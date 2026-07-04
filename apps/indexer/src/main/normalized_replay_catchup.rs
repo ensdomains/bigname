@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Result, bail};
+use anyhow::{Result, bail, ensure};
 use sqlx::PgPool;
 use sqlx::types::time::OffsetDateTime;
 use tokio::time::sleep;
@@ -103,6 +103,50 @@ pub(crate) async fn ensure_cursor_for_test(
         policy,
     )
     .await?;
+    Ok((
+        cursor.range_start_block_number,
+        cursor.next_block_number,
+        cursor.target_block_number,
+    ))
+}
+
+#[cfg(test)]
+pub(crate) async fn rewind_cursor_for_test(
+    pool: &PgPool,
+    deployment_profile: &str,
+    chain: &str,
+) -> Result<(i64, i64, i64)> {
+    let row = sqlx::query_as::<_, (i64, i64, i64, Option<OffsetDateTime>)>(
+        r#"
+        SELECT
+            range_start_block_number,
+            next_block_number,
+            target_block_number,
+            last_replayed_at
+        FROM normalized_replay_cursors
+        WHERE deployment_profile = $1
+          AND chain_id = $2
+          AND cursor_kind = $3
+        "#,
+    )
+    .bind(deployment_profile)
+    .bind(chain)
+    .bind(CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS)
+    .fetch_one(pool)
+    .await?;
+    let cursor = rewind_cursor_for_newly_observed_older_logs(
+        pool,
+        deployment_profile,
+        chain,
+        NormalizedReplayCursor {
+            range_start_block_number: row.0,
+            next_block_number: row.1,
+            target_block_number: row.2,
+            last_replayed_at: row.3,
+        },
+    )
+    .await?;
+
     Ok((
         cursor.range_start_block_number,
         cursor.next_block_number,
@@ -212,7 +256,18 @@ pub(crate) async fn run_normalized_replay_catchup_iteration(
     config: &NormalizedReplayCatchupConfig,
     chain: &str,
 ) -> Result<CatchupIterationStatus> {
+    let pending_base_rederive_replay_target =
+        bigname_storage::pending_base_normalized_rederive_replay_target(
+            pool,
+            &config.deployment_profile,
+            chain,
+        )
+        .await?;
     let Some(bounds) = load_canonical_raw_log_bounds(pool, chain).await? else {
+        ensure!(
+            pending_base_rederive_replay_target.is_none(),
+            "Base normalized-event rederive replay cursor is pending but no retained canonical raw-log bounds are available for {chain}"
+        );
         if config.defer_projection_indexes {
             ensure_projection_indexes_after_catchup(
                 pool,
@@ -223,8 +278,18 @@ pub(crate) async fn run_normalized_replay_catchup_iteration(
         }
         return Ok(CatchupIterationStatus::Idle);
     };
+    if pending_base_rederive_replay_target.is_some() {
+        ensure!(
+            bounds.start_block == bigname_storage::BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK,
+            "Base normalized-event rederive replay cursor would widen below reviewed boundary: retained canonical raw-log floor {}, expected {}",
+            bounds.start_block,
+            bigname_storage::BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK
+        );
+    }
     let closure_or_dependency_replay =
         chain_has_closure_or_dependency_replay_adapter(pool, chain).await?;
+    let closure_or_dependency_replay =
+        closure_or_dependency_replay || pending_base_rederive_replay_target.is_some();
     let target_refresh_policy = if closure_or_dependency_replay {
         TargetRefreshPolicy::PreserveExistingTarget
     } else {
@@ -246,6 +311,20 @@ pub(crate) async fn run_normalized_replay_catchup_iteration(
         cursor,
     )
     .await?;
+    if let Some(reviewed_target) = pending_base_rederive_replay_target {
+        ensure!(
+            cursor.target_block_number == reviewed_target,
+            "Base normalized-event rederive replay cursor target {} does not match reviewed completed run target {reviewed_target}",
+            cursor.target_block_number
+        );
+        bigname_storage::ensure_base_normalized_rederive_replay_manifest_snapshot_current(
+            pool,
+            &config.deployment_profile,
+            chain,
+            reviewed_target,
+        )
+        .await?;
+    }
     if cursor.next_block_number > cursor.target_block_number {
         if config.defer_projection_indexes {
             ensure_projection_indexes_after_catchup(

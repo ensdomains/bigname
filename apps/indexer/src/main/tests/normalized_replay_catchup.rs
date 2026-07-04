@@ -513,6 +513,270 @@ async fn normalized_replay_catchup_preserves_latched_closure_target() -> Result<
 }
 
 #[tokio::test]
+async fn normalized_replay_catchup_rewinds_newly_observed_logs_after_range_start() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_normalized_replay_cursor_table(database.pool()).await?;
+    let chain = "base-mainnet";
+    let range_start = 100_i64;
+    let late_block_number = 125_i64;
+    let next_block = 150_i64;
+    let target = 200_i64;
+    let reverse_address = "0x0000000000000000000000000000000000000140";
+    let late_block = provider_block(
+        "0x4040404040404040404040404040404040404040404040404040404040404040",
+        Some("0x3939393939393939393939393939393939393939393939393939393939393939"),
+        late_block_number,
+    );
+    let last_replayed_at = OffsetDateTime::now_utc();
+
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_replay_cursors (
+            deployment_profile,
+            chain_id,
+            cursor_kind,
+            range_start_block_number,
+            next_block_number,
+            target_block_number,
+            last_replayed_at
+        )
+        VALUES ('mainnet', $1, 'raw_fact_normalized_events', $2, $3, $4, $5)
+        "#,
+    )
+    .bind(chain)
+    .bind(range_start)
+    .bind(next_block)
+    .bind(target)
+    .bind(last_replayed_at)
+    .execute(database.pool())
+    .await?;
+    insert_chain_lineage_for_block(
+        database.pool(),
+        chain,
+        &late_block,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_reverse_claimed_log(
+        database.pool(),
+        chain,
+        &late_block,
+        reverse_address,
+        "0x0000000000000000000000000000000000000050",
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE raw_logs SET observed_at = $1 + INTERVAL '1 second' WHERE chain_id = $2 AND block_hash = $3",
+    )
+    .bind(last_replayed_at)
+    .bind(chain)
+    .bind(&late_block.block_hash)
+    .execute(database.pool())
+    .await?;
+
+    assert_eq!(
+        normalized_replay_catchup::rewind_cursor_for_test(database.pool(), "mainnet", chain)
+            .await?,
+        (range_start, late_block_number, target),
+        "a late canonical raw log above range_start must rewind next_block without widening range_start"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn normalized_replay_catchup_refuses_pending_base_rederive_below_boundary_raw_log_floor()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_normalized_replay_cursor_table(database.pool()).await?;
+    create_base_normalized_rederive_run_table(database.pool()).await?;
+    let chain = "base-mainnet";
+    let boundary = bigname_storage::BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK;
+    let target = boundary + 100;
+    let older_block = provider_block(
+        "0x2121212121212121212121212121212121212121212121212121212121212121",
+        Some("0x2020202020202020202020202020202020202020202020202020202020202020"),
+        boundary - 1,
+    );
+
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_replay_cursors (
+            deployment_profile,
+            chain_id,
+            cursor_kind,
+            range_start_block_number,
+            next_block_number,
+            target_block_number
+        )
+        VALUES ('mainnet', $1, 'raw_fact_normalized_events', $2, $2, $3)
+        "#,
+    )
+    .bind(chain)
+    .bind(boundary)
+    .bind(target)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO base_normalized_rederive_runs (
+            run_id,
+            deployment_profile,
+            chain_id,
+            replay_target_block,
+            status,
+            completed_at,
+            updated_at
+        )
+        VALUES ('base-rederive-reset-pending', 'mainnet', $1, $2, 'completed', now(), now())
+        "#,
+    )
+    .bind(chain)
+    .bind(target)
+    .execute(database.pool())
+    .await?;
+    insert_chain_lineage_for_block(
+        database.pool(),
+        chain,
+        &older_block,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_reverse_claimed_log(
+        database.pool(),
+        chain,
+        &older_block,
+        "0x0000000000000000000000000000000000000141",
+        "0x0000000000000000000000000000000000000051",
+        CanonicalityState::Canonical,
+    )
+    .await?;
+
+    let config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
+        "mainnet".to_owned(),
+        vec![chain.to_owned()],
+        1_000,
+        1_000,
+        1,
+    )?;
+    let error = normalized_replay_catchup::run_normalized_replay_catchup_iteration(
+        database.pool(),
+        &config,
+        chain,
+    )
+    .await
+    .expect_err("pending Base correction replay must not widen below reviewed boundary");
+    assert!(
+        format!("{error:?}").contains("would widen below reviewed boundary"),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64, i64)>(
+            r#"
+            SELECT range_start_block_number, next_block_number, target_block_number
+            FROM normalized_replay_cursors
+            WHERE deployment_profile = 'mainnet'
+              AND chain_id = $1
+              AND cursor_kind = 'raw_fact_normalized_events'
+            "#,
+        )
+        .bind(chain)
+        .fetch_one(database.pool())
+        .await?,
+        (boundary, boundary, target),
+        "catch-up must bail before ensure_cursor widens the pending correction cursor"
+    );
+    assert_eq!(
+        normalized_replay_catchup::ensure_cursor_for_test(
+            database.pool(),
+            "mainnet",
+            chain,
+            boundary - 1,
+            target,
+            false,
+        )
+        .await?,
+        (boundary - 1, boundary - 1, target),
+        "normal ensure_cursor behavior remains able to widen when invoked directly"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn normalized_replay_catchup_refuses_pending_base_rederive_without_raw_log_bounds()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_normalized_replay_cursor_table(database.pool()).await?;
+    create_base_normalized_rederive_run_table(database.pool()).await?;
+    let chain = "base-mainnet";
+    let boundary = bigname_storage::BASE_NORMALIZED_REDERIVE_REPLAY_START_BLOCK;
+    let target = boundary + 100;
+
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_replay_cursors (
+            deployment_profile,
+            chain_id,
+            cursor_kind,
+            range_start_block_number,
+            next_block_number,
+            target_block_number
+        )
+        VALUES ('mainnet', $1, 'raw_fact_normalized_events', $2, $2, $3)
+        "#,
+    )
+    .bind(chain)
+    .bind(boundary)
+    .bind(target)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO base_normalized_rederive_runs (
+            run_id,
+            deployment_profile,
+            chain_id,
+            replay_target_block,
+            status,
+            completed_at,
+            updated_at
+        )
+        VALUES ('base-rederive-reset-pending-no-logs', 'mainnet', $1, $2, 'completed', now(), now())
+        "#,
+    )
+    .bind(chain)
+    .bind(target)
+    .execute(database.pool())
+    .await?;
+
+    let config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
+        "mainnet".to_owned(),
+        vec![chain.to_owned()],
+        1_000,
+        1_000,
+        1,
+    )?;
+    let error = normalized_replay_catchup::run_normalized_replay_catchup_iteration(
+        database.pool(),
+        &config,
+        chain,
+    )
+    .await
+    .expect_err("pending Base correction replay must not idle without retained raw-log bounds");
+    assert!(
+        format!("{error:?}").contains("no retained canonical raw-log bounds"),
+        "unexpected error: {error:?}"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn normalized_replay_catchup_rebuilds_deferred_indexes_when_configured_chain_has_no_logs()
 -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -606,5 +870,25 @@ async fn create_normalized_replay_cursor_table(pool: &PgPool) -> Result<()> {
     .await
     .context("failed to create normalized replay adapter checkpoint tables for indexer tests")?;
 
+    Ok(())
+}
+
+async fn create_base_normalized_rederive_run_table(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE base_normalized_rederive_runs (
+            run_id TEXT PRIMARY KEY,
+            deployment_profile TEXT NOT NULL,
+            chain_id TEXT NOT NULL,
+            replay_target_block BIGINT NOT NULL,
+            status TEXT NOT NULL,
+            completed_at TIMESTAMPTZ,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to create Base rederive run table for indexer tests")?;
     Ok(())
 }

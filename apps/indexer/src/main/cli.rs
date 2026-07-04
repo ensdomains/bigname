@@ -13,6 +13,7 @@ use crate::backfill::{
 use crate::bootstrap_backfill::{
     DEFAULT_BOOTSTRAP_BACKFILL_RANGE_BLOCKS, DEFAULT_BOOTSTRAP_BACKFILL_WORKERS,
 };
+use crate::drop_rederive::DropAndRederiveBaseNormalizedEventsArgs;
 use crate::normalized_replay_catchup::{
     DEFAULT_NORMALIZED_REPLAY_CATCHUP_CHUNK_BLOCKS,
     DEFAULT_NORMALIZED_REPLAY_CATCHUP_MAX_LOGS_PER_CHUNK,
@@ -52,6 +53,7 @@ pub(crate) enum Command {
     Replay(ReplayArgs),
     Rewind(RewindArgs),
     Repair(RepairArgs),
+    DropAndRederiveBaseNormalizedEvents(DropAndRederiveBaseNormalizedEventsArgs),
 }
 
 #[derive(Args, Debug)]

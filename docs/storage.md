@@ -96,6 +96,175 @@ rows reported, recorded `eth_getProof` spot-check status, and the env-widened
 live verification test green table-wide, including
 `reth_db_provider_latest_rows_match_consensus`.
 
+### 2026-07-03 Base normalized-event drop-and-rederive correction
+
+The maintainer ratified a supervised corpus correction on 2026-07-03 for Base
+Basenames normalized events and adapter-owned identity rows that accumulated
+conflicting payloads across multiple derivation and manifest changes during the
+outage window. The approved method is drop plus full-closure re-derive from
+retained canonical raw facts. This is an exception to normal replay behavior:
+the ordinary raw-fact normalized-event replay path remains upsert-only and does
+not delete stale rows.
+
+The implementation owner is the indexer command
+`bigname-indexer drop-and-rederive-base-normalized-events`. Its dry run is the
+maintainer review gate: it prints the exact live census by table,
+derivation-kind/source-family delete/keep partition, block range, raw-fact
+completeness, and replay reset target without writing. The execute mode
+requires the explicit `--execute --confirm-ratified-2026-07-03` flags, the
+reviewed `--replay-target-block`, records a structured correction-event log
+line, takes a PostgreSQL exclusive advisory session lock for the full batched
+run, refuses
+concurrent `bigname-indexer` or `bigname-worker` sessions that are visible in
+`pg_stat_activity`, and fails closed unless the reviewed expected counts still
+match. Indexer and worker runtime processes and write-capable one-shot commands
+also hold the corresponding shared advisory lock while they run, so the
+correction command cannot execute concurrently with updated bigname writers.
+Execute records durable progress in `base_normalized_rederive_runs` and
+`base_normalized_rederive_run_batches`, keyed by a reviewed `--run-id`. A
+re-invocation with the same run id, target block, batch size, and expected
+census resumes incomplete work; if the live census plus recorded deleted counts
+does not equal the reviewed census, it refuses to continue. Resume also reruns
+the re-runnable replay-coverage and raw-fact completeness guards before any
+additional batch is deleted. The reviewed plan stored in the run row includes a
+snapshot of the active Base replay targets/ranges, and resume requires the
+current active target set to match that snapshot, so the check remains
+non-vacuous even after the scoped `normalized_events` rows have already been
+deleted. Execute also requires the dry-run's active target snapshot digest and
+active manifest snapshot digest as expected values, so review-to-write
+replay-target or manifest drift cannot become the stored run snapshot. The run
+row also stores a compact retained raw-fact range proof over canonical raw-log
+identity, payload fields, and lineage rows, and resume requires the current
+retained raw-log and lineage proof to match it; this keeps raw-fact drift
+detection non-vacuous after event rows are deleted. A long-paused run cannot
+continue after the active replay targets, active manifests, or retained raw
+facts have drifted out of the reviewed safe state.
+
+The normalized-event scope is:
+
+- `chain_id = 'base-mainnet'`
+- `block_number BETWEEN 17571485 AND <validated replay target>`
+- `block_hash IS NOT NULL`
+- a re-derivable derivation/source-family pair emitted by the selected Base
+  closure replay adapters:
+  - `ens_v1_reverse_claim`: `source_family IN ('ens_v1_reverse_l1',
+    'basenames_base_primary')`
+  - `ens_v1_registry_resolver_changed` or `ens_v1_subregistry_changed`:
+    `source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')`
+  - `ens_v1_unwrapped_authority`: `source_family IN ('ens_v1_registrar_l1',
+    'ens_v1_registry_l1', 'ens_v1_resolver_l1', 'ens_v1_wrapper_l1',
+    'basenames_base_registrar', 'basenames_base_registry',
+    'basenames_base_resolver')`
+
+The scope does not use `source_manifest_id`; rows with a NULL manifest id are
+included when their derivation/source-family pair is re-derivable. The dry-run
+also enumerates every other `base-mainnet` derivation/source-family pair present
+in the same block-backed range and reports it as kept. In particular,
+`raw_log_preimage_observation` rows and re-derivable-looking derivation kinds on
+non-replay source families are not in the delete scope because this supervised
+Base closure replay does not re-derive them.
+
+The identity-row scope is `resources`, `token_lineages`, `name_surfaces`, and
+`surface_bindings` where `chain_id = 'base-mainnet'` and
+`provenance->>'adapter' = 'ens_v1_unwrapped_authority'`. The command also
+removes dependent current-projection rows and `projection_normalized_event_changes`
+rows only to satisfy foreign keys and to force the later projection rebuild to
+publish from the re-derived event stream. The final reset transaction clears
+`current_projection_replay_status` markers for `name_current`,
+`address_names_current`, `children_current`, `permissions_current`, and
+`record_inventory_current`, plus `resolver_current` and `primary_names_current`
+because those families consume normalized events that this correction deletes
+and re-derives. That prevents automatic all-current replay from skipping a
+family with a stale completion marker after the delete finishes. The global
+`projection_apply_cursors` watermark is not reset because it is not scoped to
+these affected families. It does not rebuild projections, so the API must be
+drained or stopped from execute through the replay, projection rebuild, and
+verification window.
+
+The delete is batched and resumable. The order is FK-safe at every commit:
+current projections keyed by scoped identity rows, then
+`projection_normalized_event_changes`, then scoped `normalized_events`, then
+`surface_bindings`, `resources`, `name_surfaces`, and `token_lineages`.
+Projection rows and normalized events are batched by deterministic key/block
+order; identity rows are batched by primary-key order. Identity-row batches do
+not begin until all dependent current projections, projection change rows, and
+normalized events are gone, so a crash leaves a partially deleted but
+referentially valid database.
+After all delete batches have completed, one final small transaction clears
+affected `current_projection_replay_status` rows,
+`normalized_replay_adapter_checkpoint_items` and
+`normalized_replay_adapter_checkpoints` for
+`ens_v1_reverse_claim`, `ens_v1_subregistry_discovery`, and
+`ens_v1_unwrapped_authority`, clears any sibling
+`mainnet/base-mainnet/post_replay_live_adapter_backlog` cursor, then resets the
+`normalized_replay_cursors` row for
+`mainnet/base-mainnet/raw_fact_normalized_events` to
+`range_start_block_number = next_block_number = 17571485` and
+`target_block_number = <validated replay target>`. The final reset revalidates
+that the retained canonical Base raw-log floor is exactly block `17571485`, and
+the catch-up path repeats that floor check while the completed run's reset cursor
+is still pending replay. Because the catch-up cursor's replay bounds are derived
+from the canonical raw-log floor, replay refuses before cursor refresh if a later
+retention change would widen this correction below the delete boundary. The
+generic catch-up cursor refresh and older-log rewind paths otherwise retain their
+normal ability to widen or rewind when older retained raw logs appear. If the
+process dies before that final reset, replay cursors and projection markers
+remain untouched and the same `--run-id` must be resumed before replay starts.
+Guarded writer processes also refuse to start while a Base rederive run remains
+incomplete (`status` other than `completed` or `aborted`), so a released session
+lock after a crash is not enough for normal writers to proceed against a
+partially deleted corpus.
+
+The command must not delete `chain_lineage`, `raw_logs`, `raw_transactions`,
+`raw_receipts`, `raw_code_hashes`, `payload_cache`, or any other raw-fact source.
+Before execution it proves that the scoped log-derived normalized events still
+join retained non-orphaned `raw_logs`, scoped boundary events still join retained
+non-orphaned `chain_lineage`, and the canonical raw-log range inside the
+ratified replay window spans the closure boundary and validated replay target.
+It also proves that the retained canonical Base raw-log floor itself equals the
+ratified closure boundary, block `17571485`.
+It also refuses if any row in the delete scope is above the retained canonical
+raw-log head, or if any row's `(derivation_kind, source_family, block, emitting
+address)` is not covered by a currently active Base replay target/range for the
+full-closure adapter that will re-emit it. These are hard stops because the
+correction may only delete rows that current replay can recreate from retained
+raw facts.
+The completed run records both the reviewed active replay target/range snapshot
+and the full active Base manifest snapshot, including active manifest payloads
+and manifest-linked contract/discovery rows. While the reset cursor is still
+pending replay, the catch-up replay path checks the current active snapshots
+against those reviewed snapshots and refuses to replay if a different manifest
+image was synced after review, even when the replay target addresses and ranges
+would otherwise be unchanged. Repository manifest sync is skipped while the
+reviewed completed run's reset cursor is still pending; the indexer builds
+runtime state from the already-stored reviewed manifest snapshot so another
+indexer cannot rotate the stored active manifest state between the replay guard
+and the full-closure adapter reads. A skipped repository refresh remains marked
+for retry, so the same long-running indexer syncs the repository normally once
+the pending reset replay cursor completes.
+Because the delete scope is global for `base-mainnet` while replay reset is
+profile-scoped, dry-run and execute also require the requested deployment
+profile to own an existing `base-mainnet/raw_fact_normalized_events` replay
+cursor before they report or run the correction.
+Dry-run defaults the target to the live canonical Base raw-log head and reports
+the maximum affected normalized-event block plus the effective replay target
+floor. The floor is the greater of the maximum affected block and any pending
+closure-boundary raw-fact replay cursor target from an earlier drop, so neither
+idempotent nor partial-replay reruns can shrink the intended replay range while
+replay is still pending. Execute requires an explicitly provided
+`--replay-target-block`; that reviewed value is accepted when it is not above the
+current canonical raw-log head and not below the reported replay target floor.
+Raw-fact completeness is recomputed for the requested target. The command also
+refuses if any normalized event outside the delete scope still references an
+identity row that the correction would drop. If any proof fails, no write is
+allowed.
+The default batch size is `100000` rows; operators may lower it with
+`--batch-size` to keep per-commit WAL and lock duration within the deployment's
+headroom. The correction leaves row-level sidecar delete triggers enabled. That
+keeps sidecar invalidation semantics normal while batching bounds WAL per
+commit; sidecars are then reconciled by the required all-current projection
+rebuild.
+
 ## Storage layers
 
 The system of record splits into six layers.
@@ -214,7 +383,7 @@ For ENSv2, `resource_id` keys by `(chain_id, registry_contract_instance_id, upst
 | `event_silent_resolver_call_observations` | intake | durable block-scoped direct-call observations for documented projection hydration invalidation where the watched resolver emits no usable event |
 | `projection_*` | projection workers | disposable read models |
 | `address_names_current_identity_counts`, `address_names_current_identity_feed` | storage triggers on `address_names_current`, `primary_names_current`, and supporting identity-anchor and `name_current` readability changes | exact reverse identity total counts and compact feed display rows by address, role filter, and primary-name coin type for the partner-compatible identity façade, using the same canonical/read-safe and reachable-`name_current` row eligibility as reverse identity pages; this is the bounded exception in [`adrs/0005-identity-count-sidecar.md`](adrs/0005-identity-count-sidecar.md) |
-| `current_projection_replay_status` | projection workers | durable operational completion markers for bootstrap/full all-current projection replay |
+| `current_projection_replay_status` | projection workers; ratified storage correction tooling may clear affected markers when it deletes projection rows | durable operational completion markers for bootstrap/full all-current projection replay |
 | `projection_normalized_event_changes` | normalized-event storage trigger; projection workers consume | append-only downstream change log for normalized-event inserts and canonicality-state updates |
 | `projection_apply_cursors`, `projection_invalidations`, `projection_invalidation_dead_letters` | projection workers; storage trigger for projection-relevant `surface_bindings` repairs; bounded normalized-event adapter repair invalidations | durable projection apply watermarks, live key-scoped projection invalidation queue, and terminal operator-visible dead-letter records |
 | `execution_*` | execution workers; API on-demand verified-resolution cache misses for documented product routes; synchronous indexer/reorg repair for orphan-block cache outcome deletes only | durable traces and steps, normal `execution_cache_outcomes` writes, invalidation records |

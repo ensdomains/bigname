@@ -496,6 +496,196 @@ Use `RUST_LOG=info,sqlx::query=error` for these runs; otherwise SQLx slow-query
 warnings can print huge generated INSERT statements for dense chunks and waste
 time on logging instead of ingest.
 
+The 2026-07-03 ratified Base normalized-event corpus correction is supervised
+and off by default. It exists only for the comprehensive Basenames Base
+drop-and-full-closure-rederive window documented in [`storage.md`](storage.md).
+Do not run it against a live indexer or worker process, and do not treat it as a
+projection rebuild. The execute step deletes Base current-projection rows because
+those rows have foreign keys into the identity rows being dropped; the API must
+not serve during the destructive and replay/rebuild window. The delete is
+batched and resumable under a session advisory lock, with durable progress in
+`base_normalized_rederive_runs` and `base_normalized_rederive_run_batches`.
+The passed deployment profile must already own a
+`base-mainnet/raw_fact_normalized_events` replay cursor because the delete scope
+is global to Base while replay reset is profile-scoped. Updated indexer and
+worker runtimes and write-capable one-shot commands hold a shared advisory lock
+while running; the execute path takes the exclusive form of that lock and also
+refuses visible `bigname-indexer`/`bigname-worker` sessions before it writes.
+Those guarded writers also refuse to start while any Base rederive run is still
+incomplete, even if a crashed execute container released its session advisory
+lock. Apply this release's checked-in migrations before starting the correction;
+the worker migration command remains a guarded writer because checked-in
+migrations can include replay-adjacent data repairs. If a crash occurs before
+the abort-status migration is installed, resume/complete the run or restore the
+database to a consistent pre-run snapshot before running migrations or writers.
+Guarded writer processes require at least two database pool connections so the
+held advisory lock connection cannot starve the writer work.
+
+1. Stop the indexer and worker services, leaving PostgreSQL and the API online
+   for dry-run review if desired.
+2. Run the dry-run census and capture stdout for maintainer review:
+
+   ```sh
+   docker compose --env-file .env.server \
+     -f docker-compose.server.yml \
+     run --rm --no-deps indexer \
+       bigname-indexer drop-and-rederive-base-normalized-events \
+       --deployment-profile mainnet \
+       --run-id base-normalized-rederive-2026-07-03 \
+       --batch-size 100000
+   ```
+
+3. Review the printed derivation-kind/source-family partition, including the
+   re-derivable delete count and explicitly kept nonreplay pairs such as
+   `raw_log_preimage_observation` and non-closure source families;
+   identity/projection/change-log delete counts; raw-fact completeness proof,
+   including that the retained canonical Base raw-log floor is exactly block
+   `17571485`; active replay target snapshot row count and digest; active
+   manifest snapshot row count and digest; both replay cursor counts; affected
+   current-projection replay marker count; run id, batch size, batch count/order;
+   max affected block; replay target floor; and the replay reset target
+   `mainnet/base-mainnet/raw_fact_normalized_events: 17571485..=<validated replay target>`.
+4. Execute only after review, passing the dry-run counts back as exact
+   `--expected-*` arguments and a reviewed `--replay-target-block` so the tool
+   refuses drift between review and write. Use the dry-run's reported head, or
+   another reviewed value that is at least the printed replay target floor and
+   not above the current canonical raw-log head. On a rerun after the drop, the
+   floor includes any still-pending prior reset raw replay cursor target, so the
+   target cannot be shrunk while replay is still pending. Immediately before
+   this step, drain or stop the `api` service and keep it unavailable until the
+   replay, projection rebuild, and verification steps complete. This is total
+   API impact for the stack, including Ethereum name reads, not only Basenames
+   reads:
+
+   ```sh
+   docker compose --env-file .env.server \
+     -f docker-compose.server.yml \
+     stop api
+
+   docker compose --env-file .env.server \
+     -f docker-compose.server.yml \
+     run --rm --no-deps indexer \
+       bigname-indexer drop-and-rederive-base-normalized-events \
+       --deployment-profile mainnet \
+       --run-id base-normalized-rederive-2026-07-03 \
+       --batch-size 100000 \
+       --replay-target-block <dry-run-target-block> \
+       --execute \
+       --confirm-ratified-2026-07-03 \
+       --expected-normalized-events <dry-run-value> \
+       --expected-resources <dry-run-value> \
+       --expected-token-lineages <dry-run-value> \
+       --expected-name-surfaces <dry-run-value> \
+       --expected-surface-bindings <dry-run-value> \
+       --expected-name-current <dry-run-value> \
+       --expected-address-names-current <dry-run-value> \
+       --expected-children-current <dry-run-value> \
+       --expected-permissions-current <dry-run-value> \
+       --expected-record-inventory-current <dry-run-value> \
+       --expected-projection-normalized-event-changes <dry-run-value> \
+       --expected-current-projection-replay-status <dry-run-value> \
+       --expected-replay-cursor-rows <dry-run-value> \
+       --expected-adapter-checkpoint-rows <dry-run-value> \
+       --expected-adapter-checkpoint-item-rows <dry-run-value> \
+       --expected-active-replay-target-snapshot-digest <dry-run-value> \
+       --expected-active-manifest-snapshot-digest <dry-run-value>
+   ```
+
+5. Monitor batch progress while execute is running from another SQL session:
+
+   ```sql
+   SELECT run_id, status, current_step, deleted_counts, updated_at
+   FROM base_normalized_rederive_runs
+   WHERE run_id = 'base-normalized-rederive-2026-07-03';
+
+   SELECT step, count(*) AS batches, sum(row_count) AS rows
+   FROM base_normalized_rederive_run_batches
+   WHERE run_id = 'base-normalized-rederive-2026-07-03'
+   GROUP BY step
+   ORDER BY min(batch_sequence);
+   ```
+
+   The default `--batch-size 100000` bounds WAL and row locks per commit while
+   leaving row-level sidecar delete triggers enabled. Lower the batch size only
+   if per-commit WAL or lock duration needs more headroom.
+6. If the execute container dies before completion, keep the API drained and run
+   the same execute command again with the same `--run-id`, `--batch-size`,
+   `--replay-target-block`, and expected counts. The command resumes only when
+   recorded deleted counts plus the remaining live census still equal the
+   reviewed dry-run census, the current active replay target/range snapshot
+   and active manifest snapshot still match the reviewed run snapshots, and
+   retained raw facts remain complete and unchanged for the stored target.
+   Do not run replay until the run row is `status='completed'`; before that
+   final state, replay cursors and projection markers are intentionally
+   untouched. Normal indexer, worker, and guarded one-shot writers also refuse
+   to start while the run remains incomplete. If the operator decides not to
+   resume, restore the database to a consistent pre-run snapshot first, then
+   explicitly mark the run aborted so guarded writers may start:
+
+   ```sql
+   UPDATE base_normalized_rederive_runs
+   SET status = 'aborted',
+       current_step = 'aborted',
+       updated_at = now()
+   WHERE run_id = 'base-normalized-rederive-2026-07-03'
+     AND status <> 'completed';
+   ```
+
+   Do not mark a half-deleted database aborted merely to unblock writers; either
+   complete the rederive run or restore the database before aborting.
+7. Run only the catch-up indexer with normalized replay catch-up enabled and
+   `--hash-pinned-adapter-sync auto` so the reset cursor runs full-closure
+   replay from block `17571485` through the reviewed target block. Keep the API
+   drained. Run this from the same reviewed manifest image/root used for dry-run
+   and execute. The catch-up path compares both the current active Base replay
+   target/range snapshot and the full active manifest snapshot with the
+   completed run's reviewed snapshots before replaying; if either differs, it
+   bails before re-emitting rows. While this completed correction reset cursor
+   is still pending replay, the indexer skips repository manifest sync and
+   builds runtime state from the already-stored reviewed manifest snapshot, so
+   a second indexer cannot rotate the stored manifest snapshot during
+   full-closure re-derivation. The skipped repository refresh remains marked for
+   retry, so the same long-running indexer syncs normally once the pending reset
+   replay cursor completes. The final reset already
+   validated that the retained canonical Base raw-log floor equals block
+   `17571485`; catch-up repeats that check while the reset cursor is pending, so
+   normal cursor refresh cannot widen this correction replay below the delete
+   boundary on the reviewed deployment. The command also clears any stale
+   `post_replay_live_adapter_backlog` cursor for the same Base deployment. This
+   mode can re-enable live adapter sync after replay catches up, so do not let it
+   overlap the projection rebuild:
+
+   ```sh
+   docker compose --env-file .env.server \
+     -f docker-compose.server.yml \
+     run --rm --name bigname-base-normalized-replay indexer \
+       bigname-indexer run \
+       --hash-pinned-adapter-sync auto \
+       --normalized-replay-catchup-enabled \
+       --normalized-replay-defer-projection-indexes
+   ```
+
+8. After the normalized replay cursor reaches the reviewed target, stop the
+   catch-up indexer before rebuilding projections. If the command above is still
+   running because live sync resumed after catch-up, stop that container first:
+
+   ```sh
+   docker stop bigname-base-normalized-replay
+   ```
+
+9. Rebuild all current projections:
+
+   ```sh
+   docker compose --env-file .env.server \
+     -f docker-compose.server.yml \
+     run --rm --no-deps worker \
+       bigname-worker replay all-current-projections
+   ```
+
+10. Verify the conflict block, the `linkerman` and `harsh007` one-timeline checks,
+   and the identity-10k sample before restoring the API, worker, and normal
+   indexer service.
+
 Operational catch-up to finalized head should be run as bounded idempotent
 backfill chunks. Before every chunk starts range work, check current Postgres
 size, writable free disk, and any configured object-cache budget. Capacity
