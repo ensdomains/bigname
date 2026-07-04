@@ -109,8 +109,11 @@ not delete stale rows.
 The implementation owner is the indexer command
 `bigname-indexer drop-and-rederive-base-normalized-events`. Its dry run is the
 maintainer review gate: it prints the exact live census by table,
-derivation-kind/source-family delete/keep partition, block range, raw-fact
-completeness, and replay reset target without writing. The execute mode
+derivation-kind/source-family delete/keep partition, block range, active replay
+target and manifest snapshot digests, and replay reset target without writing.
+The heavyweight raw-fact completeness anti-join and retained raw-log byte proof
+are intentionally deferred from dry-run and recomputed by execute-start under
+the advisory lock before any delete. The execute mode
 requires the explicit `--execute --confirm-ratified-2026-07-03` flags, the
 reviewed `--replay-target-block`, records a structured correction-event log
 line, takes a PostgreSQL exclusive advisory session lock for the full batched
@@ -224,11 +227,14 @@ ratified replay window spans the closure boundary and validated replay target.
 It also proves that the retained canonical Base raw-log floor itself equals the
 ratified closure boundary, block `17571485`.
 It also refuses if any row in the delete scope is above the retained canonical
-raw-log head, or if any row's `(derivation_kind, source_family, block, emitting
-address)` is not covered by a currently active Base replay target/range for the
-full-closure adapter that will re-emit it. These are hard stops because the
-correction may only delete rows that current replay can recreate from retained
-raw facts.
+raw-log head, or if any present delete-scope `(derivation_kind, source_family)`
+pair lacks currently active Base replay adapter/source-family target ranges
+whose union covers the ratified closure boundary through the validated replay
+target with no block gap, or if any in-scope log-derived row was emitted by an
+address outside the current active replay target set for that row's source
+family at the event block. These are hard stops because the correction may only
+delete rows that current full-closure replay can recreate from retained raw
+facts.
 The completed run records both the reviewed active replay target/range snapshot
 and the full active Base manifest snapshot, including active manifest payloads
 and manifest-linked contract/discovery rows. While the reset cursor is still

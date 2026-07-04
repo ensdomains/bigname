@@ -122,24 +122,6 @@ pub(super) async fn load_cursor_census_from(
     cursor_census_rows(rows)
 }
 
-pub(super) async fn load_raw_fact_completeness(
-    pool: &PgPool,
-    replay_target_block: i64,
-) -> Result<BaseNormalizedRederiveRawFactCompleteness> {
-    let row = sqlx::query(raw_fact_completeness_sql())
-        .bind(replay_target_block)
-        .bind(reverse_claim_derivation_kind())
-        .bind(reverse_claim_source_families())
-        .bind(subregistry_derivation_kinds())
-        .bind(subregistry_source_families())
-        .bind(unwrapped_authority_derivation_kind())
-        .bind(unwrapped_authority_source_families())
-        .fetch_one(pool)
-        .await
-        .context("failed to load Base normalized-event rederive raw-fact completeness")?;
-    raw_fact_completeness_from_row(&row)
-}
-
 pub(super) async fn load_raw_fact_completeness_from(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     replay_target_block: i64,
@@ -387,7 +369,7 @@ fn cursor_census_rows(
 fn raw_fact_completeness_sql() -> &'static str {
     r#"
     WITH scoped_events AS (
-        SELECT *
+        SELECT chain_id, block_hash, transaction_hash, log_index
         FROM normalized_events
         WHERE chain_id = 'base-mainnet'
           AND block_number BETWEEN 17571485 AND $1
@@ -399,10 +381,14 @@ fn raw_fact_completeness_sql() -> &'static str {
           )
     ),
     log_derived AS (
-        SELECT * FROM scoped_events WHERE log_index IS NOT NULL
+        SELECT chain_id, block_hash, transaction_hash, log_index
+        FROM scoped_events
+        WHERE log_index IS NOT NULL
     ),
     boundary_events AS (
-        SELECT * FROM scoped_events WHERE log_index IS NULL
+        SELECT chain_id, block_hash
+        FROM scoped_events
+        WHERE log_index IS NULL
     ),
     canonical_raw_log_bounds AS (
         SELECT MIN(raw_logs.block_number)::BIGINT AS min_block_number,
