@@ -78,6 +78,12 @@ loc = 798
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]
+path = "crates/storage/src/base_normalized_rederive/batch/delete.rs"
+loc = 1102
+justification = "Base rederive delete batching keeps FK-safe step candidate SQL, trigger suppression, and batch delete SQL together for review during the live performance fix; future work should split the step SQL helpers after the run completes."
+review_justification = "Explicit review accepted this file above 900 LOC for the live Base rederive performance fix because splitting the delete-step SQL during the maintenance window would broaden the change; future work should split or shrink it."
+
+[[files]]
 path = "crates/storage/src/identity/write_fast.rs"
 loc = 808
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
