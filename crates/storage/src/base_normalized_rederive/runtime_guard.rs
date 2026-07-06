@@ -81,6 +81,29 @@ pub async fn ensure_base_normalized_rederive_replay_manifest_snapshot_current(
                 "completed Base normalized-event rederive run {run_id:?} has invalid reviewed plan snapshot"
             )
         })?;
+    if base_normalized_rederive_replay_has_begun(pool, deployment_profile, replay_target_block)
+        .await?
+    {
+        // The reviewed snapshot digests pin pre-replay state so drift between execute
+        // review and replay start is caught. The reviewed replay's own closure adapters
+        // legitimately correct discovery state (discovery_edges rows and discovered
+        // contract_instance_addresses) as they re-derive, and both reviewed digests
+        // cover those collections; the adapters write their replay checkpoint rows
+        // before any such mutation. Once those checkpoints exist the replay is the
+        // authorized writer of that state, and re-comparing live state against the
+        // pre-replay pins would wedge every session resume after the first discovery
+        // commit. Manifest-owned state stays protected during this window by the
+        // manifest-sync pending-replay gate (base_normalized_rederive_manifest_sync
+        // _pending_replay, checked by the indexer runtime before any manifest sync;
+        // refuse_base_normalized_rederive_manifest_sync_during_pending_replay wraps
+        // the same pending-run query).
+        info!(
+            run_id,
+            "reviewed Base rederive snapshot digest comparison skipped: replay adapter checkpoints exist, replay owns discovery-state mutations"
+        );
+        return Ok(());
+    }
+
     let reviewed_target_digest = plan_snapshot
         .stored_active_replay_target_snapshot_digest()?
         .with_context(|| {
@@ -113,6 +136,39 @@ pub async fn ensure_base_normalized_rederive_replay_manifest_snapshot_current(
         "Base normalized-event rederive active manifest snapshot changed since reviewed run {run_id:?}: reviewed {reviewed_manifest_digest}, current {current_manifest_digest}; restore the reviewed active manifest state or repeat dry-run/execute review"
     );
     Ok(())
+}
+
+async fn base_normalized_rederive_replay_has_begun(
+    pool: &PgPool,
+    deployment_profile: &str,
+    replay_target_block: i64,
+) -> Result<bool> {
+    // final_replay_reset deletes the Base closure-adapter checkpoint rows inside the
+    // execute transaction (exclusive advisory lock held through completion), so within
+    // tool-reachable states any matching row was written by the reviewed replay itself.
+    // The replay-target bind is defense-in-depth for hand-touched states: a checkpoint
+    // left behind with a different target fails CLOSED (the strict pre-replay pin
+    // re-engages) instead of silently skipping review.
+    sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM normalized_replay_adapter_checkpoints
+            WHERE deployment_profile = $1
+              AND chain_id = $2
+              AND cursor_kind = $3
+              AND checkpoint_scope = 'full_closure'
+              AND replay_target_block_number = $4
+        )
+        "#,
+    )
+    .bind(deployment_profile)
+    .bind(BASE_NORMALIZED_REDERIVE_CHAIN_ID)
+    .bind(BASE_NORMALIZED_REDERIVE_CURSOR_KIND)
+    .bind(replay_target_block)
+    .fetch_one(pool)
+    .await
+    .context("failed to inspect Base normalized-event rederive replay adapter checkpoints")
 }
 
 pub async fn pending_base_normalized_rederive_replay_target(
