@@ -5892,6 +5892,78 @@ async fn normalized_event_count_only_upsert_supersedes_basenames_registry_bounda
 }
 
 #[tokio::test]
+async fn normalized_event_count_only_upsert_allows_sibling_scope_boundary_permission_grants()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let legacy_labelhash_registry_resource_id =
+        Uuid::from_u128(0x15b7_0000_0000_0000_0000_0000_0000_0043);
+    let namehash_registry_resource_id = Uuid::from_u128(0x15b7_0000_0000_0000_0000_0000_0000_0044);
+    seed_basenames_registry_event_time_registry_key_repair_resources(
+        database.pool(),
+        legacy_labelhash_registry_resource_id,
+        namehash_registry_resource_id,
+    )
+    .await?;
+
+    // Fresh re-derivation emits by-design sibling boundary grants for the same
+    // anchor: a resolver-scoped resolver_control grant and a resource-scoped
+    // resource_control grant, sharing resource, block, and raw fact but carrying
+    // distinct identities. Neither is a supersession candidate for the other.
+    let authority_key = "registry-only:base-mainnet:0xcubebucks_namehash";
+    let resolver_scope_grant =
+        basenames_registry_boundary_permission_event(namehash_registry_resource_id, authority_key);
+    let mut resource_scope_grant = resolver_scope_grant.clone();
+    resource_scope_grant.event_identity = resolver_scope_grant.event_identity.replace(
+        "resolver:0x0000000000000000000000000000000000000456",
+        "resource",
+    );
+    assert_ne!(
+        resource_scope_grant.event_identity,
+        resolver_scope_grant.event_identity
+    );
+    resource_scope_grant.before_state["scope"] = json!({ "kind": "resource" });
+    resource_scope_grant.after_state["scope"] = json!({ "kind": "resource" });
+    resource_scope_grant.after_state["effective_powers"] = json!(["resource_control"]);
+
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&resource_scope_grant)).await?;
+    let inserted_count = upsert_normalized_events_count_only(
+        database.pool(),
+        std::slice::from_ref(&resolver_scope_grant),
+    )
+    .await
+    .context("sibling-scope boundary permission grants must not pair as supersessions")?;
+    assert_eq!(inserted_count, 1);
+
+    let canonical_states = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT event_identity, canonicality_state::TEXT
+        FROM normalized_events
+        WHERE event_identity = $1
+           OR event_identity = $2
+        ORDER BY event_identity
+        "#,
+    )
+    .bind(&resource_scope_grant.event_identity)
+    .bind(&resolver_scope_grant.event_identity)
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(canonical_states.len(), 2);
+    for (_, canonicality_state) in &canonical_states {
+        assert_eq!(canonicality_state, "canonical");
+    }
+
+    // Idempotent re-upsert of both siblings together must stay accepted.
+    let reinserted_count = upsert_normalized_events_count_only(
+        database.pool(),
+        &[resource_scope_grant.clone(), resolver_scope_grant.clone()],
+    )
+    .await?;
+    assert_eq!(reinserted_count, 0);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn normalized_event_count_only_upsert_rejects_basenames_registry_boundary_permission_in_place_resource_repair()
 -> Result<()> {
     let database = TestDatabase::new().await?;
