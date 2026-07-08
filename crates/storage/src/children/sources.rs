@@ -511,7 +511,12 @@ fn canonical_declared_child_sources_query<'a>(
         -- rebuild — 3 pairs — where the per-child-node ranking alone let both
         -- survive and the children_current publish collided on the primary key).
         -- Rank once more on the projection's actual key across both source arms and
-        -- keep the newest.
+        -- keep the newest. Cross-arm ordering caveat: v2 rows carry the latest of
+        -- their composite events while v1 rows carry a single event position, so a
+        -- v1-vs-v2 pair collision compares asymmetric timestamps; the v2 arm is
+        -- empty in the current corpus, and cross-arm ordering semantics are
+        -- deferred to the ENSv2 rollout (tracked in the repo issue on cross-arm
+        -- newest-wins ordering).
         deduped_current_sources AS (
             SELECT
                 *,
