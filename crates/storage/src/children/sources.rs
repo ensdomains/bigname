@@ -501,6 +501,36 @@ fn canonical_declared_child_sources_query<'a>(
             UNION ALL
             SELECT *
             FROM ensv2_sources
+        ),
+        -- Distinct child nodes can resolve to the same (parent, child) logical pair.
+        -- The registry derives a child node as keccak256(parent_node || labelhash)
+        -- (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L82 @ ens_v1@91c966f),
+        -- so different labels under one parent yield different child nodes — but an
+        -- unknown label renders as the bracketed-labelhash fallback name, and a
+        -- later genuine registration of that literal bracket string as a label (a
+        -- real child name_surface whose normalized_name IS the bracket text) then
+        -- resolves to the same constructed child_logical_name_id (observed in this
+        -- corpus on ens L1 during the 2026-07-08 full rebuild — 3 pairs — where the
+        -- per-child-node ranking alone let both survive and the children_current
+        -- publish collided on the primary key).
+        -- Rank once more on the projection's actual key across both source arms and
+        -- keep the newest. Cross-arm ordering caveat: v2 rows carry the latest of
+        -- their composite events while v1 rows carry a single event position, so a
+        -- v1-vs-v2 pair collision compares asymmetric timestamps; the v2 arm is
+        -- empty in the current corpus, and cross-arm ordering semantics are
+        -- deferred to the ENSv2 rollout (tracked in the repo issue on cross-arm
+        -- newest-wins ordering).
+        deduped_current_sources AS (
+            SELECT
+                *,
+                ROW_NUMBER() OVER (
+                    PARTITION BY parent_logical_name_id, child_logical_name_id
+                    ORDER BY
+                        block_number DESC,
+                        log_index DESC,
+                        normalized_event_id DESC
+                ) AS current_pair_rank
+            FROM current_sources
         )
         SELECT
             parent_logical_name_id,
@@ -527,8 +557,9 @@ fn canonical_declared_child_sources_query<'a>(
             normalized_event_ids,
             raw_fact_refs,
             manifest_versions
-        FROM current_sources
-        WHERE ($5::TEXT IS NULL OR parent_logical_name_id = $5)
+        FROM deduped_current_sources
+        WHERE current_pair_rank = 1
+          AND ($5::TEXT IS NULL OR parent_logical_name_id = $5)
         ORDER BY
             parent_logical_name_id ASC,
             canonical_display_name ASC,

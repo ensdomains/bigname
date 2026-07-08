@@ -1094,6 +1094,105 @@ async fn children_current_declared_child_sources_filter_noncanonical_events_and_
 }
 
 #[tokio::test]
+async fn children_current_declared_child_sources_dedupe_pairs_across_child_nodes() -> Result<()> {
+    // Live mechanism (2026-07-08 full rebuild, 3 ens L1 pairs): an unknown
+    // label renders as the bracketed-labelhash fallback name, and a later
+    // genuine registration of that literal bracket string as a label (a real
+    // child name_surface whose normalized_name IS the bracket text) resolves
+    // to the same constructed child_logical_name_id under the same parent —
+    // two genuinely distinct child nodes, distinct labelhashes, one pair. The
+    // source stream must emit exactly one row per pair — the newest — or the
+    // children_current publish collides on its primary key.
+    let database = TestDatabase::new().await?;
+    let parent = "ens:parent.eth";
+
+    // The unknown label "dup" renders as "[<keccak(dup) hex>]"; registering
+    // that literal bracket string as a label yields the colliding sibling.
+    let unknown_labelhash = labelhash_for_label("dup");
+    let bracket_label = format!("[{}]", &unknown_labelhash[2..]);
+    let bracket_child_id = format!("ens:{bracket_label}.parent.eth");
+    let bracket_child_name = format!("{bracket_label}.parent.eth");
+
+    upsert_name_surfaces(
+        database.pool(),
+        &[
+            name_surface(
+                parent,
+                "parent.eth",
+                "node:parent.eth",
+                30,
+                CanonicalityState::Finalized,
+            ),
+            // The literal bracket-string registration: a real child surface
+            // whose normalized_name is the bracket text of the unknown
+            // sibling's labelhash.
+            name_surface(
+                &bracket_child_id,
+                &bracket_child_name,
+                "node:bracket-literal.parent.eth",
+                31,
+                CanonicalityState::Finalized,
+            ),
+        ],
+    )
+    .await?;
+
+    upsert_normalized_events(
+        database.pool(),
+        &[
+            // Older edge: unknown label, no child surface, no preimage — the
+            // child_logical_name_id falls back to the bracket construction.
+            subregistry_event(SubregistryEventSeed {
+                event_identity: "dup-child-unknown-label",
+                namespace: "ens",
+                source_family: ENSV1_SUBREGISTRY_SOURCE_FAMILY,
+                chain_id: "ethereum-mainnet",
+                parent_namehash: "node:parent.eth",
+                child_namehash: "node:dup.parent.eth",
+                block_number: 100,
+                log_index: 0,
+                canonicality_state: CanonicalityState::Finalized,
+                tombstone: false,
+                active_edge: true,
+            }),
+            // Newer edge: the literal bracket-string registration, resolved
+            // through the child name_surface join to the same logical id.
+            subregistry_event(SubregistryEventSeed {
+                event_identity: "dup-child-bracket-literal",
+                namespace: "ens",
+                source_family: ENSV1_SUBREGISTRY_SOURCE_FAMILY,
+                chain_id: "ethereum-mainnet",
+                parent_namehash: "node:parent.eth",
+                child_namehash: "node:bracket-literal.parent.eth",
+                block_number: 101,
+                log_index: 0,
+                canonicality_state: CanonicalityState::Finalized,
+                tombstone: false,
+                active_edge: true,
+            }),
+        ],
+    )
+    .await?;
+
+    let current =
+        load_canonical_ens_v1_declared_child_sources(database.pool(), Some(parent)).await?;
+    assert_eq!(
+        current.len(),
+        1,
+        "fallback-branch and surface-branch edges resolving to one (parent, child) pair must dedupe: {current:#?}"
+    );
+    let source = &current[0];
+    assert_eq!(source.parent_logical_name_id, parent);
+    assert_eq!(source.child_logical_name_id, bracket_child_id);
+    assert_eq!(
+        source.event_identity, "dup-child-bracket-literal",
+        "the newest event must win the pair"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn children_current_parent_surface_upsert_invalidates_retained_registry_edges() -> Result<()>
 {
     let database = TestDatabase::new().await?;
