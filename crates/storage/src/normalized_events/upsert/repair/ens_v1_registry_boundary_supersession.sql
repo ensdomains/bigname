@@ -628,6 +628,22 @@ anchor_candidates AS (
          'safe'::canonicality_state,
          'finalized'::canonicality_state
      )
+     -- Boundary PermissionChanged emissions produce by-design sibling grants for the
+     -- same anchor (resource-scope resource_control plus resolver-scope
+     -- resolver_control, and per subject). Siblings are distinct permissions, never
+     -- supersession pairs: pairing them here made fresh re-derivation reject its own
+     -- dual emissions as resource mismatches. Ratified supersession shapes (labelhash
+     -- to namehash authority-key re-keys) share both scope kind and subject, so they
+     -- keep full candidacy and strictness.
+     AND (
+         current_event.event_kind <> 'PermissionChanged'
+         OR (
+             (stale.after_state #>> '{scope,kind}') IS NOT DISTINCT FROM
+                 (current_event.after_state::JSONB #>> '{scope,kind}')
+             AND (stale.after_state ->> 'subject') IS NOT DISTINCT FROM
+                 (current_event.after_state::JSONB ->> 'subject')
+         )
+     )
     LEFT JOIN resources stale_event_resource
       ON stale_event_resource.resource_id = stale.resource_id
     LEFT JOIN registrar_legacy_registry_resources stale_registry_before_resource

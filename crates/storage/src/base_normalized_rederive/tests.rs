@@ -2104,6 +2104,113 @@ async fn pending_rederive_replay_requires_reviewed_manifest_snapshot() -> Result
         "unexpected error: {error:?}"
     );
 
+    // Once the reviewed replay itself has begun (closure adapters write their replay
+    // checkpoints before any discovery mutation), the replay owns discovery-state
+    // changes and target-set drift must no longer wedge session resumes.
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_replay_adapter_checkpoints (
+            deployment_profile,
+            chain_id,
+            cursor_kind,
+            adapter,
+            checkpoint_scope,
+            replay_start_block_number,
+            replay_target_block_number
+        )
+        VALUES ($1, $2, $3, 'ens_v1_subregistry_discovery', 'full_closure', 1, $4)
+        "#,
+    )
+    .bind(DEPLOYMENT_PROFILE)
+    .bind(BASE_NORMALIZED_REDERIVE_CHAIN_ID)
+    .bind(BASE_NORMALIZED_REDERIVE_CURSOR_KIND)
+    .bind(FIXTURE_REPLAY_TARGET_BLOCK)
+    .execute(database.pool())
+    .await?;
+    ensure_base_normalized_rederive_replay_manifest_snapshot_current(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        BASE_NORMALIZED_REDERIVE_CHAIN_ID,
+        FIXTURE_REPLAY_TARGET_BLOCK,
+    )
+    .await
+    .context(
+        "in-progress correction replay must tolerate replay-target drift written by its own closure adapters",
+    )?;
+
+    // The reviewed manifest digest also covers replay-owned collections (discovery
+    // edges, discovered contract-instance addresses), so it is skipped alongside the
+    // target digest once the replay has begun. Manifest-owned state stays protected
+    // during that window by the manifest-sync refusal gate.
+    let error =
+        refuse_base_normalized_rederive_manifest_sync_during_pending_replay(database.pool())
+            .await
+            .expect_err("manifest sync must stay refused while the correction replay is pending");
+    assert!(
+        format!("{error:?}").contains("refusing manifest sync"),
+        "unexpected error: {error:?}"
+    );
+
+    // A checkpoint pinned to a different replay target must not satisfy the
+    // has-begun detector: the strict pre-replay pin re-engages (fails closed).
+    sqlx::query(
+        r#"
+        UPDATE normalized_replay_adapter_checkpoints
+        SET replay_target_block_number = replay_target_block_number + 999
+        WHERE deployment_profile = $1
+          AND chain_id = $2
+          AND cursor_kind = $3
+          AND checkpoint_scope = 'full_closure'
+        "#,
+    )
+    .bind(DEPLOYMENT_PROFILE)
+    .bind(BASE_NORMALIZED_REDERIVE_CHAIN_ID)
+    .bind(BASE_NORMALIZED_REDERIVE_CURSOR_KIND)
+    .execute(database.pool())
+    .await?;
+    let error = ensure_base_normalized_rederive_replay_manifest_snapshot_current(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        BASE_NORMALIZED_REDERIVE_CHAIN_ID,
+        FIXTURE_REPLAY_TARGET_BLOCK,
+    )
+    .await
+    .expect_err(
+        "a replay checkpoint pinned to a different target must not excuse target-set drift",
+    );
+    assert!(
+        format!("{error:?}").contains("replay target snapshot changed"),
+        "unexpected error: {error:?}"
+    );
+
+    // With the replay checkpoints removed the pre-replay pin applies again.
+    sqlx::query(
+        r#"
+        DELETE FROM normalized_replay_adapter_checkpoints
+        WHERE deployment_profile = $1
+          AND chain_id = $2
+          AND cursor_kind = $3
+          AND checkpoint_scope = 'full_closure'
+        "#,
+    )
+    .bind(DEPLOYMENT_PROFILE)
+    .bind(BASE_NORMALIZED_REDERIVE_CHAIN_ID)
+    .bind(BASE_NORMALIZED_REDERIVE_CURSOR_KIND)
+    .execute(database.pool())
+    .await?;
+    let error = ensure_base_normalized_rederive_replay_manifest_snapshot_current(
+        database.pool(),
+        DEPLOYMENT_PROFILE,
+        BASE_NORMALIZED_REDERIVE_CHAIN_ID,
+        FIXTURE_REPLAY_TARGET_BLOCK,
+    )
+    .await
+    .expect_err("pre-replay target-set drift must stay pinned once replay checkpoints are gone");
+    assert!(
+        format!("{error:?}").contains("replay target snapshot changed"),
+        "unexpected error: {error:?}"
+    );
+
     sqlx::query(
         r#"
         UPDATE normalized_replay_cursors

@@ -286,13 +286,25 @@ manifest-linked capability flags, discovery rules, contract instances, active
 addresses, and active discovery edges, so the review pin detects
 manifest-linked row additions, removals, and modifications without storing the
 live discovery graph in the run row. While the reset cursor is still pending
-replay, the catch-up replay path rebuilds the current active snapshots,
-compares their digests with those reviewed digests, and refuses to replay if a
-different manifest image was synced after review, even when the replay target
-addresses and ranges would otherwise be unchanged. Repository manifest sync is
+replay and the reviewed replay has not yet begun, the catch-up replay path
+rebuilds the current active snapshots, compares their digests with those
+reviewed digests, and refuses to replay if a different manifest image was
+synced after review, even when the replay target addresses and ranges would
+otherwise be unchanged. Once the reviewed replay itself has begun — detected by
+a Base `full_closure` replay adapter checkpoint pinned to the reviewed replay
+target (closure adapters insert their checkpoint row before any mutation, and
+final replay reset deletes those rows inside the execute transaction, so within
+tool-reachable states a matching row was written by the reviewed replay) — both
+digest comparisons are skipped: the replay's own closure adapters legitimately
+correct discovery edges and discovered contract-instance addresses, which both
+reviewed digests cover, so re-comparing live state against the pre-replay pins
+would wedge every session resume after the first discovery commit. A leftover
+checkpoint pinned to a different replay target fails closed and re-engages the
+strict pre-replay comparison. Repository manifest sync is
 skipped while the reviewed completed run's reset cursor is still pending, so
 the active manifest tables cannot be rotated by normal repository sync between
-the replay guard and the full-closure adapter reads. A skipped repository
+the replay guard and the full-closure adapter reads; that sync gate is what
+protects manifest-owned state during the checkpoint-skip window. A skipped repository
 refresh remains marked for retry, so the same long-running indexer syncs the
 repository normally once the pending reset replay cursor completes.
 Because the delete scope is global for `base-mainnet` while replay reset is
