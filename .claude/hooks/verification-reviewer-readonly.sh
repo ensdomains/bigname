@@ -5,6 +5,14 @@
 # the command. Allowlist-first and fail-closed: this guards against a permissive
 # session (acceptEdits/bypassPermissions) letting the reviewer mutate the tree it is
 # reviewing, not against a determined adversary.
+#
+# Threat model (ratified on PR #118): accident-protection parity on a trusted
+# checkout. Vectors that require hostile local configuration — e.g. git
+# diff-driver/textconv helpers reachable via --ext-diff/--textconv, or a
+# RIPGREP_CONFIG_PATH file injecting rg options — are accepted risk here; the
+# gate additionally requires `rg --no-config` to neutralize the latter in the
+# common case. Compilation-executing cargo commands (check/clippy/build/test)
+# are excluded outright: build.rs runs arbitrary code at compile time.
 set -u
 
 INPUT="$(cat)"
@@ -46,28 +54,35 @@ while IFS= read -r SEG; do
   SEG="${SEG#"${SEG%%[![:space:]]*}"}"
   SEG="${SEG%"${SEG##*[![:space:]]}"}"
   [ -z "$SEG" ] && continue
-  # git --no-optional-locks prefix: strip it for subcommand matching (accepted
-  # on any inspection subcommand); required for git status, which otherwise
-  # refreshes and rewrites the .git/index stat cache.
+  # git --no-optional-locks prefix: strip it for subcommand matching. It is
+  # required for every git inspection command — porcelain like status/diff
+  # otherwise refreshes and rewrites the .git/index stat cache and contends
+  # on .git/index.lock.
   NOLOCK=0
   case "$SEG" in git\ --no-optional-locks\ *) NOLOCK=1; SEG="git ${SEG#git --no-optional-locks }" ;; esac
   case "$SEG" in
-    git\ status|git\ status\ *)
-      [ "$NOLOCK" = 1 ] || block "git status refreshes .git/index; use git --no-optional-locks status" ;;
-    git\ diff|git\ diff\ *|git\ log|git\ log\ *|git\ show|git\ show\ *|git\ rev-parse\ *|git\ ls-files|git\ ls-files\ *|git\ blame\ *|git\ shortlog|git\ shortlog\ *|git\ describe|git\ describe\ *) ;;
+    git\ status|git\ status\ *|git\ diff|git\ diff\ *|git\ log|git\ log\ *|git\ show|git\ show\ *|git\ rev-parse\ *|git\ ls-files|git\ ls-files\ *|git\ blame\ *|git\ shortlog|git\ shortlog\ *|git\ describe|git\ describe\ *)
+      [ "$NOLOCK" = 1 ] || block "git inspection may write .git/index; use git --no-optional-locks ${SEG#git }" ;;
     git\ grep\ *)
+      [ "$NOLOCK" = 1 ] || block "git inspection may write .git/index; use git --no-optional-locks ${SEG#git }"
       case "$SEG" in *--open-files-in-pager*|*\ -O*) block "$SEG" ;; esac ;;
     # git branch: exact listing forms only — `git branch [<options>] <name>` is
     # the branch-creation form, so anything with free arguments is blocked.
-    git\ branch|git\ branch\ -a|git\ branch\ -r|git\ branch\ -v|git\ branch\ -vv|git\ branch\ -av|git\ branch\ -avv|git\ branch\ --all|git\ branch\ --verbose|git\ branch\ --list|git\ branch\ --show-current) ;;
-    # cargo: only lockfile-asserting invocations — plain check/clippy/metadata
-    # can rewrite Cargo.lock when manifests changed in the diff under review.
-    cargo\ check*|cargo\ clippy*|cargo\ metadata*|cargo\ tree*)
+    git\ branch|git\ branch\ -a|git\ branch\ -r|git\ branch\ -v|git\ branch\ -vv|git\ branch\ -av|git\ branch\ -avv|git\ branch\ --all|git\ branch\ --verbose|git\ branch\ --list|git\ branch\ --show-current)
+      [ "$NOLOCK" = 1 ] || block "git inspection may write .git/index; use git --no-optional-locks ${SEG#git }" ;;
+    # cargo: resolution/formatting only, with the lockfile asserted. Commands
+    # that compile (check/clippy/build/test/run/doc/bench) execute build.rs —
+    # arbitrary code — and are not inspection; they are blocked entirely.
+    cargo\ metadata*|cargo\ tree*)
       case "$SEG" in *--locked*|*--frozen*) ;; *) block "cargo without --locked/--frozen (may rewrite Cargo.lock): $SEG" ;; esac ;;
     cargo\ fmt\ --check*) ;;
-    # rg: --pre runs an arbitrary preprocessor command per searched file.
+    cargo\ *)
+      block "cargo compilation commands execute build.rs; out of scope for the reviewer shell: $SEG" ;;
+    # rg: --pre runs an arbitrary preprocessor per searched file, and a
+    # RIPGREP_CONFIG_PATH config can inject it invisibly — require --no-config.
     rg\ *)
-      case "$SEG" in *--pre*) block "$SEG" ;; esac ;;
+      case "$SEG" in *--pre*) block "$SEG" ;; esac
+      case "$SEG" in *--no-config*) ;; *) block "rg without --no-config (RIPGREP_CONFIG_PATH may inject --pre): $SEG" ;; esac ;;
     # sort/tree: block -o output bundles (long --output is blocked globally)
     # and sort's --compress-program, which executes a helper for temp files.
     sort|sort\ *|tree|tree\ *)
