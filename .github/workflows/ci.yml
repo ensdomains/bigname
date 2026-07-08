@@ -243,3 +243,53 @@ jobs:
 
       - name: rollback smoke gate (no network)
         run: ./scripts/rollback-smoke --no-network
+
+  manager-graphql-compat:
+    # Guards that bigname's GraphQL schema still serves every field the ENS
+    # Manager's operations ask for. Validates the Manager's committed operation
+    # documents (pulled from apps-monorepo) against bigname's committed SDL
+    # fixture. This is a subset check ("does bigname serve what the Manager
+    # needs"), not a schema-to-schema diff — bigname is deliberately a subset,
+    # so a diff would be all noise. A breaking schema change (removed/renamed
+    # field the Manager reads) fails this job; adding or removing a
+    # bigname-private field the Manager never reads does not.
+    name: Manager GraphQL compat
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # GitHub withholds repository secrets (except GITHUB_TOKEN) from
+    # fork-originated pull_request runs, so the private apps-monorepo checkout
+    # below cannot authenticate on external-fork PRs. Skip the job cleanly for
+    # those instead of failing at checkout; it still runs for same-repo
+    # branches and on every push to main, so a fork-merged regression is
+    # caught on main immediately. (Skipped jobs satisfy required checks, so
+    # making this check required would not block external contributors.)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout bigname
+        uses: actions/checkout@v4
+
+      - name: Checkout Manager operation documents
+        uses: actions/checkout@v4
+        with:
+          repository: ensdomains/apps-monorepo
+          # Pinned deliberately so bigname CI does not flake red on every
+          # Manager edit; bump this when the Manager's indexer documents change.
+          ref: 759860f5acc62ea287b0feefa23c0d17aeb862a9
+          # apps-monorepo is private; this checkout needs a fine-grained PAT /
+          # GitHub App token with contents:read on ensdomains/apps-monorepo.
+          token: ${{ secrets.APPS_MONOREPO_READ_TOKEN }}
+          path: apps-monorepo
+          # Only the operation documents are needed — keep the checkout minimal.
+          sparse-checkout: packages/indexer/documents
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Validate Manager operations against bigname schema
+        run: |
+          npx -y -p @graphql-inspector/cli@6.0.8 -p graphql@16.14.2 graphql-inspector validate \
+            'apps-monorepo/packages/indexer/documents/**/*.graphql' \
+            apps/api/src/tests/fixtures/subgraph_schema.graphql
