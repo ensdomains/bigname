@@ -504,7 +504,7 @@ fn canonical_declared_child_sources_query<'a>(
         ),
         -- Distinct child nodes can resolve to the same (parent, child) logical pair.
         -- The registry derives a child node as keccak256(parent_node || labelhash)
-        -- (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L80 @ ens_v1@91c966f),
+        -- (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L82 @ ens_v1@91c966f),
         -- so different labels under one parent yield different child nodes — but an
         -- unknown label renders as the bracketed-labelhash fallback name, and a
         -- later genuine registration of that literal bracket string as a label (a
