@@ -1,6 +1,7 @@
 ---
 name: verify-loop
 description: User-invoked only bigname verification loop. Use only when the user explicitly invokes `$verify-loop` or asks to run the verify loop after Codex has implemented work; it spawns `verification_reviewer`, triages findings, confirms real issues with failing tests or checks, fixes them, and repeats until the reviewer is clean or all findings are rejected.
+disable-model-invocation: true
 metadata:
   kind: command
 ---
