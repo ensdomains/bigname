@@ -1096,13 +1096,13 @@ async fn children_current_declared_child_sources_filter_noncanonical_events_and_
 #[tokio::test]
 async fn children_current_declared_child_sources_dedupe_pairs_across_child_nodes() -> Result<()> {
     // Distinct child_node values can resolve to the same (parent, child)
-    // logical pair when the child has no surface and no label preimage: the
-    // child_logical_name_id falls back to the labelhash-constructed bracket
-    // name, and events sharing a labelhash under one parent then collapse to
-    // one pair despite carrying different child nodes. The source stream must
-    // emit exactly one row per pair — the newest — or the children_current
-    // publish collides on its primary key (observed live on ens L1
-    // bracketed-label children, 2026-07-08 full rebuild).
+    // logical pair: live, an unknown label's bracketed-labelhash fallback name
+    // collided with a later genuine registration of that literal bracket string
+    // as a label (2026-07-08 full rebuild, 3 ens L1 pairs). This fixture forces
+    // the same collision class through the fallback branch alone (two child
+    // nodes constructing one bracket name); the dedup under test is
+    // mechanism-agnostic — it must emit exactly one row per pair, the newest,
+    // or the children_current publish collides on its primary key.
     let database = TestDatabase::new().await?;
     let parent = "ens:parent.eth";
 

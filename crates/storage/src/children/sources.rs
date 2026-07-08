@@ -503,13 +503,15 @@ fn canonical_declared_child_sources_query<'a>(
             FROM ensv2_sources
         ),
         -- Distinct child nodes can resolve to the same (parent, child) logical pair:
-        -- a parent surface with multiple namehash representations yields a different
-        -- keccak(parent_node || labelhash) child node per representation while the
-        -- constructed child_logical_name_id is identical (observed live on ens L1
-        -- bracketed-label children during the 2026-07-08 full rebuild, where the
-        -- per-child-node ranking alone let both survive and the children_current
-        -- publish collided on the primary key). Rank once more on the projection's
-        -- actual key across both source arms and keep the newest.
+        -- an unknown label renders as the bracketed-labelhash fallback name, and a
+        -- later genuine registration of that literal bracket string as a label (a
+        -- real child name_surface whose normalized_name IS the bracket text) yields
+        -- a different child node under the same parent that resolves to the same
+        -- child_logical_name_id (observed live on ens L1 during the 2026-07-08 full
+        -- rebuild — 3 pairs — where the per-child-node ranking alone let both
+        -- survive and the children_current publish collided on the primary key).
+        -- Rank once more on the projection's actual key across both source arms and
+        -- keep the newest.
         deduped_current_sources AS (
             SELECT
                 *,
