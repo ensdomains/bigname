@@ -256,6 +256,14 @@ jobs:
     name: Manager GraphQL compat
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # GitHub withholds repository secrets (except GITHUB_TOKEN) from
+    # fork-originated pull_request runs, so the private apps-monorepo checkout
+    # below cannot authenticate on external-fork PRs. Skip the job cleanly for
+    # those instead of failing at checkout; it still runs for same-repo
+    # branches and on every push to main, so a fork-merged regression is
+    # caught on main immediately. (Skipped jobs satisfy required checks, so
+    # making this check required would not block external contributors.)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - name: Checkout bigname
         uses: actions/checkout@v4
