@@ -502,14 +502,17 @@ fn canonical_declared_child_sources_query<'a>(
             SELECT *
             FROM ensv2_sources
         ),
-        -- Distinct child nodes can resolve to the same (parent, child) logical pair:
-        -- an unknown label renders as the bracketed-labelhash fallback name, and a
+        -- Distinct child nodes can resolve to the same (parent, child) logical pair.
+        -- The registry derives a child node as keccak256(parent_node || labelhash)
+        -- (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L80 @ ens_v1@91c966f),
+        -- so different labels under one parent yield different child nodes — but an
+        -- unknown label renders as the bracketed-labelhash fallback name, and a
         -- later genuine registration of that literal bracket string as a label (a
-        -- real child name_surface whose normalized_name IS the bracket text) yields
-        -- a different child node under the same parent that resolves to the same
-        -- child_logical_name_id (observed live on ens L1 during the 2026-07-08 full
-        -- rebuild — 3 pairs — where the per-child-node ranking alone let both
-        -- survive and the children_current publish collided on the primary key).
+        -- real child name_surface whose normalized_name IS the bracket text) then
+        -- resolves to the same constructed child_logical_name_id (observed in this
+        -- corpus on ens L1 during the 2026-07-08 full rebuild — 3 pairs — where the
+        -- per-child-node ranking alone let both survive and the children_current
+        -- publish collided on the primary key).
         -- Rank once more on the projection's actual key across both source arms and
         -- keep the newest. Cross-arm ordering caveat: v2 rows carry the latest of
         -- their composite events while v1 rows carry a single event position, so a
