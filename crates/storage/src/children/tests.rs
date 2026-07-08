@@ -1094,6 +1094,86 @@ async fn children_current_declared_child_sources_filter_noncanonical_events_and_
 }
 
 #[tokio::test]
+async fn children_current_declared_child_sources_dedupe_pairs_across_child_nodes() -> Result<()> {
+    // Distinct child_node values can resolve to the same (parent, child)
+    // logical pair when the child has no surface and no label preimage: the
+    // child_logical_name_id falls back to the labelhash-constructed bracket
+    // name, and events sharing a labelhash under one parent then collapse to
+    // one pair despite carrying different child nodes. The source stream must
+    // emit exactly one row per pair — the newest — or the children_current
+    // publish collides on its primary key (observed live on ens L1
+    // bracketed-label children, 2026-07-08 full rebuild).
+    let database = TestDatabase::new().await?;
+    let parent = "ens:parent.eth";
+
+    upsert_name_surfaces(
+        database.pool(),
+        &[name_surface(
+            parent,
+            "parent.eth",
+            "node:parent.eth",
+            30,
+            CanonicalityState::Finalized,
+        )],
+    )
+    .await?;
+
+    // Same first label ("dup") in both child nodes -> identical labelhash and
+    // an identical constructed child_logical_name_id; the distinct child_node
+    // strings keep both alive under the per-child-node ranking alone.
+    upsert_normalized_events(
+        database.pool(),
+        &[
+            subregistry_event(SubregistryEventSeed {
+                event_identity: "dup-child-v1-node",
+                namespace: "ens",
+                source_family: ENSV1_SUBREGISTRY_SOURCE_FAMILY,
+                chain_id: "ethereum-mainnet",
+                parent_namehash: "node:parent.eth",
+                child_namehash: "node:dup.parent.eth",
+                block_number: 100,
+                log_index: 0,
+                canonicality_state: CanonicalityState::Finalized,
+                tombstone: false,
+                active_edge: true,
+            }),
+            subregistry_event(SubregistryEventSeed {
+                event_identity: "dup-child-variant-node",
+                namespace: "ens",
+                source_family: ENSV1_SUBREGISTRY_SOURCE_FAMILY,
+                chain_id: "ethereum-mainnet",
+                parent_namehash: "node:parent.eth",
+                child_namehash: "node:dup.parent.eth.v2",
+                block_number: 101,
+                log_index: 0,
+                canonicality_state: CanonicalityState::Finalized,
+                tombstone: false,
+                active_edge: true,
+            }),
+        ],
+    )
+    .await?;
+
+    let current =
+        load_canonical_ens_v1_declared_child_sources(database.pool(), Some(parent)).await?;
+    assert_eq!(
+        current.len(),
+        1,
+        "same (parent, child) pair from distinct child nodes must dedupe: {current:#?}"
+    );
+    let source = &current[0];
+    assert_eq!(source.parent_logical_name_id, parent);
+    assert_eq!(
+        source.event_identity, "dup-child-variant-node",
+        "the newest event must win the pair"
+    );
+    let expected_labelhash = labelhash_for_child_namehash("node:dup.parent.eth");
+    assert_eq!(source.labelhash, Some(expected_labelhash));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn children_current_parent_surface_upsert_invalidates_retained_registry_edges() -> Result<()>
 {
     let database = TestDatabase::new().await?;
