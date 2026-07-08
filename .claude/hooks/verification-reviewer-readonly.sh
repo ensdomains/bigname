@@ -46,8 +46,15 @@ while IFS= read -r SEG; do
   SEG="${SEG#"${SEG%%[![:space:]]*}"}"
   SEG="${SEG%"${SEG##*[![:space:]]}"}"
   [ -z "$SEG" ] && continue
+  # git --no-optional-locks prefix: strip it for subcommand matching (accepted
+  # on any inspection subcommand); required for git status, which otherwise
+  # refreshes and rewrites the .git/index stat cache.
+  NOLOCK=0
+  case "$SEG" in git\ --no-optional-locks\ *) NOLOCK=1; SEG="git ${SEG#git --no-optional-locks }" ;; esac
   case "$SEG" in
-    git\ status|git\ status\ *|git\ diff|git\ diff\ *|git\ log|git\ log\ *|git\ show|git\ show\ *|git\ rev-parse\ *|git\ ls-files|git\ ls-files\ *|git\ blame\ *|git\ shortlog|git\ shortlog\ *|git\ describe|git\ describe\ *) ;;
+    git\ status|git\ status\ *)
+      [ "$NOLOCK" = 1 ] || block "git status refreshes .git/index; use git --no-optional-locks status" ;;
+    git\ diff|git\ diff\ *|git\ log|git\ log\ *|git\ show|git\ show\ *|git\ rev-parse\ *|git\ ls-files|git\ ls-files\ *|git\ blame\ *|git\ shortlog|git\ shortlog\ *|git\ describe|git\ describe\ *) ;;
     git\ grep\ *)
       case "$SEG" in *--open-files-in-pager*|*\ -O*) block "$SEG" ;; esac ;;
     # git branch: exact listing forms only — `git branch [<options>] <name>` is
@@ -58,17 +65,26 @@ while IFS= read -r SEG; do
     cargo\ check*|cargo\ clippy*|cargo\ metadata*|cargo\ tree*)
       case "$SEG" in *--locked*|*--frozen*) ;; *) block "cargo without --locked/--frozen (may rewrite Cargo.lock): $SEG" ;; esac ;;
     cargo\ fmt\ --check*) ;;
-    # sort/tree: block -o output bundles (long --output is blocked globally).
+    # rg: --pre runs an arbitrary preprocessor command per searched file.
+    rg\ *)
+      case "$SEG" in *--pre*) block "$SEG" ;; esac ;;
+    # sort/tree: block -o output bundles (long --output is blocked globally)
+    # and sort's --compress-program, which executes a helper for temp files.
     sort|sort\ *|tree|tree\ *)
+      case "$SEG" in *--compress-program*) block "$SEG" ;; esac
       for TOK in ${SEG#* }; do case "$TOK" in --*) ;; -*o*) block "$SEG" ;; esac; done ;;
-    # uniq: second positional argument is an output file.
+    # uniq: second positional argument is an output file; after `--` every
+    # token is positional, even dash-prefixed ones.
     uniq|uniq\ *)
-      NPOS=0
-      for TOK in ${SEG#uniq}; do case "$TOK" in -*) ;; *) NPOS=$((NPOS+1)) ;; esac; done
+      NPOS=0; DASHDASH=0
+      for TOK in ${SEG#uniq}; do
+        if [ "$DASHDASH" = 1 ]; then NPOS=$((NPOS+1)); continue; fi
+        case "$TOK" in --) DASHDASH=1 ;; -*) ;; *) NPOS=$((NPOS+1)) ;; esac
+      done
       [ "$NPOS" -le 1 ] || block "$SEG" ;;
     find\ *)
       case "$SEG" in *-delete*|*-exec*|*-ok*|*-fprint*|*-fls*) block "$SEG" ;; esac ;;
-    cd\ *|pwd|ls|ls\ *|cat\ *|head|head\ *|tail|tail\ *|wc|wc\ *|rg\ *|grep\ *|stat\ *|file\ *|du|du\ *|cut\ *|column*|nl|nl\ *|jq\ *|diff\ *|echo\ *|printf\ *|which\ *|sha256sum\ *) ;;
+    cd\ *|pwd|ls|ls\ *|cat\ *|head|head\ *|tail|tail\ *|wc|wc\ *|grep\ *|stat\ *|file\ *|du|du\ *|cut\ *|column*|nl|nl\ *|jq\ *|diff\ *|echo\ *|printf\ *|which\ *|sha256sum\ *) ;;
     *) block "$SEG" ;;
   esac
 done < <(printf '%s\n' "$SCRUBBED" | awk '{ gsub(/\|\|/, "\n"); gsub(/&&/, "\n"); gsub(/;/, "\n"); gsub(/\|/, "\n"); gsub(/&/, "\n"); print }')
