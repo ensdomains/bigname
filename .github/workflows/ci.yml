@@ -274,11 +274,9 @@ jobs:
           repository: ensdomains/apps-monorepo
           # Pinned deliberately so bigname CI does not flake red on every
           # Manager edit; bump this when the Manager's indexer documents change.
-          # TODO(leon): confirm the pin SHA (a canonical apps-monorepo main SHA).
           ref: 759860f5acc62ea287b0feefa23c0d17aeb862a9
           # apps-monorepo is private; this checkout needs a fine-grained PAT /
           # GitHub App token with contents:read on ensdomains/apps-monorepo.
-          # TODO(leon): confirm the actual secret name once provisioned.
           token: ${{ secrets.APPS_MONOREPO_READ_TOKEN }}
           path: apps-monorepo
           # Only the operation documents are needed — keep the checkout minimal.
@@ -292,6 +290,6 @@ jobs:
 
       - name: Validate Manager operations against bigname schema
         run: |
-          npx -y -p @graphql-inspector/cli@6.0.8 -p graphql@16 graphql-inspector validate \
+          npx -y -p @graphql-inspector/cli@6.0.8 -p graphql@16.14.2 graphql-inspector validate \
             'apps-monorepo/packages/indexer/documents/**/*.graphql' \
             apps/api/src/tests/fixtures/subgraph_schema.graphql
