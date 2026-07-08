@@ -628,17 +628,29 @@ held advisory lock connection cannot starve the writer work.
    ORDER BY min(batch_sequence);
    ```
 
-   The default `--batch-size 100000` bounds WAL and row locks per commit while
-   leaving row-level sidecar delete triggers enabled. Lower the batch size only
-   if per-commit WAL or lock duration needs more headroom.
+   The default `--batch-size 100000` bounds WAL and row locks per commit.
+   Current-step delete candidates are materialized once per execution session
+   from temporary scope tables into step-local temporary candidate tables, so
+   each logged batch should delete from the candidate table rather than rescan
+   the full projection. Reverse-identity sidecar triggers are disabled only
+   inside the affected projection and identity-anchor delete transactions. The
+   sidecars are intentionally stale while the API is drained and the run is
+   incomplete; the final reset transaction rebuilds
+   `address_names_current_identity_counts` and
+   `address_names_current_identity_feed` from the remaining current projections
+   before setting the run to `completed`. Lower the batch size only if
+   per-commit WAL or lock duration needs more headroom.
 6. If the execute container dies before completion, keep the API drained and run
    the same execute command again with the same `--run-id`, `--batch-size`,
    `--replay-target-block`, and expected counts. The command resumes only when
    recorded deleted counts plus the remaining live census still equal the
    reviewed dry-run census, the current active replay target/range snapshot
    and active manifest snapshot still hash to the reviewed digests stored in
-   the run row, and retained raw facts remain complete and unchanged for the
-   stored target.
+   the run row, and retained raw facts remain complete for the stored target.
+   In-progress resume does not repeat the full retained raw-log byte-checksum
+   proof captured at run creation; the advisory lock and guarded-writer
+   exclusion make raw facts immutable during the correction, while the resume
+   census and digest checks remain live.
    Do not run replay until the run row is `status='completed'`; before that
    final state, replay cursors and projection markers are intentionally
    untouched. Normal indexer, worker, and guarded one-shot writers also refuse

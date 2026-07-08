@@ -147,11 +147,15 @@ reviewed digests, so the check remains non-vacuous even after the scoped
 dry-run's active target snapshot digest and active manifest snapshot digest as
 expected values, so review-to-write replay-target or manifest drift cannot
 become the stored run snapshot. The run row's retained raw-fact range proof
-covers canonical raw-log identity, payload fields, and lineage rows, and resume
-requires the current retained raw-log and lineage proof to match it; this keeps
-raw-fact drift detection non-vacuous after event rows are deleted. A long-paused
-run cannot continue after the active replay targets, active manifests, or
-retained raw facts have drifted out of the reviewed safe state.
+covers canonical raw-log identity, payload fields, and lineage rows at run
+creation. In-progress resume validates that stored proof target, the active
+target and manifest digests, raw-fact completeness, and live-plus-deleted
+census, but it does not recompute the full retained raw-log byte checksum on
+every resume. The session advisory lock plus guarded-writer exclusion make the
+raw-fact corpus immutable for the run except for this command's scoped deletes,
+which never touch raw-fact tables. A long-paused run cannot continue after the
+active replay targets, active manifests, or raw-fact completeness guards have
+drifted out of the reviewed safe state.
 
 The normalized-event scope is:
 
@@ -220,11 +224,21 @@ The delete is batched and resumable. The order is FK-safe at every commit:
 current projections keyed by scoped identity rows, then
 `projection_normalized_event_changes`, then scoped `normalized_events`, then
 `surface_bindings`, `resources`, `name_surfaces`, and `token_lineages`.
-Projection rows and normalized events are batched by deterministic key/block
-order; identity rows are batched by primary-key order. Identity-row batches do
-not begin until all dependent current projections, projection change rows, and
-normalized events are gone, so a crash leaves a partially deleted but
-referentially valid database.
+Each execution session materializes the reviewed event and identity scopes into
+temporary tables, then materializes one candidate-key table for the current
+delete step by driving from those scope tables into the projection, event, or
+identity lookup indexes. Batches delete from that candidate table in
+deterministic key/block order. On crash or operator resume, the session
+rebuilds temporary scope and candidate tables from the remaining live rows and
+continues under the same reviewed run state. Identity-row batches do not begin
+until all dependent current projections, projection change rows, and normalized
+events are gone, so a crash leaves a partially deleted but referentially valid
+database. During the destructive delete, the API must remain drained:
+reverse-identity sidecar triggers are disabled only inside the affected
+projection and identity-anchor delete transactions, and the final reset
+transaction rebuilds `address_names_current_identity_counts` and
+`address_names_current_identity_feed` from the remaining current projections
+before marking the run completed.
 After all delete batches have completed, one final small transaction clears
 affected `current_projection_replay_status` rows,
 `normalized_replay_adapter_checkpoint_items` and

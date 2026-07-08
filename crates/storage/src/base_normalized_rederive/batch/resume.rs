@@ -161,15 +161,7 @@ pub(super) async fn rerun_resume_guards(
         &current_replay_target_snapshot,
     )
     .await?;
-    let current_raw_fact_range_proof =
-        load_raw_fact_range_proof_from(transaction, state.replay_target_block).await?;
-    ensure!(
-        current_raw_fact_range_proof == state.plan_snapshot.raw_fact_range_proof,
-        "Base normalized-event rederive raw-fact range proof changed during run {:?}: stored {:?}, current {:?}",
-        state.run_id,
-        state.plan_snapshot.raw_fact_range_proof,
-        current_raw_fact_range_proof
-    );
+    ensure_stored_raw_fact_range_proof_matches_run(state)?;
     let raw_fact_completeness =
         load_raw_fact_completeness_from(transaction, state.replay_target_block).await?;
     ensure!(
@@ -180,6 +172,23 @@ pub(super) async fn rerun_resume_guards(
     Ok(state
         .plan_snapshot
         .to_plan_with_snapshots(current_replay_target_snapshot, current_manifest_snapshot))
+}
+
+fn ensure_stored_raw_fact_range_proof_matches_run(state: &RunState) -> Result<()> {
+    let proof = &state.plan_snapshot.raw_fact_range_proof;
+    ensure!(
+        !proof.is_empty(),
+        "Base normalized-event rederive run {:?} lacks the raw-fact range proof captured at run creation",
+        state.run_id
+    );
+    ensure!(
+        proof.replay_target_block == state.replay_target_block,
+        "Base normalized-event rederive raw-fact range proof target mismatch during run {:?}: stored {}, run target {}",
+        state.run_id,
+        proof.replay_target_block,
+        state.replay_target_block
+    );
+    Ok(())
 }
 
 async fn validate_or_upgrade_active_replay_target_snapshot_digest(

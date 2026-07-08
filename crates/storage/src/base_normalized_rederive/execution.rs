@@ -60,11 +60,11 @@ pub(super) async fn create_scope_tables(
             .with_context(|| format!("failed to drop temporary scope table {table}"))?;
     }
 
-    execute(transaction, "CREATE TEMP TABLE base_rederive_scope_normalized_events (normalized_event_id BIGINT PRIMARY KEY) ON COMMIT DROP").await?;
-    execute(transaction, "CREATE TEMP TABLE base_rederive_scope_resources (resource_id UUID PRIMARY KEY) ON COMMIT DROP").await?;
-    execute(transaction, "CREATE TEMP TABLE base_rederive_scope_token_lineages (token_lineage_id UUID PRIMARY KEY) ON COMMIT DROP").await?;
-    execute(transaction, "CREATE TEMP TABLE base_rederive_scope_name_surfaces (logical_name_id TEXT PRIMARY KEY) ON COMMIT DROP").await?;
-    execute(transaction, "CREATE TEMP TABLE base_rederive_scope_surface_bindings (surface_binding_id UUID PRIMARY KEY) ON COMMIT DROP").await?;
+    execute(transaction, "CREATE TEMP TABLE base_rederive_scope_normalized_events (normalized_event_id BIGINT PRIMARY KEY) ON COMMIT PRESERVE ROWS").await?;
+    execute(transaction, "CREATE TEMP TABLE base_rederive_scope_resources (resource_id UUID PRIMARY KEY) ON COMMIT PRESERVE ROWS").await?;
+    execute(transaction, "CREATE TEMP TABLE base_rederive_scope_token_lineages (token_lineage_id UUID PRIMARY KEY) ON COMMIT PRESERVE ROWS").await?;
+    execute(transaction, "CREATE TEMP TABLE base_rederive_scope_name_surfaces (logical_name_id TEXT PRIMARY KEY) ON COMMIT PRESERVE ROWS").await?;
+    execute(transaction, "CREATE TEMP TABLE base_rederive_scope_surface_bindings (surface_binding_id UUID PRIMARY KEY) ON COMMIT PRESERVE ROWS").await?;
 
     sqlx::query(
         r#"
@@ -95,6 +95,11 @@ pub(super) async fn create_scope_tables(
     execute(transaction, "INSERT INTO base_rederive_scope_token_lineages SELECT token_lineage_id FROM token_lineages WHERE chain_id = 'base-mainnet' AND provenance->>'adapter' = 'ens_v1_unwrapped_authority'").await?;
     execute(transaction, "INSERT INTO base_rederive_scope_name_surfaces SELECT logical_name_id FROM name_surfaces WHERE chain_id = 'base-mainnet' AND provenance->>'adapter' = 'ens_v1_unwrapped_authority'").await?;
     execute(transaction, "INSERT INTO base_rederive_scope_surface_bindings SELECT surface_binding_id FROM surface_bindings WHERE chain_id = 'base-mainnet' AND provenance->>'adapter' = 'ens_v1_unwrapped_authority'").await?;
+    execute(transaction, "ANALYZE base_rederive_scope_normalized_events").await?;
+    execute(transaction, "ANALYZE base_rederive_scope_resources").await?;
+    execute(transaction, "ANALYZE base_rederive_scope_token_lineages").await?;
+    execute(transaction, "ANALYZE base_rederive_scope_name_surfaces").await?;
+    execute(transaction, "ANALYZE base_rederive_scope_surface_bindings").await?;
     Ok(())
 }
 

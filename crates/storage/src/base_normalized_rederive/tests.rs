@@ -398,6 +398,7 @@ async fn execute_deletes_fk_safe_scope_and_resets_replay() -> Result<()> {
     let expected_plan =
         load_base_normalized_rederive_plan(database.pool(), DEPLOYMENT_PROFILE, None).await?;
     let expected = expected_from_plan(&expected_plan)?;
+    seed_stale_identity_sidecars(database.pool()).await?;
 
     let outcome = execute_base_normalized_rederive_drop(
         database.pool(),
@@ -450,6 +451,14 @@ async fn execute_deletes_fk_safe_scope_and_resets_replay() -> Result<()> {
     assert_eq!(
         count_table(database.pool(), "projection_normalized_event_changes").await?,
         4
+    );
+    assert_eq!(
+        count_table(database.pool(), "address_names_current_identity_counts").await?,
+        0
+    );
+    assert_eq!(
+        count_table(database.pool(), "address_names_current_identity_feed").await?,
+        0
     );
     assert_eq!(count_table(database.pool(), "normalized_events").await?, 4);
     assert_eq!(
@@ -985,7 +994,7 @@ async fn execute_refuses_active_replay_target_snapshot_drift_from_review() -> Re
 }
 
 #[tokio::test]
-async fn batched_resume_raw_fact_proof_survives_after_event_delete_step() -> Result<()> {
+async fn batched_resume_skips_raw_fact_byte_checksum_after_event_delete_step() -> Result<()> {
     let database = test_database().await?;
     seed_rederive_fixture(database.pool()).await?;
     let expected = reviewed_counts(database.pool()).await?;
@@ -1007,21 +1016,20 @@ async fn batched_resume_raw_fact_proof_survives_after_event_delete_step() -> Res
     .execute(database.pool())
     .await?;
 
-    let error = execute_base_normalized_rederive_drop(
+    let completed = execute_base_normalized_rederive_drop(
         database.pool(),
         DEPLOYMENT_PROFILE,
         RESUME_RUN_ID,
         100,
         Some(FIXTURE_REPLAY_TARGET_BLOCK),
-        expected,
+        expected.clone(),
     )
-    .await
-    .expect_err("resume must still detect raw-fact drift after scoped events are gone");
-    assert!(
-        format!("{error:?}").contains("raw-fact range proof changed"),
-        "unexpected error: {error:?}"
+    .await?;
+    assert_eq!(completed.deleted, expected.counts);
+    assert_eq!(
+        load_run_status(database.pool(), RESUME_RUN_ID).await?,
+        ("completed".to_owned(), "completed".to_owned())
     );
-    assert_eq!(count_table(database.pool(), "surface_bindings").await?, 2);
 
     database.cleanup().await?;
     Ok(())
@@ -1170,7 +1178,7 @@ async fn batched_resume_reruns_raw_fact_completeness_before_next_delete() -> Res
     .await
     .expect_err("resume must re-run raw-fact completeness before deleting another batch");
     assert!(
-        format!("{error:?}").contains("raw-fact range proof changed"),
+        format!("{error:?}").contains("raw-fact completeness check failed on resume"),
         "unexpected error: {error:?}"
     );
     assert_eq!(count_table(database.pool(), "name_current").await?, 1);
@@ -2777,6 +2785,52 @@ fn expected_from_plan(
             &plan.active_manifest_snapshot,
         )?),
     })
+}
+
+async fn seed_stale_identity_sidecars(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO address_names_current_identity_counts (address, roles, total_count)
+        VALUES ('0xstale', 'both', 123)
+        ON CONFLICT (address, roles) DO UPDATE
+        SET total_count = EXCLUDED.total_count
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO address_names_current_identity_feed (
+            address,
+            roles,
+            coin_type,
+            logical_name_id,
+            namespace,
+            canonical_display_name,
+            normalized_name,
+            namehash,
+            is_primary,
+            relation_facets
+        )
+        VALUES (
+            '0xstale',
+            'both',
+            '',
+            'basenames:stale.base.eth',
+            'basenames',
+            'stale.base.eth',
+            'stale.base.eth',
+            '0xstale',
+            false,
+            ARRAY['token_holder']::text[]
+        )
+        ON CONFLICT (address, roles, coin_type) DO UPDATE
+        SET logical_name_id = EXCLUDED.logical_name_id
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 fn scope_rule_pair_set() -> BTreeSet<(String, String, String)> {

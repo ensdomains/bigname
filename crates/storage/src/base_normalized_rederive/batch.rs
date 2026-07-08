@@ -20,7 +20,8 @@ use super::{
     BaseNormalizedRederiveExpectedCounts, base_normalized_rederive_json_digest,
     load_plan_in_transaction, resolve_replay_target_block_from,
 };
-use delete::delete_step_batch;
+use crate::address_names::rebuild_address_names_current_identity_sidecars_in_transaction;
+use delete::{delete_step_batch, prepare_delete_step_candidates, reset_delete_candidate_tables};
 use reset::reset_replay_state;
 use resume::{
     load_completed_run_plan_with_verified_snapshot_digests, rerun_resume_guards,
@@ -205,6 +206,10 @@ async fn prepare_or_resume_run(
                 .await
                 .context("Base normalized-event rederive resume guard failed")?;
             validate_resume_census(&mut transaction, &state).await?;
+            create_scope_tables(&mut transaction, state.replay_target_block).await?;
+            reset_delete_candidate_tables(&mut transaction).await?;
+            prepare_delete_step_candidates(&mut transaction, Step::parse(&state.current_step)?)
+                .await?;
             transaction
                 .commit()
                 .await
@@ -293,6 +298,8 @@ async fn prepare_or_resume_run(
         &plan,
     )
     .await?;
+    reset_delete_candidate_tables(&mut transaction).await?;
+    prepare_delete_step_candidates(&mut transaction, Step::parse(&state.current_step)?).await?;
     transaction
         .commit()
         .await
@@ -321,6 +328,7 @@ async fn execute_next_batch(connection: &mut PgConnection, run_id: &str) -> Resu
         let reset_counts = reset_replay_state(&mut transaction, &state).await?;
         state.deleted_counts.add_reset_counts(&reset_counts);
         ensure_step_complete(step, &state.deleted_counts, &state.expected_counts)?;
+        rebuild_address_names_current_identity_sidecars_in_transaction(&mut transaction).await?;
         state.mark_completed();
         update_run_state(&mut transaction, &state).await?;
         let reset_rows = reset_counts.reset_row_count();
@@ -341,13 +349,7 @@ async fn execute_next_batch(connection: &mut PgConnection, run_id: &str) -> Resu
         return Ok(BatchProgress::new(state, step, reset_rows));
     }
 
-    let deleted = delete_step_batch(
-        &mut transaction,
-        step,
-        state.batch_size,
-        state.replay_target_block,
-    )
-    .await?;
+    let deleted = delete_step_batch(&mut transaction, step, state.batch_size).await?;
     if deleted.row_count > 0 {
         state.deleted_counts.add_step(step, deleted.row_count);
         ensure_step_not_overrun(step, &state.deleted_counts, &state.expected_counts)?;
