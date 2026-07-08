@@ -24,7 +24,7 @@ Internal reference for splitting implementation work. `AGENTS.md` is the process
 | `tests/conformance`, checked-in fixtures | Conformance and Fixtures | Capability evidence, replay/conformance suites, golden fixtures |
 | `docs/consumer-capabilities.md` | Conformance and Fixtures | Replacement meaning, rollout/rollback evidence |
 | `.refs/MANIFEST.toml`, `docs/upstream.md` | Upstream Evidence | Pin rotation, citations, known divergences |
-| `.agents/**`, `.codex/agents/**`, `.codex/rules/**`, `.codex/config.toml`, `.codex/hooks/**`, `AGENTS.md` | Agent Process | Skills, subagent definitions, hooks, automation, repo-local process rules |
+| `.agents/**`, `.codex/agents/**`, `.codex/rules/**`, `.codex/config.toml`, `.codex/hooks/**`, `.claude/**`, `AGENTS.md`, `CLAUDE.md` | Agent Process | Skills, subagent definitions, hooks, automation, repo-local process rules |
 | `scripts/**`, `.github/**`, root `Cargo.toml`, `Cargo.lock` | Platform and DevEx | Tooling, CI, workspace-wide dependency changes |
 
 ## High-Conflict Rules
