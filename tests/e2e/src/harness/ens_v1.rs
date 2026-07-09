@@ -66,6 +66,20 @@ mod multicoin_addr_calls {
     }
 }
 
+mod legacy_registry_calls {
+    use alloy_sol_types::sol;
+
+    // Dedicated legacy-registry send bindings. The pinned artifact supplies
+    // the input signatures; transaction calldata does not depend on return ABI.
+    // (upstream: .refs/ens_v1/deployments/sepolia/LegacyENSRegistry.json:L274 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/deployments/sepolia/LegacyENSRegistry.json:L280 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/deployments/sepolia/LegacyENSRegistry.json:L297 @ ens_v1@91c966f)
+    sol! {
+        function setSubnodeOwner(bytes32 node, bytes32 label, address owner) external;
+        function setResolver(bytes32 node, address resolver) external;
+    }
+}
+
 pub fn labelhash(label: &str) -> B256 {
     keccak256(label.as_bytes())
 }
@@ -343,6 +357,30 @@ pub async fn create_subname(
     .await
 }
 
+/// Create `<label>` below `parent_node` in the legacy registry. `from` must
+/// control `parent_node` in that legacy registry state.
+pub async fn create_legacy_subname(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    parent_node: B256,
+    label: &str,
+    owner: Address,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        d.legacy_registry.address,
+        &legacy_registry_calls::setSubnodeOwnerCall {
+            node: parent_node,
+            label: labelhash(label),
+            owner,
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
 pub async fn set_resolver(
     rpc: &RpcClient,
     d: &EnsV1Deployment,
@@ -359,6 +397,24 @@ pub async fn set_resolver(
             resolver,
         }
         .abi_encode(),
+    )
+    .await
+}
+
+/// Set a resolver on the legacy registry. `from` must control `node` in that
+/// legacy registry state.
+pub async fn set_legacy_resolver(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    node: B256,
+    resolver: Address,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        d.legacy_registry.address,
+        &legacy_registry_calls::setResolverCall { node, resolver }.abi_encode(),
     )
     .await
 }

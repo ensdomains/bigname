@@ -132,9 +132,9 @@ The skeleton already deploys both registries with the real fallback wiring.
 
 | Transition | Key assertions | Status |
 | --- | --- | --- |
-| Name existing only on the legacy registry | reads reflect migration-aware admission per the registry family contract | planned(2) |
-| Migrate (first write on current registry) | subsequent legacy-registry writes for that node are suppressed | planned(2) |
-| Legacy write to an unmigrated node post-cutover | still admitted (not yet migrated) | planned(2) |
+| Name existing only on the legacy registry | legacy-only 2LD derives canonical `SubregistryChanged` with old-registry emitter/current-registry authority provenance; no exact-name surface is minted and `eth` has no routeable children surface; a legacy-only child under a registered parent appears as a bracketed placeholder | covered(registry_migration_legacy_to_current_admission) |
+| Migrate (first write on current registry) | asserted across two ingests of one chain because subregistry observations are one-per-node current-edge state (the legacy observation is superseded, not retained): pre-migration the legacy-emitted owner state is admitted; post-migration the current-registry controller registration supersedes it, later old-registry resolver and owner writes emit no normalized resolver/owner changes, and current-registry resolver and registry owner stay visible in normalized events and exact-name reads | covered(registry_migration_legacy_to_current_admission) |
+| Legacy write to an unmigrated node post-cutover | a different legacy child written after another node migrates is still admitted with migration-epoch provenance and appears as a bracketed child under its registered parent | covered(registry_migration_legacy_to_current_admission) |
 
 ### ENSv2 (sepolia-dev profile)
 

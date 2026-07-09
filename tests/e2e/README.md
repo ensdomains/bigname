@@ -112,6 +112,12 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
 - `registry_driven_reads::zero_owner_subname_leaves_default_children_listing`
   — creates and then zeroes a registry-only subname, asserting the tombstoned
   child leaves the default parent children listing.
+- `registry_migration::registry_migration_legacy_to_current_admission` —
+  exercises the active registry v3 old-registry role end to end: a pure
+  legacy 2LD derives subregistry state without minting an exact-name surface,
+  a current-registry registration suppresses later legacy resolver/owner
+  writes for that node, and a different unmigrated legacy child remains
+  admitted after the cutover.
 - `resolver_records::resolver_changes_follow_registry_and_zero_releases` —
   registers with the admitted PublicResolver, moves the registry binding to a
   second deployed PublicResolver copy, then sets it to zero; exact-name and
