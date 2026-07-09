@@ -69,6 +69,51 @@ pub async fn ingest_at_current_head(
     })
 }
 
+pub async fn ingest_and_serve_with_ens_execution(
+    anvil: &Anvil,
+    deployment: &EnsV1Deployment,
+    universal_resolver: &crate::harness::artifacts::Deployed,
+    ready_sql: Option<&str>,
+) -> Result<PipelineRun> {
+    // Deliberately NO margin mining: on-demand verified execution keys its
+    // persisted outcome by the head it executed at (eth_call runs at
+    // `latest`), while explain readback rebuilds the key from the
+    // projection row's position. They only meet when the head IS the row's
+    // last-event block, so execution scenarios ingest at the exact head.
+    let repo_root = repo_root();
+    let rpc = anvil.client();
+    let head = rpc.block_number().await?;
+
+    let scratch = TempDir::create()?;
+    let mut targets = deployment.manifest_targets();
+    targets.insert(
+        "universal_resolver",
+        (universal_resolver.address, universal_resolver.block_number),
+    );
+    let profile = manifests::generate_local_profile(scratch.path(), &repo_root, &targets)?;
+
+    let db = HarnessDb::create().await?;
+    pipeline::indexer_run_until_checkpoint(
+        &repo_root,
+        &db.url,
+        &db.pool,
+        &profile.root,
+        &anvil.url,
+        head,
+        ready_sql,
+    )
+    .await?;
+    pipeline::worker_replay_all_current_projections(&repo_root, &db.url).await?;
+    let chain_rpc_urls = [("ethereum-mainnet", anvil.url.as_str())];
+    let api = pipeline::ApiServer::start_with_chain_rpc_urls(&repo_root, &db.url, &chain_rpc_urls)
+        .await?;
+    Ok(PipelineRun {
+        db,
+        api,
+        _scratch: scratch,
+    })
+}
+
 pub async fn ingest_basenames_and_serve(
     base_anvil: &Anvil,
     deployment: &BasenamesDeployment,

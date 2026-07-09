@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::str::FromStr;
 
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_sol_types::{SolCall, SolValue, sol};
@@ -191,6 +192,8 @@ pub struct EnsV1Deployment {
     pub name_wrapper: Deployed,
 }
 
+pub const EXECUTION_UNIVERSAL_RESOLVER_ADDRESS: &str = "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe";
+
 pub async fn deploy_ens_v1(rpc: &RpcClient, repo_root: &Path) -> Result<EnsV1Deployment> {
     let accounts = rpc.accounts().await?;
     let deployer = *accounts.first().context("anvil exposes no accounts")?;
@@ -365,6 +368,62 @@ pub async fn deploy_extra_public_resolver(
             .abi_encode_params(),
     )
     .await
+}
+
+/// Deploy the pinned UniversalResolver with local constructor dependencies,
+/// then install its runtime bytecode at the address currently used by the
+/// execution crate for ENS verified resolution.
+///
+/// The constructor shape is pinned upstream:
+/// (upstream: .refs/ens_v1/contracts/universalResolver/UniversalResolver.sol:L11 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/universalResolver/UniversalResolver.sol:L19 @ ens_v1@91c966f)
+/// and the batch gateway provider returns the URL set supplied at deployment:
+/// (upstream: .refs/ens_v1/contracts/ccipRead/GatewayProvider.sol:L11 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/ccipRead/GatewayProvider.sol:L16 @ ens_v1@91c966f).
+pub async fn install_local_universal_resolver(
+    rpc: &RpcClient,
+    repo_root: &Path,
+    d: &EnsV1Deployment,
+) -> Result<Deployed> {
+    let gateway_provider = deploy(
+        rpc,
+        d.deployer,
+        &load_ens_v1_artifact(repo_root, "sepolia", "BatchGatewayProvider")?,
+        &(d.deployer, Vec::<String>::new()).abi_encode_params(),
+    )
+    .await?;
+    let materialized = deploy(
+        rpc,
+        d.deployer,
+        &load_ens_v1_artifact(repo_root, "sepolia", "UniversalResolver")?,
+        &(d.deployer, d.registry.address, gateway_provider.address).abi_encode_params(),
+    )
+    .await?;
+    let runtime_code = rpc.get_code(materialized.address).await.with_context(|| {
+        format!(
+            "read local UniversalResolver runtime at {:#x}",
+            materialized.address
+        )
+    })?;
+    if runtime_code.is_empty() {
+        bail!(
+            "local UniversalResolver deployment at {:#x} has no runtime code",
+            materialized.address
+        );
+    }
+    let execution_address = Address::from_str(EXECUTION_UNIVERSAL_RESOLVER_ADDRESS)
+        .context("parse execution UniversalResolver address")?;
+    rpc.set_code(execution_address, &runtime_code)
+        .await
+        .with_context(|| {
+            format!(
+                "install local UniversalResolver runtime at {EXECUTION_UNIVERSAL_RESOLVER_ADDRESS}"
+            )
+        })?;
+    Ok(Deployed {
+        address: execution_address,
+        block_number: materialized.block_number,
+    })
 }
 
 async fn wire_registry_nodes(

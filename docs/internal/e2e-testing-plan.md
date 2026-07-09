@@ -169,17 +169,17 @@ The Phase 5 primary-name rows use ENSv1's Base L2ReverseRegistrar
 | NFT-only transfer vs management-only transfer vs full transfer | registrar token and registry-owner control facets move independently, then converge on reclaim | covered(basenames_declared_state_matrix_end_to_end) |
 | Address-resolution change on the L2 resolver | declared `addr:60` record updates through the admitted Base L2Resolver | covered(basenames_declared_state_matrix_end_to_end) |
 | Primary name set/unset (Base reverse registrar event) | declared candidate tracks `NameForAddrChanged` at Base coin type 2147492101 and clears on blank | covered(basenames_declared_state_matrix_end_to_end) |
-| L1 compatibility resolution | transport path, verified only through the execution plane | planned(6) |
+| L1 compatibility resolution | transport path, verified only through the execution plane | blocked(needs the Basenames L1Resolver transport with a CCIP gateway pair the pins cannot deploy standalone — same gateway/verifier limitation as the CCIP execution row) |
 
 ### Verified resolution and offchain (execution plane)
 
 | Scenario | Key assertions | Status |
 | --- | --- | --- |
-| Direct-path verified query via locally deployed UniversalResolver | verified section agrees with declared; execution trace persisted (layer 3) | planned(6) |
-| Wildcard-derived answer | wildcard topology populated, supported class honored | planned(6) |
-| Alias-path answer | alias hops recorded | planned(6) |
-| CCIP-Read success / failure / proof mismatch (local mock gateway) | statuses distinguish; failures never fabricate values | planned(6) |
-| Cache invalidation on record change, topology change, reorg | stale verified answers do not survive | planned(6) |
+| Direct-path verified query via locally deployed UniversalResolver | verified section agrees with declared; execution trace, steps, and cache outcome persist and are asserted at layer 3; **REVIEW POINTS**: (1) execution calls a hardcoded Universal Resolver address, ignoring the manifest-declared ens_execution role (the harness installs the local UR runtime at that address via anvil_setCode); (2) the persisted on-demand outcome is not explain-readable — persist-side and explain-side cache keys derive from different inputs, so explain-after-verify 404s even with head, row position, and record set aligned (pinned as 404; conformance never exercises this composition because it seeds outcomes to match the read side) | covered(verified_resolution::direct_path_verified_query_via_local_universal_resolver_persists_trace) |
+| Wildcard-derived answer | wildcard topology populated, supported class honored | blocked(no e2e-deployed pinned contract path currently produces the `observed_wildcard_path` topology required by the public support class; API tests seed that topology, and faking it here would bypass the contract-first harness) |
+| Alias-path answer | alias hops recorded | blocked(no ENSv1 pinned deployment helper or local manifest admission path currently produces `resolver_alias_path`; alias coverage is seeded below e2e and needs a contract-backed source before this row can flip) |
+| CCIP-Read success / failure / proof mismatch (local mock gateway) | statuses distinguish; failures never fabricate values | blocked(local mock gateway coverage needs a deployable offchain resolver/gateway pair from pins; the simple ENSv1 mock resolver is test source without a harness deployment artifact (upstream: .refs/ens_v1/contracts/test/mocks/MockOffchainResolver.sol:L15 @ ens_v1@91c966f), while shipped offchain resolver artifacts require DNSSEC/gateway-verifier topology not deployed by the ENSv1 e2e stack) |
+| Cache invalidation on record change, topology change, reorg | stale verified answers do not survive | blocked(record-change refresh requires a supported same-DB live ingest plus projection replay to move the selected snapshot and record boundary after the on-chain mutation; worker invalidation commands can delete exact stale boundaries but do not refresh the snapshot or re-execute against the post-change block by themselves) |
 
 ## Perturbation multipliers (phase 3, cross-cutting)
 

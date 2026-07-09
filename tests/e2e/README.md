@@ -67,7 +67,10 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
    its old-registry role. (Mirroring only `v1.toml` once produced a false
    "production doesn't watch the registry" finding; completeness here is
    load-bearing.) Roles a scenario does not deploy get placeholder
-   addresses (no code, no logs). Basenames scenarios mirror the shipped
+   addresses (no code, no logs). Execution-plane ENS scenarios also mirror
+   `ens_execution` when they supply a local `universal_resolver` target; the
+   base ENSv1 scenarios keep execution manifests out of the generated profile.
+   Basenames scenarios mirror the shipped
    `manifests/mainnet/base/basenames` family versions with local Base
    addresses; the Phase 5 declared-state slice does not mirror
    `manifests/mainnet/ethereum/basenames` because no L1-compatibility or
@@ -78,7 +81,10 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
    checkpoint reaches the scenario head (the live loop, not `backfill`, is
    what promotes checkpoints that snapshot-selected API reads require), then
    `worker replay all-current-projections`, then `bigname-api serve` on a
-   local port. An `indexer backfill` entry point is also provided for future
+   local port. Execution-plane scenarios start the API with
+   `--chain-rpc-url ethereum-mainnet=<anvil>` so on-demand verified
+   resolution executes against the selected stored snapshot. An
+   `indexer backfill` entry point is also provided for future
    backfill-vs-live parity scenarios.
 5. **Assertions** — each scenario checkpoint asserts at the validation
    layers named in `docs/architecture.md` § Test matrix: persisted raw logs,
@@ -175,6 +181,19 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
   transfer control vectors, then sets and clears the Base coin-type primary
   claim. Verified execution remains out of scope for this row: `mode=both`
   keeps verified primary state as `not_found`.
+- `verified_resolution::direct_path_verified_query_via_local_universal_resolver_persists_trace`
+  — deploys the pinned ENSv1 UniversalResolver with local constructor
+  dependencies (upstream: .refs/ens_v1/contracts/universalResolver/UniversalResolver.sol:L11 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/universalResolver/UniversalResolver.sol:L19 @ ens_v1@91c966f),
+  installs its runtime bytecode at the address used by the execution crate,
+  mirrors `ens_execution`, registers `verified.eth`, writes `addr:60`, and
+  calls the public profile route with API chain RPC pointed at anvil.
+  It asserts declared and verified values match, plus persisted
+  `execution_traces`, `execution_steps`, and `execution_cache_outcomes`
+  rows, and pins two review points: execution targets a hardcoded Universal
+  Resolver address rather than the manifest role, and explain readback of
+  the on-demand persisted outcome 404s (write-side and read-side cache keys
+  disagree — see the ledger).
 - `perturbations::*` — one moderately rich ENSv1 chain shape (`perturb.eth`
   registration, addr/text records, and a registry-only subname) run through
   the phase-3 multipliers: projection replay plus normalized-event replay,

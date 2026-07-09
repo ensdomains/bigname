@@ -1,4 +1,4 @@
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256, hex};
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 
@@ -137,6 +137,23 @@ impl RpcClient {
             .as_str()
             .ok_or_else(|| anyhow!("eth_call non-string result"))?;
         alloy_primitives::hex::decode(hex_str).context("eth_call hex decode")
+    }
+
+    pub async fn get_code(&self, address: Address) -> Result<Vec<u8>> {
+        let raw = self.call("eth_getCode", json!([address, "latest"])).await?;
+        let hex_str = raw
+            .as_str()
+            .ok_or_else(|| anyhow!("eth_getCode non-string result"))?;
+        hex::decode(hex_str).context("eth_getCode hex decode")
+    }
+
+    pub async fn set_code(&self, address: Address, code: &[u8]) -> Result<()> {
+        self.call(
+            "anvil_setCode",
+            json!([address, Bytes::copy_from_slice(code)]),
+        )
+        .await?;
+        Ok(())
     }
 
     /// Warp chain time forward and mine one block so the new timestamp is observable.

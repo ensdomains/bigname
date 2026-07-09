@@ -465,22 +465,34 @@ pub struct ApiServer {
 
 impl ApiServer {
     pub async fn start(repo_root: &Path, database_url: &str) -> Result<Self> {
+        Self::start_with_chain_rpc_urls(repo_root, database_url, &[]).await
+    }
+
+    pub async fn start_with_chain_rpc_urls(
+        repo_root: &Path,
+        database_url: &str,
+        chain_rpc_urls: &[ChainRpcUrl<'_>],
+    ) -> Result<Self> {
         let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
         let bind_addr = format!("127.0.0.1:{port}");
-        let child = cargo()
-            .current_dir(repo_root)
-            .args([
-                "run",
-                "--quiet",
-                "--manifest-path",
-                "apps/api/Cargo.toml",
-                "--",
-                "serve",
-                "--bind-addr",
-                &bind_addr,
-                "--database-url",
-                database_url,
-            ])
+        let mut command = cargo();
+        command.current_dir(repo_root).args([
+            "run",
+            "--quiet",
+            "--manifest-path",
+            "apps/api/Cargo.toml",
+            "--",
+            "serve",
+            "--bind-addr",
+            &bind_addr,
+            "--database-url",
+            database_url,
+        ]);
+        if !chain_rpc_urls.is_empty() {
+            let chain_rpc_urls = format_chain_rpc_urls(chain_rpc_urls);
+            command.args(["--chain-rpc-url", &chain_rpc_urls]);
+        }
+        let child = command
             .kill_on_drop(true)
             .spawn()
             .context("spawn bigname-api serve")?;

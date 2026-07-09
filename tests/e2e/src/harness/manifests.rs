@@ -36,6 +36,7 @@ const FAMILIES: &[&str] = &[
     "ens_v1_reverse_l1",
     "ens_v1_wrapper_l1",
 ];
+const ENS_EXECUTION_FAMILY: &str = "ens_execution";
 
 const BASE_NAMESPACES: &[&str] = &[
     "basenames_base_registry",
@@ -56,7 +57,11 @@ pub fn generate_local_profile(
     // keyed by `[[contracts]].role` and `[[roots]].name`
     local_targets: &HashMap<&str, (Address, u64)>,
 ) -> Result<LocalProfile> {
-    let families = FAMILIES.iter().map(|family| FamilySpec {
+    let mut family_names = FAMILIES.to_vec();
+    if local_targets.contains_key("universal_resolver") {
+        family_names.push(ENS_EXECUTION_FAMILY);
+    }
+    let families = family_names.into_iter().map(|family| FamilySpec {
         chain_combo: "ethereum",
         namespace_group: "ens",
         family,

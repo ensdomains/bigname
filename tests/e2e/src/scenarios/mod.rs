@@ -7,4 +7,5 @@ mod registry_migration;
 mod resolver_records;
 mod reverse_primary;
 mod support;
+mod verified_resolution;
 mod wrapper;
