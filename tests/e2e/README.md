@@ -47,12 +47,17 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
    artifacts rather than re-compiling means the local chain runs byte-exact
    upstream code; when `.refs` pins rotate, the harness re-verifies our
    decoding against the new artifacts.
-3. **Manifests** — `harness::manifests` copies the shipped
-   `manifests/mainnet/ethereum/ens` family manifests and re-points each
-   declared root/role at its locally deployed address and real deploy block.
-   Roles a scenario does not deploy get placeholder addresses (no code, no
-   logs) so family shape and ABI admission stay identical to production.
-   Nothing under the checked-in `manifests/` tree changes.
+3. **Manifests** — `harness::manifests` copies **every version file** of
+   the shipped `manifests/mainnet/ethereum/ens` family manifests and
+   re-points each declared root/role at its locally deployed address and
+   real deploy block. Rollout statuses, capability flags, ABI declarations,
+   and discovery rules are preserved verbatim, so admission semantics stay
+   identical to production — including the active registry v3 manifest with
+   its old-registry role. (Mirroring only `v1.toml` once produced a false
+   "production doesn't watch the registry" finding; completeness here is
+   load-bearing.) Roles a scenario does not deploy get placeholder
+   addresses (no code, no logs). Nothing under the checked-in `manifests/`
+   tree changes.
 4. **Pipeline** — `harness::pipeline` runs the real binaries: an
    `indexer run` live-intake session supervised until the canonical
    checkpoint reaches the scenario head (the live loop, not `backfill`, is
@@ -70,17 +75,13 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
 - `register_eth_name` — walking skeleton. Registers `alice.eth` through the
   controller's commit/reveal flow (time-warped past the minimum commitment
   age) and asserts raw-log persistence, canonical normalized event kinds,
-  and the exact-name route's registration/coverage output. Mirrors the
-  shipped mainnet profile exactly, and pins its consequence: declared
-  resolver and registry-owner state stay absent because the registry family
-  ships as an inactive seed. Verified resolution is out of scope: no
-  execution RPC is configured.
-- `registry_driven_reads` — opts the registry family into
-  `rollout_status = "active"` (with the pinned registry event ABI the
-  adapter requires) and covers what that unlocks: declared resolver
-  bindings, registry owner, record-inventory selectors, and registry-only
-  subnames appearing as bracketed labelhash placeholder children with no
-  exact-name surface minted.
+  and the exact-name route's registration/coverage output. Verified
+  resolution is out of scope: no execution RPC is configured.
+- `registry_driven_reads` — registry-sourced declared state under the
+  shipped profile: declared resolver bindings, registry owner,
+  record-inventory selectors, and registry-only subnames appearing as
+  bracketed labelhash placeholder children with no exact-name surface
+  minted.
 - `lifecycle::renew_and_transfer_keep_identity` — renewal extends expiry on
   the same backing resource; the two-transaction transfer→reclaim pair
   opens a genuine registry-owner divergence window (transient anchor) and

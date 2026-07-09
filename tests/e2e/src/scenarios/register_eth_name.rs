@@ -10,10 +10,8 @@ use crate::harness::{anvil::Anvil, ens_v1, repo_root};
 /// and assert at three layers — persisted raw logs, normalized events, and
 /// public API output. Verified-resolution (execution-trace) coverage is
 /// deliberately out of scope for this scenario: no execution RPC is
-/// configured. The manifest profile mirrors the shipped mainnet rollout
-/// exactly, so registry-driven facts (declared resolver binding, registry
-/// owner) stay absent — see the registry_driven_reads scenario for the
-/// activated variant.
+/// configured. Registry-driven declared state (resolver binding, registry
+/// owner, children) is asserted in the registry_driven_reads scenario.
 #[tokio::test]
 async fn register_eth_name_end_to_end() -> Result<()> {
     let anvil = Anvil::spawn().await?;
@@ -36,7 +34,6 @@ async fn register_eth_name_end_to_end() -> Result<()> {
     let run = support::ingest_and_serve(
         &anvil,
         &deployment,
-        &[],
         Some(
             "SELECT EXISTS (SELECT 1 FROM normalized_events \
              WHERE logical_name_id = 'ens:alice.eth' AND canonicality_state = 'canonical')",
@@ -118,17 +115,6 @@ async fn register_eth_name_end_to_end() -> Result<()> {
         format!("{user:#x}"),
         "registrant should be the registering account"
     );
-    // Shipped-profile pin: the mainnet profile leaves the registry family
-    // as an inactive seed, so declared resolver state stays absent even
-    // though the NewResolver raw log is persisted (asserted above). The
-    // registry_driven_reads scenario covers the activated variant.
-    assert_eq!(pointer("/declared_state/resolver/address"), Value::Null);
-    assert_eq!(pointer("/declared_state/resolver/chain_id"), Value::Null);
-    assert_eq!(
-        pointer("/declared_state/control/registry_owner"),
-        Value::Null
-    );
-
     let expiry = pointer("/declared_state/registration/expiry")
         .as_u64()
         .context("registration expiry missing")?;

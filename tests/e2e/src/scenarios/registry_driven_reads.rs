@@ -4,15 +4,10 @@ use serde_json::Value;
 use super::support;
 use crate::harness::{anvil::Anvil, ens_v1, repo_root};
 
-/// Registry-driven declared state: resolver bindings, registry-only
-/// subnames, and resolver-local records. The shipped mainnet profile leaves
-/// `ens_v1_registry_l1` as a deprecated bootstrap seed with no start block
-/// and no event ABI, so none of these facts are ingested by a faithful
-/// mirror; this scenario opts the registry family into
-/// `rollout_status = "active"` with the registry event fragments declared —
-/// an explicit, labeled divergence from the shipped profile that exercises
-/// the registry-driven pipeline the architecture doc specifies for declared
-/// resolver bindings and child surfaces.
+/// Registry-driven declared state under the shipped profile: resolver
+/// bindings, registry-only subnames, and resolver-local records, ingested
+/// through the active registry admission (registry manifest v3, which also
+/// admits the old registry and the resolver/subregistry discovery rules).
 #[tokio::test]
 async fn registry_driven_reads() -> Result<()> {
     let anvil = Anvil::spawn().await?;
@@ -39,7 +34,6 @@ async fn registry_driven_reads() -> Result<()> {
     let run = support::ingest_and_serve(
         &anvil,
         &deployment,
-        &["ens_v1_registry_l1"],
         // Both resolver-local record writes must have been derived before
         // intake stops; they are the last adapter outputs this scenario needs.
         Some(

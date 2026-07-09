@@ -47,23 +47,23 @@ evidence, that:
 - Chain time can be warped (`evm_increaseTime`), so expiry, grace, premium
   decay, and commit-age waits are testable in seconds.
 
-It also produced the suite's first finding, since triaged: declared resolver
-state was missing after a registration that set a resolver, while the
-registry's `NewResolver` log was verifiably persisted. Root cause is the
-shipped mainnet profile itself — `ens_v1_registry_l1` ships as a
-`deprecated` bootstrap seed with no start block and no event ABI, so
-registry-driven facts (declared resolver bindings, registry owner, subname
-ownership) are not ingested by a faithful mirror; only inactive-family raw
-logs that ride along in watched transactions get persisted as replay
-context. The harness now supports an explicit per-family activation opt-in
-(which also injects the pinned registry event fragments the adapter
-requires); with it, the full registry-driven pipeline works end to end.
-Scenario policy going forward: the walking skeleton pins the shipped-mirror
-behavior (resolver/registry-owner absent); registry-dependent scenarios run
-under the activated variant and say so. **Whether the shipped mainnet
-profile should activate the registry family is an open product decision**
-— if yes, it is a doc-first manifest/admission change, and the activated
-manifest content the harness generates is a working draft of it.
+Phase 1 also produced the suite's first finding — which, on challenge,
+turned out to be a **harness defect, not a product one**, and is worth
+recording as a lesson. The initial symptom (declared resolver state missing
+after a registration that set a resolver, while the registry's
+`NewResolver` log was verifiably persisted) was diagnosed as "the shipped
+profile doesn't ingest the registry" because the harness mirrored only
+`v1.toml` per family — and the registry family's `v1.toml` is a deprecated
+seed. In reality families version their manifests in place:
+`ens_v1_registry_l1/v3.toml` is `active` and admits the current registry,
+the old registry (`registry_old`), the resolver/subregistry discovery
+rules, and the registry event ABI. Production does ingest the registry.
+The harness now mirrors every `v*.toml` per family, and all
+registry-driven scenarios pass under the true shipped profile with no
+divergence. Standing rule: a "faithful mirror" claim requires mirroring
+every manifest version, and any future "production doesn't do X" finding
+must be validated against the complete profile (and, where possible, the
+live API) before it is reported.
 
 ## Scenario matrices
 
@@ -73,7 +73,7 @@ Legend: `covered(scenario)` / `planned(N)` = target phase / `blocked(reason)`.
 
 | Transition | Key assertions | Status |
 | --- | --- | --- |
-| Register via controller commit/reveal | registration active, registrant, expiry math, coverage full/authoritative; shipped-mirror pin: declared resolver and registry owner stay absent | covered(register_eth_name) |
+| Register via controller commit/reveal | registration active, registrant, expiry math, coverage full/authoritative | covered(register_eth_name) |
 | Register without resolver | no declared resolver, otherwise identical | planned(2) |
 | Renew before expiry | expiry extends, RegistrationRenewed derived, same backing resource | covered(renew_and_transfer_keep_identity) |
 | Transfer the registrar token, then reclaim | registrant and registry owner follow; the two-transaction transfer→reclaim window is a real registry-owner divergence that mints a transient anchor and converges back to the original registrar resource | covered(renew_and_transfer_keep_identity) |
@@ -85,7 +85,7 @@ Legend: `covered(scenario)` / `planned(N)` = target phase / `blocked(reason)`.
 
 | Transition | Key assertions | Status |
 | --- | --- | --- |
-| Parent creates registry-only subname | child listed under parent with correct owner (registry family activated) | covered(registry_driven_reads) |
+| Parent creates registry-only subname | child listed under parent with correct owner | covered(registry_driven_reads) |
 | Subname created with unrevealed label (labelhash only — the registry never carries label strings for subnames) | bracketed placeholder child row; no exact-name surface minted (404) | covered(registry_driven_reads) |
 | Same label under two different parents | two distinct identities, no cross-talk | planned(2) |
 | Deep hierarchy (three+ levels) | ancestry and child enumeration at each level | planned(2) |
@@ -105,9 +105,6 @@ Legend: `covered(scenario)` / `planned(N)` = target phase / `blocked(reason)`.
 | Wrapper-created subname | wrapped child with its own fuse state | planned(4) |
 
 ### ENSv1 — resolvers and records
-
-Unblocked by the phase-1 finding triage; these run under the
-registry-activated profile variant (see Verified foundations).
 
 | Transition | Key assertions | Status |
 | --- | --- | --- |

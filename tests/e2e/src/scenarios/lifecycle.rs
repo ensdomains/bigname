@@ -37,7 +37,6 @@ async fn renew_and_transfer_keep_identity() -> Result<()> {
     let run = support::ingest_and_serve(
         &anvil,
         &deployment,
-        &["ens_v1_registry_l1"],
         Some(
             "SELECT EXISTS (SELECT 1 FROM normalized_events \
              WHERE logical_name_id = 'ens:carol.eth' AND event_kind = 'TokenControlTransferred' \
@@ -144,7 +143,6 @@ async fn expiry_grace_and_reregistration_rotate_identity() -> Result<()> {
     let in_grace = support::ingest_and_serve(
         &anvil,
         &deployment,
-        &[],
         Some(
             "SELECT EXISTS (SELECT 1 FROM normalized_events \
              WHERE logical_name_id = 'ens:dave.eth' AND canonicality_state = 'canonical')",
@@ -193,7 +191,6 @@ async fn expiry_grace_and_reregistration_rotate_identity() -> Result<()> {
     let after = support::ingest_and_serve(
         &anvil,
         &deployment,
-        &[],
         Some(
             "SELECT count(*) >= 2 FROM normalized_events \
              WHERE logical_name_id = 'ens:dave.eth' AND event_kind = 'RegistrationGranted' \

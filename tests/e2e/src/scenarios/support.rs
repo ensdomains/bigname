@@ -11,13 +11,12 @@ pub struct PipelineRun {
 }
 
 /// Ingest the chain as it stands (live intake to the current head, then a
-/// full projection replay) and serve the API. `activate_families` opts
-/// specific source families out of the shipped rollout status — see
-/// `manifests::generate_local_profile_with_activation`.
+/// full projection replay) and serve the API. The manifest profile mirrors
+/// every shipped mainnet ENSv1 family manifest version with addresses
+/// re-pointed at the local deployment.
 pub async fn ingest_and_serve(
     anvil: &Anvil,
     deployment: &EnsV1Deployment,
-    activate_families: &[&str],
     ready_sql: Option<&str>,
 ) -> Result<PipelineRun> {
     let repo_root = repo_root();
@@ -26,11 +25,10 @@ pub async fn ingest_and_serve(
     let head = rpc.block_number().await?;
 
     let scratch = TempDir::create()?;
-    let profile = manifests::generate_local_profile_with_activation(
+    let profile = manifests::generate_local_profile(
         scratch.path(),
         &repo_root,
         &deployment.manifest_targets(),
-        activate_families,
     )?;
 
     let db = HarnessDb::create().await?;

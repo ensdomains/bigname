@@ -449,6 +449,13 @@ impl EnsV1Deployment {
                 (self.registry.address, self.registry.block_number),
             ),
             (
+                "registry_old",
+                (
+                    self.legacy_registry.address,
+                    self.legacy_registry.block_number,
+                ),
+            ),
+            (
                 "ETHRegistrar",
                 (
                     self.base_registrar.address,
