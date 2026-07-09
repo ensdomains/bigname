@@ -223,15 +223,20 @@ Order optimizes for information per unit of work: the determinism
 multipliers (3) come before breadth because they multiply every scenario
 that exists by then.
 
-| Phase | Scope | Entry criteria | Exit criteria |
-| --- | --- | --- | --- |
-| 1 | Walking skeleton | — | done: registration scenario green in CI |
-| 2 | ENSv1 lifecycle + subnames + registry migration; checkpoint/snapshot abstraction | resolver finding triaged (its outcome shapes assertions) | lifecycle and subname matrices fully `covered`; snapshots checked in |
-| 3 | Perturbation runner: reorg, restart, backfill parity, replay equality | ≥ 5 scenarios exist | every scenario runs perturbed nightly; PR tier unchanged |
-| 4 | Wrapper + reverse/primary | 2 | wrapper and reverse matrices `covered` |
-| 5 | Basenames dual-chain | 3 (perturbations apply from day one) | Basenames declared-state matrix `covered` |
-| 6 | Execution plane: verified resolution + CCIP + layer-3 assertions | 5 | verified matrix `covered`; execution traces asserted |
-| 7 | ENSv2 declared-state matrix | sepolia-dev profile semantics confirmed against shipped manifests | ENSv2 matrix `covered` except admission-blocked rows |
+All seven phases executed (2026-07-09, commits `f13fe50`..`1bdf886`; 24
+scenarios green). Remaining open rows are the explicitly deferred
+label-preimage-reveal row, the blocked rows carrying their pin-level
+reasons, and the review points recorded per matrix.
+
+| Phase | Scope | Status |
+| --- | --- | --- |
+| 1 | Walking skeleton | done — registration scenario green in CI |
+| 2 | ENSv1 lifecycle + subnames + registry migration | done — matrices covered except the deferred label-preimage-reveal row; route snapshots live in the perturbation harness rather than checked-in files |
+| 3 | Perturbation runner: reorg, restart, backfill parity, replay equality | done — all four multipliers green over the rich chain; nightly tiering remains a CI follow-up |
+| 4 | Wrapper + reverse/primary | done — covered with two wrapper review points |
+| 5 | Basenames dual-chain | done — declared-state matrix covered; L1-compat blocked with the CCIP-gateway reason |
+| 6 | Execution plane | done — direct path covered with layer-3 trace assertions and two review points; wildcard/alias/CCIP/cache-invalidation blocked with pin-level reasons |
+| 7 | ENSv2 declared-state matrix | done — covered except alias/shared-subregistry/migration blocked rows, with three review points (coverage promotion, discovered-registry scan, re-registration intake wedge) |
 
 ## CI tiers
 
