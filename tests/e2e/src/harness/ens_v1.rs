@@ -80,6 +80,84 @@ mod legacy_registry_calls {
     }
 }
 
+mod registrar_token_calls {
+    use alloy_sol_types::sol;
+
+    // BaseRegistrarImplementation is an ERC721 and advertises
+    // approve(address,uint256) in its interface id.
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L5 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L24 @ ens_v1@91c966f)
+    sol! {
+        function approve(address to, uint256 tokenId) external;
+    }
+}
+
+mod wrapper_calls {
+    use alloy_sol_types::sol;
+
+    // NameWrapper .eth wrapping moves the registrar token into the wrapper,
+    // reclaims registry ownership to the wrapper, and mints a wrapped token.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L246 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L268 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L270 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1013 @ ens_v1@91c966f)
+    //
+    // Unwrap checks CANNOT_UNWRAP, burns wrapper state, restores registry
+    // ownership, then returns the registrar token.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L390 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L391 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1023 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1028 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1029 @ ens_v1@91c966f)
+    //
+    // Fuse and wrapped-subname calls are owner-gated wrapper operations.
+    // Burning owner-controlled fuses is only allowed through setFuses.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L421 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L427 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L434 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L565 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L579 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L596 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L612 @ ens_v1@91c966f)
+    //
+    // Fuse constants are imported by NameWrapper from INameWrapper.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L6 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L10 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L12 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L13 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L18 @ ens_v1@91c966f)
+    sol! {
+        function wrapETH2LD(string label, address wrappedOwner, uint16 ownerControlledFuses, address resolver) external returns (uint64 expiry);
+        function unwrapETH2LD(bytes32 labelhash, address registrant, address controller) external;
+        function setFuses(bytes32 node, uint16 ownerControlledFuses) external returns (uint32 oldFuses);
+        function setSubnodeOwner(bytes32 parentNode, string label, address owner, uint32 fuses, uint64 expiry) external returns (bytes32 node);
+        function setSubnodeRecord(bytes32 parentNode, string label, address owner, address resolver, uint64 ttl, uint32 fuses, uint64 expiry) external returns (bytes32 node);
+    }
+}
+
+mod reverse_calls {
+    use alloy_sol_types::sol;
+
+    // ReverseRegistrar.setName claims for msg.sender, then writes name() on
+    // the configured resolver.
+    // (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L105 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L107 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L108 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L123 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L129 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L130 @ ens_v1@91c966f)
+    // PublicResolver authorizes the trusted ReverseRegistrar to write NameResolver records.
+    // (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L70 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L116 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L117 @ ens_v1@91c966f)
+    sol! {
+        function setDefaultResolver(address resolver) external;
+        function setName(string name) external returns (bytes32 node);
+    }
+}
+
 pub fn labelhash(label: &str) -> B256 {
     keccak256(label.as_bytes())
 }
@@ -588,6 +666,176 @@ pub async fn transfer_eth_name(
         &reclaimCall {
             id: token_id,
             owner: to,
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+/// Approve the wrapper for `<label>.eth` and wrap the live registrar lease.
+pub async fn wrap_eth_2ld(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    label: &str,
+    wrapped_owner: Address,
+    owner_controlled_fuses: u16,
+    resolver: Address,
+) -> Result<()> {
+    let token_id = U256::from_be_bytes(labelhash(label).0);
+    send_checked(
+        rpc,
+        from,
+        d.base_registrar.address,
+        &registrar_token_calls::approveCall {
+            to: d.name_wrapper.address,
+            tokenId: token_id,
+        }
+        .abi_encode(),
+    )
+    .await?;
+    send_checked(
+        rpc,
+        from,
+        d.name_wrapper.address,
+        &wrapper_calls::wrapETH2LDCall {
+            label: label.to_string(),
+            wrappedOwner: wrapped_owner,
+            ownerControlledFuses: owner_controlled_fuses,
+            resolver,
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+pub async fn unwrap_eth_2ld(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    label: &str,
+    registrant: Address,
+    controller: Address,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        d.name_wrapper.address,
+        &wrapper_calls::unwrapETH2LDCall {
+            labelhash: labelhash(label),
+            registrant,
+            controller,
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+pub async fn set_wrapper_fuses(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    name: &str,
+    owner_controlled_fuses: u16,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        d.name_wrapper.address,
+        &wrapper_calls::setFusesCall {
+            node: namehash(name),
+            ownerControlledFuses: owner_controlled_fuses,
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+pub struct WrappedSubnodeOwner<'a> {
+    pub parent: &'a str,
+    pub label: &'a str,
+    pub owner: Address,
+    pub fuses: u32,
+    pub expiry: u64,
+}
+
+pub async fn set_wrapped_subnode_owner(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    input: WrappedSubnodeOwner<'_>,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        d.name_wrapper.address,
+        &wrapper_calls::setSubnodeOwnerCall {
+            parentNode: namehash(input.parent),
+            label: input.label.to_string(),
+            owner: input.owner,
+            fuses: input.fuses,
+            expiry: input.expiry,
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+pub struct WrappedSubnodeRecord<'a> {
+    pub parent: &'a str,
+    pub label: &'a str,
+    pub owner: Address,
+    pub resolver: Address,
+    pub fuses: u32,
+    pub expiry: u64,
+}
+
+pub async fn set_wrapped_subnode_record(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    input: WrappedSubnodeRecord<'_>,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        d.name_wrapper.address,
+        &wrapper_calls::setSubnodeRecordCall {
+            parentNode: namehash(input.parent),
+            label: input.label.to_string(),
+            owner: input.owner,
+            resolver: input.resolver,
+            ttl: 0,
+            fuses: input.fuses,
+            expiry: input.expiry,
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+pub async fn set_reverse_name(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    name: &str,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        d.deployer,
+        d.reverse_registrar.address,
+        &reverse_calls::setDefaultResolverCall {
+            resolver: d.public_resolver.address,
+        }
+        .abi_encode(),
+    )
+    .await?;
+    send_checked(
+        rpc,
+        from,
+        d.reverse_registrar.address,
+        &reverse_calls::setNameCall {
+            name: name.to_string(),
         }
         .abi_encode(),
     )

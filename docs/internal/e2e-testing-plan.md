@@ -96,13 +96,13 @@ Legend: `covered(scenario)` / `planned(N)` = target phase / `blocked(reason)`.
 
 | Transition | Key assertions | Status |
 | --- | --- | --- |
-| Wrap a registrar name | authority anchor rotates to wrapper, new token lineage, wrapped holder visible | planned(4) |
-| Unwrap before lease end | prior registrar anchor and lineage reactivate | planned(4) |
-| Burn CANNOT_UNWRAP / CANNOT_TRANSFER / CANNOT_SET_RESOLVER | effective powers masked accordingly, no invented grants | planned(4) |
-| Emancipate a wrapped subname (PARENT_CANNOT_CONTROL) | parent's powers over child masked | planned(4) |
-| Wrapped expiry/grace edge | wrapper expiry semantics vs registrar expiry | planned(4) |
-| Wrapped owner ≠ registrant | both facets reported distinctly | planned(4) |
-| Wrapper-created subname | wrapped child with its own fuse state | planned(4) |
+| Wrap a registrar name | adapter layer rotates fully (surface binding follows the wrapper resource + lineage; canonical AuthorityTransferred to the NameWrapper derives), and the wrapped holder shows as registrant; **REVIEW POINT**: the exact-name projection's control section retains the pre-wrap registry owner and a registrar-anchored authority_key — projection and adapter disagree for names wrapped after registrar birth (wrapper-born children project correctly, isolating the wrap-window ordering) | covered(wrapper_wrap_fuses_subnames_and_unwrap_restore_identity) |
+| Unwrap before lease end | prior registrar anchor and lineage reactivate | covered(wrapper_wrap_fuses_subnames_and_unwrap_restore_identity) |
+| Burn CANNOT_UNWRAP / CANNOT_TRANSFER / CANNOT_SET_RESOLVER | fuse changes arrive as PermissionScopeChanged scope events with exact raw bitmaps (196608 → 196621, validating pinned fuse constants); wrapper resources publish no subject grants, and the NameWrapper contract holds the registrar-anchor resource_control grant while wrapped; **REVIEW POINT**: no published effective-powers row exists for the wrapped holder anywhere, while the docs describe wrapper powers as "masked before publication" — a published-then-masked shape the pipeline never produces | covered(wrapper_wrap_fuses_subnames_and_unwrap_restore_identity) |
+| Emancipate a wrapped subname (PARENT_CANNOT_CONTROL) | no parent-owner powers published over the child (trivially satisfied today because wrapper-anchored resources publish no grants at all — see the fuse-row review point) | covered(wrapper_wrap_fuses_subnames_and_unwrap_restore_identity) |
+| Wrapped expiry/grace edge | wrapETH2LD projects wrapper expiry as registrar expiry plus grace; exact-name expiry follows the wrapper authority | covered(wrapper_wrap_fuses_subnames_and_unwrap_restore_identity) |
+| Wrapped owner ≠ registrant | wrapped holder appears as registrant while the pre-wrap owner remains in the (stale — see wrap-row review point) registry_owner facet | covered(wrapper_wrap_fuses_subnames_and_unwrap_restore_identity) |
+| Wrapper-created subname | wrapper-born child projects fully wrapper-anchored: wrapper authority_kind/key, its own resource, registry_owner = the NameWrapper contract, holder as registrant, setSubnodeRecord resolver projected | covered(wrapper_wrap_fuses_subnames_and_unwrap_restore_identity) |
 
 ### ENSv1 — resolvers and records
 
@@ -121,10 +121,10 @@ Legend: `covered(scenario)` / `planned(N)` = target phase / `blocked(reason)`.
 
 | Transition | Key assertions | Status |
 | --- | --- | --- |
-| Reverse claim set | claimed primary name appears as candidate only | planned(4) |
+| Reverse claim set | claimed primary name appears as candidate only | covered(reverse_claim_set_changed_then_cleared_tracks_declared_candidate) |
 | Claim whose forward resolution mismatches | claimed present, verified reports mismatch (needs execution plane) | planned(6) |
-| Claim changed, then cleared | candidate follows, then empties | planned(4) |
-| Claim string that fails normalization | surfaces invalid_name, never silently dropped | planned(4) |
+| Claim changed, then cleared | candidate follows, then empties | covered(reverse_claim_set_changed_then_cleared_tracks_declared_candidate) |
+| Claim string that fails normalization | surfaces invalid_name, never silently dropped | covered(reverse_claim_invalid_name_surfaces_raw_claim) |
 
 ### ENSv1 — registry migration (legacy → current registry)
 

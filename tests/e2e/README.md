@@ -135,6 +135,23 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
 - `resolver_records::shared_resolver_keeps_per_name_records_and_overview_fan_in_unsupported`
   — two names share one resolver while per-node records stay distinct; the
   resolver overview keeps binding fan-in explicitly unsupported.
+- `wrapper::wrapper_wrap_fuses_subnames_and_unwrap_restore_identity` —
+  wraps registrar names through the pinned NameWrapper, asserts wrapper
+  resource/token-lineage rotation, burns `CANNOT_UNWRAP`,
+  `CANNOT_TRANSFER`, and `CANNOT_SET_RESOLVER` to pin effective-power
+  masking, creates wrapped subnames with `PARENT_CANNOT_CONTROL`, checks
+  wrapper expiry vs registrar expiry, and unwraps a separate name before
+  lease end to confirm the prior registrar resource and lineage reactivate.
+- `reverse_primary::reverse_claim_set_changed_then_cleared_tracks_declared_candidate`
+  — drives `ReverseRegistrar.setName` through the admitted reverse family
+  and asserts declared primary-name readback: `mode=declared` exposes only
+  the claimed candidate, `mode=both` keeps verified state separate as
+  `not_found`, and later claim/blank-name updates replace and then clear the
+  candidate.
+- `reverse_primary::reverse_claim_invalid_name_surfaces_raw_claim` — writes
+  a nonblank reverse claim that fails ENSIP-15 normalization and asserts
+  `claimed_primary_name.status=invalid_name` with `raw_claim_name` preserved
+  and no coerced candidate name.
 - `perturbations::*` — one moderately rich ENSv1 chain shape (`perturb.eth`
   registration, addr/text records, and a registry-only subname) run through
   the phase-3 multipliers: projection replay plus normalized-event replay,
