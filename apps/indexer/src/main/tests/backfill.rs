@@ -1412,10 +1412,10 @@ async fn source_scoped_backfill_empty_historical_blocks_skip_payload_cache_metad
     assert_eq!(outcome.raw_log_count, 0);
     assert_eq!(outcome.raw_transaction_count, 0);
     assert_eq!(outcome.raw_receipt_count, 0);
-    assert_eq!(outcome.raw_code_hash_count, 1);
+    assert_eq!(outcome.raw_code_hash_count, 0);
     assert_eq!(table_count(database.pool(), "chain_lineage").await?, 1);
     assert_eq!(table_count(database.pool(), "chain_lineage").await?, 1);
-    assert_eq!(table_count(database.pool(), "raw_code_hashes").await?, 1);
+    assert_eq!(table_count(database.pool(), "raw_code_hashes").await?, 0);
     assert_eq!(table_count(database.pool(), "raw_logs").await?, 0);
     assert_eq!(table_count(database.pool(), "raw_transactions").await?, 0);
     assert_eq!(table_count(database.pool(), "raw_receipts").await?, 0);
@@ -1658,7 +1658,8 @@ async fn raw_only_hash_pinned_backfill_skips_adapter_replay_after_raw_persistenc
 }
 
 #[tokio::test]
-async fn raw_only_sparse_backfill_retains_tx_sibling_logs_and_code_observations() -> Result<()> {
+async fn raw_only_sparse_backfill_retains_tx_sibling_logs_and_scopes_code_observations_to_emitters()
+-> Result<()> {
     let database = TestDatabase::new().await?;
     create_backfill_job_tables(database.pool()).await?;
     let contract_instance_id = Uuid::from_u128(9_255);
@@ -1721,7 +1722,7 @@ async fn raw_only_sparse_backfill_retains_tx_sibling_logs_and_code_observations(
             .await?;
 
     assert_eq!(outcome.raw_log_count, 2);
-    assert_eq!(outcome.raw_code_hash_count, 2);
+    assert_eq!(outcome.raw_code_hash_count, 1);
     assert_eq!(
         sqlx::query_as::<_, (String, i64)>(
             "SELECT emitting_address, log_index FROM raw_logs ORDER BY log_index"
@@ -1739,10 +1740,7 @@ async fn raw_only_sparse_backfill_retains_tx_sibling_logs_and_code_observations(
         )
         .fetch_all(database.pool())
         .await?,
-        vec![
-            (block.block_number, selected_address.to_owned()),
-            (next_block.block_number, selected_address.to_owned()),
-        ]
+        vec![(block.block_number, selected_address.to_owned())]
     );
 
     server.abort();
@@ -3762,7 +3760,7 @@ async fn explicit_watched_targets_are_sorted_idempotent_and_validated() -> Resul
             .and_then(Value::as_str),
         Some("ens_v2_registrar_l1")
     );
-    assert_eq!(outcome.raw_code_hash_count, 2);
+    assert_eq!(outcome.raw_code_hash_count, 1);
 
     let reordered_plan = load_watched_source_selector_plan(
         database.pool(),
@@ -5326,7 +5324,7 @@ async fn assert_dynamic_resolver_backfill_scope_behavior(
     assert_eq!(outcome.raw_log_count, 10);
     assert_eq!(
         outcome.raw_code_hash_count,
-        if generic_ensv1_resolver { 7 } else { 6 }
+        if generic_ensv1_resolver { 7 } else { 4 }
     );
 
     let job = load_backfill_job(database.pool(), outcome.backfill_job_id)
@@ -5447,8 +5445,6 @@ async fn assert_dynamic_resolver_backfill_scope_behavior(
                 pending_resolver_address.to_owned(),
                 unsupported_resolver_address.to_owned(),
                 selected_resolver_address.to_owned(),
-                pending_resolver_address.to_owned(),
-                unsupported_resolver_address.to_owned(),
             ]
         }
     );
@@ -5467,7 +5463,7 @@ async fn assert_dynamic_resolver_backfill_scope_behavior(
         if generic_ensv1_resolver {
             vec![42, 42, 42, 42, 42, 42, 43]
         } else {
-            vec![42, 42, 42, 43, 43, 43]
+            vec![42, 42, 42, 43]
         }
     );
     assert_eq!(
@@ -5624,7 +5620,7 @@ async fn assert_dynamic_resolver_backfill_scope_behavior(
         .collect::<Vec<_>>();
     assert_eq!(
         code_requests.len(),
-        if generic_ensv1_resolver { 7 } else { 6 }
+        if generic_ensv1_resolver { 7 } else { 4 }
     );
     assert_eq!(
         code_requests
@@ -5647,8 +5643,6 @@ async fn assert_dynamic_resolver_backfill_scope_behavior(
                 Some(pending_resolver_address),
                 Some(unsupported_resolver_address),
                 Some(selected_resolver_address),
-                Some(pending_resolver_address),
-                Some(unsupported_resolver_address),
             ]
         }
     );
@@ -5680,8 +5674,6 @@ async fn assert_dynamic_resolver_backfill_scope_behavior(
                 Some(block_42.block_hash.clone()),
                 Some(block_42.block_hash.clone()),
                 Some(block_42.block_hash.clone()),
-                Some(block_43.block_hash.clone()),
-                Some(block_43.block_hash.clone()),
                 Some(block_43.block_hash.clone()),
             ]
         }

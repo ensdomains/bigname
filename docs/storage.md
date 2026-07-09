@@ -349,7 +349,7 @@ rebuild.
 The system of record splits into six layers.
 
 1. `chain_lineage` — block ancestry, fork points, hash-first reconciliation, head promotion, one durable header-anchor row per observed block hash.
-2. `raw_facts` — hot indexed replay facts: selected/admitted target logs, the minimum transaction/receipt fields needed to decode them, code-hash observations, fetched call snapshots, optional header/log audit extensions, compact payload-cache metadata.
+2. `raw_facts` — hot indexed replay facts: selected/admitted target logs, the minimum transaction/receipt fields needed to decode them, code-hash observations, fetched call snapshots, optional header/log audit extensions, compact payload-cache metadata. Code-hash observations are activity-scoped, not a per-block grid: a block admits `raw_code_hashes` rows only for that block's selected log emitters, plus the live tailer's one-time baseline for a watched address with no stored observation. Consumers read the latest non-orphaned observation per target; the code at an intervening block is a read-side answer, never a materialized raw fact. See [`chain-intake.md`](chain-intake.md).
 3. `manifests_and_discovery` — source manifests, discovered edges, rollout flags.
 4. `identity_and_events` — `NameSurface`, `SurfaceBinding`, `resources`, `token_lineages`, and append-only `normalized_events`.
 5. `projections` — current-state and collection read models.

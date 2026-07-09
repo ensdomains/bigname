@@ -49,7 +49,7 @@ use log_ranges::{
 };
 use materialization::{
     fetch_full_payload_bundles_for_log_blocks, materialize_backfill_block_payloads,
-    selected_code_observation_addresses,
+    selected_seed_log_addresses,
 };
 use sparse::{
     raw_only_sparse_materialization_slices, run_hash_pinned_raw_only_sparse_backfill_range,
@@ -279,7 +279,8 @@ pub(crate) async fn run_hash_pinned_backfill_range(
         receipts.extend(materialized_payloads.receipts);
         logs.extend(materialized_payloads.logs);
 
-        let code_observation_addresses = selected_code_observation_addresses(&selected_addresses);
+        let code_observation_addresses =
+            selected_seed_log_addresses(&selection_logs, &selected_addresses);
         if !code_observation_addresses.is_empty() {
             code_observation_requests.push(ProviderBlockCodeObservationRequest {
                 block_hash: raw_block.block_hash.clone(),
