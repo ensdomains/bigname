@@ -112,6 +112,23 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
 - `registry_driven_reads::zero_owner_subname_leaves_default_children_listing`
   — creates and then zeroes a registry-only subname, asserting the tombstoned
   child leaves the default parent children listing.
+- `resolver_records::resolver_changes_follow_registry_and_zero_releases` —
+  registers with the admitted PublicResolver, moves the registry binding to a
+  second deployed PublicResolver copy, then sets it to zero; exact-name and
+  compact records resolver state follow each transition.
+- `resolver_records::records_route_values_and_version_boundaries_follow_current_resolver`
+  — writes a non-60 multicoin addr record and contenthash, asserts compact
+  cached values and selectors, then checks resolver replacement and
+  `clearRecords` move the record-version boundary without leaking prior
+  values.
+- `resolver_records::unadmitted_custom_resolver_observes_facts_but_keeps_profile_gated`
+  — binds a name to an unpatched PublicResolver copy and writes a text
+  record on it; declared reads never surface the unadmitted write (no
+  record events, no inventory selectors, `not_found` on request,
+  enumeration supported-but-empty).
+- `resolver_records::shared_resolver_keeps_per_name_records_and_overview_fan_in_unsupported`
+  — two names share one resolver while per-node records stay distinct; the
+  resolver overview keeps binding fan-in explicitly unsupported.
 
 ## Debugging
 

@@ -110,12 +110,12 @@ Legend: `covered(scenario)` / `planned(N)` = target phase / `blocked(reason)`.
 | --- | --- | --- |
 | Set resolver at registration | declared resolver populated with ResolverChanged provenance | covered(registry_driven_reads) |
 | Write addr(60) and text records | record inventory carries the written selectors at the current boundary | covered(registry_driven_reads) |
-| Change resolver later / set to zero | declared resolver follows, then releases | planned(2) |
-| Multicoin addr and contenthash records; cached values on the records route | family-native value shapes at the current version boundary | planned(2) |
-| Resolver replaced by another resolver | old records not attributed to the new resolver; version boundary moves | planned(2) |
-| Record version bump (clear records) | inventory and cache invalidate for the prior boundary | planned(2) |
-| Unadmitted custom resolver emits records | facts observed, profile stays pending; no declared-record fabrication | planned(2) |
-| One shared resolver serving many names | per-name reads correct; resolver-overview enumeration stays explicitly unsupported | planned(2) |
+| Change resolver later / set to zero | exact-name and records-route resolver state follow public resolver → second PublicResolver copy → zero-address null shape | covered(resolver_changes_follow_registry_and_zero_releases) |
+| Multicoin addr and contenthash records; cached values on the records route | inventory carries `addr:0` and `contenthash`; compact records route returns raw multicoin bytes and contenthash bytes at the current boundary | covered(records_route_values_and_version_boundaries_follow_current_resolver) |
+| Resolver replaced by another resolver | after moving to another PublicResolver copy, current records route no longer returns resolver-A `addr:0` or `contenthash` successes; the record-version boundary moves positionally (the wire boundary object carries chain position only — its event-identity fields are null) | covered(records_route_values_and_version_boundaries_follow_current_resolver) |
+| Record version bump (clear records) | `clearRecords` moves the record-version boundary to a later position and the prior cached text value no longer returns success | covered(records_route_values_and_version_boundaries_follow_current_resolver) |
+| Unadmitted custom resolver emits records | writes on an unadmitted-generation resolver are invisible to declared reads end to end: no `RecordChanged` derives, inventory publishes no selectors and reports explicit `not_observed_on_current_resolver` gaps per family, the requested text returns `not_found` with no value, and known-key enumeration stays supported-but-empty (a record-free unadmitted binding instead reports families as `resolver_family_pending` — asymmetric shapes, both pinned) | covered(unadmitted_custom_resolver_observes_facts_but_keeps_profile_gated) |
+| One shared resolver serving many names | per-name text/addr reads stay node-scoped while resolver overview keeps `nodes` fan-in unsupported with `resolver_binding_enumeration_not_projected` | covered(shared_resolver_keeps_per_name_records_and_overview_fan_in_unsupported) |
 
 ### ENSv1 — reverse and primary names
 

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use alloy_primitives::{Address, B256, U256, keccak256};
+use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_sol_types::{SolCall, SolValue, sol};
 use anyhow::{Context, Result, bail};
 
@@ -17,7 +17,11 @@ use super::rpc::RpcClient;
 // (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L352 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/ethregistrar/IPriceOracle.sol:L5 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L26 @ ens_v1@91c966f)
+// (upstream: .refs/ens_v1/contracts/resolvers/profiles/ContenthashResolver.sol:L14 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L15 @ ens_v1@91c966f)
+// (upstream: .refs/ens_v1/contracts/resolvers/profiles/IVersionableResolver.sol:L5 @ ens_v1@91c966f)
+// (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L20 @ ens_v1@91c966f)
+// (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L22 @ ens_v1@91c966f)
 sol! {
     function setSubnodeOwner(bytes32 node, bytes32 label, address owner) external returns (bytes32);
     function owner(bytes32 node) external view returns (address);
@@ -27,7 +31,9 @@ sol! {
     function transferFrom(address from, address to, uint256 tokenId) external;
     function renew(string label, uint256 duration, bytes32 referrer) external payable;
     function setAddr(bytes32 node, address a) external;
+    function setContenthash(bytes32 node, bytes hash) external;
     function setText(bytes32 node, string key, string value) external;
+    function clearRecords(bytes32 node) external;
 
     struct Registration {
         string label;
@@ -47,6 +53,17 @@ sol! {
     function commit(bytes32 commitment) external;
     function register(Registration registration) external payable;
     function rentPrice(string label, uint256 duration) external view returns (Price price);
+}
+
+mod multicoin_addr_calls {
+    use alloy_sol_types::sol;
+
+    // The coin-type overload must stay out of the main `sol!` block because
+    // the generated Rust call type collides with `setAddr(bytes32,address)`.
+    // (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47 @ ens_v1@91c966f)
+    sol! {
+        function setAddr(bytes32 node, uint256 coinType, bytes addressBytes) external;
+    }
 }
 
 pub fn labelhash(label: &str) -> B256 {
@@ -232,6 +249,32 @@ pub async fn deploy_ens_v1(rpc: &RpcClient, repo_root: &Path) -> Result<EnsV1Dep
     Ok(deployment)
 }
 
+/// Deploy another byte-exact copy of the pinned PublicResolver artifact
+/// without adding it to `manifest_targets`.
+///
+/// The constructor dependencies mirror the main deployment helper:
+/// (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L66 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L75 @ ens_v1@91c966f).
+pub async fn deploy_extra_public_resolver(
+    rpc: &RpcClient,
+    repo_root: &Path,
+    d: &EnsV1Deployment,
+) -> Result<Deployed> {
+    deploy(
+        rpc,
+        d.deployer,
+        &load_ens_v1_artifact(repo_root, "sepolia", "PublicResolver")?,
+        &(
+            d.registry.address,
+            d.name_wrapper.address,
+            d.controller.address,
+            d.reverse_registrar.address,
+        )
+            .abi_encode_params(),
+    )
+    .await
+}
+
 async fn wire_registry_nodes(
     rpc: &RpcClient,
     deployer: Address,
@@ -356,6 +399,66 @@ pub async fn set_addr_record(
         &setAddrCall {
             node: namehash(name),
             a: target,
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+pub async fn set_multicoin_addr_record(
+    rpc: &RpcClient,
+    resolver: Address,
+    from: Address,
+    name: &str,
+    coin_type: u64,
+    address_bytes: &[u8],
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        resolver,
+        &multicoin_addr_calls::setAddrCall {
+            node: namehash(name),
+            coinType: U256::from(coin_type),
+            addressBytes: Bytes::copy_from_slice(address_bytes),
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+pub async fn set_contenthash_record(
+    rpc: &RpcClient,
+    resolver: Address,
+    from: Address,
+    name: &str,
+    contenthash: &[u8],
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        resolver,
+        &setContenthashCall {
+            node: namehash(name),
+            hash: Bytes::copy_from_slice(contenthash),
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+pub async fn clear_records(
+    rpc: &RpcClient,
+    resolver: Address,
+    from: Address,
+    name: &str,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        resolver,
+        &clearRecordsCall {
+            node: namehash(name),
         }
         .abi_encode(),
     )
