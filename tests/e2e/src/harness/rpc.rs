@@ -54,6 +54,19 @@ impl RpcClient {
         parse_quantity(&self.call("eth_blockNumber", json!([])).await?)
     }
 
+    pub async fn block_hash(&self, block_number: u64) -> Result<String> {
+        let raw = self
+            .call(
+                "eth_getBlockByNumber",
+                json!([format!("{block_number:#x}"), false]),
+            )
+            .await?;
+        raw.get("hash")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow!("eth_getBlockByNumber({block_number}) returned no hash"))
+    }
+
     pub async fn accounts(&self) -> Result<Vec<Address>> {
         let raw = self.call("eth_accounts", json!([])).await?;
         serde_json::from_value(raw).context("eth_accounts decode")
@@ -137,6 +150,22 @@ impl RpcClient {
         self.call("anvil_mine", json!([format!("{blocks:#x}")]))
             .await?;
         Ok(())
+    }
+
+    pub async fn evm_snapshot(&self) -> Result<String> {
+        let raw = self.call("evm_snapshot", json!([])).await?;
+        raw.as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow!("evm_snapshot returned non-string result: {raw}"))
+    }
+
+    pub async fn evm_revert(&self, snapshot_id: &str) -> Result<()> {
+        let raw = self.call("evm_revert", json!([snapshot_id])).await?;
+        match raw.as_bool() {
+            Some(true) => Ok(()),
+            Some(false) => bail!("evm_revert({snapshot_id}) returned false"),
+            None => bail!("evm_revert({snapshot_id}) returned non-bool result: {raw}"),
+        }
     }
 }
 

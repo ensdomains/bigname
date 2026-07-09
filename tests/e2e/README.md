@@ -135,6 +135,15 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
 - `resolver_records::shared_resolver_keeps_per_name_records_and_overview_fan_in_unsupported`
   — two names share one resolver while per-node records stay distinct; the
   resolver overview keeps binding fan-in explicitly unsupported.
+- `perturbations::*` — one moderately rich ENSv1 chain shape (`perturb.eth`
+  registration, addr/text records, and a registry-only subname) run through
+  the phase-3 multipliers: projection replay plus normalized-event replay,
+  indexer restart after the first live checkpoint, backfill-from-zero
+  normalized-event digest parity, and a live same-session reorg that converges
+  to the winning branch while retaining orphaned losing-branch audit rows.
+  Backfill parity is intentionally asserted at `normalized_events`, not API
+  routes, because the backfill command does not promote canonical checkpoints
+  required by snapshot-selected reads.
 
 ## Debugging
 

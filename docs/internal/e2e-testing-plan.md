@@ -180,15 +180,23 @@ second anvil presented as `base-mainnet`.
 These wrap *existing* scenarios rather than adding new ones — each scenario
 gains hostile variants once, via the harness:
 
-| Perturbation | Mechanism | Convergence requirement |
-| --- | --- | --- |
-| Reorg at each checkpoint | anvil snapshot/revert (or `anvil_reorg`), mine a divergent branch | API output byte-identical to a never-reorged run; orphaned rows persist for audit |
-| Indexer killed and relaunched mid-scenario | kill the supervised `indexer run`, restart | identical final output |
-| Backfill-from-zero after the fact | the harness's `backfill` runner over the finished chain | identical API output vs the live-followed run |
-| Projection replay | snapshot all relevant routes per checkpoint, run `replay all-current-projections`, re-snapshot | byte equality (mirrors the conformance replay gate, but over chain-derived state) |
+| Perturbation | Mechanism | Convergence requirement | Status |
+| --- | --- | --- | --- |
+| Reorg at each checkpoint | anvil snapshot/revert via `harness::rpc::{evm_snapshot, evm_revert}`, mine a divergent longer branch under one live `pipeline::IndexerRunSession` | winning-branch route snapshots equal a fresh winning-chain control; losing-branch `raw_logs` and `normalized_events` remain present with orphaned canonicality by losing block hash | covered(`perturbations::rich_chain_live_reorg_converges_to_winning_branch`, `harness::pipeline::IndexerRunSession`, `harness::perturb::route_snapshots`) |
+| Indexer killed and relaunched mid-scenario | `pipeline::indexer_run_restart_after_first_checkpoint` kills the first `indexer run` after the first canonical checkpoint row, then restarts to scenario readiness | final route snapshots equal an unperturbed live ingest of the same finished chain | covered(`perturbations::rich_chain_indexer_restart_mid_scenario_matches_control`, `harness::pipeline::indexer_run_restart_after_first_checkpoint`, `harness::perturb::assert_snapshots_equal`) |
+| Backfill-from-zero after the fact | the harness's `backfill` runner over the finished chain, block `0..head` | scenario-scoped (per touched surface) normalized-event digests match exactly; after normalizing per-corpus contract-instance ids, live ⊆ backfill exactly, with backfill-only extras bounded to bookkeeping/late-round kinds (`SourceManifestUpdated`/`CapabilityChanged`/`PreimageObserved`); no API-route parity claim because backfill does not promote snapshot checkpoints | covered(`perturbations::rich_chain_backfill_normalized_events_match_live_ingest`, `harness::perturb::assert_backfill_normalized_event_parity`) |
+| Projection replay | snapshot fixed route set, run `replay all-current-projections`, then run full-range `replay normalized-events` plus projection replay and re-snapshot | route snapshots remain byte-equal after projection replay and after normalized-event replay plus projection replay | covered(`perturbations::rich_chain_projection_and_normalized_event_replay_are_route_stable`, `harness::perturb::route_snapshots`) |
 
 Wall-clock cost is the constraint: perturbed variants belong to the nightly
 tier, not the PR gate.
+
+Runtime verification of these four surfaced three wire/derivation facts now
+encoded in the harness: `last_updated` on empty collections is read-time
+wall clock (the only run-varying route field found — normalized in
+snapshots); contract-instance ids are minted per corpus, so cross-database
+event comparison must strip exactly those fields; and control runs must
+ingest to the identical head (`ingest_at_current_head`) because route
+bodies embed `chain_positions`.
 
 ## Harness roadmap
 

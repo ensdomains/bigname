@@ -1,5 +1,6 @@
 use std::net::TcpListener;
 use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -28,6 +29,157 @@ async fn run_to_completion(mut command: Command, what: &str) -> Result<String> {
         );
     }
     Ok(stdout)
+}
+
+fn indexer_log_path(label: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "bigname-e2e-indexer-{}-{label}.log",
+        std::process::id()
+    ))
+}
+
+/// A supervised `indexer run` process. The caller decides when the live session
+/// has reached enough checkpoints/readiness and then stops it explicitly.
+pub struct IndexerRunSession {
+    child: Child,
+    log_path: PathBuf,
+}
+
+impl IndexerRunSession {
+    pub fn start(
+        repo_root: &Path,
+        database_url: &str,
+        manifests_root: &Path,
+        chain_rpc_url: &str,
+        log_label: &str,
+    ) -> Result<Self> {
+        // Output goes to a log file, not a pipe: the run loop can out-write an
+        // undrained pipe buffer and block, deadlocking the session.
+        let log_path = indexer_log_path(log_label);
+        let log_file = std::fs::File::create(&log_path).context("create indexer log file")?;
+        let child = cargo()
+            .current_dir(repo_root)
+            .args([
+                "run",
+                "--quiet",
+                "--manifest-path",
+                "apps/indexer/Cargo.toml",
+                "--",
+                "run",
+                "--database-url",
+                database_url,
+                "--manifests-root",
+            ])
+            .arg(manifests_root)
+            .args([
+                "--chain-rpc-url",
+                &format!("ethereum-mainnet={chain_rpc_url}"),
+                "--poll-interval-secs",
+                "1",
+                // Scenario readiness often waits on a full-closure authority
+                // sync round; the default 30s cadence just slows tests down.
+                "--normalized-replay-catchup-poll-interval-secs",
+                "2",
+            ])
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::from(log_file.try_clone()?))
+            .stderr(std::process::Stdio::from(log_file))
+            .spawn()
+            .context("spawn indexer run")?;
+
+        Ok(Self { child, log_path })
+    }
+
+    pub async fn wait_for_first_checkpoint(&mut self, pool: &sqlx::PgPool) -> Result<i64> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(600);
+        loop {
+            self.bail_if_exited()?;
+            let checkpoint = canonical_checkpoint(pool).await?;
+            if let Some(block) = checkpoint {
+                return Ok(block);
+            }
+            self.bail_if_timed_out(deadline, "indexer run did not write a canonical checkpoint")
+                .await?;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    pub async fn wait_for_checkpoint(
+        &mut self,
+        pool: &sqlx::PgPool,
+        target_block: u64,
+        extra_ready_sql: Option<&str>,
+    ) -> Result<()> {
+        // First iterations may sit behind a cargo build of the indexer crate.
+        let deadline = std::time::Instant::now() + Duration::from_secs(600);
+        loop {
+            self.bail_if_exited()?;
+            let checkpoint = canonical_checkpoint(pool).await?;
+            if checkpoint.is_some_and(|block| block >= target_block as i64) {
+                let extra_ready = match extra_ready_sql {
+                    Some(sql) => sqlx::query_scalar::<_, bool>(sql).fetch_one(pool).await?,
+                    None => true,
+                };
+                if extra_ready {
+                    return Ok(());
+                }
+            }
+            self.bail_if_timed_out(
+                deadline,
+                &format!("indexer run did not reach canonical checkpoint {target_block}"),
+            )
+            .await?;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    pub async fn stop(mut self) -> Result<()> {
+        if self.child.try_wait()?.is_none() {
+            self.child.kill().await.ok();
+        }
+        Ok(())
+    }
+
+    fn bail_if_exited(&mut self) -> Result<()> {
+        if let Some(status) = self.child.try_wait()? {
+            bail!(
+                "indexer run exited early ({status}); log tail (reversed) from {:?}:\n{}",
+                self.log_path,
+                self.log_tail()
+            );
+        }
+        Ok(())
+    }
+
+    async fn bail_if_timed_out(
+        &mut self,
+        deadline: std::time::Instant,
+        message: &str,
+    ) -> Result<()> {
+        if std::time::Instant::now() > deadline {
+            self.child.kill().await.ok();
+            bail!(
+                "{message} within 600s; log tail (reversed) from {:?}:\n{}",
+                self.log_path,
+                self.log_tail()
+            );
+        }
+        Ok(())
+    }
+
+    fn log_tail(&self) -> String {
+        let log = std::fs::read_to_string(&self.log_path).unwrap_or_default();
+        log.lines().rev().take(60).collect::<Vec<_>>().join("\n")
+    }
+}
+
+async fn canonical_checkpoint(pool: &sqlx::PgPool) -> Result<Option<i64>> {
+    Ok(sqlx::query_scalar(
+        "SELECT canonical_block_number FROM chain_checkpoints WHERE chain_id = 'ethereum-mainnet'",
+    )
+    .fetch_optional(pool)
+    .await?
+    .flatten())
 }
 
 pub async fn indexer_backfill(
@@ -85,80 +237,57 @@ pub async fn indexer_run_until_checkpoint(
     target_block: u64,
     extra_ready_sql: Option<&str>,
 ) -> Result<()> {
-    // Output goes to a log file, not a pipe: the run loop can out-write an
-    // undrained pipe buffer and block, deadlocking the session.
-    let log_path = std::env::temp_dir().join(format!(
-        "bigname-e2e-indexer-{}-{target_block}.log",
-        std::process::id()
-    ));
-    let log_file = std::fs::File::create(&log_path).context("create indexer log file")?;
-    let mut child = cargo()
-        .current_dir(repo_root)
-        .args([
-            "run",
-            "--quiet",
-            "--manifest-path",
-            "apps/indexer/Cargo.toml",
-            "--",
-            "run",
-            "--database-url",
-            database_url,
-            "--manifests-root",
-        ])
-        .arg(manifests_root)
-        .args([
-            "--chain-rpc-url",
-            &format!("ethereum-mainnet={chain_rpc_url}"),
-            "--poll-interval-secs",
-            "1",
-            // Scenario readiness often waits on a full-closure authority
-            // sync round; the default 30s cadence just slows tests down.
-            "--normalized-replay-catchup-poll-interval-secs",
-            "2",
-        ])
-        .kill_on_drop(true)
-        .stdout(std::process::Stdio::from(log_file.try_clone()?))
-        .stderr(std::process::Stdio::from(log_file))
-        .spawn()
-        .context("spawn indexer run")?;
+    let mut session = IndexerRunSession::start(
+        repo_root,
+        database_url,
+        manifests_root,
+        chain_rpc_url,
+        &target_block.to_string(),
+    )?;
+    session
+        .wait_for_checkpoint(pool, target_block, extra_ready_sql)
+        .await?;
+    session.stop().await
+}
 
-    // First iterations may sit behind a cargo build of the indexer crate.
-    let deadline = std::time::Instant::now() + Duration::from_secs(600);
-    loop {
-        if let Some(status) = child.try_wait()? {
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-            let tail: String = log.lines().rev().take(60).collect::<Vec<_>>().join("\n");
-            bail!(
-                "indexer run exited early ({status}); log tail (reversed) from {log_path:?}:\n{tail}"
-            );
-        }
-        let checkpoint: Option<i64> = sqlx::query_scalar(
-            "SELECT canonical_block_number FROM chain_checkpoints WHERE chain_id = 'ethereum-mainnet'",
-        )
-        .fetch_optional(pool)
-        .await?
-        .flatten();
-        if checkpoint.is_some_and(|block| block >= target_block as i64) {
-            let extra_ready = match extra_ready_sql {
-                Some(sql) => sqlx::query_scalar::<_, bool>(sql).fetch_one(pool).await?,
-                None => true,
-            };
-            if extra_ready {
-                child.kill().await.ok();
-                return Ok(());
-            }
-        }
-        if std::time::Instant::now() > deadline {
-            child.kill().await.ok();
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-            let tail: String = log.lines().rev().take(60).collect::<Vec<_>>().join("\n");
-            bail!(
-                "indexer run did not reach canonical checkpoint {target_block} within 600s; \
-                 log tail (reversed) from {log_path:?}:\n{tail}"
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
+pub struct RestartCompletion {
+    pub target_block: u64,
+    pub extra_ready_sql: Option<String>,
+}
+
+pub async fn indexer_run_restart_after_first_checkpoint<F, Fut>(
+    repo_root: &Path,
+    database_url: &str,
+    pool: &sqlx::PgPool,
+    manifests_root: &Path,
+    chain_rpc_url: &str,
+    after_first_checkpoint: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<RestartCompletion>>,
+{
+    let mut first_session = IndexerRunSession::start(
+        repo_root,
+        database_url,
+        manifests_root,
+        chain_rpc_url,
+        "restart-first",
+    )?;
+    first_session.wait_for_first_checkpoint(pool).await?;
+    first_session.stop().await?;
+
+    let completion = after_first_checkpoint().await?;
+    indexer_run_until_checkpoint(
+        repo_root,
+        database_url,
+        pool,
+        manifests_root,
+        chain_rpc_url,
+        completion.target_block,
+        completion.extra_ready_sql.as_deref(),
+    )
+    .await
 }
 
 /// Full-range normalized-event replay from stored raw facts — the operator

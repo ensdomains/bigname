@@ -3,6 +3,7 @@ pub mod artifacts;
 pub mod db;
 pub mod ens_v1;
 pub mod manifests;
+pub mod perturb;
 pub mod pipeline;
 pub mod rpc;
 
