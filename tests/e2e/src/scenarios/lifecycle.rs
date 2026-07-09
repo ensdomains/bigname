@@ -1,4 +1,5 @@
-use anyhow::Result;
+use alloy_primitives::Address;
+use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::support;
@@ -9,6 +10,63 @@ const YEAR: u64 = 365 * 24 * 60 * 60;
 const MIN_REGISTRATION: u64 = 28 * 24 * 60 * 60;
 // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L17 @ ens_v1@91c966f)
 const GRACE_PERIOD: u64 = 90 * 24 * 60 * 60;
+
+/// Zero-resolver registration follows the controller's direct registrar
+/// branch: no registry resolver binding is written while the lease itself is
+/// otherwise active
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L287 @ ens_v1@91c966f).
+#[tokio::test]
+async fn register_without_resolver_keeps_declared_resolver_empty() -> Result<()> {
+    let anvil = Anvil::spawn().await?;
+    let rpc = anvil.client();
+
+    let deployment = ens_v1::deploy_ens_v1(&rpc, &repo_root()).await?;
+    let alice = rpc.accounts().await?[1];
+
+    ens_v1::register_eth_name(&rpc, &deployment, "erin", alice, YEAR, Address::ZERO).await?;
+
+    let run = support::ingest_and_serve(
+        &anvil,
+        &deployment,
+        Some(
+            "SELECT EXISTS (SELECT 1 FROM normalized_events \
+             WHERE logical_name_id = 'ens:erin.eth' AND event_kind = 'RegistrationGranted' \
+             AND canonicality_state = 'canonical')",
+        ),
+    )
+    .await?;
+
+    let (status, body) = run.api.get_json("/v1/names/ens/erin.eth").await?;
+    assert_eq!(status, 200, "exact-name lookup failed: {body}");
+    let pointer = |path: &str| -> Value { body.pointer(path).cloned().unwrap_or(Value::Null) };
+    assert_eq!(pointer("/data/normalized_name"), "erin.eth");
+    assert_eq!(pointer("/coverage/status"), "full");
+    assert_eq!(pointer("/coverage/exhaustiveness"), "authoritative");
+    assert_eq!(pointer("/declared_state/registration/status"), "active");
+    assert_eq!(
+        pointer("/declared_state/registration/registrant"),
+        format!("{alice:#x}"),
+        "registrant should be the registering account"
+    );
+    assert_eq!(
+        pointer("/declared_state/control/registry_owner"),
+        format!("{alice:#x}"),
+        "registry owner should still be populated from registrar registry update"
+    );
+    assert_eq!(
+        pointer("/declared_state/resolver/address"),
+        Value::Null,
+        "zero-resolver registration should not declare a resolver; body: {body}"
+    );
+    assert_eq!(
+        pointer("/declared_state/resolver/chain_id"),
+        Value::Null,
+        "zero-resolver registration should use the supported no-resolver shape"
+    );
+
+    run.db.cleanup().await?;
+    Ok(())
+}
 
 /// Renew, then transfer: expiry extends and the registrant changes while
 /// the backing resource and token lineage stay stable — ordinary lifecycle
@@ -231,5 +289,137 @@ async fn expiry_grace_and_reregistration_rotate_identity() -> Result<()> {
     );
 
     after.db.cleanup().await?;
+    Ok(())
+}
+
+/// Past expiry plus the upstream grace period, with no re-registration of
+/// the name itself. Two contractual facts, pinned separately across two
+/// ingests of the same chain:
+///
+/// 1. On a chain with no activity at all after the grace end, the release
+///    never settles: release settlement runs at the full-closure boundary of
+///    an authority sync round, and rounds are driven by log-bearing blocks —
+///    empty blocks past grace end advance nothing. The registration stays
+///    last-known (`active`, past expiry), same as the in-grace read.
+/// 2. Any later admitted activity (here: an unrelated registration) gives
+///    the next sync round a boundary past `expiry + GRACE_PERIOD`; the
+///    release then materializes anchored to the first indexed block after
+///    grace end, exact-name flips to `released`, and the name leaves the
+///    current registrant collection while history is retained.
+#[tokio::test]
+async fn expire_without_reregistration_releases_and_unlists_registration() -> Result<()> {
+    let anvil = Anvil::spawn().await?;
+    let rpc = anvil.client();
+
+    let deployment = ens_v1::deploy_ens_v1(&rpc, &repo_root()).await?;
+    let accounts = rpc.accounts().await?;
+    let (alice, bob) = (accounts[1], accounts[2]);
+    let resolver = deployment.public_resolver.address;
+
+    ens_v1::register_eth_name(
+        &rpc,
+        &deployment,
+        "frank",
+        alice,
+        MIN_REGISTRATION,
+        resolver,
+    )
+    .await?;
+    rpc.increase_time(MIN_REGISTRATION + GRACE_PERIOD + 24 * 60 * 60)
+        .await?;
+
+    let quiet = support::ingest_and_serve(
+        &anvil,
+        &deployment,
+        Some(
+            "SELECT EXISTS (SELECT 1 FROM normalized_events \
+             WHERE logical_name_id = 'ens:frank.eth' AND event_kind = 'RegistrationGranted' \
+             AND canonicality_state = 'canonical')",
+        ),
+    )
+    .await?;
+    let released_on_quiet_chain: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM normalized_events \
+         WHERE logical_name_id = 'ens:frank.eth' AND event_kind = 'RegistrationReleased')",
+    )
+    .fetch_one(&quiet.db.pool)
+    .await?;
+    assert!(
+        !released_on_quiet_chain,
+        "release must not settle without a post-grace log-bearing boundary; \
+         if this now settles, update this scenario and the ledger"
+    );
+    quiet.db.cleanup().await?;
+
+    // Unrelated post-grace activity gives the next authority sync round a
+    // boundary past the grace end.
+    ens_v1::register_eth_name(&rpc, &deployment, "george", bob, MIN_REGISTRATION, resolver).await?;
+
+    let run = support::ingest_and_serve(
+        &anvil,
+        &deployment,
+        Some(
+            "SELECT EXISTS (SELECT 1 FROM normalized_events \
+             WHERE logical_name_id = 'ens:frank.eth' AND event_kind = 'RegistrationReleased' \
+             AND canonicality_state = 'canonical')",
+        ),
+    )
+    .await?;
+
+    let (status, body) = run.api.get_json("/v1/names/ens/frank.eth").await?;
+    assert_eq!(status, 200, "exact-name lookup failed: {body}");
+    let pointer = |path: &str| -> Value { body.pointer(path).cloned().unwrap_or(Value::Null) };
+    assert_eq!(
+        pointer("/declared_state/registration/status"),
+        "released",
+        "post-grace registration should be released; body: {body}"
+    );
+    assert_eq!(
+        pointer("/declared_state/registration/latest_event_kind"),
+        "RegistrationReleased"
+    );
+    assert_eq!(
+        pointer("/declared_state/registration/registrant"),
+        format!("{alice:#x}"),
+        "released summary should retain the last registrant"
+    );
+    let expiry = pointer("/declared_state/registration/expiry")
+        .as_i64()
+        .context("released registration expiry missing")?;
+    let released_at = pointer("/declared_state/registration/released_at")
+        .as_i64()
+        .context("released_at missing from released registration")?;
+    let event_released_at: i64 = sqlx::query_scalar(
+        "SELECT (after_state->>'released_at')::BIGINT FROM normalized_events \
+         WHERE logical_name_id = 'ens:frank.eth' AND event_kind = 'RegistrationReleased' \
+         AND canonicality_state = 'canonical'",
+    )
+    .fetch_one(&run.db.pool)
+    .await?;
+    assert_eq!(
+        released_at, event_released_at,
+        "exact-name released_at should come from the canonical release event"
+    );
+    assert!(
+        released_at >= expiry + GRACE_PERIOD as i64,
+        "released_at {released_at} should be at or after expiry {expiry} plus grace"
+    );
+
+    let address_path = format!("/v1/addresses/{alice:#x}/names?namespace=ens&relation=registrant");
+    let (status, address_names) = run.api.get_json(&address_path).await?;
+    assert_eq!(status, 200, "address names lookup failed: {address_names}");
+    let address_entries = address_names
+        .pointer("/data")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        address_entries
+            .iter()
+            .all(|entry| entry.get("normalized_name").and_then(Value::as_str) != Some("frank.eth")),
+        "released name must not appear in the current registrant collection: {address_names}"
+    );
+
+    run.db.cleanup().await?;
     Ok(())
 }

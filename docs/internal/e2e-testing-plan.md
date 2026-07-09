@@ -74,12 +74,12 @@ Legend: `covered(scenario)` / `planned(N)` = target phase / `blocked(reason)`.
 | Transition | Key assertions | Status |
 | --- | --- | --- |
 | Register via controller commit/reveal | registration active, registrant, expiry math, coverage full/authoritative | covered(register_eth_name) |
-| Register without resolver | no declared resolver, otherwise identical | planned(2) |
+| Register without resolver | registration active with full/authoritative coverage, registrant and registry owner set, declared resolver `address`/`chain_id` null | covered(register_without_resolver_keeps_declared_resolver_empty) |
 | Renew before expiry | expiry extends, RegistrationRenewed derived, same backing resource | covered(renew_and_transfer_keep_identity) |
 | Transfer the registrar token, then reclaim | registrant and registry owner follow; the two-transaction transfer→reclaim window is a real registry-owner divergence that mints a transient anchor and converges back to the original registrar resource | covered(renew_and_transfer_keep_identity) |
 | Expire → grace | no wire-level grace status: registration stays `active` with `released_at` null and expiry in the past; grace is consumer-derived | covered(expiry_grace_and_reregistration_rotate_identity) |
 | Grace end → premium decay → re-register (different owner) | new backing resource minted; both leases' registration events persist under distinct resources | covered(expiry_grace_and_reregistration_rotate_identity) |
-| Expire with no re-registration | released state, enumeration excludes it where contractual | planned(2) |
+| Expire with no re-registration | two pinned facts: on a chain with no activity after grace end the release never settles (authority sync rounds are driven by log-bearing blocks; empty blocks advance no boundary — registration stays last-known `active` with past expiry); once any later admitted activity lands, the next round's boundary passes expiry+grace and `RegistrationReleased` materializes anchored to the first block after grace end, flipping exact-name to `released` with `released_at` from that event and excluding the name from the current registrant collection | covered(expire_without_reregistration_releases_and_unlists_registration) |
 
 ### ENSv1 — subnames
 
@@ -87,9 +87,9 @@ Legend: `covered(scenario)` / `planned(N)` = target phase / `blocked(reason)`.
 | --- | --- | --- |
 | Parent creates registry-only subname | child listed under parent with correct owner | covered(registry_driven_reads) |
 | Subname created with unrevealed label (labelhash only — the registry never carries label strings for subnames) | bracketed placeholder child row; no exact-name surface minted (404) | covered(registry_driven_reads) |
-| Same label under two different parents | two distinct identities, no cross-talk | planned(2) |
-| Deep hierarchy (three+ levels) | ancestry and child enumeration at each level | planned(2) |
-| Subname owner set to zero | binding released, child leaves default enumeration | planned(2) |
+| Same label under two different parents | same labelhash under `alice.eth` and `bob.eth` produces distinct child namehashes and owners, with no cross-parent leakage in either `/children` route | covered(same_label_under_two_parents_keeps_children_distinct) |
+| Deep hierarchy (three+ levels) | registry facts derive at any depth (canonical SubregistryChanged for the grandchild under the placeholder's node), but enumeration stops at unknown surfaces: bracketed placeholder names are rejected as `invalid_input` at the ENSIP-15 boundary, and children under an unrevealed-label parent project no `children_current` row | covered(deep_registry_hierarchy_lists_direct_children_only) |
+| Subname owner set to zero | zero-owner tombstone removes the child from the parent's default `/children` listing | covered(zero_owner_subname_leaves_default_children_listing) |
 | Label preimage revealed later | placeholder upgrades to the real name | planned(2) |
 
 ### ENSv1 — wrapper

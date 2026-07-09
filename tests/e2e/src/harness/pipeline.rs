@@ -111,6 +111,10 @@ pub async fn indexer_run_until_checkpoint(
             &format!("ethereum-mainnet={chain_rpc_url}"),
             "--poll-interval-secs",
             "1",
+            // Scenario readiness often waits on a full-closure authority
+            // sync round; the default 30s cadence just slows tests down.
+            "--normalized-replay-catchup-poll-interval-secs",
+            "2",
         ])
         .kill_on_drop(true)
         .stdout(std::process::Stdio::from(log_file.try_clone()?))
@@ -155,6 +159,39 @@ pub async fn indexer_run_until_checkpoint(
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+}
+
+/// Full-range normalized-event replay from stored raw facts — the operator
+/// command that rebuilds adapter state under a complete closure boundary.
+/// The active corpus registers under the `mainnet` profile (the generated
+/// root mirrors the shipped mainnet manifests), so that is the profile the
+/// replay must name.
+pub async fn indexer_replay_normalized_events(
+    repo_root: &Path,
+    database_url: &str,
+    to_block: u64,
+) -> Result<String> {
+    let mut command = cargo();
+    command.current_dir(repo_root).args([
+        "run",
+        "--quiet",
+        "--manifest-path",
+        "apps/indexer/Cargo.toml",
+        "--",
+        "replay",
+        "normalized-events",
+        "--database-url",
+        database_url,
+        "--deployment-profile",
+        "mainnet",
+        "--chain",
+        "ethereum-mainnet",
+        "--from-block",
+        "0",
+        "--to-block",
+        &to_block.to_string(),
+    ]);
+    run_to_completion(command, "indexer replay normalized-events").await
 }
 
 pub async fn worker_replay_all_current_projections(

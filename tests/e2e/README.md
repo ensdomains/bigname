@@ -91,6 +91,27 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
   `active` with a past expiry; no wire-level grace status) and once after a
   different account re-registers post-premium-decay (new backing resource;
   both leases' history preserved under distinct resources).
+- `lifecycle::register_without_resolver_keeps_declared_resolver_empty` —
+  registers through the controller with resolver `address(0)` and asserts
+  active registration state with a supported null declared-resolver shape.
+- `lifecycle::expire_without_reregistration_releases_and_unlists_registration`
+  — registers for the upstream minimum duration and warps past expiry plus
+  grace without re-registering. Pins both halves of the contract: on a
+  quiet chain the release never settles (sync boundaries are driven by
+  log-bearing blocks), and the first unrelated post-grace activity lets the
+  next sync round derive the release, flip exact-name to `released`, and
+  drop the name from the current registrant collection.
+- `registry_driven_reads::same_label_under_two_parents_keeps_children_distinct`
+  — creates `sub` under two registered parents and asserts separate child
+  namehashes/owners with no cross-parent leakage.
+- `registry_driven_reads::deep_registry_hierarchy_lists_direct_children_only`
+  — creates a registry-only grandchild under a placeholder parent. Registry
+  facts derive at any depth, but enumeration stops at unknown surfaces:
+  placeholder names are rejected as `invalid_input` and the grandchild
+  projects no children row.
+- `registry_driven_reads::zero_owner_subname_leaves_default_children_listing`
+  — creates and then zeroes a registry-only subname, asserting the tombstoned
+  child leaves the default parent children listing.
 
 ## Debugging
 
