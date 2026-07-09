@@ -159,10 +159,10 @@ async fn run_ops_finalized_catchup_chunk(
         chain,
         WatchedSourceSelector::WatchedTargetSet(
             chunk
-                .targets
-                .iter()
-                .map(|target| WatchedTargetIdentity {
-                    contract_instance_id: target.contract_instance_id,
+                .target_contract_instance_ids()
+                .into_iter()
+                .map(|contract_instance_id| WatchedTargetIdentity {
+                    contract_instance_id,
                 })
                 .collect(),
         ),

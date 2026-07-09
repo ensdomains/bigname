@@ -75,20 +75,35 @@ pub fn summarize_watched_contracts(
 }
 
 pub fn plan_watched_contracts(watched_contracts: &[WatchedContract]) -> Vec<WatchedChainPlan> {
-    let mut plans = BTreeMap::<String, WatchedChainPlan>::new();
+    #[derive(Default)]
+    struct ChainPlanAccumulator {
+        addresses: BTreeSet<String>,
+        manifest_root_entry_count: usize,
+        manifest_contract_entry_count: usize,
+        discovery_edge_entry_count: usize,
+    }
+
+    let mut plans = BTreeMap::<String, ChainPlanAccumulator>::new();
 
     for watched_contract in watched_contracts {
+        if !plans.contains_key(&watched_contract.chain) {
+            plans.insert(
+                watched_contract.chain.clone(),
+                ChainPlanAccumulator::default(),
+            );
+        }
         let plan = plans
-            .entry(watched_contract.chain.clone())
-            .or_insert_with(|| WatchedChainPlan {
-                chain: watched_contract.chain.clone(),
-                addresses: Vec::new(),
-                manifest_root_entry_count: 0,
-                manifest_contract_entry_count: 0,
-                discovery_edge_entry_count: 0,
-            });
+            .get_mut(&watched_contract.chain)
+            .expect("chain accumulator inserted above");
 
-        plan.addresses.push(watched_contract.address.clone());
+        // Dedup addresses at insert time: at discovery-graph scale most
+        // watched entries are per-edge duplicates of one address (6.32M
+        // entries over 1.12M addresses on ethereum-mainnet), so cloning every
+        // entry and deduping afterwards briefly held millions of redundant
+        // address strings.
+        if !plan.addresses.contains(&watched_contract.address) {
+            plan.addresses.insert(watched_contract.address.clone());
+        }
 
         match watched_contract.source {
             WatchedContractSource::ManifestRoot => plan.manifest_root_entry_count += 1,
@@ -97,12 +112,16 @@ pub fn plan_watched_contracts(watched_contracts: &[WatchedContract]) -> Vec<Watc
         }
     }
 
-    let mut plans = plans.into_values().collect::<Vec<_>>();
-    for plan in &mut plans {
-        plan.addresses.sort();
-        plan.addresses.dedup();
-    }
     plans
+        .into_iter()
+        .map(|(chain, accumulator)| WatchedChainPlan {
+            chain,
+            addresses: accumulator.addresses.into_iter().collect(),
+            manifest_root_entry_count: accumulator.manifest_root_entry_count,
+            manifest_contract_entry_count: accumulator.manifest_contract_entry_count,
+            discovery_edge_entry_count: accumulator.discovery_edge_entry_count,
+        })
+        .collect()
 }
 
 pub fn resolve_watched_source_selector(
