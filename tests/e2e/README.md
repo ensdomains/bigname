@@ -75,19 +75,12 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
 
 ## Extending
 
-The intended growth path, mirroring the architecture doc's test matrix:
-
-- **More transitions** — wrap/unwrap, fuse burns, subname creation
-  (registry-only and wrapped), transfer, expiry/grace/premium re-registration,
-  old-registry migration suppression. Scenarios are ordered on-chain action
-  scripts; prefer one scenario per lifecycle path over one per event.
-- **Perturbations** — re-run a scenario with a reorg at a checkpoint
-  (anvil `anvil_reorg`/snapshot-revert), an indexer restart mid-sequence, or
-  a from-zero backfill diffed against the live-followed run. Every variant
-  must converge to identical API output.
-- **Determinism** — snapshot route payloads per checkpoint before and after
-  `replay all-current-projections` and require byte equality, as
-  `tests/conformance` does for its synthetic corpus.
+The scenario matrices, perturbation multipliers, harness roadmap, and
+phasing live in [`docs/internal/e2e-testing-plan.md`](../../docs/internal/e2e-testing-plan.md)
+— that document is the coverage ledger; update it in the same change that
+adds or unblocks a scenario. Scenarios are ordered on-chain action scripts
+with named checkpoints; prefer one scenario per lifecycle path over one per
+event.
 
 Keep upstream behavior claims cited to pinned `.refs/` sources; uncited
 claims get rejected in review (AGENTS.md § Upstream anchors).
