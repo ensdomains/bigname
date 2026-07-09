@@ -60,6 +60,10 @@ impl HarnessDb {
     }
 
     pub async fn cleanup(self) -> Result<()> {
+        if std::env::var_os("BIGNAME_E2E_KEEP_DB").is_some() {
+            eprintln!("BIGNAME_E2E_KEEP_DB set; keeping {}", self.url);
+            return Ok(());
+        }
         self.pool.close().await;
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)

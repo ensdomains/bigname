@@ -70,8 +70,34 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
 - `register_eth_name` — walking skeleton. Registers `alice.eth` through the
   controller's commit/reveal flow (time-warped past the minimum commitment
   age) and asserts raw-log persistence, canonical normalized event kinds,
-  and the exact-name route's registration/coverage output. Verified
-  resolution is out of scope: no execution RPC is configured.
+  and the exact-name route's registration/coverage output. Mirrors the
+  shipped mainnet profile exactly, and pins its consequence: declared
+  resolver and registry-owner state stay absent because the registry family
+  ships as an inactive seed. Verified resolution is out of scope: no
+  execution RPC is configured.
+- `registry_driven_reads` — opts the registry family into
+  `rollout_status = "active"` (with the pinned registry event ABI the
+  adapter requires) and covers what that unlocks: declared resolver
+  bindings, registry owner, record-inventory selectors, and registry-only
+  subnames appearing as bracketed labelhash placeholder children with no
+  exact-name surface minted.
+- `lifecycle::renew_and_transfer_keep_identity` — renewal extends expiry on
+  the same backing resource; the two-transaction transfer→reclaim pair
+  opens a genuine registry-owner divergence window (transient anchor) and
+  converges back to the original registrar resource.
+- `lifecycle::expiry_grace_and_reregistration_rotate_identity` — ingests
+  the same chain twice: once inside the grace window (registration stays
+  `active` with a past expiry; no wire-level grace status) and once after a
+  different account re-registers post-premium-decay (new backing resource;
+  both leases' history preserved under distinct resources).
+
+## Debugging
+
+- `BIGNAME_E2E_KEEP_DB=1` keeps each scenario's database (the URL is
+  printed) instead of dropping it.
+- The supervised `indexer run` session writes its full log to
+  `$TMPDIR/bigname-e2e-indexer-<pid>-<target block>.log`; failures include
+  the tail.
 
 ## Extending
 

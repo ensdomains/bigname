@@ -9,14 +9,25 @@ use super::rpc::RpcClient;
 
 // Call fragments match the pinned upstream sources:
 // (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L39 @ ens_v1@91c966f)
+// (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L45 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L23 @ ens_v1@91c966f)
+// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/ethregistrar/IETHRegistrarController.sol:L7 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L210 @ ens_v1@91c966f)
+// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L352 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/ethregistrar/IPriceOracle.sol:L5 @ ens_v1@91c966f)
+// (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L26 @ ens_v1@91c966f)
+// (upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L15 @ ens_v1@91c966f)
 sol! {
     function setSubnodeOwner(bytes32 node, bytes32 label, address owner) external returns (bytes32);
     function owner(bytes32 node) external view returns (address);
+    function setResolver(bytes32 node, address resolver) external;
     function addController(address controller) external;
+    function reclaim(uint256 id, address owner) external;
+    function transferFrom(address from, address to, uint256 tokenId) external;
+    function renew(string label, uint256 duration, bytes32 referrer) external payable;
+    function setAddr(bytes32 node, address a) external;
+    function setText(bytes32 node, string key, string value) external;
 
     struct Registration {
         string label;
@@ -263,6 +274,218 @@ async fn send_checked(rpc: &RpcClient, from: Address, to: Address, data: &[u8]) 
         bail!("call to {to} reverted (tx {})", receipt.tx_hash);
     }
     Ok(())
+}
+
+/// Create `<label>.<parent>` in the registry, owned by `owner`. `from` must
+/// control the parent node.
+pub async fn create_subname(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    parent: &str,
+    label: &str,
+    owner: Address,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        d.registry.address,
+        &setSubnodeOwnerCall {
+            node: namehash(parent),
+            label: labelhash(label),
+            owner,
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+pub async fn set_resolver(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    name: &str,
+    resolver: Address,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        d.registry.address,
+        &setResolverCall {
+            node: namehash(name),
+            resolver,
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+pub async fn set_text_record(
+    rpc: &RpcClient,
+    resolver: Address,
+    from: Address,
+    name: &str,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        resolver,
+        &setTextCall {
+            node: namehash(name),
+            key: key.to_string(),
+            value: value.to_string(),
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+pub async fn set_addr_record(
+    rpc: &RpcClient,
+    resolver: Address,
+    from: Address,
+    name: &str,
+    target: Address,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        resolver,
+        &setAddrCall {
+            node: namehash(name),
+            a: target,
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+/// Renew `<label>.eth` through the controller for `duration_secs`.
+pub async fn renew_eth_name(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    label: &str,
+    duration_secs: u64,
+) -> Result<()> {
+    let price_raw = rpc
+        .eth_call(
+            d.controller.address,
+            &rentPriceCall {
+                label: label.to_string(),
+                duration: U256::from(duration_secs),
+            }
+            .abi_encode(),
+        )
+        .await?;
+    let price = rentPriceCall::abi_decode_returns(&price_raw).context("rentPrice decode")?;
+    let receipt = rpc
+        .send_transaction(
+            from,
+            Some(d.controller.address),
+            &renewCall {
+                label: label.to_string(),
+                duration: U256::from(duration_secs),
+                referrer: B256::ZERO,
+            }
+            .abi_encode(),
+            price.base + price.premium,
+        )
+        .await?;
+    if !receipt.status_ok {
+        bail!("renew of {label}.eth reverted (tx {})", receipt.tx_hash);
+    }
+    Ok(())
+}
+
+/// Transfer the registrar token for `<label>.eth` and reclaim registry
+/// ownership for the new holder.
+pub async fn transfer_eth_name(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    to: Address,
+    label: &str,
+) -> Result<()> {
+    let token_id = U256::from_be_bytes(labelhash(label).0);
+    send_checked(
+        rpc,
+        from,
+        d.base_registrar.address,
+        &transferFromCall {
+            from,
+            to,
+            tokenId: token_id,
+        }
+        .abi_encode(),
+    )
+    .await?;
+    send_checked(
+        rpc,
+        to,
+        d.base_registrar.address,
+        &reclaimCall {
+            id: token_id,
+            owner: to,
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+impl EnsV1Deployment {
+    /// Manifest patch targets for this deployment, keyed by `[[roots]].name`
+    /// and `[[contracts]].role` (see `harness::manifests`).
+    pub fn manifest_targets(&self) -> std::collections::HashMap<&'static str, (Address, u64)> {
+        std::collections::HashMap::from([
+            (
+                "ENSRegistry",
+                (self.registry.address, self.registry.block_number),
+            ),
+            (
+                "registry",
+                (self.registry.address, self.registry.block_number),
+            ),
+            (
+                "ETHRegistrar",
+                (
+                    self.base_registrar.address,
+                    self.base_registrar.block_number,
+                ),
+            ),
+            (
+                "registrar",
+                (
+                    self.base_registrar.address,
+                    self.base_registrar.block_number,
+                ),
+            ),
+            (
+                "unwrapped_registrar_controller",
+                (self.controller.address, self.controller.block_number),
+            ),
+            (
+                "public_resolver",
+                (
+                    self.public_resolver.address,
+                    self.public_resolver.block_number,
+                ),
+            ),
+            (
+                "reverse_registrar",
+                (
+                    self.reverse_registrar.address,
+                    self.reverse_registrar.block_number,
+                ),
+            ),
+            (
+                "name_wrapper",
+                (self.name_wrapper.address, self.name_wrapper.block_number),
+            ),
+        ])
+    }
 }
 
 pub struct RegisteredName {

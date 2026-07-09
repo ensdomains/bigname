@@ -85,6 +85,13 @@ pub async fn indexer_run_until_checkpoint(
     target_block: u64,
     extra_ready_sql: Option<&str>,
 ) -> Result<()> {
+    // Output goes to a log file, not a pipe: the run loop can out-write an
+    // undrained pipe buffer and block, deadlocking the session.
+    let log_path = std::env::temp_dir().join(format!(
+        "bigname-e2e-indexer-{}-{target_block}.log",
+        std::process::id()
+    ));
+    let log_file = std::fs::File::create(&log_path).context("create indexer log file")?;
     let mut child = cargo()
         .current_dir(repo_root)
         .args([
@@ -106,8 +113,8 @@ pub async fn indexer_run_until_checkpoint(
             "1",
         ])
         .kill_on_drop(true)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::from(log_file.try_clone()?))
+        .stderr(std::process::Stdio::from(log_file))
         .spawn()
         .context("spawn indexer run")?;
 
@@ -115,12 +122,11 @@ pub async fn indexer_run_until_checkpoint(
     let deadline = std::time::Instant::now() + Duration::from_secs(600);
     loop {
         if let Some(status) = child.try_wait()? {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = child.stderr.take() {
-                use tokio::io::AsyncReadExt;
-                let _ = pipe.read_to_string(&mut stderr).await;
-            }
-            bail!("indexer run exited early ({status}):\n{stderr}");
+            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let tail: String = log.lines().rev().take(60).collect::<Vec<_>>().join("\n");
+            bail!(
+                "indexer run exited early ({status}); log tail (reversed) from {log_path:?}:\n{tail}"
+            );
         }
         let checkpoint: Option<i64> = sqlx::query_scalar(
             "SELECT canonical_block_number FROM chain_checkpoints WHERE chain_id = 'ethereum-mainnet'",
@@ -140,7 +146,12 @@ pub async fn indexer_run_until_checkpoint(
         }
         if std::time::Instant::now() > deadline {
             child.kill().await.ok();
-            bail!("indexer run did not reach canonical checkpoint {target_block} within 600s");
+            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let tail: String = log.lines().rev().take(60).collect::<Vec<_>>().join("\n");
+            bail!(
+                "indexer run did not reach canonical checkpoint {target_block} within 600s; \
+                 log tail (reversed) from {log_path:?}:\n{tail}"
+            );
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }

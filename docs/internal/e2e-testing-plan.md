@@ -47,10 +47,23 @@ evidence, that:
 - Chain time can be warped (`evm_increaseTime`), so expiry, grace, premium
   decay, and commit-age waits are testable in seconds.
 
-It also produced the suite's first finding (declared resolver state missing
-after a registration that set a resolver, while the registry's `NewResolver`
-log is verifiably persisted) — tracked separately; the resolver-and-records
-matrix below is blocked on its resolution.
+It also produced the suite's first finding, since triaged: declared resolver
+state was missing after a registration that set a resolver, while the
+registry's `NewResolver` log was verifiably persisted. Root cause is the
+shipped mainnet profile itself — `ens_v1_registry_l1` ships as a
+`deprecated` bootstrap seed with no start block and no event ABI, so
+registry-driven facts (declared resolver bindings, registry owner, subname
+ownership) are not ingested by a faithful mirror; only inactive-family raw
+logs that ride along in watched transactions get persisted as replay
+context. The harness now supports an explicit per-family activation opt-in
+(which also injects the pinned registry event fragments the adapter
+requires); with it, the full registry-driven pipeline works end to end.
+Scenario policy going forward: the walking skeleton pins the shipped-mirror
+behavior (resolver/registry-owner absent); registry-dependent scenarios run
+under the activated variant and say so. **Whether the shipped mainnet
+profile should activate the registry family is an open product decision**
+— if yes, it is a doc-first manifest/admission change, and the activated
+manifest content the harness generates is a working draft of it.
 
 ## Scenario matrices
 
@@ -60,24 +73,23 @@ Legend: `covered(scenario)` / `planned(N)` = target phase / `blocked(reason)`.
 
 | Transition | Key assertions | Status |
 | --- | --- | --- |
-| Register via controller commit/reveal | registration active, registrant, expiry math, coverage full/authoritative | covered(register_eth_name) |
+| Register via controller commit/reveal | registration active, registrant, expiry math, coverage full/authoritative; shipped-mirror pin: declared resolver and registry owner stay absent | covered(register_eth_name) |
 | Register without resolver | no declared resolver, otherwise identical | planned(2) |
-| Renew before expiry | expiry extends, same backing resource and token lineage | planned(2) |
-| Transfer the registrar token | registrant changes, resource and lineage stable, history shows control transfer | planned(2) |
-| Reclaim registry ownership (registrant ≠ registry owner, then converge) | control section distinguishes the two owners | planned(2) |
-| Expire → grace | status reflects grace, nothing rotates | planned(2) |
-| Grace end → premium decay → re-register (different owner) | new resource and token lineage minted, old history preserved and partitioned | planned(2) |
+| Renew before expiry | expiry extends, RegistrationRenewed derived, same backing resource | covered(renew_and_transfer_keep_identity) |
+| Transfer the registrar token, then reclaim | registrant and registry owner follow; the two-transaction transfer→reclaim window is a real registry-owner divergence that mints a transient anchor and converges back to the original registrar resource | covered(renew_and_transfer_keep_identity) |
+| Expire → grace | no wire-level grace status: registration stays `active` with `released_at` null and expiry in the past; grace is consumer-derived | covered(expiry_grace_and_reregistration_rotate_identity) |
+| Grace end → premium decay → re-register (different owner) | new backing resource minted; both leases' registration events persist under distinct resources | covered(expiry_grace_and_reregistration_rotate_identity) |
 | Expire with no re-registration | released state, enumeration excludes it where contractual | planned(2) |
 
 ### ENSv1 — subnames
 
 | Transition | Key assertions | Status |
 | --- | --- | --- |
-| Parent creates registry-only subname | child listed under parent, registry-anchored resource, no token lineage | planned(2) |
+| Parent creates registry-only subname | child listed under parent with correct owner (registry family activated) | covered(registry_driven_reads) |
+| Subname created with unrevealed label (labelhash only — the registry never carries label strings for subnames) | bracketed placeholder child row; no exact-name surface minted (404) | covered(registry_driven_reads) |
 | Same label under two different parents | two distinct identities, no cross-talk | planned(2) |
 | Deep hierarchy (three+ levels) | ancestry and child enumeration at each level | planned(2) |
 | Subname owner set to zero | binding released, child leaves default enumeration | planned(2) |
-| Subname created with unrevealed label (contract-side, labelhash only) | bracketed placeholder row, no fabricated name | planned(2) |
 | Label preimage revealed later | placeholder upgrades to the real name | planned(2) |
 
 ### ENSv1 — wrapper
@@ -94,16 +106,19 @@ Legend: `covered(scenario)` / `planned(N)` = target phase / `blocked(reason)`.
 
 ### ENSv1 — resolvers and records
 
-Blocked as a group on the open resolver-binding finding from phase 1.
+Unblocked by the phase-1 finding triage; these run under the
+registry-activated profile variant (see Verified foundations).
 
 | Transition | Key assertions | Status |
 | --- | --- | --- |
-| Set resolver at registration / later / to zero | declared resolver appears, changes, releases | blocked(resolver finding) |
-| Write addr(60), multicoin addr, text, contenthash | record inventory and cached values at the current version boundary | blocked(resolver finding) |
-| Resolver replaced by another resolver | old records not attributed to the new resolver; version boundary moves | blocked(resolver finding) |
-| Record version bump (clear records) | inventory and cache invalidate for the prior boundary | blocked(resolver finding) |
-| Unadmitted custom resolver emits records | facts observed, profile stays pending; no declared-record fabrication | blocked(resolver finding) |
-| One shared resolver serving many names | per-name reads correct; resolver-overview enumeration stays explicitly unsupported | blocked(resolver finding) |
+| Set resolver at registration | declared resolver populated with ResolverChanged provenance | covered(registry_driven_reads) |
+| Write addr(60) and text records | record inventory carries the written selectors at the current boundary | covered(registry_driven_reads) |
+| Change resolver later / set to zero | declared resolver follows, then releases | planned(2) |
+| Multicoin addr and contenthash records; cached values on the records route | family-native value shapes at the current version boundary | planned(2) |
+| Resolver replaced by another resolver | old records not attributed to the new resolver; version boundary moves | planned(2) |
+| Record version bump (clear records) | inventory and cache invalidate for the prior boundary | planned(2) |
+| Unadmitted custom resolver emits records | facts observed, profile stays pending; no declared-record fabrication | planned(2) |
+| One shared resolver serving many names | per-name reads correct; resolver-overview enumeration stays explicitly unsupported | planned(2) |
 
 ### ENSv1 — reverse and primary names
 
