@@ -1,3 +1,4 @@
+use sqlx::types::Uuid;
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
@@ -129,10 +130,17 @@ pub(super) fn collect_chain_position_events(
 pub(super) fn build_record_version_boundary(
     event: &RelevantEvent,
     has_boundary_pointer: bool,
+    row_resource_id: Uuid,
 ) -> Result<Value> {
+    // The boundary identifies the event where this row's record topology begins
+    // (event id + chain position). For names whose record history crosses an
+    // authority transition, that event can live on the predecessor resource of
+    // the same name; the boundary's resource tag describes the ROW it belongs
+    // to, not the anchoring event's origin (ratified 2026-07-09), so rows keyed
+    // by (resource_id, boundary storage key) stay self-consistent for readers.
     Ok(json!({
         "logical_name_id": event.logical_name_id,
-        "resource_id": event.resource_id,
+        "resource_id": row_resource_id,
         "normalized_event_id": has_boundary_pointer.then_some(event.normalized_event_id),
         "event_kind": has_boundary_pointer.then_some(event.event_kind.clone()),
         "chain_position": chain_position_value(event)?,
@@ -214,5 +222,67 @@ fn chain_slot(chain_id: &str) -> String {
         ETHEREUM_MAINNET_CHAIN_ID => "ethereum".to_owned(),
         BASE_MAINNET_CHAIN_ID => "base".to_owned(),
         _ => chain_id.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod boundary_resource_tests {
+    use serde_json::json;
+    use sqlx::types::{Uuid, time::OffsetDateTime};
+
+    use super::build_record_version_boundary;
+    use crate::record_inventory::types::RelevantEvent;
+    use bigname_storage::CanonicalityState;
+
+    fn anchor_event(resource_id: Uuid) -> RelevantEvent {
+        RelevantEvent {
+            normalized_event_id: 4242,
+            logical_name_id: "ens:tokensdotfun.eth".to_owned(),
+            resource_id,
+            event_kind: "RecordChanged".to_owned(),
+            source_family: "ens_v1_resolver_l1".to_owned(),
+            manifest_version: 1,
+            source_manifest_id: None,
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_number: 1_234_567,
+            block_hash: "0xanchorblock".to_owned(),
+            log_index: Some(7),
+            block_timestamp: Some(
+                OffsetDateTime::from_unix_timestamp(1_770_000_000).expect("valid timestamp"),
+            ),
+            raw_fact_ref: json!({}),
+            canonicality_state: CanonicalityState::Finalized,
+            after_state: json!({}),
+            emitting_address: None,
+        }
+    }
+
+    #[test]
+    fn boundary_carries_the_row_resource_and_keeps_the_anchor_pointer() {
+        // A name whose record history crosses an authority transition anchors
+        // its current topology at an event on the predecessor resource. The
+        // boundary must be tagged with the ROW's resource (ratified 2026-07-09)
+        // while still pointing at the true anchoring event, or staging fails
+        // the storage-key consistency check for 2.4M+ transition-crossing names.
+        let predecessor_resource = Uuid::from_u128(0xF2C6);
+        let row_resource = Uuid::from_u128(0x0972);
+        let anchor = anchor_event(predecessor_resource);
+
+        let boundary = build_record_version_boundary(&anchor, true, row_resource)
+            .expect("boundary must build");
+
+        assert_eq!(
+            boundary["resource_id"],
+            json!(row_resource),
+            "boundary must be tagged with the row's resource"
+        );
+        assert_eq!(boundary["normalized_event_id"], json!(4242));
+        assert_eq!(boundary["event_kind"], json!("RecordChanged"));
+        assert_eq!(
+            boundary["chain_position"]["block_number"],
+            json!(1_234_567),
+            "the anchor event pointer must be preserved"
+        );
+        assert_eq!(boundary["logical_name_id"], json!("ens:tokensdotfun.eth"));
     }
 }
