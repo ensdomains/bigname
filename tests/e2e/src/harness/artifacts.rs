@@ -35,6 +35,27 @@ pub fn load_ens_v1_artifact(repo_root: &Path, network: &str, name: &str) -> Resu
     })
 }
 
+/// Creation bytecode loaded from pinned ENSv2 hardhat-deploy artifacts under
+/// `.refs/ens_v2/contracts/deployments/sepolia-dev/<name>.json`.
+pub fn load_ens_v2_artifact(repo_root: &Path, name: &str) -> Result<Artifact> {
+    let path = repo_root
+        .join(".refs/ens_v2/contracts/deployments/sepolia-dev")
+        .join(format!("{name}.json"));
+    let raw = std::fs::read_to_string(&path).with_context(|| {
+        format!("missing pinned ENSv2 artifact {path:?}; run scripts/sync-refs")
+    })?;
+    let parsed: Value = serde_json::from_str(&raw).context("ENSv2 artifact json parse")?;
+    let bytecode = parsed
+        .get("bytecode")
+        .and_then(Value::as_str)
+        .filter(|code| code.len() > 2)
+        .ok_or_else(|| anyhow!("ENSv2 artifact {name} has no creation bytecode"))?;
+    Ok(Artifact {
+        name: format!("ens_v2:sepolia-dev:{name}"),
+        creation_code: hex::decode(bytecode).context("ENSv2 artifact bytecode hex decode")?,
+    })
+}
+
 /// Forge-built artifact from the pinned Basenames checkout. The committed
 /// broadcast bytecode predates the pinned sources (its constructors differ),
 /// so deployments build the pinned sources instead — the pin vendors every

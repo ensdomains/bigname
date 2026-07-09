@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::harness::{
     anvil::Anvil, basenames::BasenamesDeployment, db::HarnessDb, ens_v1::EnsV1Deployment,
-    manifests, perturb, pipeline, repo_root,
+    ens_v2::EnsV2Deployment, manifests, perturb, pipeline, repo_root,
 };
 
 pub struct PipelineRun {
@@ -149,6 +149,55 @@ pub async fn ingest_basenames_at_current_head(
         pipeline::ChainCheckpointTarget {
             chain_rpc_urls: &chain_rpc_urls,
             chain: "base-mainnet",
+            target_block: head,
+            extra_ready_sql: ready_sql,
+        },
+    )
+    .await?;
+    pipeline::worker_replay_all_current_projections(&repo_root, &db.url).await?;
+    let api = pipeline::ApiServer::start(&repo_root, &db.url).await?;
+    Ok(PipelineRun {
+        db,
+        api,
+        _scratch: scratch,
+    })
+}
+
+pub async fn ingest_ens_v2_sepolia_and_serve(
+    sepolia_anvil: &Anvil,
+    deployment: &EnsV2Deployment,
+    ready_sql: Option<&str>,
+) -> Result<PipelineRun> {
+    sepolia_anvil.client().mine(2).await?;
+    ingest_ens_v2_sepolia_at_current_head(sepolia_anvil, deployment, ready_sql).await
+}
+
+pub async fn ingest_ens_v2_sepolia_at_current_head(
+    sepolia_anvil: &Anvil,
+    deployment: &EnsV2Deployment,
+    ready_sql: Option<&str>,
+) -> Result<PipelineRun> {
+    let repo_root = repo_root();
+    let rpc = sepolia_anvil.client();
+    let head = rpc.block_number().await?;
+
+    let scratch = TempDir::create()?;
+    let profile = manifests::generate_local_sepolia_profile(
+        scratch.path(),
+        &repo_root,
+        &deployment.manifest_targets(),
+    )?;
+
+    let db = HarnessDb::create().await?;
+    let chain_rpc_urls = [("ethereum-sepolia", sepolia_anvil.url.as_str())];
+    pipeline::indexer_run_until_chain_checkpoint(
+        &repo_root,
+        &db.url,
+        &db.pool,
+        &profile.root,
+        pipeline::ChainCheckpointTarget {
+            chain_rpc_urls: &chain_rpc_urls,
+            chain: "ethereum-sepolia",
             target_block: head,
             extra_ready_sql: ready_sql,
         },

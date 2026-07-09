@@ -27,6 +27,10 @@ impl Anvil {
         Self::spawn_with_chain_id(8453).await
     }
 
+    pub async fn spawn_ethereum_sepolia() -> Result<Self> {
+        Self::spawn_with_chain_id(11155111).await
+    }
+
     async fn spawn_with_chain_id(chain_id: u64) -> Result<Self> {
         let port = free_port()?;
         let url = format!("http://127.0.0.1:{port}");

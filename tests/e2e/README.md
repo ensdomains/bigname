@@ -32,8 +32,9 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
 
 1. **Chain** — `harness::anvil` starts a local node with a fixed genesis
    timestamp, presented to the indexer by provider label (`ethereum-mainnet`
-   for ENSv1 scenarios, `base-mainnet` for Basenames). Chain identity is the
-   provider label; the local numeric chain id is only for realistic receipts.
+   for ENSv1 scenarios, `ethereum-sepolia` for ENSv2 sepolia-dev, and
+   `base-mainnet` for Basenames). Chain identity is the provider label; the
+   local numeric chain id is only for realistic receipts.
 2. **Contracts** — `harness::ens_v1` deploys the mainnet ENSv1 topology from
    pinned artifact bytecode (`.refs/ens_v1/deployments/`): the legacy
    registry, the current registry deployed with the legacy registry as its
@@ -74,8 +75,10 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
    `manifests/mainnet/base/basenames` family versions with local Base
    addresses; the Phase 5 declared-state slice does not mirror
    `manifests/mainnet/ethereum/basenames` because no L1-compatibility or
-   execution-plane row runs yet. Nothing under the checked-in `manifests/`
-   tree changes.
+   execution-plane row runs yet. ENSv2 scenarios mirror the shipped
+   `manifests/sepolia/ethereum/ens` families into a generated
+   `manifests-sepolia` root so the selected profile remains the sepolia-dev
+   one. Nothing under the checked-in `manifests/` tree changes.
 4. **Pipeline** — `harness::pipeline` runs the real binaries: an
    `indexer run` live-intake session supervised until the canonical
    checkpoint reaches the scenario head (the live loop, not `backfill`, is
@@ -181,6 +184,18 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
   transfer control vectors, then sets and clears the Base coin-type primary
   claim. Verified execution remains out of scope for this row: `mode=both`
   keeps verified primary state as `not_found`.
+- `ens_v2::ens_v2_sepolia_dev_declared_matrix_end_to_end` — deploys the
+  admitted sepolia-dev ENSv2 root registry, ETH registry, registrar, rent
+  oracle, and payment-token artifacts from `.refs/ens_v2`, mirrors
+  `manifests/sepolia/ethereum/ens`, registers `.eth` names through the
+  commit/reveal ETHRegistrar, and asserts identity/registration/control
+  under `ethereum-sepolia`, role-driven token regeneration and current
+  permission rows, and subregistry attach/swap behavior across two
+  ingests. Pins three review points recorded in the ledger: freshly
+  registered names report shadow coverage despite the documented full
+  promotion; discovered child-registry logs are never scanned in-session;
+  and unregister→re-register wedges intake when ingested (exercised
+  on-chain only, post-ingest).
 - `verified_resolution::direct_path_verified_query_via_local_universal_resolver_persists_trace`
   — deploys the pinned ENSv1 UniversalResolver with local constructor
   dependencies (upstream: .refs/ens_v1/contracts/universalResolver/UniversalResolver.sol:L11 @ ens_v1@91c966f)

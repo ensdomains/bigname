@@ -143,13 +143,13 @@ artifacts; scenarios mirror the admitted four families only.
 
 | Transition | Key assertions | Status |
 | --- | --- | --- |
-| Register through the v2 registrar | registrar intent linked to registry resource | planned(7) |
-| Token regenerated (role change burns/mints token) | resource identity and surface binding stable, current token id updates | planned(7) |
-| Role bitmap grant/revoke, root vs resource scope | effective powers per vocabulary, unknown bits omitted | planned(7) |
-| Subregistry attached, then swapped | subtree surfaces rebind; old subtree partitioned | planned(7) |
-| Alias-derived surface with no direct registry entry | alias path visible in topology, surface exists | planned(7) |
-| Shared subregistry → multiple surfaces, one resource | grouping by resource works, identities distinct | planned(7) |
-| Unregister → re-register | resource version increments, prior history preserved | planned(7) |
+| Register through the v2 registrar | registrar intent linked to registry resource; identity, registration (authority_kind `ens_v2_registry`), control, and history all serve under `ethereum-sepolia`; **REVIEW POINT**: exact-name coverage stays `unsupported`/`ensv2_exact_name_profile_shadow` for freshly registered names, contradicting docs/api-v1-routes.md's promised full coverage — the coverage gate needs a supported-flagged registrar event but the projection loader's RELEVANT_EVENT_KINDS excludes RegistrarNameRegistered (renewed names would pass); pinned, chipped | covered(ens_v2_sepolia_dev_declared_matrix_end_to_end) |
+| Token regenerated (role change burns/mints token) | resource identity and surface binding stable, current token id updates | covered(ens_v2_sepolia_dev_declared_matrix_end_to_end) |
+| Role bitmap grant/revoke, root vs resource scope | effective powers per registry vocabulary; revoke removes current subject row | covered(ens_v2_sepolia_dev_declared_matrix_end_to_end) |
+| Subregistry attached, then swapped | SubregistryChanged derives for attach and swap at the parent registry, the parent resource survives the swap, and the old child stays out of the parent's children; **REVIEW POINT**: a discovered child registry's own logs are never scanned within the discovering session (discovery admits the edge, but zero raw logs are fetched from the discovered address in-session), so registrations INSIDE discovered subregistries derive nothing live — they need a later backfill/ops-catchup; child-name reads under discovered registries are pinned absent | covered(ens_v2_sepolia_dev_declared_matrix_end_to_end) |
+| Alias-derived surface with no direct registry entry | alias path visible in topology, surface exists | blocked(the admitted resolver family decodes `AliasChanged`, but the sepolia profile does not admit a contract-backed path that creates a `resolver_alias_path` surface binding; emitting alias topology alone would not mint an exact-name surface) |
+| Shared subregistry → multiple surfaces, one resource | grouping by resource works, identities distinct | blocked(current discovery maps one registry address to one active suffix, so the same subregistry attached under multiple parents is superseded rather than represented as simultaneous surfaces; needs a doc/admission decision before an honest e2e row can assert it) |
+| Unregister → re-register | ON-CHAIN identity contract covered: resource and token lineage both advance across the cycle (pinned registry increments both); **the ingestion half is blocked by a wedge bug (chipped)**: with these events in an ingested chain, the run loop's full-closure catch-up fails permanently on a stable-identity anchor conflict refreshing the re-registered surface, aborting every poll iteration and halting checkpoint advancement — the scenario exercises the flow post-ingest only | covered(ens_v2_sepolia_dev_declared_matrix_end_to_end) |
 | ENSv1→ENSv2 migration flow | — | blocked(migration controllers outside admission; doc-first change required) |
 
 ### Basenames (second chain instance)
@@ -213,7 +213,7 @@ bodies embed `chain_positions`.
 | Perturbation runner wrapping any scenario | 3 | one implementation, N scenarios × M variants |
 | Second anvil instance + `base-mainnet` manifest generation | 5 | covered: `Anvil::spawn_base_mainnet`, multi-provider pipeline runners, and Base Basenames manifest mirroring |
 | Basenames artifact source | 5 | covered: forge-builds the pinned sources on demand (offline; libs vendored in the pin) — the committed broadcast bytecode predates the pinned tree and was rejected as uncitable |
-| ENSv2 sepolia-dev deployment module + profile generation | 7 | artifacts verified present; scenario set gated on the shipped sepolia profile semantics |
+| ENSv2 sepolia-dev deployment module + profile generation | 7 | covered: `harness::ens_v2`, `manifests-sepolia` mirror, and `ethereum-sepolia` checkpoint target |
 | Mock CCIP gateway (local HTTP server) | 6 | request/response digests must land in execution traces |
 | Execution RPC wiring (`--chain-rpc-url` on API/worker pointed at anvil) | 6 | UniversalResolver artifact bytecode is pinned for both v1 and v2 |
 

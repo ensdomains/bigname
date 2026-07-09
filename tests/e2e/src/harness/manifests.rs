@@ -45,7 +45,15 @@ const BASE_NAMESPACES: &[&str] = &[
     "basenames_base_primary",
 ];
 
+const ENS_V2_SEPOLIA_FAMILIES: &[&str] = &[
+    "ens_v2_root_l1",
+    "ens_v2_registry_l1",
+    "ens_v2_registrar_l1",
+    "ens_v2_resolver_l1",
+];
+
 struct FamilySpec {
+    profile_root: &'static str,
     chain_combo: &'static str,
     namespace_group: &'static str,
     family: &'static str,
@@ -62,11 +70,18 @@ pub fn generate_local_profile(
         family_names.push(ENS_EXECUTION_FAMILY);
     }
     let families = family_names.into_iter().map(|family| FamilySpec {
+        profile_root: "mainnet",
         chain_combo: "ethereum",
         namespace_group: "ens",
         family,
     });
-    generate_profile_from_families(scratch_dir, repo_root, local_targets, families)
+    generate_profile_from_families(
+        scratch_dir,
+        "manifests-e2e",
+        repo_root,
+        local_targets,
+        families,
+    )
 }
 
 pub fn generate_local_basenames_profile(
@@ -76,23 +91,53 @@ pub fn generate_local_basenames_profile(
     local_targets: &HashMap<&str, (Address, u64)>,
 ) -> Result<LocalProfile> {
     let families = BASE_NAMESPACES.iter().map(|family| FamilySpec {
+        profile_root: "mainnet",
         chain_combo: "base",
         namespace_group: "basenames",
         family,
     });
-    generate_profile_from_families(scratch_dir, repo_root, local_targets, families)
+    generate_profile_from_families(
+        scratch_dir,
+        "manifests-e2e",
+        repo_root,
+        local_targets,
+        families,
+    )
+}
+
+pub fn generate_local_sepolia_profile(
+    scratch_dir: &Path,
+    repo_root: &Path,
+    // keyed by `[[contracts]].role` and `[[roots]].name`
+    local_targets: &HashMap<&str, (Address, u64)>,
+) -> Result<LocalProfile> {
+    let families = ENS_V2_SEPOLIA_FAMILIES.iter().map(|family| FamilySpec {
+        profile_root: "sepolia",
+        chain_combo: "ethereum",
+        namespace_group: "ens",
+        family,
+    });
+    generate_profile_from_families(
+        scratch_dir,
+        "manifests-sepolia",
+        repo_root,
+        local_targets,
+        families,
+    )
 }
 
 fn generate_profile_from_families(
     scratch_dir: &Path,
+    generated_root: &str,
     repo_root: &Path,
     local_targets: &HashMap<&str, (Address, u64)>,
     families: impl IntoIterator<Item = FamilySpec>,
 ) -> Result<LocalProfile> {
-    let root = scratch_dir.join("manifests-e2e");
+    let root = scratch_dir.join(generated_root);
     for spec in families {
         let family_dir = repo_root
-            .join("manifests/mainnet")
+            .join("manifests")
+            .join(spec.profile_root)
             .join(spec.chain_combo)
             .join(spec.namespace_group)
             .join(spec.family);
