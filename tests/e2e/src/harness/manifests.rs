@@ -37,18 +37,64 @@ const FAMILIES: &[&str] = &[
     "ens_v1_wrapper_l1",
 ];
 
+const BASE_NAMESPACES: &[&str] = &[
+    "basenames_base_registry",
+    "basenames_base_registrar",
+    "basenames_base_resolver",
+    "basenames_base_primary",
+];
+
+struct FamilySpec {
+    chain_combo: &'static str,
+    namespace_group: &'static str,
+    family: &'static str,
+}
+
 pub fn generate_local_profile(
     scratch_dir: &Path,
     repo_root: &Path,
     // keyed by `[[contracts]].role` and `[[roots]].name`
     local_targets: &HashMap<&str, (Address, u64)>,
 ) -> Result<LocalProfile> {
+    let families = FAMILIES.iter().map(|family| FamilySpec {
+        chain_combo: "ethereum",
+        namespace_group: "ens",
+        family,
+    });
+    generate_profile_from_families(scratch_dir, repo_root, local_targets, families)
+}
+
+pub fn generate_local_basenames_profile(
+    scratch_dir: &Path,
+    repo_root: &Path,
+    // keyed by `[[contracts]].role` and `[[roots]].name`
+    local_targets: &HashMap<&str, (Address, u64)>,
+) -> Result<LocalProfile> {
+    let families = BASE_NAMESPACES.iter().map(|family| FamilySpec {
+        chain_combo: "base",
+        namespace_group: "basenames",
+        family,
+    });
+    generate_profile_from_families(scratch_dir, repo_root, local_targets, families)
+}
+
+fn generate_profile_from_families(
+    scratch_dir: &Path,
+    repo_root: &Path,
+    local_targets: &HashMap<&str, (Address, u64)>,
+    families: impl IntoIterator<Item = FamilySpec>,
+) -> Result<LocalProfile> {
     let root = scratch_dir.join("manifests-e2e");
-    for family in FAMILIES {
+    for spec in families {
         let family_dir = repo_root
-            .join("manifests/mainnet/ethereum/ens")
-            .join(family);
-        let out_dir = root.join("ethereum/ens").join(family);
+            .join("manifests/mainnet")
+            .join(spec.chain_combo)
+            .join(spec.namespace_group)
+            .join(spec.family);
+        let out_dir = root
+            .join(spec.chain_combo)
+            .join(spec.namespace_group)
+            .join(spec.family);
         std::fs::create_dir_all(&out_dir)?;
         let mut mirrored = 0usize;
         for entry in std::fs::read_dir(&family_dir)
@@ -68,7 +114,11 @@ pub fn generate_local_profile(
             std::fs::write(out_dir.join(file_name), toml::to_string(&doc)?)?;
             mirrored += 1;
         }
-        anyhow::ensure!(mirrored > 0, "no version files mirrored for {family}");
+        anyhow::ensure!(
+            mirrored > 0,
+            "no version files mirrored for {}",
+            spec.family
+        );
     }
     Ok(LocalProfile { root })
 }

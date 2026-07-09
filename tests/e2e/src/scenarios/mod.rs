@@ -1,3 +1,4 @@
+mod basenames;
 mod lifecycle;
 mod perturbations;
 mod register_eth_name;

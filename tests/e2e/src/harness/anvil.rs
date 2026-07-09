@@ -10,9 +10,9 @@ use super::rpc::RpcClient;
 /// Fixed genesis timestamp so scenario time math is stable across runs.
 pub const GENESIS_TIMESTAMP: u64 = 1_750_000_000;
 
-/// A local anvil instance presented to the indexer as `ethereum-mainnet`.
+/// A local anvil instance presented to the indexer under a provider label.
 /// Chain admission is keyed by the provider label, not the numeric chain id,
-/// but we still run with `--chain-id 1` so transaction receipts look mainnet-like.
+/// but we still run realistic local ids so transaction receipts look familiar.
 pub struct Anvil {
     child: Child,
     pub url: String,
@@ -20,6 +20,14 @@ pub struct Anvil {
 
 impl Anvil {
     pub async fn spawn() -> Result<Self> {
+        Self::spawn_with_chain_id(1).await
+    }
+
+    pub async fn spawn_base_mainnet() -> Result<Self> {
+        Self::spawn_with_chain_id(8453).await
+    }
+
+    async fn spawn_with_chain_id(chain_id: u64) -> Result<Self> {
         let port = free_port()?;
         let url = format!("http://127.0.0.1:{port}");
         let child = Command::new("anvil")
@@ -27,7 +35,7 @@ impl Anvil {
                 "--port",
                 &port.to_string(),
                 "--chain-id",
-                "1",
+                &chain_id.to_string(),
                 "--timestamp",
                 &GENESIS_TIMESTAMP.to_string(),
                 "--silent",

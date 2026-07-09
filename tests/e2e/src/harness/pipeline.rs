@@ -38,6 +38,30 @@ fn indexer_log_path(label: &str) -> PathBuf {
     ))
 }
 
+pub type ChainRpcUrl<'a> = (&'a str, &'a str);
+
+pub struct ChainCheckpointTarget<'a> {
+    pub chain_rpc_urls: &'a [ChainRpcUrl<'a>],
+    pub chain: &'a str,
+    pub target_block: u64,
+    pub extra_ready_sql: Option<&'a str>,
+}
+
+pub struct ChainBackfillTarget<'a> {
+    pub chain_rpc_urls: &'a [ChainRpcUrl<'a>],
+    pub chain: &'a str,
+    pub block_range: std::ops::RangeInclusive<u64>,
+    pub idempotency_key: &'a str,
+}
+
+fn format_chain_rpc_urls(chain_rpc_urls: &[ChainRpcUrl<'_>]) -> String {
+    chain_rpc_urls
+        .iter()
+        .map(|(chain, url)| format!("{chain}={url}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// A supervised `indexer run` process. The caller decides when the live session
 /// has reached enough checkpoints/readiness and then stops it explicitly.
 pub struct IndexerRunSession {
@@ -53,10 +77,27 @@ impl IndexerRunSession {
         chain_rpc_url: &str,
         log_label: &str,
     ) -> Result<Self> {
+        Self::start_with_chain_rpc_urls(
+            repo_root,
+            database_url,
+            manifests_root,
+            &[("ethereum-mainnet", chain_rpc_url)],
+            log_label,
+        )
+    }
+
+    pub fn start_with_chain_rpc_urls(
+        repo_root: &Path,
+        database_url: &str,
+        manifests_root: &Path,
+        chain_rpc_urls: &[ChainRpcUrl<'_>],
+        log_label: &str,
+    ) -> Result<Self> {
         // Output goes to a log file, not a pipe: the run loop can out-write an
         // undrained pipe buffer and block, deadlocking the session.
         let log_path = indexer_log_path(log_label);
         let log_file = std::fs::File::create(&log_path).context("create indexer log file")?;
+        let chain_rpc_urls = format_chain_rpc_urls(chain_rpc_urls);
         let child = cargo()
             .current_dir(repo_root)
             .args([
@@ -73,7 +114,7 @@ impl IndexerRunSession {
             .arg(manifests_root)
             .args([
                 "--chain-rpc-url",
-                &format!("ethereum-mainnet={chain_rpc_url}"),
+                &chain_rpc_urls,
                 "--poll-interval-secs",
                 "1",
                 // Scenario readiness often waits on a full-closure authority
@@ -91,10 +132,19 @@ impl IndexerRunSession {
     }
 
     pub async fn wait_for_first_checkpoint(&mut self, pool: &sqlx::PgPool) -> Result<i64> {
+        self.wait_for_first_chain_checkpoint(pool, "ethereum-mainnet")
+            .await
+    }
+
+    pub async fn wait_for_first_chain_checkpoint(
+        &mut self,
+        pool: &sqlx::PgPool,
+        chain: &str,
+    ) -> Result<i64> {
         let deadline = std::time::Instant::now() + Duration::from_secs(600);
         loop {
             self.bail_if_exited()?;
-            let checkpoint = canonical_checkpoint(pool).await?;
+            let checkpoint = canonical_checkpoint(pool, chain).await?;
             if let Some(block) = checkpoint {
                 return Ok(block);
             }
@@ -110,11 +160,22 @@ impl IndexerRunSession {
         target_block: u64,
         extra_ready_sql: Option<&str>,
     ) -> Result<()> {
+        self.wait_for_chain_checkpoint(pool, "ethereum-mainnet", target_block, extra_ready_sql)
+            .await
+    }
+
+    pub async fn wait_for_chain_checkpoint(
+        &mut self,
+        pool: &sqlx::PgPool,
+        chain: &str,
+        target_block: u64,
+        extra_ready_sql: Option<&str>,
+    ) -> Result<()> {
         // First iterations may sit behind a cargo build of the indexer crate.
         let deadline = std::time::Instant::now() + Duration::from_secs(600);
         loop {
             self.bail_if_exited()?;
-            let checkpoint = canonical_checkpoint(pool).await?;
+            let checkpoint = canonical_checkpoint(pool, chain).await?;
             if checkpoint.is_some_and(|block| block >= target_block as i64) {
                 let extra_ready = match extra_ready_sql {
                     Some(sql) => sqlx::query_scalar::<_, bool>(sql).fetch_one(pool).await?,
@@ -173,10 +234,11 @@ impl IndexerRunSession {
     }
 }
 
-async fn canonical_checkpoint(pool: &sqlx::PgPool) -> Result<Option<i64>> {
+async fn canonical_checkpoint(pool: &sqlx::PgPool, chain: &str) -> Result<Option<i64>> {
     Ok(sqlx::query_scalar(
-        "SELECT canonical_block_number FROM chain_checkpoints WHERE chain_id = 'ethereum-mainnet'",
+        "SELECT canonical_block_number FROM chain_checkpoints WHERE chain_id = $1",
     )
+    .bind(chain)
     .fetch_optional(pool)
     .await?
     .flatten())
@@ -191,6 +253,30 @@ pub async fn indexer_backfill(
     to_block: u64,
     idempotency_key: &str,
 ) -> Result<String> {
+    let chain_rpc_urls = [("ethereum-mainnet", chain_rpc_url)];
+    indexer_backfill_with_chain_rpc_urls(
+        repo_root,
+        database_url,
+        manifests_root,
+        ChainBackfillTarget {
+            chain_rpc_urls: &chain_rpc_urls,
+            chain: "ethereum-mainnet",
+            block_range: from_block..=to_block,
+            idempotency_key,
+        },
+    )
+    .await
+}
+
+pub async fn indexer_backfill_with_chain_rpc_urls(
+    repo_root: &Path,
+    database_url: &str,
+    manifests_root: &Path,
+    target: ChainBackfillTarget<'_>,
+) -> Result<String> {
+    let chain_rpc_urls = format_chain_rpc_urls(target.chain_rpc_urls);
+    let from_block = target.block_range.start().to_string();
+    let to_block = target.block_range.end().to_string();
     let mut command = cargo();
     command
         .current_dir(repo_root)
@@ -208,15 +294,15 @@ pub async fn indexer_backfill(
         .arg(manifests_root)
         .args([
             "--chain-rpc-url",
-            &format!("ethereum-mainnet={chain_rpc_url}"),
+            &chain_rpc_urls,
             "--chain",
-            "ethereum-mainnet",
+            target.chain,
             "--from-block",
-            &from_block.to_string(),
+            &from_block,
             "--to-block",
-            &to_block.to_string(),
+            &to_block,
             "--idempotency-key",
-            idempotency_key,
+            target.idempotency_key,
         ]);
     run_to_completion(command, "indexer backfill").await
 }
@@ -237,15 +323,43 @@ pub async fn indexer_run_until_checkpoint(
     target_block: u64,
     extra_ready_sql: Option<&str>,
 ) -> Result<()> {
-    let mut session = IndexerRunSession::start(
+    let chain_rpc_urls = [("ethereum-mainnet", chain_rpc_url)];
+    indexer_run_until_chain_checkpoint(
+        repo_root,
+        database_url,
+        pool,
+        manifests_root,
+        ChainCheckpointTarget {
+            chain_rpc_urls: &chain_rpc_urls,
+            chain: "ethereum-mainnet",
+            target_block,
+            extra_ready_sql,
+        },
+    )
+    .await
+}
+
+pub async fn indexer_run_until_chain_checkpoint(
+    repo_root: &Path,
+    database_url: &str,
+    pool: &sqlx::PgPool,
+    manifests_root: &Path,
+    target: ChainCheckpointTarget<'_>,
+) -> Result<()> {
+    let mut session = IndexerRunSession::start_with_chain_rpc_urls(
         repo_root,
         database_url,
         manifests_root,
-        chain_rpc_url,
-        &target_block.to_string(),
+        target.chain_rpc_urls,
+        &target.target_block.to_string(),
     )?;
     session
-        .wait_for_checkpoint(pool, target_block, extra_ready_sql)
+        .wait_for_chain_checkpoint(
+            pool,
+            target.chain,
+            target.target_block,
+            target.extra_ready_sql,
+        )
         .await?;
     session.stop().await
 }

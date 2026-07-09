@@ -154,15 +154,21 @@ artifacts; scenarios mirror the admitted four families only.
 
 ### Basenames (second chain instance)
 
-Deployment module from `.refs/basenames/broadcast/` transactions; runs on a
+Deployment module forge-builds the pinned `.refs/basenames` sources (the
+committed broadcast bytecode predates the pinned tree — its constructor
+layouts differ and cannot be cited); runs on a
 second anvil presented as `base-mainnet`.
+The Phase 5 primary-name rows use ENSv1's Base L2ReverseRegistrar
+`NameForAddrChanged` event and constructor coin type 2147492101
+(upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L98 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L391 @ ens_v1@91c966f).
 
 | Transition | Key assertions | Status |
 | --- | --- | --- |
-| Register a *.base.eth name | Base-side authority split (registry/registrar/resolver families) | planned(5) |
-| NFT-only transfer vs management-only transfer vs full transfer | the three control facets move independently | planned(5) |
-| Address-resolution change on the L2 resolver | declared record updates | planned(5) |
-| Primary name set/unset (Base reverse registrar event) | claimed primary at the Base coin type | planned(5) |
+| Register a *.base.eth name | Base-side authority split (registry/registrar/resolver families) | covered(basenames_declared_state_matrix_end_to_end) |
+| NFT-only transfer vs management-only transfer vs full transfer | registrar token and registry-owner control facets move independently, then converge on reclaim | covered(basenames_declared_state_matrix_end_to_end) |
+| Address-resolution change on the L2 resolver | declared `addr:60` record updates through the admitted Base L2Resolver | covered(basenames_declared_state_matrix_end_to_end) |
+| Primary name set/unset (Base reverse registrar event) | declared candidate tracks `NameForAddrChanged` at Base coin type 2147492101 and clears on blank | covered(basenames_declared_state_matrix_end_to_end) |
 | L1 compatibility resolution | transport path, verified only through the execution plane | planned(6) |
 
 ### Verified resolution and offchain (execution plane)
@@ -205,8 +211,8 @@ bodies embed `chain_positions`.
 | Checkpoint abstraction (named on-chain step + per-checkpoint route snapshots) | 2 | snapshots as checked-in JSON; diff-reviewable; becomes the documented state machine |
 | Route snapshot walker (canonical route set per name/address under test) | 2 | normalize away run-varying fields (timestamps, UUIDs) explicitly, never blindly |
 | Perturbation runner wrapping any scenario | 3 | one implementation, N scenarios × M variants |
-| Second anvil instance + `base-mainnet` manifest generation | 5 | dual-chain profile in the generated root |
-| Broadcast-log artifact loader (forge `run-latest.json`) | 5 | Basenames deploys |
+| Second anvil instance + `base-mainnet` manifest generation | 5 | covered: `Anvil::spawn_base_mainnet`, multi-provider pipeline runners, and Base Basenames manifest mirroring |
+| Basenames artifact source | 5 | covered: forge-builds the pinned sources on demand (offline; libs vendored in the pin) — the committed broadcast bytecode predates the pinned tree and was rejected as uncitable |
 | ENSv2 sepolia-dev deployment module + profile generation | 7 | artifacts verified present; scenario set gated on the shipped sepolia profile semantics |
 | Mock CCIP gateway (local HTTP server) | 6 | request/response digests must land in execution traces |
 | Execution RPC wiring (`--chain-rpc-url` on API/worker pointed at anvil) | 6 | UniversalResolver artifact bytecode is pinned for both v1 and v2 |

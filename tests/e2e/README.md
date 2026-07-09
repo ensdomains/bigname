@@ -31,8 +31,9 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
 ## How a scenario runs
 
 1. **Chain** — `harness::anvil` starts a local node with a fixed genesis
-   timestamp, presented to the indexer as `ethereum-mainnet` (chain identity
-   is the provider label; nothing verifies the numeric chain id).
+   timestamp, presented to the indexer by provider label (`ethereum-mainnet`
+   for ENSv1 scenarios, `base-mainnet` for Basenames). Chain identity is the
+   provider label; the local numeric chain id is only for realistic receipts.
 2. **Contracts** — `harness::ens_v1` deploys the mainnet ENSv1 topology from
    pinned artifact bytecode (`.refs/ens_v1/deployments/`): the legacy
    registry, the current registry deployed with the legacy registry as its
@@ -46,7 +47,17 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
    reverse registrars, name wrapper, and public resolver. Deploying from
    artifacts rather than re-compiling means the local chain runs byte-exact
    upstream code; when `.refs` pins rotate, the harness re-verifies our
-   decoding against the new artifacts.
+   decoding against the new artifacts. `harness::basenames` deploys the
+   Base Registry, BaseRegistrar, RegistrarController, helper ReverseRegistrar,
+   and L2Resolver forge-built on demand from the pinned sources (the
+   committed broadcast bytecode predates the pinned tree and its
+   constructors differ; the pin vendors every forge lib, so the build is
+   offline and runs at most once per test process)
+   with the script-declared `base.eth` and `80002105.reverse` wiring
+   (upstream: .refs/basenames/script/deploy/DeployReverseRegistrar.s.sol:L19 @ basenames@1809bbc).
+   The declared-primary contract is ENSv1's Base L2ReverseRegistrar artifact,
+   whose deployment carries coin type `2147492101`
+   (upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L391 @ ens_v1@91c966f).
 3. **Manifests** — `harness::manifests` copies **every version file** of
    the shipped `manifests/mainnet/ethereum/ens` family manifests and
    re-points each declared root/role at its locally deployed address and
@@ -56,7 +67,11 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
    its old-registry role. (Mirroring only `v1.toml` once produced a false
    "production doesn't watch the registry" finding; completeness here is
    load-bearing.) Roles a scenario does not deploy get placeholder
-   addresses (no code, no logs). Nothing under the checked-in `manifests/`
+   addresses (no code, no logs). Basenames scenarios mirror the shipped
+   `manifests/mainnet/base/basenames` family versions with local Base
+   addresses; the Phase 5 declared-state slice does not mirror
+   `manifests/mainnet/ethereum/basenames` because no L1-compatibility or
+   execution-plane row runs yet. Nothing under the checked-in `manifests/`
    tree changes.
 4. **Pipeline** — `harness::pipeline` runs the real binaries: an
    `indexer run` live-intake session supervised until the canonical
@@ -152,6 +167,14 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
   a nonblank reverse claim that fails ENSIP-15 normalization and asserts
   `claimed_primary_name.status=invalid_name` with `raw_claim_name` preserved
   and no coerced candidate name.
+- `basenames::basenames_declared_state_matrix_end_to_end` — deploys the
+  Basenames Base stack forge-built from the pinned sources plus the ENSv1 Base
+  L2ReverseRegistrar, mirrors the Base Basenames manifests, registers
+  `alice.base.eth`, asserts Base-side authority split and L2Resolver
+  `addr:60` record readback, exercises NFT-only, management-only, and full
+  transfer control vectors, then sets and clears the Base coin-type primary
+  claim. Verified execution remains out of scope for this row: `mode=both`
+  keeps verified primary state as `not_found`.
 - `perturbations::*` — one moderately rich ENSv1 chain shape (`perturb.eth`
   registration, addr/text records, and a registry-only subname) run through
   the phase-3 multipliers: projection replay plus normalized-event replay,
