@@ -1,3 +1,4 @@
+mod full_rebuild;
 mod hooks;
 mod reads;
 mod rows;
@@ -5,6 +6,7 @@ mod types;
 mod upserts;
 mod validation;
 
+pub use full_rebuild::publish_primary_names_current_full_rebuild;
 pub use hooks::verified_primary_name_claim_hooks;
 pub use reads::{
     clear_primary_names_current, delete_primary_name_current,
