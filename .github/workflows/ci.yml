@@ -168,6 +168,58 @@ jobs:
       - name: cargo test conformance
         run: cargo test --manifest-path tests/conformance/Cargo.toml --locked
 
+  e2e:
+    name: test (e2e)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: bigname
+          POSTGRES_USER: bigname
+          POSTGRES_PASSWORD: bigname
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bigname -d bigname"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      BIGNAME_DATABASE_URL: postgres://bigname:bigname@127.0.0.1:5432/bigname
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pinned Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang libclang-dev
+
+      - name: Install foundry (anvil)
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Sync pinned upstream checkouts
+        run: scripts/sync-refs
+
+      - name: Prebuild pipeline binaries
+        run: cargo build --package bigname-indexer --package bigname-worker --package bigname-api
+
+      - name: cargo test e2e
+        run: cargo test --manifest-path tests/e2e/Cargo.toml --locked
+
   test:
     name: test
     runs-on: ubuntu-latest
@@ -175,6 +227,7 @@ jobs:
     needs:
       - test_shard
       - conformance
+      - e2e
     if: always()
     steps:
       - name: Check test shards
@@ -185,6 +238,10 @@ jobs:
           fi
           if [ "${{ needs.conformance.result }}" != "success" ]; then
             echo "conformance finished with result: ${{ needs.conformance.result }}"
+            exit 1
+          fi
+          if [ "${{ needs.e2e.result }}" != "success" ]; then
+            echo "e2e finished with result: ${{ needs.e2e.result }}"
             exit 1
           fi
 
