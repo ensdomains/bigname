@@ -1,14 +1,65 @@
 use std::collections::BTreeSet;
 
+use anyhow::Result;
 use bigname_manifests::WatchedSourceSelectorPlan;
-use bigname_storage::{BackfillCoverageFactScope, BackfillCoverageFactWrite};
+use bigname_storage::{
+    BackfillCoverageFactScope, BackfillCoverageFactWrite, BackfillRange,
+    complete_backfill_range_recording_coverage,
+};
 
 use crate::{
     ens_v1_resolver::SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
     source_scope::watched_source_plan_uses_generic_resolver_scope,
 };
 
+use super::{
+    BackfillJobRunConfig,
+    failure_recording::{ReservedRangeFailure, record_reserved_range_failure},
+};
+
 const SOURCE_FAMILY_BASENAMES_BASE_REGISTRY: &str = "basenames_base_registry";
+
+/// Complete a reserved range, recording plan-derived coverage facts in the
+/// job-flip transaction when this range completion also completes the job.
+/// Completion failures are persisted as reserved-range failure state, matching
+/// the other reserved-range phases.
+pub(super) async fn complete_reserved_range_recording_plan_coverage(
+    pool: &sqlx::PgPool,
+    active_range: &BackfillRange,
+    config: &BackfillJobRunConfig,
+    source_plan: &WatchedSourceSelectorPlan,
+    uses_basenames_registry_scan_all: bool,
+    failure_reason: &'static str,
+) -> Result<()> {
+    let completion = complete_backfill_range_recording_coverage(
+        pool,
+        active_range.backfill_range_id,
+        &config.lease_token,
+        |job| {
+            job_completion_coverage_facts(
+                source_plan,
+                uses_basenames_registry_scan_all,
+                job.range_start_block_number,
+                job.range_end_block_number,
+            )
+        },
+    )
+    .await;
+    if let Err(error) = completion {
+        return Err(record_reserved_range_failure(ReservedRangeFailure {
+            pool,
+            reserved_range: active_range,
+            config,
+            failure_reason,
+            block_number: None,
+            attempted_range: None,
+            phase: "range_completion",
+            error,
+        })
+        .await);
+    }
+    Ok(())
+}
 
 /// Coverage facts recorded when a backfill job completes, derived from the
 /// executor's own in-memory selector plan so the recorded coverage can never
@@ -18,7 +69,7 @@ const SOURCE_FAMILY_BASENAMES_BASE_REGISTRY: &str = "basenames_base_registry";
 /// range; their per-address targets are excluded because the fetch was not
 /// address-enumerated. Every other selected target yields an address-scope
 /// fact clamped to the job range, skipping empty intersections.
-pub(crate) fn job_completion_coverage_facts<'a>(
+fn job_completion_coverage_facts<'a>(
     source_plan: &'a WatchedSourceSelectorPlan,
     uses_basenames_registry_scan_all: bool,
     job_start_block: i64,

@@ -7,7 +7,7 @@ use crate::backfill::{
     BackfillTopicPlan, CoinbaseSqlBackfillConfig, CoinbaseSqlValidationMode,
     HistoricalBackfillSourceOps, HistoricalLogPayload, HistoricalLogPayloadRequest,
     coinbase_sql::load_backfill_topic_plan,
-    coverage_facts::job_completion_coverage_facts,
+    coverage_facts::complete_reserved_range_recording_plan_coverage,
     failure_recording::{ReservedRangeFailure, record_reserved_range_failure},
     fetching::{
         BackfillCanonicalityEvidence, fill_log_payloads_from_validation_provider,
@@ -20,8 +20,8 @@ use crate::provider::{ChainProviderOps, ProviderLog, ProviderResolvedBlock};
 use anyhow::{Context, Result, bail};
 use bigname_manifests::WatchedSourceSelectorPlan;
 use bigname_storage::{
-    BackfillLifecycleStatus, BackfillRange, advance_backfill_range,
-    complete_backfill_range_recording_coverage, load_backfill_job, reserve_backfill_range,
+    BackfillLifecycleStatus, BackfillRange, advance_backfill_range, load_backfill_job,
+    reserve_backfill_range,
 };
 use std::{collections::BTreeMap, time::Instant};
 use tracing::{info, warn};
@@ -292,36 +292,15 @@ pub(crate) async fn run_reserved_coinbase_sql_backfill_range(
             .context("Coinbase SQL backfill block number overflowed while advancing range")?;
     }
 
-    let uses_basenames_registry_scan_all =
-        super::coinbase_sql_uses_basenames_registry_scan_all(source_plan, topic_plan);
-    if let Err(error) = complete_backfill_range_recording_coverage(
+    complete_reserved_range_recording_plan_coverage(
         pool,
-        active_range.backfill_range_id,
-        &config.lease_token,
-        |job| {
-            job_completion_coverage_facts(
-                source_plan,
-                uses_basenames_registry_scan_all,
-                job.range_start_block_number,
-                job.range_end_block_number,
-            )
-        },
+        &active_range,
+        config,
+        source_plan,
+        super::coinbase_sql_uses_basenames_registry_scan_all(source_plan, topic_plan),
+        "Coinbase SQL backfill range completion failed",
     )
     .await
-    {
-        return Err(record_reserved_range_failure(ReservedRangeFailure {
-            pool,
-            reserved_range: &active_range,
-            config,
-            failure_reason: "Coinbase SQL backfill range completion failed",
-            block_number: None,
-            attempted_range: None,
-            phase: "range_completion",
-            error,
-        })
-        .await);
-    }
-    Ok(())
 }
 fn next_coinbase_sql_window_blocks(
     current_window_blocks: i64,
