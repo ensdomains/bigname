@@ -877,6 +877,25 @@ async fn coverage_fact_writes_are_idempotent_and_validated() -> Result<()> {
         ]
     );
 
+    let mut widened_interval = facts[0].clone();
+    widened_interval.covered_to_block = 130;
+    let distinct_interval_inserted = write_backfill_coverage_facts(
+        &mut conn,
+        created.job.backfill_job_id,
+        "eth-mainnet",
+        BackfillCoverageFactDerivation::LegacyFullPayloadIdentity,
+        std::slice::from_ref(&widened_interval),
+    )
+    .await?;
+    assert_eq!(
+        distinct_interval_inserted, 1,
+        "a same-start fact with a different end block is a distinct interval and must not be dropped"
+    );
+    assert_eq!(
+        load_backfill_coverage_fact_counts(database.pool(), created.job.backfill_job_id).await?,
+        3
+    );
+
     let mut missing_address = facts[0].clone();
     missing_address.address = None;
     let error = write_backfill_coverage_facts(
@@ -1128,6 +1147,99 @@ async fn deleting_a_backfill_job_cascades_its_coverage_facts() -> Result<()> {
         load_backfill_coverage_fact_counts(database.pool(), created.job.backfill_job_id).await?,
         0,
         "coverage facts must cascade with their job"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn concurrent_final_range_completions_flip_the_job_and_record_facts_once() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let created = create_backfill_job(
+        database.pool(),
+        &backfill_job_create("job-concurrent-final-ranges"),
+    )
+    .await?;
+    let coverage_facts = |job: &BackfillJob| {
+        vec![address_coverage_fact(
+            "ens_v1_registry_l1",
+            "0x0000000000000000000000000000000000000001",
+            job.range_start_block_number,
+            job.range_end_block_number,
+        )]
+        .into_iter()
+    };
+
+    let first = reserve_backfill_range(
+        database.pool(),
+        created.job.backfill_job_id,
+        "worker-a",
+        "lease-a",
+        lease_deadline(),
+    )
+    .await?
+    .expect("first range must be reservable");
+    let second = reserve_backfill_range(
+        database.pool(),
+        created.job.backfill_job_id,
+        "worker-b",
+        "lease-b",
+        lease_deadline(),
+    )
+    .await?
+    .expect("second range must be reservable");
+    advance_backfill_range(database.pool(), first.backfill_range_id, "lease-a", 109).await?;
+    advance_backfill_range(database.pool(), second.backfill_range_id, "lease-b", 120).await?;
+
+    // The final two ranges complete concurrently: the job row lock must
+    // serialize them so exactly one transaction observes zero incomplete
+    // ranges and flips the job with its coverage facts. Without the lock,
+    // neither flips and the job is later completed fact-less by the
+    // reservation path.
+    let (first_result, second_result) = tokio::join!(
+        complete_backfill_range_recording_coverage(
+            database.pool(),
+            first.backfill_range_id,
+            "lease-a",
+            coverage_facts,
+        ),
+        complete_backfill_range_recording_coverage(
+            database.pool(),
+            second.backfill_range_id,
+            "lease-b",
+            coverage_facts,
+        ),
+    );
+    assert_eq!(
+        first_result?.status,
+        BackfillLifecycleStatus::Completed,
+        "first range completion must succeed"
+    );
+    assert_eq!(
+        second_result?.status,
+        BackfillLifecycleStatus::Completed,
+        "second range completion must succeed"
+    );
+
+    let job = load_backfill_job(database.pool(), created.job.backfill_job_id)
+        .await?
+        .expect("job must exist");
+    assert_eq!(
+        job.status,
+        BackfillLifecycleStatus::Completed,
+        "the last concurrent range completion must flip the job"
+    );
+    assert_eq!(
+        load_coverage_fact_rows(database.pool(), created.job.backfill_job_id).await?,
+        vec![(
+            "eth-mainnet".to_owned(),
+            "ens_v1_registry_l1".to_owned(),
+            "address".to_owned(),
+            Some("0x0000000000000000000000000000000000000001".to_owned()),
+            100,
+            120,
+            "job_completion".to_owned(),
+        )]
     );
 
     database.cleanup().await

@@ -26,12 +26,16 @@ CREATE TABLE public.backfill_coverage_facts (
     CONSTRAINT backfill_coverage_facts_derivation_check CHECK (
         derivation = ANY (ARRAY['job_completion'::text, 'legacy_full_payload_identity'::text])
     ),
+    -- covered_to_block participates so two targets sharing a clamped start
+    -- block keep their distinct intervals; readers check containment against
+    -- any row, so multiple interval rows per tuple are expected.
     CONSTRAINT backfill_coverage_facts_tuple_key UNIQUE NULLS NOT DISTINCT (
         backfill_job_id,
         source_family,
         scope,
         address,
-        covered_from_block
+        covered_from_block,
+        covered_to_block
     )
 );
 
