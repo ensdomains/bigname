@@ -1,0 +1,88 @@
+mod evaluate;
+
+#[cfg(test)]
+mod tests;
+
+use anyhow::{Result, bail};
+use bigname_manifests::load_watched_contracts;
+use serde_json::{Value, json};
+
+use super::{InspectDataCompletenessArgs, connect_read_only};
+use evaluate::{
+    CheckStatus, DEFAULT_MAX_HEAD_LAG_BLOCKS, DataCompletenessReport, evaluate_data_completeness,
+};
+
+pub(in crate::inspect) async fn inspect_data_completeness(
+    args: InspectDataCompletenessArgs,
+) -> Result<()> {
+    let pool = connect_read_only(&args.database).await?;
+    let read = bigname_storage::load_data_completeness(&pool).await?;
+    let watched_contracts = load_watched_contracts(&pool).await?;
+    let max_head_lag_blocks = args
+        .max_head_lag_blocks
+        .unwrap_or(DEFAULT_MAX_HEAD_LAG_BLOCKS);
+    let report = evaluate_data_completeness(&read, &watched_contracts, max_head_lag_blocks);
+
+    println!("{}", render_data_completeness(&report));
+
+    if args.fail_on_incomplete && !report.data_complete() {
+        bail!("database is not data-complete");
+    }
+    Ok(())
+}
+
+fn render_data_completeness(report: &DataCompletenessReport) -> Value {
+    json!({
+        "command": "inspect data-completeness",
+        "read_only": true,
+        "data_complete": report.data_complete(),
+        "max_head_lag_blocks": report.max_head_lag_blocks,
+        "checks": [
+            check("reconciliation_frontier_at_head", report.frontier_at_head(), json!({
+                "chains": report.frontiers.iter().map(|frontier| json!({
+                    "chain": frontier.chain_id.as_str(),
+                    "canonical_block_number": frontier.canonical_block_number,
+                    "lineage_head_block_number": frontier.lineage_head_block_number,
+                    "head_lag_blocks": frontier.head_lag_blocks,
+                })).collect::<Vec<_>>(),
+            })),
+            check("reconciliation_lineage_contiguous", report.lineage_contiguous(), json!({
+                "chains": report.frontiers.iter().map(|frontier| json!({
+                    "chain": frontier.chain_id.as_str(),
+                    "contiguous": frontier.contiguous,
+                    "missing_block_count": frontier.missing_block_count,
+                })).collect::<Vec<_>>(),
+            })),
+            check("watch_set_code_observation_coverage", report.watch_set_observed(), json!({
+                "active_watched_target_count": report.active_watched_target_count,
+                "unobserved_target_count": report.unobserved_targets.len(),
+                "unobserved_targets": report.unobserved_targets.iter().take(20).map(|target| json!({
+                    "chain": target.chain.as_str(),
+                    "address": target.address.as_str(),
+                    "source_family": target.source_family.as_str(),
+                })).collect::<Vec<_>>(),
+            })),
+            check("normalization_no_failure", report.normalization_healthy(), json!({
+                "failed_cursors": report.failed_replay_cursors.clone(),
+            })),
+            check("normalization_caught_up_to_raw_head", report.normalization_caught_up(), json!({
+                "lagging_cursors": report.lagging_replay_cursors.iter().map(cursor_lag).collect::<Vec<_>>(),
+            })),
+            check("projection_apply_drained", report.projection_drained(), json!({
+                "lagging_cursors": report.lagging_projection_cursors.iter().map(cursor_lag).collect::<Vec<_>>(),
+            })),
+            check("projections_non_empty", report.content_present(), json!({
+                "normalized_event_count": report.normalized_event_count,
+                "name_current_count": report.name_current_count,
+            })),
+        ],
+    })
+}
+
+fn check(name: &'static str, status: CheckStatus, detail: Value) -> Value {
+    json!({ "name": name, "status": status.label(), "detail": detail })
+}
+
+fn cursor_lag(lag: &evaluate::CursorLag) -> Value {
+    json!({ "cursor": lag.label.as_str(), "behind_by": lag.behind_by })
+}

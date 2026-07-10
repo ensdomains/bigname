@@ -1,5 +1,6 @@
 mod backfill;
 mod canonicality;
+mod data_completeness;
 mod execution_trace;
 mod formatting;
 mod manifest_drift;
@@ -32,6 +33,10 @@ pub(crate) enum InspectCommand {
         about = "Inspect canonicality, durable raw fact counts, and retained payload-cache metadata for one block hash"
     )]
     Canonicality(InspectCanonicalityArgs),
+    #[command(
+        about = "Check whether this database is data-complete enough to serve: reconciliation frontier, watch-set code-observation coverage, replay and projection cursors, and projection content"
+    )]
+    DataCompleteness(InspectDataCompletenessArgs),
     #[command(about = "Inspect one persisted execution trace and its ordered steps")]
     ExecutionTrace(InspectExecutionTraceArgs),
     #[command(about = "Inspect stored manifest drift and proxy implementation alert observations")]
@@ -58,6 +63,18 @@ pub(crate) struct InspectCanonicalityArgs {
     pub(crate) chain_id: String,
     #[arg(long)]
     pub(crate) block_hash: String,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct InspectDataCompletenessArgs {
+    #[command(flatten)]
+    pub(crate) database: DatabaseConfig,
+    #[arg(long)]
+    pub(crate) json: bool,
+    #[arg(long)]
+    pub(crate) fail_on_incomplete: bool,
+    #[arg(long)]
+    pub(crate) max_head_lag_blocks: Option<i64>,
 }
 
 #[derive(Args, Debug)]
@@ -102,6 +119,9 @@ pub(crate) async fn inspect_command(args: InspectArgs) -> Result<()> {
     match args.command {
         InspectCommand::BackfillJob(args) => backfill::inspect_backfill_job(args).await,
         InspectCommand::Canonicality(args) => canonicality::inspect_canonicality(args).await,
+        InspectCommand::DataCompleteness(args) => {
+            data_completeness::inspect_data_completeness(args).await
+        }
         InspectCommand::ExecutionTrace(args) => {
             execution_trace::inspect_execution_trace(args).await
         }

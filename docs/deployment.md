@@ -22,6 +22,18 @@ docker run --rm ghcr.io/tateb/bigname:latest bigname-api print-openapi
 docker run --rm ghcr.io/tateb/bigname:latest bigname-worker inspect watch-plan --json
 ```
 
+Before promoting a database or cutting traffic over to one, check that it is
+data-complete. The command is read-only and exits non-zero with
+`--fail-on-incomplete`; `docs/runbooks/data-completeness.md` describes each check and how
+to read a failure. It is a database-level gate, not a route-level one, and `/v1/status`
+cannot substitute for it: that endpoint reports an empty projection queue as caught up to
+head, so an incomplete database looks caught up.
+
+```sh
+docker run --rm ghcr.io/tateb/bigname:latest \
+  bigname-worker inspect data-completeness --json --fail-on-incomplete
+```
+
 ## Fresh Server Compose
 
 1. Install Docker and Docker Compose.

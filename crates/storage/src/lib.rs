@@ -8,6 +8,7 @@ mod backfill_jobs;
 mod base_normalized_rederive;
 mod checkpoints;
 mod children;
+mod data_completeness;
 mod evm_primitives;
 mod execution;
 mod history;
@@ -109,6 +110,10 @@ pub use children::{
     load_children_current, load_children_current_including_noncanonical,
     load_children_current_page, load_children_current_summaries,
     stream_canonical_declared_child_sources, upsert_children_current_rows,
+};
+pub use data_completeness::{
+    ChainCompletenessRow, DataCompletenessRead, ObservedCodeAddress, ProjectionApplyCursorRow,
+    ReplayCursorRow, load_data_completeness,
 };
 pub use evm_primitives::{normalize_evm_address, normalize_evm_b256};
 pub use execution::{
