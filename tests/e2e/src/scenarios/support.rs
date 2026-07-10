@@ -252,6 +252,55 @@ pub async fn backfill_ens_v2_sepolia_and_replay_projections(
     })
 }
 
+/// Ingest BOTH mainnet-profile chains into one corpus: the ENSv1 ethereum
+/// anvil and the Basenames base anvil run under one live session with the
+/// full composed profile (ENSv1 + Basenames + the ethereum-chain glue
+/// families), waiting each chain's canonical checkpoint before serving.
+pub async fn ingest_mainnet_composed_and_serve(
+    eth_anvil: &Anvil,
+    ens_deployment: &EnsV1Deployment,
+    base_anvil: &Anvil,
+    basenames_deployment: &BasenamesDeployment,
+    ready_sql: Option<&str>,
+) -> Result<PipelineRun> {
+    let repo_root = repo_root();
+    eth_anvil.client().mine(2).await?;
+    base_anvil.client().mine(2).await?;
+    let eth_head = eth_anvil.client().block_number().await?;
+    let base_head = base_anvil.client().block_number().await?;
+
+    let scratch = TempDir::create()?;
+    let profile = manifests::generate_local_mainnet_composed_profile(
+        scratch.path(),
+        &repo_root,
+        &ens_deployment.manifest_targets(),
+        &basenames_deployment.manifest_targets(),
+    )?;
+
+    let db = HarnessDb::create().await?;
+    let chain_rpc_urls = [
+        ("ethereum-mainnet", eth_anvil.url.as_str()),
+        ("base-mainnet", base_anvil.url.as_str()),
+    ];
+    pipeline::indexer_run_until_chain_checkpoints(
+        &repo_root,
+        &db.url,
+        &db.pool,
+        &profile.root,
+        &chain_rpc_urls,
+        &[("ethereum-mainnet", eth_head), ("base-mainnet", base_head)],
+        ready_sql,
+    )
+    .await?;
+    pipeline::worker_replay_all_current_projections(&repo_root, &db.url).await?;
+    let api = pipeline::ApiServer::start(&repo_root, &db.url).await?;
+    Ok(PipelineRun {
+        db,
+        api,
+        _scratch: scratch,
+    })
+}
+
 /// Base twin of the backfill helpers: derive the Basenames chain via
 /// backfill and rebuild projections without a live run (no API — backfill
 /// promotes no canonical checkpoint).

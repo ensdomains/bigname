@@ -401,6 +401,43 @@ pub async fn indexer_run_until_chain_checkpoint(
     session.stop().await
 }
 
+/// Run one live session over multiple chains and wait each chain's
+/// canonical checkpoint sequentially; `extra_ready_sql` gates the final
+/// wait.
+pub async fn indexer_run_until_chain_checkpoints(
+    repo_root: &Path,
+    database_url: &str,
+    pool: &sqlx::PgPool,
+    manifests_root: &Path,
+    chain_rpc_urls: &[ChainRpcUrl<'_>],
+    targets: &[(&str, u64)],
+    extra_ready_sql: Option<&str>,
+) -> Result<()> {
+    let label = targets
+        .iter()
+        .map(|(_, block)| block.to_string())
+        .collect::<Vec<_>>()
+        .join("-");
+    let mut session = IndexerRunSession::start_with_chain_rpc_urls(
+        repo_root,
+        database_url,
+        manifests_root,
+        chain_rpc_urls,
+        &label,
+    )?;
+    for (index, (chain, target_block)) in targets.iter().enumerate() {
+        let extra = if index + 1 == targets.len() {
+            extra_ready_sql
+        } else {
+            None
+        };
+        session
+            .wait_for_chain_checkpoint(pool, chain, *target_block, extra)
+            .await?;
+    }
+    session.stop().await
+}
+
 pub struct RestartCompletion {
     pub target_block: u64,
     pub extra_ready_sql: Option<String>,
@@ -513,6 +550,24 @@ impl ApiServer {
         chain_rpc_urls: &[ChainRpcUrl<'_>],
     ) -> Result<Self> {
         ensure_pipeline_binaries_built(repo_root);
+        // The free port is released before the API binds it, so a parallel
+        // test can steal it in the window; retry with a fresh port when the
+        // child dies instead of becoming healthy.
+        let mut last_error = None;
+        for _ in 0..3 {
+            match Self::try_start(repo_root, database_url, chain_rpc_urls).await {
+                Ok(server) => return Ok(server),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.expect("at least one API start attempt ran"))
+    }
+
+    async fn try_start(
+        repo_root: &Path,
+        database_url: &str,
+        chain_rpc_urls: &[ChainRpcUrl<'_>],
+    ) -> Result<Self> {
         let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
         let bind_addr = format!("127.0.0.1:{port}");
         let mut command = cargo();
@@ -536,7 +591,7 @@ impl ApiServer {
             .kill_on_drop(true)
             .spawn()
             .context("spawn bigname-api serve")?;
-        let server = Self {
+        let mut server = Self {
             _child: child,
             base_url: format!("http://{bind_addr}"),
             http: reqwest::Client::new(),
@@ -545,9 +600,15 @@ impl ApiServer {
         Ok(server)
     }
 
-    async fn wait_healthy(&self) -> Result<()> {
+    async fn wait_healthy(&mut self) -> Result<()> {
         // First readiness poll may sit behind a cargo build of the API crate.
         for _ in 0..1200 {
+            if let Some(status) = self._child.try_wait()? {
+                bail!(
+                    "API exited before becoming healthy at {} ({status})",
+                    self.base_url
+                );
+            }
             if let Ok(response) = self
                 .http
                 .get(format!("{}/healthz", self.base_url))

@@ -105,6 +105,60 @@ pub fn generate_local_basenames_profile(
     )
 }
 
+const MAINNET_GLUE_FAMILIES: &[&str] = &["basenames_l1_compat", "basenames_execution"];
+
+/// Mirror the FULL shipped mainnet profile into one generated root: the
+/// ENSv1 ethereum families, the Basenames base-mainnet families, and the
+/// two ethereum-chain glue families (`basenames_l1_compat`,
+/// `basenames_execution`) that no single-protocol scenario mirrors. Glue
+/// roles a scenario does not deploy get placeholder addresses like any
+/// other undeployed role.
+pub fn generate_local_mainnet_composed_profile(
+    scratch_dir: &Path,
+    repo_root: &Path,
+    ens_targets: &HashMap<&str, (Address, u64)>,
+    basenames_targets: &HashMap<&str, (Address, u64)>,
+) -> Result<LocalProfile> {
+    let profile = generate_profile_from_families(
+        scratch_dir,
+        "manifests-e2e",
+        repo_root,
+        ens_targets,
+        FAMILIES.iter().map(|family| FamilySpec {
+            profile_root: "mainnet",
+            chain_combo: "ethereum",
+            namespace_group: "ens",
+            family,
+        }),
+    )?;
+    generate_profile_from_families(
+        scratch_dir,
+        "manifests-e2e",
+        repo_root,
+        basenames_targets,
+        BASE_NAMESPACES.iter().map(|family| FamilySpec {
+            profile_root: "mainnet",
+            chain_combo: "base",
+            namespace_group: "basenames",
+            family,
+        }),
+    )?;
+    let glue_targets = HashMap::new();
+    generate_profile_from_families(
+        scratch_dir,
+        "manifests-e2e",
+        repo_root,
+        &glue_targets,
+        MAINNET_GLUE_FAMILIES.iter().map(|family| FamilySpec {
+            profile_root: "mainnet",
+            chain_combo: "ethereum",
+            namespace_group: "basenames",
+            family,
+        }),
+    )?;
+    Ok(profile)
+}
+
 pub fn generate_local_sepolia_profile(
     scratch_dir: &Path,
     repo_root: &Path,

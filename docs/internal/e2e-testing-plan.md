@@ -237,12 +237,12 @@ blocked migration row; revisit only if a profile ever admits both.
 
 | Scenario | Key assertions | Status |
 | --- | --- | --- |
-| Composed-corpus equivalence | one corpus, both anvils, full mainnet-profile mirror (ENSv1 ethereum + Basenames base-mainnet + the ethereum-chain glue families): each protocol's route snapshots equal its single-protocol baseline, and per-chain checkpoints advance independently | planned(9) |
-| base.eth namespace handoff | L1 `base.eth` declared state (ENSv1 registry) coexists with Base-authoritative `*.base.eth` children; the exact-name/children boundary sits where the manifests say, with no cross-chain leakage in either direction | planned(9) |
-| One address, two protocols | names registered on both chains by one address in one corpus: address-scoped collections union with chain-scoped surfaces and no identity bleed — the ADR-0002 scoping claim, currently only ever tested one chain at a time | planned(9) |
-| Primary-name coexistence | the same address holds a mainnet `addr.reverse` claim and a Base `80002105.reverse` claim in one corpus; each chain's declared candidate stays correct | planned(9) |
-| Cross-chain perturbations | reorg one chain of a two-chain corpus — the other chain's canonicality untouched; backfill parity holds per chain | planned(9) |
-| L1-compat declared side | the active `basenames_l1_compat` family's watch/admission exercised (what the corpus derives at the L1Resolver address) while the CCIP transport hop stays blocked | planned(9) |
+| Composed-corpus equivalence | one corpus, both anvils, full mainnet-profile mirror (ENSv1 ethereum + Basenames base-mainnet + the ethereum-chain glue families): per-chain canonical checkpoints coexist, and each protocol's exact-name body equals its single-protocol baseline after normalizing corpus-minted identifiers — including the found nuance that `authority_key`'s third segment is the per-corpus contract-instance ordinal (9 vs 1 across corpora), so the key is corpus-relative rather than purely chain-derived | covered(composed_mainnet_profile_serves_both_protocols_without_leakage) |
+| base.eth namespace handoff | pinned: `base.eth` has no ENSv1-side registration in the corpus (404 under the ens namespace), `*.base.eth` names serve under the basenames namespace with base-mainnet positions only, and neither name ever carries the other chain's position | covered(composed_mainnet_profile_serves_both_protocols_without_leakage) |
+| One address, two protocols | one EOA registers on both chains in one corpus: per-namespace address collections each list exactly their own name with distinct backing resources — no identity bleed | covered(composed_mainnet_profile_serves_both_protocols_without_leakage) |
+| Primary-name coexistence | the same address holds a mainnet `addr.reverse` claim (coin 60) and a Base `80002105.reverse` claim (coin 2147492101) in one corpus; each namespace's declared candidate serves its own name with no leak | covered(composed_mainnet_profile_serves_both_protocols_without_leakage) |
+| Cross-chain perturbations | a LIVE mid-session reorg on the Base chain converges Base to the winning branch (losing rows orphaned by block hash) while the ethereum chain keeps zero orphaned rows, an unmoved canonical checkpoint, and a still-served name | covered(base_reorg_leaves_ethereum_canonicality_untouched) |
+| L1-compat declared side | both glue families (`basenames_l1_compat` v1, `basenames_execution` v1+v2) sync their admission into the composed corpus as stored manifest state on `ethereum-mainnet` (live runs derive no manifest bookkeeping events — those are backfill-only extras per the phase-3 parity pin) and the undeployed placeholder role stays silent; the CCIP transport hop stays blocked | covered(composed_mainnet_profile_serves_both_protocols_without_leakage) |
 
 ## Perturbation multipliers (phase 3, cross-cutting)
 
@@ -279,7 +279,7 @@ bodies embed `chain_positions`.
 | ENSv2 sepolia-dev deployment module + profile generation | 7 | covered: `harness::ens_v2`, `manifests-sepolia` mirror, and `ethereum-sepolia` checkpoint target |
 | Mock CCIP gateway (local HTTP server) | 6 | request/response digests must land in execution traces |
 | Execution RPC wiring (`--chain-rpc-url` on API/worker pointed at anvil) | 6 | UniversalResolver artifact bytecode is pinned for both v1 and v2 |
-| Merged mainnet-profile mirror + dual-anvil pipeline run | 9 | union of the ENSv1 and Basenames target sets including the ethereum-chain glue families; the pipeline runner already accepts a `chain_rpc_urls` list |
+| Merged mainnet-profile mirror + dual-anvil pipeline run | 9 | covered: `manifests::generate_local_mainnet_composed_profile` unions all eleven mainnet families (five ENSv1, four Base, two ethereum-chain glue) into one root, and `pipeline::indexer_run_until_chain_checkpoints` waits each chain's canonical checkpoint under one live session |
 
 ## Phasing
 
@@ -308,7 +308,7 @@ matrix.
 | 6 | Execution plane | done — direct path covered with layer-3 trace assertions and two review points; wildcard/alias/CCIP/cache-invalidation blocked with pin-level reasons |
 | 7 | ENSv2 declared-state matrix | done — covered except alias/shared-subregistry/migration blocked rows, with three review points (coverage promotion, discovered-registry scan, re-registration intake wedge) |
 | 8 | Audit-driven matrix extensions: the missing transitions and admission blocked rows from the 2026-07-10 completeness audit | open — highest-risk first moves: ENSv2 renewal (closes the coverage-promotion review point), born-wrapped registration, and the Basenames UpgradeableRegistrarController path |
-| 9 | Cross-protocol composition (mainnet profile): merged-profile mirror, dual-anvil corpus, composition rows | open — gated on the merged mainnet-profile harness capability |
+| 9 | Cross-protocol composition (mainnet profile): merged-profile mirror, dual-anvil corpus, composition rows | done — all six rows covered over the composed corpus, including a live one-chain reorg; findings: `authority_key` is corpus-relative (instance ordinal), and manifest bookkeeping events are backfill-only |
 
 ## CI tiers
 

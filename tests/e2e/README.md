@@ -78,7 +78,12 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
    execution-plane row runs yet. ENSv2 scenarios mirror the shipped
    `manifests/sepolia/ethereum/ens` families into a generated
    `manifests-sepolia` root so the selected profile remains the sepolia-dev
-   one. Nothing under the checked-in `manifests/` tree changes.
+   one. Cross-protocol scenarios mirror the FULL mainnet profile — all
+   eleven families across both chains, including the two ethereum-chain
+   glue families (`basenames_l1_compat`, `basenames_execution`) — into one
+   root and run a single live session over two anvils, waiting each
+   chain's canonical checkpoint. Nothing under the checked-in `manifests/`
+   tree changes.
 4. **Pipeline** — `harness::pipeline` runs the real binaries: an
    `indexer run` live-intake session supervised until the canonical
    checkpoint reaches the scenario head (the live loop, not `backfill`, is
@@ -433,6 +438,20 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
   Backfill parity is intentionally asserted at `normalized_events`, not API
   routes, because the backfill command does not promote canonical checkpoints
   required by snapshot-selected reads.
+- `cross_protocol::composed_mainnet_profile_serves_both_protocols_without_leakage`
+  — ingests the full shipped mainnet profile (ENSv1 ethereum + Basenames
+  base + the ethereum-chain glue families) as ONE corpus over two anvils:
+  per-chain checkpoints coexist, each protocol's exact-name body equals its
+  single-protocol baseline after normalizing corpus-minted identifiers
+  (`authority_key`'s third segment is the per-corpus contract-instance
+  ordinal), the base.eth namespace boundary holds with zero cross-chain
+  position leakage, per-namespace address collections and primary
+  candidates stay scoped, and the glue families' admission syncs as stored
+  manifest state (manifest bookkeeping events are backfill-only).
+- `cross_protocol::base_reorg_leaves_ethereum_canonicality_untouched` — a
+  live mid-session reorg on the Base chain of the composed corpus converges
+  Base to the winning branch with orphaned losing rows while the ethereum
+  chain keeps zero orphaned rows, an unmoved checkpoint, and a served name.
 
 ## Debugging
 
