@@ -741,6 +741,21 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
     assert_eq!(ranges[0].checkpoint_block_number, 43);
     assert_eq!(ranges[0].attempt_count, 1);
 
+    assert_eq!(source_plan.selected_targets.len(), 1);
+    let watched_target = &source_plan.selected_targets[0];
+    assert_eq!(
+        load_coverage_fact_rows(database.pool(), outcome.backfill_job_id).await?,
+        vec![(
+            "ethereum-mainnet".to_owned(),
+            watched_target.source_family.clone(),
+            "address".to_owned(),
+            Some(watched_target.address.to_ascii_lowercase()),
+            watched_target.effective_from_block.max(42),
+            watched_target.effective_to_block.min(43),
+            "job_completion".to_owned(),
+        )]
+    );
+
     let rerun = run_resumable_hash_pinned_backfill_job(
         database.pool(),
         &source_plan,
@@ -752,6 +767,11 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
     assert_eq!(rerun.reserved_range_count, 0);
     assert_eq!(rerun.completed_range_count, 0);
     assert_eq!(rerun.resolved_block_count, 0);
+    assert_eq!(
+        table_count(database.pool(), "backfill_coverage_facts").await?,
+        1,
+        "idempotent rerun must not duplicate coverage facts"
+    );
 
     let widened_error = run_resumable_hash_pinned_backfill_job(
         database.pool(),
@@ -3202,6 +3222,30 @@ async fn source_scoped_backfill_enforces_selected_target_effective_ranges_during
     assert_eq!(outcome.raw_log_count, 4);
     assert_eq!(outcome.raw_code_hash_count, 2);
     assert_eq!(
+        load_coverage_fact_rows(database.pool(), outcome.backfill_job_id).await?,
+        vec![
+            (
+                "ethereum-mainnet".to_owned(),
+                "ens_v2_registry_l1".to_owned(),
+                "address".to_owned(),
+                Some(first_address.to_owned()),
+                42,
+                42,
+                "job_completion".to_owned(),
+            ),
+            (
+                "ethereum-mainnet".to_owned(),
+                "ens_v2_registry_l1".to_owned(),
+                "address".to_owned(),
+                Some(second_address.to_owned()),
+                43,
+                43,
+                "job_completion".to_owned(),
+            ),
+        ],
+        "coverage facts must record each selected target's effective window clamped to the job range"
+    );
+    assert_eq!(
         sqlx::query_as::<_, (Vec<i64>, Vec<String>)>(
             "SELECT ARRAY_AGG(block_number ORDER BY block_number, log_index), ARRAY_AGG(emitting_address ORDER BY block_number, log_index) FROM raw_logs"
         )
@@ -5336,6 +5380,43 @@ async fn assert_dynamic_resolver_backfill_scope_behavior(
         job.source_identity,
         backfill::backfill_job_source_identity_payload(&source_plan)?
     );
+    let coverage_fact_rows = load_coverage_fact_rows(database.pool(), outcome.backfill_job_id).await?;
+    if generic_ensv1_resolver {
+        assert_eq!(
+            coverage_fact_rows,
+            vec![(
+                fixture.chain.to_owned(),
+                fixture.resolver_source_family.to_owned(),
+                "family".to_owned(),
+                None,
+                40,
+                44,
+                "job_completion".to_owned(),
+            )],
+            "a generic resolver scan must credit the whole family over the full job range instead of per-address facts"
+        );
+    } else {
+        assert_eq!(
+            coverage_fact_rows,
+            [
+                selected_resolver_address,
+                pending_resolver_address,
+                unsupported_resolver_address,
+            ]
+            .map(|address| (
+                fixture.chain.to_owned(),
+                fixture.resolver_source_family.to_owned(),
+                "address".to_owned(),
+                Some(address.to_owned()),
+                42,
+                43,
+                "job_completion".to_owned(),
+            ))
+            .to_vec(),
+            "address-enumerated resolver scans must record per-target facts clamped to their effective windows"
+        );
+    }
+
     let source_identity = serde_json::to_string(&job.source_identity)
         .context("dynamic resolver source identity must serialize")?;
     let forbidden_targets = vec![
@@ -5944,7 +6025,53 @@ async fn create_backfill_job_tables(pool: &PgPool) -> Result<()> {
     .await
     .context("failed to create backfill_ranges_active_lease_token_idx for indexer tests")?;
 
+    sqlx::query(
+        r#"
+        CREATE TABLE backfill_coverage_facts (
+            backfill_coverage_fact_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            backfill_job_id BIGINT NOT NULL REFERENCES backfill_jobs (backfill_job_id) ON DELETE CASCADE,
+            chain_id TEXT NOT NULL,
+            source_family TEXT NOT NULL,
+            scope TEXT NOT NULL CHECK (scope IN ('address', 'family')),
+            address TEXT CHECK ((scope = 'address') = (address IS NOT NULL)),
+            covered_from_block BIGINT NOT NULL,
+            covered_to_block BIGINT NOT NULL,
+            derivation TEXT NOT NULL CHECK (derivation IN ('job_completion', 'legacy_full_payload_identity')),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            CHECK (covered_from_block <= covered_to_block),
+            CONSTRAINT backfill_coverage_facts_tuple_key UNIQUE NULLS NOT DISTINCT (
+                backfill_job_id,
+                source_family,
+                scope,
+                address,
+                covered_from_block
+            )
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to create backfill_coverage_facts table for indexer tests")?;
+
     Ok(())
+}
+
+async fn load_coverage_fact_rows(
+    pool: &PgPool,
+    backfill_job_id: i64,
+) -> Result<Vec<(String, String, String, Option<String>, i64, i64, String)>> {
+    sqlx::query_as(
+        r#"
+        SELECT chain_id, source_family, scope, address, covered_from_block, covered_to_block, derivation
+        FROM backfill_coverage_facts
+        WHERE backfill_job_id = $1
+        ORDER BY scope, source_family, address, covered_from_block
+        "#,
+    )
+    .bind(backfill_job_id)
+    .fetch_all(pool)
+    .await
+    .context("failed to load coverage fact rows")
 }
 
 fn parse_rpc_block_number(value: &str) -> i64 {
@@ -5958,4 +6085,274 @@ async fn table_count(pool: &PgPool, table_name: &str) -> Result<i64> {
         .fetch_one(pool)
         .await
         .with_context(|| format!("failed to count {table_name} rows"))
+}
+
+async fn insert_completed_backfill_job(
+    pool: &PgPool,
+    idempotency_key: &str,
+    source_identity: Value,
+) -> Result<i64> {
+    let created = create_backfill_job(
+        pool,
+        &BackfillJobCreate {
+            deployment_profile: "mainnet".to_owned(),
+            chain_id: "ethereum-mainnet".to_owned(),
+            source_identity,
+            scan_mode: "hash_pinned_block".to_owned(),
+            range_start_block_number: 100,
+            range_end_block_number: 120,
+            idempotency_key: idempotency_key.to_owned(),
+            ranges: Vec::new(),
+        },
+    )
+    .await?;
+    let lease_token = format!("lease-{idempotency_key}");
+    let reserved = bigname_storage::reserve_backfill_range(
+        pool,
+        created.job.backfill_job_id,
+        "worker-legacy",
+        &lease_token,
+        OffsetDateTime::from_unix_timestamp(OffsetDateTime::now_utc().unix_timestamp() + 300)
+            .context("lease deadline must be valid")?,
+    )
+    .await?
+    .context("synthetic job range must be reservable")?;
+    bigname_storage::advance_backfill_range(pool, reserved.backfill_range_id, &lease_token, 120)
+        .await?;
+    bigname_storage::complete_backfill_range(pool, reserved.backfill_range_id, &lease_token)
+        .await?;
+    Ok(created.job.backfill_job_id)
+}
+
+#[tokio::test]
+async fn legacy_coverage_derivation_covers_full_payload_identities() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let backfill_job_id = insert_completed_backfill_job(
+        database.pool(),
+        "legacy-full-payload",
+        json!({
+            "selector_kind": "watched_target_set",
+            "source_family": null,
+            "requested_watched_targets": [
+                { "contract_instance_id": "0abbca82-a3c4-4fcf-860b-d1eccfd10977" }
+            ],
+            "selected_targets": [
+                {
+                    "source_family": "basenames_base_registry",
+                    "contract_instance_id": "0abbca82-a3c4-4fcf-860b-d1eccfd10977",
+                    "address": "0xF9bBA2F07a2c95FC4225f1CaeC76E6bf04B463E9",
+                    "effective_from_block": 90,
+                    "effective_to_block": 110
+                },
+                {
+                    "source_family": "basenames_base_registrar",
+                    "contract_instance_id": "1abbca82-a3c4-4fcf-860b-d1eccfd10977",
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "effective_from_block": 121,
+                    "effective_to_block": 130
+                }
+            ],
+            "source_identity_hash": "fnv1a64:67379b1d8040bfc2"
+        }),
+    )
+    .await?;
+
+    let outcome =
+        repair::derive_legacy_backfill_coverage_facts(database.pool(), backfill_job_id).await?;
+    assert_eq!(outcome.backfill_job_id, backfill_job_id);
+    assert_eq!(outcome.address_fact_count, 1);
+    assert_eq!(outcome.family_fact_count, 0);
+    assert_eq!(outcome.inserted_fact_count, 1);
+    assert_eq!(
+        load_coverage_fact_rows(database.pool(), backfill_job_id).await?,
+        vec![(
+            "ethereum-mainnet".to_owned(),
+            "basenames_base_registry".to_owned(),
+            "address".to_owned(),
+            Some("0xf9bba2f07a2c95fc4225f1caec76e6bf04b463e9".to_owned()),
+            100,
+            110,
+            "legacy_full_payload_identity".to_owned(),
+        )],
+        "legacy derivation must clamp effective windows to the job range, lowercase addresses, and skip out-of-range targets"
+    );
+
+    let repeated =
+        repair::derive_legacy_backfill_coverage_facts(database.pool(), backfill_job_id).await?;
+    assert_eq!(repeated.inserted_fact_count, 0);
+    assert_eq!(
+        table_count(database.pool(), "backfill_coverage_facts").await?,
+        1,
+        "re-derivation must be idempotent"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn legacy_coverage_derivation_credits_generic_and_scan_all_family_scans() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let generic_job_id = insert_completed_backfill_job(
+        database.pool(),
+        "legacy-generic-topic-scans",
+        json!({
+            "selector_kind": "whole_active_watched_chain",
+            "source_family": null,
+            "requested_watched_targets": [],
+            "selected_targets": [
+                {
+                    "source_family": "ens_v1_registry_l1",
+                    "contract_instance_id": "0abbca82-a3c4-4fcf-860b-d1eccfd10977",
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "effective_from_block": 100,
+                    "effective_to_block": 120
+                }
+            ],
+            "generic_topic_scans": [
+                {
+                    "source_family": "ens_v1_resolver_l1",
+                    "source_identity_payload_format": "generic_resolver_event_topics_v1"
+                }
+            ],
+            "source_identity_payload_format": "selected_targets_with_generic_topic_scans_v1",
+            "source_identity_hash": "keccak256:0x1111111111111111111111111111111111111111111111111111111111111111"
+        }),
+    )
+    .await?;
+
+    let outcome =
+        repair::derive_legacy_backfill_coverage_facts(database.pool(), generic_job_id).await?;
+    assert_eq!(outcome.address_fact_count, 1);
+    assert_eq!(outcome.family_fact_count, 1);
+    assert_eq!(outcome.inserted_fact_count, 2);
+    assert_eq!(
+        load_coverage_fact_rows(database.pool(), generic_job_id).await?,
+        vec![
+            (
+                "ethereum-mainnet".to_owned(),
+                "ens_v1_registry_l1".to_owned(),
+                "address".to_owned(),
+                Some("0x1111111111111111111111111111111111111111".to_owned()),
+                100,
+                120,
+                "legacy_full_payload_identity".to_owned(),
+            ),
+            (
+                "ethereum-mainnet".to_owned(),
+                "ens_v1_resolver_l1".to_owned(),
+                "family".to_owned(),
+                None,
+                100,
+                120,
+                "legacy_full_payload_identity".to_owned(),
+            ),
+        ]
+    );
+
+    let scan_all_job_id = insert_completed_backfill_job(
+        database.pool(),
+        "legacy-basenames-scan-all",
+        json!({
+            "selector_kind": "source_family",
+            "source_family": "basenames_base_registry",
+            "requested_watched_targets": [],
+            "source_identity_payload_format": "basenames_registry_scan_all_event_signatures_v1",
+            "backfill_provider": "coinbase_cdp_sql",
+            "scan_mode": "coinbase_sql_hash_pinned_logs_v1",
+            "source_identity_hash": "keccak256:0x2222222222222222222222222222222222222222222222222222222222222222"
+        }),
+    )
+    .await?;
+
+    let outcome =
+        repair::derive_legacy_backfill_coverage_facts(database.pool(), scan_all_job_id).await?;
+    assert_eq!(outcome.address_fact_count, 0);
+    assert_eq!(outcome.family_fact_count, 1);
+    assert_eq!(outcome.inserted_fact_count, 1);
+    assert_eq!(
+        load_coverage_fact_rows(database.pool(), scan_all_job_id).await?,
+        vec![(
+            "ethereum-mainnet".to_owned(),
+            "basenames_base_registry".to_owned(),
+            "family".to_owned(),
+            None,
+            100,
+            120,
+            "legacy_full_payload_identity".to_owned(),
+        )],
+        "a scan-all identity must credit the registry family over the full job range"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn legacy_coverage_derivation_refuses_compact_digests_and_incomplete_jobs() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let compact_job_id = insert_completed_backfill_job(
+        database.pool(),
+        "legacy-compact-digest",
+        json!({
+            "selector_kind": "source_family",
+            "source_family": "basenames_base_registry",
+            "requested_watched_targets": [],
+            "selected_target_count": 1_218_984,
+            "selected_targets_digest_algorithm": "keccak256",
+            "selected_targets_digest": "keccak256:0x3333333333333333333333333333333333333333333333333333333333333333",
+            "source_identity_payload_format": "selected_targets_digest_v1",
+            "source_identity_hash": "keccak256:0x4444444444444444444444444444444444444444444444444444444444444444"
+        }),
+    )
+    .await?;
+
+    let error = repair::derive_legacy_backfill_coverage_facts(database.pool(), compact_job_id)
+        .await
+        .expect_err("compact digest identities must be refused");
+    assert!(
+        error
+            .to_string()
+            .contains("must be re-completed on fact-writing code"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(
+        table_count(database.pool(), "backfill_coverage_facts").await?,
+        0,
+        "a refused derivation must not write facts"
+    );
+
+    let pending = create_backfill_job(
+        database.pool(),
+        &BackfillJobCreate {
+            deployment_profile: "mainnet".to_owned(),
+            chain_id: "ethereum-mainnet".to_owned(),
+            source_identity: json!({
+                "selector_kind": "watched_target_set",
+                "source_family": null,
+                "requested_watched_targets": [],
+                "selected_targets": [],
+                "source_identity_hash": "fnv1a64:0000000000000000"
+            }),
+            scan_mode: "hash_pinned_block".to_owned(),
+            range_start_block_number: 100,
+            range_end_block_number: 120,
+            idempotency_key: "legacy-still-pending".to_owned(),
+            ranges: Vec::new(),
+        },
+    )
+    .await?;
+    let error =
+        repair::derive_legacy_backfill_coverage_facts(database.pool(), pending.job.backfill_job_id)
+            .await
+            .expect_err("non-completed jobs must be refused");
+    assert!(
+        error
+            .to_string()
+            .contains("can only be derived for completed jobs"),
+        "unexpected error: {error:#}"
+    );
+
+    database.cleanup().await
 }
