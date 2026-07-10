@@ -1476,3 +1476,53 @@ fn rows_describe_same_identity(a: &CoinbaseSqlLogRow, b: &CoinbaseSqlLogRow) -> 
         && a.emitting_address == b.emitting_address
         && a.topics == b.topics
 }
+
+#[test]
+fn build_query_applies_order_and_limit_to_the_whole_union() -> Result<()> {
+    let pack = pack(
+        vec!["0x1111111111111111111111111111111111111111".to_owned()],
+        Vec::new(),
+        Vec::new(),
+    );
+    for cursor in [
+        None,
+        Some(super::pagination::CoinbaseSqlLogCursor {
+            block_number: 12,
+            transaction_index: 3,
+            log_index: 4,
+        }),
+    ] {
+        let sql = build_query(&pack, cursor, 50)?;
+        assert_eq!(
+            sql.matches("ORDER BY").count(),
+            1,
+            "exactly one ORDER BY must exist, and none inside either union arm: {sql}"
+        );
+        assert_eq!(
+            sql.matches("LIMIT").count(),
+            1,
+            "exactly one LIMIT must exist, and none inside either union arm: {sql}"
+        );
+        let union_position = sql
+            .find("UNION ALL")
+            .expect("query must union the decoded and encoded arms");
+        let order_position = sql
+            .find("ORDER BY block_number, transaction_index, log_index")
+            .expect("query must order by the pagination cursor tuple");
+        assert!(
+            order_position > union_position,
+            "ORDER BY must come after both union arms: {sql}"
+        );
+        assert!(
+            sql.contains("SELECT *\nFROM (\n  SELECT"),
+            "the union arms must be wrapped in a subquery: {sql}"
+        );
+        // ClickHouse binds a trailing ORDER BY/LIMIT to the LAST union arm
+        // only; both must sit outside the subquery that closes the union.
+        assert!(
+            sql.ends_with(")\nORDER BY block_number, transaction_index, log_index\nLIMIT 50"),
+            "ORDER BY/LIMIT must apply to the whole union, outside the subquery close: {sql}"
+        );
+    }
+    Ok(())
+}
