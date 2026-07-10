@@ -504,8 +504,23 @@ Actionable refusal classes:
   the current manifest so fresh facts assert coverage relative to the current
   event set.
 - Same-height non-orphan fork ambiguity: repair/orphan the losing lineage row,
-  then retry. Numeric completed-range coverage is accepted only when the stored
-  promoted path has no competing non-orphan row at the same height.
+  refetch the range on the winning branch, then retry. Numeric completed-range
+  coverage is accepted only when the stored promoted path has no competing
+  non-orphan row at the same height; orphan-repairing without refetching would
+  let facts fetched on the losing branch credit the winning branch's numbers.
+
+Threat-model boundary for number-keyed coverage: coverage facts and completed
+ranges are keyed by block number, not hash. The design is sound only while the
+blocks a job fetches are final relative to the validation provider at fetch
+time — a fact recorded from a fetch of a block that is later reorged would
+credit the replacement block's number. Operationally this holds today (jobs
+fetch far behind the provider head during catch-up, and the same-height
+non-orphan fork probe refuses promotion whenever competing lineage rows
+exist), but it is an operational premise, not an enforced invariant: sample
+validation hash-checks against the provider's current view without a finality
+watermark, and bootstrap ranges end at the latest head. Do not run
+number-keyed backfills whose upper bound intentionally exceeds the provider
+finalized head; the enforced clamp/per-fact watermark is tracked on #145.
 - Selected-log companion rows missing: rerun the selected hash-pinned backfill so
   raw code, transaction, and receipt rows are persisted with the selected logs.
 - Missing event-silent current resolver state after catch-up: let ordinary live
