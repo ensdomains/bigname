@@ -67,6 +67,12 @@ pub async fn write_backfill_coverage_facts(
     if facts.is_empty() {
         return Ok(0);
     }
+    // Validate the whole batch before the first insert: on a bare connection a
+    // mid-batch validation failure would otherwise leave earlier chunks
+    // persisted behind an error return.
+    for fact in facts {
+        validate_backfill_coverage_fact_write(fact)?;
+    }
     let chain_id = load_backfill_job_chain_id(conn, backfill_job_id).await?;
     let mut inserted = 0_u64;
     for chunk in facts.chunks(COVERAGE_FACT_INSERT_CHUNK_ROWS) {
