@@ -5390,11 +5390,11 @@ async fn assert_dynamic_resolver_backfill_scope_behavior(
                 fixture.resolver_source_family.to_owned(),
                 "family".to_owned(),
                 None,
-                40,
-                44,
+                42,
+                43,
                 "job_completion".to_owned(),
             )],
-            "a generic resolver scan must credit the whole family over the full job range instead of per-address facts"
+            "a generic resolver scan must credit the family over its targets' effective span instead of per-address facts"
         );
     } else {
         assert_eq!(
@@ -6026,33 +6026,7 @@ async fn create_backfill_job_tables(pool: &PgPool) -> Result<()> {
     .await
     .context("failed to create backfill_ranges_active_lease_token_idx for indexer tests")?;
 
-    sqlx::query(
-        r#"
-        CREATE TABLE backfill_coverage_facts (
-            backfill_coverage_fact_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-            backfill_job_id BIGINT NOT NULL REFERENCES backfill_jobs (backfill_job_id) ON DELETE CASCADE,
-            chain_id TEXT NOT NULL,
-            source_family TEXT NOT NULL,
-            scope TEXT NOT NULL CHECK (scope IN ('address', 'family')),
-            address TEXT CHECK ((scope = 'address') = (address IS NOT NULL)),
-            covered_from_block BIGINT NOT NULL,
-            covered_to_block BIGINT NOT NULL,
-            derivation TEXT NOT NULL CHECK (derivation IN ('job_completion', 'legacy_full_payload_identity')),
-            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            CHECK (covered_from_block <= covered_to_block),
-            CONSTRAINT backfill_coverage_facts_tuple_key UNIQUE NULLS NOT DISTINCT (
-                backfill_job_id,
-                source_family,
-                scope,
-                address,
-                covered_from_block
-            )
-        )
-        "#,
-    )
-    .execute(pool)
-    .await
-    .context("failed to create backfill_coverage_facts table for indexer tests")?;
+    create_backfill_coverage_facts_table(pool).await?;
 
     Ok(())
 }
@@ -6353,6 +6327,35 @@ async fn legacy_coverage_derivation_refuses_compact_digests_and_incomplete_jobs(
             .to_string()
             .contains("can only be derived for completed jobs"),
         "unexpected error: {error:#}"
+    );
+
+    let unknown_format_job_id = insert_completed_backfill_job(
+        database.pool(),
+        "legacy-unknown-format",
+        json!({
+            "selector_kind": "source_family",
+            "source_family": "basenames_base_registry",
+            "requested_watched_targets": [],
+            "selected_targets": [],
+            "source_identity_payload_format": "selected_targets_bloom_filter_v9",
+            "source_identity_hash": "keccak256:0x5555555555555555555555555555555555555555555555555555555555555555"
+        }),
+    )
+    .await?;
+    let error =
+        repair::derive_legacy_backfill_coverage_facts(database.pool(), unknown_format_job_id)
+            .await
+            .expect_err("unknown identity payload formats must be refused");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported source_identity_payload_format"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(
+        table_count(database.pool(), "backfill_coverage_facts").await?,
+        0,
+        "a refused unknown-format derivation must not write facts"
     );
 
     database.cleanup().await

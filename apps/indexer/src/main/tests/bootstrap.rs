@@ -2330,33 +2330,7 @@ async fn create_bootstrap_backfill_job_tables(pool: &PgPool) -> Result<()> {
     .await
     .context("failed to create backfill_ranges table for bootstrap tests")?;
 
-    sqlx::query(
-        r#"
-        CREATE TABLE backfill_coverage_facts (
-            backfill_coverage_fact_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-            backfill_job_id BIGINT NOT NULL REFERENCES backfill_jobs (backfill_job_id) ON DELETE CASCADE,
-            chain_id TEXT NOT NULL,
-            source_family TEXT NOT NULL,
-            scope TEXT NOT NULL CHECK (scope IN ('address', 'family')),
-            address TEXT CHECK ((scope = 'address') = (address IS NOT NULL)),
-            covered_from_block BIGINT NOT NULL,
-            covered_to_block BIGINT NOT NULL,
-            derivation TEXT NOT NULL CHECK (derivation IN ('job_completion', 'legacy_full_payload_identity')),
-            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            CHECK (covered_from_block <= covered_to_block),
-            CONSTRAINT backfill_coverage_facts_tuple_key UNIQUE NULLS NOT DISTINCT (
-                backfill_job_id,
-                source_family,
-                scope,
-                address,
-                covered_from_block
-            )
-        )
-        "#,
-    )
-    .execute(pool)
-    .await
-    .context("failed to create backfill_coverage_facts table for bootstrap tests")?;
+    create_backfill_coverage_facts_table(pool).await?;
 
     Ok(())
 }

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
 use bigname_manifests::WatchedSourceSelectorPlan;
@@ -65,8 +65,10 @@ pub(super) async fn complete_reserved_range_recording_plan_coverage(
 /// executor's own in-memory selector plan so the recorded coverage can never
 /// drift from what the job actually fetched. Families fetched via
 /// topics-complete scans (the ENSv1 generic resolver scope and the Basenames
-/// registry scan-all shape) yield one family-scope fact over the full job
-/// range; their per-address targets are excluded because the fetch was not
+/// registry scan-all shape) yield one family-scope fact clamped to the span of
+/// the plan's targets for that family — the scan-all planner skips windows
+/// with no selected targets, so blocks outside that span were never fetched —
+/// and their per-address targets are excluded because the fetch was not
 /// address-enumerated. Every other selected target yields an address-scope
 /// fact clamped to the job range, skipping empty intersections.
 fn job_completion_coverage_facts<'a>(
@@ -83,16 +85,34 @@ fn job_completion_coverage_facts<'a>(
         family_scan_source_families.insert(SOURCE_FAMILY_BASENAMES_BASE_REGISTRY);
     }
 
-    let family_facts = family_scan_source_families
-        .clone()
-        .into_iter()
-        .map(move |source_family| BackfillCoverageFactWrite {
-            source_family: source_family.to_owned(),
-            scope: BackfillCoverageFactScope::Family,
-            address: None,
-            covered_from_block: job_start_block,
-            covered_to_block: job_end_block,
-        });
+    let mut family_scan_spans = BTreeMap::<&'a str, (i64, i64)>::new();
+    for target in &source_plan.selected_targets {
+        if !family_scan_source_families.contains(target.source_family.as_str()) {
+            continue;
+        }
+        let span = family_scan_spans
+            .entry(target.source_family.as_str())
+            .or_insert((target.effective_from_block, target.effective_to_block));
+        span.0 = span.0.min(target.effective_from_block);
+        span.1 = span.1.max(target.effective_to_block);
+    }
+    let family_facts = family_scan_spans.into_iter().filter_map(
+        move |(source_family, (span_from_block, span_to_block))| {
+            let (covered_from_block, covered_to_block) = covered_block_interval(
+                span_from_block,
+                span_to_block,
+                job_start_block,
+                job_end_block,
+            )?;
+            Some(BackfillCoverageFactWrite {
+                source_family: source_family.to_owned(),
+                scope: BackfillCoverageFactScope::Family,
+                address: None,
+                covered_from_block,
+                covered_to_block,
+            })
+        },
+    );
     let address_facts = source_plan
         .selected_targets
         .iter()
@@ -234,13 +254,51 @@ mod tests {
         assert_eq!(facts[0].address, None);
         assert_eq!(
             (facts[0].covered_from_block, facts[0].covered_to_block),
-            (10, 20)
+            (12, 18),
+            "family fact must be clamped to the resolver targets' effective span"
         );
         assert_eq!(facts[1].source_family, "ens_v1_registry_l1");
         assert_eq!(facts[1].scope, BackfillCoverageFactScope::Address);
         assert_eq!(
             (facts[1].covered_from_block, facts[1].covered_to_block),
             (10, 20)
+        );
+    }
+
+    #[test]
+    fn family_scans_without_matching_targets_or_overlap_yield_no_family_fact() {
+        let mut no_resolver_targets = source_plan(
+            "ethereum-mainnet",
+            vec![target(
+                "ens_v1_registry_l1",
+                1,
+                "0x1111111111111111111111111111111111111111",
+                5,
+                50,
+            )],
+        );
+        no_resolver_targets.selector_kind = WatchedSourceSelectorKind::SourceFamily;
+        no_resolver_targets.source_family = Some("ens_v1_resolver_l1".to_owned());
+        assert!(
+            job_completion_coverage_facts(&no_resolver_targets, false, 10, 20)
+                .all(|fact| fact.scope != BackfillCoverageFactScope::Family),
+            "a family scan with no selected targets must not claim family coverage"
+        );
+
+        let disjoint_span = source_plan(
+            "base-mainnet",
+            vec![target(
+                "basenames_base_registry",
+                1,
+                "0x1111111111111111111111111111111111111111",
+                30,
+                40,
+            )],
+        );
+        assert_eq!(
+            job_completion_coverage_facts(&disjoint_span, true, 10, 20).count(),
+            0,
+            "a family span disjoint from the job range must not claim coverage"
         );
     }
 
@@ -253,15 +311,15 @@ mod tests {
                     "basenames_base_registry",
                     1,
                     "0x1111111111111111111111111111111111111111",
-                    5,
-                    50,
+                    12,
+                    18,
                 ),
                 target(
                     "basenames_base_registry",
                     2,
                     "0x2222222222222222222222222222222222222222",
-                    12,
-                    18,
+                    14,
+                    30,
                 ),
             ],
         );
@@ -274,7 +332,8 @@ mod tests {
         assert_eq!(facts[0].address, None);
         assert_eq!(
             (facts[0].covered_from_block, facts[0].covered_to_block),
-            (10, 20)
+            (12, 20),
+            "family fact must span the union of registry target windows clamped to the job range"
         );
     }
 
