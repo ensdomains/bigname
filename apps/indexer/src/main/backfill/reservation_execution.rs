@@ -12,8 +12,8 @@ use bigname_manifests::{
 };
 use bigname_storage::{
     BackfillJobCreate, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange,
-    BackfillRangeSpec, advance_backfill_range, complete_backfill_range, create_backfill_job,
-    load_backfill_job, reserve_backfill_range,
+    BackfillRangeSpec, advance_backfill_range, complete_backfill_range_recording_coverage,
+    create_backfill_job, load_backfill_job, reserve_backfill_range,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -28,6 +28,7 @@ use crate::{
 use super::{
     BackfillBlockRange, BackfillJobRunConfig, BackfillJobRunOutcome, BackfillTopicPlan,
     CoinbaseSqlBackfillConfig,
+    coverage_facts::job_completion_coverage_facts,
     failure_recording::{ReservedRangeFailure, record_reserved_range_failure},
     fetching::{load_backfill_canonicality_evidence, run_hash_pinned_backfill_range},
     selection::{SelectedTargetIntervalIndex, SelectedTargetRangeCursor},
@@ -584,8 +585,20 @@ pub(super) async fn run_reserved_hash_pinned_backfill_range(
             .context("backfill block number overflowed while advancing range")?;
     }
 
-    if let Err(error) =
-        complete_backfill_range(pool, active_range.backfill_range_id, &config.lease_token).await
+    if let Err(error) = complete_backfill_range_recording_coverage(
+        pool,
+        active_range.backfill_range_id,
+        &config.lease_token,
+        |job| {
+            job_completion_coverage_facts(
+                source_plan,
+                false,
+                job.range_start_block_number,
+                job.range_end_block_number,
+            )
+        },
+    )
+    .await
     {
         return Err(record_reserved_range_failure(ReservedRangeFailure {
             pool,
