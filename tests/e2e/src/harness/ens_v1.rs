@@ -11,6 +11,7 @@ use super::rpc::RpcClient;
 // Call fragments match the pinned upstream sources:
 // (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L39 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L45 @ ens_v1@91c966f)
+// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L112 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L23 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/ethregistrar/IETHRegistrarController.sol:L7 @ ens_v1@91c966f)
@@ -21,13 +22,16 @@ use super::rpc::RpcClient;
 // (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L26 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/resolvers/profiles/ContenthashResolver.sol:L14 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L15 @ ens_v1@91c966f)
+// (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L13 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/resolvers/profiles/IVersionableResolver.sol:L5 @ ens_v1@91c966f)
+// (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L98 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L20 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/resolvers/ResolverBase.sol:L22 @ ens_v1@91c966f)
 sol! {
     function setSubnodeOwner(bytes32 node, bytes32 label, address owner) external returns (bytes32);
     function owner(bytes32 node) external view returns (address);
     function setResolver(bytes32 node, address resolver) external;
+    function setApprovalForAll(address operator, bool approved) external;
     function addController(address controller) external;
     function setController(address controller, bool enabled) external;
     function reclaim(uint256 id, address owner) external;
@@ -36,7 +40,19 @@ sol! {
     function setAddr(bytes32 node, address a) external;
     function setContenthash(bytes32 node, bytes hash) external;
     function setText(bytes32 node, string key, string value) external;
+    function setName(bytes32 node, string newName) external;
+    function approve(bytes32 node, address delegate, bool approved) external;
     function clearRecords(bytes32 node) external;
+    // (upstream: .refs/ens_v1/contracts/resolvers/profiles/ABIResolver.sol:L16 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/resolvers/profiles/InterfaceResolver.sol:L17 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/resolvers/profiles/DNSResolver.sol:L51 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/resolvers/profiles/DNSResolver.sol:L136 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/resolvers/profiles/PubkeyResolver.sol:L19 @ ens_v1@91c966f)
+    function setABI(bytes32 node, uint256 contentType, bytes data) external;
+    function setInterface(bytes32 node, bytes4 interfaceID, address implementer) external;
+    function setDNSRecords(bytes32 node, bytes data) external;
+    function setZonehash(bytes32 node, bytes hash) external;
+    function setPubkey(bytes32 node, bytes32 x, bytes32 y) external;
 
     struct Registration {
         string label;
@@ -151,6 +167,10 @@ mod reverse_calls {
     // (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L123 @ ens_v1@91c966f)
     // (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L129 @ ens_v1@91c966f)
     // (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L130 @ ens_v1@91c966f)
+    // Claim-only and third-party claim entrypoints route through claimForAddr.
+    // (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L64 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L74 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L93 @ ens_v1@91c966f)
     // PublicResolver authorizes the trusted ReverseRegistrar to write NameResolver records.
     // (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L70 @ ens_v1@91c966f)
     // (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L116 @ ens_v1@91c966f)
@@ -158,6 +178,9 @@ mod reverse_calls {
     sol! {
         function setDefaultResolver(address resolver) external;
         function setName(string name) external returns (bytes32 node);
+        function claim(address owner) external returns (bytes32 node);
+        function claimWithResolver(address owner, address resolver) external returns (bytes32 node);
+        function setNameForAddr(address addr, address owner, address resolver, string name) external returns (bytes32 node);
     }
 }
 
@@ -177,6 +200,10 @@ pub fn namehash(name: &str) -> B256 {
         node = keccak256(buf);
     }
     node
+}
+
+pub fn reverse_node(address: Address) -> B256 {
+    namehash(&format!("{address:x}.addr.reverse"))
 }
 
 /// The ENSv1 mainnet contract topology deployed onto a local chain from
@@ -510,6 +537,22 @@ pub async fn create_subname(
     .await
 }
 
+pub async fn set_registry_approval_for_all(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    owner: Address,
+    operator: Address,
+    approved: bool,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        owner,
+        d.registry.address,
+        &setApprovalForAllCall { operator, approved }.abi_encode(),
+    )
+    .await
+}
+
 /// Create `<label>` below `parent_node` in the legacy registry. `from` must
 /// control `parent_node` in that legacy registry state.
 pub async fn create_legacy_subname(
@@ -588,6 +631,154 @@ pub async fn set_text_record(
             node: namehash(name),
             key: key.to_string(),
             value: value.to_string(),
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+pub async fn set_abi_record(
+    rpc: &RpcClient,
+    resolver: Address,
+    from: Address,
+    name: &str,
+    content_type: u64,
+    data: &[u8],
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        resolver,
+        &setABICall {
+            node: namehash(name),
+            contentType: U256::from(content_type),
+            data: Bytes::copy_from_slice(data),
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+pub async fn set_interface_record(
+    rpc: &RpcClient,
+    resolver: Address,
+    from: Address,
+    name: &str,
+    interface_id: [u8; 4],
+    implementer: Address,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        resolver,
+        &setInterfaceCall {
+            node: namehash(name),
+            interfaceID: interface_id.into(),
+            implementer,
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+pub async fn set_dns_records(
+    rpc: &RpcClient,
+    resolver: Address,
+    from: Address,
+    name: &str,
+    data: &[u8],
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        resolver,
+        &setDNSRecordsCall {
+            node: namehash(name),
+            data: Bytes::copy_from_slice(data),
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+pub async fn set_zonehash(
+    rpc: &RpcClient,
+    resolver: Address,
+    from: Address,
+    name: &str,
+    hash: &[u8],
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        resolver,
+        &setZonehashCall {
+            node: namehash(name),
+            hash: Bytes::copy_from_slice(hash),
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+pub async fn set_pubkey_record(
+    rpc: &RpcClient,
+    resolver: Address,
+    from: Address,
+    name: &str,
+    x: B256,
+    y: B256,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        resolver,
+        &setPubkeyCall {
+            node: namehash(name),
+            x,
+            y,
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+pub async fn set_name_record_for_node(
+    rpc: &RpcClient,
+    resolver: Address,
+    from: Address,
+    node: B256,
+    name: &str,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        resolver,
+        &setNameCall {
+            node,
+            newName: name.to_string(),
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+pub async fn approve_resolver_delegate(
+    rpc: &RpcClient,
+    resolver: Address,
+    owner: Address,
+    name: &str,
+    delegate: Address,
+    approved: bool,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        owner,
+        resolver,
+        &approveCall {
+            node: namehash(name),
+            delegate,
+            approved,
         }
         .abi_encode(),
     )
@@ -957,21 +1148,81 @@ pub async fn set_reverse_name(
     from: Address,
     name: &str,
 ) -> Result<()> {
-    send_checked(
-        rpc,
-        d.deployer,
-        d.reverse_registrar.address,
-        &reverse_calls::setDefaultResolverCall {
-            resolver: d.public_resolver.address,
-        }
-        .abi_encode(),
-    )
-    .await?;
+    set_reverse_default_resolver(rpc, d, d.public_resolver.address).await?;
     send_checked(
         rpc,
         from,
         d.reverse_registrar.address,
         &reverse_calls::setNameCall {
+            name: name.to_string(),
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+pub async fn set_reverse_default_resolver(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    resolver: Address,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        d.deployer,
+        d.reverse_registrar.address,
+        &reverse_calls::setDefaultResolverCall { resolver }.abi_encode(),
+    )
+    .await
+}
+
+pub async fn claim_reverse(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    owner: Address,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        d.reverse_registrar.address,
+        &reverse_calls::claimCall { owner }.abi_encode(),
+    )
+    .await
+}
+
+pub async fn claim_reverse_with_resolver(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    owner: Address,
+    resolver: Address,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        d.reverse_registrar.address,
+        &reverse_calls::claimWithResolverCall { owner, resolver }.abi_encode(),
+    )
+    .await
+}
+
+pub async fn set_reverse_name_for_addr(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    address: Address,
+    owner: Address,
+    resolver: Address,
+    name: &str,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        d.reverse_registrar.address,
+        &reverse_calls::setNameForAddrCall {
+            addr: address,
+            owner,
+            resolver,
             name: name.to_string(),
         }
         .abi_encode(),

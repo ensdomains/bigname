@@ -67,6 +67,10 @@ if docker inspect "$container" >/dev/null 2>&1; then
     docker start "$container" >/dev/null
   fi
 else
+  # The e2e suite runs dozens of pipeline stacks in parallel, each with its
+  # own pools; the stock 100-connection ceiling saturates and surfaces as
+  # pool-acquire timeouts in unrelated tests. (Recreate the container to
+  # pick this up: docker rm -f bigname-test-postgres.)
   docker run \
     --detach \
     --name "$container" \
@@ -74,7 +78,7 @@ else
     --env "POSTGRES_USER=$user" \
     --env "POSTGRES_PASSWORD=$password" \
     --publish "127.0.0.1:$port:5432" \
-    "$image" >/dev/null
+    "$image" -c max_connections=300 >/dev/null
 fi
 
 for attempt in $(seq 1 60); do

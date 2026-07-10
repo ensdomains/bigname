@@ -204,6 +204,29 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
 - `resolver_records::shared_resolver_keeps_per_name_records_and_overview_fan_in_unsupported`
   — two names share one resolver while per-node records stay distinct; the
   resolver overview keeps binding fan-in explicitly unsupported.
+- `resolver_authorization::operator_delegate_writes_match_owner_authorship`
+  — compares owner-authored and delegated text/subname writes after separate
+  registry and resolver approvals, asserting equal normalized semantics and
+  the owner/operator addresses retained as the respective raw transaction
+  senders (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L19 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L112 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L98 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L128 @ ens_v1@91c966f).
+- `record_families::remaining_record_families_derive_normalized_but_stay_unenumerated`
+  — writes ABI, interface, a DNS RRset (then deletes it), a zonehash, and a
+  forward name() record: every family derives fully keyed `RecordChanged`
+  at the normalized layer, `DNSRecordDeleted` derives as
+  supersession-by-delete on the same key
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/DNSResolver.sol:L186 @ ens_v1@91c966f),
+  and the inventory enumerates selectors only for addr/text/contenthash —
+  the keyed families stay out of selectors, gaps, and unsupported_families.
+- `record_families::pubkey_write_on_admitted_resolver_stays_invisible` —
+  setPubkey on the admitted resolver
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/PubkeyResolver.sol:L25 @ ens_v1@91c966f)
+  is invisible at every layer: the topic-filtered live scan persists no raw
+  log, nothing derives, and no pubkey family surfaces in the inventory
+  (the adapter gate rejects the family by tested design; drift-vs-narrowing
+  is a doc-first question).
 - `wrapper::wrapper_wrap_fuses_subnames_and_unwrap_restore_identity` —
   wraps registrar names through the pinned NameWrapper, asserts wrapper
   resource/token-lineage rotation, burns `CANNOT_UNWRAP`,
@@ -221,6 +244,31 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
   a nonblank reverse claim that fails ENSIP-15 normalization and asserts
   `claimed_primary_name.status=invalid_name` with `raw_claim_name` preserved
   and no coerced candidate name.
+- `reverse_primary_turn_j::claim_without_name_record_keeps_candidate_absent`
+  — calls `claim` without a name write, asserting the registry child edge and
+  reverse claim derive separately, no resolver log or candidate appears, and
+  the persisted/public tuple is explicitly `not_found`
+  (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L64 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L84 @ ens_v1@91c966f).
+- `reverse_primary_turn_j::authorised_third_party_claim_keys_candidate_to_claimed_address`
+  — registry-authorises an operator to call `setNameForAddr`, then proves the
+  reverse node, candidate tuple, and primary-name route key off the claimed
+  address while raw transaction provenance retains the operator sender
+  (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L44 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L129 @ ens_v1@91c966f).
+- `reverse_primary_turn_j::unadmitted_reverse_resolver_keeps_candidate_absent`
+  — claims through a fresh PublicResolver copy and writes its reverse-node
+  name; the admitted reverse claim remains visible, but the unadmitted
+  `NameChanged` derives nothing and the candidate stays `not_found`
+  (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L93 @ ens_v1@91c966f).
+- `reverse_primary_turn_j::forward_mismatch_keeps_declared_candidate_but_verified_not_found`
+  — runs with chain RPC and the local Universal Resolver, writes a forward
+  `addr:60` different from the reverse claimant, and pins the current honest
+  gap: the declared candidate succeeds, but a tuple-present claim never
+  invokes primary verification, so verified mode is `not_found` with no
+  primary execution trace or cache outcome
+  (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L105 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L26 @ ens_v1@91c966f).
 - `basenames::basenames_declared_state_matrix_end_to_end` — deploys the
   Basenames Base stack forge-built from the pinned sources plus the ENSv1 Base
   L2ReverseRegistrar, mirrors the Base Basenames manifests, registers
@@ -271,6 +319,15 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
 - The supervised `indexer run` session writes its full log to
   `$TMPDIR/bigname-e2e-indexer-<pid>-<target block>.log`; failures include
   the tail.
+- `BIGNAME_E2E_READY_TIMEOUT_SECS` shortens the 600s readiness deadline
+  when reproducing intake wedges locally.
+- Full local runs are most stable with bounded parallelism
+  (`-- --test-threads=8`): every scenario spawns an anvil plus three
+  pipeline processes, and unbounded parallelism saturates the shared
+  postgres into pool-acquire timeouts in unrelated tests. The harness caps
+  each spawned binary's pool via `BIGNAME_DATABASE_MAX_CONNECTIONS` and
+  `scripts/test-db` raises the server ceiling to 300 (recreate the
+  container with `docker rm -f bigname-test-postgres` to pick that up).
 
 ## Extending
 
