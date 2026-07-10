@@ -74,24 +74,92 @@ pub fn assert_snapshots_equal(expected: &RouteSnapshots, actual: &RouteSnapshots
     Ok(())
 }
 
-async fn normalized_event_rows(pool: &sqlx::PgPool) -> Result<BTreeSet<String>> {
-    // Contract-instance ids are minted per corpus (random UUIDs at manifest
-    // sync), so identical discovery derivations differ bytewise across
-    // databases; strip exactly those fields for cross-database comparison.
+async fn normalized_event_rows(
+    pool: &sqlx::PgPool,
+    logical_name_ids: Option<&[&str]>,
+) -> Result<Vec<String>> {
+    let ids = logical_name_ids.map(|ids| ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>());
     let rows: Vec<String> = sqlx::query_scalar(
-        "SELECT jsonb_build_array( \
-            event_identity, \
-            event_kind, \
-            logical_name_id, \
-            canonicality_state::TEXT, \
-            after_state - 'to_contract_instance_id' - 'from_contract_instance_id' \
-                #- '{claim_provenance,contract_instance_id}' \
+        "SELECT jsonb_build_object( \
+            'event_identity', event_identity, \
+            'namespace', namespace, \
+            'logical_name_id', logical_name_id, \
+            'resource_id', resource_id::TEXT, \
+            'event_kind', event_kind, \
+            'source_family', source_family, \
+            'manifest_version', manifest_version, \
+            'source_manifest_id', source_manifest_id, \
+            'chain_id', chain_id, \
+            'block_number', block_number, \
+            'block_hash', block_hash, \
+            'transaction_hash', transaction_hash, \
+            'log_index', log_index, \
+            'raw_fact_ref', raw_fact_ref, \
+            'derivation_kind', derivation_kind, \
+            'canonicality_state', canonicality_state::TEXT, \
+            'before_state', before_state, \
+            'after_state', after_state \
         )::TEXT \
-        FROM normalized_events",
+        FROM normalized_events \
+        WHERE $1::TEXT[] IS NULL OR logical_name_id = ANY($1)",
+    )
+    .bind(ids)
+    .fetch_all(pool)
+    .await?;
+
+    // Manifest sync mints contract-instance UUIDs independently in each
+    // corpus. Replace those UUIDs wherever they occur with the stable
+    // chain/address identity; every other normalized-event field remains in
+    // the comparison, including resource ids, manifest ids, raw-fact refs,
+    // positions, before-state, and after-state.
+    let contract_instances = contract_instance_keys(pool).await?;
+    let mut normalized = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut row: Value = serde_json::from_str(&row)?;
+        normalize_contract_instance_ids(&mut row, &contract_instances);
+        normalized.push(serde_json::to_string(&row)?);
+    }
+    normalized.sort();
+    Ok(normalized)
+}
+
+async fn contract_instance_keys(pool: &sqlx::PgPool) -> Result<BTreeMap<String, String>> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT DISTINCT ON (contract_instance_id) \
+            contract_instance_id::TEXT, \
+            chain_id || ':' || lower(address) AS stable_key \
+        FROM contract_instance_addresses \
+        ORDER BY contract_instance_id, (deactivated_at IS NULL) DESC, admitted_at DESC",
     )
     .fetch_all(pool)
     .await?;
     Ok(rows.into_iter().collect())
+}
+
+fn normalize_contract_instance_ids(
+    value: &mut Value,
+    contract_instances: &BTreeMap<String, String>,
+) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                normalize_contract_instance_ids(value, contract_instances);
+            }
+        }
+        Value::Object(fields) => {
+            for value in fields.values_mut() {
+                normalize_contract_instance_ids(value, contract_instances);
+            }
+        }
+        Value::String(value) => {
+            for (id, stable_key) in contract_instances {
+                if value.contains(id) {
+                    *value = value.replace(id, &format!("<contract:{stable_key}>"));
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Backfill parity contract, pinned at the layers the bounded backfill job
@@ -111,17 +179,20 @@ pub async fn assert_backfill_normalized_event_parity(
     backfill: &sqlx::PgPool,
     scenario_logical_name_ids: &[&str],
 ) -> Result<()> {
-    let scoped: (i64, String) = scoped_digest(live, scenario_logical_name_ids).await?;
-    let scoped_backfill: (i64, String) = scoped_digest(backfill, scenario_logical_name_ids).await?;
+    let scoped = normalized_event_rows(live, Some(scenario_logical_name_ids)).await?;
+    let scoped_backfill = normalized_event_rows(backfill, Some(scenario_logical_name_ids)).await?;
     if scoped != scoped_backfill {
         bail!(
-            "scenario-scoped normalized_events digest differed: live {scoped:?}, backfill {scoped_backfill:?}"
+            "scenario-scoped normalized_events differed: live {} rows, backfill {} rows\n{}",
+            scoped.len(),
+            scoped_backfill.len(),
+            first_line_diff(&scoped.join("\n"), &scoped_backfill.join("\n"))
         );
     }
 
-    let live_rows = normalized_event_rows(live).await?;
-    let backfill_rows = normalized_event_rows(backfill).await?;
-    let missing: Vec<&String> = live_rows.difference(&backfill_rows).collect();
+    let live_rows = normalized_event_rows(live, None).await?;
+    let backfill_rows = normalized_event_rows(backfill, None).await?;
+    let missing = multiset_difference(&live_rows, &backfill_rows);
     if !missing.is_empty() {
         bail!(
             "{} live-derived events are missing from the backfill database:\n{}",
@@ -134,7 +205,7 @@ pub async fn assert_backfill_normalized_event_parity(
         );
     }
     assert_delta_bounded(
-        backfill_rows.difference(&live_rows),
+        multiset_difference(&backfill_rows, &live_rows).iter(),
         "backfill-only",
         &[
             "SourceManifestUpdated",
@@ -145,43 +216,38 @@ pub async fn assert_backfill_normalized_event_parity(
     Ok(())
 }
 
+fn multiset_difference(left: &[String], right: &[String]) -> Vec<String> {
+    let mut right_counts = BTreeMap::<&str, usize>::new();
+    for row in right {
+        *right_counts.entry(row).or_default() += 1;
+    }
+
+    let mut difference = Vec::new();
+    for row in left {
+        match right_counts.get_mut(row.as_str()) {
+            Some(count) if *count > 0 => *count -= 1,
+            _ => difference.push(row.clone()),
+        }
+    }
+    difference
+}
+
 fn assert_delta_bounded<'a>(
     rows: impl Iterator<Item = &'a String>,
     direction: &str,
     allowed_kinds: &[&str],
 ) -> Result<()> {
     for row in rows {
-        let parsed: Vec<Value> = serde_json::from_str(row)?;
-        let kind = parsed.get(1).and_then(Value::as_str).unwrap_or_default();
+        let parsed: Value = serde_json::from_str(row)?;
+        let kind = parsed
+            .get("event_kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         if !allowed_kinds.contains(&kind) {
             bail!("unexpected {direction} normalized event kind {kind}: {row}");
         }
     }
     Ok(())
-}
-
-async fn scoped_digest(pool: &sqlx::PgPool, logical_name_ids: &[&str]) -> Result<(i64, String)> {
-    let ids: Vec<String> = logical_name_ids.iter().map(|id| id.to_string()).collect();
-    Ok(sqlx::query_as(
-        "\
-        SELECT \
-            COUNT(*)::BIGINT AS row_count, \
-            COALESCE(md5(string_agg(row_text, E'\\n' ORDER BY row_text)), md5('')) AS digest \
-        FROM ( \
-            SELECT jsonb_build_array( \
-                event_identity, \
-                event_kind, \
-                logical_name_id, \
-                canonicality_state::TEXT, \
-                after_state \
-            )::TEXT AS row_text \
-            FROM normalized_events \
-            WHERE logical_name_id = ANY($1) \
-        ) AS rows",
-    )
-    .bind(&ids)
-    .fetch_one(pool)
-    .await?)
 }
 
 async fn get_normalized_body(api: &ApiServer, path: &str) -> Result<Value> {
@@ -201,6 +267,10 @@ fn normalize_snapshot_body(value: &mut Value) {
             }
         }
         Value::Object(fields) => {
+            let empty_collection = fields
+                .get("data")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty);
             for (key, value) in fields {
                 match key.as_str() {
                     // `normalized_event_id` is a database sequence value. A
@@ -210,10 +280,12 @@ fn normalize_snapshot_body(value: &mut Value) {
                     // Route provenance aggregates those same sequence values;
                     // preserve cardinality but not run-specific ids.
                     "normalized_event_ids" => normalize_id_array(value, "<normalized_event_id>"),
-                    // On empty collections `last_updated` is the read-time
-                    // wall clock rather than a chain-derived position, so it
-                    // differs across runs of identical state.
-                    "last_updated" => normalize_present_id(value, "<last_updated>"),
+                    // Only empty collection envelopes fall back to the
+                    // read-time wall clock. Non-empty and exact-name
+                    // timestamps remain part of replay equality.
+                    "last_updated" if empty_collection => {
+                        normalize_present_id(value, "<last_updated>")
+                    }
                     _ => normalize_snapshot_body(value),
                 }
             }

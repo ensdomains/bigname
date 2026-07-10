@@ -1276,6 +1276,16 @@ async fn third_party_controller_registration_degrades_without_label_events() -> 
         named_surfaces, 0,
         "label-less paths must not mint exact surfaces"
     );
+    for name in ["thirdparty.base.eth", "tokenonly.base.eth"] {
+        let (status, body) = run
+            .api
+            .get_json(&format!("/v1/names/basenames/{name}"))
+            .await?;
+        assert_eq!(
+            status, 404,
+            "label-less registration must not become an exact-name route: {body}"
+        );
+    }
     let grants: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events \
          WHERE transaction_hash IN ($1, $2) \

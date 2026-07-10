@@ -404,7 +404,7 @@ async fn rebuild_ignores_suppressed_old_registry_raw_facts_after_migration() -> 
 }
 
 #[tokio::test]
-async fn rebuild_preserves_ens_v2_resource_identity_across_token_regeneration() -> Result<()> {
+async fn rebuild_promotes_fresh_ens_v2_registration_across_token_regeneration() -> Result<()> {
     let database = TestDatabase::new().await?;
     let (registry_manifest_id, registrar_manifest_id) =
         seed_ens_v2_exact_name_profile_manifests(database.pool()).await?;
@@ -417,7 +417,12 @@ async fn rebuild_preserves_ens_v2_resource_identity_across_token_regeneration() 
             raw_block("ethereum-sepolia", "0xensv2-surface", 700, 1_717_172_700),
             raw_block("ethereum-sepolia", "0xensv2-link", 701, 1_717_172_701),
             raw_block("ethereum-sepolia", "0xensv2-regen", 702, 1_717_172_702),
-            raw_block("ethereum-sepolia", "0xensv2-renew", 703, 1_717_172_703),
+            raw_block(
+                "ethereum-sepolia",
+                "0xensv2-registrar-register",
+                703,
+                1_717_172_703,
+            ),
         ],
     )
     .await?;
@@ -556,15 +561,16 @@ async fn rebuild_preserves_ens_v2_resource_identity_across_token_regeneration() 
             with_source_manifest_id(
                 ens_v2_registrar_event(
                     &binding,
-                    "renew",
-                    "RegistrationRenewed",
-                    "0xensv2-renew",
+                    "register",
+                    EVENT_KIND_REGISTRAR_NAME_REGISTERED,
+                    "0xensv2-registrar-register",
                     703,
                     0,
                     json!({}),
                     json!({
+                        "source_event": "NameRegistered",
+                        "owner": "0x0000000000000000000000000000000000000b0b",
                         "duration": 31_536_000_i64,
-                        "expiry": 1_931_536_000_i64,
                     }),
                 ),
                 registrar_manifest_id,

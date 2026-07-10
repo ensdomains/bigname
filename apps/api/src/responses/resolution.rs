@@ -245,6 +245,7 @@ pub(crate) fn build_resolution_execution_explain_response(
     records: &[ResolutionRecordKey],
     trace: &ExecutionTrace,
     outcome: &ExecutionOutcome,
+    selected_snapshot: &SelectedSnapshot,
 ) -> Result<ResolutionResponse> {
     let data = build_name_data(&row);
     let verified_state =
@@ -252,8 +253,8 @@ pub(crate) fn build_resolution_execution_explain_response(
     let provenance =
         build_name_provenance_with_execution_trace(&row.provenance, Some(trace.execution_trace_id));
     let coverage = build_name_coverage(&row.coverage);
-    let chain_positions = ensure_object(&row.chain_positions);
-    let consistency = canonicality_consistency(&row.canonicality_summary).to_owned();
+    let chain_positions = selected_snapshot.chain_positions_value();
+    let consistency = selected_snapshot.consistency.as_str().to_owned();
     let last_updated = format_timestamp(row.last_recomputed_at);
 
     Ok(ResolutionResponse {

@@ -265,10 +265,8 @@ async fn wrapper_wrap_fuses_subnames_and_unwrap_restore_identity() -> Result<()>
     // docs/architecture.md § Permissions); fuse state arrives as
     // PermissionScopeChanged scope events carrying the raw fuse bitmap. The
     // wrapped HOLDER therefore has no published effective-powers row on any
-    // resource — REVIEW POINT: the docs say wrapper-backed effective powers
-    // are "masked by the active fuse state before publication", which
-    // implies a published-then-masked shape the current pipeline does not
-    // produce at all; recorded in the ledger.
+    // resource. Public docs classify fuse masking and wrapper-holder grants as
+    // unprojected; this assertion pins that current limitation.
     // Fuse bitmaps validate the pinned upstream constants: wrap burned
     // PARENT_CANNOT_CONTROL(65536)+IS_DOT_ETH(131072) = 196608; setFuses
     // added CANNOT_UNWRAP(1)+CANNOT_TRANSFER(4)+CANNOT_SET_RESOLVER(8)
@@ -307,7 +305,7 @@ async fn wrapper_wrap_fuses_subnames_and_unwrap_restore_identity() -> Result<()>
     let locked_permissions = permissions(&wrapped, locked_wrapper_resource).await?;
     assert!(
         locked_permissions.is_empty(),
-        "burned CANNOT_UNWRAP/CANNOT_TRANSFER/CANNOT_SET_RESOLVER should mask all current wrapper powers, not publish invented grants: {locked_permissions:?}"
+        "wrapper resources should publish no subject grants while fuse masking remains unprojected: {locked_permissions:?}"
     );
     let (status, locked_roles) = wrapped
         .api
@@ -319,7 +317,7 @@ async fn wrapper_wrap_fuses_subnames_and_unwrap_restore_identity() -> Result<()>
     );
     assert!(
         data_array(&locked_roles).is_empty(),
-        "name roles should share the masked permissions shape: {locked_roles}"
+        "name roles should expose no wrapper-holder grants while that projection is unsupported: {locked_roles}"
     );
 
     let kid_body = exact_name(&wrapped, "kid.locked.eth").await?;

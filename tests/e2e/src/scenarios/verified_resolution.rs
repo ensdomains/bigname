@@ -270,28 +270,31 @@ async fn direct_path_verified_query_via_local_universal_resolver_persists_trace(
     let query = verified_query(&verified_body, "addr:60")?;
     let trace_id = assert_verified_addr_query(&verified_body, query, target)?;
 
-    // REVIEW POINT (pinned observed behavior): the on-demand verified read
-    // above persists an execution trace and cache outcome, but the explain
-    // route cannot read them back — the persist-side cache key and the
-    // explain-side rebuilt key are derived from different inputs (observed
-    // deltas across runs: requested-chain-position and record-boundary
-    // components), so explain returns not_found even immediately after the
-    // verified read, with the head aligned to the row position and the
-    // record set matched. tests/conformance never exercises this
-    // composition because it seeds outcomes to match the read side.
-    // Recorded in the ledger; the assertions pin today's contract.
+    // The explain route must reconstruct the same selected-snapshot cache
+    // identity used by the on-demand profile write. The name projection may
+    // predate the selected head, so deriving requested positions from
+    // name_current rather than the route snapshot would miss this outcome.
     let (explain_status, explain_body) = run
         .api
         .get_json("/v1/explain/resolutions/ens/verified.eth/execution?records=addr:60,contenthash")
         .await?;
     assert_eq!(
-        explain_status, 404,
-        "pinned: on-demand persisted outcomes are not explain-readable today; full body: {explain_body}"
+        explain_status, 200,
+        "on-demand persisted outcome should be explain-readable; full body: {explain_body}"
+    );
+    let explain_query = verified_query(&explain_body, "addr:60")?;
+    let explain_trace_id = assert_verified_addr_query(&explain_body, explain_query, target)?;
+    assert_eq!(
+        explain_trace_id, trace_id,
+        "explain should return the trace persisted by the profile request; full body: {explain_body}"
     );
     assert_eq!(
-        explain_body.pointer("/error/code"),
-        Some(&json!("not_found")),
-        "explain miss should be a clean not_found; full body: {explain_body}"
+        pointer(
+            &explain_body,
+            "/verified_state/execution/execution_trace_id"
+        ),
+        trace_id,
+        "execution summary should use the persisted profile trace; full body: {explain_body}"
     );
 
     assert_execution_artifacts(&run, &trace_id, target).await?;

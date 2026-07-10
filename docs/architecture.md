@@ -69,7 +69,7 @@ Stable identity for the backing authority object — the anchor for permission l
 Stable identity for tokenized ownership history. Token IDs can change while the resource is unchanged; the lineage outlives the ID.
 
 - ENSv1: registry-only control has none. A registrar lease or wrapper position mints one. Renewal, transfer, expiry, and grace within the same anchor preserve it. Authority moving to a different tokenized anchor rotates it; returning to the prior tokenized anchor reactivates the prior lineage.
-- ENSv2: preserved across `TokenRegenerated`. Update the current token ID attribute and append the normalized event. Resource identity is anchored by upstream `eacVersionId`; tokens are versioned by `tokenVersionId`. Unregister/re-register increments both; regeneration increments only the token version.[^v2-pr-l28][^v2-pr-l203][^v2-pr-l237][^v2-pr-l451][^v2-pr-l461][^v2-pr-l536][^v2-pr-l545]
+- ENSv2: preserved across `TokenRegenerated`. Update the current token ID attribute and append the normalized event. Resource identity is anchored by upstream `eacVersionId`; tokens are versioned by `tokenVersionId`. Unregister/re-register increments both; regeneration increments only the token version.[^v2-pr-l28][^v2-pr-l203][^v2-pr-l237][^v2-pr-l241][^v2-pr-l242][^v2-pr-l451][^v2-pr-l461][^v2-pr-l542][^v2-pr-l547]
 
 ### `contract_instance_id`
 
@@ -268,7 +268,7 @@ Taxonomy reconciliation decisions:
 - `DelegateRetainedAfterTransfer` is not admitted until a concrete source event and consumer projection are specified. Current permission transfer behavior is represented by `PermissionChanged`, `RootPermissionChanged`, and `PermissionScopeChanged`.
 - ENSv2 ERC-1155 `TransferSingle` and `TransferBatch` remain unsupported for this sepolia-dev taxonomy slice. Upstream registry token updates can emit those ERC-1155 events, but ownership-transfer normalization requires a manifest/admission update outside this taxonomy-only decision. (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L199 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L230 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L232 @ ens_v2@554c309)
 
-ENSv1 wrapper/resolver mappings: `PreimageObserved`, `SurfaceBound`, `SurfaceUnbound`, `AuthorityTransferred`, `ExpiryChanged`, `TokenControlTransferred`, `ResolverChanged`, `PermissionChanged`, `PermissionScopeChanged`, and `RecordChanged` come from admitted NameWrapper and PublicResolver events.[^v1-iname-l27][^v1-iname-l31][^v1-iname-l35][^v1-iname-l37][^v1-iname-l38][^v1-nw-l1022][^v1-nw-l1034][^v1-pres-l20][^v1-pres-l51][^v1-pres-l58] `PermissionScopeChanged` carries wrapper fuse changes that mask effective powers without inventing new subject grants.
+ENSv1 wrapper/resolver mappings: `PreimageObserved`, `SurfaceBound`, `SurfaceUnbound`, `AuthorityTransferred`, `ExpiryChanged`, `TokenControlTransferred`, `ResolverChanged`, `PermissionChanged`, `PermissionScopeChanged`, and `RecordChanged` come from admitted NameWrapper and PublicResolver events.[^v1-iname-l27][^v1-iname-l31][^v1-iname-l35][^v1-iname-l37][^v1-iname-l38][^v1-nw-l1022][^v1-nw-l1034][^v1-pres-l20][^v1-pres-l51][^v1-pres-l58] `PermissionScopeChanged` retains wrapper fuse changes without inventing subject grants. Current projections do not turn those scope events into wrapper-holder permission rows or a published masked `effective_powers` set.
 
 Every normalized event carries: namespace, `logical_name_id` when applicable, `resource_id` when applicable, source family, manifest version, chain position, raw fact reference, derivation kind, canonicality flag, and before/after state where possible.
 
@@ -328,7 +328,7 @@ Permissions are first-class projections and explain views. Track grants by scope
 
 Public reads expose `effective_powers` directly so callers don't reconstruct authority from raw role bitmaps. The first declared-state route is resource-centric: `GET /v1/resources/{resource_id}/permissions`. Name-, address-, and resolver-centric views summarize or filter the same resource-anchored truth.
 
-For ENSv1 wrapper-backed resources, `effective_powers` is masked by the active NameWrapper fuse state before publication. `PermissionScopeChanged` carries fuse changes that remove powers without inventing new subject grants.[^v1-iname-l10][^v1-nw-l421][^v1-nw-l427][^v1-nw-l637][^v1-nw-l666][^v1-nw-l676][^v1-nw-l723][^v1-nw-l827][^v1-nw-l1023][^v1-nw-l132]
+For ENSv1 wrapper-backed resources, the current projection publishes no wrapper-holder subject grant derived from fuse state. Fuse changes remain available as `PermissionScopeChanged` history, but wrapper-resource permission and name-role reads may be empty, and a wrap of an existing registrar name can retain stale pre-wrap control facets.[^v1-iname-l10][^v1-nw-l421][^v1-nw-l427][^v1-nw-l637][^v1-nw-l666][^v1-nw-l676][^v1-nw-l723][^v1-nw-l827][^v1-nw-l1023][^v1-nw-l132] An empty permission result therefore does not prove that active fuses were applied to an otherwise complete published grant set.
 
 For ENSv2, `PermissionedRegistry.getResource(anyId)` keys permissions by upstream resource, so public permissions key by the bigname `resource_id` linked to that resource, not by token ID.[^v2-iperm-l57][^v2-pr-l261][^v2-pr-l351] Resolver-scoped permissions live in the same resource-anchored model with resolver scope metadata; `PermissionedResolver` uses name-, text-key-, and coin-type-specific EAC resources for setters.[^v2-pres-l70][^v2-pres-l159][^v2-pres-l239][^v2-pres-l257][^v2-pres-l282]
 
@@ -481,9 +481,14 @@ Repository layout:
 
 ## Test matrix
 
-ENSv1 and wrapper: ENSv1-only name, wrapped name, wrapped expiry/grace edge, fuse changes that alter control, wrapped owner ≠ registrant, reverse claim vs verified primary mismatch.
+This is a protocol-risk inventory, not a claim that the e2e suite covers every
+row. `tests/conformance` owns public route-contract permutations; `tests/e2e`
+selects high-value upstream-to-storage-to-HTTP paths and documents its explicit
+gaps.
 
-ENSv2: root-scope role grant, delegate retained after transfer, token regeneration without ownership change, shared subregistry creating multiple surfaces for one resource, alias-derived surface with no direct registry entry, subregistry swap replacing a subtree, re-registration with same resource and new token ID.
+ENSv1 and wrapper: ENSv1-only name, wrapped name, wrapped expiry/grace edge, fuse-scope history plus missing or stale wrapper permission/control publication, wrapped owner ≠ registrant, reverse claim vs verified primary mismatch.
+
+ENSv2: root-scope role grant, delegate retained after transfer, token regeneration without ownership change, shared subregistry creating multiple surfaces for one resource, alias-derived surface with no direct registry entry, subregistry swap replacing a subtree, and unregister/re-register rotating both resource and token lineage.[^v2-pr-l237][^v2-pr-l241][^v2-pr-l242][^v2-pr-l542][^v2-pr-l547]
 
 DNS / wildcard / offchain: imported DNS name, gasless DNS or metadata-discovered name where supported, wildcard-derived subname, CCIP success, CCIP failure, offchain gateway mismatch.
 
@@ -491,7 +496,9 @@ Basenames: NFT-only transfer, management-only transfer, address-resolution chang
 
 Operational: reorg across authority events, reorg across verified execution cache, replay determinism from raw facts, replay determinism from normalized events, proxy implementation change, manifest version change.
 
-Validate at four layers: raw facts, normalized events, execution traces, public API output.
+End-to-end cases validate the layers material to their claim: raw facts,
+normalized events, projections, execution traces, and/or public API output.
+They do not replace conformance coverage of the documented route surface.
 
 ## Open decisions
 
@@ -663,12 +670,14 @@ Validate at four layers: raw facts, normalized events, execution traces, public 
 [^v2-pr-l222]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L222 @ ens_v2@554c309)
 [^v2-pr-l225]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L225 @ ens_v2@554c309)
 [^v2-pr-l237]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L237 @ ens_v2@554c309)
+[^v2-pr-l241]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L241 @ ens_v2@554c309)
+[^v2-pr-l242]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L242 @ ens_v2@554c309)
 [^v2-pr-l261]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L261 @ ens_v2@554c309)
 [^v2-pr-l351]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L351 @ ens_v2@554c309)
 [^v2-pr-l451]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L451 @ ens_v2@554c309)
 [^v2-pr-l461]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461 @ ens_v2@554c309)
-[^v2-pr-l536]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L536 @ ens_v2@554c309)
-[^v2-pr-l545]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L545 @ ens_v2@554c309)
+[^v2-pr-l542]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L542 @ ens_v2@554c309)
+[^v2-pr-l547]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L547 @ ens_v2@554c309)
 
 [^v2-regroles-l6]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L6 @ ens_v2@554c309)
 [^v2-regroles-l9]: (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L9 @ ens_v2@554c309)

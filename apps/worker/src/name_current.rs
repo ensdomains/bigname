@@ -74,6 +74,7 @@ const NAME_CURRENT_REBUILD_CONCURRENCY: usize = 32;
 const EVENT_KIND_ALIAS_CHANGED: &str = "AliasChanged";
 const EVENT_KIND_RESOLVER_CHANGED: &str = "ResolverChanged";
 const EVENT_KIND_RECORD_VERSION_CHANGED: &str = "RecordVersionChanged";
+const EVENT_KIND_REGISTRAR_NAME_REGISTERED: &str = "RegistrarNameRegistered";
 const RECORD_INVENTORY_UNSUPPORTED_REASON: &str =
     "record_inventory remains unsupported in the ENSv1 name_current rebuild";
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
@@ -84,6 +85,7 @@ const RELEVANT_EVENT_KINDS: &[&str] = &[
     EVENT_KIND_ALIAS_CHANGED,
     "ExpiryChanged",
     "RegistrationGranted",
+    EVENT_KIND_REGISTRAR_NAME_REGISTERED,
     "RegistrationReleased",
     "RegistrationRenewed",
     EVENT_KIND_RECORD_VERSION_CHANGED,

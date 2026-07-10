@@ -848,6 +848,19 @@ Current projection timestamp fields are representable Unix-second values or `nul
 
 Projection tables may be truncated and rebuilt from canonical facts plus normalized events.
 
+When a code change widens the normalized-event set consumed by a projection,
+already-consumed change cursors do not by themselves revisit old current rows.
+Replay version 7 therefore forces an all-current worker replay after ENSv2 fresh
+registrar registrations became exact-name-profile evidence. The replay changes
+no raw fact, normalized event, identity row, or projection payload in SQL; the
+normal worker rebuild remains the projection write owner and re-evaluates
+canonicality and manifest evidence from retained inputs. Replay versioning is a
+bootstrap gate, not a mixed-version writer fence. Deployments must stop or drain
+every version-6 worker before any version-7 worker starts, keep public reads
+drained until the version-7 replay and pending invalidations finish, and never
+run the two worker versions concurrently; an older worker can otherwise publish
+the superseded result after the new replay.
+
 Historical projection materializations are projection-owned caches, not truth. When a worker materializes an `at` or `chain_positions` snapshot, the rows are keyed by the normal projection key plus exact chain-position context or an equivalent snapshot key. They may be bounded and evicted by policy; absence returns `stale`. A historical materialization must never overwrite a newer current row in place, and the API must never fill a missing historical projection from raw facts or provider data.
 
 Exact-name snapshot selection is a storage read boundary, not a new family. The API resolves `at`, explicit `chain_positions`, and `consistency` to one concrete `ChainPositions` object, then reads only projection rows and execution outputs eligible for that exact object. `name_current`, `coverage_current`, `surface_bindings_current`, `permissions_current`, and `record_inventory_current` retain enough chain-position context for the API to reject mismatched joins rather than combine rows from different snapshots.

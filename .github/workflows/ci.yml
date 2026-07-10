@@ -17,6 +17,7 @@ env:
   CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: sccache
   RUST_VERSION: 1.93.1
+  FOUNDRY_VERSION: v1.7.1
   SCCACHE_GHA_ENABLED: "true"
 
 jobs:
@@ -42,6 +43,9 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --check
 
+      - name: cargo fmt (e2e workspace)
+        run: cargo fmt --manifest-path tests/e2e/Cargo.toml -- --check
+
       - name: Rust source size ratchet
         env:
           BASE_REF: ${{ github.base_ref }}
@@ -61,8 +65,14 @@ jobs:
       - name: cargo check
         run: cargo check --workspace --all-targets --all-features
 
+      - name: cargo check (e2e workspace)
+        run: cargo check --manifest-path tests/e2e/Cargo.toml --locked --all-targets
+
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --all-features
+
+      - name: cargo clippy (e2e workspace)
+        run: cargo clippy --manifest-path tests/e2e/Cargo.toml --locked --all-targets -- -D warnings
 
   test_shard:
     name: test (${{ matrix.name }})
@@ -179,6 +189,7 @@ jobs:
           POSTGRES_DB: bigname
           POSTGRES_USER: bigname
           POSTGRES_PASSWORD: bigname
+          POSTGRES_INITDB_ARGS: "--set=max_connections=300"
         ports:
           - 5432:5432
         options: >-
@@ -204,6 +215,8 @@ jobs:
 
       - name: Install foundry (anvil)
         uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: ${{ env.FOUNDRY_VERSION }}
 
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@v0.0.10
@@ -212,13 +225,15 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Sync pinned upstream checkouts
-        run: scripts/sync-refs
+        run: |
+          scripts/sync-refs
+          scripts/sync-refs --check
 
       - name: Prebuild pipeline binaries
         run: cargo build --package bigname-indexer --package bigname-worker --package bigname-api
 
       - name: cargo test e2e
-        run: cargo test --manifest-path tests/e2e/Cargo.toml --locked
+        run: cargo test --manifest-path tests/e2e/Cargo.toml --locked -- --test-threads=8
 
   test:
     name: test

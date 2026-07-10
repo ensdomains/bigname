@@ -1,40 +1,5 @@
 use super::*;
 
-pub(super) async fn load_supported_record_inventory_current(
-    pool: &PgPool,
-    row: &NameCurrentRow,
-) -> Result<Option<RecordInventoryCurrentRow>> {
-    let Some((resource_id, record_version_boundary)) = record_inventory_lookup_key(row) else {
-        return Ok(None);
-    };
-
-    if let Some(record_inventory_row) =
-        load_record_inventory_current(pool, resource_id, &record_version_boundary).await?
-    {
-        return Ok(Some(record_inventory_row));
-    }
-
-    if record_version_boundary_has_pointer(&record_version_boundary) {
-        return Ok(None);
-    }
-
-    let Some(persisted_boundary) =
-        find_supported_record_inventory_boundary(pool, resource_id, &record_version_boundary)
-            .await?
-    else {
-        return Ok(None);
-    };
-
-    load_record_inventory_current(pool, resource_id, &persisted_boundary)
-        .await?
-        .with_context(|| {
-            format!(
-                "matched record_inventory_current boundary for resource_id {resource_id} but the projection row was not loadable"
-            )
-        })
-        .map(Some)
-}
-
 pub(super) async fn load_explicit_unsupported_record_inventory_current(
     pool: &PgPool,
     row: &NameCurrentRow,

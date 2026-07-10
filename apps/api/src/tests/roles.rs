@@ -776,7 +776,7 @@ async fn mark_permissions_current_projection_ready(database: &TestDatabase) -> R
             upserted_row_count,
             deleted_row_count
         )
-        VALUES ('permissions_current', 6, 0, 0, 0, 0)
+        VALUES ('permissions_current', 7, 0, 0, 0, 0)
         ON CONFLICT (projection) DO UPDATE SET
             replay_version = EXCLUDED.replay_version,
             completed_normalized_target_block = EXCLUDED.completed_normalized_target_block,

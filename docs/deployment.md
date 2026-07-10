@@ -48,6 +48,24 @@ service containers can therefore mark those old indexer/worker containers
 unhealthy until they are replaced with the matching image; treat that as version
 skew, not evidence that PostgreSQL is down.
 
+### Projection replay version upgrades
+
+A replay-version change that widens a projection's consumed input set is not a
+worker-rolling-compatible upgrade. Deployment automation must drain public API
+traffic, stop every old worker, and confirm no old worker process remains before
+starting any worker from the new image. Start one new worker, wait until every
+current projection family has a marker for the new replay version and
+`projection_invalidations` is empty, and only then start or undrain the API and
+the remaining new workers. Indexers may continue ingesting while workers are
+stopped; their durable changes will be consumed after replay handoff.
+
+Replay version 7 is such an upgrade: it makes retained ENSv2 fresh registrar
+registrations part of `name_current` exact-name-profile evidence. Version-6 and
+version-7 workers must never overlap. The replay-version marker prevents a new
+worker from trusting old bootstrap completion; it does not fence an old worker
+from claiming a later invalidation. Container healthchecks report version skew
+but do not stop an old process, so they are not a substitute for this drain.
+
 The indexer loads exactly one manifest profile root. Use `/app/manifests/mainnet`
 for the mainnet profile or `/app/manifests/sepolia` for the ENSv2 Sepolia
 profile. Do not point one runtime at both manifest roots.

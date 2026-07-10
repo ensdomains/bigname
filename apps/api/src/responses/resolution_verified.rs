@@ -118,13 +118,6 @@ mod resolution_verified {
         readback::validate_loaded_resolution_verified_outcome(row, records, outcome)
     }
 
-    pub(super) async fn load_supported_record_inventory_current(
-        pool: &PgPool,
-        row: &NameCurrentRow,
-    ) -> Result<Option<RecordInventoryCurrentRow>> {
-        readback::load_supported_record_inventory_current(pool, row).await
-    }
-
     pub(super) async fn load_supported_record_inventory_current_for_snapshot(
         pool: &PgPool,
         row: &NameCurrentRow,
@@ -183,7 +176,7 @@ use self::resolution_verified::{
     lookup_resolution_verified_outcome,
     load_explicit_unsupported_record_inventory_current,
     load_record_inventory_current_matching_selected_snapshot,
-    load_supported_record_inventory_current, load_supported_record_inventory_current_for_snapshot,
+    load_supported_record_inventory_current_for_snapshot,
     PartialCompactHits, ResolutionVerifiedOutcomeLookup, resolution_execution_cache_lookup_records,
     resolution_verified_support_boundary, validate_loaded_resolution_verified_outcome,
 };

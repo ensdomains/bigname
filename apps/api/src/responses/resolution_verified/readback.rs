@@ -272,13 +272,6 @@ pub(super) fn resolution_execution_cache_lookup_records(
 ) -> Vec<ResolutionRecordKey> {
     bigname_storage::resolution_execution_cache_lookup_records(row, records)
 }
-pub(super) async fn load_supported_record_inventory_current(
-    pool: &PgPool,
-    row: &NameCurrentRow,
-) -> Result<Option<RecordInventoryCurrentRow>> {
-    record_inventory::load_supported_record_inventory_current(pool, row).await
-}
-
 pub(super) async fn load_supported_record_inventory_current_for_snapshot(
     pool: &PgPool,
     row: &NameCurrentRow,

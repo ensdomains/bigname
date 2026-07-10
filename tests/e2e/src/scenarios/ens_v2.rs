@@ -318,24 +318,26 @@ async fn ens_v2_sepolia_dev_declared_matrix_end_to_end() -> Result<()> {
         "ens",
         "alice.eth namespace mismatch; body: {alice_body}"
     );
-    // REVIEW POINT (pinned observed behavior contradicting the docs):
-    // docs/api-v1-routes.md promises status=full / authoritative /
-    // enumeration_basis=exact_name_profile for the promoted sepolia
-    // exact-name profile, but a freshly REGISTERED name can never be
-    // promoted — the coverage gate requires a registrar-family event whose
-    // manifest carries exact_name_profile=supported, and the projection
-    // loader's RELEVANT_EVENT_KINDS excludes RegistrarNameRegistered, the
-    // only registrar event kind a registration derives (renewed names would
-    // pass via RegistrationRenewed). Recorded in the ledger with a chip.
     assert_eq!(
         pointer(&alice_body, "/coverage/status"),
-        "unsupported",
-        "pinned: freshly registered sepolia names report shadow coverage; body: {alice_body}"
+        "full",
+        "freshly registered sepolia names should use the promoted exact-name profile; body: {alice_body}"
     );
     assert_eq!(
-        pointer(&alice_body, "/coverage/unsupported_reason"),
-        "ensv2_exact_name_profile_shadow",
-        "pinned shadow reason; body: {alice_body}"
+        pointer(&alice_body, "/coverage/exhaustiveness"),
+        "authoritative",
+        "promoted exact-name coverage should be authoritative; body: {alice_body}"
+    );
+    assert_eq!(
+        pointer(&alice_body, "/coverage/enumeration_basis"),
+        "exact_name_profile",
+        "promoted exact-name coverage should identify its enumeration basis; body: {alice_body}"
+    );
+    assert!(
+        alice_body
+            .pointer("/coverage/unsupported_reason")
+            .is_some_and(serde_json::Value::is_null),
+        "promoted exact-name coverage should not carry an unsupported reason; body: {alice_body}"
     );
     assert_eq!(
         pointer(&alice_body, "/declared_state/registration/status"),

@@ -7,47 +7,36 @@ pub(super) async fn explain_resolution_execution_current(
 
     let records = parse_resolution_record_keys(query.records.as_deref(), ResolutionMode::Verified)?;
     let logical_name_id = format!("{namespace}:{name}");
-    let row = load_name_current(&state.pool, &logical_name_id)
-        .await
-        .map_err(|load_error| {
-            error!(
-                service = "api",
-                namespace = %namespace,
-                name = %name,
-                logical_name_id = %logical_name_id,
-                records = ?records,
-                error = ?load_error,
-                "failed to load exact-name current projection for resolution execution explain route"
-            );
-            ApiError::internal_error(format!(
-                "failed to load resolution execution explain projection for name {namespace}/{name}"
-            ))
-        })?;
+    let ExactNameRead {
+        row,
+        selected_snapshot,
+    } = load_exact_name_read_for_route(
+        &state.pool,
+        ExactNameReadRequest::new(&namespace, &name, ExactNameSnapshotSelector::default())
+            .include_resolution_auxiliary(namespace == BASENAMES_NAMESPACE),
+    )
+    .await?;
 
-    let Some(row) = row else {
-        return Err(ApiError {
-            status: StatusCode::NOT_FOUND,
-            code: "not_found",
-            message: format!("name {name} was not found in namespace {namespace}"),
-        });
-    };
-
-    let record_inventory_current = load_supported_record_inventory_current(&state.pool, &row)
-        .await
-        .map_err(|load_error| {
-            error!(
-                service = "api",
-                namespace = %namespace,
-                name = %name,
-                logical_name_id = %logical_name_id,
-                records = ?records,
-                error = ?load_error,
-                "failed to load declared record inventory for resolution execution explain route"
-            );
-            ApiError::internal_error(format!(
-                "failed to load resolution execution explain projection for name {namespace}/{name}"
-            ))
-        })?;
+    let record_inventory_current = load_supported_record_inventory_current_for_snapshot(
+        &state.pool,
+        &row,
+        &selected_snapshot,
+    )
+    .await
+    .map_err(|load_error| {
+        error!(
+            service = "api",
+            namespace = %namespace,
+            name = %name,
+            logical_name_id = %logical_name_id,
+            records = ?records,
+            error = ?load_error,
+            "failed to load declared record inventory for resolution execution explain route"
+        );
+        ApiError::internal_error(format!(
+            "failed to load resolution execution explain projection for name {namespace}/{name}"
+        ))
+    })?;
 
     if resolution_verified_support_boundary(&row, record_inventory_current.as_ref()).is_none() {
         return Err(ApiError {
@@ -63,7 +52,7 @@ pub(super) async fn explain_resolution_execution_current(
         &row,
         &cache_key_records,
         record_inventory_current.as_ref(),
-        row.chain_positions.clone(),
+        selected_snapshot.chain_positions_value(),
     )
     .map_err(|cache_key_error| {
         error!(
@@ -130,8 +119,14 @@ pub(super) async fn explain_resolution_execution_current(
         )));
     };
 
-    let response = build_resolution_execution_explain_response(row, &records, &trace, &outcome)
-        .map_err(|build_error| {
+    let response = build_resolution_execution_explain_response(
+        row,
+        &records,
+        &trace,
+        &outcome,
+        &selected_snapshot,
+    )
+    .map_err(|build_error| {
             error!(
                 service = "api",
                 namespace = %namespace,

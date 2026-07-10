@@ -68,6 +68,13 @@ fn indexer_log_path(label: &str) -> PathBuf {
     ))
 }
 
+fn worker_log_path(label: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "bigname-e2e-worker-{}-{label}.log",
+        std::process::id()
+    ))
+}
+
 pub type ChainRpcUrl<'a> = (&'a str, &'a str);
 
 pub struct ChainCheckpointTarget<'a> {
@@ -97,6 +104,89 @@ fn format_chain_rpc_urls(chain_rpc_urls: &[ChainRpcUrl<'_>]) -> String {
 pub struct IndexerRunSession {
     child: Child,
     log_path: PathBuf,
+}
+
+/// A supervised production `worker run` process. Most scenarios use the
+/// deterministic one-shot projection replay command; this session exists for
+/// the smaller set that must prove bootstrap handoff and continuous
+/// invalidation/apply behavior while intake and the API remain live.
+pub struct WorkerRunSession {
+    child: Child,
+    log_path: PathBuf,
+}
+
+impl WorkerRunSession {
+    pub fn start(repo_root: &Path, database_url: &str, log_label: &str) -> Result<Self> {
+        ensure_pipeline_binaries_built(repo_root);
+        let log_path = worker_log_path(log_label);
+        let log_file = std::fs::File::create(&log_path).context("create worker log file")?;
+        let child = cargo()
+            .current_dir(repo_root)
+            .args([
+                "run",
+                "--quiet",
+                "--manifest-path",
+                "apps/worker/Cargo.toml",
+                "--",
+                "run",
+                "--database-url",
+                database_url,
+                "--poll-interval-secs",
+                "1",
+            ])
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::from(log_file.try_clone()?))
+            .stderr(std::process::Stdio::from(log_file))
+            .spawn()
+            .context("spawn worker run")?;
+        Ok(Self { child, log_path })
+    }
+
+    pub async fn wait_for_sql(&mut self, pool: &sqlx::PgPool, sql: &str) -> Result<()> {
+        let ready_timeout_secs = std::env::var("BIGNAME_E2E_READY_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(600);
+        let deadline = std::time::Instant::now() + Duration::from_secs(ready_timeout_secs);
+        loop {
+            self.bail_if_exited()?;
+            if sqlx::query_scalar::<_, bool>(sql).fetch_one(pool).await? {
+                return Ok(());
+            }
+            if std::time::Instant::now() > deadline {
+                self.child.kill().await.ok();
+                bail!(
+                    "worker run did not satisfy readiness SQL within {ready_timeout_secs}s; log tail (reversed) from {:?}:\n{}",
+                    self.log_path,
+                    self.log_tail()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    pub async fn stop(mut self) -> Result<()> {
+        if self.child.try_wait()?.is_none() {
+            self.child.kill().await.ok();
+        }
+        Ok(())
+    }
+
+    fn bail_if_exited(&mut self) -> Result<()> {
+        if let Some(status) = self.child.try_wait()? {
+            bail!(
+                "worker run exited early ({status}); log tail (reversed) from {:?}:\n{}",
+                self.log_path,
+                self.log_tail()
+            );
+        }
+        Ok(())
+    }
+
+    fn log_tail(&self) -> String {
+        let log = std::fs::read_to_string(&self.log_path).unwrap_or_default();
+        log.lines().rev().take(60).collect::<Vec<_>>().join("\n")
+    }
 }
 
 impl IndexerRunSession {
@@ -635,6 +725,26 @@ impl ApiServer {
             .json()
             .await
             .with_context(|| format!("GET {path} body"))?;
+        Ok((status, body))
+    }
+
+    pub async fn post_json(
+        &self,
+        path: &str,
+        request: &serde_json::Value,
+    ) -> Result<(reqwest::StatusCode, serde_json::Value)> {
+        let response = self
+            .http
+            .post(format!("{}{path}", self.base_url))
+            .json(request)
+            .send()
+            .await
+            .with_context(|| format!("POST {path}"))?;
+        let status = response.status();
+        let body = response
+            .json()
+            .await
+            .with_context(|| format!("POST {path} body"))?;
         Ok((status, body))
     }
 }

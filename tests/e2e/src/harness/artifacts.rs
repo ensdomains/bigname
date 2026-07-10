@@ -58,9 +58,9 @@ pub fn load_ens_v2_artifact(repo_root: &Path, name: &str) -> Result<Artifact> {
 
 /// Forge-built artifact from the pinned Basenames checkout. The committed
 /// broadcast bytecode predates the pinned sources (its constructors differ),
-/// so deployments build the pinned sources instead — the pin vendors every
-/// forge lib, making `forge build` fully offline. Built at most once per
-/// test process, on demand.
+/// so deployments build the pinned sources instead. `scripts/sync-refs`
+/// materializes the pinned recursive Forge-library submodules. The incremental
+/// build runs at most once per test process, on demand.
 pub fn load_basenames_forge_artifact(repo_root: &Path, contract: &str) -> Result<Artifact> {
     ensure_basenames_built(repo_root)?;
     let path = repo_root
@@ -92,23 +92,30 @@ fn ensure_basenames_built(repo_root: &Path) -> Result<()> {
                 "out/UpgradeableRegistrarController.sol/UpgradeableRegistrarController.json",
                 "out/ERC1967Proxy.sol/ERC1967Proxy.json",
             ];
-            if required_artifacts
-                .iter()
-                .all(|relative| root.join(relative).exists())
-            {
-                return Ok(());
-            }
             let output = std::process::Command::new("forge")
                 .arg("build")
                 .current_dir(&root)
                 .output()
                 .map_err(|error| format!("spawn forge build: {error}"))?;
-            if output.status.success() {
+            if !output.status.success() {
+                return Err(format!(
+                    "forge build in {root:?} failed:\n{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+
+            let missing = required_artifacts
+                .iter()
+                .filter(|relative| !root.join(relative).exists())
+                .copied()
+                .collect::<Vec<_>>();
+            if missing.is_empty() {
                 Ok(())
             } else {
                 Err(format!(
-                    "forge build in {root:?} failed:\n{}",
-                    String::from_utf8_lossy(&output.stderr)
+                    "forge build in {root:?} did not produce required artifacts: {}",
+                    missing.join(", ")
                 ))
             }
         })

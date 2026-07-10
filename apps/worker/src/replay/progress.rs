@@ -6,7 +6,8 @@ use super::CurrentProjectionReplayStepSummary;
 /// Bump whenever a current projection's consumed input set changes semantically.
 /// Version 5 covers RootPermissionChanged and registry-scope permission consumption added in PR #24.
 /// Version 6 covers ENSv2 max/oversized expiry values projecting to null instead of stale finite timestamps.
-pub const CURRENT_PROJECTION_REPLAY_VERSION: i32 = 6;
+/// Version 7 covers ENSv2 fresh registrar registrations becoming exact-name-profile evidence.
+pub const CURRENT_PROJECTION_REPLAY_VERSION: i32 = 7;
 
 pub(super) async fn projection_replay_completed(
     pool: &PgPool,

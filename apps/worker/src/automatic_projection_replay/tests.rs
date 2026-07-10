@@ -172,6 +172,34 @@ async fn restart_handoff_with_apply_cursor_ignores_later_chain_checkpoint() -> R
     Ok(())
 }
 
+#[tokio::test]
+async fn restart_handoff_rejects_previous_replay_version_markers() -> Result<()> {
+    let database = test_database().await?;
+    seed_apply_cursor(database.pool()).await?;
+    seed_ready_normalized_replay_cursor(database.pool(), 20).await?;
+    seed_chain_checkpoint(database.pool(), 20).await?;
+    seed_replay_markers(database.pool(), 20).await?;
+
+    sqlx::query(
+        r#"
+        UPDATE current_projection_replay_status
+        SET replay_version = $1
+        "#,
+    )
+    .bind(replay::CURRENT_PROJECTION_REPLAY_VERSION - 1)
+    .execute(database.pool())
+    .await
+    .context("failed to make current projection replay markers stale")?;
+
+    assert!(
+        !projection_bootstrap_already_handed_off_to_apply(database.pool()).await?,
+        "an apply cursor plus previous-version markers must force bootstrap replay"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[test]
 fn primary_hydration_start_is_independent_from_text_hydration_completion() {
     assert_eq!(

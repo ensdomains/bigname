@@ -13,6 +13,11 @@ async fn get_resolution_execution_explain_returns_persisted_verified_state_and_r
     let surface_binding_id = Uuid::from_u128(0x3300);
     let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000021);
     let request_key = resolution_execution_request_key(&["text:com.twitter", "addr:60"]);
+    let selected_requested_positions = json!([{
+        "chain_id": "ethereum-mainnet",
+        "block_number": 21_000_004,
+        "block_hash": "0xexplain-head"
+    }]);
     let persisted_verified_queries = json!([
         {
             "record_key": "text:com.twitter",
@@ -64,20 +69,47 @@ async fn get_resolution_execution_explain_returns_persisted_verified_state_and_r
             resource_id,
         ))
         .await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "ethereum": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_004,
+                "block_hash": "0xexplain-head",
+                "timestamp": "2026-04-17T00:00:04Z"
+            }
+        }))
+        .await?;
+    sqlx::query(
+        "UPDATE chain_lineage SET parent_hash = '0xbinding' \
+         WHERE chain_id = 'ethereum-mainnet' AND block_hash = '0xexplain-head'",
+    )
+    .execute(&database.pool)
+    .await?;
 
-    let trace = resolution_execution_trace(
+    let mut trace = resolution_execution_trace(
         execution_trace_id,
         &request_key,
         &["text:com.twitter", "addr:60"],
         persisted_verified_queries.clone(),
     );
-    let outcome = resolution_execution_outcome(
+    trace.chain_context["requested_positions"] = selected_requested_positions.clone();
+    for step in &mut trace.steps {
+        step.canonicality_dependency = json!({
+            "ethereum-mainnet": {
+                "block_hash": "0xexplain-head",
+                "block_number": 21_000_004,
+                "state": "canonical"
+            }
+        });
+    }
+    let mut outcome = resolution_execution_outcome(
         execution_trace_id,
         &request_key,
         persisted_verified_queries.clone(),
         logical_name_id,
         resource_id,
     );
+    outcome.cache_key.requested_chain_positions = selected_requested_positions.clone();
     let profile_request_key = resolution_execution_request_key(STANDARD_PROFILE_CACHE_RECORD_KEYS);
     let profile_verified_queries = json!([
         {
@@ -112,13 +144,14 @@ async fn get_resolution_execution_explain_returns_persisted_verified_state_and_r
             "failure_reason": "no_contenthash"
         }
     ]);
-    let profile_outcome = resolution_execution_outcome(
+    let mut profile_outcome = resolution_execution_outcome(
         execution_trace_id,
         &profile_request_key,
         profile_verified_queries.clone(),
         logical_name_id,
         resource_id,
     );
+    profile_outcome.cache_key.requested_chain_positions = selected_requested_positions;
     upsert_execution_trace(&database.pool, &trace).await?;
     upsert_execution_outcome(&database.pool, &outcome).await?;
     upsert_execution_outcome(&database.pool, &profile_outcome).await?;
@@ -162,7 +195,13 @@ async fn get_resolution_execution_explain_returns_persisted_verified_state_and_r
         explain_payload.chain_positions,
         resolution_payload.chain_positions
     );
-    assert_eq!(explain_payload.consistency, "finalized");
+    assert_eq!(
+        resolution_payload
+            .chain_positions
+            .pointer("/ethereum/block_hash"),
+        Some(&json!("0xexplain-head"))
+    );
+    assert_eq!(explain_payload.consistency, resolution_payload.consistency);
     assert_eq!(resolution_payload.consistency, "head");
     assert_eq!(
         explain_payload.last_updated,
@@ -213,9 +252,9 @@ async fn get_resolution_execution_explain_returns_persisted_verified_state_and_r
                         "latency": 4,
                         "canonicality_dependency": {
                             "ethereum-mainnet": {
-                                "block_hash": "0xbinding",
-                                "block_number": 21_000_003,
-                                "state": "finalized"
+                                "block_hash": "0xexplain-head",
+                                "block_number": 21_000_004,
+                                "state": "canonical"
                             }
                         }
                     },
@@ -227,9 +266,9 @@ async fn get_resolution_execution_explain_returns_persisted_verified_state_and_r
                         "latency": 28,
                         "canonicality_dependency": {
                             "ethereum-mainnet": {
-                                "block_hash": "0xbinding",
-                                "block_number": 21_000_003,
-                                "state": "finalized"
+                                "block_hash": "0xexplain-head",
+                                "block_number": 21_000_004,
+                                "state": "canonical"
                             }
                         }
                     }

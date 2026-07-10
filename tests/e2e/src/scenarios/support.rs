@@ -75,11 +75,10 @@ pub async fn ingest_and_serve_with_ens_execution(
     universal_resolver: &crate::harness::artifacts::Deployed,
     ready_sql: Option<&str>,
 ) -> Result<PipelineRun> {
-    // Deliberately NO margin mining: on-demand verified execution keys its
-    // persisted outcome by the head it executed at (eth_call runs at
-    // `latest`), while explain readback rebuilds the key from the
-    // projection row's position. They only meet when the head IS the row's
-    // last-event block, so execution scenarios ingest at the exact head.
+    // Keep the normal post-event margin so the selected head is deliberately
+    // newer than name_current's last-event block. Verified execution and
+    // explain readback must still share the selected-snapshot cache identity.
+    anvil.client().mine(2).await?;
     let repo_root = repo_root();
     let rpc = anvil.client();
     let head = rpc.block_number().await?;

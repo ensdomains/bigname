@@ -69,6 +69,7 @@ The slim surface removes namespace-inferred `/v1/resolve*` aliases. Canonical na
 ## Coverage notes
 
 - `Address.names` with `include=role_summary` is an additive expansion of the same address-to-surface collection, not a separate route or replacement surface.
+- ENSv1 wrapper-holder role replacement is not graduated. Fuse changes are retained as history, but current wrapper resources may have no holder permission rows and wrap-existing exact-name control may retain stale pre-wrap facets; empty role/permission results must not be interpreted as a complete masked-power answer.
 - `Address.history` is the declared-state address activity read over address-derived surface and resource anchors. It reuses the shared history contract rather than introducing a separate truth system.
 - `GET /v1/profiles/names/{name}` is the app mixed profile route. `record_inventory` defines the known record-selector space; `record_cache` is the declared last-known-value view over that space; `verified_queries` is the server-selected execution answer set.
 - ENSv2 exact-name profile support is promoted only for the `sepolia-dev` deployment profile when `ens_v2_registrar_l1` declares `exact_name_profile = "supported"`. That promotion covers exact-name profile reads from the admitted `ETHRegistry` and `ETHRegistrar`; it does not graduate resolver-profile support, verified resolution, primary names, or history coverage.[^v2-ethreg][^v2-ethrc][^v2-iperm-l34][^v2-iethreg-l32]

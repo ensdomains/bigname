@@ -1,31 +1,34 @@
 # bigname end-to-end scenario tests
 
-This package tests the whole pipeline against a real local chain running the
-**pinned upstream contracts**. Where `tests/conformance` seeds synthetic rows
-directly into Postgres, this harness starts from actual contract emissions:
-it deploys the ENSv1 stack from the pinned `.refs/ens_v1` deployment
-artifacts onto a local anvil node, drives on-chain state transitions
-(registrations, transfers, expiry via time-warp), ingests them with the real
-`bigname-indexer run` loop, rebuilds projections with the real
-`bigname-worker`, and asserts against the real `bigname-api` binary over
-HTTP.
+This package exercises selected end-to-end paths against local EVM chains
+using contracts sourced from the pinned upstream checkouts. Where
+`tests/conformance` seeds synthetic rows directly into Postgres, this harness
+starts from actual contract emissions, drives on-chain state transitions, and
+checks the resulting raw facts, normalized events, projections, execution
+artifacts, or HTTP responses required by each scenario. Most scenarios use the
+real `bigname-indexer run` loop followed by one-shot projection replay and the
+real `bigname-api`; one focused smoke keeps `bigname-indexer run`,
+`bigname-worker run`, and the API live together.
 
 The two packages are complementary:
 
-- `tests/conformance` — fast, hermetic checks of route contracts, coverage
-  semantics, and replay determinism over hand-authored state.
-- `tests/e2e` — checks that our beliefs about upstream contract behavior are
-  true, by observing the pipeline ingest events emitted by the exact bytecode
-  upstream shipped.
+- `tests/conformance` — fast, hermetic ownership of public route contracts,
+  filter/mode/meta permutations, coverage semantics, and replay determinism
+  over hand-authored state.
+- `tests/e2e` — selected high-value checks that upstream-shaped contract
+  emissions cross the real process and storage boundaries as expected, using
+  deployments loaded from pinned upstream artifacts or built from pinned
+  upstream sources.
 
 ## Prerequisites
 
 - [foundry](https://getfoundry.sh) (`anvil` on `PATH`)
-- pinned upstream checkouts: `scripts/sync-refs`
+- pinned upstream checkouts: `scripts/sync-refs` (this also initializes the
+  recursive Basenames Forge-library submodules)
 - a test Postgres: run through `scripts/test-db`
 
 ```sh
-scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
+scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml -- --test-threads=8
 ```
 
 ## How a scenario runs
@@ -35,8 +38,9 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
    for ENSv1 scenarios, `ethereum-sepolia` for ENSv2 sepolia-dev, and
    `base-mainnet` for Basenames). Chain identity is the provider label; the
    local numeric chain id is only for realistic receipts.
-2. **Contracts** — `harness::ens_v1` deploys the mainnet ENSv1 topology from
-   pinned artifact bytecode (`.refs/ens_v1/deployments/`): the legacy
+2. **Contracts** — `harness::ens_v1` deploys an ENSv1 topology from prebuilt
+   creation bytecode in the pinned deployment artifacts
+   (`.refs/ens_v1/deployments/`): the legacy
    registry, the current registry deployed with the legacy registry as its
    constructor argument
    (upstream: .refs/ens_v1/deployments/sepolia/ENSRegistry.json:L414 @ ens_v1@91c966f),
@@ -45,30 +49,33 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
    (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L210 @ ens_v1@91c966f),
    the exponential-premium price oracle over upstream's own dummy USD oracle
    (upstream: .refs/ens_v1/contracts/ethregistrar/DummyOracle.sol:L3 @ ens_v1@91c966f),
-   reverse registrars, name wrapper, and public resolver. Deploying from
-   artifacts rather than re-compiling means the local chain runs byte-exact
-   upstream code; when `.refs` pins rotate, the harness re-verifies our
-   decoding against the new artifacts. `harness::basenames` deploys the
-   Base Registry, BaseRegistrar, RegistrarController, helper ReverseRegistrar,
-   and L2Resolver forge-built on demand from the pinned sources (the
+   reverse registrars, name wrapper, and public resolver. `harness::ens_v2`
+   likewise loads prebuilt creation bytecode from the pinned `sepolia-dev`
+   deployment artifacts under `.refs/ens_v2`. These artifact-backed stacks
+   avoid local recompilation, but scenario-local addresses, constructor
+   arguments, and wiring are not a claim that the resulting deployment is
+   byte-for-byte identical to production. `harness::basenames` instead deploys
+   the Base Registry, BaseRegistrar, RegistrarController, helper
+   ReverseRegistrar, and L2Resolver forge-built on demand from the pinned
+   sources (the
    committed broadcast bytecode predates the pinned tree and its
-   constructors differ; the pin vendors every forge lib, so the build is
-   offline and runs at most once per test process)
+   constructors differ; `scripts/sync-refs` checks out every pinned recursive
+   Forge-library submodule, and one incremental build runs per test process)
    with the script-declared `base.eth` and `80002105.reverse` wiring
    (upstream: .refs/basenames/script/deploy/DeployReverseRegistrar.s.sol:L19 @ basenames@1809bbc).
    The declared-primary contract is ENSv1's Base L2ReverseRegistrar artifact,
    whose deployment carries coin type `2147492101`
    (upstream: .refs/ens_v1/deployments/base/L2ReverseRegistrar.json:L391 @ ens_v1@91c966f).
-3. **Manifests** — `harness::manifests` copies **every version file** of
-   the shipped `manifests/mainnet/ethereum/ens` family manifests and
-   re-points each declared root/role at its locally deployed address and
-   real deploy block. Rollout statuses, capability flags, ABI declarations,
-   and discovery rules are preserved verbatim, so admission semantics stay
-   identical to production — including the active registry v3 manifest with
-   its old-registry role. (Mirroring only `v1.toml` once produced a false
-   "production doesn't watch the registry" finding; completeness here is
-   load-bearing.) Roles a scenario does not deploy get placeholder
-   addresses (no code, no logs). Execution-plane ENS scenarios also mirror
+3. **Manifests** — `harness::manifests` copies the checked-in version files
+   for the selected manifest families. It preserves rollout statuses,
+   capability flags, ABI declarations, and discovery-rule structure while
+   substituting scenario-local contract identities and start blocks. Roles a
+   scenario does not deploy get deterministic placeholder addresses with no
+   code or logs. The mirror is structurally faithful to the selected checked-in
+   families, but it is not production-identity-equivalent and a silent
+   placeholder does not test that role's behavior. The ENSv1 mirror includes
+   the active registry v3 manifest and its old-registry role. Execution-plane
+   ENS scenarios also mirror
    `ens_execution` when they supply a local `universal_resolver` target; the
    base ENSv1 scenarios keep execution manifests out of the generated profile.
    Basenames scenarios mirror the shipped
@@ -78,26 +85,44 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
    execution-plane row runs yet. ENSv2 scenarios mirror the shipped
    `manifests/sepolia/ethereum/ens` families into a generated
    `manifests-sepolia` root so the selected profile remains the sepolia-dev
-   one. Cross-protocol scenarios mirror the FULL mainnet profile — all
-   eleven families across both chains, including the two ethereum-chain
-   glue families (`basenames_l1_compat`, `basenames_execution`) — into one
-   root and run a single live session over two anvils, waiting each
-   chain's canonical checkpoint. Nothing under the checked-in `manifests/`
-   tree changes.
-4. **Pipeline** — `harness::pipeline` runs the real binaries: an
-   `indexer run` live-intake session supervised until the canonical
-   checkpoint reaches the scenario head (the live loop, not `backfill`, is
+   one. Cross-protocol scenarios structurally mirror the eleven currently
+   checked-in mainnet families across both chains, including the two
+   ethereum-chain glue families (`basenames_l1_compat`,
+   `basenames_execution`), into one generated root and run a single live
+   session over two anvils. Nothing under the checked-in `manifests/` tree
+   changes.
+4. **Pipeline** — most scenarios run an `indexer run` live-intake session
+   supervised until the canonical checkpoint reaches the scenario head (the
+   live loop, not `backfill`, is
    what promotes checkpoints that snapshot-selected API reads require), then
    `worker replay all-current-projections`, then `bigname-api serve` on a
-   local port. Execution-plane scenarios start the API with
-   `--chain-rpc-url ethereum-mainnet=<anvil>` so on-demand verified
-   resolution executes against the selected stored snapshot. An
-   `indexer backfill` entry point is also provided for future
-   backfill-vs-live parity scenarios.
-5. **Assertions** — each scenario checkpoint asserts at the validation
-   layers named in `docs/architecture.md` § Test matrix: persisted raw logs,
-   canonical normalized events, execution traces (once an execution-plane
-   scenario exists), and public API output over HTTP.
+   local port. The
+   `register_eth_name::live_worker_applies_registration_and_renewal_while_api_serves`
+   smoke instead keeps the production `worker run` loop active with the
+   indexer and API, proving bootstrap handoff and continuous projection apply
+   for one registration/renewal path. Execution-plane scenarios start the API
+   with `--chain-rpc-url ethereum-mainnet=<anvil>` so on-demand verified
+   resolution executes against the selected stored snapshot. Backfill helpers
+   exercise raw-fact-to-normalized-event and projection rebuild boundaries
+   where canonical checkpoints intentionally make API reads unavailable.
+5. **Assertions** — each scenario asserts the validation layers material to
+   its claim. Many cover persisted raw logs, canonical normalized events,
+   rebuilt projections, and public HTTP output; the verified-resolution
+   scenario also checks durable execution traces, steps, and cache outcomes.
+   Backfill-only cases stop before HTTP rather than implying route coverage.
+
+## Coverage ownership
+
+| Evidence question | Owning suite |
+| --- | --- |
+| Public status/body schema, filters, modes, metadata levels, pagination, unsupported behavior, and route permutations across the full documented `v1` surface | `tests/conformance` |
+| Selected upstream-shaped lifecycle, admission, replay, reorg, projection, execution, and cross-protocol paths through real binaries and storage | `tests/e2e` |
+| High-value HTTP integration smokes, including exact-name reads, `GET /v1/status`, and `POST /v1/identity:lookup` | Selected `tests/e2e` scenarios; conformance still owns their contract permutations |
+| Most scenario projection state | `tests/e2e` via one-shot `worker replay all-current-projections` |
+| Continuous production projection apply while indexer and API remain live | The focused `register_eth_name::live_worker_applies_registration_and_renewal_while_api_serves` smoke |
+
+The e2e scenario list is deliberately risk-weighted. It is not an exhaustive
+route inventory or a claim that every protocol transition is covered.
 
 ## Scenarios
 
@@ -106,6 +131,13 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
   age) and asserts raw-log persistence, canonical normalized event kinds,
   and the exact-name route's registration/coverage output. Verified
   resolution is out of scope: no execution RPC is configured.
+- `register_eth_name::live_worker_applies_registration_and_renewal_while_api_serves`
+  — starts the production indexer, worker, and API loops together, registers
+  and then renews `liveworker.eth` after startup, and waits for continuous
+  projection apply before checking each exact-name result. It also smokes
+  `POST /v1/identity:lookup` against the live name and confirms
+  `GET /v1/status` reports ready. This is the production worker-loop smoke;
+  the broader scenario matrix uses deterministic one-shot projection replay.
 - `registry_driven_reads` — registry-sourced declared state under the
   shipped profile: declared resolver bindings, registry owner,
   record-inventory selectors, and registry-only subnames appearing as
@@ -235,10 +267,15 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
 - `wrapper::wrapper_wrap_fuses_subnames_and_unwrap_restore_identity` —
   wraps registrar names through the pinned NameWrapper, asserts wrapper
   resource/token-lineage rotation, burns `CANNOT_UNWRAP`,
-  `CANNOT_TRANSFER`, and `CANNOT_SET_RESOLVER` to pin effective-power
-  masking, creates wrapped subnames with `PARENT_CANNOT_CONTROL`, checks
-  wrapper expiry vs registrar expiry, and unwraps a separate name before
-  lease end to confirm the prior registrar resource and lineage reactivate.
+  `CANNOT_TRANSFER`, and `CANNOT_SET_RESOLVER`, and pins the emitted
+  `PermissionScopeChanged` fuse bitmaps. It also exposes the current
+  publication gap: wrapper-backed resources have no holder subject grants or
+  published masked `effective_powers`, while a wrap-of-existing-name retains
+  stale control facets. The scenario therefore does not claim effective-power
+  masking is published. It creates wrapped subnames with
+  `PARENT_CANNOT_CONTROL`, checks wrapper expiry vs registrar expiry, and
+  unwraps a separate name before lease end to confirm the prior registrar
+  resource and lineage reactivate.
 - `wrapper_turn_k::born_wrapped_registration_exposes_trailing_grant_rebind`
   — deploys and authorises the manifest-admitted mainnet
   WrappedETHRegistrarController artifact, registers through its flat
@@ -339,9 +376,9 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
 - `basenames_turn_m::l2_resolver_records_clear_and_contenthash_gap` — writes
   text, non-60 multicoin address, and name records in separate transactions,
   then clears them and pins keyed state plus the version boundary. A
-  contenthash write on the same admitted resolver is topic-filtered from raw
-  intake, derives no normalized event, and remains the explicit
-  `not_observed_on_current_resolver` inventory gap
+  contenthash write on the same watched resolver is retained as a raw log,
+  but resolver-family admission rejects normalized derivation; it remains the
+  explicit `not_observed_on_current_resolver` inventory gap
   (upstream: .refs/basenames/src/L2/resolver/ResolverBase.sol:L35 @ basenames@1809bbc)
   (upstream: .refs/basenames/src/L2/resolver/ContentHashResolver.sol:L32 @ basenames@1809bbc)
   (upstream: .refs/basenames/src/L2/resolver/ContentHashResolver.sol:L34 @ basenames@1809bbc).
@@ -375,14 +412,22 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
   commit/reveal ETHRegistrar, and asserts identity/registration/control
   under `ethereum-sepolia`, role-driven token regeneration and current
   permission rows, and subregistry attach/swap behavior across two
-  ingests. Pins three review points recorded in the ledger: freshly
-  registered names report shadow coverage despite the documented full
-  promotion; discovered child-registry logs are never scanned in-session;
-  and unregister→re-register wedges intake when ingested (exercised
-  on-chain only, post-ingest).
+  ingests. Fresh registration confirms the promoted exact-name profile end
+  to end (`full`, `authoritative`, and `exact_name_profile`). It retains two
+  review points recorded in the ledger: discovered child-registry logs are
+  never scanned in-session, and unregister→re-register wedges intake when
+  ingested (exercised on-chain only, post-ingest). The on-chain cycle rotates
+  both resource and token lineage: `unregister` burns the token and increments
+  both `eacVersionId` and `tokenVersionId`, from which the registry
+  reconstructs later resource and token IDs
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L237 @ ens_v2@554c309)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L241 @ ens_v2@554c309)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L242 @ ens_v2@554c309)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L542 @ ens_v2@554c309)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L547 @ ens_v2@554c309).
 - `ens_v2_turn_l::renewal_promotes_coverage_and_registry_edges_follow` —
-  registrar renewal derives both fragments and CONFIRMS the coverage
-  promotion end to end (the shadow lifts once a renewal lands); a direct
+  registrar renewal derives both fragments and preserves the promoted
+  exact-name coverage end to end; a direct
   registry renew emits `ExpiryUpdated` alone on the wire but derives both
   `ExpiryChanged` and a registry-family `RegistrationRenewed`; expiry
   reduction reverts upstream
@@ -425,22 +470,25 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
   calls the public profile route with API chain RPC pointed at anvil.
   It asserts declared and verified values match, plus persisted
   `execution_traces`, `execution_steps`, and `execution_cache_outcomes`
-  rows, and pins two review points: execution targets a hardcoded Universal
-  Resolver address rather than the manifest role, and explain readback of
-  the on-demand persisted outcome 404s (write-side and read-side cache keys
-  disagree — see the ledger).
-- `perturbations::*` — one moderately rich ENSv1 chain shape (`perturb.eth`
-  registration, addr/text records, and a registry-only subname) run through
-  the phase-3 multipliers: projection replay plus normalized-event replay,
-  indexer restart after the first live checkpoint, backfill-from-zero
-  normalized-event digest parity, and a live same-session reorg that converges
-  to the winning branch while retaining orphaned losing-branch audit rows.
+  rows, and successful explain readback with the same execution trace. The
+  harness installs the local runtime at bigname's frozen official Universal
+  Resolver proxy address; this validates that admitted entrypoint class, not
+  arbitrary local substitution of the execution role address.
+- `perturbations::*` — one representative, moderately rich ENSv1 chain shape
+  (`perturb.eth` registration, addr/text records, and a registry-only subname)
+  run through the phase-3 multipliers: projection replay plus
+  normalized-event replay, indexer restart after the first live checkpoint,
+  backfill-from-zero normalized-event digest parity, and a live same-session
+  reorg that converges to the winning branch while retaining orphaned
+  losing-branch audit rows.
   Backfill parity is intentionally asserted at `normalized_events`, not API
   routes, because the backfill command does not promote canonical checkpoints
-  required by snapshot-selected reads.
+  required by snapshot-selected reads. These multipliers validate that one
+  corpus; they are not applied to every scenario or protocol.
 - `cross_protocol::composed_mainnet_profile_serves_both_protocols_without_leakage`
-  — ingests the full shipped mainnet profile (ENSv1 ethereum + Basenames
-  base + the ethereum-chain glue families) as ONE corpus over two anvils:
+  — ingests a generated structural mirror of the currently checked-in mainnet
+  families (ENSv1 ethereum + Basenames base + the ethereum-chain glue
+  families) as one corpus over two anvils:
   per-chain checkpoints coexist, each protocol's exact-name body equals its
   single-protocol baseline after normalizing corpus-minted identifiers
   (`authority_key`'s third segment is the per-corpus contract-instance
@@ -463,7 +511,7 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
 - `BIGNAME_E2E_READY_TIMEOUT_SECS` shortens the 600s readiness deadline
   when reproducing intake wedges locally.
 - Full local runs are most stable with bounded parallelism
-  (`-- --test-threads=8`): every scenario spawns an anvil plus three
+  (`-- --test-threads=8`): most scenarios spawn an anvil plus several
   pipeline processes, and unbounded parallelism saturates the shared
   postgres into pool-acquire timeouts in unrelated tests. The harness caps
   each spawned binary's pool via `BIGNAME_DATABASE_MAX_CONNECTIONS` and
@@ -472,12 +520,13 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
 
 ## Extending
 
-The scenario matrices, perturbation multipliers, harness roadmap, and
-phasing live in [`docs/internal/e2e-testing-plan.md`](../../docs/internal/e2e-testing-plan.md)
-— that document is the coverage ledger; update it in the same change that
-adds or unblocks a scenario. Scenarios are ordered on-chain action scripts
-with named checkpoints; prefer one scenario per lifecycle path over one per
-event.
+The scenario matrices, representative perturbation multipliers, harness
+roadmap, and phasing live in
+[`docs/internal/e2e-testing-plan.md`](../../docs/internal/e2e-testing-plan.md)
+— that document is the scenario ledger, not an exhaustiveness guarantee;
+update it in the same change that adds or unblocks a scenario. Scenarios are
+ordered on-chain action scripts with named checkpoints; prefer one scenario
+per lifecycle path over one per event.
 
 Keep upstream behavior claims cited to pinned `.refs/` sources; uncited
 claims get rejected in review (AGENTS.md § Upstream anchors).
