@@ -1,12 +1,16 @@
 mod basenames;
 mod ens_v2;
 mod lifecycle;
+mod lifecycle_divergence;
 mod perturbations;
 mod register_eth_name;
+mod registration_burst;
 mod registry_driven_reads;
 mod registry_migration;
+mod registry_preimages;
 mod resolver_records;
 mod reverse_primary;
 mod support;
+mod unadmitted_controller;
 mod verified_resolution;
 mod wrapper;

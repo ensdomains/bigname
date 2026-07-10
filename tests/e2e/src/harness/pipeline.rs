@@ -11,7 +11,37 @@ use tokio::process::{Child, Command};
 /// runs reuse the build cache.
 fn cargo() -> Command {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    Command::new(cargo)
+    let mut command = Command::new(cargo);
+    // E2e corpora are tiny, but every spawned binary defaults to a
+    // 10-connection pool; under suite parallelism that exhausts the shared
+    // test postgres (max_connections 100) and surfaces as pool-acquire
+    // timeouts in unrelated tests.
+    command.env("BIGNAME_DATABASE_MAX_CONNECTIONS", "4");
+    command
+}
+
+/// Build the three pipeline binaries once per test process before any session
+/// spawns. Concurrent in-test `cargo run` calls otherwise convoy behind the
+/// workspace build lock whenever fingerprints flipped (sqlx tracks
+/// DATABASE_URL, so alternating bare and `scripts/test-db` cargo invocations
+/// rebuilds the graph), and readiness deadlines burn while queued.
+fn ensure_pipeline_binaries_built(repo_root: &Path) {
+    static BUILT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    BUILT.get_or_init(|| {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+        for manifest in [
+            "apps/indexer/Cargo.toml",
+            "apps/worker/Cargo.toml",
+            "apps/api/Cargo.toml",
+        ] {
+            let status = std::process::Command::new(&cargo)
+                .current_dir(repo_root)
+                .args(["build", "--quiet", "--manifest-path", manifest])
+                .status()
+                .unwrap_or_else(|error| panic!("spawn cargo build for {manifest}: {error}"));
+            assert!(status.success(), "cargo build failed for {manifest}");
+        }
+    });
 }
 
 async fn run_to_completion(mut command: Command, what: &str) -> Result<String> {
@@ -93,6 +123,7 @@ impl IndexerRunSession {
         chain_rpc_urls: &[ChainRpcUrl<'_>],
         log_label: &str,
     ) -> Result<Self> {
+        ensure_pipeline_binaries_built(repo_root);
         // Output goes to a log file, not a pipe: the run loop can out-write an
         // undrained pipe buffer and block, deadlocking the session.
         let log_path = indexer_log_path(log_label);
@@ -172,7 +203,12 @@ impl IndexerRunSession {
         extra_ready_sql: Option<&str>,
     ) -> Result<()> {
         // First iterations may sit behind a cargo build of the indexer crate.
-        let deadline = std::time::Instant::now() + Duration::from_secs(600);
+        // Override for local wedge reproduction; CI uses the default.
+        let ready_timeout_secs = std::env::var("BIGNAME_E2E_READY_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(600);
+        let deadline = std::time::Instant::now() + Duration::from_secs(ready_timeout_secs);
         loop {
             self.bail_if_exited()?;
             let checkpoint = canonical_checkpoint(pool, chain).await?;
@@ -274,6 +310,7 @@ pub async fn indexer_backfill_with_chain_rpc_urls(
     manifests_root: &Path,
     target: ChainBackfillTarget<'_>,
 ) -> Result<String> {
+    ensure_pipeline_binaries_built(repo_root);
     let chain_rpc_urls = format_chain_rpc_urls(target.chain_rpc_urls);
     let from_block = target.block_range.start().to_string();
     let to_block = target.block_range.end().to_string();
@@ -414,6 +451,7 @@ pub async fn indexer_replay_normalized_events(
     database_url: &str,
     to_block: u64,
 ) -> Result<String> {
+    ensure_pipeline_binaries_built(repo_root);
     let mut command = cargo();
     command.current_dir(repo_root).args([
         "run",
@@ -441,6 +479,7 @@ pub async fn worker_replay_all_current_projections(
     repo_root: &Path,
     database_url: &str,
 ) -> Result<String> {
+    ensure_pipeline_binaries_built(repo_root);
     let mut command = cargo();
     command.current_dir(repo_root).args([
         "run",
@@ -473,6 +512,7 @@ impl ApiServer {
         database_url: &str,
         chain_rpc_urls: &[ChainRpcUrl<'_>],
     ) -> Result<Self> {
+        ensure_pipeline_binaries_built(repo_root);
         let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
         let bind_addr = format!("127.0.0.1:{port}");
         let mut command = cargo();

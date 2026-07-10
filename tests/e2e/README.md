@@ -110,6 +110,11 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
   the same backing resource; the two-transaction transfer→reclaim pair
   opens a genuine registry-owner divergence window (transient anchor) and
   converges back to the original registrar resource.
+- `lifecycle_divergence::transfer_without_reclaim_keeps_registry_owner_divergent`
+  — leaves the registrar token holder and registry owner split by omitting
+  the separate reclaim call
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172 @ ens_v1@91c966f),
+  then pins the registry-only exact binding and the address-collection gap.
 - `lifecycle::expiry_grace_and_reregistration_rotate_identity` — ingests
   the same chain twice: once inside the grace window (registration stays
   `active` with a past expiry; no wire-level grace status) and once after a
@@ -125,6 +130,21 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
   log-bearing blocks), and the first unrelated post-grace activity lets the
   next sync round derive the release, flip exact-name to `released`, and
   drop the name from the current registrant collection.
+- `registration_burst::registration_with_records_reverse_and_referrer_derives_single_burst`
+  — supplies controller registration data and the Ethereum reverse bit,
+  deriving registrar, registry, resolver, and reverse facts from one
+  transaction
+  (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L307 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L319 @ ens_v1@91c966f);
+  the nonzero referrer is decoded from the retained controller log
+  (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L340 @ ens_v1@91c966f),
+  while record authorship is pinned to that controller transaction and the
+  normalized record shape's explicit lack of a writer field. Pins the
+  chipped anchor-rebind review point: the burst's records derive only under
+  the transient registry-only resource, so exact-name serves an empty
+  selector inventory with explicit gaps and the mid-burst controller as
+  registry_owner; a second ingest shows later plain writes restoring the
+  inventory while the stale owner facet persists.
 - `registry_driven_reads::same_label_under_two_parents_keeps_children_distinct`
   — creates `sub` under two registered parents and asserts separate child
   namehashes/owners with no cross-parent leakage.
@@ -136,6 +156,31 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
 - `registry_driven_reads::zero_owner_subname_leaves_default_children_listing`
   — creates and then zeroes a registry-only subname, asserting the tombstoned
   child leaves the default parent children listing.
+- `registry_preimages::registry_only_non_eth_tree_derives_declared_state` —
+  builds `leaf.xyz` entirely through registry ownership
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75 @ ens_v1@91c966f),
+  then uses admitted reverse `NameChanged` text
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L18 @ ens_v1@91c966f)
+  to release the already-observed forward resolver and record facts into a
+  registry-only exact surface.
+- `registry_preimages::label_preimage_revealed_later_upgrades_child_listing`
+  — observes a label through a later controller registration
+  (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L334 @ ens_v1@91c966f),
+  upgrades the bracketed child display, and confirms that label proof alone
+  does not mint an exact-name surface. Phase 2 pins the reveal via
+  backfill + projection replay because live re-ingest of the reveal chain
+  hangs the run loop before checkpoint promotion (chipped review point);
+  `BIGNAME_E2E_READY_TIMEOUT_SECS` shortens the readiness deadline when
+  reproducing that wedge.
+- `unadmitted_controller::unadmitted_controller_registration_derives_registry_side_only`
+  — adds a fresh EOA as a registrar controller and registers directly on
+  the registrar
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L110 @ ens_v1@91c966f):
+  registrar-plane facts persist raw-only (no lease events derive, not even
+  `TokenControlTransferred` — fresh mints have no existing lease), exactly
+  one registry-side `SubregistryChanged` derives, the child stays a
+  bracketed placeholder, and no exact-name surface or registrant-collection
+  entry appears.
 - `registry_migration::registry_migration_legacy_to_current_admission` —
   exercises the active registry v3 old-registry role end to end: a pure
   legacy 2LD derives subregistry state without minting an exact-name surface,

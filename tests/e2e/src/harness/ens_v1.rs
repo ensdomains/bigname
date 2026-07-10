@@ -17,6 +17,7 @@ use super::rpc::RpcClient;
 // (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L210 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L352 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/ethregistrar/IPriceOracle.sol:L5 @ ens_v1@91c966f)
+// (upstream: .refs/ens_v1/contracts/root/Controllable.sol:L18 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L26 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/resolvers/profiles/ContenthashResolver.sol:L14 @ ens_v1@91c966f)
 // (upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L15 @ ens_v1@91c966f)
@@ -28,6 +29,7 @@ sol! {
     function owner(bytes32 node) external view returns (address);
     function setResolver(bytes32 node, address resolver) external;
     function addController(address controller) external;
+    function setController(address controller, bool enabled) external;
     function reclaim(uint256 id, address owner) external;
     function transferFrom(address from, address to, uint256 tokenId) external;
     function renew(string label, uint256 duration, bytes32 referrer) external payable;
@@ -193,6 +195,8 @@ pub struct EnsV1Deployment {
 }
 
 pub const EXECUTION_UNIVERSAL_RESOLVER_ADDRESS: &str = "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe";
+// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L27 @ ens_v1@91c966f)
+pub const REVERSE_RECORD_ETHEREUM: u8 = 1;
 
 pub async fn deploy_ens_v1(rpc: &RpcClient, repo_root: &Path) -> Result<EnsV1Deployment> {
     let accounts = rpc.accounts().await?;
@@ -328,7 +332,7 @@ pub async fn deploy_ens_v1(rpc: &RpcClient, repo_root: &Path) -> Result<EnsV1Dep
         reverse_registrar,
         name_wrapper,
     };
-    let controller_calls = [
+    let registrar_controller_calls = [
         addControllerCall {
             controller: deployment.controller.address,
         }
@@ -338,9 +342,21 @@ pub async fn deploy_ens_v1(rpc: &RpcClient, repo_root: &Path) -> Result<EnsV1Dep
         }
         .abi_encode(),
     ];
-    for data in controller_calls {
+    for data in registrar_controller_calls {
         send_checked(rpc, deployer, deployment.base_registrar.address, &data).await?;
     }
+    // (upstream: .refs/ens_v1/deploy/ethregistrar/04_deploy_eth_registrar_controller.ts:L78 @ ens_v1@91c966f)
+    send_checked(
+        rpc,
+        deployer,
+        deployment.reverse_registrar.address,
+        &setControllerCall {
+            controller: deployment.controller.address,
+            enabled: true,
+        }
+        .abi_encode(),
+    )
+    .await?;
     Ok(deployment)
 }
 
@@ -696,9 +712,9 @@ pub async fn renew_eth_name(
     Ok(())
 }
 
-/// Transfer the registrar token for `<label>.eth` and reclaim registry
-/// ownership for the new holder.
-pub async fn transfer_eth_name(
+/// Transfer the registrar token for `<label>.eth` without reclaiming registry
+/// ownership (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172 @ ens_v1@91c966f).
+pub async fn transfer_eth_name_without_reclaim(
     rpc: &RpcClient,
     d: &EnsV1Deployment,
     from: Address,
@@ -717,7 +733,20 @@ pub async fn transfer_eth_name(
         }
         .abi_encode(),
     )
-    .await?;
+    .await
+}
+
+/// Transfer the registrar token for `<label>.eth` and reclaim registry
+/// ownership for the new holder.
+pub async fn transfer_eth_name(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    to: Address,
+    label: &str,
+) -> Result<()> {
+    transfer_eth_name_without_reclaim(rpc, d, from, to, label).await?;
+    let token_id = U256::from_be_bytes(labelhash(label).0);
     send_checked(
         rpc,
         to,
@@ -725,6 +754,55 @@ pub async fn transfer_eth_name(
         &reclaimCall {
             id: token_id,
             owner: to,
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+mod registrar_direct {
+    use alloy_sol_types::sol;
+
+    sol! {
+        function register(uint256 id, address owner, uint256 duration) external returns (uint256);
+    }
+}
+
+/// Authorise an extra registrar controller from the registrar owner
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L79 @ ens_v1@91c966f).
+pub async fn add_registrar_controller(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    controller: Address,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        d.deployer,
+        d.base_registrar.address,
+        &addControllerCall { controller }.abi_encode(),
+    )
+    .await
+}
+
+/// Register `<label>.eth` directly on the registrar as an authorised
+/// controller, bypassing the admitted string-label controllers
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L110 @ ens_v1@91c966f).
+pub async fn register_via_registrar(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    sender: Address,
+    label: &str,
+    owner: Address,
+    duration_secs: u64,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        sender,
+        d.base_registrar.address,
+        &registrar_direct::registerCall {
+            id: U256::from_be_bytes(labelhash(label).0),
+            owner,
+            duration: U256::from(duration_secs),
         }
         .abi_encode(),
     )
@@ -966,6 +1044,34 @@ pub struct RegisteredName {
     pub owner: Address,
     pub commit_block: u64,
     pub register_block: u64,
+    pub register_tx_hash: String,
+}
+
+#[derive(Default)]
+pub struct RegistrationOptions {
+    pub data: Vec<Bytes>,
+    pub reverse_record: u8,
+    pub referrer: B256,
+}
+
+pub fn registration_addr_record_data(name: &str, target: Address) -> Bytes {
+    multicoin_addr_calls::setAddrCall {
+        node: namehash(name),
+        coinType: U256::from(60),
+        addressBytes: Bytes::copy_from_slice(target.as_slice()),
+    }
+    .abi_encode()
+    .into()
+}
+
+pub fn registration_text_record_data(name: &str, key: &str, value: &str) -> Bytes {
+    setTextCall {
+        node: namehash(name),
+        key: key.to_owned(),
+        value: value.to_owned(),
+    }
+    .abi_encode()
+    .into()
 }
 
 /// Register `<label>.eth` through the pinned registrar controller's
@@ -978,15 +1084,36 @@ pub async fn register_eth_name(
     duration_secs: u64,
     resolver: Address,
 ) -> Result<RegisteredName> {
+    register_eth_name_with_options(
+        rpc,
+        d,
+        label,
+        owner,
+        duration_secs,
+        resolver,
+        RegistrationOptions::default(),
+    )
+    .await
+}
+
+pub async fn register_eth_name_with_options(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    label: &str,
+    owner: Address,
+    duration_secs: u64,
+    resolver: Address,
+    options: RegistrationOptions,
+) -> Result<RegisteredName> {
     let registration = Registration {
         label: label.to_string(),
         owner,
         duration: U256::from(duration_secs),
         secret: B256::repeat_byte(0x42),
         resolver,
-        data: vec![],
-        reverseRecord: 0,
-        referrer: B256::ZERO,
+        data: options.data,
+        reverseRecord: options.reverse_record,
+        referrer: options.referrer,
     };
 
     let commitment_raw = rpc
@@ -1047,5 +1174,6 @@ pub async fn register_eth_name(
         owner,
         commit_block: commit_receipt.block_number,
         register_block: register_receipt.block_number,
+        register_tx_hash: register_receipt.tx_hash,
     })
 }

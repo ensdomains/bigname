@@ -292,6 +292,20 @@ pub async fn serve_existing_db(db: HarnessDb, scratch: TempDir) -> Result<Pipeli
     })
 }
 
+/// Backfill-derive the chain and rebuild projections without a live run.
+/// Used where live re-ingest of a chain wedges the run loop (see the
+/// preimage-reveal review point); API serving is impossible on this path
+/// because backfill does not promote canonical checkpoints.
+pub async fn backfill_and_replay_projections(
+    anvil: &Anvil,
+    deployment: &EnsV1Deployment,
+    idempotency_key: &str,
+) -> Result<BackfillRun> {
+    let run = backfill_normalized_events(anvil, deployment, idempotency_key).await?;
+    pipeline::worker_replay_all_current_projections(&repo_root(), &run.db.url).await?;
+    Ok(run)
+}
+
 pub async fn route_snapshots(
     run: &PipelineRun,
     subjects: &perturb::RouteSnapshotSubjects,
