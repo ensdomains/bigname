@@ -177,18 +177,15 @@ async fn select_stored_promotion_anchor(
         if let Some(provider_block) = resolved
             .iter()
             .find(|block| block.block_number == stored_frontier.block_number)
-        {
-            if provider_block
+            && provider_block
                 .block_hash
                 .eq_ignore_ascii_case(&stored_frontier.block_hash)
-            {
-                let provider_anchor_hash = provider_block.block_hash.clone();
-                return Ok(Some((stored_frontier, provider_anchor_hash)));
-            }
-            // Hash mismatch: the stored frontier tip is not on the provider's
-            // canonical chain (stale fork tip); fall back to the parent walk,
-            // which can still find a lower stored ancestor.
+        {
+            let provider_anchor_hash = provider_block.block_hash.clone();
+            return Ok(Some((stored_frontier, provider_anchor_hash)));
         }
+        // Hash mismatch (stale fork tip) or unresolved height: fall back to
+        // the parent walk, which can still find a lower stored ancestor.
     }
 
     for candidate in candidates {
