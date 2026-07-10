@@ -531,8 +531,10 @@ Backfill idempotency is derived from deployment profile, chain, finite range, sc
 `(source_family, address)` tuples had their logs fetched over which block
 interval — durable fetch evidence derived from the job's own in-memory
 selector plan at completion time, in the same transaction as the job status
-flip. Checkpoint promotion consumes these rows instead of recomputing
-selector plans from persisted identities.
+flip. These rows exist to back checkpoint promotion, which will consume them
+instead of recomputing selector plans from persisted identities once the
+promotion rework (PR #125) lands; until then they are written but not yet
+read by promotion.
 
 - Scope semantics: `scope=address` rows carry the lowercased emitting
   address and cover exactly that tuple. `scope=family` rows carry a NULL
