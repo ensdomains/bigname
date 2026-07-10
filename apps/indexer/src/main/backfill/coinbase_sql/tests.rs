@@ -9,6 +9,7 @@ use sqlx::types::Uuid;
 
 use super::{
     coinbase_sql_logs_need_validation_provider_payload,
+    pagination::{CoinbaseSqlLogCursor, append_page_rows, ensure_full_page_advanced_cursor},
     planner::build_filter_packs,
     push_deduped_log,
     query::{CoinbaseSqlFilterPack, build_or_split_filter_pack, build_query},
@@ -17,7 +18,7 @@ use super::{
 use crate::{
     backfill::{
         BackfillBlockRange, BackfillTopicPlan, COINBASE_SQL_RESULT_SET_CAP,
-        CoinbaseSqlBackfillConfig, CoinbaseSqlValidationMode,
+        CoinbaseSqlBackfillConfig, CoinbaseSqlFetchStats, CoinbaseSqlValidationMode,
         DEFAULT_COINBASE_SQL_QUERY_CHAR_LIMIT, HistoricalLogPayloadRequest,
         reservation_execution::{
             backfill_job_source_identity_payload, coinbase_sql_backfill_job_source_identity_payload,
@@ -1221,4 +1222,257 @@ fn row_validation_rejects_block_hash_mismatch() -> Result<()> {
         .expect_err("mismatched validation-provider block hash must fail");
     assert!(format!("{error:?}").contains("validation provider resolved"));
     Ok(())
+}
+
+const DEDUP_TRANSACTION_HASH: &str =
+    "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const DEDUP_TOPIC1: &str = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+
+fn union_arm_row(
+    log_index: i64,
+    decoded: bool,
+    transaction_hash: &str,
+    topic1: &str,
+) -> Result<CoinbaseSqlLogRow> {
+    let mut object = json!({
+        "block_number": 10,
+        "block_hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transaction_hash": transaction_hash,
+        "transaction_index": 1,
+        "log_index": log_index,
+        "emitting_address": "0x1111111111111111111111111111111111111111",
+        "event_signature": null,
+        "parameters": null,
+        "topics": [
+            "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            topic1
+        ]
+    });
+    if decoded {
+        object["event_signature"] = json!("NewOwner(bytes32,bytes32,address)");
+        object["parameters"] = json!({
+            "owner": "0x2222222222222222222222222222222222222222"
+        });
+    }
+    CoinbaseSqlLogRow::from_value(object)
+}
+
+fn decoded_union_row(log_index: i64) -> Result<CoinbaseSqlLogRow> {
+    union_arm_row(log_index, true, DEDUP_TRANSACTION_HASH, DEDUP_TOPIC1)
+}
+
+fn encoded_union_row(log_index: i64) -> Result<CoinbaseSqlLogRow> {
+    union_arm_row(log_index, false, DEDUP_TRANSACTION_HASH, DEDUP_TOPIC1)
+}
+
+#[test]
+fn pagination_drops_byte_identical_union_duplicate_rows() -> Result<()> {
+    let mut rows = Vec::new();
+    let mut previous_cursor = None;
+    let mut stats = CoinbaseSqlFetchStats::default();
+
+    append_page_rows(
+        &mut rows,
+        &mut previous_cursor,
+        vec![
+            decoded_union_row(2)?,
+            decoded_union_row(2)?,
+            decoded_union_row(3)?,
+        ],
+        &mut stats,
+    )?;
+
+    assert_eq!(rows, vec![decoded_union_row(2)?, decoded_union_row(3)?]);
+    assert_eq!(stats.union_duplicate_count, 1);
+    Ok(())
+}
+
+#[test]
+fn pagination_prefers_decoded_union_rows_in_both_arrival_orders() -> Result<()> {
+    for page in [
+        vec![decoded_union_row(2)?, encoded_union_row(2)?],
+        vec![encoded_union_row(2)?, decoded_union_row(2)?],
+    ] {
+        let mut rows = Vec::new();
+        let mut previous_cursor = None;
+        let mut stats = CoinbaseSqlFetchStats::default();
+
+        append_page_rows(&mut rows, &mut previous_cursor, page, &mut stats)?;
+
+        assert_eq!(rows, vec![decoded_union_row(2)?]);
+        assert!(
+            !rows[0].requires_validation_provider_data,
+            "the decoded shape must win regardless of arrival order"
+        );
+        assert_eq!(stats.union_duplicate_count, 1);
+    }
+    Ok(())
+}
+
+#[test]
+fn pagination_deduplicates_union_rows_across_page_boundaries() -> Result<()> {
+    let mut rows = Vec::new();
+    let mut previous_cursor = None;
+    let mut stats = CoinbaseSqlFetchStats::default();
+
+    // Page cursors are exclusive lower bounds, so a page normally never
+    // re-serves its predecessor's tail tuple; if the warehouse does repeat
+    // it, the fold must reconcile rather than fail the fetch.
+    append_page_rows(
+        &mut rows,
+        &mut previous_cursor,
+        vec![decoded_union_row(1)?, encoded_union_row(2)?],
+        &mut stats,
+    )?;
+    append_page_rows(
+        &mut rows,
+        &mut previous_cursor,
+        vec![decoded_union_row(2)?, decoded_union_row(3)?],
+        &mut stats,
+    )?;
+
+    assert_eq!(
+        rows,
+        vec![
+            decoded_union_row(1)?,
+            decoded_union_row(2)?,
+            decoded_union_row(3)?
+        ]
+    );
+    assert_eq!(stats.union_duplicate_count, 1);
+    Ok(())
+}
+
+#[test]
+fn pagination_rejects_conflicting_duplicate_rows() -> Result<()> {
+    let conflicting_pages = [
+        vec![
+            decoded_union_row(2)?,
+            union_arm_row(
+                2,
+                true,
+                "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                DEDUP_TOPIC1,
+            )?,
+        ],
+        vec![
+            decoded_union_row(2)?,
+            union_arm_row(
+                2,
+                false,
+                DEDUP_TRANSACTION_HASH,
+                "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            )?,
+        ],
+    ];
+    for page in conflicting_pages {
+        let mut rows = Vec::new();
+        let mut previous_cursor = None;
+        let mut stats = CoinbaseSqlFetchStats::default();
+
+        let error = append_page_rows(&mut rows, &mut previous_cursor, page, &mut stats)
+            .expect_err("conflicting duplicate content must fail the fetch");
+        assert!(
+            error.to_string().contains(
+                "Coinbase SQL rows were not strictly ordered at block 10, transaction index 1, log index 2"
+            ),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(stats.union_duplicate_count, 0);
+    }
+    Ok(())
+}
+
+#[test]
+fn pagination_rejects_backward_ordered_rows() -> Result<()> {
+    let mut rows = Vec::new();
+    let mut previous_cursor = None;
+    let mut stats = CoinbaseSqlFetchStats::default();
+
+    let error = append_page_rows(
+        &mut rows,
+        &mut previous_cursor,
+        vec![decoded_union_row(3)?, decoded_union_row(2)?],
+        &mut stats,
+    )
+    .expect_err("backward cursor order must fail the fetch");
+    assert!(
+        error.to_string().contains(
+            "Coinbase SQL rows were not strictly ordered at block 10, transaction index 1, log index 2"
+        ),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(stats.union_duplicate_count, 0);
+    Ok(())
+}
+
+#[test]
+fn pagination_rejects_full_pages_that_do_not_advance_the_cursor() -> Result<()> {
+    let stalled = CoinbaseSqlLogCursor {
+        block_number: 10,
+        transaction_index: 1,
+        log_index: 2,
+    };
+    let error = ensure_full_page_advanced_cursor(Some(stalled), Some(stalled))
+        .expect_err("a full page that leaves the cursor unmoved must fail the fetch");
+    assert!(
+        error
+            .to_string()
+            .contains("without advancing the pagination cursor past block 10, transaction index 1, log index 2"),
+        "unexpected error: {error:#}"
+    );
+
+    let advanced = CoinbaseSqlLogCursor {
+        block_number: 10,
+        transaction_index: 1,
+        log_index: 3,
+    };
+    ensure_full_page_advanced_cursor(Some(stalled), Some(advanced))?;
+    ensure_full_page_advanced_cursor(None, Some(advanced))?;
+    ensure_full_page_advanced_cursor(None, None)?;
+    Ok(())
+}
+
+#[test]
+fn pagination_rejects_decoded_twins_with_conflicting_content() -> Result<()> {
+    // Two decoded shapes of the same underlying log (identical identity
+    // fields) that differ in decoded content must not be reconciled by the
+    // encoded/decoded preference: the (decoded, decoded) discriminator arm
+    // falls through to the strict-order bail.
+    let first = decoded_union_row(2)?;
+    let mut second = decoded_union_row(2)?;
+    second.data = "0xdeadbeef".to_owned();
+    assert!(
+        rows_describe_same_identity(&first, &second),
+        "fixture rows must share every log identity field"
+    );
+
+    let mut rows = Vec::new();
+    let mut previous_cursor = None;
+    let mut stats = CoinbaseSqlFetchStats::default();
+    let error = append_page_rows(
+        &mut rows,
+        &mut previous_cursor,
+        vec![first, second],
+        &mut stats,
+    )
+    .expect_err("conflicting decoded twins must fail the fetch");
+    assert!(
+        error.to_string().contains(
+            "Coinbase SQL rows were not strictly ordered at block 10, transaction index 1, log index 2"
+        ),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(stats.union_duplicate_count, 0);
+    Ok(())
+}
+
+fn rows_describe_same_identity(a: &CoinbaseSqlLogRow, b: &CoinbaseSqlLogRow) -> bool {
+    a.block_number == b.block_number
+        && a.block_hash == b.block_hash
+        && a.transaction_hash == b.transaction_hash
+        && a.transaction_index == b.transaction_index
+        && a.log_index == b.log_index
+        && a.emitting_address == b.emitting_address
+        && a.topics == b.topics
 }
