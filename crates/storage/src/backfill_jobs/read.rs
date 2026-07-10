@@ -105,6 +105,10 @@ where
     row.map(decode_backfill_job).transpose()
 }
 
+/// Lock-order invariant: any transaction that locks both a job row and rows
+/// of its ranges must take the job lock first (resolving the job id with a
+/// plain SELECT when only a range id is at hand). Every writer observes this,
+/// so range-level operations racing job-level operations cannot deadlock.
 pub(super) async fn load_backfill_job_for_update<'e, E>(
     executor: E,
     backfill_job_id: i64,
