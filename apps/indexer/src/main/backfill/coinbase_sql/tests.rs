@@ -1514,13 +1514,13 @@ fn build_query_applies_order_and_limit_to_the_whole_union() -> Result<()> {
             "ORDER BY must come after both union arms: {sql}"
         );
         assert!(
-            sql.contains("SELECT *\nFROM (\n  SELECT"),
+            sql.contains("SELECT\n  u.block_number AS block_number,"),
             "the union arms must be wrapped in a subquery: {sql}"
         );
         // ClickHouse binds a trailing ORDER BY/LIMIT to the LAST union arm
         // only; both must sit outside the subquery that closes the union.
         assert!(
-            sql.ends_with(")\nORDER BY block_number, transaction_index, log_index\nLIMIT 50"),
+            sql.ends_with(") u\nORDER BY block_number, transaction_index, log_index\nLIMIT 50"),
             "ORDER BY/LIMIT must apply to the whole union, outside the subquery close: {sql}"
         );
     }

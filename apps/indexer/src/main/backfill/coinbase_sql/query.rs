@@ -214,7 +214,16 @@ active_encoded_logs AS (
   FROM encoded_log_sums e
   WHERE e.action_sum > 0
 )
-SELECT *
+SELECT
+  u.block_number AS block_number,
+  u.block_hash AS block_hash,
+  u.transaction_hash AS transaction_hash,
+  u.transaction_index AS transaction_index,
+  u.log_index AS log_index,
+  u.emitting_address AS emitting_address,
+  u.event_signature AS event_signature,
+  u.parameters AS parameters,
+  u.topics AS topics
 FROM (
   SELECT
     l.block_number AS block_number,
@@ -241,7 +250,7 @@ FROM (
     l.topics AS topics
   FROM active_encoded_logs l
   WHERE {output_predicates}
-)
+) u
 ORDER BY block_number, transaction_index, log_index
 LIMIT {limit}"#,
         from_block = pack.from_block,
