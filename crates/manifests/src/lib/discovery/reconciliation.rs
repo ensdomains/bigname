@@ -257,7 +257,7 @@ pub async fn reconcile_scoped_discovery_observations(
         .map(|edge| edge.spec.clone())
         .collect::<HashSet<_>>();
     let mut deactivation_terminal_states_by_edge_id =
-        BTreeMap::<i64, ObservationTerminalState>::new();
+        BTreeMap::<i64, (String, ObservationTerminalState)>::new();
     let mut removed_parent_edges = Vec::<(String, Uuid, ObservationTerminalState)>::new();
     let mut affected_contract_instance_ids = HashSet::<Uuid>::new();
 
@@ -279,8 +279,10 @@ pub async fn reconcile_scoped_discovery_observations(
             continue;
         }
 
-        deactivation_terminal_states_by_edge_id
-            .insert(existing_edge.discovery_edge_id, terminal_state.clone());
+        deactivation_terminal_states_by_edge_id.insert(
+            existing_edge.discovery_edge_id,
+            (existing_edge.spec.chain.clone(), terminal_state.clone()),
+        );
         affected_contract_instance_ids.insert(existing_edge.spec.from_contract_instance_id);
         affected_contract_instance_ids.insert(existing_edge.spec.to_contract_instance_id);
         if discovery_edge_propagates_role(&existing_edge.spec.edge_kind) {
@@ -306,7 +308,7 @@ pub async fn reconcile_scoped_discovery_observations(
             }
             deactivation_terminal_states_by_edge_id
                 .entry(descendant.discovery_edge_id)
-                .or_insert_with(|| terminal_state.clone());
+                .or_insert_with(|| (descendant.spec.chain.clone(), terminal_state.clone()));
             affected_contract_instance_ids.insert(descendant.spec.from_contract_instance_id);
             affected_contract_instance_ids.insert(descendant.spec.to_contract_instance_id);
         }
@@ -314,8 +316,9 @@ pub async fn reconcile_scoped_discovery_observations(
 
     let mut deactivated_edge_count = 0;
     let mut mutated_chains = BTreeSet::new();
-    for (discovery_edge_id, terminal_state) in deactivation_terminal_states_by_edge_id {
-        mutated_chains.insert(terminal_state.chain.clone());
+    for (discovery_edge_id, (edge_chain, terminal_state)) in deactivation_terminal_states_by_edge_id
+    {
+        mutated_chains.insert(edge_chain);
         deactivate_reconciled_discovery_edge(
             transaction.as_mut(),
             discovery_edge_id,

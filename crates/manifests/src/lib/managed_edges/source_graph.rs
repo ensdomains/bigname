@@ -394,25 +394,39 @@ async fn reconcile_managed_edges(
 async fn deactivate_discovery_edges_without_active_source_manifest(
     executor: &mut sqlx::postgres::PgConnection,
 ) -> Result<usize> {
-    let deactivated_chains = sqlx::query_scalar::<_, String>(
+    // Aggregate server-side: a stale manifest can own millions of edges, and
+    // materializing one returned row per edge would buffer them all in the
+    // sync transaction.
+    let deactivated_counts_by_chain = sqlx::query_as::<_, (String, i64)>(
         r#"
-        UPDATE discovery_edges de
-        SET deactivated_at = now()
-        WHERE de.deactivated_at IS NULL
-          AND NOT EXISTS (
-              SELECT 1
-              FROM manifest_versions mv
-              WHERE mv.manifest_id = de.source_manifest_id
-                AND mv.rollout_status = 'active'
-          )
-        RETURNING de.chain_id
+        WITH deactivated AS (
+            UPDATE discovery_edges de
+            SET deactivated_at = now()
+            WHERE de.deactivated_at IS NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM manifest_versions mv
+                  WHERE mv.manifest_id = de.source_manifest_id
+                    AND mv.rollout_status = 'active'
+              )
+            RETURNING de.chain_id
+        )
+        SELECT chain_id, COUNT(*)::BIGINT AS deactivated_count
+        FROM deactivated
+        GROUP BY chain_id
         "#,
     )
     .fetch_all(&mut *executor)
     .await
     .context("failed to deactivate discovery edges without an active source manifest")?;
-    let deactivated_edge_count = deactivated_chains.len();
-    let mutated_chains = deactivated_chains.into_iter().collect::<BTreeSet<_>>();
+    let deactivated_edge_count = deactivated_counts_by_chain
+        .iter()
+        .map(|(_, count)| *count as usize)
+        .sum();
+    let mutated_chains = deactivated_counts_by_chain
+        .into_iter()
+        .map(|(chain, _)| chain)
+        .collect::<BTreeSet<_>>();
     bump_discovery_admission_epochs(executor, &mutated_chains).await?;
 
     Ok(deactivated_edge_count)

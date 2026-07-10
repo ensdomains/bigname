@@ -4482,6 +4482,242 @@ async fn reconcile_fetched_heads_topic_drift_above_target_does_not_block_covered
     Ok(())
 }
 
+fn watched_surface_manifest(contract_addresses: &[&str]) -> String {
+    let contracts = contract_addresses
+        .iter()
+        .enumerate()
+        .map(|(index, address)| {
+            format!(
+                "[[contracts]]\nrole = \"watched{index}\"\naddress = \"{address}\"\nproxy_kind = \"none\"\n"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        r#"
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v2_registry_l1"
+chain = "ethereum-mainnet"
+deployment_epoch = "ens_v2"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+
+[capability_flags]
+exact_lookup = "supported"
+
+[[roots]]
+name = "RootRegistry"
+address = "0x00000000000000000000000000000000000000e1"
+
+{contracts}
+[[discovery_rules]]
+edge_kind = "subregistry"
+from_role = "RootRegistry"
+admission = "reachable_from_root"
+{abi}
+"#,
+        abi = test_manifest_abi_toml()
+    )
+}
+
+/// Mirror of the round-4 probe: the MANIFEST-DECLARED arm of the watched
+/// surface grows between two promotions sharing a frontier — a real
+/// `sync_repository` run adds a same-family contract entry with no discovery
+/// edge and no ABI change, so only the sync-time admission-epoch bump can
+/// invalidate the memo. `covered` selects whether a family-scope fact covers
+/// the new tuple.
+async fn manifest_growth_promotion_scenario(covered: bool) -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let chain = "ethereum-mainnet";
+    let chunk = crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS;
+    let root_address = "0x00000000000000000000000000000000000000e1";
+    let first_address = "0x00000000000000000000000000000000000000e2";
+    let late_address = "0x00000000000000000000000000000000000000e3";
+
+    let manifests = TestManifestDir::new()?;
+    let manifest_path = manifests.write_manifest(&watched_surface_manifest(&[first_address]))?;
+    bigname_manifests::sync_repository(
+        database.pool(),
+        &load_manifest_repository(&manifests.path)?,
+    )
+    .await?;
+
+    let stored_safe_block_number = chunk * 3 + 7;
+    let live_latest_block_number = stored_safe_block_number + 25;
+    let blocks = linear_provider_blocks(live_latest_block_number);
+    let current = blocks
+        .first()
+        .expect("test chain must include a current block")
+        .clone();
+    let latest = blocks
+        .last()
+        .expect("test chain must include a latest block")
+        .clone();
+    let stored_safe = blocks
+        .iter()
+        .find(|block| block.block_number == stored_safe_block_number)
+        .expect("test chain must include the stored safe block")
+        .clone();
+    for block in &blocks {
+        if block.block_number > stored_safe_block_number {
+            continue;
+        }
+        let state = if block.block_number == stored_safe_block_number {
+            CanonicalityState::Safe
+        } else {
+            CanonicalityState::Canonical
+        };
+        insert_chain_lineage_for_block(database.pool(), chain, block, state).await?;
+    }
+    let coverage_job_id = insert_completed_backfill_range_coverage_with_source_identity(
+        database.pool(),
+        chain,
+        current.block_number + 1,
+        stored_safe_block_number,
+        json!({"source_identity_hash": "test:manifest-growth"}),
+        "manifest-growth",
+    )
+    .await?;
+    let mut facts = vec![
+        address_coverage_fact(
+            "ens_v2_registry_l1",
+            root_address,
+            current.block_number + 1,
+            stored_safe_block_number,
+        ),
+        address_coverage_fact(
+            "ens_v2_registry_l1",
+            first_address,
+            current.block_number + 1,
+            stored_safe_block_number,
+        ),
+    ];
+    if covered {
+        facts.push(family_coverage_fact(
+            "ens_v2_registry_l1",
+            current.block_number + 1,
+            stored_safe_block_number,
+        ));
+    }
+    insert_backfill_coverage_fact_rows(database.pool(), coverage_job_id, &facts).await?;
+    insert_chain_checkpoint(
+        database.pool(),
+        &ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    )
+    .await?;
+    let (provider, server) = bundle_provider(vec![latest.clone(), stored_safe.clone()]).await?;
+    let heads = ProviderHeadSnapshot {
+        canonical: latest,
+        safe: Some(stored_safe),
+        finalized: None,
+    };
+    let coverage_frontiers = ChainCoverageFrontiers::default();
+    let task = IntakeChainTask {
+        chain: chain.to_owned(),
+        addresses: vec![root_address.to_owned(), first_address.to_owned()],
+        manifest_root_entry_count: 1,
+        manifest_contract_entry_count: 1,
+        discovery_edge_entry_count: 0,
+        checkpoint: ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    };
+
+    let (task, first_outcome) = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &heads,
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+        &coverage_frontiers,
+    )
+    .await
+    .expect("fully covered first slice must promote")
+    .expect("first promotion must advance the checkpoint");
+    assert_eq!(
+        first_outcome.canonical_status,
+        CanonicalReconciliationStatus::StoredLineagePromoted
+    );
+
+    // In-place manifest edit: a same-family contract entry appears (identical
+    // ABI, no discovery edge). Only the sync-time epoch bump can force the
+    // frontier to re-verify.
+    fs::write(
+        &manifest_path,
+        watched_surface_manifest(&[first_address, late_address]),
+    )
+    .with_context(|| format!("failed to rewrite {}", manifest_path.display()))?;
+    bigname_manifests::sync_repository(
+        database.pool(),
+        &load_manifest_repository(&manifests.path)?,
+    )
+    .await?;
+
+    let second = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &heads,
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+        &coverage_frontiers,
+    )
+    .await;
+    if covered {
+        let (_, outcome) = second
+            .expect("the grown tuple is family-covered, so re-verification must pass")
+            .expect("promotion must advance the checkpoint");
+        assert_eq!(
+            outcome.canonical_status,
+            CanonicalReconciliationStatus::StoredLineagePromoted
+        );
+    } else {
+        let error =
+            second.expect_err("the uncovered manifest-grown tuple must refuse promotion");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered
+                .contains("have no single backfill_coverage_facts row containing their required interval")
+                && rendered.contains(late_address),
+            "refusal must name the manifest-grown uncovered tuple: {rendered}"
+        );
+    }
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconcile_fetched_heads_refuses_uncovered_tuple_grown_by_manifest_sync() -> Result<()> {
+    manifest_growth_promotion_scenario(false).await
+}
+
+#[tokio::test]
+async fn reconcile_fetched_heads_promotes_family_covered_tuple_grown_by_manifest_sync()
+-> Result<()> {
+    manifest_growth_promotion_scenario(true).await
+}
+
 /// Scale guard for the coverage anti-join: 100k watched tuples with matching
 /// facts must verify clean, and the per-tuple containment probe must be
 /// index-backed (no sequential scan over backfill_coverage_facts).
