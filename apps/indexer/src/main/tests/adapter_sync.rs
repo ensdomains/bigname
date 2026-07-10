@@ -666,6 +666,7 @@ async fn post_replay_handoff_fetches_provider_gap_after_backlog() -> Result<()> 
         true,
         HeaderAuditMode::Minimal,
         &[],
+        &ChainCoverageFrontiers::default(),
     )
     .await?
     .expect("provider gap reconciliation must update the live checkpoint");

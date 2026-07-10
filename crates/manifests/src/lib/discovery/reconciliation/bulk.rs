@@ -150,3 +150,44 @@ pub(super) async fn insert_reconciled_discovery_edges(
 
     Ok(edges.len())
 }
+
+/// Deactivate one reconciled discovery edge, closing its active window at the
+/// terminal state when one is known. `admitted_at`-anchored `deactivated_at`
+/// keeps replayed deactivations monotonic against historical block times.
+pub(super) async fn deactivate_reconciled_discovery_edge(
+    executor: &mut sqlx::postgres::PgConnection,
+    discovery_edge_id: i64,
+    terminal_block_number: Option<i64>,
+    terminal_block_hash: Option<&str>,
+    terminal_chain: Option<&str>,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE discovery_edges
+        SET active_to_block_number = COALESCE($2, active_to_block_number),
+            active_to_block_hash = COALESCE($3, active_to_block_hash),
+            deactivated_at = COALESCE(
+                (
+                    SELECT GREATEST(discovery_edges.admitted_at, rb.block_timestamp)
+                    FROM chain_lineage rb
+                    WHERE rb.chain_id = $4
+                      AND rb.block_hash = $3
+                    LIMIT 1
+                ),
+                now()
+            )
+        WHERE discovery_edge_id = $1
+          AND deactivated_at IS NULL
+        "#,
+    )
+    .bind(discovery_edge_id)
+    .bind(terminal_block_number)
+    .bind(terminal_block_hash)
+    .bind(terminal_chain)
+    .execute(&mut *executor)
+    .await
+    .with_context(|| {
+        format!("failed to deactivate reconciled discovery_edge_id {discovery_edge_id}")
+    })?;
+    Ok(())
+}

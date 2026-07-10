@@ -1,5 +1,7 @@
 #[path = "discovery/admission.rs"]
 mod admission;
+#[path = "discovery/admission_epoch.rs"]
+mod admission_epoch;
 #[path = "discovery/loading.rs"]
 mod loading;
 #[path = "discovery/persistence.rs"]
@@ -12,6 +14,8 @@ mod reconciliation;
 mod types;
 
 pub use admission::DiscoveryAdmissionState;
+pub(crate) use admission_epoch::bump_discovery_admission_epochs;
+pub use admission_epoch::load_discovery_admission_epoch;
 pub use loading::load_discovery_admission_state;
 pub use persistence::persist_discovery_observation;
 pub use reconciliation::{

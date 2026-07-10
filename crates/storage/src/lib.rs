@@ -74,7 +74,8 @@ pub use backfill_jobs::{
     BackfillRangeSpec, advance_backfill_range, complete_backfill_job, complete_backfill_range,
     complete_backfill_range_recording_coverage, create_backfill_job, fail_backfill_job,
     fail_backfill_range, load_backfill_coverage_fact_counts, load_backfill_job,
-    load_backfill_ranges, reserve_backfill_range, write_backfill_coverage_facts,
+    load_backfill_ranges, load_completed_backfill_jobs_intersecting_range, reserve_backfill_range,
+    write_backfill_coverage_facts,
 };
 pub use base_normalized_rederive::{
     BASE_NORMALIZED_REDERIVE_ADAPTER, BASE_NORMALIZED_REDERIVE_BACKLOG_CURSOR_KIND,
@@ -168,7 +169,9 @@ pub use label_preimages::{
 };
 pub use lineage::{
     CanonicalityState, ChainLineageBlock, chain_lineage_contains_ancestor,
-    load_chain_lineage_block, mark_chain_lineage_range_orphaned, upsert_chain_lineage_blocks,
+    chain_lineage_contains_canonical_ancestor_position, load_chain_lineage_block,
+    load_chain_lineage_canonical_child_path, load_highest_canonical_chain_lineage_block,
+    mark_chain_lineage_range_orphaned, upsert_chain_lineage_blocks,
     upsert_chain_lineage_blocks_recanonicalizing_orphaned,
     upsert_chain_lineage_blocks_without_snapshots,
     upsert_chain_lineage_blocks_without_snapshots_recanonicalizing_orphaned,

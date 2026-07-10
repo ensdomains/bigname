@@ -25,6 +25,7 @@ use self::{
     },
     planning::{declared_start_block_for_entry, plan_manifest_entries},
 };
+use crate::discovery::bump_discovery_admission_epochs;
 use crate::{
     ManifestLoadStatus, ManifestRepository, ManifestSyncStatus, ManifestSyncSummary,
     managed_edges::{reconcile_manifest_source_graph, replace_manifest_children},
@@ -57,6 +58,7 @@ pub async fn sync_repository(
 
     let mut retained_keys = HashSet::new();
     let mut in_place_transitions = Vec::new();
+    let mut mutated_chains = std::collections::BTreeSet::new();
     let mut active_declared_start_blocks = HashMap::<(String, Uuid), (i64, String, String)>::new();
     let mut sync_summary = ManifestSyncSummary {
         status: ManifestSyncStatus::Synced,
@@ -77,6 +79,7 @@ pub async fn sync_repository(
     for loaded_manifest in repository.manifests() {
         let storage_key = ManifestStorageKey::from_loaded_manifest(loaded_manifest)?;
         retained_keys.insert(storage_key);
+        mutated_chains.insert(loaded_manifest.manifest.chain.clone());
 
         let manifest_id = upsert_manifest_version(transaction.as_mut(), loaded_manifest).await?;
         let existing_entries =
@@ -173,11 +176,20 @@ pub async fn sync_repository(
         }
 
         delete_stale_manifest_version(transaction.as_mut(), existing_manifest.manifest_id).await?;
+        mutated_chains.insert(existing_manifest.storage_key.chain.clone());
         sync_summary.removed_manifest_count += 1;
     }
 
     sync_summary.cleared_discovery_edge_count =
         reconcile_manifest_source_graph(transaction.as_mut(), &in_place_transitions).await?;
+
+    // The manifest-declared arm of the watched surface (entries, seeded
+    // addresses, declared start blocks, rollout status) can grow without any
+    // discovery-edge mutation; promotion's verified coverage frontier is
+    // versioned by the admission epoch, so every chain this sync touched must
+    // bump. Sync only runs when the repository actually changed, and a
+    // spurious re-verification costs a few anti-join chunks.
+    bump_discovery_admission_epochs(transaction.as_mut(), &mutated_chains).await?;
 
     transaction
         .commit()

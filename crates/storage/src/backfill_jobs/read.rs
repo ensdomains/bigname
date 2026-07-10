@@ -12,6 +12,40 @@ pub async fn load_backfill_job(pool: &PgPool, backfill_job_id: i64) -> Result<Op
     load_backfill_job_internal(pool, backfill_job_id).await
 }
 
+/// Load completed backfill jobs for a chain whose declared block range
+/// intersects `[from_block, to_block]` — the jobs whose coverage facts a
+/// promotion slice can rely on (fact intervals are clamped to their job's
+/// range at derivation time).
+pub async fn load_completed_backfill_jobs_intersecting_range(
+    pool: &PgPool,
+    chain_id: &str,
+    from_block: i64,
+    to_block: i64,
+) -> Result<Vec<BackfillJob>> {
+    let select_sql = backfill_job_select_sql(
+        r#"
+        WHERE chain_id = $1
+          AND status = 'completed'::backfill_lifecycle_status
+          AND range_start_block_number <= $3
+          AND range_end_block_number >= $2
+        "#,
+        "ORDER BY backfill_job_id",
+    );
+    let rows = sqlx::query(&select_sql)
+        .bind(chain_id)
+        .bind(from_block)
+        .bind(to_block)
+        .fetch_all(pool)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load completed backfill jobs for chain {chain_id} intersecting {from_block}..={to_block}"
+            )
+        })?;
+
+    rows.into_iter().map(decode_backfill_job).collect()
+}
+
 /// Load child ranges for one backfill job in declared range order.
 pub async fn load_backfill_ranges(
     pool: &PgPool,

@@ -186,3 +186,36 @@ async fn active_manifest_abi_events_from_rows(
 
     Ok(events)
 }
+
+/// Source families of the chain's active manifests that declare at least one
+/// topic0-bearing ABI event — the families whose watched tuples require log
+/// fetch coverage. Event-silent families produce no coverage requirement.
+pub async fn load_log_producing_source_families(pool: &PgPool, chain: &str) -> Result<Vec<String>> {
+    let source_families = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT DISTINCT source_family
+        FROM manifest_versions
+        WHERE rollout_status = 'active'
+          AND chain = $1
+        ORDER BY source_family
+        "#,
+    )
+    .bind(chain)
+    .fetch_all(pool)
+    .await
+    .with_context(|| format!("failed to load active source families for chain {chain}"))?;
+    if source_families.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let events =
+        load_active_manifest_abi_events_by_chain_and_source_families(pool, chain, &source_families)
+            .await?;
+    Ok(events
+        .into_iter()
+        .filter(|event| event.topic0.is_some())
+        .map(|event| event.source_family)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect())
+}

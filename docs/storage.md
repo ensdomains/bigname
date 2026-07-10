@@ -521,7 +521,26 @@ Very large source-family jobs and whole-active watched-chain jobs may persist co
 
 Idempotency validation has one compatibility bridge for jobs created before compact identity was introduced: a legacy full-payload identity and a `selected_targets_digest_v1` identity may match even when their `source_identity_hash` values differ, but only when every selector/provider field outside the selected-target representation and hash matches exactly and the compact count, digest, and sample recompute from the full `selected_targets` set. A different target set, topic plan, scan/provider field, range, chain, profile, scan mode, or idempotency key remains an immutable-job conflict.
 
+When whole-chain or mixed-source backfill uses generic ENSv1 resolver topic scanning, the persisted identity records that scan in `generic_topic_scans` with `source_identity_payload_format=generic_resolver_event_topics_v1`. The address-scoped portion may be stored as `selected_targets_with_generic_topic_scans_v1` or, when compact, `selected_targets_digest_with_generic_topic_scans_v1`; in both forms `selected_targets`, `selected_target_count`, digest, and sample intentionally exclude the resolver-family targets covered by the generic topic scan while `source_identity_hash` covers the selected-target identity plus the generic scan declaration.
+
 Backfill idempotency is derived from deployment profile, chain, finite range, scan family, and source identity. It must not include the local manifest root path: moving the same selected manifest corpus between filesystem locations does not create new raw backfill work. Bootstrap checkpoint reuse follows the same rule by matching persisted source identity and contiguous range coverage rather than the literal idempotency-key text.
+
+Historic checkpoint promotion consumes durable `backfill_coverage_facts`
+rows (see below) instead of recomputing coverage from persisted job source
+identities. Coverage is keyed by active `(source_family, address)` intervals,
+so a tuple is required only for blocks where it is active, one source
+family's coverage never credits another family at the same address, and
+family-scope fact rows credit every address of that family over the fact
+interval. Retained full-block payload metadata is cache evidence, not a
+substitute for fetch coverage. Watched source families with no active ABI
+event topics do not impose historical selected-log coverage, because there
+are no selected log facts for backfill to prove. Event-silent
+reverse-resolver direct-call indexing is scoped to ordinary live-tip
+reconciliation: live intake retains direct-call transactions and receipts
+from the current live block payload and records durable observations for
+later current-state hydration, but historic stored-lineage promotion does not
+require or synthesize per-block event-silent reverse-resolver state. That
+reverse resolver data is latest-only by design.
 
 `effective_to_block` is finite for every persisted selected target — backfill jobs are finite at creation time. Bootstrap ranges start at each eligible target's manifest/discovery admitted start and end at the finite provider head observed at job creation. A watched target whose manifest-declared `start_block` is unknown is skipped by bootstrap; it leaves no synthetic block-zero, provider-history, recent-window, or job-start range in `backfill_*`.
 
