@@ -41,8 +41,8 @@ loc = 613
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]
-path = "apps/indexer/src/main/runtime/poll_loop.rs"
-loc = 604
+path = "apps/indexer/src/main/reconciliation/canonical/stored_lineage/coverage.rs"
+loc = 687
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]

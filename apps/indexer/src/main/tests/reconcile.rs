@@ -2258,7 +2258,6 @@ async fn reconcile_fetched_heads_promotes_when_current_target_is_inactive_for_ea
     insert_backfill_coverage_fact_rows(
         database.pool(),
         backfill_job_id,
-        chain,
         &[address_coverage_fact(
             "test_source_family",
             selected_address,
@@ -2577,7 +2576,6 @@ async fn reconcile_fetched_heads_refuses_coverage_fact_interval_missing_early_pa
     insert_backfill_coverage_fact_rows(
         database.pool(),
         backfill_job_id,
-        chain,
         &[address_coverage_fact(
             "test_source_family",
             selected_address,
@@ -2978,7 +2976,6 @@ async fn reconcile_fetched_heads_family_scope_fact_credits_all_addresses_of_that
     insert_backfill_coverage_fact_rows(
         database.pool(),
         family_scan_job_id,
-        chain,
         &[family_coverage_fact(
             "test_source_family_a",
             current.block_number + 1,
@@ -3982,6 +3979,487 @@ async fn reconcile_fetched_heads_refuses_promotion_on_manifest_topic_set_drift()
     Ok(())
 }
 
+/// Shared fixture for the watch-set-growth tests: full coverage for the
+/// initial tuple, one promoted slice against a shared frontier, then a second
+/// watched tuple appears with an active window starting inside the
+/// already-verified span (discovery admission is checkpoint-gated, so new
+/// tuples always land behind the frontier).
+#[expect(clippy::too_many_arguments)]
+async fn promote_one_slice_then_admit_tuple(
+    database: &TestDatabase,
+    chain: &str,
+    coverage_frontiers: &ChainCoverageFrontiers,
+    late_namespace: &str,
+    late_manifest_id: i64,
+    late_source_family: &str,
+    late_address: &str,
+    late_active_from_block: i64,
+) -> Result<(
+    IntakeChainTask,
+    ProviderHeadSnapshot,
+    crate::provider::JsonRpcProvider,
+    tokio::task::JoinHandle<()>,
+)> {
+    let chunk = crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS;
+    let selected_address = "0x0000000000000000000000000000000000000001";
+    insert_reconcile_watched_manifest_contract(
+        database.pool(),
+        10_090,
+        "test",
+        chain,
+        "test_source_family",
+        Uuid::from_u128(10_090),
+        selected_address,
+    )
+    .await?;
+
+    let stored_safe_block_number = chunk * 3 + 7;
+    let live_latest_block_number = stored_safe_block_number + 25;
+    let blocks = linear_provider_blocks(live_latest_block_number);
+    let current = blocks
+        .first()
+        .expect("test chain must include a current block")
+        .clone();
+    let latest = blocks
+        .last()
+        .expect("test chain must include a latest block")
+        .clone();
+    let stored_safe = blocks
+        .iter()
+        .find(|block| block.block_number == stored_safe_block_number)
+        .expect("test chain must include the stored safe block")
+        .clone();
+    for block in &blocks {
+        if block.block_number > stored_safe_block_number {
+            continue;
+        }
+        let state = if block.block_number == stored_safe_block_number {
+            CanonicalityState::Safe
+        } else {
+            CanonicalityState::Canonical
+        };
+        insert_chain_lineage_for_block(database.pool(), chain, block, state).await?;
+    }
+    insert_completed_backfill_range_coverage(
+        database.pool(),
+        chain,
+        current.block_number + 1,
+        stored_safe_block_number,
+        &[selected_address],
+    )
+    .await?;
+    insert_chain_checkpoint(
+        database.pool(),
+        &ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    )
+    .await?;
+    let (provider, server) = bundle_provider(vec![latest.clone(), stored_safe.clone()]).await?;
+    let heads = ProviderHeadSnapshot {
+        canonical: latest,
+        safe: Some(stored_safe),
+        finalized: None,
+    };
+    let task = IntakeChainTask {
+        chain: chain.to_owned(),
+        addresses: vec![selected_address.to_owned()],
+        manifest_root_entry_count: 0,
+        manifest_contract_entry_count: 1,
+        discovery_edge_entry_count: 0,
+        checkpoint: ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    };
+
+    let (task, first_outcome) = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &heads,
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+        coverage_frontiers,
+    )
+    .await
+    .expect("fully covered first slice must promote")
+    .expect("first promotion must advance the checkpoint");
+    assert_eq!(
+        first_outcome.canonical_status,
+        CanonicalReconciliationStatus::StoredLineagePromoted
+    );
+
+    insert_reconcile_watched_manifest_contract(
+        database.pool(),
+        late_manifest_id,
+        late_namespace,
+        chain,
+        late_source_family,
+        Uuid::from_u128(late_manifest_id as u128),
+        late_address,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE contract_instance_addresses SET active_from_block_number = $1 WHERE chain_id = $2 AND LOWER(address) = $3",
+    )
+    .bind(late_active_from_block)
+    .bind(chain)
+    .bind(late_address)
+    .execute(database.pool())
+    .await
+    .context("failed to set the late tuple's active window")?;
+
+    Ok((task, heads, provider, server))
+}
+
+/// Discovery admits a new same-family tuple behind the verified frontier
+/// (fingerprint unchanged): the adapter-sync clamp is what forces the next
+/// verification to see it, and the uncovered tuple refuses promotion.
+#[tokio::test]
+async fn reconcile_fetched_heads_refuses_uncovered_tuple_admitted_behind_the_frontier()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let chain = "base-mainnet";
+    let chunk = crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS;
+    let coverage_frontiers = ChainCoverageFrontiers::default();
+    let late_address = "0x0000000000000000000000000000000000000002";
+    let late_active_from = chunk + 100;
+    let (task, heads, provider, server) = promote_one_slice_then_admit_tuple(
+        &database,
+        chain,
+        &coverage_frontiers,
+        "test2",
+        10_091,
+        "test_source_family",
+        late_address,
+        late_active_from,
+    )
+    .await?;
+    // The admission hook's effect: rewind the frontier to just before the new
+    // tuple's window.
+    coverage_frontiers.clamp_verified_through(chain, late_active_from - 1);
+
+    let error = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &heads,
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+        &coverage_frontiers,
+    )
+    .await
+    .expect_err("the admitted tuple has no coverage facts and must refuse promotion");
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.contains("have no single backfill_coverage_facts row containing their required interval")
+            && rendered.contains(late_address),
+        "refusal must name the admitted uncovered tuple: {rendered}"
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// The admitted tuple's family is covered by an existing family-scope fact:
+/// the clamp forces re-verification, which passes, and promotion proceeds.
+#[tokio::test]
+async fn reconcile_fetched_heads_promotes_after_reverifying_covered_admitted_tuple() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let chain = "base-mainnet";
+    let chunk = crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS;
+    let stored_safe_block_number = chunk * 3 + 7;
+    let coverage_frontiers = ChainCoverageFrontiers::default();
+    let late_address = "0x0000000000000000000000000000000000000003";
+    let late_active_from = chunk + 100;
+
+    // Family-scope coverage for the late family exists before its tuple is
+    // admitted (the registry-family scan fetched every address).
+    let family_job_id = insert_completed_backfill_range_coverage_with_source_identity(
+        database.pool(),
+        chain,
+        1,
+        stored_safe_block_number,
+        json!({"source_identity_hash": "test:late-family-scan"}),
+        "late-family-scan",
+    )
+    .await?;
+    insert_backfill_coverage_fact_rows(
+        database.pool(),
+        family_job_id,
+        &[family_coverage_fact(
+            "late_source_family",
+            1,
+            stored_safe_block_number,
+        )],
+    )
+    .await?;
+
+    let (task, heads, provider, server) = promote_one_slice_then_admit_tuple(
+        &database,
+        chain,
+        &coverage_frontiers,
+        "test",
+        10_092,
+        "late_source_family",
+        late_address,
+        late_active_from,
+    )
+    .await?;
+    coverage_frontiers.clamp_verified_through(chain, late_active_from - 1);
+
+    let (task, outcome) = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &heads,
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+        &coverage_frontiers,
+    )
+    .await
+    .expect("the admitted tuple is family-covered, so re-verification must pass")
+    .expect("promotion must advance the checkpoint");
+    assert_eq!(
+        outcome.canonical_status,
+        CanonicalReconciliationStatus::StoredLineagePromoted
+    );
+    assert_eq!(
+        task.checkpoint.canonical_block_number,
+        Some(chunk * 2 + 1)
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// A manifest reload that changes the chain's ABI event sets invalidates the
+/// frontier memo by fingerprint alone: the newly admitted uncovered tuple is
+/// caught on re-verification even without an explicit clamp.
+#[tokio::test]
+async fn reconcile_fetched_heads_manifest_abi_change_invalidates_the_frontier_memo() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let chain = "base-mainnet";
+    let chunk = crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS;
+    let coverage_frontiers = ChainCoverageFrontiers::default();
+    let late_address = "0x0000000000000000000000000000000000000004";
+    let late_active_from = chunk + 100;
+    // A NEW family changes the log-producing topic-set fingerprint; no clamp
+    // is issued — the fingerprint mismatch alone must drop the memo.
+    let (task, heads, provider, server) = promote_one_slice_then_admit_tuple(
+        &database,
+        chain,
+        &coverage_frontiers,
+        "test",
+        10_093,
+        "late_uncovered_family",
+        late_address,
+        late_active_from,
+    )
+    .await?;
+
+    let error = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &heads,
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+        &coverage_frontiers,
+    )
+    .await
+    .expect_err("the fingerprint reset must surface the uncovered admitted tuple");
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.contains("have no single backfill_coverage_facts row containing their required interval")
+            && rendered.contains(late_address),
+        "fingerprint-driven re-verification must name the uncovered tuple: {rendered}"
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// A drifted persisted topic0 set intersecting only blocks above the current
+/// promotion target must not block promoting the covered prefix; once the
+/// crawl reaches the drifted job's range, promotion refuses.
+#[tokio::test]
+async fn reconcile_fetched_heads_topic_drift_above_target_does_not_block_covered_prefix()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let chain = "base-mainnet";
+    let chunk = crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS;
+    let selected_address = "0x0000000000000000000000000000000000000001";
+    insert_reconcile_watched_manifest_contract(
+        database.pool(),
+        10_094,
+        "test",
+        chain,
+        "test_source_family",
+        Uuid::from_u128(10_094),
+        selected_address,
+    )
+    .await?;
+
+    let stored_safe_block_number = chunk * 2 + 7;
+    let live_latest_block_number = stored_safe_block_number + 25;
+    let blocks = linear_provider_blocks(live_latest_block_number);
+    let current = blocks
+        .first()
+        .expect("test chain must include a current block")
+        .clone();
+    let latest = blocks
+        .last()
+        .expect("test chain must include a latest block")
+        .clone();
+    let stored_safe = blocks
+        .iter()
+        .find(|block| block.block_number == stored_safe_block_number)
+        .expect("test chain must include the stored safe block")
+        .clone();
+    for block in &blocks {
+        if block.block_number > stored_safe_block_number {
+            continue;
+        }
+        let state = if block.block_number == stored_safe_block_number {
+            CanonicalityState::Safe
+        } else {
+            CanonicalityState::Canonical
+        };
+        insert_chain_lineage_for_block(database.pool(), chain, block, state).await?;
+    }
+    insert_completed_backfill_range_coverage(
+        database.pool(),
+        chain,
+        current.block_number + 1,
+        stored_safe_block_number,
+        &[selected_address],
+    )
+    .await?;
+    // The drifted topic-plan job intersects only blocks ABOVE the first
+    // promotion target (current + chunk) but below the anchor.
+    insert_completed_backfill_range_coverage_with_source_identity(
+        database.pool(),
+        chain,
+        current.block_number + chunk + 50,
+        current.block_number + chunk + 60,
+        json!({
+            "source_identity_hash": "test:drifted-above-target",
+            "coinbase_sql_topic_plan": {
+                "topic0s_by_source_family": {
+                    "test_source_family": [
+                        "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                    ]
+                }
+            }
+        }),
+        "drifted-above-target",
+    )
+    .await?;
+    insert_chain_checkpoint(
+        database.pool(),
+        &ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    )
+    .await?;
+    let (provider, server) = bundle_provider(vec![latest.clone(), stored_safe.clone()]).await?;
+    let heads = ProviderHeadSnapshot {
+        canonical: latest,
+        safe: Some(stored_safe),
+        finalized: None,
+    };
+    let coverage_frontiers = ChainCoverageFrontiers::default();
+    let task = IntakeChainTask {
+        chain: chain.to_owned(),
+        addresses: vec![selected_address.to_owned()],
+        manifest_root_entry_count: 0,
+        manifest_contract_entry_count: 1,
+        discovery_edge_entry_count: 0,
+        checkpoint: ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    };
+
+    let (task, first_outcome) = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &heads,
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+        &coverage_frontiers,
+    )
+    .await
+    .expect("drift above the promotion target must not block the covered prefix")
+    .expect("first promotion must advance the checkpoint");
+    assert_eq!(
+        first_outcome.canonical_status,
+        CanonicalReconciliationStatus::StoredLineagePromoted
+    );
+    assert_eq!(
+        task.checkpoint.canonical_block_number,
+        Some(current.block_number + chunk)
+    );
+
+    let error = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &heads,
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+        &coverage_frontiers,
+    )
+    .await
+    .expect_err("once the crawl reaches the drifted job's range, promotion must refuse");
+    assert!(
+        format!("{error:#}").contains("manifest ABI topic0 set changed after completed backfill job"),
+        "unexpected drift refusal error: {error:#}"
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
 /// Scale guard for the coverage anti-join: 100k watched tuples with matching
 /// facts must verify clean, and the per-tuple containment probe must be
 /// index-backed (no sequential scan over backfill_coverage_facts).
@@ -4198,7 +4676,7 @@ async fn insert_completed_backfill_range_coverage_for_source_family(
             )
         })
         .collect::<Vec<_>>();
-    insert_backfill_coverage_fact_rows(pool, backfill_job_id, chain, &facts).await
+    insert_backfill_coverage_fact_rows(pool, backfill_job_id, &facts).await
 }
 
 fn address_coverage_fact(
@@ -4233,7 +4711,6 @@ fn family_coverage_fact(
 async fn insert_backfill_coverage_fact_rows(
     pool: &sqlx::PgPool,
     backfill_job_id: i64,
-    chain: &str,
     facts: &[bigname_storage::BackfillCoverageFactWrite],
 ) -> Result<()> {
     let mut conn = pool.acquire().await?;

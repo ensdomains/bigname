@@ -27,10 +27,13 @@ pub(crate) struct ChainCoverageFrontiers {
     verified: Mutex<BTreeMap<String, VerifiedCoverageInterval>>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct VerifiedCoverageInterval {
     from_block: i64,
     through_block: i64,
+    /// Fingerprint of the manifest topic0 sets the interval was verified
+    /// under; an ABI reload mid-process invalidates the memo.
+    topic_set_fingerprint: String,
 }
 
 impl ChainCoverageFrontiers {
@@ -39,7 +42,7 @@ impl ChainCoverageFrontiers {
             .lock()
             .expect("coverage frontier lock must not be poisoned")
             .get(chain)
-            .copied()
+            .cloned()
     }
 
     fn record(&self, chain: &str, interval: VerifiedCoverageInterval) {
@@ -49,11 +52,56 @@ impl ChainCoverageFrontiers {
             .insert(chain.to_owned(), interval);
     }
 
-    fn reset(&self, chain: &str) {
+    pub(crate) fn reset(&self, chain: &str) {
         self.verified
             .lock()
             .expect("coverage frontier lock must not be poisoned")
             .remove(chain);
+    }
+
+    /// Rewind the verified frontier so re-verification covers blocks from
+    /// `new_through_block + 1` — called when the watch set grows behind the
+    /// frontier (discovery admits an edge whose active window starts inside
+    /// the already-verified span). Rewinding past the interval start drops the
+    /// memo entirely.
+    pub(crate) fn clamp_verified_through(&self, chain: &str, new_through_block: i64) {
+        let mut verified = self
+            .verified
+            .lock()
+            .expect("coverage frontier lock must not be poisoned");
+        let Some(interval) = verified.get_mut(chain) else {
+            return;
+        };
+        if new_through_block < interval.from_block {
+            verified.remove(chain);
+        } else if new_through_block < interval.through_block {
+            interval.through_block = new_through_block;
+        }
+    }
+}
+
+#[cfg(test)]
+impl ChainCoverageFrontiers {
+    pub(crate) fn record_verified_for_tests(
+        &self,
+        chain: &str,
+        from_block: i64,
+        through_block: i64,
+        topic_set_fingerprint: &str,
+    ) {
+        self.record(
+            chain,
+            VerifiedCoverageInterval {
+                from_block,
+                through_block,
+                topic_set_fingerprint: topic_set_fingerprint.to_owned(),
+            },
+        );
+    }
+
+    pub(crate) fn verified_through_for_tests(&self, chain: &str) -> Option<i64> {
+        self.verified_interval(chain)
+            .map(|interval| interval.through_block)
     }
 }
 
@@ -117,38 +165,64 @@ async fn ensure_verified_coverage_frontier(
     required_through: i64,
     verify_ahead_through_block: i64,
 ) -> std::result::Result<(), String> {
+    let log_producing_source_families = load_log_producing_source_families(pool, chain)
+        .await
+        .map_err(|error| error.to_string())?;
+    let current_topic0s_by_family =
+        load_current_topic0s_by_family(pool, chain, &log_producing_source_families).await?;
+    let topic_set_fingerprint = topic_set_fingerprint(&current_topic0s_by_family);
+
     let mut interval = coverage_frontiers.verified_interval(chain);
-    if let Some(existing) = interval
-        && required_from < existing.from_block
+    if let Some(existing) = &interval
+        && (required_from < existing.from_block
+            || existing.topic_set_fingerprint != topic_set_fingerprint)
     {
-        // The checkpoint regressed below the verified interval (deep reorg);
-        // start over rather than trusting a frontier that no longer starts at
-        // the promotion base.
+        // Either the checkpoint regressed below the verified interval (deep
+        // reorg) or the manifest ABI event sets changed since verification;
+        // start over rather than trusting a stale memo.
         coverage_frontiers.reset(chain);
         interval = None;
     }
-    if let Some(existing) = interval
+    if let Some(existing) = &interval
         && required_through <= existing.through_block
     {
         return Ok(());
     }
 
-    let log_producing_source_families = load_log_producing_source_families(pool, chain)
-        .await
-        .map_err(|error| error.to_string())?;
-    let verify_ahead_through_block = verify_ahead_through_block.max(required_through);
-    let extension_from = interval.map_or(required_from, |existing| existing.through_block + 1);
-    ensure_family_topic_sets_undrifted(
+    let mut verify_ahead_through_block = verify_ahead_through_block.max(required_through);
+    let extension_from = interval
+        .as_ref()
+        .map_or(required_from, |existing| existing.through_block + 1);
+    if let Err(_look_ahead_drift) = ensure_family_topic_sets_undrifted(
         pool,
         chain,
-        &log_producing_source_families,
+        &current_topic0s_by_family,
         extension_from,
         verify_ahead_through_block,
     )
-    .await?;
+    .await
+    {
+        // A drifted job intersecting only blocks above the promotion target
+        // must not block promoting the covered prefix: recheck scoped to the
+        // target, and if that passes, cap the look-ahead so the memo never
+        // covers a span the drift guard did not clear.
+        ensure_family_topic_sets_undrifted(
+            pool,
+            chain,
+            &current_topic0s_by_family,
+            extension_from,
+            required_through,
+        )
+        .await?;
+        verify_ahead_through_block = required_through;
+    }
 
-    let from_block = interval.map_or(required_from, |existing| existing.from_block);
-    let mut through_block = interval.map_or(required_from - 1, |existing| existing.through_block);
+    let from_block = interval
+        .as_ref()
+        .map_or(required_from, |existing| existing.from_block);
+    let mut through_block = interval
+        .as_ref()
+        .map_or(required_from - 1, |existing| existing.through_block);
     while through_block < required_through {
         let chunk_from = through_block + 1;
         let chunk_through = chunk_from
@@ -171,6 +245,7 @@ async fn ensure_verified_coverage_frontier(
                 VerifiedCoverageInterval {
                     from_block,
                     through_block,
+                    topic_set_fingerprint: topic_set_fingerprint.clone(),
                 },
             );
             continue;
@@ -194,6 +269,7 @@ async fn ensure_verified_coverage_frontier(
                     VerifiedCoverageInterval {
                         from_block,
                         through_block,
+                        topic_set_fingerprint: topic_set_fingerprint.clone(),
                     },
                 );
                 continue;
@@ -253,11 +329,11 @@ fn uncovered_tuples_refusal(
 async fn ensure_family_topic_sets_undrifted(
     pool: &sqlx::PgPool,
     chain: &str,
-    log_producing_source_families: &[String],
+    current_topic0s_by_family: &BTreeMap<String, BTreeSet<String>>,
     from_block: i64,
     to_block: i64,
 ) -> std::result::Result<(), String> {
-    if log_producing_source_families.is_empty() {
+    if current_topic0s_by_family.is_empty() {
         return Ok(());
     }
     let jobs = load_completed_backfill_jobs_intersecting_range(pool, chain, from_block, to_block)
@@ -267,26 +343,8 @@ async fn ensure_family_topic_sets_undrifted(
         return Ok(());
     }
 
-    let events = load_active_manifest_abi_events_by_chain_and_source_families(
-        pool,
-        chain,
-        log_producing_source_families,
-    )
-    .await
-    .map_err(|error| error.to_string())?;
-    let mut current_topic0s_by_family = BTreeMap::<String, BTreeSet<String>>::new();
-    for event in events {
-        let Some(topic0) = event.topic0 else {
-            continue;
-        };
-        current_topic0s_by_family
-            .entry(event.source_family)
-            .or_default()
-            .insert(topic0.to_ascii_lowercase());
-    }
-
-    let relied_families = log_producing_source_families
-        .iter()
+    let relied_families = current_topic0s_by_family
+        .keys()
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
     for job in &jobs {
@@ -336,6 +394,50 @@ async fn ensure_family_topic_sets_undrifted(
     }
 
     Ok(())
+}
+
+/// Current manifest topic0 sets per log-producing family; also the input to
+/// the frontier memo's ABI fingerprint.
+async fn load_current_topic0s_by_family(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    log_producing_source_families: &[String],
+) -> std::result::Result<BTreeMap<String, BTreeSet<String>>, String> {
+    if log_producing_source_families.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let events = load_active_manifest_abi_events_by_chain_and_source_families(
+        pool,
+        chain,
+        log_producing_source_families,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let mut current_topic0s_by_family = BTreeMap::<String, BTreeSet<String>>::new();
+    for event in events {
+        let Some(topic0) = event.topic0 else {
+            continue;
+        };
+        current_topic0s_by_family
+            .entry(event.source_family)
+            .or_default()
+            .insert(topic0.to_ascii_lowercase());
+    }
+    Ok(current_topic0s_by_family)
+}
+
+fn topic_set_fingerprint(current_topic0s_by_family: &BTreeMap<String, BTreeSet<String>>) -> String {
+    let mut fingerprint = String::new();
+    for (source_family, topic0s) in current_topic0s_by_family {
+        fingerprint.push_str(source_family);
+        fingerprint.push('=');
+        for topic0 in topic0s {
+            fingerprint.push_str(topic0);
+            fingerprint.push(',');
+        }
+        fingerprint.push(';');
+    }
+    fingerprint
 }
 
 /// Families a job fetched through topic-filtered generic scans whose identity

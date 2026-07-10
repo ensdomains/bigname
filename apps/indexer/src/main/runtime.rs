@@ -13,6 +13,8 @@ mod refresh;
 #[path = "runtime/tracing_init.rs"]
 mod tracing_init;
 
+#[cfg(test)]
+pub(crate) use adapter_sync::invalidate_coverage_frontier_for_admitted_edges;
 #[allow(unused_imports)]
 pub(crate) use adapter_sync::sync_adapter_owned_raw_log_state;
 #[allow(unused_imports)]

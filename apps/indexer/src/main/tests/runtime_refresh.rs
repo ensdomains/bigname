@@ -1209,7 +1209,11 @@ async fn storage_discovery_refresh_adds_ensv1_address_without_manifest_reload_an
     .await?;
 
     let (refreshed_state, refreshed_tasks) =
-        refresh_runtime_state_from_storage_discovery(database.pool(), &initial_state)
+        refresh_runtime_state_from_storage_discovery(
+        database.pool(),
+        &initial_state,
+        &ChainCoverageFrontiers::default(),
+    )
             .await?
             .expect("stored ENSv1 discovery must refresh the watched plan without manifest reload");
 
@@ -1391,7 +1395,8 @@ async fn runtime_refresh_adds_ensv1_resolver_watch_target_without_manifest_reloa
     let (refreshed_state, refreshed_tasks) = refresh_runtime_state_from_storage_discovery(
         database.pool(),
         &initial_state,
-    )
+        &ChainCoverageFrontiers::default(),
+)
     .await?
     .expect(
         "stored ENSv1 resolver discovery must refresh the watched plan without manifest reload",
@@ -1547,7 +1552,11 @@ async fn storage_discovery_refresh_adds_basenames_address_without_manifest_reloa
     .await?;
 
     let (refreshed_state, refreshed_tasks) =
-        refresh_runtime_state_from_storage_discovery(database.pool(), &initial_state)
+        refresh_runtime_state_from_storage_discovery(
+        database.pool(),
+        &initial_state,
+        &ChainCoverageFrontiers::default(),
+    )
             .await?
             .expect(
                 "stored Basenames discovery must refresh the watched plan without manifest reload",

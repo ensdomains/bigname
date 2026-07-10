@@ -79,8 +79,8 @@ async fn sync_adapter_owned_raw_log_state_backfills_reverse_claims_from_stored_r
     .await?;
 
     let watched_plan = load_watched_chain_plan(database.pool()).await?;
-    sync_adapter_owned_raw_log_state(database.pool(), &watched_plan).await?;
-    sync_adapter_owned_raw_log_state(database.pool(), &watched_plan).await?;
+    sync_adapter_owned_raw_log_state(database.pool(), &watched_plan, &ChainCoverageFrontiers::default()).await?;
+    sync_adapter_owned_raw_log_state(database.pool(), &watched_plan, &ChainCoverageFrontiers::default()).await?;
 
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -903,8 +903,8 @@ async fn sync_adapter_owned_raw_log_state_backfills_wrapper_authority_from_store
     .await?;
 
     let watched_plan = load_watched_chain_plan(database.pool()).await?;
-    sync_adapter_owned_raw_log_state(database.pool(), &watched_plan).await?;
-    sync_adapter_owned_raw_log_state(database.pool(), &watched_plan).await?;
+    sync_adapter_owned_raw_log_state(database.pool(), &watched_plan, &ChainCoverageFrontiers::default()).await?;
+    sync_adapter_owned_raw_log_state(database.pool(), &watched_plan, &ChainCoverageFrontiers::default()).await?;
 
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -1261,8 +1261,8 @@ async fn sync_adapter_owned_raw_log_state_backfills_basenames_reverse_claims_and
     .await?;
 
     let watched_plan = load_watched_chain_plan(database.pool()).await?;
-    sync_adapter_owned_raw_log_state(database.pool(), &watched_plan).await?;
-    sync_adapter_owned_raw_log_state(database.pool(), &watched_plan).await?;
+    sync_adapter_owned_raw_log_state(database.pool(), &watched_plan, &ChainCoverageFrontiers::default()).await?;
+    sync_adapter_owned_raw_log_state(database.pool(), &watched_plan, &ChainCoverageFrontiers::default()).await?;
 
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -1335,6 +1335,103 @@ async fn sync_adapter_owned_raw_log_state_backfills_basenames_reverse_claims_and
         .fetch_one(database.pool())
         .await?,
         1
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn admitted_discovery_edges_invalidate_the_coverage_frontier() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "base-mainnet";
+    let registry_instance = Uuid::from_u128(77_001);
+    let resolver_instance = Uuid::from_u128(77_002);
+    insert_contract_instance(database.pool(), registry_instance, chain, "registry").await?;
+    insert_contract_instance(database.pool(), resolver_instance, chain, "resolver").await?;
+
+    let coverage_frontiers = ChainCoverageFrontiers::default();
+    coverage_frontiers.record_verified_for_tests(chain, 1, 10_000, "fingerprint");
+    let watermark = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT MAX(discovery_edge_id) FROM discovery_edges",
+    )
+    .fetch_one(database.pool())
+    .await?
+    .unwrap_or(0);
+
+    // A newly inserted bounded edge rewinds the frontier to just before its
+    // active window.
+    insert_active_discovery_edge_with_range(
+        database.pool(),
+        chain,
+        "resolver",
+        registry_instance,
+        resolver_instance,
+        None,
+        Some(5_000),
+        Some(6_000),
+    )
+    .await?;
+    crate::runtime::invalidate_coverage_frontier_for_admitted_edges(
+        database.pool(),
+        chain,
+        watermark,
+        &coverage_frontiers,
+    )
+    .await?;
+    assert_eq!(
+        coverage_frontiers.verified_through_for_tests(chain),
+        Some(4_999),
+        "a bounded admitted edge must rewind the frontier to just before its window"
+    );
+
+    // An admission that inserted no new rows (reactivation of existing edges)
+    // cannot be located by the id watermark and must drop the memo entirely.
+    coverage_frontiers.record_verified_for_tests(chain, 1, 10_000, "fingerprint");
+    let current_watermark = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT MAX(discovery_edge_id) FROM discovery_edges",
+    )
+    .fetch_one(database.pool())
+    .await?
+    .unwrap_or(0);
+    crate::runtime::invalidate_coverage_frontier_for_admitted_edges(
+        database.pool(),
+        chain,
+        current_watermark,
+        &coverage_frontiers,
+    )
+    .await?;
+    assert_eq!(
+        coverage_frontiers.verified_through_for_tests(chain),
+        None,
+        "an admission without identifiable inserts must reset the frontier"
+    );
+
+    // An admitted edge with an unbounded active window also drops the memo.
+    coverage_frontiers.record_verified_for_tests(chain, 1, 10_000, "fingerprint");
+    let watermark = current_watermark;
+    insert_active_discovery_edge_with_range(
+        database.pool(),
+        chain,
+        "resolver",
+        registry_instance,
+        resolver_instance,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    crate::runtime::invalidate_coverage_frontier_for_admitted_edges(
+        database.pool(),
+        chain,
+        watermark,
+        &coverage_frontiers,
+    )
+    .await?;
+    assert_eq!(
+        coverage_frontiers.verified_through_for_tests(chain),
+        None,
+        "an unbounded admitted window must reset the frontier"
     );
 
     database.cleanup().await?;

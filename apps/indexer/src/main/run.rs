@@ -43,7 +43,12 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
     )
     .await?;
     if run_mode.sync_adapter_before_startup_backfill {
-        sync_adapter_owned_raw_log_state(&pool, &manifest_runtime_state.watched_chain_plan).await?;
+        sync_adapter_owned_raw_log_state(
+            &pool,
+            &manifest_runtime_state.watched_chain_plan,
+            &crate::reconciliation::ChainCoverageFrontiers::default(),
+        )
+        .await?;
     } else {
         info!(
             service = "indexer",
@@ -87,7 +92,12 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
                 run_mode.startup_backfill_adapter_sync_mode.as_str(),
             "startup bootstrap backfill drained; syncing adapter-owned raw-log state before live polling"
         );
-        sync_adapter_owned_raw_log_state(&pool, &manifest_runtime_state.watched_chain_plan).await?;
+        sync_adapter_owned_raw_log_state(
+            &pool,
+            &manifest_runtime_state.watched_chain_plan,
+            &crate::reconciliation::ChainCoverageFrontiers::default(),
+        )
+        .await?;
     }
     if run_mode.normalized_replay_catchup_enabled {
         let catchup_config = NormalizedReplayCatchupConfig::new(
@@ -220,6 +230,10 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         run_mode.broad_runtime_refresh_enabled,
         header_audit_mode,
         args.event_silent_reverse_resolver_addresses,
+        // Process-lifetime verified-coverage frontier: deep-gap promotion
+        // verifies fact coverage in large chunks once, then every poll cycle
+        // is an O(1) in-memory check.
+        &crate::reconciliation::ChainCoverageFrontiers::default(),
     )
     .await
 }

@@ -19,17 +19,19 @@ use super::intake::{
 use super::logging::{
     log_intake_chain_tasks, log_manifest_normalized_event_summary, log_manifest_runtime_state,
     log_manifest_summary, log_provider_registry, log_watched_chain_plan,
-    log_watched_contract_summary,
 };
 use super::manifest::{
     ManifestRuntimeState, RuntimeWatchScope, build_manifest_runtime_state_with_watch_scope,
     ensure_manifest_root_ready, load_manifest_repository,
 };
-use super::refresh::{
-    refresh_intake_chain_tasks, refresh_manifest_normalized_events_from_storage,
-    refresh_runtime_state_from_storage_discovery,
-};
+use super::refresh::{refresh_intake_chain_tasks, refresh_manifest_normalized_events_from_storage};
 
+#[path = "poll_loop/discovery_refresh.rs"]
+mod discovery_refresh;
+
+use discovery_refresh::refresh_discovery_watch_state;
+
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn run_poll_loop(
     pool: &sqlx::PgPool,
     manifests_root: PathBuf,
@@ -45,12 +47,9 @@ pub(crate) async fn run_poll_loop(
     discovery_refresh_enabled: bool,
     header_audit_mode: HeaderAuditMode,
     event_silent_reverse_resolver_addresses: Vec<String>,
+    coverage_frontiers: &ChainCoverageFrontiers,
 ) -> Result<()> {
     let deployment_profile = deployment_profile_from_manifest_root(&manifests_root);
-    // Process-lifetime verified-coverage frontier cache: deep-gap promotion
-    // verifies fact coverage in large chunks once, then every poll cycle is an
-    // O(1) in-memory check.
-    let coverage_frontiers = ChainCoverageFrontiers::default();
     let mut live_poll_adapter_sync_restored_after_replay = false;
     let mut interval = tokio::time::interval(Duration::from_secs(poll_interval_secs));
     interval.tick().await;
@@ -109,6 +108,7 @@ pub(crate) async fn run_poll_loop(
                                         && let Err(error) = sync_adapter_owned_raw_log_state(
                                             pool,
                                             &next_manifest_runtime_state.watched_chain_plan,
+                                            coverage_frontiers,
                                         )
                                         .await
                                     {
@@ -426,7 +426,7 @@ pub(crate) async fn run_poll_loop(
                     effective_adapter_sync_on_live_poll,
                     header_audit_mode,
                     &event_silent_reverse_resolver_addresses,
-                    &coverage_frontiers,
+                    coverage_frontiers,
                 )
                 .await?;
 
@@ -482,78 +482,14 @@ pub(crate) async fn run_poll_loop(
                 }
 
                 if discovery_refresh_enabled {
-                    match refresh_runtime_state_from_storage_discovery(pool, &manifest_runtime_state)
-                        .await
-                    {
-                        Ok(Some((next_manifest_runtime_state, next_tasks))) => {
-                            validate_provider_registry_for_intake_tasks(
-                                &next_tasks,
-                                provider_registry,
-                            )
-                            .context(
-                                "refreshed stored discovery state no longer matches configured provider sources",
-                            )?;
-                            let previous_watch_state =
-                                watched_chain_plan_state(&manifest_runtime_state.watched_chain_plan);
-                            let next_watch_state =
-                                watched_chain_plan_state(&next_manifest_runtime_state.watched_chain_plan);
-                            let previous_intake_state = intake_runtime_state(&intake_chain_tasks);
-                            let next_intake_state = intake_runtime_state(&next_tasks);
-
-                            info!(
-                                service = "indexer",
-                                refresh_reason = "timer",
-                                watched_plan_changed = true,
-                                checkpoint_state_changed = false,
-                                plan_source = "stored_discovery_state",
-                                previous_watched_chain_count = previous_watch_state.chain_count,
-                                previous_watched_address_count = previous_watch_state.address_count,
-                                previous_watched_entry_count_total = previous_watch_state.entry_count,
-                                watched_chain_count = next_watch_state.chain_count,
-                                watched_address_count = next_watch_state.address_count,
-                                watched_entry_count_total = next_watch_state.entry_count,
-                                previous_intake_chain_count = previous_intake_state.chain_count,
-                                previous_intake_address_count = previous_intake_state.address_count,
-                                previous_intake_entry_count_total = previous_intake_state.entry_count,
-                                intake_chain_count = next_intake_state.chain_count,
-                                intake_address_count = next_intake_state.address_count,
-                                intake_entry_count_total = next_intake_state.entry_count,
-                                intake_cold_start_chain_count = next_intake_state.cold_start_chain_count,
-                                intake_resumable_chain_count = next_intake_state.resumable_chain_count,
-                                intake_safe_checkpoint_chain_count = next_intake_state.safe_checkpoint_chain_count,
-                                intake_finalized_checkpoint_chain_count = next_intake_state.finalized_checkpoint_chain_count,
-                                "runtime watched chain plan changed after stored discovery sync"
-                            );
-                            log_watched_contract_summary(&next_manifest_runtime_state.watched_contract_summary);
-                            log_watched_chain_plan(
-                                "discovery-refresh",
-                                &next_manifest_runtime_state.watched_chain_plan,
-                            );
-                            log_intake_chain_tasks("discovery-refresh", &next_tasks);
-                            log_provider_registry("discovery-refresh", &next_tasks, provider_registry);
-                            manifest_runtime_state = next_manifest_runtime_state;
-                            intake_chain_tasks = next_tasks;
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            let current_watch_state =
-                                watched_chain_plan_state(&manifest_runtime_state.watched_chain_plan);
-                            let current_intake_state = intake_runtime_state(&intake_chain_tasks);
-                            warn!(
-                                service = "indexer",
-                                refresh_reason = "timer",
-                                plan_source = "stored_discovery_state",
-                                error = ?error,
-                                watched_chain_count = current_watch_state.chain_count,
-                                watched_address_count = current_watch_state.address_count,
-                                watched_entry_count_total = current_watch_state.entry_count,
-                                intake_chain_count = current_intake_state.chain_count,
-                                intake_address_count = current_intake_state.address_count,
-                                intake_entry_count_total = current_intake_state.entry_count,
-                                "failed to refresh runtime watch state from stored discovery edges; keeping last successful state"
-                            );
-                        }
-                    }
+                    refresh_discovery_watch_state(
+                        pool,
+                        provider_registry,
+                        coverage_frontiers,
+                        &mut manifest_runtime_state,
+                        &mut intake_chain_tasks,
+                    )
+                    .await?;
                 }
             }
         }
