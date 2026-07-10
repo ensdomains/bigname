@@ -4240,7 +4240,6 @@ async fn insert_backfill_coverage_fact_rows(
     bigname_storage::write_backfill_coverage_facts(
         &mut conn,
         backfill_job_id,
-        chain,
         bigname_storage::BackfillCoverageFactDerivation::JobCompletion,
         facts,
     )
