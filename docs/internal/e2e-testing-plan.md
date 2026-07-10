@@ -287,16 +287,16 @@ Order optimizes for information per unit of work: the determinism
 multipliers (3) come before breadth because they multiply every scenario
 that exists by then.
 
-All seven phases executed (2026-07-09, commits `f13fe50`..`1bdf886`; 24
-scenarios green). A 2026-07-10 adversarial completeness audit (three
-independent reviewers, one per protocol, enumerating from the pinned
-contracts toward the matrix) found the matrices helper-shaped rather than
-contract-shaped: upstream transitions outside the harness helpers were
-missing as a class. Its missing transitions enter the matrices as
-`planned(8)` rows and its admission findings as new blocked rows; phase 8
-tracks closing them. Open rows are now the `planned(8)` set, the blocked
-rows carrying their pin-level reasons, and the review points recorded per
-matrix.
+All seven original phases executed (2026-07-09, commits
+`f13fe50`..`1bdf886`; 24 scenarios green). A 2026-07-10 adversarial
+completeness audit (three independent reviewers, one per protocol,
+enumerating from the pinned contracts toward the matrix) found the
+matrices helper-shaped rather than contract-shaped and opened phase 8
+(the missing transitions) and phase 9 (cross-protocol composition).
+Both closed the same day (commits `08fe850`..`448704e`; 56 scenarios
+green): every audit row is now covered or blocked with a pin-level
+reason — no planned rows remain. Open work lives entirely in the
+blocked rows and the chipped review points.
 
 | Phase | Scope | Status |
 | --- | --- | --- |
