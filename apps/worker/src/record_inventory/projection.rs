@@ -300,8 +300,11 @@ async fn build_row_from_events(
     };
     let has_record_version_boundary_pointer =
         boundary_anchor.event_kind == EVENT_KIND_RECORD_VERSION_CHANGED;
-    let record_version_boundary =
-        build_record_version_boundary(boundary_anchor, has_record_version_boundary_pointer)?;
+    let record_version_boundary = build_record_version_boundary(
+        boundary_anchor,
+        has_record_version_boundary_pointer,
+        resource_id,
+    )?;
     let record_change_events = scoped_events
         .iter()
         .filter(|event| {

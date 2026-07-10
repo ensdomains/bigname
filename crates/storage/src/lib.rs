@@ -207,7 +207,8 @@ pub use primary_name::{
     clear_primary_names_current, delete_primary_name_current,
     delete_primary_name_current_in_transaction, load_primary_name_current,
     load_primary_name_current_snapshot,
-    load_primary_name_current_snapshot_for_update_in_transaction, upsert_primary_name_current_rows,
+    load_primary_name_current_snapshot_for_update_in_transaction,
+    publish_primary_names_current_full_rebuild, upsert_primary_name_current_rows,
     upsert_primary_name_current_snapshots, upsert_primary_name_current_snapshots_in_transaction,
     verified_primary_name_claim_hooks,
 };

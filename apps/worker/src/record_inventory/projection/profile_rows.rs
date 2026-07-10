@@ -19,6 +19,7 @@ pub(super) async fn build_profile_gated_row(
         record_version_boundary: build_record_version_boundary(
             boundary_anchor,
             has_record_version_boundary_pointer,
+            resource_id,
         )?,
         enumeration_basis: json!({
             "observed_selectors": false,
