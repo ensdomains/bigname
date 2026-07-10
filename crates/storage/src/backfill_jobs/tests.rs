@@ -21,6 +21,7 @@ struct TestDatabase {
     admin_pool: PgPool,
     pool: PgPool,
     database_name: String,
+    connect_options: PgConnectOptions,
 }
 
 impl TestDatabase {
@@ -55,9 +56,10 @@ impl TestDatabase {
             .await
             .with_context(|| format!("failed to create test database {database_name}"))?;
 
+        let connect_options = base_options.database(&database_name);
         let pool = PgPoolOptions::new()
             .max_connections(5)
-            .connect_with(base_options.database(&database_name))
+            .connect_with(connect_options.clone())
             .await
             .context("failed to connect backfill job test pool")?;
 
@@ -70,11 +72,31 @@ impl TestDatabase {
             admin_pool,
             pool,
             database_name,
+            connect_options,
         })
     }
 
     fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// A dedicated single-connection pool, pre-warmed so acquiring a
+    /// connection at use time is instant. Concurrency tests need one per
+    /// competing transaction: a shared pool serializes competitors inside
+    /// pool acquisition for the other transaction's whole lifetime, masking
+    /// the very races the tests exist to catch.
+    async fn dedicated_single_connection_pool(&self) -> Result<PgPool> {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(self.connect_options.clone())
+            .await
+            .context("failed to connect dedicated single-connection test pool")?;
+        drop(
+            pool.acquire()
+                .await
+                .context("failed to warm dedicated single-connection test pool")?,
+        );
+        Ok(pool)
     }
 
     async fn cleanup(self) -> Result<()> {
@@ -770,5 +792,493 @@ async fn complete_backfill_job_preserves_failed_range_lifecycle_at_range_end() -
     );
     assert!(ranges[0].completed_at.is_none());
 
+    database.cleanup().await
+}
+
+fn address_coverage_fact(
+    source_family: &str,
+    address: &str,
+    covered_from_block: i64,
+    covered_to_block: i64,
+) -> BackfillCoverageFactWrite {
+    BackfillCoverageFactWrite {
+        source_family: source_family.to_owned(),
+        scope: BackfillCoverageFactScope::Address,
+        address: Some(address.to_owned()),
+        covered_from_block,
+        covered_to_block,
+    }
+}
+
+async fn load_coverage_fact_rows(
+    pool: &PgPool,
+    backfill_job_id: i64,
+) -> Result<Vec<(String, String, String, Option<String>, i64, i64, String)>> {
+    sqlx::query_as(
+        r#"
+        SELECT chain_id, source_family, scope, address, covered_from_block, covered_to_block, derivation
+        FROM backfill_coverage_facts
+        WHERE backfill_job_id = $1
+        ORDER BY scope, source_family, address, covered_from_block, covered_to_block
+        "#,
+    )
+    .bind(backfill_job_id)
+    .fetch_all(pool)
+    .await
+    .context("failed to load coverage fact rows")
+}
+
+#[tokio::test]
+async fn coverage_fact_writes_are_idempotent_and_validated() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let created = create_backfill_job(
+        database.pool(),
+        &backfill_job_create("job-coverage-fact-writes"),
+    )
+    .await?;
+    let facts = vec![
+        address_coverage_fact(
+            "ens_v1_registry_l1",
+            "0x0000000000000000000000000000000000000001",
+            100,
+            120,
+        ),
+        BackfillCoverageFactWrite {
+            source_family: "ens_v1_resolver_l1".to_owned(),
+            scope: BackfillCoverageFactScope::Family,
+            address: None,
+            covered_from_block: 100,
+            covered_to_block: 120,
+        },
+    ];
+
+    let mut conn = database.pool().acquire().await?;
+    let inserted = write_backfill_coverage_facts(
+        &mut conn,
+        created.job.backfill_job_id,
+        BackfillCoverageFactDerivation::LegacyFullPayloadIdentity,
+        &facts,
+    )
+    .await?;
+    assert_eq!(inserted, 2);
+    let repeated = write_backfill_coverage_facts(
+        &mut conn,
+        created.job.backfill_job_id,
+        BackfillCoverageFactDerivation::LegacyFullPayloadIdentity,
+        &facts,
+    )
+    .await?;
+    assert_eq!(repeated, 0);
+    assert_eq!(
+        load_backfill_coverage_fact_counts(database.pool(), created.job.backfill_job_id).await?,
+        2
+    );
+    assert_eq!(
+        load_coverage_fact_rows(database.pool(), created.job.backfill_job_id).await?,
+        vec![
+            (
+                "eth-mainnet".to_owned(),
+                "ens_v1_registry_l1".to_owned(),
+                "address".to_owned(),
+                Some("0x0000000000000000000000000000000000000001".to_owned()),
+                100,
+                120,
+                "legacy_full_payload_identity".to_owned(),
+            ),
+            (
+                "eth-mainnet".to_owned(),
+                "ens_v1_resolver_l1".to_owned(),
+                "family".to_owned(),
+                None,
+                100,
+                120,
+                "legacy_full_payload_identity".to_owned(),
+            ),
+        ]
+    );
+
+    let mut widened_interval = facts[0].clone();
+    widened_interval.covered_to_block = 130;
+    let distinct_interval_inserted = write_backfill_coverage_facts(
+        &mut conn,
+        created.job.backfill_job_id,
+        BackfillCoverageFactDerivation::LegacyFullPayloadIdentity,
+        std::slice::from_ref(&widened_interval),
+    )
+    .await?;
+    assert_eq!(
+        distinct_interval_inserted, 1,
+        "a same-start fact with a different end block is a distinct interval and must not be dropped"
+    );
+    assert_eq!(
+        load_backfill_coverage_fact_counts(database.pool(), created.job.backfill_job_id).await?,
+        3
+    );
+
+    let mut missing_address = facts[0].clone();
+    missing_address.address = None;
+    let error = write_backfill_coverage_facts(
+        &mut conn,
+        created.job.backfill_job_id,
+        BackfillCoverageFactDerivation::LegacyFullPayloadIdentity,
+        std::slice::from_ref(&missing_address),
+    )
+    .await
+    .expect_err("address-scoped fact without an address must be rejected");
+    assert!(
+        error.to_string().contains("must carry an address"),
+        "unexpected error: {error:#}"
+    );
+
+    let mut inverted_range = facts[0].clone();
+    inverted_range.covered_from_block = 121;
+    let error = write_backfill_coverage_facts(
+        &mut conn,
+        created.job.backfill_job_id,
+        BackfillCoverageFactDerivation::LegacyFullPayloadIdentity,
+        std::slice::from_ref(&inverted_range),
+    )
+    .await
+    .expect_err("inverted coverage interval must be rejected");
+    assert!(
+        error.to_string().contains("is after covered_to_block"),
+        "unexpected error: {error:#}"
+    );
+
+    drop(conn);
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn range_completion_records_coverage_facts_only_when_job_flips() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let created = create_backfill_job(
+        database.pool(),
+        &backfill_job_create("job-coverage-on-completion"),
+    )
+    .await?;
+    let coverage_facts = |job: &BackfillJob| {
+        vec![address_coverage_fact(
+            "ens_v1_registry_l1",
+            "0x0000000000000000000000000000000000000001",
+            job.range_start_block_number,
+            job.range_end_block_number,
+        )]
+        .into_iter()
+    };
+
+    let first = reserve_backfill_range(
+        database.pool(),
+        created.job.backfill_job_id,
+        "worker-a",
+        "lease-first",
+        lease_deadline(),
+    )
+    .await?
+    .expect("first range must be reservable");
+    advance_backfill_range(database.pool(), first.backfill_range_id, "lease-first", 109).await?;
+    complete_backfill_range_recording_coverage(
+        database.pool(),
+        first.backfill_range_id,
+        "lease-first",
+        coverage_facts,
+    )
+    .await?;
+    assert_eq!(
+        load_backfill_coverage_fact_counts(database.pool(), created.job.backfill_job_id).await?,
+        0,
+        "facts must not be recorded before the job completes"
+    );
+
+    let second = reserve_backfill_range(
+        database.pool(),
+        created.job.backfill_job_id,
+        "worker-a",
+        "lease-second",
+        lease_deadline(),
+    )
+    .await?
+    .expect("second range must be reservable");
+    advance_backfill_range(
+        database.pool(),
+        second.backfill_range_id,
+        "lease-second",
+        120,
+    )
+    .await?;
+    complete_backfill_range_recording_coverage(
+        database.pool(),
+        second.backfill_range_id,
+        "lease-second",
+        coverage_facts,
+    )
+    .await?;
+
+    let job = load_backfill_job(database.pool(), created.job.backfill_job_id)
+        .await?
+        .expect("job must exist");
+    assert_eq!(job.status, BackfillLifecycleStatus::Completed);
+    assert_eq!(
+        load_coverage_fact_rows(database.pool(), created.job.backfill_job_id).await?,
+        vec![(
+            "eth-mainnet".to_owned(),
+            "ens_v1_registry_l1".to_owned(),
+            "address".to_owned(),
+            Some("0x0000000000000000000000000000000000000001".to_owned()),
+            100,
+            120,
+            "job_completion".to_owned(),
+        )]
+    );
+
+    let recompleted = complete_backfill_range_recording_coverage(
+        database.pool(),
+        second.backfill_range_id,
+        "lease-second",
+        coverage_facts,
+    )
+    .await?;
+    assert_eq!(recompleted.status, BackfillLifecycleStatus::Completed);
+    assert_eq!(
+        load_backfill_coverage_fact_counts(database.pool(), created.job.backfill_job_id).await?,
+        1,
+        "re-completion must not duplicate coverage facts"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn coverage_fact_writes_chunk_below_the_bind_limit() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let fact_count = 40_000_usize;
+    assert!(
+        fact_count > super::coverage_facts::COVERAGE_FACT_INSERT_CHUNK_ROWS,
+        "fixture must span multiple insert chunks"
+    );
+    let mut request = backfill_job_create("job-coverage-chunking");
+    request.ranges = Vec::new();
+    let created = create_backfill_job(database.pool(), &request).await?;
+
+    let reserved = reserve_backfill_range(
+        database.pool(),
+        created.job.backfill_job_id,
+        "worker-a",
+        "lease-chunk",
+        lease_deadline(),
+    )
+    .await?
+    .expect("range must be reservable");
+    advance_backfill_range(
+        database.pool(),
+        reserved.backfill_range_id,
+        "lease-chunk",
+        120,
+    )
+    .await?;
+    complete_backfill_range_recording_coverage(
+        database.pool(),
+        reserved.backfill_range_id,
+        "lease-chunk",
+        |job: &BackfillJob| {
+            let (covered_from_block, covered_to_block) =
+                (job.range_start_block_number, job.range_end_block_number);
+            (0..fact_count).map(move |index| {
+                address_coverage_fact(
+                    "ens_v1_wrapper_l1",
+                    &format!("0x{index:040x}"),
+                    covered_from_block,
+                    covered_to_block,
+                )
+            })
+        },
+    )
+    .await?;
+    assert_eq!(
+        load_backfill_coverage_fact_counts(database.pool(), created.job.backfill_job_id).await?,
+        fact_count as u64
+    );
+
+    let slice_facts = (0..fact_count)
+        .map(|index| {
+            address_coverage_fact(
+                "ens_v1_wrapper_l1",
+                &format!("0x{index:040x}"),
+                request.range_start_block_number,
+                request.range_end_block_number,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut conn = database.pool().acquire().await?;
+    let reinserted = write_backfill_coverage_facts(
+        &mut conn,
+        created.job.backfill_job_id,
+        BackfillCoverageFactDerivation::JobCompletion,
+        &slice_facts,
+    )
+    .await?;
+    drop(conn);
+    assert_eq!(
+        reinserted, 0,
+        "re-deriving the same facts must be a chunked no-op"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn deleting_a_backfill_job_cascades_its_coverage_facts() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let created = create_backfill_job(
+        database.pool(),
+        &backfill_job_create("job-coverage-cascade"),
+    )
+    .await?;
+    let mut conn = database.pool().acquire().await?;
+    write_backfill_coverage_facts(
+        &mut conn,
+        created.job.backfill_job_id,
+        BackfillCoverageFactDerivation::JobCompletion,
+        &[address_coverage_fact(
+            "ens_v1_registry_l1",
+            "0x0000000000000000000000000000000000000001",
+            100,
+            120,
+        )],
+    )
+    .await?;
+    drop(conn);
+    assert_eq!(
+        load_backfill_coverage_fact_counts(database.pool(), created.job.backfill_job_id).await?,
+        1
+    );
+
+    sqlx::query("DELETE FROM backfill_jobs WHERE backfill_job_id = $1")
+        .bind(created.job.backfill_job_id)
+        .execute(database.pool())
+        .await
+        .context("failed to delete backfill job for cascade test")?;
+    assert_eq!(
+        load_backfill_coverage_fact_counts(database.pool(), created.job.backfill_job_id).await?,
+        0,
+        "coverage facts must cascade with their job"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn concurrent_final_range_completions_flip_the_job_and_record_facts_once() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    // Each completion gets its own pre-warmed single-connection pool so the
+    // two transactions genuinely overlap; on a shared pool the second
+    // completion sits in pool acquisition for the first transaction's whole
+    // lifetime, which serializes them and lets pre-fix code pass.
+    let first_pool = database.dedicated_single_connection_pool().await?;
+    let second_pool = database.dedicated_single_connection_pool().await?;
+    let coverage_facts = |job: &BackfillJob| {
+        vec![address_coverage_fact(
+            "ens_v1_registry_l1",
+            "0x0000000000000000000000000000000000000001",
+            job.range_start_block_number,
+            job.range_end_block_number,
+        )]
+        .into_iter()
+    };
+
+    // One interleaving is not a proof; repeat the scenario so a lost flip
+    // cannot slip through on a lucky schedule.
+    for iteration in 0..4 {
+        let created = create_backfill_job(
+            database.pool(),
+            &backfill_job_create(&format!("job-concurrent-final-ranges-{iteration}")),
+        )
+        .await?;
+        let first_lease = format!("lease-a-{iteration}");
+        let second_lease = format!("lease-b-{iteration}");
+        let first = reserve_backfill_range(
+            database.pool(),
+            created.job.backfill_job_id,
+            "worker-a",
+            &first_lease,
+            lease_deadline(),
+        )
+        .await?
+        .expect("first range must be reservable");
+        let second = reserve_backfill_range(
+            database.pool(),
+            created.job.backfill_job_id,
+            "worker-b",
+            &second_lease,
+            lease_deadline(),
+        )
+        .await?
+        .expect("second range must be reservable");
+        advance_backfill_range(database.pool(), first.backfill_range_id, &first_lease, 109).await?;
+        advance_backfill_range(
+            database.pool(),
+            second.backfill_range_id,
+            &second_lease,
+            120,
+        )
+        .await?;
+        drop(first_pool.acquire().await?);
+        drop(second_pool.acquire().await?);
+
+        // The final two ranges complete concurrently: the job row lock must
+        // serialize them so exactly one transaction observes zero incomplete
+        // ranges and flips the job with its coverage facts. Without the
+        // lock, neither flips and the job is later completed fact-less by
+        // the reservation path.
+        let (first_result, second_result) = tokio::join!(
+            complete_backfill_range_recording_coverage(
+                &first_pool,
+                first.backfill_range_id,
+                &first_lease,
+                coverage_facts,
+            ),
+            complete_backfill_range_recording_coverage(
+                &second_pool,
+                second.backfill_range_id,
+                &second_lease,
+                coverage_facts,
+            ),
+        );
+        assert_eq!(
+            first_result?.status,
+            BackfillLifecycleStatus::Completed,
+            "first range completion must succeed (iteration {iteration})"
+        );
+        assert_eq!(
+            second_result?.status,
+            BackfillLifecycleStatus::Completed,
+            "second range completion must succeed (iteration {iteration})"
+        );
+
+        let job = load_backfill_job(database.pool(), created.job.backfill_job_id)
+            .await?
+            .expect("job must exist");
+        assert_eq!(
+            job.status,
+            BackfillLifecycleStatus::Completed,
+            "the last concurrent range completion must flip the job (iteration {iteration})"
+        );
+        assert_eq!(
+            load_coverage_fact_rows(database.pool(), created.job.backfill_job_id).await?,
+            vec![(
+                "eth-mainnet".to_owned(),
+                "ens_v1_registry_l1".to_owned(),
+                "address".to_owned(),
+                Some("0x0000000000000000000000000000000000000001".to_owned()),
+                100,
+                120,
+                "job_completion".to_owned(),
+            )],
+            "coverage facts must be recorded exactly once (iteration {iteration})"
+        );
+    }
+
+    first_pool.close().await;
+    second_pool.close().await;
     database.cleanup().await
 }

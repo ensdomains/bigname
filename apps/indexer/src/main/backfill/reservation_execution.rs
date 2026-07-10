@@ -12,8 +12,8 @@ use bigname_manifests::{
 };
 use bigname_storage::{
     BackfillJobCreate, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange,
-    BackfillRangeSpec, advance_backfill_range, complete_backfill_range, create_backfill_job,
-    load_backfill_job, reserve_backfill_range,
+    BackfillRangeSpec, advance_backfill_range, create_backfill_job, load_backfill_job,
+    reserve_backfill_range,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -28,6 +28,7 @@ use crate::{
 use super::{
     BackfillBlockRange, BackfillJobRunConfig, BackfillJobRunOutcome, BackfillTopicPlan,
     CoinbaseSqlBackfillConfig,
+    coverage_facts::complete_reserved_range_recording_plan_coverage,
     failure_recording::{ReservedRangeFailure, record_reserved_range_failure},
     fetching::{load_backfill_canonicality_evidence, run_hash_pinned_backfill_range},
     selection::{SelectedTargetIntervalIndex, SelectedTargetRangeCursor},
@@ -584,23 +585,15 @@ pub(super) async fn run_reserved_hash_pinned_backfill_range(
             .context("backfill block number overflowed while advancing range")?;
     }
 
-    if let Err(error) =
-        complete_backfill_range(pool, active_range.backfill_range_id, &config.lease_token).await
-    {
-        return Err(record_reserved_range_failure(ReservedRangeFailure {
-            pool,
-            reserved_range: &active_range,
-            config,
-            failure_reason: "backfill range completion failed",
-            block_number: None,
-            attempted_range: None,
-            phase: "range_completion",
-            error,
-        })
-        .await);
-    }
-
-    Ok(())
+    complete_reserved_range_recording_plan_coverage(
+        pool,
+        &active_range,
+        config,
+        source_plan,
+        false,
+        "backfill range completion failed",
+    )
+    .await
 }
 pub(super) fn backfill_lease_duration_secs(lease_expires_at: OffsetDateTime) -> Result<i64> {
     let duration_secs = lease_expires_at

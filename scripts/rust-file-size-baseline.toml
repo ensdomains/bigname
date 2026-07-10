@@ -22,12 +22,12 @@ justification = "Phase 7 allowlist for an oversized production file; future chan
 
 [[files]]
 path = "apps/indexer/src/main/backfill/reservation_execution.rs"
-loc = 622
+loc = 615
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]
 path = "apps/indexer/src/main/backfill/reservation_execution/coinbase_sql.rs"
-loc = 796
+loc = 790
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]

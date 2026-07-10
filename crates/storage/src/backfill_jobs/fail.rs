@@ -4,7 +4,9 @@ use sqlx::{PgPool, Postgres};
 
 use super::{
     decode::{decode_backfill_job, decode_backfill_range},
-    read::{load_backfill_job_for_update, load_backfill_range_for_update},
+    read::{
+        load_backfill_job_for_update, load_backfill_range_for_update, load_backfill_range_job_id,
+    },
     sql::{backfill_job_returning_sql, backfill_range_returning_sql},
     types::{BackfillJob, BackfillLifecycleStatus, BackfillRange},
     validate::{ensure_lease_matches, validate_failure, validate_non_empty},
@@ -27,6 +29,17 @@ pub async fn fail_backfill_range(
         .begin()
         .await
         .context("failed to open transaction for backfill range failure")?;
+
+    // Job lock before range lock (see load_backfill_job_for_update): this
+    // writer also marks the job row failed below.
+    let backfill_job_id = load_backfill_range_job_id(&mut *transaction, backfill_range_id)
+        .await?
+        .with_context(|| format!("missing backfill range {backfill_range_id}"))?;
+    load_backfill_job_for_update(&mut *transaction, backfill_job_id)
+        .await?
+        .with_context(|| {
+            format!("missing backfill job {backfill_job_id} for range {backfill_range_id}")
+        })?;
 
     let current = load_backfill_range_for_update(&mut *transaction, backfill_range_id)
         .await?

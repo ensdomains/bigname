@@ -1179,6 +1179,20 @@ async fn create_ops_catchup_backfill_job_tables(pool: &PgPool) -> Result<()> {
     .await
     .context("failed to create active lease token index for ops catch-up tests")?;
 
+    create_backfill_coverage_facts_table(pool).await?;
+
+    Ok(())
+}
+
+/// Apply the real backfill_coverage_facts migration so fixture schemas cannot
+/// drift from the checked-in DDL.
+async fn create_backfill_coverage_facts_table(pool: &PgPool) -> Result<()> {
+    sqlx::raw_sql(include_str!(
+        "../../../../../migrations/20260710060000_backfill_coverage_facts.sql"
+    ))
+    .execute(pool)
+    .await
+    .context("failed to apply the backfill_coverage_facts migration for indexer tests")?;
     Ok(())
 }
 

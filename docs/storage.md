@@ -525,6 +525,53 @@ Backfill idempotency is derived from deployment profile, chain, finite range, sc
 
 `effective_to_block` is finite for every persisted selected target — backfill jobs are finite at creation time. Bootstrap ranges start at each eligible target's manifest/discovery admitted start and end at the finite provider head observed at job creation. A watched target whose manifest-declared `start_block` is unknown is skipped by bootstrap; it leaves no synthetic block-zero, provider-history, recent-window, or job-start range in `backfill_*`.
 
+### Backfill coverage facts
+
+`backfill_coverage_facts` records, per completed job, which watched
+`(source_family, address)` tuples had their logs fetched over which block
+interval — durable fetch evidence derived from the job's own in-memory
+selector plan at completion time, in the same transaction as the job status
+flip. These rows exist to back checkpoint promotion, which will consume them
+instead of recomputing selector plans from persisted identities once the
+promotion rework (PR #125) lands; until then they are written but not yet
+read by promotion.
+
+- Scope semantics: `scope=address` rows carry the lowercased emitting
+  address and cover exactly that tuple. `scope=family` rows carry a NULL
+  address and mean every address of the family is covered by a
+  topics-complete fetch over the row's interval (ENSv1 generic resolver
+  scans and Base Basenames registry Coinbase SQL scan-all).
+- Derivation kinds: `job_completion` rows are written by the completing
+  job from its in-memory plan; `legacy_full_payload_identity` rows are
+  re-derived by `repair derive-backfill-coverage-facts` from persisted
+  verbatim-target identities of already-completed jobs.
+- Append-only discipline: no code path UPDATEs a fact row. Re-derivation is
+  idempotent through `ON CONFLICT DO NOTHING` against the tuple key
+  `(backfill_job_id, source_family, scope, address, covered_from_block,
+  covered_to_block)` (`NULLS NOT DISTINCT`); the same derivation re-run
+  inserts nothing.
+- Family facts are clamped to the merged union segments of the family's
+  target effective windows intersected with the job range — a deliberate
+  under-claim relative to the raw job range, because the Coinbase SQL
+  scan-all planner skips windows holding no targets. It cannot cause a
+  spurious promotion refusal: requirement tuples are by construction inside
+  the union of the family's target windows.
+- Repair derivability: identities that persist the fetched target set
+  verbatim (fnv1a64-era full payloads) re-derive completely. Compact digest
+  identities (`selected_targets_digest_v1` and its generic-scan variant)
+  are refused — the target set is unrecoverable from a digest. Family-scan
+  identities that do not persist the scanned family's target windows
+  (`basenames_registry_scan_all_event_signatures_v1`,
+  `generic_resolver_event_topics_v1`, and
+  `selected_targets_with_generic_topic_scans_v1` whose producers filtered
+  the generic families' targets out of `selected_targets`) are refused
+  rather than deriving partial coverage; those jobs must be re-run on
+  fact-writing code.
+- `backfill_coverage_facts.backfill_job_id` cascades on job delete. Once
+  checkpoint promotion relies on facts, deleting or pruning completed
+  `backfill_jobs` rows silently destroys promotion evidence — job pruning
+  is forbidden.
+
 ### Backfill range checkpoint vs chain checkpoint
 
 Backfill range checkpoints are operational state. They record only that bounded fetch/resume work reached a position in a declared range. They do not change any `canonicality_state` value and do not advance `canonical_head`, `safe_head`, or `finalized_head`.

@@ -3,11 +3,11 @@ use sqlx::types::time::OffsetDateTime;
 use sqlx::{PgPool, Row};
 
 use super::{
-    complete::set_backfill_job_completed,
+    complete::{set_backfill_job_completed, warn_backfill_job_completed_without_coverage_facts},
     decode::decode_backfill_range,
     read::{
         incomplete_range_count, load_active_backfill_range_by_lease, load_backfill_job_for_update,
-        load_backfill_range_for_update,
+        load_backfill_range_for_update, load_backfill_range_job_id,
     },
     sql::backfill_range_returning_sql,
     types::{BackfillLifecycleStatus, BackfillRange},
@@ -88,7 +88,8 @@ pub async fn reserve_backfill_range(
 
     let Some(candidate) = candidate else {
         if incomplete_range_count(&mut *transaction, backfill_job_id).await? == 0 {
-            set_backfill_job_completed(&mut transaction, backfill_job_id).await?;
+            let job = set_backfill_job_completed(&mut transaction, backfill_job_id).await?;
+            warn_backfill_job_completed_without_coverage_facts(&job, "reserve_backfill_range");
         }
         transaction
             .commit()
@@ -165,6 +166,17 @@ pub async fn advance_backfill_range(
         .begin()
         .await
         .context("failed to open transaction for backfill range advance")?;
+
+    // Job lock before range lock (see load_backfill_job_for_update): this
+    // writer also updates the job row below.
+    let backfill_job_id = load_backfill_range_job_id(&mut *transaction, backfill_range_id)
+        .await?
+        .with_context(|| format!("missing backfill range {backfill_range_id}"))?;
+    load_backfill_job_for_update(&mut *transaction, backfill_job_id)
+        .await?
+        .with_context(|| {
+            format!("missing backfill job {backfill_job_id} for range {backfill_range_id}")
+        })?;
 
     let current = load_backfill_range_for_update(&mut *transaction, backfill_range_id)
         .await?

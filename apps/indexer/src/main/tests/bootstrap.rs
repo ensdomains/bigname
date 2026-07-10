@@ -2330,5 +2330,7 @@ async fn create_bootstrap_backfill_job_tables(pool: &PgPool) -> Result<()> {
     .await
     .context("failed to create backfill_ranges table for bootstrap tests")?;
 
+    create_backfill_coverage_facts_table(pool).await?;
+
     Ok(())
 }
