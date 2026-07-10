@@ -199,14 +199,12 @@ fn warn_backfill_job_coverage_fact_gap(job: &BackfillJob, completion_path: &str,
             | Some("selected_targets_digest_with_generic_topic_scans_v1")
     );
     // Only recommend the repair command for identity shapes it derives
-    // soundly: verbatim selected_targets payloads. Family-scan-only shapes do
-    // not persist the family target spans, so their coverage is unrecoverable.
+    // soundly: plain verbatim selected_targets payloads. Generic-scan and
+    // family-scan-only shapes do not persist the scanned family's target
+    // spans, so their coverage is unrecoverable.
     let guidance = if compact_digest_identity {
         "; its compact digest identity makes coverage unrecoverable without re-running the job on fact-writing code"
-    } else if matches!(
-        payload_format,
-        None | Some("selected_targets_with_generic_topic_scans_v1")
-    ) {
+    } else if payload_format.is_none() {
         "; run repair derive-backfill-coverage-facts to derive coverage from its verbatim selected_targets"
     } else {
         "; its identity does not persist the family target spans needed for sound coverage facts, so re-run the job on fact-writing code"
@@ -241,7 +239,6 @@ where
     let inserted_fact_count = write_backfill_coverage_facts_from_iter(
         executor,
         job.backfill_job_id,
-        &job.chain_id,
         BackfillCoverageFactDerivation::JobCompletion,
         coverage_facts(&job),
     )

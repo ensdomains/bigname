@@ -29,11 +29,12 @@ pub(crate) struct LegacyBackfillCoverageFactsOutcome {
 /// Derive coverage facts for an already-completed job from its persisted
 /// verbatim-target `source_identity` (fnv1a64-era full payloads included).
 /// Refused shapes: compact digests (the fetched target set is not recoverable
-/// from a digest) and family-scan-only identities (they do not persist the
-/// family target spans needed for sound family facts) — both require
-/// re-running the job on fact-writing code. Family facts for
-/// `generic_topic_scans` families use the same clamp-and-merge segments as
-/// live completion, derived from the persisted targets of that family.
+/// from a digest), family-scan-only identities, and identities declaring
+/// `generic_topic_scans` without persisting the scanned family's targets
+/// (partial address-only coverage would silently omit the family fetch) —
+/// all require re-running the job on fact-writing code. Family facts for
+/// `generic_topic_scans` families with persisted targets use the same
+/// clamp-and-merge segments as live completion.
 pub(crate) async fn derive_legacy_backfill_coverage_facts(
     pool: &sqlx::PgPool,
     backfill_job_id: i64,
@@ -62,7 +63,6 @@ pub(crate) async fn derive_legacy_backfill_coverage_facts(
     let inserted_fact_count = write_backfill_coverage_facts(
         &mut transaction,
         job.backfill_job_id,
-        &job.chain_id,
         BackfillCoverageFactDerivation::LegacyFullPayloadIdentity,
         &facts,
     )
@@ -123,10 +123,6 @@ fn legacy_coverage_facts_from_source_identity(
             )
         })?;
 
-    // Live producers filter family-scanned targets out of the persisted
-    // selected_targets, so family facts here only materialize when the
-    // identity carries such targets; absent windows conservatively yield no
-    // family coverage.
     let family_scan_source_families = generic_topic_scan_source_families(source_identity);
     let mut family_scan_windows = BTreeMap::<String, Vec<(i64, i64)>>::new();
     let mut facts = Vec::new();
@@ -176,6 +172,21 @@ fn legacy_coverage_facts_from_source_identity(
             covered_from_block,
             covered_to_block,
         });
+    }
+
+    // Live producers filtered the generic-scanned families' targets out of
+    // the persisted selected_targets, so a declared scan without persisted
+    // windows means the family's fetched span is unrecoverable. Deriving only
+    // the address-scoped portion would report success while silently omitting
+    // family coverage the job actually fetched — refuse instead of writing
+    // partial coverage.
+    for declared_family in &family_scan_source_families {
+        if !family_scan_windows.contains_key(declared_family) {
+            bail!(
+                "backfill job {} declares a generic topic scan for source family {declared_family} but persists no selected targets for it; the address-scoped facts could be derived, but this command refuses partial coverage because the family's fetched span is unrecoverable — re-run the job on fact-writing code",
+                job.backfill_job_id
+            );
+        }
     }
 
     for (source_family, windows) in family_scan_windows {
