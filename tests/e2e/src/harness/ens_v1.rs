@@ -6,7 +6,7 @@ use alloy_sol_types::{SolCall, SolValue, sol};
 use anyhow::{Context, Result, bail};
 
 use super::artifacts::{Deployed, deploy, load_ens_v1_artifact};
-use super::rpc::RpcClient;
+use super::rpc::{RpcClient, TxReceipt};
 
 // Call fragments match the pinned upstream sources:
 // (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L39 @ ens_v1@91c966f)
@@ -111,6 +111,56 @@ mod registrar_token_calls {
     }
 }
 
+mod registrar_queries {
+    use alloy_sol_types::sol;
+
+    // The registrar expiry is the cap used to derive the wrapper's .eth
+    // expiry and lets scenarios choose a live child expiry below its parent.
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/IBaseRegistrar.sol:L31 @ ens_v1@91c966f)
+    sol! {
+        function nameExpires(uint256 id) external view returns (uint256 expiry);
+    }
+}
+
+mod wrapped_controller_calls {
+    use alloy_sol_types::sol;
+
+    // The admitted mainnet WrappedETHRegistrarController artifact predates
+    // the tuple-based current controller, so its flat call ABI must remain
+    // scoped away from the main controller bindings.
+    // (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L278 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L419 @ ens_v1@91c966f)
+    sol! {
+        struct Price {
+            uint256 base;
+            uint256 premium;
+        }
+
+        function makeCommitment(
+            string name,
+            address owner,
+            uint256 duration,
+            bytes32 secret,
+            address resolver,
+            bytes[] data,
+            bool reverseRecord,
+            uint16 ownerControlledFuses
+        ) external pure returns (bytes32 commitment);
+        function commit(bytes32 commitment) external;
+        function register(
+            string name,
+            address owner,
+            uint256 duration,
+            bytes32 secret,
+            address resolver,
+            bytes[] data,
+            bool reverseRecord,
+            uint16 ownerControlledFuses
+        ) external payable;
+        function rentPrice(string name, uint256 duration) external view returns (Price price);
+    }
+}
+
 mod wrapper_calls {
     use alloy_sol_types::sol;
 
@@ -148,11 +198,28 @@ mod wrapper_calls {
     // (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L13 @ ens_v1@91c966f)
     // (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L18 @ ens_v1@91c966f)
     sol! {
+        function wrap(bytes name, address wrappedOwner, address resolver) external;
         function wrapETH2LD(string label, address wrappedOwner, uint16 ownerControlledFuses, address resolver) external returns (uint64 expiry);
         function unwrapETH2LD(bytes32 labelhash, address registrant, address controller) external;
         function setFuses(bytes32 node, uint16 ownerControlledFuses) external returns (uint32 oldFuses);
+        function setChildFuses(bytes32 parentNode, bytes32 labelhash, uint32 fuses, uint64 expiry) external;
+        function extendExpiry(bytes32 parentNode, bytes32 labelhash, uint64 expiry) external returns (uint64 newExpiry);
         function setSubnodeOwner(bytes32 parentNode, string label, address owner, uint32 fuses, uint64 expiry) external returns (bytes32 node);
         function setSubnodeRecord(bytes32 parentNode, string label, address owner, address resolver, uint64 ttl, uint32 fuses, uint64 expiry) external returns (bytes32 node);
+        function getData(uint256 id) external view returns (address owner, uint32 fuses, uint64 expiry);
+    }
+}
+
+mod wrapper_token_calls {
+    use alloy_sol_types::sol;
+
+    // NameWrapper's ERC1155 base supports both single and batch ownership
+    // motion without touching the ENS registry.
+    // (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L137 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L154 @ ens_v1@91c966f)
+    sol! {
+        function safeTransferFrom(address from, address to, uint256 id, uint256 amount, bytes data) external;
+        function safeBatchTransferFrom(address from, address to, uint256[] ids, uint256[] amounts, bytes data) external;
     }
 }
 
@@ -202,6 +269,26 @@ pub fn namehash(name: &str) -> B256 {
     node
 }
 
+/// Encode a dotted name in the DNS wire form consumed by NameWrapper.wrap.
+/// (upstream: .refs/ens_v1/test/fixtures/dnsEncodeName.ts:L3 @ ens_v1@91c966f)
+pub fn dns_encode_name(name: &str) -> Result<Bytes> {
+    if name.is_empty() {
+        return Ok(Bytes::from(vec![0]));
+    }
+    let mut encoded = Vec::with_capacity(name.len() + 2);
+    for label in name.split('.') {
+        if label.is_empty() {
+            bail!("DNS name contains an empty label: {name}");
+        }
+        let length = u8::try_from(label.len())
+            .with_context(|| format!("DNS label is longer than 255 bytes: {label}"))?;
+        encoded.push(length);
+        encoded.extend_from_slice(label.as_bytes());
+    }
+    encoded.push(0);
+    Ok(Bytes::from(encoded))
+}
+
 pub fn reverse_node(address: Address) -> B256 {
     namehash(&format!("{address:x}.addr.reverse"))
 }
@@ -219,6 +306,7 @@ pub struct EnsV1Deployment {
     pub public_resolver: Deployed,
     pub reverse_registrar: Deployed,
     pub name_wrapper: Deployed,
+    pub wrapped_controller: Deployed,
 }
 
 pub const EXECUTION_UNIVERSAL_RESOLVER_ADDRESS: &str = "0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe";
@@ -335,6 +423,28 @@ pub async fn deploy_ens_v1(rpc: &RpcClient, repo_root: &Path) -> Result<EnsV1Dep
             .abi_encode_params(),
     )
     .await?;
+    // Use the byte-exact mainnet WrappedETHRegistrarController artifact: it
+    // is the contract admitted by the manifest's
+    // `wrapped_registrar_controller` role. Its constructor arguments mirror
+    // the pinned deployment script.
+    // (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L5 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/deploy/ethregistrar/03_deploy_wrapped_eth_registrar_controller.ts:L36 @ ens_v1@91c966f)
+    let wrapped_controller = deploy(
+        rpc,
+        deployer,
+        &load_ens_v1_artifact(repo_root, "mainnet", "WrappedETHRegistrarController")?,
+        &(
+            base_registrar.address,
+            price_oracle.address,
+            U256::from(60u8),
+            U256::from(86_400u32),
+            reverse_registrar.address,
+            name_wrapper.address,
+            registry.address,
+        )
+            .abi_encode_params(),
+    )
+    .await?;
     let public_resolver = deploy(
         rpc,
         deployer,
@@ -358,6 +468,7 @@ pub async fn deploy_ens_v1(rpc: &RpcClient, repo_root: &Path) -> Result<EnsV1Dep
         public_resolver,
         reverse_registrar,
         name_wrapper,
+        wrapped_controller,
     };
     let registrar_controller_calls = [
         addControllerCall {
@@ -366,6 +477,10 @@ pub async fn deploy_ens_v1(rpc: &RpcClient, repo_root: &Path) -> Result<EnsV1Dep
         .abi_encode(),
         addControllerCall {
             controller: deployment.name_wrapper.address,
+        }
+        .abi_encode(),
+        addControllerCall {
+            controller: deployment.wrapped_controller.address,
         }
         .abi_encode(),
     ];
@@ -379,6 +494,21 @@ pub async fn deploy_ens_v1(rpc: &RpcClient, repo_root: &Path) -> Result<EnsV1Dep
         deployment.reverse_registrar.address,
         &setControllerCall {
             controller: deployment.controller.address,
+            enabled: true,
+        }
+        .abi_encode(),
+    )
+    .await?;
+    // The wrapped controller is authorised on both contracts it calls during
+    // registerAndWrapETH2LD, matching the pinned deployment flow.
+    // (upstream: .refs/ens_v1/deploy/ethregistrar/03_deploy_wrapped_eth_registrar_controller.ts:L67 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/deploy/ethregistrar/03_deploy_wrapped_eth_registrar_controller.ts:L76 @ ens_v1@91c966f)
+    send_checked(
+        rpc,
+        deployer,
+        deployment.name_wrapper.address,
+        &setControllerCall {
+            controller: deployment.wrapped_controller.address,
             enabled: true,
         }
         .abi_encode(),
@@ -504,13 +634,22 @@ async fn wire_registry_nodes(
 }
 
 async fn send_checked(rpc: &RpcClient, from: Address, to: Address, data: &[u8]) -> Result<()> {
+    send_checked_receipt(rpc, from, to, data).await.map(|_| ())
+}
+
+async fn send_checked_receipt(
+    rpc: &RpcClient,
+    from: Address,
+    to: Address,
+    data: &[u8],
+) -> Result<TxReceipt> {
     let receipt = rpc
         .send_transaction(from, Some(to), data, U256::ZERO)
         .await?;
     if !receipt.status_ok {
         bail!("call to {to} reverted (tx {})", receipt.tx_hash);
     }
-    Ok(())
+    Ok(receipt)
 }
 
 /// Create `<label>.<parent>` in the registry, owned by `owner`. `from` must
@@ -951,6 +1090,21 @@ pub async fn transfer_eth_name(
     .await
 }
 
+pub async fn eth_name_expiry(rpc: &RpcClient, d: &EnsV1Deployment, label: &str) -> Result<u64> {
+    let raw = rpc
+        .eth_call(
+            d.base_registrar.address,
+            &registrar_queries::nameExpiresCall {
+                id: U256::from_be_bytes(labelhash(label).0),
+            }
+            .abi_encode(),
+        )
+        .await?;
+    let decoded = registrar_queries::nameExpiresCall::abi_decode_returns(&raw)
+        .context("nameExpires decode")?;
+    u64::try_from(decoded).context("registrar expiry exceeds u64")
+}
+
 mod registrar_direct {
     use alloy_sol_types::sol;
 
@@ -1037,6 +1191,114 @@ pub async fn wrap_eth_2ld(
     .await
 }
 
+/// Wrap an existing non-.eth registry name. The registry owner must first
+/// approve the NameWrapper as an operator so its internal setOwner call is
+/// authorised.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L342 @ ens_v1@91c966f)
+pub async fn wrap_registry_name(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    name: &str,
+    wrapped_owner: Address,
+    resolver: Address,
+) -> Result<String> {
+    let receipt = send_checked_receipt(
+        rpc,
+        from,
+        d.name_wrapper.address,
+        &wrapper_calls::wrapCall {
+            name: dns_encode_name(name)?,
+            wrappedOwner: wrapped_owner,
+            resolver,
+        }
+        .abi_encode(),
+    )
+    .await?;
+    Ok(receipt.tx_hash)
+}
+
+pub struct WrappedNameData {
+    pub owner: Address,
+    pub fuses: u32,
+    pub expiry: u64,
+}
+
+pub async fn wrapped_name_data(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    name: &str,
+) -> Result<WrappedNameData> {
+    let raw = rpc
+        .eth_call(
+            d.name_wrapper.address,
+            &wrapper_calls::getDataCall {
+                id: U256::from_be_bytes(namehash(name).0),
+            }
+            .abi_encode(),
+        )
+        .await?;
+    let decoded = wrapper_calls::getDataCall::abi_decode_returns(&raw).context("getData decode")?;
+    Ok(WrappedNameData {
+        owner: decoded.owner,
+        fuses: decoded.fuses,
+        expiry: decoded.expiry,
+    })
+}
+
+pub async fn transfer_wrapped_name(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    to: Address,
+    name: &str,
+) -> Result<String> {
+    let receipt = send_checked_receipt(
+        rpc,
+        from,
+        d.name_wrapper.address,
+        &wrapper_token_calls::safeTransferFromCall {
+            from,
+            to,
+            id: U256::from_be_bytes(namehash(name).0),
+            amount: U256::from(1u8),
+            data: Bytes::new(),
+        }
+        .abi_encode(),
+    )
+    .await?;
+    Ok(receipt.tx_hash)
+}
+
+pub async fn batch_transfer_wrapped_names(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    to: Address,
+    names: &[&str],
+) -> Result<String> {
+    let ids = names
+        .iter()
+        .map(|name| U256::from_be_bytes(namehash(name).0))
+        .collect::<Vec<_>>();
+    let amounts = vec![U256::from(1u8); ids.len()];
+    let receipt = send_checked_receipt(
+        rpc,
+        from,
+        d.name_wrapper.address,
+        &wrapper_token_calls::safeBatchTransferFromCall {
+            from,
+            to,
+            ids,
+            amounts,
+            data: Bytes::new(),
+        }
+        .abi_encode(),
+    )
+    .await?;
+    Ok(receipt.tx_hash)
+}
+
 pub async fn unwrap_eth_2ld(
     rpc: &RpcClient,
     d: &EnsV1Deployment,
@@ -1077,6 +1339,54 @@ pub async fn set_wrapper_fuses(
         .abi_encode(),
     )
     .await
+}
+
+pub async fn set_child_fuses(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    parent: &str,
+    label: &str,
+    fuses: u32,
+    expiry: u64,
+) -> Result<String> {
+    let receipt = send_checked_receipt(
+        rpc,
+        from,
+        d.name_wrapper.address,
+        &wrapper_calls::setChildFusesCall {
+            parentNode: namehash(parent),
+            labelhash: labelhash(label),
+            fuses,
+            expiry,
+        }
+        .abi_encode(),
+    )
+    .await?;
+    Ok(receipt.tx_hash)
+}
+
+pub async fn extend_child_expiry(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    from: Address,
+    parent: &str,
+    label: &str,
+    expiry: u64,
+) -> Result<String> {
+    let receipt = send_checked_receipt(
+        rpc,
+        from,
+        d.name_wrapper.address,
+        &wrapper_calls::extendExpiryCall {
+            parentNode: namehash(parent),
+            labelhash: labelhash(label),
+            expiry,
+        }
+        .abi_encode(),
+    )
+    .await?;
+    Ok(receipt.tx_hash)
 }
 
 pub struct WrappedSubnodeOwner<'a> {
@@ -1269,6 +1579,13 @@ impl EnsV1Deployment {
                 (self.controller.address, self.controller.block_number),
             ),
             (
+                "wrapped_registrar_controller",
+                (
+                    self.wrapped_controller.address,
+                    self.wrapped_controller.block_number,
+                ),
+            ),
+            (
                 "public_resolver",
                 (
                     self.public_resolver.address,
@@ -1422,6 +1739,105 @@ pub async fn register_eth_name_with_options(
 
     Ok(RegisteredName {
         label: label.to_string(),
+        owner,
+        commit_block: commit_receipt.block_number,
+        register_block: register_receipt.block_number,
+        register_tx_hash: register_receipt.tx_hash,
+    })
+}
+
+/// Register and wrap `<label>.eth` through the admitted mainnet wrapped
+/// controller's flat commit/reveal ABI. Its reveal calls
+/// NameWrapper.registerAndWrapETH2LD before emitting NameRegistered.
+/// (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289 @ ens_v1@91c966f)
+pub async fn register_wrapped_eth_name(
+    rpc: &RpcClient,
+    d: &EnsV1Deployment,
+    label: &str,
+    owner: Address,
+    duration_secs: u64,
+    resolver: Address,
+    owner_controlled_fuses: u16,
+) -> Result<RegisteredName> {
+    let secret = B256::repeat_byte(0x43);
+    let data = Vec::<Bytes>::new();
+    let commitment_raw = rpc
+        .eth_call(
+            d.wrapped_controller.address,
+            &wrapped_controller_calls::makeCommitmentCall {
+                name: label.to_owned(),
+                owner,
+                duration: U256::from(duration_secs),
+                secret,
+                resolver,
+                data: data.clone(),
+                reverseRecord: false,
+                ownerControlledFuses: owner_controlled_fuses,
+            }
+            .abi_encode(),
+        )
+        .await?;
+    let commitment =
+        wrapped_controller_calls::makeCommitmentCall::abi_decode_returns(&commitment_raw)
+            .context("wrapped makeCommitment decode")?;
+
+    let commit_receipt = rpc
+        .send_transaction(
+            owner,
+            Some(d.wrapped_controller.address),
+            &wrapped_controller_calls::commitCall { commitment }.abi_encode(),
+            U256::ZERO,
+        )
+        .await?;
+    if !commit_receipt.status_ok {
+        bail!(
+            "wrapped-controller commit reverted (tx {})",
+            commit_receipt.tx_hash
+        );
+    }
+
+    rpc.increase_time(61).await?;
+
+    let price_raw = rpc
+        .eth_call(
+            d.wrapped_controller.address,
+            &wrapped_controller_calls::rentPriceCall {
+                name: label.to_owned(),
+                duration: U256::from(duration_secs),
+            }
+            .abi_encode(),
+        )
+        .await?;
+    let price = wrapped_controller_calls::rentPriceCall::abi_decode_returns(&price_raw)
+        .context("wrapped rentPrice decode")?;
+    let register_receipt = rpc
+        .send_transaction(
+            owner,
+            Some(d.wrapped_controller.address),
+            &wrapped_controller_calls::registerCall {
+                name: label.to_owned(),
+                owner,
+                duration: U256::from(duration_secs),
+                secret,
+                resolver,
+                data,
+                reverseRecord: false,
+                ownerControlledFuses: owner_controlled_fuses,
+            }
+            .abi_encode(),
+            price.base + price.premium,
+        )
+        .await?;
+    if !register_receipt.status_ok {
+        bail!(
+            "wrapped registration of {label}.eth reverted (tx {})",
+            register_receipt.tx_hash
+        );
+    }
+
+    Ok(RegisteredName {
+        label: label.to_owned(),
         owner,
         commit_block: commit_receipt.block_number,
         register_block: register_receipt.block_number,

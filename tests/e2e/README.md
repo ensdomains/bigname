@@ -234,6 +234,40 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
   masking, creates wrapped subnames with `PARENT_CANNOT_CONTROL`, checks
   wrapper expiry vs registrar expiry, and unwraps a separate name before
   lease end to confirm the prior registrar resource and lineage reactivate.
+- `wrapper_turn_k::born_wrapped_registration_exposes_trailing_grant_rebind`
+  — deploys and authorises the manifest-admitted mainnet
+  WrappedETHRegistrarController artifact, registers through its flat
+  commit/reveal ABI and NameWrapper's registerAndWrapETH2LD entrypoint
+  (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289 @ ens_v1@91c966f),
+  and pins the current mixed result: one transient wrapper resource, a final
+  registrar binding, and registry-only exact-name authority fields.
+- `wrapper_turn_k_transfers::wrapped_renewal_tracks_registrar_expiry_without_wrapper_event`
+  — renews a wrapped 2LD through the current controller, proving the wrapper
+  emits no expiry event and its onchain expiry stays stale while exact-name
+  follows the registrar `RegistrationRenewed` value
+  (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L366 @ ens_v1@91c966f).
+- `wrapper_turn_k_transfers::wrapped_erc1155_single_and_batch_transfers_preserve_identity`
+  — performs real single and two-id batch ERC1155 transfers, pins per-id
+  `TransferBatch` fan-out, holder-following registrants, stable wrapper
+  resource/lineage, zero registry/lifecycle derivation, and the existing
+  stale control facets under holder rotation
+  (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L154 @ ens_v1@91c966f).
+- `wrapper_turn_k::parent_burns_pcc_then_extends_existing_child_expiry`
+  — creates a live wrapped child without PCC, burns the exact 0→65536
+  transition through parent-authorised setChildFuses, then extends the child
+  to its parent's expiry cap without rotating identity
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L517 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L475 @ ens_v1@91c966f).
+- `wrapper_turn_k::wrap_existing_registry_subname_rotates_child_only` —
+  wraps a plain child under a registry-only parent using DNS wire bytes and
+  registry operator approval; the child's registry `Transfer` (not
+  `NewOwner`) rotates it to a distinct wrapper resource and publishes the
+  `NameWrapped` label preimage while the parent stays registry-only
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L342 @ ens_v1@91c966f).
+  Reveal-via-wrap trips the same live-intake hang as
+  reveal-via-registration (chipped), so this scenario pins derivation and
+  projections via backfill + replay — no API layer.
 - `reverse_primary::reverse_claim_set_changed_then_cleared_tracks_declared_candidate`
   — drives `ReverseRegistrar.setName` through the admitted reverse family
   and asserts declared primary-name readback: `mode=declared` exposes only
