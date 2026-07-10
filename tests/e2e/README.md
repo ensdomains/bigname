@@ -323,6 +323,42 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
   promotion; discovered child-registry logs are never scanned in-session;
   and unregister→re-register wedges intake when ingested (exercised
   on-chain only, post-ingest).
+- `ens_v2_turn_l::renewal_promotes_coverage_and_registry_edges_follow` —
+  registrar renewal derives both fragments and CONFIRMS the coverage
+  promotion end to end (the shadow lifts once a renewal lands); a direct
+  registry renew emits `ExpiryUpdated` alone on the wire but derives both
+  `ExpiryChanged` and a registry-family `RegistrationRenewed`; expiry
+  reduction reverts upstream
+  (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L196 @ ens_v2@554c309).
+- `ens_v2_turn_l::resolver_and_subregistry_edges_follow_set_change_zero` —
+  resolver set/change/zero and subregistry attach/detach derive NULL-edge
+  detaches; pinned via backfill + replay because the composed live chain
+  hangs intake (chipped; every op ingests cleanly alone), which also pinned
+  the backfill/live parity gap: backfill derives zero v2
+  `PermissionChanged`.
+- `ens_v2_turn_l::expiry_passes_then_reregistration_advances_lineage` —
+  the event-silent expiry flip serves last-known active state with a past
+  expiry; re-registration advances the on-chain counters while BOTH intake
+  paths refuse the cycle (live hang; backfill anchor-conflict abort,
+  asserted verbatim).
+- `ens_v2_turn_l::root_apex_attach_and_root_scope_roles` — the root
+  family's first transitions: `eth` apex registration + attach derive,
+  root-scope grant/revoke read from the resulting bitmap and clear
+  `permissions_current`, and registry-level setParent derives
+  `ParentChanged`
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L152 @ ens_v2@554c309).
+- `ens_v2_turn_l::reserved_labels_foreign_registrar_and_token_sale` —
+  labelhash-keyed token-less reservations promote in place preserving
+  expiry; a non-admitted root-role registrar derives registry-only facts
+  with gated coverage; an ERC1155 sale migrates roles (admin-half rendered
+  as `admin_*` powers) with no token regeneration while the registrant
+  facet stays at the seller (chipped).
+- `ens_v2_turn_l::discovered_v2_resolver_records_stay_unscanned` — a
+  VerifiableFactory-proxied writable resolver
+  (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L177 @ ens_v2@554c309)
+  is discovery-admitted from the registry's `ResolverUpdated`, but zero raw
+  logs are scanned at the discovered address in-session and zero record
+  events derive — the discovered-registry scan gap extends to resolvers.
 - `verified_resolution::direct_path_verified_query_via_local_universal_resolver_persists_trace`
   — deploys the pinned ENSv1 UniversalResolver with local constructor
   dependencies (upstream: .refs/ens_v1/contracts/universalResolver/UniversalResolver.sol:L11 @ ens_v1@91c966f)

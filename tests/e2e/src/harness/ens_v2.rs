@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use alloy_primitives::{Address, B256, U256, keccak256};
+use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_sol_types::{SolCall, SolValue};
 use anyhow::{Context, Result, bail};
 
 use super::artifacts::{Deployed, deploy, load_ens_v2_artifact};
-use super::rpc::RpcClient;
+use super::rpc::{RpcClient, TxReceipt};
 
 const MIN_COMMITMENT_AGE: u64 = 60;
 const MAX_COMMITMENT_AGE: u64 = 86_400;
@@ -15,6 +15,7 @@ pub const MIN_REGISTER_DURATION: u64 = 2_419_200;
 const ROLE_REGISTRAR: usize = 0;
 pub const ROLE_UNREGISTER: usize = 12;
 pub const ROLE_SET_PARENT: usize = 8;
+pub const ROLE_RENEW: usize = 16;
 pub const ROLE_SET_SUBREGISTRY: usize = 20;
 pub const ROLE_SET_RESOLVER: usize = 24;
 
@@ -76,6 +77,7 @@ mod registry_calls {
         function grantRoles(uint256 anyId, uint256 roleBitmap, address account) external returns (bool);
         function grantRootRoles(uint256 roleBitmap, address account) external returns (bool);
         function revokeRoles(uint256 anyId, uint256 roleBitmap, address account) external returns (bool);
+        function revokeRootRoles(uint256 roleBitmap, address account) external returns (bool);
         function setSubregistry(uint256 anyId, address registry) external;
         function setResolver(uint256 anyId, address resolver) external;
         function setParent(address parent, string label) external;
@@ -250,12 +252,15 @@ pub async fn deploy_ens_v2(rpc: &RpcClient, repo_root: &Path) -> Result<EnsV2Dep
         rpc,
         deployer,
         eth_registry.address,
+        // Upstream grants REGISTRAR | RENEW so registrar renewals can move
+        // registry expiry
+        // (upstream: .refs/ens_v2/contracts/deploy/03_ETHRegistrar.ts:L45 @ ens_v2@554c309).
         &registry_calls::grantRootRolesCall {
-            roleBitmap: role_bit(ROLE_REGISTRAR),
+            roleBitmap: role_bit(ROLE_REGISTRAR) | role_bit(ROLE_RENEW),
             account: eth_registrar.address,
         }
         .abi_encode(),
-        "grant ENSv2 registrar root role",
+        "grant ENSv2 registrar root roles",
     )
     .await?;
 
@@ -681,6 +686,244 @@ pub fn role_bit(bit: usize) -> U256 {
     U256::from(1_u8) << bit
 }
 
+/// Admin-half counterpart of a role bit
+/// (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L11 @ ens_v2@554c309).
+pub fn admin_role_bit(bit: usize) -> U256 {
+    role_bit(bit) << 128
+}
+
+mod erc1155_calls {
+    use alloy_sol_types::sol;
+
+    // The registry token is an ERC1155 singleton
+    // (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L230 @ ens_v2@554c309).
+    sol! {
+        function safeTransferFrom(address from, address to, uint256 id, uint256 value, bytes data) external;
+    }
+}
+
+mod renew_calls {
+    use alloy_sol_types::sol;
+
+    // Registrar renew pays and forwards; direct registry renew moves expiry
+    // only and rejects reduction.
+    // (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L196 @ ens_v2@554c309)
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L249 @ ens_v2@554c309)
+    sol! {
+        function renew(string label, uint64 duration, address paymentToken, bytes32 referrer) external;
+    }
+}
+
+mod registry_renew_calls {
+    use alloy_sol_types::sol;
+
+    sol! {
+        function renew(uint256 anyId, uint64 newExpiry) external;
+    }
+}
+
+/// Renew `<label>.eth` through the registrar, funding the payer with mock
+/// USDC first.
+pub async fn renew_eth_name(
+    rpc: &RpcClient,
+    d: &EnsV2Deployment,
+    from: Address,
+    label: &str,
+    duration_secs: u64,
+) -> Result<TxReceipt> {
+    send_checked(
+        rpc,
+        d.deployer,
+        d.mock_usdc.address,
+        &erc20_calls::mintCall {
+            to: from,
+            amount: U256::from(10_u64).pow(U256::from(12_u8)),
+        }
+        .abi_encode(),
+        &format!("mint USDC for {label}.eth renewal"),
+    )
+    .await?;
+    send_checked(
+        rpc,
+        from,
+        d.mock_usdc.address,
+        &erc20_calls::approveCall {
+            spender: d.eth_registrar.address,
+            value: U256::MAX,
+        }
+        .abi_encode(),
+        &format!("approve registrar renewal for {label}.eth"),
+    )
+    .await?;
+    let receipt = rpc
+        .send_transaction(
+            from,
+            Some(d.eth_registrar.address),
+            &renew_calls::renewCall {
+                label: label.to_owned(),
+                duration: duration_secs,
+                paymentToken: d.mock_usdc.address,
+                referrer: B256::ZERO,
+            }
+            .abi_encode(),
+            U256::ZERO,
+        )
+        .await?;
+    if !receipt.status_ok {
+        bail!(
+            "ENSv2 registrar renew {label} reverted (tx {})",
+            receipt.tx_hash
+        );
+    }
+    Ok(receipt)
+}
+
+/// Direct registry renew; returns the receipt without asserting success so
+/// callers can pin the reduction revert.
+pub async fn renew_in_registry(
+    rpc: &RpcClient,
+    registry: Address,
+    from: Address,
+    any_id: U256,
+    new_expiry: u64,
+) -> Result<TxReceipt> {
+    rpc.send_transaction(
+        from,
+        Some(registry),
+        &registry_renew_calls::renewCall {
+            anyId: any_id,
+            newExpiry: new_expiry,
+        }
+        .abi_encode(),
+        U256::ZERO,
+    )
+    .await
+}
+
+pub async fn set_resolver_in_registry(
+    rpc: &RpcClient,
+    registry: Address,
+    from: Address,
+    any_id: U256,
+    resolver: Address,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        registry,
+        &registry_calls::setResolverCall {
+            anyId: any_id,
+            resolver,
+        }
+        .abi_encode(),
+        "ENSv2 setResolver",
+    )
+    .await
+}
+
+pub async fn transfer_registry_token(
+    rpc: &RpcClient,
+    registry: Address,
+    from: Address,
+    to: Address,
+    token_id: U256,
+) -> Result<TxReceipt> {
+    let receipt = rpc
+        .send_transaction(
+            from,
+            Some(registry),
+            &erc1155_calls::safeTransferFromCall {
+                from,
+                to,
+                id: token_id,
+                value: U256::from(1_u8),
+                data: Bytes::new(),
+            }
+            .abi_encode(),
+            U256::ZERO,
+        )
+        .await?;
+    if !receipt.status_ok {
+        bail!("ENSv2 token transfer reverted (tx {})", receipt.tx_hash);
+    }
+    Ok(receipt)
+}
+
+pub async fn grant_root_roles(
+    rpc: &RpcClient,
+    registry: Address,
+    from: Address,
+    role_bitmap: U256,
+    account: Address,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        registry,
+        &registry_calls::grantRootRolesCall {
+            roleBitmap: role_bitmap,
+            account,
+        }
+        .abi_encode(),
+        "ENSv2 grantRootRoles",
+    )
+    .await
+}
+
+/// Revoke root-scope roles
+/// (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L158 @ ens_v2@554c309).
+pub async fn revoke_root_roles(
+    rpc: &RpcClient,
+    registry: Address,
+    from: Address,
+    role_bitmap: U256,
+    account: Address,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        registry,
+        &registry_calls::revokeRootRolesCall {
+            roleBitmap: role_bitmap,
+            account,
+        }
+        .abi_encode(),
+        "ENSv2 revokeRootRoles",
+    )
+    .await
+}
+
+/// Direct registry register with explicit role bitmap, registry, resolver,
+/// and expiry — reservations must pass owner=0 with an empty bitmap
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L184 @ ens_v2@554c309).
+#[allow(clippy::too_many_arguments)]
+pub async fn register_in_registry_with(
+    rpc: &RpcClient,
+    registry: Address,
+    from: Address,
+    label: &str,
+    owner: Address,
+    role_bitmap: U256,
+    resolver: Address,
+    expiry: u64,
+) -> Result<TxReceipt> {
+    rpc.send_transaction(
+        from,
+        Some(registry),
+        &registry_calls::registerCall {
+            label: label.to_owned(),
+            owner,
+            registry: Address::ZERO,
+            resolver,
+            roleBitmap: role_bitmap,
+            expiry,
+        }
+        .abi_encode(),
+        U256::ZERO,
+    )
+    .await
+}
+
 async fn send_checked(
     rpc: &RpcClient,
     from: Address,
@@ -695,4 +938,170 @@ async fn send_checked(
         bail!("{description} reverted at {to:#x} (tx {})", receipt.tx_hash);
     }
     Ok(())
+}
+
+mod resolver_calls {
+    use alloy_sol_types::sol;
+
+    // Writable v2 resolver (UUPS impl deployed directly for tests):
+    // constructor(hcaFactory) then initialize(admin, roleBitmap)
+    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L223 @ ens_v2@554c309).
+    sol! {
+        function initialize(address admin, uint256 roleBitmap) external;
+        function setText(bytes32 node, string key, string value) external;
+        function clearRecords(bytes32 node) external;
+    }
+}
+
+mod resolver_addr_calls {
+    use alloy_sol_types::sol;
+
+    sol! {
+        function setAddr(bytes32 node, address addr_) external;
+    }
+}
+
+mod factory_calls {
+    use alloy_sol_types::sol;
+
+    // User resolvers deploy behind VerifiableFactory proxies — the raw
+    // implementation disables its initializers
+    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L177 @ ens_v2@554c309).
+    sol! {
+        function deployProxy(address implementation, uint256 salt, bytes data) external returns (address);
+    }
+}
+
+/// Deploy the writable PermissionedResolver behind a VerifiableFactory
+/// proxy, initializing the admin with the full role bitmap.
+pub async fn deploy_permissioned_resolver(
+    rpc: &RpcClient,
+    repo_root: &Path,
+    d: &EnsV2Deployment,
+    admin: Address,
+) -> Result<Deployed> {
+    let implementation = deploy(
+        rpc,
+        d.deployer,
+        &load_ens_v2_artifact(repo_root, "PermissionedResolverImpl")?,
+        &(d.hca_factory.address,).abi_encode_params(),
+    )
+    .await?;
+    let factory = deploy(
+        rpc,
+        d.deployer,
+        &load_ens_v2_artifact(repo_root, "VerifiableFactory")?,
+        &[],
+    )
+    .await?;
+    let init_data = resolver_calls::initializeCall {
+        admin,
+        roleBitmap: all_roles(),
+    }
+    .abi_encode();
+    let receipt = rpc
+        .send_transaction(
+            admin,
+            Some(factory.address),
+            &factory_calls::deployProxyCall {
+                implementation: implementation.address,
+                salt: U256::from(1_u8),
+                data: init_data.into(),
+            }
+            .abi_encode(),
+            U256::ZERO,
+        )
+        .await?;
+    if !receipt.status_ok {
+        bail!(
+            "VerifiableFactory deployProxy reverted (tx {})",
+            receipt.tx_hash
+        );
+    }
+    let raw_receipt = rpc
+        .call(
+            "eth_getTransactionReceipt",
+            serde_json::json!([receipt.tx_hash]),
+        )
+        .await?;
+    let proxy_topic = format!(
+        "{:#x}",
+        keccak256("ProxyDeployed(address,address,uint256,address)".as_bytes())
+    );
+    let proxy = raw_receipt
+        .get("logs")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .find_map(|log| {
+            let topics = log.get("topics")?.as_array()?;
+            if topics.first()?.as_str()? != proxy_topic {
+                return None;
+            }
+            let padded = topics.get(2)?.as_str()?;
+            Address::parse_checksummed(format!("0x{}", &padded[padded.len() - 40..]), None)
+                .ok()
+                .or_else(|| format!("0x{}", &padded[padded.len() - 40..]).parse().ok())
+        })
+        .context("ProxyDeployed log missing from deployProxy receipt")?;
+    Ok(Deployed {
+        address: proxy,
+        block_number: receipt.block_number,
+    })
+}
+
+pub async fn set_resolver_text(
+    rpc: &RpcClient,
+    resolver: Address,
+    from: Address,
+    node: B256,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        resolver,
+        &resolver_calls::setTextCall {
+            node,
+            key: key.to_owned(),
+            value: value.to_owned(),
+        }
+        .abi_encode(),
+        "v2 resolver setText",
+    )
+    .await
+}
+
+pub async fn set_resolver_addr(
+    rpc: &RpcClient,
+    resolver: Address,
+    from: Address,
+    node: B256,
+    addr: Address,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        resolver,
+        &resolver_addr_calls::setAddrCall { node, addr_: addr }.abi_encode(),
+        "v2 resolver setAddr",
+    )
+    .await
+}
+
+pub async fn clear_resolver_records(
+    rpc: &RpcClient,
+    resolver: Address,
+    from: Address,
+    node: B256,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        resolver,
+        &resolver_calls::clearRecordsCall { node }.abi_encode(),
+        "v2 resolver clearRecords",
+    )
+    .await
 }

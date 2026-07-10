@@ -54,6 +54,20 @@ impl RpcClient {
         parse_quantity(&self.call("eth_blockNumber", json!([])).await?)
     }
 
+    pub async fn block_timestamp(&self) -> Result<u128> {
+        let raw = self
+            .call("eth_getBlockByNumber", json!(["latest", false]))
+            .await?;
+        let timestamp = raw
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("latest block returned no timestamp"))?;
+        Ok(u128::from_str_radix(
+            timestamp.trim_start_matches("0x"),
+            16,
+        )?)
+    }
+
     pub async fn block_hash(&self, block_number: u64) -> Result<String> {
         let raw = self
             .call(

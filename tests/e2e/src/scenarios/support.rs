@@ -212,6 +212,46 @@ pub async fn ingest_ens_v2_sepolia_at_current_head(
     })
 }
 
+/// Sepolia twin of `backfill_and_replay_projections`: derive the ENSv2 chain
+/// via backfill and rebuild projections without a live run. Used where live
+/// re-ingest wedges (the chipped re-registration intake bug); no API — the
+/// backfill path promotes no canonical checkpoint.
+pub async fn backfill_ens_v2_sepolia_and_replay_projections(
+    sepolia_anvil: &Anvil,
+    deployment: &EnsV2Deployment,
+    idempotency_key: &str,
+) -> Result<BackfillRun> {
+    let repo_root = repo_root();
+    let head = sepolia_anvil.client().block_number().await?;
+
+    let scratch = TempDir::create()?;
+    let profile = manifests::generate_local_sepolia_profile(
+        scratch.path(),
+        &repo_root,
+        &deployment.manifest_targets(),
+    )?;
+
+    let db = HarnessDb::create().await?;
+    let chain_rpc_urls = [("ethereum-sepolia", sepolia_anvil.url.as_str())];
+    pipeline::indexer_backfill_with_chain_rpc_urls(
+        &repo_root,
+        &db.url,
+        &profile.root,
+        pipeline::ChainBackfillTarget {
+            chain_rpc_urls: &chain_rpc_urls,
+            chain: "ethereum-sepolia",
+            block_range: 0..=head,
+            idempotency_key,
+        },
+    )
+    .await?;
+    pipeline::worker_replay_all_current_projections(&repo_root, &db.url).await?;
+    Ok(BackfillRun {
+        db,
+        _scratch: scratch,
+    })
+}
+
 pub async fn ingest_with_restart_and_serve<F, Fut>(
     anvil: &Anvil,
     deployment: &EnsV1Deployment,
