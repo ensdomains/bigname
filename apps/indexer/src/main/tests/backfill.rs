@@ -6294,6 +6294,50 @@ async fn legacy_coverage_derivation_merges_generic_family_windows_and_refuses_sc
         "a refused scan-all derivation must not write facts"
     );
 
+    // The live producer shape: generic_topic_scans declared, but the scanned
+    // family's targets were filtered out of the persisted selected_targets.
+    // Deriving only the address facts would silently omit the family fetch.
+    let target_less_job_id = insert_completed_backfill_job(
+        database.pool(),
+        "legacy-generic-scan-without-targets",
+        json!({
+            "selector_kind": "whole_active_watched_chain",
+            "source_family": null,
+            "requested_watched_targets": [],
+            "selected_targets": [
+                {
+                    "source_family": "ens_v1_registry_l1",
+                    "contract_instance_id": "0abbca82-a3c4-4fcf-860b-d1eccfd10977",
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "effective_from_block": 100,
+                    "effective_to_block": 120
+                }
+            ],
+            "generic_topic_scans": [
+                {
+                    "source_family": "ens_v1_resolver_l1",
+                    "source_identity_payload_format": "generic_resolver_event_topics_v1"
+                }
+            ],
+            "source_identity_payload_format": "selected_targets_with_generic_topic_scans_v1",
+            "source_identity_hash": "keccak256:0x6666666666666666666666666666666666666666666666666666666666666666"
+        }),
+    )
+    .await?;
+
+    let error = repair::derive_legacy_backfill_coverage_facts(database.pool(), target_less_job_id)
+        .await
+        .expect_err("generic scans without persisted family targets must be refused");
+    assert!(
+        error.to_string().contains("refuses partial coverage"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(
+        load_coverage_fact_rows(database.pool(), target_less_job_id).await?,
+        Vec::new(),
+        "a refused target-less generic-scan derivation must not write facts, not even the derivable address portion"
+    );
+
     database.cleanup().await
 }
 

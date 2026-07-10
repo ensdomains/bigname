@@ -856,7 +856,6 @@ async fn coverage_fact_writes_are_idempotent_and_validated() -> Result<()> {
     let inserted = write_backfill_coverage_facts(
         &mut conn,
         created.job.backfill_job_id,
-        "eth-mainnet",
         BackfillCoverageFactDerivation::LegacyFullPayloadIdentity,
         &facts,
     )
@@ -865,7 +864,6 @@ async fn coverage_fact_writes_are_idempotent_and_validated() -> Result<()> {
     let repeated = write_backfill_coverage_facts(
         &mut conn,
         created.job.backfill_job_id,
-        "eth-mainnet",
         BackfillCoverageFactDerivation::LegacyFullPayloadIdentity,
         &facts,
     )
@@ -904,7 +902,6 @@ async fn coverage_fact_writes_are_idempotent_and_validated() -> Result<()> {
     let distinct_interval_inserted = write_backfill_coverage_facts(
         &mut conn,
         created.job.backfill_job_id,
-        "eth-mainnet",
         BackfillCoverageFactDerivation::LegacyFullPayloadIdentity,
         std::slice::from_ref(&widened_interval),
     )
@@ -923,7 +920,6 @@ async fn coverage_fact_writes_are_idempotent_and_validated() -> Result<()> {
     let error = write_backfill_coverage_facts(
         &mut conn,
         created.job.backfill_job_id,
-        "eth-mainnet",
         BackfillCoverageFactDerivation::LegacyFullPayloadIdentity,
         std::slice::from_ref(&missing_address),
     )
@@ -939,7 +935,6 @@ async fn coverage_fact_writes_are_idempotent_and_validated() -> Result<()> {
     let error = write_backfill_coverage_facts(
         &mut conn,
         created.job.backfill_job_id,
-        "eth-mainnet",
         BackfillCoverageFactDerivation::LegacyFullPayloadIdentity,
         std::slice::from_ref(&inverted_range),
     )
@@ -1118,7 +1113,6 @@ async fn coverage_fact_writes_chunk_below_the_bind_limit() -> Result<()> {
     let reinserted = write_backfill_coverage_facts(
         &mut conn,
         created.job.backfill_job_id,
-        "eth-mainnet",
         BackfillCoverageFactDerivation::JobCompletion,
         &slice_facts,
     )
@@ -1144,7 +1138,6 @@ async fn deleting_a_backfill_job_cascades_its_coverage_facts() -> Result<()> {
     write_backfill_coverage_facts(
         &mut conn,
         created.job.backfill_job_id,
-        "eth-mainnet",
         BackfillCoverageFactDerivation::JobCompletion,
         &[address_coverage_fact(
             "ens_v1_registry_l1",

@@ -1,0 +1,635 @@
+diff --git a/apps/indexer/src/main/backfill/coverage_facts.rs b/apps/indexer/src/main/backfill/coverage_facts.rs
+index 9c7ed12..e3c46d4 100644
+--- a/apps/indexer/src/main/backfill/coverage_facts.rs
++++ b/apps/indexer/src/main/backfill/coverage_facts.rs
+@@ -1,4 +1,4 @@
+-use std::collections::BTreeSet;
++use std::collections::{BTreeMap, BTreeSet};
+ 
+ use anyhow::Result;
+ use bigname_manifests::WatchedSourceSelectorPlan;
+@@ -65,8 +65,10 @@ pub(super) async fn complete_reserved_range_recording_plan_coverage(
+ /// executor's own in-memory selector plan so the recorded coverage can never
+ /// drift from what the job actually fetched. Families fetched via
+ /// topics-complete scans (the ENSv1 generic resolver scope and the Basenames
+-/// registry scan-all shape) yield one family-scope fact over the full job
+-/// range; their per-address targets are excluded because the fetch was not
++/// registry scan-all shape) yield one family-scope fact clamped to the span of
++/// the plan's targets for that family — the scan-all planner skips windows
++/// with no selected targets, so blocks outside that span were never fetched —
++/// and their per-address targets are excluded because the fetch was not
+ /// address-enumerated. Every other selected target yields an address-scope
+ /// fact clamped to the job range, skipping empty intersections.
+ fn job_completion_coverage_facts<'a>(
+@@ -83,16 +85,34 @@ fn job_completion_coverage_facts<'a>(
+         family_scan_source_families.insert(SOURCE_FAMILY_BASENAMES_BASE_REGISTRY);
+     }
+ 
+-    let family_facts = family_scan_source_families
+-        .clone()
+-        .into_iter()
+-        .map(move |source_family| BackfillCoverageFactWrite {
+-            source_family: source_family.to_owned(),
+-            scope: BackfillCoverageFactScope::Family,
+-            address: None,
+-            covered_from_block: job_start_block,
+-            covered_to_block: job_end_block,
+-        });
++    let mut family_scan_spans = BTreeMap::<&'a str, (i64, i64)>::new();
++    for target in &source_plan.selected_targets {
++        if !family_scan_source_families.contains(target.source_family.as_str()) {
++            continue;
++        }
++        let span = family_scan_spans
++            .entry(target.source_family.as_str())
++            .or_insert((target.effective_from_block, target.effective_to_block));
++        span.0 = span.0.min(target.effective_from_block);
++        span.1 = span.1.max(target.effective_to_block);
++    }
++    let family_facts = family_scan_spans.into_iter().filter_map(
++        move |(source_family, (span_from_block, span_to_block))| {
++            let (covered_from_block, covered_to_block) = covered_block_interval(
++                span_from_block,
++                span_to_block,
++                job_start_block,
++                job_end_block,
++            )?;
++            Some(BackfillCoverageFactWrite {
++                source_family: source_family.to_owned(),
++                scope: BackfillCoverageFactScope::Family,
++                address: None,
++                covered_from_block,
++                covered_to_block,
++            })
++        },
++    );
+     let address_facts = source_plan
+         .selected_targets
+         .iter()
+@@ -234,7 +254,8 @@ mod tests {
+         assert_eq!(facts[0].address, None);
+         assert_eq!(
+             (facts[0].covered_from_block, facts[0].covered_to_block),
+-            (10, 20)
++            (12, 18),
++            "family fact must be clamped to the resolver targets' effective span"
+         );
+         assert_eq!(facts[1].source_family, "ens_v1_registry_l1");
+         assert_eq!(facts[1].scope, BackfillCoverageFactScope::Address);
+@@ -244,6 +265,43 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn family_scans_without_matching_targets_or_overlap_yield_no_family_fact() {
++        let mut no_resolver_targets = source_plan(
++            "ethereum-mainnet",
++            vec![target(
++                "ens_v1_registry_l1",
++                1,
++                "0x1111111111111111111111111111111111111111",
++                5,
++                50,
++            )],
++        );
++        no_resolver_targets.selector_kind = WatchedSourceSelectorKind::SourceFamily;
++        no_resolver_targets.source_family = Some("ens_v1_resolver_l1".to_owned());
++        assert!(
++            job_completion_coverage_facts(&no_resolver_targets, false, 10, 20)
++                .all(|fact| fact.scope != BackfillCoverageFactScope::Family),
++            "a family scan with no selected targets must not claim family coverage"
++        );
++
++        let disjoint_span = source_plan(
++            "base-mainnet",
++            vec![target(
++                "basenames_base_registry",
++                1,
++                "0x1111111111111111111111111111111111111111",
++                30,
++                40,
++            )],
++        );
++        assert_eq!(
++            job_completion_coverage_facts(&disjoint_span, true, 10, 20).count(),
++            0,
++            "a family span disjoint from the job range must not claim coverage"
++        );
++    }
++
+     #[test]
+     fn basenames_registry_scan_all_yields_only_the_registry_family_fact() {
+         let source_plan = source_plan(
+@@ -253,15 +311,15 @@ mod tests {
+                     "basenames_base_registry",
+                     1,
+                     "0x1111111111111111111111111111111111111111",
+-                    5,
+-                    50,
++                    12,
++                    18,
+                 ),
+                 target(
+                     "basenames_base_registry",
+                     2,
+                     "0x2222222222222222222222222222222222222222",
+-                    12,
+-                    18,
++                    14,
++                    30,
+                 ),
+             ],
+         );
+@@ -274,7 +332,8 @@ mod tests {
+         assert_eq!(facts[0].address, None);
+         assert_eq!(
+             (facts[0].covered_from_block, facts[0].covered_to_block),
+-            (10, 20)
++            (12, 20),
++            "family fact must span the union of registry target windows clamped to the job range"
+         );
+     }
+ 
+diff --git a/apps/indexer/src/main/tests/backfill.rs b/apps/indexer/src/main/tests/backfill.rs
+index aa7efa4..6c4fea3 100644
+--- a/apps/indexer/src/main/tests/backfill.rs
++++ b/apps/indexer/src/main/tests/backfill.rs
+@@ -5390,11 +5390,11 @@ async fn assert_dynamic_resolver_backfill_scope_behavior(
+                 fixture.resolver_source_family.to_owned(),
+                 "family".to_owned(),
+                 None,
+-                40,
+-                44,
++                42,
++                43,
+                 "job_completion".to_owned(),
+             )],
+-            "a generic resolver scan must credit the whole family over the full job range instead of per-address facts"
++            "a generic resolver scan must credit the family over its targets' effective span instead of per-address facts"
+         );
+     } else {
+         assert_eq!(
+@@ -6026,33 +6026,7 @@ async fn create_backfill_job_tables(pool: &PgPool) -> Result<()> {
+     .await
+     .context("failed to create backfill_ranges_active_lease_token_idx for indexer tests")?;
+ 
+-    sqlx::query(
+-        r#"
+-        CREATE TABLE backfill_coverage_facts (
+-            backfill_coverage_fact_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+-            backfill_job_id BIGINT NOT NULL REFERENCES backfill_jobs (backfill_job_id) ON DELETE CASCADE,
+-            chain_id TEXT NOT NULL,
+-            source_family TEXT NOT NULL,
+-            scope TEXT NOT NULL CHECK (scope IN ('address', 'family')),
+-            address TEXT CHECK ((scope = 'address') = (address IS NOT NULL)),
+-            covered_from_block BIGINT NOT NULL,
+-            covered_to_block BIGINT NOT NULL,
+-            derivation TEXT NOT NULL CHECK (derivation IN ('job_completion', 'legacy_full_payload_identity')),
+-            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+-            CHECK (covered_from_block <= covered_to_block),
+-            CONSTRAINT backfill_coverage_facts_tuple_key UNIQUE NULLS NOT DISTINCT (
+-                backfill_job_id,
+-                source_family,
+-                scope,
+-                address,
+-                covered_from_block
+-            )
+-        )
+-        "#,
+-    )
+-    .execute(pool)
+-    .await
+-    .context("failed to create backfill_coverage_facts table for indexer tests")?;
++    create_backfill_coverage_facts_table(pool).await?;
+ 
+     Ok(())
+ }
+@@ -6355,5 +6329,34 @@ async fn legacy_coverage_derivation_refuses_compact_digests_and_incomplete_jobs(
+         "unexpected error: {error:#}"
+     );
+ 
++    let unknown_format_job_id = insert_completed_backfill_job(
++        database.pool(),
++        "legacy-unknown-format",
++        json!({
++            "selector_kind": "source_family",
++            "source_family": "basenames_base_registry",
++            "requested_watched_targets": [],
++            "selected_targets": [],
++            "source_identity_payload_format": "selected_targets_bloom_filter_v9",
++            "source_identity_hash": "keccak256:0x5555555555555555555555555555555555555555555555555555555555555555"
++        }),
++    )
++    .await?;
++    let error =
++        repair::derive_legacy_backfill_coverage_facts(database.pool(), unknown_format_job_id)
++            .await
++            .expect_err("unknown identity payload formats must be refused");
++    assert!(
++        error
++            .to_string()
++            .contains("unsupported source_identity_payload_format"),
++        "unexpected error: {error:#}"
++    );
++    assert_eq!(
++        table_count(database.pool(), "backfill_coverage_facts").await?,
++        0,
++        "a refused unknown-format derivation must not write facts"
++    );
++
+     database.cleanup().await
+ }
+diff --git a/apps/indexer/src/main/tests/bootstrap.rs b/apps/indexer/src/main/tests/bootstrap.rs
+index 1de368c..1519e56 100644
+--- a/apps/indexer/src/main/tests/bootstrap.rs
++++ b/apps/indexer/src/main/tests/bootstrap.rs
+@@ -2330,33 +2330,7 @@ async fn create_bootstrap_backfill_job_tables(pool: &PgPool) -> Result<()> {
+     .await
+     .context("failed to create backfill_ranges table for bootstrap tests")?;
+ 
+-    sqlx::query(
+-        r#"
+-        CREATE TABLE backfill_coverage_facts (
+-            backfill_coverage_fact_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+-            backfill_job_id BIGINT NOT NULL REFERENCES backfill_jobs (backfill_job_id) ON DELETE CASCADE,
+-            chain_id TEXT NOT NULL,
+-            source_family TEXT NOT NULL,
+-            scope TEXT NOT NULL CHECK (scope IN ('address', 'family')),
+-            address TEXT CHECK ((scope = 'address') = (address IS NOT NULL)),
+-            covered_from_block BIGINT NOT NULL,
+-            covered_to_block BIGINT NOT NULL,
+-            derivation TEXT NOT NULL CHECK (derivation IN ('job_completion', 'legacy_full_payload_identity')),
+-            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+-            CHECK (covered_from_block <= covered_to_block),
+-            CONSTRAINT backfill_coverage_facts_tuple_key UNIQUE NULLS NOT DISTINCT (
+-                backfill_job_id,
+-                source_family,
+-                scope,
+-                address,
+-                covered_from_block
+-            )
+-        )
+-        "#,
+-    )
+-    .execute(pool)
+-    .await
+-    .context("failed to create backfill_coverage_facts table for bootstrap tests")?;
++    create_backfill_coverage_facts_table(pool).await?;
+ 
+     Ok(())
+ }
+diff --git a/apps/indexer/src/main/tests/support.rs b/apps/indexer/src/main/tests/support.rs
+index 9710273..6411e73 100644
+--- a/apps/indexer/src/main/tests/support.rs
++++ b/apps/indexer/src/main/tests/support.rs
+@@ -1179,34 +1179,20 @@ async fn create_ops_catchup_backfill_job_tables(pool: &PgPool) -> Result<()> {
+     .await
+     .context("failed to create active lease token index for ops catch-up tests")?;
+ 
+-    sqlx::query(
+-        r#"
+-        CREATE TABLE backfill_coverage_facts (
+-            backfill_coverage_fact_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+-            backfill_job_id BIGINT NOT NULL REFERENCES backfill_jobs (backfill_job_id) ON DELETE CASCADE,
+-            chain_id TEXT NOT NULL,
+-            source_family TEXT NOT NULL,
+-            scope TEXT NOT NULL CHECK (scope IN ('address', 'family')),
+-            address TEXT CHECK ((scope = 'address') = (address IS NOT NULL)),
+-            covered_from_block BIGINT NOT NULL,
+-            covered_to_block BIGINT NOT NULL,
+-            derivation TEXT NOT NULL CHECK (derivation IN ('job_completion', 'legacy_full_payload_identity')),
+-            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+-            CHECK (covered_from_block <= covered_to_block),
+-            CONSTRAINT backfill_coverage_facts_tuple_key UNIQUE NULLS NOT DISTINCT (
+-                backfill_job_id,
+-                source_family,
+-                scope,
+-                address,
+-                covered_from_block
+-            )
+-        )
+-        "#,
+-    )
++    create_backfill_coverage_facts_table(pool).await?;
++
++    Ok(())
++}
++
++/// Apply the real backfill_coverage_facts migration so fixture schemas cannot
++/// drift from the checked-in DDL.
++async fn create_backfill_coverage_facts_table(pool: &PgPool) -> Result<()> {
++    sqlx::raw_sql(include_str!(
++        "../../../../../migrations/20260710060000_backfill_coverage_facts.sql"
++    ))
+     .execute(pool)
+     .await
+-    .context("failed to create backfill_coverage_facts table for ops catch-up tests")?;
+-
++    .context("failed to apply the backfill_coverage_facts migration for indexer tests")?;
+     Ok(())
+ }
+ 
+diff --git a/crates/storage/src/backfill_jobs/complete.rs b/crates/storage/src/backfill_jobs/complete.rs
+index 74664f7..28ca5c1 100644
+--- a/crates/storage/src/backfill_jobs/complete.rs
++++ b/crates/storage/src/backfill_jobs/complete.rs
+@@ -1,5 +1,7 @@
+ use anyhow::{Context, Result, bail};
++use serde_json::Value;
+ use sqlx::{PgPool, Postgres};
++use tracing::warn;
+ 
+ use super::{
+     coverage_facts::{
+@@ -9,7 +11,7 @@ use super::{
+     decode::{decode_backfill_job, decode_backfill_range},
+     read::{
+         incomplete_range_count, load_backfill_job_for_update, load_backfill_range_for_update,
+-        load_backfill_ranges_for_update,
++        load_backfill_range_job_id, load_backfill_ranges_for_update,
+     },
+     sql::{backfill_job_returning_sql, backfill_range_returning_sql},
+     types::{BackfillJob, BackfillLifecycleStatus, BackfillRange},
+@@ -50,6 +52,20 @@ where
+         .await
+         .context("failed to open transaction for backfill range completion")?;
+ 
++    // Lock the job before the range (matching complete_backfill_job's lock
++    // order) so concurrent completions of the final two ranges serialize.
++    // Otherwise, under READ COMMITTED, neither transaction's incomplete-range
++    // count reaches zero, and the job is later flipped by the reservation path
++    // without coverage facts.
++    let backfill_job_id = load_backfill_range_job_id(&mut *transaction, backfill_range_id)
++        .await?
++        .with_context(|| format!("missing backfill range {backfill_range_id}"))?;
++    load_backfill_job_for_update(&mut *transaction, backfill_job_id)
++        .await?
++        .with_context(|| {
++            format!("missing backfill job {backfill_job_id} for range {backfill_range_id}")
++        })?;
++
+     let current = load_backfill_range_for_update(&mut *transaction, backfill_range_id)
+         .await?
+         .with_context(|| format!("missing backfill range {backfill_range_id}"))?;
+@@ -148,6 +164,7 @@ pub async fn complete_backfill_job(pool: &PgPool, backfill_job_id: i64) -> Resul
+     .with_context(|| format!("failed to complete ranges for backfill job {backfill_job_id}"))?;
+ 
+     let job = set_backfill_job_completed(&mut transaction, backfill_job_id).await?;
++    warn_backfill_job_completed_without_coverage_facts(&job, "complete_backfill_job");
+ 
+     transaction
+         .commit()
+@@ -157,6 +174,37 @@ pub async fn complete_backfill_job(pool: &PgPool, backfill_job_id: i64) -> Resul
+     Ok(job)
+ }
+ 
++/// Every job completed without coverage facts leaves a durable gap that
++/// checkpoint promotion cannot prove over; make those flips loud so operators
++/// can re-derive (or rerun) before promotion stalls on the missing tuples.
++pub(super) fn warn_backfill_job_completed_without_coverage_facts(
++    job: &BackfillJob,
++    completion_path: &str,
++) {
++    let payload_format = job
++        .source_identity
++        .get("source_identity_payload_format")
++        .and_then(Value::as_str);
++    let compact_digest_identity = matches!(
++        payload_format,
++        Some("selected_targets_digest_v1")
++            | Some("selected_targets_digest_with_generic_topic_scans_v1")
++    );
++    warn!(
++        backfill_job_id = job.backfill_job_id,
++        chain_id = %job.chain_id,
++        completion_path,
++        source_identity_payload_format = payload_format.unwrap_or_default(),
++        compact_digest_identity,
++        "backfill job completed without coverage facts{}",
++        if compact_digest_identity {
++            "; its compact digest identity makes coverage unrecoverable without re-running the job on fact-writing code"
++        } else {
++            "; run repair derive-backfill-coverage-facts if its source_identity carries the fetched targets verbatim"
++        }
++    );
++}
++
+ async fn maybe_complete_backfill_job<F, I>(
+     executor: &mut sqlx::Transaction<'_, Postgres>,
+     backfill_job_id: i64,
+@@ -166,6 +214,8 @@ where
+     F: FnOnce(&BackfillJob) -> I,
+     I: Iterator<Item = BackfillCoverageFactWrite>,
+ {
++    // The caller holds the job row lock, so this count cannot race a
++    // concurrent completion of another range of the same job.
+     let incomplete_count = incomplete_range_count(&mut **executor, backfill_job_id).await?;
+     if incomplete_count != 0 {
+         return Ok(());
+diff --git a/crates/storage/src/backfill_jobs/lease.rs b/crates/storage/src/backfill_jobs/lease.rs
+index 876552a..afecd57 100644
+--- a/crates/storage/src/backfill_jobs/lease.rs
++++ b/crates/storage/src/backfill_jobs/lease.rs
+@@ -3,7 +3,7 @@ use sqlx::types::time::OffsetDateTime;
+ use sqlx::{PgPool, Row};
+ 
+ use super::{
+-    complete::set_backfill_job_completed,
++    complete::{set_backfill_job_completed, warn_backfill_job_completed_without_coverage_facts},
+     decode::decode_backfill_range,
+     read::{
+         incomplete_range_count, load_active_backfill_range_by_lease, load_backfill_job_for_update,
+@@ -88,7 +88,8 @@ pub async fn reserve_backfill_range(
+ 
+     let Some(candidate) = candidate else {
+         if incomplete_range_count(&mut *transaction, backfill_job_id).await? == 0 {
+-            set_backfill_job_completed(&mut transaction, backfill_job_id).await?;
++            let job = set_backfill_job_completed(&mut transaction, backfill_job_id).await?;
++            warn_backfill_job_completed_without_coverage_facts(&job, "reserve_backfill_range");
+         }
+         transaction
+             .commit()
+diff --git a/crates/storage/src/backfill_jobs/read.rs b/crates/storage/src/backfill_jobs/read.rs
+index f035077..f8e4e51 100644
+--- a/crates/storage/src/backfill_jobs/read.rs
++++ b/crates/storage/src/backfill_jobs/read.rs
+@@ -20,6 +20,30 @@ pub async fn load_backfill_ranges(
+     load_backfill_ranges_internal(pool, backfill_job_id).await
+ }
+ 
++/// Resolve a range's parent job id without locking either row, so callers can
++/// take the job lock before the range lock.
++pub(super) async fn load_backfill_range_job_id<'e, E>(
++    executor: E,
++    backfill_range_id: i64,
++) -> Result<Option<i64>>
++where
++    E: Executor<'e, Database = Postgres>,
++{
++    let row =
++        sqlx::query("SELECT backfill_job_id FROM backfill_ranges WHERE backfill_range_id = $1")
++            .bind(backfill_range_id)
++            .fetch_optional(executor)
++            .await
++            .with_context(|| {
++                format!("failed to resolve job for backfill range {backfill_range_id}")
++            })?;
++    row.map(|row| {
++        row.try_get::<i64, _>("backfill_job_id")
++            .context("missing backfill_job_id from backfill range row")
++    })
++    .transpose()
++}
++
+ pub(super) async fn incomplete_range_count<'e, E>(executor: E, backfill_job_id: i64) -> Result<i64>
+ where
+     E: Executor<'e, Database = Postgres>,
+diff --git a/crates/storage/src/backfill_jobs/tests.rs b/crates/storage/src/backfill_jobs/tests.rs
+index 6478c42..e71763a 100644
+--- a/crates/storage/src/backfill_jobs/tests.rs
++++ b/crates/storage/src/backfill_jobs/tests.rs
+@@ -877,6 +877,25 @@ async fn coverage_fact_writes_are_idempotent_and_validated() -> Result<()> {
+         ]
+     );
+ 
++    let mut widened_interval = facts[0].clone();
++    widened_interval.covered_to_block = 130;
++    let distinct_interval_inserted = write_backfill_coverage_facts(
++        &mut conn,
++        created.job.backfill_job_id,
++        "eth-mainnet",
++        BackfillCoverageFactDerivation::LegacyFullPayloadIdentity,
++        std::slice::from_ref(&widened_interval),
++    )
++    .await?;
++    assert_eq!(
++        distinct_interval_inserted, 1,
++        "a same-start fact with a different end block is a distinct interval and must not be dropped"
++    );
++    assert_eq!(
++        load_backfill_coverage_fact_counts(database.pool(), created.job.backfill_job_id).await?,
++        3
++    );
++
+     let mut missing_address = facts[0].clone();
+     missing_address.address = None;
+     let error = write_backfill_coverage_facts(
+@@ -1132,3 +1151,96 @@ async fn deleting_a_backfill_job_cascades_its_coverage_facts() -> Result<()> {
+ 
+     database.cleanup().await
+ }
++
++#[tokio::test]
++async fn concurrent_final_range_completions_flip_the_job_and_record_facts_once() -> Result<()> {
++    let database = TestDatabase::new().await?;
++    let created = create_backfill_job(
++        database.pool(),
++        &backfill_job_create("job-concurrent-final-ranges"),
++    )
++    .await?;
++    let coverage_facts = |job: &BackfillJob| {
++        vec![address_coverage_fact(
++            "ens_v1_registry_l1",
++            "0x0000000000000000000000000000000000000001",
++            job.range_start_block_number,
++            job.range_end_block_number,
++        )]
++        .into_iter()
++    };
++
++    let first = reserve_backfill_range(
++        database.pool(),
++        created.job.backfill_job_id,
++        "worker-a",
++        "lease-a",
++        lease_deadline(),
++    )
++    .await?
++    .expect("first range must be reservable");
++    let second = reserve_backfill_range(
++        database.pool(),
++        created.job.backfill_job_id,
++        "worker-b",
++        "lease-b",
++        lease_deadline(),
++    )
++    .await?
++    .expect("second range must be reservable");
++    advance_backfill_range(database.pool(), first.backfill_range_id, "lease-a", 109).await?;
++    advance_backfill_range(database.pool(), second.backfill_range_id, "lease-b", 120).await?;
++
++    // The final two ranges complete concurrently: the job row lock must
++    // serialize them so exactly one transaction observes zero incomplete
++    // ranges and flips the job with its coverage facts. Without the lock,
++    // neither flips and the job is later completed fact-less by the
++    // reservation path.
++    let (first_result, second_result) = tokio::join!(
++        complete_backfill_range_recording_coverage(
++            database.pool(),
++            first.backfill_range_id,
++            "lease-a",
++            coverage_facts,
++        ),
++        complete_backfill_range_recording_coverage(
++            database.pool(),
++            second.backfill_range_id,
++            "lease-b",
++            coverage_facts,
++        ),
++    );
++    assert_eq!(
++        first_result?.status,
++        BackfillLifecycleStatus::Completed,
++        "first range completion must succeed"
++    );
++    assert_eq!(
++        second_result?.status,
++        BackfillLifecycleStatus::Completed,
++        "second range completion must succeed"
++    );
++
++    let job = load_backfill_job(database.pool(), created.job.backfill_job_id)
++        .await?
++        .expect("job must exist");
++    assert_eq!(
++        job.status,
++        BackfillLifecycleStatus::Completed,
++        "the last concurrent range completion must flip the job"
++    );
++    assert_eq!(
++        load_coverage_fact_rows(database.pool(), created.job.backfill_job_id).await?,
++        vec![(
++            "eth-mainnet".to_owned(),
++            "ens_v1_registry_l1".to_owned(),
++            "address".to_owned(),
++            Some("0x0000000000000000000000000000000000000001".to_owned()),
++            100,
++            120,
++            "job_completion".to_owned(),
++        )]
++    );
++
++    database.cleanup().await
++}
+diff --git a/migrations/20260710060000_backfill_coverage_facts.sql b/migrations/20260710060000_backfill_coverage_facts.sql
+index a473c13..516a9ed 100644
+--- a/migrations/20260710060000_backfill_coverage_facts.sql
++++ b/migrations/20260710060000_backfill_coverage_facts.sql
+@@ -26,12 +26,16 @@ CREATE TABLE public.backfill_coverage_facts (
+     CONSTRAINT backfill_coverage_facts_derivation_check CHECK (
+         derivation = ANY (ARRAY['job_completion'::text, 'legacy_full_payload_identity'::text])
+     ),
++    -- covered_to_block participates so two targets sharing a clamped start
++    -- block keep their distinct intervals; readers check containment against
++    -- any row, so multiple interval rows per tuple are expected.
+     CONSTRAINT backfill_coverage_facts_tuple_key UNIQUE NULLS NOT DISTINCT (
+         backfill_job_id,
+         source_family,
+         scope,
+         address,
+-        covered_from_block
++        covered_from_block,
++        covered_to_block
+     )
+ );
+ 
