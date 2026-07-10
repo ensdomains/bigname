@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use anyhow::Result;
 use bigname_manifests::{
     UncoveredWatchedTuple, find_uncovered_watched_tuples,
-    load_active_manifest_abi_events_by_chain_and_source_families,
+    load_active_manifest_abi_events_by_chain_and_source_families, load_discovery_admission_epoch,
     load_log_producing_source_families, load_watched_contracts_by_addresses,
 };
 use bigname_storage::{ChainLineageBlock, load_completed_backfill_jobs_intersecting_range};
@@ -34,6 +34,11 @@ struct VerifiedCoverageInterval {
     /// Fingerprint of the manifest topic0 sets the interval was verified
     /// under; an ABI reload mid-process invalidates the memo.
     topic_set_fingerprint: String,
+    /// Discovery admission epoch the interval was verified under. Every
+    /// discovery_edges mutation bumps the chain's epoch in the same
+    /// transaction (in this or any other process), so watch-set growth
+    /// behind the frontier always forces re-verification.
+    discovery_admission_epoch: i64,
 }
 
 impl ChainCoverageFrontiers {
@@ -52,31 +57,11 @@ impl ChainCoverageFrontiers {
             .insert(chain.to_owned(), interval);
     }
 
-    pub(crate) fn reset(&self, chain: &str) {
+    fn reset(&self, chain: &str) {
         self.verified
             .lock()
             .expect("coverage frontier lock must not be poisoned")
             .remove(chain);
-    }
-
-    /// Rewind the verified frontier so re-verification covers blocks from
-    /// `new_through_block + 1` — called when the watch set grows behind the
-    /// frontier (discovery admits an edge whose active window starts inside
-    /// the already-verified span). Rewinding past the interval start drops the
-    /// memo entirely.
-    pub(crate) fn clamp_verified_through(&self, chain: &str, new_through_block: i64) {
-        let mut verified = self
-            .verified
-            .lock()
-            .expect("coverage frontier lock must not be poisoned");
-        let Some(interval) = verified.get_mut(chain) else {
-            return;
-        };
-        if new_through_block < interval.from_block {
-            verified.remove(chain);
-        } else if new_through_block < interval.through_block {
-            interval.through_block = new_through_block;
-        }
     }
 }
 
@@ -88,6 +73,7 @@ impl ChainCoverageFrontiers {
         from_block: i64,
         through_block: i64,
         topic_set_fingerprint: &str,
+        discovery_admission_epoch: i64,
     ) {
         self.record(
             chain,
@@ -95,6 +81,7 @@ impl ChainCoverageFrontiers {
                 from_block,
                 through_block,
                 topic_set_fingerprint: topic_set_fingerprint.to_owned(),
+                discovery_admission_epoch,
             },
         );
     }
@@ -171,15 +158,20 @@ async fn ensure_verified_coverage_frontier(
     let current_topic0s_by_family =
         load_current_topic0s_by_family(pool, chain, &log_producing_source_families).await?;
     let topic_set_fingerprint = topic_set_fingerprint(&current_topic0s_by_family);
+    let discovery_admission_epoch = load_discovery_admission_epoch(pool, chain)
+        .await
+        .map_err(|error| error.to_string())?;
 
     let mut interval = coverage_frontiers.verified_interval(chain);
     if let Some(existing) = &interval
         && (required_from < existing.from_block
-            || existing.topic_set_fingerprint != topic_set_fingerprint)
+            || existing.topic_set_fingerprint != topic_set_fingerprint
+            || existing.discovery_admission_epoch != discovery_admission_epoch)
     {
-        // Either the checkpoint regressed below the verified interval (deep
-        // reorg) or the manifest ABI event sets changed since verification;
-        // start over rather than trusting a stale memo.
+        // The checkpoint regressed below the verified interval (deep reorg),
+        // the manifest ABI event sets changed, or the discovery graph mutated
+        // since verification (any process); start over rather than trusting a
+        // stale memo.
         coverage_frontiers.reset(chain);
         interval = None;
     }
@@ -246,6 +238,7 @@ async fn ensure_verified_coverage_frontier(
                     from_block,
                     through_block,
                     topic_set_fingerprint: topic_set_fingerprint.clone(),
+                    discovery_admission_epoch,
                 },
             );
             continue;
@@ -270,6 +263,7 @@ async fn ensure_verified_coverage_frontier(
                         from_block,
                         through_block,
                         topic_set_fingerprint: topic_set_fingerprint.clone(),
+                        discovery_admission_epoch,
                     },
                 );
                 continue;

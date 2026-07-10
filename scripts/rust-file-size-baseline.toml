@@ -42,7 +42,7 @@ justification = "Phase 7 allowlist for an oversized production file; future chan
 
 [[files]]
 path = "apps/indexer/src/main/reconciliation/canonical/stored_lineage/coverage.rs"
-loc = 687
+loc = 681
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]
@@ -70,11 +70,6 @@ justification = "Phase 7 allowlist for an oversized production file; future chan
 [[files]]
 path = "crates/adapters/src/ens_v1_unwrapped_authority/materialization.rs"
 loc = 634
-justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
-
-[[files]]
-path = "crates/manifests/src/lib/discovery/reconciliation.rs"
-loc = 614
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]

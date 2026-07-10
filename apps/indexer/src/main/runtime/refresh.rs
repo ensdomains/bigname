@@ -47,14 +47,8 @@ pub(crate) async fn refresh_intake_chain_tasks(
 pub(crate) async fn refresh_runtime_state_from_storage_discovery(
     pool: &sqlx::PgPool,
     manifest_runtime_state: &ManifestRuntimeState,
-    coverage_frontiers: &crate::reconciliation::ChainCoverageFrontiers,
 ) -> Result<Option<(ManifestRuntimeState, Vec<IntakeChainTask>)>> {
-    sync_adapter_owned_raw_log_state(
-        pool,
-        &manifest_runtime_state.watched_chain_plan,
-        coverage_frontiers,
-    )
-    .await?;
+    sync_adapter_owned_raw_log_state(pool, &manifest_runtime_state.watched_chain_plan).await?;
 
     let Some(next_watched_chain_plan) =
         refresh_watched_chain_plan(pool, &manifest_runtime_state.watched_chain_plan).await?

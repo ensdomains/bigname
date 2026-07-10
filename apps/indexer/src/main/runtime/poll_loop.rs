@@ -108,7 +108,6 @@ pub(crate) async fn run_poll_loop(
                                         && let Err(error) = sync_adapter_owned_raw_log_state(
                                             pool,
                                             &next_manifest_runtime_state.watched_chain_plan,
-                                            coverage_frontiers,
                                         )
                                         .await
                                     {
@@ -485,7 +484,6 @@ pub(crate) async fn run_poll_loop(
                     refresh_discovery_watch_state(
                         pool,
                         provider_registry,
-                        coverage_frontiers,
                         &mut manifest_runtime_state,
                         &mut intake_chain_tasks,
                     )

@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use tracing::{info, warn};
 
 use crate::provider::ProviderRegistry;
-use crate::reconciliation::ChainCoverageFrontiers;
 
 use super::super::intake::{
     IntakeChainTask, intake_runtime_state, validate_provider_registry_for_intake_tasks,
@@ -22,17 +21,10 @@ use super::super::refresh::refresh_runtime_state_from_storage_discovery;
 pub(super) async fn refresh_discovery_watch_state(
     pool: &sqlx::PgPool,
     provider_registry: &ProviderRegistry,
-    coverage_frontiers: &ChainCoverageFrontiers,
     manifest_runtime_state: &mut ManifestRuntimeState,
     intake_chain_tasks: &mut Vec<IntakeChainTask>,
 ) -> Result<()> {
-    match refresh_runtime_state_from_storage_discovery(
-        pool,
-        manifest_runtime_state,
-        coverage_frontiers,
-    )
-    .await
-    {
+    match refresh_runtime_state_from_storage_discovery(pool, manifest_runtime_state).await {
         Ok(Some((next_manifest_runtime_state, next_tasks))) => {
             validate_provider_registry_for_intake_tasks(&next_tasks, provider_registry).context(
                 "refreshed stored discovery state no longer matches configured provider sources",

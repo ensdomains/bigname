@@ -3984,16 +3984,10 @@ async fn reconcile_fetched_heads_refuses_promotion_on_manifest_topic_set_drift()
 /// watched tuple appears with an active window starting inside the
 /// already-verified span (discovery admission is checkpoint-gated, so new
 /// tuples always land behind the frontier).
-#[expect(clippy::too_many_arguments)]
-async fn promote_one_slice_then_admit_tuple(
+async fn promote_one_covered_slice(
     database: &TestDatabase,
     chain: &str,
     coverage_frontiers: &ChainCoverageFrontiers,
-    late_namespace: &str,
-    late_manifest_id: i64,
-    late_source_family: &str,
-    late_address: &str,
-    late_active_from_block: i64,
 ) -> Result<(
     IntakeChainTask,
     ProviderHeadSnapshot,
@@ -4102,32 +4096,66 @@ async fn promote_one_slice_then_admit_tuple(
         CanonicalReconciliationStatus::StoredLineagePromoted
     );
 
-    insert_reconcile_watched_manifest_contract(
-        database.pool(),
-        late_manifest_id,
-        late_namespace,
-        chain,
-        late_source_family,
-        Uuid::from_u128(late_manifest_id as u128),
-        late_address,
-    )
-    .await?;
-    sqlx::query(
-        "UPDATE contract_instance_addresses SET active_from_block_number = $1 WHERE chain_id = $2 AND LOWER(address) = $3",
-    )
-    .bind(late_active_from_block)
-    .bind(chain)
-    .bind(late_address)
-    .execute(database.pool())
-    .await
-    .context("failed to set the late tuple's active window")?;
-
     Ok((task, heads, provider, server))
 }
 
-/// Discovery admits a new same-family tuple behind the verified frontier
-/// (fingerprint unchanged): the adapter-sync clamp is what forces the next
-/// verification to see it, and the uncovered tuple refuses promotion.
+/// Admit a resolver discovery edge from the fixture's watched contract to a
+/// new address through the REAL admission funnel
+/// (`reconcile_discovery_observations`), which bumps the chain's discovery
+/// admission epoch in the same transaction.
+async fn admit_resolver_edge_observation(
+    pool: &PgPool,
+    chain: &str,
+    to_address: &str,
+    active_from_block: i64,
+) -> Result<()> {
+    // reachable_from_root admission requires the from-instance to be a
+    // manifest root.
+    insert_manifest_root_contract_instance(
+        pool,
+        10_090,
+        Uuid::from_u128(10_090),
+        "0x0000000000000000000000000000000000000001",
+    )
+    .await?;
+    insert_manifest_discovery_rule(pool, 10_090, "resolver", "WatchedContract", "reachable_from_root")
+        .await?;
+    let summary = bigname_manifests::reconcile_discovery_observations(
+        pool,
+        "reconcile-e2e-admission",
+        &[bigname_manifests::DiscoveryObservation {
+            chain: chain.to_owned(),
+            from_address: "0x0000000000000000000000000000000000000001".to_owned(),
+            to_address: to_address.to_owned(),
+            edge_kind: "resolver".to_owned(),
+            discovery_source: "reconcile-e2e-admission".to_owned(),
+            active_from_block_number: Some(active_from_block),
+            active_from_block_hash: None,
+            active_to_block_number: None,
+            active_to_block_hash: None,
+            provenance: json!({
+                "provider": "reconcile-e2e-test",
+                "observation_key": "reconcile-e2e-edge",
+            }),
+        }],
+    )
+    .await?;
+    assert_eq!(
+        summary.admitted_edge_count, 1,
+        "the observation must be admitted through the real funnel"
+    );
+    assert_eq!(
+        summary.inserted_edge_count, 1,
+        "the observation must insert a new discovery edge"
+    );
+    Ok(())
+}
+
+/// A REAL discovery admission between two promotion calls sharing a frontier:
+/// the same-family tuple appears behind the verified span (fingerprint
+/// unchanged), the admission bumps the chain's discovery epoch in the same
+/// transaction, and the next promotion re-verifies and refuses on the
+/// uncovered new tuple.
 #[tokio::test]
 async fn reconcile_fetched_heads_refuses_uncovered_tuple_admitted_behind_the_frontier()
 -> Result<()> {
@@ -4138,20 +4166,10 @@ async fn reconcile_fetched_heads_refuses_uncovered_tuple_admitted_behind_the_fro
     let coverage_frontiers = ChainCoverageFrontiers::default();
     let late_address = "0x0000000000000000000000000000000000000002";
     let late_active_from = chunk + 100;
-    let (task, heads, provider, server) = promote_one_slice_then_admit_tuple(
-        &database,
-        chain,
-        &coverage_frontiers,
-        "test2",
-        10_091,
-        "test_source_family",
-        late_address,
-        late_active_from,
-    )
-    .await?;
-    // The admission hook's effect: rewind the frontier to just before the new
-    // tuple's window.
-    coverage_frontiers.clamp_verified_through(chain, late_active_from - 1);
+    let (task, heads, provider, server) =
+        promote_one_covered_slice(&database, chain, &coverage_frontiers).await?;
+    admit_resolver_edge_observation(database.pool(), chain, late_address, late_active_from)
+        .await?;
 
     let error = reconcile_fetched_heads_with_adapter_sync(
         database.pool(),
@@ -4178,7 +4196,8 @@ async fn reconcile_fetched_heads_refuses_uncovered_tuple_admitted_behind_the_fro
 }
 
 /// The admitted tuple's family is covered by an existing family-scope fact:
-/// the clamp forces re-verification, which passes, and promotion proceeds.
+/// the epoch bump forces re-verification, which passes, and promotion
+/// proceeds.
 #[tokio::test]
 async fn reconcile_fetched_heads_promotes_after_reverifying_covered_admitted_tuple() -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -4190,40 +4209,33 @@ async fn reconcile_fetched_heads_promotes_after_reverifying_covered_admitted_tup
     let late_address = "0x0000000000000000000000000000000000000003";
     let late_active_from = chunk + 100;
 
-    // Family-scope coverage for the late family exists before its tuple is
-    // admitted (the registry-family scan fetched every address).
+    // Family-scope coverage for the watched family exists before the new
+    // tuple is admitted (a topics-complete family scan fetched every
+    // address of the family).
     let family_job_id = insert_completed_backfill_range_coverage_with_source_identity(
         database.pool(),
         chain,
         1,
         stored_safe_block_number,
-        json!({"source_identity_hash": "test:late-family-scan"}),
-        "late-family-scan",
+        json!({"source_identity_hash": "test:family-scan"}),
+        "family-scan",
     )
     .await?;
     insert_backfill_coverage_fact_rows(
         database.pool(),
         family_job_id,
         &[family_coverage_fact(
-            "late_source_family",
+            "test_source_family",
             1,
             stored_safe_block_number,
         )],
     )
     .await?;
 
-    let (task, heads, provider, server) = promote_one_slice_then_admit_tuple(
-        &database,
-        chain,
-        &coverage_frontiers,
-        "test",
-        10_092,
-        "late_source_family",
-        late_address,
-        late_active_from,
-    )
-    .await?;
-    coverage_frontiers.clamp_verified_through(chain, late_active_from - 1);
+    let (task, heads, provider, server) =
+        promote_one_covered_slice(&database, chain, &coverage_frontiers).await?;
+    admit_resolver_edge_observation(database.pool(), chain, late_address, late_active_from)
+        .await?;
 
     let (task, outcome) = reconcile_fetched_heads_with_adapter_sync(
         database.pool(),
@@ -4266,17 +4278,27 @@ async fn reconcile_fetched_heads_manifest_abi_change_invalidates_the_frontier_me
     let late_active_from = chunk + 100;
     // A NEW family changes the log-producing topic-set fingerprint; no clamp
     // is issued — the fingerprint mismatch alone must drop the memo.
-    let (task, heads, provider, server) = promote_one_slice_then_admit_tuple(
-        &database,
-        chain,
-        &coverage_frontiers,
-        "test",
+    let (task, heads, provider, server) =
+        promote_one_covered_slice(&database, chain, &coverage_frontiers).await?;
+    insert_reconcile_watched_manifest_contract(
+        database.pool(),
         10_093,
+        "test",
+        chain,
         "late_uncovered_family",
+        Uuid::from_u128(10_093),
         late_address,
-        late_active_from,
     )
     .await?;
+    sqlx::query(
+        "UPDATE contract_instance_addresses SET active_from_block_number = $1 WHERE chain_id = $2 AND LOWER(address) = $3",
+    )
+    .bind(late_active_from)
+    .bind(chain)
+    .bind(late_address)
+    .execute(database.pool())
+    .await
+    .context("failed to set the late tuple's active window")?;
 
     let error = reconcile_fetched_heads_with_adapter_sync(
         database.pool(),
