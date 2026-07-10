@@ -56,7 +56,7 @@ pub(crate) async fn derive_legacy_backfill_coverage_facts(
         .await
         .context("failed to open transaction for legacy coverage fact derivation")?;
     let inserted_fact_count = write_backfill_coverage_facts(
-        &mut *transaction,
+        &mut transaction,
         job.backfill_job_id,
         &job.chain_id,
         BackfillCoverageFactDerivation::LegacyFullPayloadIdentity,

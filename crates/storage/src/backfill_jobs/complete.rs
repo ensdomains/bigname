@@ -173,7 +173,7 @@ where
 
     let job = set_backfill_job_completed(executor, backfill_job_id).await?;
     write_backfill_coverage_facts_from_iter(
-        &mut **executor,
+        executor,
         job.backfill_job_id,
         &job.chain_id,
         BackfillCoverageFactDerivation::JobCompletion,
