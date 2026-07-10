@@ -70,6 +70,7 @@ pub(super) async fn fetch_all_pages(
         if page_len < page_limit {
             break;
         }
+        ensure_full_page_advanced_cursor(cursor, previous_cursor)?;
         cursor = previous_cursor;
         if cursor.is_none() {
             bail!("Coinbase SQL returned a full page without a cursor row");
@@ -192,6 +193,28 @@ fn rows_are_same_underlying_log(a: &CoinbaseSqlLogRow, b: &CoinbaseSqlLogRow) ->
         && a.transaction_hash == b.transaction_hash
         && a.emitting_address == b.emitting_address
         && a.topics == b.topics
+}
+
+/// A full page whose rows all reconciled as duplicates of the previous tail
+/// leaves the pagination cursor unmoved, and the next request would be
+/// byte-identical — an infinite loop against a paid API. Fail the fetch
+/// instead; a healthy warehouse can only produce this by returning the same
+/// duplicate row page_limit times.
+pub(super) fn ensure_full_page_advanced_cursor(
+    previous_query_cursor: Option<CoinbaseSqlLogCursor>,
+    next_query_cursor: Option<CoinbaseSqlLogCursor>,
+) -> Result<()> {
+    if let Some(cursor) = next_query_cursor
+        && Some(cursor) == previous_query_cursor
+    {
+        bail!(
+            "Coinbase SQL returned a full page without advancing the pagination cursor past block {}, transaction index {}, log index {}; refusing to re-issue an identical query",
+            cursor.block_number,
+            cursor.transaction_index,
+            cursor.log_index
+        );
+    }
+    Ok(())
 }
 
 fn record_response_stats(stats: &mut CoinbaseSqlFetchStats, response: &CoinbaseSqlQueryResponse) {

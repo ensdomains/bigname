@@ -9,7 +9,7 @@ use sqlx::types::Uuid;
 
 use super::{
     coinbase_sql_logs_need_validation_provider_payload,
-    pagination::append_page_rows,
+    pagination::{CoinbaseSqlLogCursor, append_page_rows, ensure_full_page_advanced_cursor},
     planner::build_filter_packs,
     push_deduped_log,
     query::{CoinbaseSqlFilterPack, build_or_split_filter_pack, build_query},
@@ -1404,4 +1404,75 @@ fn pagination_rejects_backward_ordered_rows() -> Result<()> {
     );
     assert_eq!(stats.union_duplicate_count, 0);
     Ok(())
+}
+
+#[test]
+fn pagination_rejects_full_pages_that_do_not_advance_the_cursor() -> Result<()> {
+    let stalled = CoinbaseSqlLogCursor {
+        block_number: 10,
+        transaction_index: 1,
+        log_index: 2,
+    };
+    let error = ensure_full_page_advanced_cursor(Some(stalled), Some(stalled))
+        .expect_err("a full page that leaves the cursor unmoved must fail the fetch");
+    assert!(
+        error
+            .to_string()
+            .contains("without advancing the pagination cursor past block 10, transaction index 1, log index 2"),
+        "unexpected error: {error:#}"
+    );
+
+    let advanced = CoinbaseSqlLogCursor {
+        block_number: 10,
+        transaction_index: 1,
+        log_index: 3,
+    };
+    ensure_full_page_advanced_cursor(Some(stalled), Some(advanced))?;
+    ensure_full_page_advanced_cursor(None, Some(advanced))?;
+    ensure_full_page_advanced_cursor(None, None)?;
+    Ok(())
+}
+
+#[test]
+fn pagination_rejects_decoded_twins_with_conflicting_content() -> Result<()> {
+    // Two decoded shapes of the same underlying log (identical identity
+    // fields) that differ in decoded content must not be reconciled by the
+    // encoded/decoded preference: the (decoded, decoded) discriminator arm
+    // falls through to the strict-order bail.
+    let first = decoded_union_row(2)?;
+    let mut second = decoded_union_row(2)?;
+    second.data = "0xdeadbeef".to_owned();
+    assert!(
+        rows_describe_same_identity(&first, &second),
+        "fixture rows must share every log identity field"
+    );
+
+    let mut rows = Vec::new();
+    let mut previous_cursor = None;
+    let mut stats = CoinbaseSqlFetchStats::default();
+    let error = append_page_rows(
+        &mut rows,
+        &mut previous_cursor,
+        vec![first, second],
+        &mut stats,
+    )
+    .expect_err("conflicting decoded twins must fail the fetch");
+    assert!(
+        error.to_string().contains(
+            "Coinbase SQL rows were not strictly ordered at block 10, transaction index 1, log index 2"
+        ),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(stats.union_duplicate_count, 0);
+    Ok(())
+}
+
+fn rows_describe_same_identity(a: &CoinbaseSqlLogRow, b: &CoinbaseSqlLogRow) -> bool {
+    a.block_number == b.block_number
+        && a.block_hash == b.block_hash
+        && a.transaction_hash == b.transaction_hash
+        && a.transaction_index == b.transaction_index
+        && a.log_index == b.log_index
+        && a.emitting_address == b.emitting_address
+        && a.topics == b.topics
 }
