@@ -4,11 +4,13 @@ use anyhow::{Context, Result};
 use sqlx::PgPool;
 
 /// Invariant: any transaction that mutates `discovery_edges` (insert,
-/// reactivation, window update, or deactivation) must bump the owning
-/// chain's `discovery_admission_epochs` row in the same transaction.
-/// Promotion's verified coverage frontier is versioned by this epoch; a
-/// missed bump would let a stale frontier promote over a newly watched
-/// tuple's unfetched logs.
+/// reactivation, window update, or deactivation) OR the manifest-declared
+/// watched surface (manifest entries, seeded addresses, declared start
+/// blocks, rollout status) must bump the owning chain's
+/// `discovery_admission_epochs` row in the same transaction. Promotion's
+/// verified coverage frontier is versioned by this epoch; a missed bump
+/// would let a stale frontier promote over a newly watched tuple's
+/// unfetched logs.
 pub(crate) async fn bump_discovery_admission_epochs(
     executor: &mut sqlx::postgres::PgConnection,
     chains: &BTreeSet<String>,

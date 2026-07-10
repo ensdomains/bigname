@@ -35,9 +35,9 @@ struct VerifiedCoverageInterval {
     /// under; an ABI reload mid-process invalidates the memo.
     topic_set_fingerprint: String,
     /// Discovery admission epoch the interval was verified under. Every
-    /// discovery_edges mutation bumps the chain's epoch in the same
-    /// transaction (in this or any other process), so watch-set growth
-    /// behind the frontier always forces re-verification.
+    /// discovery_edges mutation and manifest-sync watched-surface change
+    /// bumps the chain's epoch in the same transaction (in this or any other
+    /// process), so watch-set growth always forces re-verification.
     discovery_admission_epoch: i64,
 }
 
