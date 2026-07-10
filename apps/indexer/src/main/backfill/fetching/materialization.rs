@@ -66,12 +66,6 @@ pub(super) fn materialize_backfill_block_payloads(
     })
 }
 
-pub(super) fn selected_code_observation_addresses(
-    selected_addresses: &BTreeSet<String>,
-) -> Vec<String> {
-    selected_addresses.iter().cloned().collect()
-}
-
 pub(super) fn selected_seed_log_addresses(
     selection_logs: &[ProviderLog],
     selected_addresses: &BTreeSet<String>,
@@ -562,5 +556,43 @@ mod tests {
             gas_used: Some(21_000),
             logs_bloom: None,
         }
+    }
+
+    #[test]
+    fn code_observations_are_empty_for_blocks_without_selected_logs() {
+        let selected_address = "0x0000000000000000000000000000000000000001";
+        let selected = BTreeSet::from([selected_address.to_owned()]);
+
+        assert!(selected_seed_log_addresses(&[], &selected).is_empty());
+    }
+
+    #[test]
+    fn code_observations_exclude_selected_addresses_that_did_not_emit() {
+        let emitting = "0x0000000000000000000000000000000000000001";
+        let silent = "0x0000000000000000000000000000000000000002";
+        let selected = BTreeSet::from([emitting.to_owned(), silent.to_owned()]);
+
+        assert_eq!(
+            selected_seed_log_addresses(&[provider_log(emitting, 0)], &selected),
+            vec![emitting.to_owned()]
+        );
+    }
+
+    #[test]
+    fn code_observations_exclude_unselected_emitters() {
+        let selected_address = "0x0000000000000000000000000000000000000001";
+        let unselected_address = "0x00000000000000000000000000000000000000ff";
+        let selected = BTreeSet::from([selected_address.to_owned()]);
+
+        assert_eq!(
+            selected_seed_log_addresses(
+                &[
+                    provider_log(selected_address, 0),
+                    provider_log(unselected_address, 1),
+                ],
+                &selected,
+            ),
+            vec![selected_address.to_owned()]
+        );
     }
 }
