@@ -5380,7 +5380,8 @@ async fn assert_dynamic_resolver_backfill_scope_behavior(
         job.source_identity,
         backfill::backfill_job_source_identity_payload(&source_plan)?
     );
-    let coverage_fact_rows = load_coverage_fact_rows(database.pool(), outcome.backfill_job_id).await?;
+    let coverage_fact_rows =
+        load_coverage_fact_rows(database.pool(), outcome.backfill_job_id).await?;
     if generic_ensv1_resolver {
         assert_eq!(
             coverage_fact_rows,

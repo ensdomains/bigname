@@ -1033,8 +1033,13 @@ async fn coverage_fact_writes_chunk_below_the_bind_limit() -> Result<()> {
     )
     .await?
     .expect("range must be reservable");
-    advance_backfill_range(database.pool(), reserved.backfill_range_id, "lease-chunk", 120)
-        .await?;
+    advance_backfill_range(
+        database.pool(),
+        reserved.backfill_range_id,
+        "lease-chunk",
+        120,
+    )
+    .await?;
     complete_backfill_range_recording_coverage(
         database.pool(),
         reserved.backfill_range_id,

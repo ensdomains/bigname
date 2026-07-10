@@ -377,7 +377,8 @@ async fn run_repair(args: RepairArgs) -> Result<()> {
                     "bigname-indexer",
                 )
                 .await?;
-            let outcome = derive_legacy_backfill_coverage_facts(&pool, args.backfill_job_id).await?;
+            let outcome =
+                derive_legacy_backfill_coverage_facts(&pool, args.backfill_job_id).await?;
             tracing::info!(
                 service = "indexer",
                 command = "repair derive-backfill-coverage-facts",

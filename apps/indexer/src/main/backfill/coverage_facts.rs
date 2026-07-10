@@ -42,24 +42,27 @@ pub(crate) fn job_completion_coverage_facts<'a>(
             covered_from_block: job_start_block,
             covered_to_block: job_end_block,
         });
-    let address_facts = source_plan.selected_targets.iter().filter_map(move |target| {
-        if family_scan_source_families.contains(target.source_family.as_str()) {
-            return None;
-        }
-        let (covered_from_block, covered_to_block) = covered_block_interval(
-            target.effective_from_block,
-            target.effective_to_block,
-            job_start_block,
-            job_end_block,
-        )?;
-        Some(BackfillCoverageFactWrite {
-            source_family: target.source_family.clone(),
-            scope: BackfillCoverageFactScope::Address,
-            address: Some(target.address.to_ascii_lowercase()),
-            covered_from_block,
-            covered_to_block,
-        })
-    });
+    let address_facts = source_plan
+        .selected_targets
+        .iter()
+        .filter_map(move |target| {
+            if family_scan_source_families.contains(target.source_family.as_str()) {
+                return None;
+            }
+            let (covered_from_block, covered_to_block) = covered_block_interval(
+                target.effective_from_block,
+                target.effective_to_block,
+                job_start_block,
+                job_end_block,
+            )?;
+            Some(BackfillCoverageFactWrite {
+                source_family: target.source_family.clone(),
+                scope: BackfillCoverageFactScope::Address,
+                address: Some(target.address.to_ascii_lowercase()),
+                covered_from_block,
+                covered_to_block,
+            })
+        });
 
     family_facts.chain(address_facts)
 }
@@ -106,14 +109,31 @@ mod tests {
         let source_plan = source_plan(
             "base-mainnet",
             vec![
-                target("basenames_base_registry", 1, "0xABCDEFabcdefABCDEFabcdefabcdefABCDEFabcd", 10, 30),
-                target("basenames_base_registrar", 2, "0x2222222222222222222222222222222222222222", 25, 60),
-                target("basenames_base_resolver", 3, "0x3333333333333333333333333333333333333333", 1, 19),
+                target(
+                    "basenames_base_registry",
+                    1,
+                    "0xABCDEFabcdefABCDEFabcdefabcdefABCDEFabcd",
+                    10,
+                    30,
+                ),
+                target(
+                    "basenames_base_registrar",
+                    2,
+                    "0x2222222222222222222222222222222222222222",
+                    25,
+                    60,
+                ),
+                target(
+                    "basenames_base_resolver",
+                    3,
+                    "0x3333333333333333333333333333333333333333",
+                    1,
+                    19,
+                ),
             ],
         );
 
-        let facts =
-            job_completion_coverage_facts(&source_plan, false, 20, 40).collect::<Vec<_>>();
+        let facts = job_completion_coverage_facts(&source_plan, false, 20, 40).collect::<Vec<_>>();
 
         assert_eq!(facts.len(), 2);
         assert_eq!(facts[0].source_family, "basenames_base_registry");
@@ -138,13 +158,24 @@ mod tests {
         let source_plan = source_plan(
             "ethereum-mainnet",
             vec![
-                target("ens_v1_registry_l1", 1, "0x1111111111111111111111111111111111111111", 5, 50),
-                target("ens_v1_resolver_l1", 2, "0x2222222222222222222222222222222222222222", 12, 18),
+                target(
+                    "ens_v1_registry_l1",
+                    1,
+                    "0x1111111111111111111111111111111111111111",
+                    5,
+                    50,
+                ),
+                target(
+                    "ens_v1_resolver_l1",
+                    2,
+                    "0x2222222222222222222222222222222222222222",
+                    12,
+                    18,
+                ),
             ],
         );
 
-        let facts =
-            job_completion_coverage_facts(&source_plan, false, 10, 20).collect::<Vec<_>>();
+        let facts = job_completion_coverage_facts(&source_plan, false, 10, 20).collect::<Vec<_>>();
 
         assert_eq!(facts.len(), 2);
         assert_eq!(facts[0].source_family, "ens_v1_resolver_l1");
@@ -167,8 +198,20 @@ mod tests {
         let source_plan = source_plan(
             "base-mainnet",
             vec![
-                target("basenames_base_registry", 1, "0x1111111111111111111111111111111111111111", 5, 50),
-                target("basenames_base_registry", 2, "0x2222222222222222222222222222222222222222", 12, 18),
+                target(
+                    "basenames_base_registry",
+                    1,
+                    "0x1111111111111111111111111111111111111111",
+                    5,
+                    50,
+                ),
+                target(
+                    "basenames_base_registry",
+                    2,
+                    "0x2222222222222222222222222222222222222222",
+                    12,
+                    18,
+                ),
             ],
         );
 

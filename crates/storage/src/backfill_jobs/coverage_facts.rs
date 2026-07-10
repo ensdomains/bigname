@@ -99,9 +99,14 @@ pub(super) async fn write_backfill_coverage_facts_from_iter(
         }
     }
     if !chunk.is_empty() {
-        inserted +=
-            insert_backfill_coverage_fact_chunk(conn, backfill_job_id, chain_id, derivation, &chunk)
-                .await?;
+        inserted += insert_backfill_coverage_fact_chunk(
+            conn,
+            backfill_job_id,
+            chain_id,
+            derivation,
+            &chunk,
+        )
+        .await?;
     }
     Ok(inserted)
 }
@@ -117,7 +122,9 @@ pub async fn load_backfill_coverage_fact_counts(
     .bind(backfill_job_id)
     .fetch_one(pool)
     .await
-    .with_context(|| format!("failed to count coverage facts for backfill job {backfill_job_id}"))?;
+    .with_context(|| {
+        format!("failed to count coverage facts for backfill job {backfill_job_id}")
+    })?;
     u64::try_from(count).context("backfill coverage fact count must not be negative")
 }
 
