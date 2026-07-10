@@ -73,6 +73,13 @@ impl CoinbaseSqlClient {
                     retry_count += 1;
                     sleep_backoff(attempt).await;
                 }
+                Ok(response)
+                    if is_waf_challenge_response(response.status, &response.body)
+                        && attempt + 1 < MAX_SQL_ATTEMPTS =>
+                {
+                    retry_count += 1;
+                    sleep_waf_challenge_backoff(attempt).await;
+                }
                 Ok(response) => {
                     let status = response.status;
                     let body = truncate_error_body(&response.body);
@@ -281,8 +288,21 @@ fn should_retry_status(status: StatusCode) -> bool {
         || status == StatusCode::GATEWAY_TIMEOUT
 }
 
+/// Cloudflare's WAF intermittently serves 403 HTML challenge pages even at
+/// request rates well below the configured qps. Those are transient and
+/// retryable with a generous backoff; a 403 carrying a JSON body is a real
+/// authorization or limit error from the API and stays fatal.
+fn is_waf_challenge_response(status: StatusCode, body: &str) -> bool {
+    status == StatusCode::FORBIDDEN && serde_json::from_str::<Value>(body.trim()).is_err()
+}
+
 async fn sleep_backoff(attempt: usize) {
     let millis = 250_u64.saturating_mul(1_u64 << attempt.min(4));
+    tokio::time::sleep(Duration::from_millis(millis)).await;
+}
+
+async fn sleep_waf_challenge_backoff(attempt: usize) {
+    let millis = 2_000_u64.saturating_mul(1_u64 << attempt.min(4));
     tokio::time::sleep(Duration::from_millis(millis)).await;
 }
 
@@ -318,6 +338,32 @@ mod tests {
         };
 
         assert!(format!("{error:#}").contains("must use https://"));
+    }
+
+    #[test]
+    fn forbidden_html_challenge_is_retryable_but_json_forbidden_is_fatal() {
+        assert!(
+            is_waf_challenge_response(
+                StatusCode::FORBIDDEN,
+                "<!DOCTYPE html><html><head><title>Attention Required! | Cloudflare</title></head></html>",
+            ),
+            "a 403 with an HTML challenge body must be retryable"
+        );
+        assert!(
+            is_waf_challenge_response(StatusCode::FORBIDDEN, ""),
+            "a 403 with an empty body cannot be a structured API error and must be retryable"
+        );
+        assert!(
+            !is_waf_challenge_response(
+                StatusCode::FORBIDDEN,
+                r#"{"errorType":"forbidden","errorMessage":"missing scope"}"#,
+            ),
+            "a 403 with a JSON body is a real authorization error and must stay fatal"
+        );
+        assert!(
+            !is_waf_challenge_response(StatusCode::UNAUTHORIZED, "<html></html>"),
+            "only 403 responses participate in challenge detection"
+        );
     }
 
     #[test]
