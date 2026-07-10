@@ -311,6 +311,58 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml
   transfer control vectors, then sets and clears the Base coin-type primary
   claim. Verified execution remains out of scope for this row: `mode=both`
   keeps verified primary state as `not_found`.
+- `basenames_turn_m::renew_release_and_premium_reregistration_rotate_lineage`
+  — renews through the legacy controller's three-argument `NameRenewed`,
+  advances beyond expiry plus grace, emits admitted post-grace activity, and
+  re-registers to a different owner. It pins release synthesis, the two
+  burn/re-mint transfers, lineage rotation, and distinct lease resources
+  (upstream: .refs/basenames/src/L2/RegistrarController.sol:L497 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L294 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L443 @ basenames@1809bbc).
+- `basenames_turn_m::upgradeable_controller_proxy_registers_and_renews` —
+  deploys and initializes the upgradeable controller implementation and proxy,
+  authorizes the proxy, and drives registration and renewal through it. The
+  admitted events retain proxy-emitter provenance while contract-instance
+  identity keeps the implementation distinct
+  (upstream: .refs/basenames/test/Integration/SwitchToUpgradeableRegistrarController.t.sol:L45 @ basenames@1809bbc)
+  (upstream: .refs/basenames/test/Integration/SwitchToUpgradeableRegistrarController.t.sol:L59 @ basenames@1809bbc)
+  (upstream: .refs/basenames/test/Integration/SwitchToUpgradeableRegistrarController.t.sol:L68 @ basenames@1809bbc).
+- `basenames_turn_m::basenames_subnames_list_preimages_placeholders_and_tombstones`
+  — creates a revealed child and hash-only sibling under a registered Base
+  parent, pins child listing and the bracketed placeholder, then removes the
+  hash-only child through a zero-owner write.
+- `basenames_turn_m::l2_resolver_records_clear_and_contenthash_gap` — writes
+  text, non-60 multicoin address, and name records in separate transactions,
+  then clears them and pins keyed state plus the version boundary. A
+  contenthash write on the same admitted resolver is topic-filtered from raw
+  intake, derives no normalized event, and remains the explicit
+  `not_observed_on_current_resolver` inventory gap
+  (upstream: .refs/basenames/src/L2/resolver/ResolverBase.sol:L35 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/L2/resolver/ContentHashResolver.sol:L32 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/L2/resolver/ContentHashResolver.sol:L34 @ basenames@1809bbc).
+- `basenames_turn_m::unadmitted_resolver_rotation_stays_profile_gated_then_clears`
+  — rotates to an L2Resolver built against an alternate registry, pins the
+  immutable-dependent code-hash mismatch as empty selectors with
+  `resolver_family_unsupported` entries under `unsupported_families` (rather
+  than `explicit_gaps`), keeps its records profile-gated, then rotates to zero
+  and clears declared resolver state
+  (upstream: .refs/basenames/src/L2/L2Resolver.sol:L113 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/L2/L2Resolver.sol:L114 @ basenames@1809bbc).
+- `basenames_turn_m::legacy_reverse_registrar_stays_registry_and_raw_record_only`
+  — drives helper `claimForBaseAddr` and `setNameForAddr`; a claim-only ingest
+  derives `NewOwner`, while the combined replay retains the latter child
+  assignment and resolver discovery keeps `NewResolver` with no logical name.
+  `NameChanged` remains raw-only; no normalized record, reverse child
+  placeholder, or primary candidate is inferred
+  (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L158 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L193 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/L2/resolver/NameResolver.sol:L30 @ basenames@1809bbc).
+- `basenames_turn_m::third_party_controller_registration_degrades_without_label_events`
+  — authorizes an EOA controller and pins direct `register` as a raw token
+  mint plus one registry authority derivation without `RegistrationGranted`;
+  `registerOnly` retains only the raw token mint and creates no registry node
+  (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L237 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L248 @ basenames@1809bbc).
 - `ens_v2::ens_v2_sepolia_dev_declared_matrix_end_to_end` — deploys the
   admitted sepolia-dev ENSv2 root registry, ETH registry, registrar, rent
   oracle, and payment-token artifacts from `.refs/ens_v2`, mirrors

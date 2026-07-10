@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 
 use super::artifacts::{Deployed, deploy, load_ens_v1_artifact};
 use super::ens_v1::{labelhash, namehash};
-use super::rpc::RpcClient;
+use super::rpc::{RpcClient, TxReceipt};
 
 // ENSv1's Base L2ReverseRegistrar deployment declares Base coin type
 // 2147492101.
@@ -35,7 +35,14 @@ sol! {
     function reclaim(uint256 id, address owner) external;
     function setAddr(bytes32 node, address a) external;
     function setName(string name) external;
+    function renew(string name, uint256 duration) external payable;
     function registerPrice(string name, uint256 duration) external view returns (uint256);
+
+    struct Price {
+        uint256 base;
+        uint256 premium;
+    }
+    function rentPrice(string name, uint256 duration) external view returns (Price price);
 
     struct RegisterRequest {
         string name;
@@ -48,6 +55,104 @@ sol! {
     function register(RegisterRequest request) external payable;
 }
 
+mod registry_calls {
+    use alloy_sol_types::sol;
+
+    // Registry mutations and reads are kept apart from BaseRegistrar's
+    // one-argument setResolver overload.
+    // (upstream: .refs/basenames/src/L2/Registry.sol:L113 @ basenames@1809bbc)
+    // (upstream: .refs/basenames/src/L2/Registry.sol:L132 @ basenames@1809bbc)
+    // (upstream: .refs/basenames/src/L2/Registry.sol:L165 @ basenames@1809bbc)
+    sol! {
+        function setSubnodeOwner(bytes32 node, bytes32 label, address owner) external returns (bytes32);
+        function setResolver(bytes32 node, address resolver) external;
+        function owner(bytes32 node) external view returns (address);
+    }
+}
+
+mod resolver_calls {
+    use alloy_sol_types::sol;
+
+    // (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/TextResolver.sol:L17 @ basenames@1809bbc)
+    // (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/NameResolver.sol:L15 @ basenames@1809bbc)
+    // (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/ResolverBase.sol:L22 @ basenames@1809bbc)
+    // (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/ContentHashResolver.sol:L16 @ basenames@1809bbc)
+    sol! {
+        function setText(bytes32 node, string key, string value) external;
+        function setName(bytes32 node, string newName) external;
+        function clearRecords(bytes32 node) external;
+        function setContenthash(bytes32 node, bytes hash) external;
+    }
+}
+
+mod multicoin_addr_calls {
+    use alloy_sol_types::sol;
+
+    // (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/AddrResolver.sol:L45 @ basenames@1809bbc)
+    sol! {
+        function setAddr(bytes32 node, uint256 coinType, bytes addressBytes) external;
+    }
+}
+
+mod upgradeable_controller_calls {
+    use alloy_sol_types::sol;
+
+    // UpgradeableRegistrarController is initialized through its ERC1967
+    // proxy and extends the legacy registration tuple with ENSIP-19 fields.
+    // (upstream: .refs/basenames/src/L2/UpgradeableRegistrarController.sol:L300 @ basenames@1809bbc)
+    // (upstream: .refs/basenames/src/L2/UpgradeableRegistrarController.sol:L515 @ basenames@1809bbc)
+    sol! {
+        function initialize(
+            address base,
+            address prices,
+            address reverseRegistrar,
+            address owner,
+            bytes32 rootNode,
+            string rootName,
+            address paymentReceiver,
+            address legacyRegistrarController,
+            address legacyL2Resolver,
+            address l2ReverseRegistrar
+        ) external;
+
+        struct RegisterRequest {
+            string name;
+            address owner;
+            uint256 duration;
+            address resolver;
+            bytes[] data;
+            bool reverseRecord;
+            uint256[] coinTypes;
+            uint256 signatureExpiry;
+            bytes signature;
+        }
+        function register(RegisterRequest request) external payable;
+        function setRegistrarController(address registrarController) external;
+    }
+}
+
+mod reverse_calls {
+    use alloy_sol_types::sol;
+
+    // (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L150 @ basenames@1809bbc)
+    // (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L193 @ basenames@1809bbc)
+    sol! {
+        function claimForBaseAddr(address addr, address owner, address resolver) external returns (bytes32 node);
+        function setNameForAddr(address addr, address owner, address resolver, string name) external returns (bytes32 node);
+    }
+}
+
+mod direct_registrar_calls {
+    use alloy_sol_types::sol;
+
+    // (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L237 @ basenames@1809bbc)
+    // (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L248 @ basenames@1809bbc)
+    sol! {
+        function register(uint256 id, address owner, uint256 duration) external returns (uint256);
+        function registerOnly(uint256 id, address owner, uint256 duration) external returns (uint256);
+    }
+}
+
 /// Local Basenames Base deployment, forge-built from the pinned sources
 /// (the committed broadcast bytecode predates them and its constructors
 /// differ), plus the ENSv1 Base L2ReverseRegistrar hardhat artifact.
@@ -56,16 +161,25 @@ pub struct BasenamesDeployment {
     pub deployer: Address,
     pub registry: Deployed,
     pub base_registrar: Deployed,
+    pub price_oracle: Deployed,
     pub registrar_controller: Deployed,
+    pub upgradeable_registrar_controller: Option<Deployed>,
+    pub upgradeable_registrar_controller_implementation: Option<Deployed>,
     pub l2_resolver: Deployed,
     pub primary_reverse_registrar: Deployed,
     pub helper_reverse_registrar: Deployed,
+}
+
+pub struct UnadmittedL2ResolverDeployment {
+    pub registry: Deployed,
+    pub resolver: Deployed,
 }
 
 pub struct RegisteredBasename {
     pub label: String,
     pub owner: Address,
     pub register_block: u64,
+    pub register_tx_hash: String,
 }
 
 pub async fn deploy_basenames(rpc: &RpcClient, repo_root: &Path) -> Result<BasenamesDeployment> {
@@ -221,7 +335,10 @@ pub async fn deploy_basenames(rpc: &RpcClient, repo_root: &Path) -> Result<Basen
         deployer,
         registry,
         base_registrar,
+        price_oracle,
         registrar_controller,
+        upgradeable_registrar_controller: None,
+        upgradeable_registrar_controller_implementation: None,
         l2_resolver,
         primary_reverse_registrar,
         helper_reverse_registrar,
@@ -230,6 +347,91 @@ pub async fn deploy_basenames(rpc: &RpcClient, repo_root: &Path) -> Result<Basen
 
 fn forge(repo_root: &Path, contract: &str) -> Result<super::artifacts::Artifact> {
     super::artifacts::load_basenames_forge_artifact(repo_root, contract)
+}
+
+/// Deploy the pinned UpgradeableRegistrarController implementation behind
+/// the vendored OpenZeppelin ERC1967Proxy, initialize proxy storage, and
+/// authorize the proxy, and make it the L2Resolver's trusted controller.
+/// (upstream: .refs/basenames/src/L2/UpgradeableRegistrarController.sol:L300 @ basenames@1809bbc)
+/// (upstream: .refs/basenames/lib/openzeppelin-contracts/contracts/proxy/ERC1967/ERC1967Proxy.sol:L15 @ basenames@1809bbc)
+/// (upstream: .refs/basenames/lib/openzeppelin-contracts/contracts/proxy/ERC1967/ERC1967Proxy.sol:L26 @ basenames@1809bbc)
+/// (upstream: .refs/basenames/script/configure/EstablishController.s.sol:L15 @ basenames@1809bbc)
+/// (upstream: .refs/basenames/script/configure/EstablishController.s.sol:L18 @ basenames@1809bbc)
+/// (upstream: .refs/basenames/test/Integration/SwitchToUpgradeableRegistrarController.t.sol:L66 @ basenames@1809bbc)
+pub async fn deploy_upgradeable_registrar_controller(
+    rpc: &RpcClient,
+    repo_root: &Path,
+    d: &mut BasenamesDeployment,
+) -> Result<()> {
+    if d.upgradeable_registrar_controller.is_some()
+        || d.upgradeable_registrar_controller_implementation.is_some()
+    {
+        bail!("UpgradeableRegistrarController already deployed");
+    }
+
+    let implementation = deploy(
+        rpc,
+        d.deployer,
+        &forge(repo_root, "UpgradeableRegistrarController")?,
+        &[],
+    )
+    .await?;
+    let initialize = upgradeable_controller_calls::initializeCall {
+        base: d.base_registrar.address,
+        prices: d.price_oracle.address,
+        reverseRegistrar: d.helper_reverse_registrar.address,
+        owner: d.deployer,
+        rootNode: namehash("base.eth"),
+        rootName: ".base.eth".to_owned(),
+        paymentReceiver: d.deployer,
+        legacyRegistrarController: d.registrar_controller.address,
+        legacyL2Resolver: d.l2_resolver.address,
+        l2ReverseRegistrar: d.primary_reverse_registrar.address,
+    }
+    .abi_encode();
+    let proxy = deploy(
+        rpc,
+        d.deployer,
+        &forge(repo_root, "ERC1967Proxy")?,
+        &(implementation.address, Bytes::copy_from_slice(&initialize)).abi_encode_params(),
+    )
+    .await?;
+
+    send_checked(
+        rpc,
+        d.deployer,
+        d.base_registrar.address,
+        &addControllerCall {
+            controller: proxy.address,
+        }
+        .abi_encode(),
+    )
+    .await?;
+    send_checked(
+        rpc,
+        d.deployer,
+        d.helper_reverse_registrar.address,
+        &setControllerApprovalCall {
+            controller: proxy.address,
+            approved: true,
+        }
+        .abi_encode(),
+    )
+    .await?;
+    send_checked(
+        rpc,
+        d.deployer,
+        d.l2_resolver.address,
+        &upgradeable_controller_calls::setRegistrarControllerCall {
+            registrarController: proxy.address,
+        }
+        .abi_encode(),
+    )
+    .await?;
+
+    d.upgradeable_registrar_controller = Some(proxy);
+    d.upgradeable_registrar_controller_implementation = Some(implementation);
+    Ok(())
 }
 
 async fn wire_base_namespace(
@@ -285,13 +487,23 @@ async fn wire_base_reverse_namespace(
 }
 
 async fn send_checked(rpc: &RpcClient, from: Address, to: Address, data: &[u8]) -> Result<()> {
-    let receipt = rpc
-        .send_transaction(from, Some(to), data, U256::ZERO)
-        .await?;
+    send_checked_receipt(rpc, from, to, data, U256::ZERO)
+        .await
+        .map(|_| ())
+}
+
+async fn send_checked_receipt(
+    rpc: &RpcClient,
+    from: Address,
+    to: Address,
+    data: &[u8],
+    value: U256,
+) -> Result<TxReceipt> {
+    let receipt = rpc.send_transaction(from, Some(to), data, value).await?;
     if !receipt.status_ok {
         bail!("call to {to} reverted (tx {})", receipt.tx_hash);
     }
-    Ok(())
+    Ok(receipt)
 }
 
 pub async fn register_base_name(
@@ -340,7 +552,161 @@ pub async fn register_base_name(
         label: label.to_owned(),
         owner,
         register_block: receipt.block_number,
+        register_tx_hash: receipt.tx_hash,
     })
+}
+
+pub async fn legacy_base_rent_price(
+    rpc: &RpcClient,
+    d: &BasenamesDeployment,
+    label: &str,
+    duration_secs: u64,
+) -> Result<(U256, U256)> {
+    controller_rent_price(rpc, d.registrar_controller.address, label, duration_secs).await
+}
+
+/// Renew a Basename through the legacy controller. Its three-argument
+/// NameRenewed event is emitted by the controller while BaseRegistrar emits
+/// its token-id lifecycle event.
+/// (upstream: .refs/basenames/src/L2/RegistrarController.sol:L486 @ basenames@1809bbc)
+pub async fn renew_base_name(
+    rpc: &RpcClient,
+    d: &BasenamesDeployment,
+    from: Address,
+    label: &str,
+    duration_secs: u64,
+) -> Result<TxReceipt> {
+    renew_through_controller(
+        rpc,
+        d.registrar_controller.address,
+        from,
+        label,
+        duration_secs,
+    )
+    .await
+}
+
+pub async fn register_upgradeable_base_name(
+    rpc: &RpcClient,
+    d: &BasenamesDeployment,
+    from: Address,
+    label: &str,
+    owner: Address,
+    duration_secs: u64,
+) -> Result<RegisteredBasename> {
+    let controller = upgradeable_controller(d)?;
+    let price = controller_register_price(rpc, controller.address, label, duration_secs).await?;
+    let request = upgradeable_controller_calls::RegisterRequest {
+        name: label.to_owned(),
+        owner,
+        duration: U256::from(duration_secs),
+        resolver: d.l2_resolver.address,
+        data: Vec::<Bytes>::new(),
+        reverseRecord: false,
+        coinTypes: Vec::<U256>::new(),
+        signatureExpiry: U256::ZERO,
+        signature: Bytes::new(),
+    };
+    let receipt = send_checked_receipt(
+        rpc,
+        from,
+        controller.address,
+        &upgradeable_controller_calls::registerCall { request }.abi_encode(),
+        price,
+    )
+    .await
+    .with_context(|| format!("register {label}.base.eth through upgradeable controller"))?;
+    Ok(RegisteredBasename {
+        label: label.to_owned(),
+        owner,
+        register_block: receipt.block_number,
+        register_tx_hash: receipt.tx_hash,
+    })
+}
+
+pub async fn renew_upgradeable_base_name(
+    rpc: &RpcClient,
+    d: &BasenamesDeployment,
+    from: Address,
+    label: &str,
+    duration_secs: u64,
+) -> Result<TxReceipt> {
+    renew_through_controller(
+        rpc,
+        upgradeable_controller(d)?.address,
+        from,
+        label,
+        duration_secs,
+    )
+    .await
+}
+
+fn upgradeable_controller(d: &BasenamesDeployment) -> Result<&Deployed> {
+    d.upgradeable_registrar_controller
+        .as_ref()
+        .context("UpgradeableRegistrarController has not been deployed")
+}
+
+async fn controller_register_price(
+    rpc: &RpcClient,
+    controller: Address,
+    label: &str,
+    duration_secs: u64,
+) -> Result<U256> {
+    let raw = rpc
+        .eth_call(
+            controller,
+            &registerPriceCall {
+                name: label.to_owned(),
+                duration: U256::from(duration_secs),
+            }
+            .abi_encode(),
+        )
+        .await?;
+    registerPriceCall::abi_decode_returns(&raw).context("registerPrice decode")
+}
+
+async fn controller_rent_price(
+    rpc: &RpcClient,
+    controller: Address,
+    label: &str,
+    duration_secs: u64,
+) -> Result<(U256, U256)> {
+    let raw = rpc
+        .eth_call(
+            controller,
+            &rentPriceCall {
+                name: label.to_owned(),
+                duration: U256::from(duration_secs),
+            }
+            .abi_encode(),
+        )
+        .await?;
+    let price = rentPriceCall::abi_decode_returns(&raw).context("rentPrice decode")?;
+    Ok((price.base, price.premium))
+}
+
+async fn renew_through_controller(
+    rpc: &RpcClient,
+    controller: Address,
+    from: Address,
+    label: &str,
+    duration_secs: u64,
+) -> Result<TxReceipt> {
+    let (base, _) = controller_rent_price(rpc, controller, label, duration_secs).await?;
+    send_checked_receipt(
+        rpc,
+        from,
+        controller,
+        &renewCall {
+            name: label.to_owned(),
+            duration: U256::from(duration_secs),
+        }
+        .abi_encode(),
+        base,
+    )
+    .await
+    .with_context(|| format!("renew {label}.base.eth through controller {controller}"))
 }
 
 pub async fn transfer_base_token(
@@ -406,6 +772,110 @@ pub async fn set_registry_owner(
     .await
 }
 
+pub async fn set_base_subnode_owner(
+    rpc: &RpcClient,
+    d: &BasenamesDeployment,
+    from: Address,
+    parent_name: &str,
+    label: &str,
+    owner: Address,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        d.registry.address,
+        &registry_calls::setSubnodeOwnerCall {
+            node: namehash(parent_name),
+            label: labelhash(label),
+            owner,
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+pub async fn set_base_registry_resolver(
+    rpc: &RpcClient,
+    d: &BasenamesDeployment,
+    from: Address,
+    name: &str,
+    resolver: Address,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        d.registry.address,
+        &registry_calls::setResolverCall {
+            node: namehash(name),
+            resolver,
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+/// Deploy the same L2Resolver source with a distinct immutable registry and
+/// deliberately omit it from the local manifest targets. The separate
+/// Registry gives the scenario an honest authorization hierarchy without
+/// making that registry authoritative.
+/// (upstream: .refs/basenames/src/L2/Registry.sol:L63 @ basenames@1809bbc)
+/// (upstream: .refs/basenames/src/L2/L2Resolver.sol:L113 @ basenames@1809bbc)
+pub async fn deploy_unadmitted_l2_resolver(
+    rpc: &RpcClient,
+    repo_root: &Path,
+    d: &BasenamesDeployment,
+    name: &str,
+    owner: Address,
+) -> Result<UnadmittedL2ResolverDeployment> {
+    let registry = deploy(
+        rpc,
+        d.deployer,
+        &forge(repo_root, "Registry")?,
+        &(d.deployer,).abi_encode_params(),
+    )
+    .await?;
+    for (parent, label, child_owner) in [
+        ("", "eth", d.deployer),
+        ("eth", "base", d.deployer),
+        ("base.eth", base_label(name)?, owner),
+    ] {
+        send_checked(
+            rpc,
+            d.deployer,
+            registry.address,
+            &registry_calls::setSubnodeOwnerCall {
+                node: namehash(parent),
+                label: labelhash(label),
+                owner: child_owner,
+            }
+            .abi_encode(),
+        )
+        .await?;
+    }
+    let resolver = deploy(
+        rpc,
+        d.deployer,
+        &forge(repo_root, "L2Resolver")?,
+        &(
+            registry.address,
+            d.registrar_controller.address,
+            d.helper_reverse_registrar.address,
+            d.deployer,
+        )
+            .abi_encode_params(),
+    )
+    .await?;
+    Ok(UnadmittedL2ResolverDeployment { registry, resolver })
+}
+
+fn base_label(name: &str) -> Result<&str> {
+    let label = name.strip_suffix(".base.eth").unwrap_or(name);
+    if label.is_empty() || label.contains('.') {
+        bail!("expected a Basenames 2LD label or <label>.base.eth, got {name}");
+    }
+    Ok(label)
+}
+
 pub async fn set_addr_record(
     rpc: &RpcClient,
     d: &BasenamesDeployment,
@@ -424,6 +894,237 @@ pub async fn set_addr_record(
         .abi_encode(),
     )
     .await
+}
+
+pub async fn set_base_text_record(
+    rpc: &RpcClient,
+    resolver: Address,
+    from: Address,
+    name: &str,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        resolver,
+        &resolver_calls::setTextCall {
+            node: namehash(name),
+            key: key.to_owned(),
+            value: value.to_owned(),
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+pub async fn set_base_multicoin_addr_record(
+    rpc: &RpcClient,
+    resolver: Address,
+    from: Address,
+    name: &str,
+    coin_type: u64,
+    address_bytes: &[u8],
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        resolver,
+        &multicoin_addr_calls::setAddrCall {
+            node: namehash(name),
+            coinType: U256::from(coin_type),
+            addressBytes: Bytes::copy_from_slice(address_bytes),
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+pub async fn set_base_name_record(
+    rpc: &RpcClient,
+    resolver: Address,
+    from: Address,
+    name: &str,
+    value: &str,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        resolver,
+        &resolver_calls::setNameCall {
+            node: namehash(name),
+            newName: value.to_owned(),
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+pub async fn clear_base_records(
+    rpc: &RpcClient,
+    resolver: Address,
+    from: Address,
+    name: &str,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        resolver,
+        &resolver_calls::clearRecordsCall {
+            node: namehash(name),
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+pub async fn set_base_contenthash_record(
+    rpc: &RpcClient,
+    resolver: Address,
+    from: Address,
+    name: &str,
+    contenthash: &[u8],
+) -> Result<()> {
+    send_checked(
+        rpc,
+        from,
+        resolver,
+        &resolver_calls::setContenthashCall {
+            node: namehash(name),
+            hash: Bytes::copy_from_slice(contenthash),
+        }
+        .abi_encode(),
+    )
+    .await
+}
+
+pub async fn claim_legacy_base_reverse(
+    rpc: &RpcClient,
+    d: &BasenamesDeployment,
+    from: Address,
+    address: Address,
+    owner: Address,
+    resolver: Address,
+) -> Result<TxReceipt> {
+    send_checked_receipt(
+        rpc,
+        from,
+        d.helper_reverse_registrar.address,
+        &reverse_calls::claimForBaseAddrCall {
+            addr: address,
+            owner,
+            resolver,
+        }
+        .abi_encode(),
+        U256::ZERO,
+    )
+    .await
+}
+
+pub async fn set_legacy_base_reverse_name(
+    rpc: &RpcClient,
+    d: &BasenamesDeployment,
+    from: Address,
+    address: Address,
+    owner: Address,
+    resolver: Address,
+    name: &str,
+) -> Result<TxReceipt> {
+    send_checked_receipt(
+        rpc,
+        from,
+        d.helper_reverse_registrar.address,
+        &reverse_calls::setNameForAddrCall {
+            addr: address,
+            owner,
+            resolver,
+            name: name.to_owned(),
+        }
+        .abi_encode(),
+        U256::ZERO,
+    )
+    .await
+}
+
+pub fn base_reverse_node_for(address: Address) -> B256 {
+    namehash(&format!("{address:x}.80002105.reverse"))
+}
+
+pub async fn add_base_controller(
+    rpc: &RpcClient,
+    d: &BasenamesDeployment,
+    controller: Address,
+) -> Result<()> {
+    send_checked(
+        rpc,
+        d.deployer,
+        d.base_registrar.address,
+        &addControllerCall { controller }.abi_encode(),
+    )
+    .await
+}
+
+pub async fn direct_register_base_name(
+    rpc: &RpcClient,
+    d: &BasenamesDeployment,
+    controller: Address,
+    label: &str,
+    owner: Address,
+    duration_secs: u64,
+) -> Result<TxReceipt> {
+    send_checked_receipt(
+        rpc,
+        controller,
+        d.base_registrar.address,
+        &direct_registrar_calls::registerCall {
+            id: U256::from_be_bytes(labelhash(label).0),
+            owner,
+            duration: U256::from(duration_secs),
+        }
+        .abi_encode(),
+        U256::ZERO,
+    )
+    .await
+}
+
+pub async fn direct_register_base_name_only(
+    rpc: &RpcClient,
+    d: &BasenamesDeployment,
+    controller: Address,
+    label: &str,
+    owner: Address,
+    duration_secs: u64,
+) -> Result<TxReceipt> {
+    send_checked_receipt(
+        rpc,
+        controller,
+        d.base_registrar.address,
+        &direct_registrar_calls::registerOnlyCall {
+            id: U256::from_be_bytes(labelhash(label).0),
+            owner,
+            duration: U256::from(duration_secs),
+        }
+        .abi_encode(),
+        U256::ZERO,
+    )
+    .await
+}
+
+pub async fn base_registry_owner(
+    rpc: &RpcClient,
+    d: &BasenamesDeployment,
+    name: &str,
+) -> Result<Address> {
+    let raw = rpc
+        .eth_call(
+            d.registry.address,
+            &registry_calls::ownerCall {
+                node: namehash(name),
+            }
+            .abi_encode(),
+        )
+        .await?;
+    registry_calls::ownerCall::abi_decode_returns(&raw).context("Registry.owner decode")
 }
 
 pub async fn set_primary_name(
@@ -446,7 +1147,7 @@ pub async fn set_primary_name(
 
 impl BasenamesDeployment {
     pub fn manifest_targets(&self) -> std::collections::HashMap<&'static str, (Address, u64)> {
-        std::collections::HashMap::from([
+        let mut targets = std::collections::HashMap::from([
             (
                 "BasenamesRegistry",
                 (self.registry.address, self.registry.block_number),
@@ -480,7 +1181,20 @@ impl BasenamesDeployment {
                     self.primary_reverse_registrar.block_number,
                 ),
             ),
-        ])
+        ]);
+        if let Some(controller) = &self.upgradeable_registrar_controller {
+            targets.insert(
+                "upgradeable_registrar_controller",
+                (controller.address, controller.block_number),
+            );
+        }
+        if let Some(implementation) = &self.upgradeable_registrar_controller_implementation {
+            targets.insert(
+                "upgradeable_registrar_controller_implementation",
+                (implementation.address, implementation.block_number),
+            );
+        }
+        targets
     }
 }
 

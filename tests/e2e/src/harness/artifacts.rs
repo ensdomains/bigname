@@ -87,7 +87,15 @@ fn ensure_basenames_built(repo_root: &Path) -> Result<()> {
     BUILD
         .get_or_init(|| {
             let root = repo_root.join(".refs/basenames");
-            if root.join("out/Registry.sol/Registry.json").exists() {
+            let required_artifacts = [
+                "out/Registry.sol/Registry.json",
+                "out/UpgradeableRegistrarController.sol/UpgradeableRegistrarController.json",
+                "out/ERC1967Proxy.sol/ERC1967Proxy.json",
+            ];
+            if required_artifacts
+                .iter()
+                .all(|relative| root.join(relative).exists())
+            {
                 return Ok(());
             }
             let output = std::process::Command::new("forge")

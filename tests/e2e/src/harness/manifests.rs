@@ -192,6 +192,17 @@ fn patch_targets(doc: &mut Value, local_targets: &HashMap<&str, (Address, u64)>)
             table.insert("address".into(), Value::String(format!("{address:#x}")));
             table.insert("start_block".into(), Value::Integer(start_block as i64));
             table.remove("code_hash");
+            if table.contains_key("implementation") {
+                let implementation_label = format!("{label}_implementation");
+                let implementation = local_targets
+                    .get(implementation_label.as_str())
+                    .map(|(address, _)| *address)
+                    .unwrap_or_else(|| placeholder_address(&implementation_label));
+                table.insert(
+                    "implementation".into(),
+                    Value::String(format!("{implementation:#x}")),
+                );
+            }
         }
     }
     Ok(())
