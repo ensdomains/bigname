@@ -69,10 +69,12 @@ pub use audit::{
     list_raw_payload_cache_audit_metadata, list_stored_lineage_range,
 };
 pub use backfill_jobs::{
+    BackfillCoverageFactDerivation, BackfillCoverageFactScope, BackfillCoverageFactWrite,
     BackfillJob, BackfillJobCreate, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange,
     BackfillRangeSpec, advance_backfill_range, complete_backfill_job, complete_backfill_range,
-    create_backfill_job, fail_backfill_job, fail_backfill_range, load_backfill_job,
-    load_backfill_ranges, reserve_backfill_range,
+    complete_backfill_range_recording_coverage, create_backfill_job, fail_backfill_job,
+    fail_backfill_range, load_backfill_coverage_fact_counts, load_backfill_job,
+    load_backfill_ranges, reserve_backfill_range, write_backfill_coverage_facts,
 };
 pub use base_normalized_rederive::{
     BASE_NORMALIZED_REDERIVE_ADAPTER, BASE_NORMALIZED_REDERIVE_BACKLOG_CURSOR_KIND,

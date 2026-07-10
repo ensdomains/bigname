@@ -2,6 +2,10 @@ use anyhow::{Context, Result, bail};
 use sqlx::{PgPool, Postgres};
 
 use super::{
+    coverage_facts::{
+        BackfillCoverageFactDerivation, BackfillCoverageFactWrite,
+        write_backfill_coverage_facts_from_iter,
+    },
     decode::{decode_backfill_job, decode_backfill_range},
     read::{
         incomplete_range_count, load_backfill_job_for_update, load_backfill_range_for_update,
@@ -18,6 +22,27 @@ pub async fn complete_backfill_range(
     backfill_range_id: i64,
     lease_token: &str,
 ) -> Result<BackfillRange> {
+    complete_backfill_range_recording_coverage(pool, backfill_range_id, lease_token, |_| {
+        std::iter::empty()
+    })
+    .await
+}
+
+/// Complete a leased range and, when this range completion also completes the
+/// parent job, record the job's coverage facts in the same transaction as the
+/// job status flip. `coverage_facts` is invoked at most once, with the
+/// completed job row, and must derive facts from the executor's in-memory plan
+/// (never by reloading the watch set, which can drift during long backfills).
+pub async fn complete_backfill_range_recording_coverage<F, I>(
+    pool: &PgPool,
+    backfill_range_id: i64,
+    lease_token: &str,
+    coverage_facts: F,
+) -> Result<BackfillRange>
+where
+    F: FnOnce(&BackfillJob) -> I,
+    I: Iterator<Item = BackfillCoverageFactWrite>,
+{
     validate_non_empty("lease_token", lease_token)?;
 
     let mut transaction = pool
@@ -69,7 +94,7 @@ pub async fn complete_backfill_range(
         .with_context(|| format!("failed to complete backfill range {backfill_range_id}"))?;
     let range = decode_backfill_range(range)?;
 
-    maybe_complete_backfill_job(&mut transaction, range.backfill_job_id).await?;
+    maybe_complete_backfill_job(&mut transaction, range.backfill_job_id, coverage_facts).await?;
 
     transaction
         .commit()
@@ -132,16 +157,29 @@ pub async fn complete_backfill_job(pool: &PgPool, backfill_job_id: i64) -> Resul
     Ok(job)
 }
 
-async fn maybe_complete_backfill_job(
+async fn maybe_complete_backfill_job<F, I>(
     executor: &mut sqlx::Transaction<'_, Postgres>,
     backfill_job_id: i64,
-) -> Result<()> {
+    coverage_facts: F,
+) -> Result<()>
+where
+    F: FnOnce(&BackfillJob) -> I,
+    I: Iterator<Item = BackfillCoverageFactWrite>,
+{
     let incomplete_count = incomplete_range_count(&mut **executor, backfill_job_id).await?;
     if incomplete_count != 0 {
         return Ok(());
     }
 
-    set_backfill_job_completed(executor, backfill_job_id).await?;
+    let job = set_backfill_job_completed(executor, backfill_job_id).await?;
+    write_backfill_coverage_facts_from_iter(
+        &mut **executor,
+        job.backfill_job_id,
+        &job.chain_id,
+        BackfillCoverageFactDerivation::JobCompletion,
+        coverage_facts(&job),
+    )
+    .await?;
     Ok(())
 }
 
