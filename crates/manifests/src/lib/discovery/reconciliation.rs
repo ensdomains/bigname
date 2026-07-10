@@ -5,12 +5,13 @@ mod existing;
 #[path = "reconciliation/support.rs"]
 mod support;
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use anyhow::{Context, Result, ensure};
 use sqlx::{PgPool, types::Uuid};
 
 use super::admission::DiscoveryAdmissionState;
+use super::admission_epoch::bump_discovery_admission_epochs;
 use super::loading::{
     load_discovery_admission_state_with_excluded_source as load_admission_state,
     load_scoped_discovery_admission_state_with_excluded_source as load_scoped_admission_state,
@@ -29,8 +30,8 @@ use crate::{
 };
 
 use self::bulk::{
-    PendingContractInstanceSeed, insert_pending_contract_instance_seeds,
-    insert_reconciled_discovery_edges,
+    PendingContractInstanceSeed, deactivate_reconciled_discovery_edge,
+    insert_pending_contract_instance_seeds, insert_reconciled_discovery_edges,
 };
 use self::existing::{
     load_active_reconciled_discovery_descendant_edges, load_active_reconciled_discovery_edges,
@@ -146,45 +147,23 @@ pub async fn reconcile_discovery_observations(
     )?;
 
     let mut deactivated_edge_count = 0;
+    let mut mutated_chains = BTreeSet::new();
     for existing_edge in existing_edges {
         if desired_set.contains(&existing_edge.spec) {
             continue;
         }
+        mutated_chains.insert(existing_edge.spec.chain.clone());
 
         let terminal_state =
             deactivation_terminal_states_by_key.get(&existing_edge.spec.observation_key);
-
-        sqlx::query(
-            r#"
-            UPDATE discovery_edges
-            SET active_to_block_number = COALESCE($2, active_to_block_number),
-                active_to_block_hash = COALESCE($3, active_to_block_hash),
-                deactivated_at = COALESCE(
-                    (
-                        SELECT GREATEST(discovery_edges.admitted_at, rb.block_timestamp)
-                        FROM chain_lineage rb
-                        WHERE rb.chain_id = $4
-                          AND rb.block_hash = $3
-                        LIMIT 1
-                    ),
-                    now()
-                )
-            WHERE discovery_edge_id = $1
-              AND deactivated_at IS NULL
-            "#,
+        deactivate_reconciled_discovery_edge(
+            transaction.as_mut(),
+            existing_edge.discovery_edge_id,
+            terminal_state.and_then(|state| state.block_number),
+            terminal_state.and_then(|state| state.block_hash.as_deref()),
+            terminal_state.map(|state| state.chain.as_str()),
         )
-        .bind(existing_edge.discovery_edge_id)
-        .bind(terminal_state.and_then(|state| state.block_number))
-        .bind(terminal_state.and_then(|state| state.block_hash.as_deref()))
-        .bind(terminal_state.map(|state| state.chain.as_str()))
-        .execute(transaction.as_mut())
-        .await
-        .with_context(|| {
-            format!(
-                "failed to deactivate reconciled discovery_edge_id {}",
-                existing_edge.discovery_edge_id
-            )
-        })?;
+        .await?;
         deactivated_edge_count += 1;
     }
 
@@ -194,10 +173,12 @@ pub async fn reconcile_discovery_observations(
         .collect::<Vec<_>>();
     let inserted_edge_count =
         insert_reconciled_discovery_edges(transaction.as_mut(), &new_edges).await?;
+    mutated_chains.extend(new_edges.iter().map(|edge| edge.chain.clone()));
 
     if inserted_edge_count > 0 || deactivated_edge_count > 0 {
         reconcile_active_contract_instance_addresses(transaction.as_mut()).await?;
     }
+    bump_discovery_admission_epochs(transaction.as_mut(), &mutated_chains).await?;
 
     transaction
         .commit()
@@ -332,38 +313,17 @@ pub async fn reconcile_scoped_discovery_observations(
     }
 
     let mut deactivated_edge_count = 0;
+    let mut mutated_chains = BTreeSet::new();
     for (discovery_edge_id, terminal_state) in deactivation_terminal_states_by_edge_id {
-        sqlx::query(
-            r#"
-            UPDATE discovery_edges
-            SET active_to_block_number = COALESCE($2, active_to_block_number),
-                active_to_block_hash = COALESCE($3, active_to_block_hash),
-                deactivated_at = COALESCE(
-                    (
-                        SELECT GREATEST(discovery_edges.admitted_at, rb.block_timestamp)
-                        FROM chain_lineage rb
-                        WHERE rb.chain_id = $4
-                          AND rb.block_hash = $3
-                        LIMIT 1
-                    ),
-                    now()
-                )
-            WHERE discovery_edge_id = $1
-              AND deactivated_at IS NULL
-            "#,
+        mutated_chains.insert(terminal_state.chain.clone());
+        deactivate_reconciled_discovery_edge(
+            transaction.as_mut(),
+            discovery_edge_id,
+            terminal_state.block_number,
+            terminal_state.block_hash.as_deref(),
+            Some(terminal_state.chain.as_str()),
         )
-        .bind(discovery_edge_id)
-        .bind(terminal_state.block_number)
-        .bind(terminal_state.block_hash.as_deref())
-        .bind(terminal_state.chain.as_str())
-        .execute(transaction.as_mut())
-        .await
-        .with_context(|| {
-            format!(
-                "failed to deactivate scoped discovery_edge_id {}",
-                discovery_edge_id
-            )
-        })?;
+        .await?;
         deactivated_edge_count += 1;
     }
 
@@ -377,6 +337,8 @@ pub async fn reconcile_scoped_discovery_observations(
     }
     let inserted_edge_count =
         insert_reconciled_discovery_edges(transaction.as_mut(), &new_edges).await?;
+    mutated_chains.extend(new_edges.iter().map(|edge| edge.chain.clone()));
+    bump_discovery_admission_epochs(transaction.as_mut(), &mutated_chains).await?;
 
     if inserted_edge_count > 0 || deactivated_edge_count > 0 {
         reconcile_active_contract_instance_addresses_for_ids(

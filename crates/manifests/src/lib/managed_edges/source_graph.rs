@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
+use std::collections::BTreeSet;
+
+use crate::discovery::bump_discovery_admission_epochs;
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -315,10 +318,12 @@ async fn reconcile_managed_edges(
         .collect::<HashSet<_>>();
 
     let mut cleared_edge_count = 0;
+    let mut mutated_chains = BTreeSet::new();
     for existing_edge in existing_edges {
         if desired_set.contains(&existing_edge.spec) {
             continue;
         }
+        mutated_chains.insert(existing_edge.spec.chain.clone());
 
         sqlx::query(
             r#"
@@ -344,6 +349,7 @@ async fn reconcile_managed_edges(
         if existing_set.contains(desired_edge) {
             continue;
         }
+        mutated_chains.insert(desired_edge.chain.clone());
 
         sqlx::query(
             r#"
@@ -380,13 +386,15 @@ async fn reconcile_managed_edges(
         })?;
     }
 
+    bump_discovery_admission_epochs(executor, &mutated_chains).await?;
+
     Ok(cleared_edge_count)
 }
 
 async fn deactivate_discovery_edges_without_active_source_manifest(
     executor: &mut sqlx::postgres::PgConnection,
 ) -> Result<usize> {
-    let result = sqlx::query(
+    let deactivated_chains = sqlx::query_scalar::<_, String>(
         r#"
         UPDATE discovery_edges de
         SET deactivated_at = now()
@@ -397,11 +405,15 @@ async fn deactivate_discovery_edges_without_active_source_manifest(
               WHERE mv.manifest_id = de.source_manifest_id
                 AND mv.rollout_status = 'active'
           )
+        RETURNING de.chain_id
         "#,
     )
-    .execute(&mut *executor)
+    .fetch_all(&mut *executor)
     .await
     .context("failed to deactivate discovery edges without an active source manifest")?;
+    let deactivated_edge_count = deactivated_chains.len();
+    let mutated_chains = deactivated_chains.into_iter().collect::<BTreeSet<_>>();
+    bump_discovery_admission_epochs(executor, &mutated_chains).await?;
 
-    Ok(result.rows_affected() as usize)
+    Ok(deactivated_edge_count)
 }

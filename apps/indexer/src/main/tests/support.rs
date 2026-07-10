@@ -461,6 +461,18 @@ impl TestDatabase {
             .execute(&pool)
             .await
             .context("failed to create discovery_edges table for indexer tests")?;
+
+    sqlx::query(
+        r#"
+            CREATE TABLE discovery_admission_epochs (
+                chain_id TEXT PRIMARY KEY,
+                epoch BIGINT NOT NULL
+            )
+            "#,
+    )
+    .execute(&pool)
+    .await
+    .context("failed to create discovery_admission_epochs table for indexer tests")?;
         sqlx::query(
             r#"
                 CREATE TABLE chain_lineage (
