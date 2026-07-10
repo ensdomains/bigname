@@ -180,8 +180,8 @@ fn latest_record_cache_entry_value(
     // retaining the raw hex stays faithful to the log.
     // (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47 @ ens_v1@91c966f)
     // (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L59 @ ens_v1@91c966f)
-    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L539 @ ens_v2@554c309)
-    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L557 @ ens_v2@554c309)
+    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L665 @ ens_v2@48b3e2d)
+    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L679 @ ens_v2@48b3e2d)
     // Absent the payload there is nothing to retain.
     //
     // For supported addr profiles, the setters accept an empty bytes payload, retain that raw
@@ -190,9 +190,9 @@ fn latest_record_cache_entry_value(
     // (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L52 @ ens_v1@91c966f)
     // (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L59 @ ens_v1@91c966f)
     // (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L63 @ ens_v1@91c966f)
-    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L551 @ ens_v2@554c309)
-    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L556 @ ens_v2@554c309)
-    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L557 @ ens_v2@554c309)
+    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L673 @ ens_v2@48b3e2d)
+    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L678 @ ens_v2@48b3e2d)
+    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L679 @ ens_v2@48b3e2d)
     // (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L57 @ basenames@1809bbc)
     // (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L58 @ basenames@1809bbc)
     // (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L61 @ basenames@1809bbc)

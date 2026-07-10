@@ -1,6 +1,6 @@
 # ENSv2 sepolia-dev ETHRegistrar admission for the alternate profile.
 # ETHRegistrar deployment address:
-# (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2@554c309).
+# (upstream: .refs/ens_v2_sepolia_dev/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2_sepolia_dev@554c309).
 manifest_version = 1
 namespace = "ens"
 source_family = "ens_v2_registrar_l1"

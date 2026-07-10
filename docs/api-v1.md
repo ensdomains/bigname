@@ -61,7 +61,7 @@ Cross-chain rules:
 Deployment profiles:
 
 - One runtime serves one profile at a time. Responses and explicit `chain_positions` must not mix mainnet and Sepolia chain keys.
-- The ENSv2 `sepolia-dev` profile, when selected, supports declared exact-name profile reads against the admitted `ETHRegistry` and `ETHRegistrar` deployments[^v2-deploy-ethreg][^v2-deploy-ethrc]. It does not enable mainnet, reverse/primary, wrapper authority, migration, Universal Resolver, verified resolution, or execution-explain surfaces.
+- The ENSv2 post-audit Sepolia profile, when selected, supports declared exact-name profile reads against the admitted `ETHRegistry` and `ETHRegistrar` deployments[^v2-deploy-ethreg][^v2-deploy-ethrc]. It does not enable mainnet, reverse/primary, wrapper authority, migration, Universal Resolver, verified resolution, or execution-explain surfaces.
 
 ### Exact-name snapshot
 
@@ -159,7 +159,7 @@ The identity route has three read profiles:
 - Profile/detail profile: `POST /v1/identity:lookup` with `profile=detail` returns full native `IdentityRecord` rows for profile aggregation and account switchers. It may carry larger payloads and pagination.
 - Shadow profile: `POST /v1/identity:lookup` with `profile=shadow` follows the detail response shape for deterministic migration comparison.
 
-Identity lookup normalizes names before lookup. Identity reads are projection-backed by default and do not run live verified execution. Production ENSv2/L2 manifest admission remains a separate workstream; this route does not widen the documented ENSv2 `sepolia-dev` support boundary.
+Identity lookup normalizes names before lookup. Identity reads are projection-backed by default and do not run live verified execution. Production ENSv2/L2 manifest admission remains a separate workstream; this route does not widen the documented ENSv2 post-audit Sepolia support boundary.
 
 Identity not-found behavior is adapter-compatible rather than core-route `404` behavior:
 
@@ -484,7 +484,7 @@ See [`architecture.md`](architecture.md#subgraph-compatible-graphql-surface) for
 [^v1-revreg-l129]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L129 @ ens_v1@91c966f)
 [^v1-revreg-l130]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L130 @ ens_v1@91c966f)
 
-[^v2-deploy-ethreg]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2 @ ens_v2@554c309)
-[^v2-deploy-ethrc]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2@554c309)
-[^v2-eac-l56]: (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L56 @ ens_v2@554c309)
-[^v2-eac-l187]: (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L187 @ ens_v2@554c309)
+[^v2-deploy-ethreg]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L2 @ ens_v2@48b3e2d)
+[^v2-deploy-ethrc]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistrar.json:L2 @ ens_v2@48b3e2d)
+[^v2-eac-l56]: (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L54 @ ens_v2@48b3e2d)
+[^v2-eac-l187]: (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L454 @ ens_v2@48b3e2d)

@@ -1026,7 +1026,7 @@ async fn replay_normalized_events_rejects_deployment_profile_outside_active_mani
     let error = replay_raw_fact_normalized_events(
         database.pool(),
         RawFactNormalizedEventReplayRequest {
-            deployment_profile: "sepolia-dev".to_owned(),
+            deployment_profile: "sepolia".to_owned(),
             chain: chain.to_owned(),
             selection: RawFactNormalizedEventReplaySelection::BlockRange {
                 from_block: block.block_number,
@@ -1047,6 +1047,54 @@ async fn replay_normalized_events_rejects_deployment_profile_outside_active_mani
             .fetch_one(database.pool())
             .await?,
         0
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn replay_normalized_events_matches_post_audit_sepolia_manifest_profile() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-sepolia";
+    insert_active_replay_manifest_contract(
+        database.pool(),
+        905,
+        "ens",
+        "ens_v2_registrar_l1",
+        chain,
+        "ens_v2_sepolia_post_audit",
+        Uuid::from_u128(0x905),
+        "0x0000000000000000000000000000000000000905",
+        "registrar",
+    )
+    .await?;
+
+    let outcome = replay_raw_fact_normalized_events(
+        database.pool(),
+        RawFactNormalizedEventReplayRequest {
+            deployment_profile: "sepolia".to_owned(),
+            chain: chain.to_owned(),
+            selection: RawFactNormalizedEventReplaySelection::BlockHashes(Vec::new()),
+        },
+    )
+    .await?;
+    assert_eq!(outcome.deployment_profile, "sepolia");
+    assert_eq!(outcome.selected_block_count, 0);
+
+    let error = replay_raw_fact_normalized_events(
+        database.pool(),
+        RawFactNormalizedEventReplayRequest {
+            deployment_profile: "sepolia-dev".to_owned(),
+            chain: chain.to_owned(),
+            selection: RawFactNormalizedEventReplaySelection::BlockHashes(Vec::new()),
+        },
+    )
+    .await
+    .expect_err("legacy profile label must not match the current Sepolia manifest root");
+    assert!(
+        format!("{error:?}")
+            .contains("does not match active manifest/discovery corpus profile sepolia"),
+        "unexpected error: {error:?}"
     );
 
     database.cleanup().await

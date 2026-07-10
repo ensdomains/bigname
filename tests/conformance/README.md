@@ -274,7 +274,7 @@ Execution notes:
   `relation=registrant`, `relation=effective_controller`, and replay-stable paging behavior. The
   route contract and row shape remain unchanged with empty `declared_state`; this does not claim
   history support, verified execution, universal resolver support, an ENSv2-specific history
-  ledger, or execution-trace history. ENSv2 `sepolia-dev` exact-name profile support is covered
+  ledger, or execution-trace history. ENSv2 `sepolia` exact-name profile support is covered
   only by the separate exact-name contract and remains scoped to admitted exact-name reads
 - the Basenames history readback contract seeds canonical Basenames rows and asserts they read
   back through the existing shared history envelopes for

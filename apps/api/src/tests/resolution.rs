@@ -1468,13 +1468,13 @@ fn ensv2_sepolia_resolution_row(
                 "manifest_version": 11,
                 "source_family": "ens_v2_registry_l1",
                 "chain": "ethereum-sepolia",
-                "deployment_epoch": "ens_v2_sepolia_dev",
+                "deployment_epoch": "ens_v2_sepolia_post_audit",
             },
             {
                 "manifest_version": 11,
                 "source_family": "ens_v2_registrar_l1",
                 "chain": "ethereum-sepolia",
-                "deployment_epoch": "ens_v2_sepolia_dev",
+                "deployment_epoch": "ens_v2_sepolia_post_audit",
             }
         ],
         "execution_trace_id": null,
@@ -4045,7 +4045,8 @@ async fn get_resolution_keeps_basenames_deferred_path_classes_selector_local() -
 }
 
 #[tokio::test]
-async fn get_resolution_ensv2_sepolia_dev_verified_and_explain_stay_unsupported() -> Result<()> {
+async fn get_resolution_ensv2_post_audit_sepolia_verified_and_explain_stay_unsupported()
+-> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let cases = [
         ("alice.eth", "Alice.eth", true, 0x8d10_u128),
@@ -4198,7 +4199,7 @@ async fn get_resolution_ensv2_sepolia_dev_verified_and_explain_stay_unsupported(
 }
 
 #[tokio::test]
-async fn get_resolution_ensv2_sepolia_dev_declared_record_sections_stay_unsupported_even_with_projection_row()
+async fn get_resolution_ensv2_post_audit_sepolia_declared_record_sections_stay_unsupported_even_with_projection_row()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let normalized_name = "alice.eth";

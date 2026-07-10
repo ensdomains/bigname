@@ -35,11 +35,12 @@ pub fn load_ens_v1_artifact(repo_root: &Path, network: &str, name: &str) -> Resu
     })
 }
 
-/// Creation bytecode loaded from pinned ENSv2 hardhat-deploy artifacts under
-/// `.refs/ens_v2/contracts/deployments/sepolia-dev/<name>.json`.
+/// Creation bytecode loaded from the current pinned ENSv2 Sepolia
+/// hardhat-deploy artifacts under
+/// `.refs/ens_v2/contracts/deployments/sepolia/<name>.json`.
 pub fn load_ens_v2_artifact(repo_root: &Path, name: &str) -> Result<Artifact> {
     let path = repo_root
-        .join(".refs/ens_v2/contracts/deployments/sepolia-dev")
+        .join(".refs/ens_v2/contracts/deployments/sepolia")
         .join(format!("{name}.json"));
     let raw = std::fs::read_to_string(&path).with_context(|| {
         format!("missing pinned ENSv2 artifact {path:?}; run scripts/sync-refs")
@@ -51,7 +52,7 @@ pub fn load_ens_v2_artifact(repo_root: &Path, name: &str) -> Result<Artifact> {
         .filter(|code| code.len() > 2)
         .ok_or_else(|| anyhow!("ENSv2 artifact {name} has no creation bytecode"))?;
     Ok(Artifact {
-        name: format!("ens_v2:sepolia-dev:{name}"),
+        name: format!("ens_v2:sepolia:{name}"),
         creation_code: hex::decode(bytecode).context("ENSv2 artifact bytecode hex decode")?,
     })
 }

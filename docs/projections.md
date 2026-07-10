@@ -59,7 +59,7 @@ Full `name_current` replacement publishes with the reverse-identity sidecar trig
 
 For ENSv1, reverse / primary `NameChanged` text supplies a forward-name preimage only.[^v1-namechanged-l10][^v1-namechanged-l18][^v1-revreg-l129][^v1-revreg-l130] Workers may use that preimage to release pending forward-node observations into `name_current`; the reverse claim itself never synthesizes authority, resolver topology, or primary-name truth.
 
-For `namespace=ens` on the `sepolia-dev` profile, declared exact-name profile rows come from `ens_v2_registry_l1` and `ens_v2_registrar_l1`.[^v2-deploy-ethreg][^v2-deploy-ethrc][^v2-iperm-l34][^v2-events-l15][^v2-events-l30][^v2-events-l49][^v2-events-l69][^v2-events-l75][^v2-iethreg-l32][^v2-iethreg-l53] That profile produces no rows for mainnet, reverse or primary, wrapper authority, migration history, universal-resolver entrypoints, verified resolution, execution explain, or out-of-profile resolver-local facts.
+For `namespace=ens` on the post-audit Sepolia profile, declared exact-name profile rows come from `ens_v2_registry_l1` and `ens_v2_registrar_l1`.[^v2-deploy-ethreg][^v2-deploy-ethrc][^v2-iperm-l34][^v2-events-l15][^v2-events-l30][^v2-events-l49][^v2-events-l69][^v2-events-l75][^v2-iethreg-l32][^v2-iethreg-l53] That profile produces no rows for mainnet, reverse or primary, wrapper authority, migration history, universal-resolver entrypoints, verified resolution, execution explain, or out-of-profile resolver-local facts.
 
 For `namespace=basenames`, exact-name truth comes from `basenames_base_registry`, `basenames_base_registrar`, `basenames_base_resolver`. `basenames_base_primary` is ENSv1 Base `L2ReverseRegistrar` claim-intake only; `basenames_l1_compat` and `basenames_execution` do not become alternate exact-name truth.[^bn-readme-l70][^v1-l2rev-base-deploy][^v1-l2rev-event]
 
@@ -71,7 +71,7 @@ The shipped explain routes `GET /v1/explain/names/{namespace}/{name}/surface-bin
 
 The shared `Coverage` object is read inline on `GET /v1/names/{namespace}/{name}` and as the body of `GET /v1/coverage/{namespace}/{name}`. Both reads use the same exact-name snapshot selector and return the same answer for the same `{namespace, name}` and selected positions.
 
-For the ENSv2 `sepolia-dev` exact-name profile: `status=full`, `exhaustiveness=authoritative`, `source_classes_considered=["ens_v2_registry_l1","ens_v2_registrar_l1"]`, `enumeration_basis=exact_name_profile`, `unsupported_reason=null`.[^v2-deploy-ethreg][^v2-deploy-ethrc] That row is scoped to declared exact-name profile support only — it does not cover mainnet, reverse, primary, wrapper, migration, universal-resolver entrypoints, verified resolution, execution explain, or out-of-profile resolver-local sections.
+For the ENSv2 post-audit Sepolia exact-name profile: `status=full`, `exhaustiveness=authoritative`, `source_classes_considered=["ens_v2_registry_l1","ens_v2_registrar_l1"]`, `enumeration_basis=exact_name_profile`, `unsupported_reason=null`.[^v2-deploy-ethreg][^v2-deploy-ethrc] That row is scoped to declared exact-name profile support only — it does not cover mainnet, reverse, primary, wrapper, migration, universal-resolver entrypoints, verified resolution, execution explain, or out-of-profile resolver-local sections.
 
 `CoverageChanged` updates this state. Capability changes may invalidate or recompute it.
 
@@ -100,7 +100,7 @@ Sort keys `name`, `expiry_date`, `registration_date`, `created_at` are projectio
 
 Default unit is declared direct child nodes. Compact rows for `GET /v1/names/{namespace}/{name}/children` come from `children_current`: child display name, normalized name or unknown-label placeholder, parent-relative label, labelhash where projected, namehash, owner, registrant where available, direct `subname_count` where projected. When the child has a current `name_current` summary, compact rows join it for owner/registrant and count expansion; unknown-label rows remain projection rows and do not become canonical exact-name surfaces.
 
-For ENSv1 and Basenames registry-derived children, `SubregistryChanged` proves the parent node, child node, labelhash, and owner, but the registry event supplies only the label hash for a subnode.[^v1-registry-l45][^v1-registry-l82][^bn-registry-l81][^bn-registry-l120][^bn-registry-l122] Workers publish a declared child row for every current canonical registry edge whose parent surface is known, deduplicated on the projection pair key: when distinct current edges resolve to the same `(parent, child)` logical name pair — an unknown-label edge's bracket placeholder colliding with a genuine registration of that literal bracket string as a label — only the newest edge is published, since the pair key can hold one row. If the child label is known through a canonical child `name_surfaces` row or a retained label preimage, the row uses the readable child name. If the label is not known, the row uses the explicit placeholder form `[<labelhash-without-0x>].<parent-normalized-name>` for both `normalized_name` and `canonical_display_name`; square brackets are intentionally outside normalized ENS label syntax so clients can recognize unknown-label children. Label preimages may come from admitted on-chain name-bearing events, retained name surfaces, resolver/reverse preimage observations, or an operational rainbow-table import. They are proof-checked facts: bigname normalizes the candidate label and verifies that its keccak labelhash equals the retained `labelhash`. Once verified, source canonicality changes do not invalidate the preimage mapping, and the mapping still does not create exact-name authority, ownership, resolver, record, or primary-name truth. Adding a label preimage invalidates affected historical parent child collections so rebuilds replace matching unknown-label placeholders with readable labels over time. The ENS subgraph performs a similar labelhash-to-label lookup through `ens.nameByHash` before assembling `label.parent` names.[^ens-subgraph-namebyhash-l111][^ens-subgraph-namebyhash-l126] For ENSv2 `sepolia-dev`, declared direct child and linked-subregistry buckets come from `SubregistryChanged` and `ParentChanged` graph events, not token ID enumeration.[^v2-events-l49][^v2-events-l75][^v2-pr-l131][^v2-pr-l151] For Basenames, declared direct child rows still come from the admitted Base registry / registrar / resolver split, not primary-claim intake or L1 compatibility transport.[^bn-readme-l8][^bn-readme-l69][^bn-readme-l70][^v1-l2rev-base-deploy][^v1-l2rev-event]
+For ENSv1 and Basenames registry-derived children, `SubregistryChanged` proves the parent node, child node, labelhash, and owner, but the registry event supplies only the label hash for a subnode.[^v1-registry-l45][^v1-registry-l82][^bn-registry-l81][^bn-registry-l120][^bn-registry-l122] Workers publish a declared child row for every current canonical registry edge whose parent surface is known, deduplicated on the projection pair key: when distinct current edges resolve to the same `(parent, child)` logical name pair — an unknown-label edge's bracket placeholder colliding with a genuine registration of that literal bracket string as a label — only the newest edge is published, since the pair key can hold one row. If the child label is known through a canonical child `name_surfaces` row or a retained label preimage, the row uses the readable child name. If the label is not known, the row uses the explicit placeholder form `[<labelhash-without-0x>].<parent-normalized-name>` for both `normalized_name` and `canonical_display_name`; square brackets are intentionally outside normalized ENS label syntax so clients can recognize unknown-label children. Label preimages may come from admitted on-chain name-bearing events, retained name surfaces, resolver/reverse preimage observations, or an operational rainbow-table import. They are proof-checked facts: bigname normalizes the candidate label and verifies that its keccak labelhash equals the retained `labelhash`. Once verified, source canonicality changes do not invalidate the preimage mapping, and the mapping still does not create exact-name authority, ownership, resolver, record, or primary-name truth. Adding a label preimage invalidates affected historical parent child collections so rebuilds replace matching unknown-label placeholders with readable labels over time. The ENS subgraph performs a similar labelhash-to-label lookup through `ens.nameByHash` before assembling `label.parent` names.[^ens-subgraph-namebyhash-l111][^ens-subgraph-namebyhash-l126] For ENSv2 post-audit Sepolia, declared direct child and linked-subregistry buckets come from `SubregistryChanged` and `ParentChanged` graph events, not token ID enumeration.[^v2-events-l49][^v2-events-l75][^v2-pr-l131][^v2-pr-l151] For Basenames, declared direct child rows still come from the admitted Base registry / registrar / resolver split, not primary-claim intake or L1 compatibility transport.[^bn-readme-l8][^bn-readme-l69][^bn-readme-l70][^v1-l2rev-base-deploy][^v1-l2rev-event]
 
 Linked, alias-derived, and observed-wildcard children are separate `surface_class` buckets. Default sort is `display_name_asc`. `include=counts` uses the declared direct-child count only; other buckets stay deferred.
 
@@ -391,34 +391,34 @@ Workers own one family each: `name_current`, `address_names_current`, `children_
 [^v1-iuniv-l44]: (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L44 @ ens_v1@91c966f)
 [^v1-iuniv-l52]: (upstream: .refs/ens_v1/contracts/universalResolver/IUniversalResolver.sol:L52 @ ens_v1@91c966f)
 
-[^v2-deploy-ethreg]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2 @ ens_v2@554c309)
-[^v2-deploy-ethrc]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2@554c309)
+[^v2-deploy-ethreg]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L2 @ ens_v2@48b3e2d)
+[^v2-deploy-ethrc]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistrar.json:L2 @ ens_v2@48b3e2d)
 
-[^v2-iperm-l34]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L34 @ ens_v2@554c309)
-[^v2-events-l15]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L15 @ ens_v2@554c309)
-[^v2-events-l30]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L30 @ ens_v2@554c309)
-[^v2-events-l49]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L49 @ ens_v2@554c309)
-[^v2-events-l69]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L69 @ ens_v2@554c309)
-[^v2-events-l75]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L75 @ ens_v2@554c309)
-[^v2-iethreg-l32]: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@554c309)
-[^v2-iethreg-l53]: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L53 @ ens_v2@554c309)
+[^v2-iperm-l34]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L38 @ ens_v2@48b3e2d)
+[^v2-events-l15]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L18 @ ens_v2@48b3e2d)
+[^v2-events-l30]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L33 @ ens_v2@48b3e2d)
+[^v2-events-l49]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L56 @ ens_v2@48b3e2d)
+[^v2-events-l69]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L82 @ ens_v2@48b3e2d)
+[^v2-events-l75]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L88 @ ens_v2@48b3e2d)
+[^v2-iethreg-l32]: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@48b3e2d)
+[^v2-iethreg-l53]: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRenewer.sol:L21 @ ens_v2@48b3e2d)
 
-[^v2-pr-l131]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L131 @ ens_v2@554c309)
-[^v2-pr-l151]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L151 @ ens_v2@554c309)
-[^v2-pr-l451]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L451 @ ens_v2@554c309)
+[^v2-pr-l131]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L142 @ ens_v2@48b3e2d)
+[^v2-pr-l151]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L171 @ ens_v2@48b3e2d)
+[^v2-pr-l451]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L528 @ ens_v2@48b3e2d)
 
-[^v2-iperm-resolver-l14]: (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L14 @ ens_v2@554c309)
-[^v2-pres-l56]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L56 @ ens_v2@554c309)
-[^v2-pres-l132]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L132 @ ens_v2@554c309)
-[^v2-pres-l142]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L142 @ ens_v2@554c309)
-[^v2-pres-l153]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L153 @ ens_v2@554c309)
-[^v2-pres-l230]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L230 @ ens_v2@554c309)
-[^v2-pres-l239]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L239 @ ens_v2@554c309)
-[^v2-pres-l257]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L257 @ ens_v2@554c309)
-[^v2-pres-l282]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L282 @ ens_v2@554c309)
-[^v2-pres-l412]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L412 @ ens_v2@554c309)
-[^v2-pres-l650]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L650 @ ens_v2@554c309)
+[^v2-iperm-resolver-l14]: (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L19 @ ens_v2@48b3e2d)
+[^v2-pres-l56]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L53 @ ens_v2@48b3e2d)
+[^v2-pres-l132]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L142 @ ens_v2@48b3e2d)
+[^v2-pres-l142]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L149 @ ens_v2@48b3e2d)
+[^v2-pres-l153]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L172 @ ens_v2@48b3e2d)
+[^v2-pres-l230]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L258 @ ens_v2@48b3e2d)
+[^v2-pres-l239]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L273 @ ens_v2@48b3e2d)
+[^v2-pres-l257]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L303 @ ens_v2@48b3e2d)
+[^v2-pres-l282]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L369 @ ens_v2@48b3e2d)
+[^v2-pres-l412]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L508 @ ens_v2@48b3e2d)
+[^v2-pres-l650]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L767 @ ens_v2@48b3e2d)
 
-[^v2-eac-l19]: (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L19 @ ens_v2@554c309)
-[^v2-eac-l176]: (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L176 @ ens_v2@554c309)
-[^v2-eac-l181]: (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L181 @ ens_v2@554c309)
+[^v2-eac-l19]: (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L22 @ ens_v2@48b3e2d)
+[^v2-eac-l176]: (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L180 @ ens_v2@48b3e2d)
+[^v2-eac-l181]: (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L454 @ ens_v2@48b3e2d)

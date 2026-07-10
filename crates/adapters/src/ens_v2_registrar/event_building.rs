@@ -7,7 +7,7 @@ use sqlx::PgPool;
 use super::{
     DERIVATION_KIND_ENS_V2_REGISTRAR, EVENT_KIND_REGISTRAR_NAME_REGISTERED,
     EVENT_KIND_REGISTRATION_RENEWED,
-    decoding::{RegistrarObservation, hex_string, normalize_address},
+    decoding::{RegistrarObservation, RenewalPayment, hex_string, normalize_address},
     raw_logs::RegistrarRawLogRow,
     resource_links::load_registry_resource_link,
 };
@@ -52,20 +52,38 @@ pub(super) async fn build_registrar_event(
             new_expiry,
             payment_token,
             referrer,
-            base,
-        } => (
-            EVENT_KIND_REGISTRATION_RENEWED,
-            token_id,
-            label,
-            json!({
+            payment,
+        } => {
+            let mut after_state = json!({
                 "source_event": "NameRenewed",
                 "duration": duration,
                 "expiry": new_expiry,
                 "payment_token": payment_token,
                 "referrer": referrer,
-                "base": base,
-            }),
-        ),
+            });
+            let object = after_state
+                .as_object_mut()
+                .expect("static renewal after_state is an object");
+            match payment {
+                RenewalPayment::LegacyBase(base) => {
+                    // Preserve the exact pre-audit payload shape whenever a
+                    // historical two-topic log is explicitly decoded.
+                    object.insert("base".to_owned(), Value::String(base));
+                }
+                RenewalPayment::PostAuditAmount(amount) => {
+                    object.insert("amount".to_owned(), Value::String(amount.clone()));
+                    // Keep the pre-audit key as a compatibility alias on new
+                    // post-audit renewal payloads.
+                    object.insert("base".to_owned(), Value::String(amount));
+                }
+            }
+            (
+                EVENT_KIND_REGISTRATION_RENEWED,
+                token_id,
+                label,
+                after_state,
+            )
+        }
     };
 
     let link = load_registry_resource_link(pool, &raw_log.namespace, &token_id).await?;

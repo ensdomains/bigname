@@ -3788,7 +3788,7 @@ async fn insert_manifest_version(
     .bind(rollout_status)
     .bind("ensip15@ens-normalize-0.1.1")
     .bind(format!(
-        "tests/{source_family}/ens-v2-sepolia-dev-v{manifest_version}.toml"
+        "tests/{source_family}/ens-v2-sepolia-post-audit-v{manifest_version}.toml"
     ))
     .bind(json!({}))
     .fetch_one(pool)

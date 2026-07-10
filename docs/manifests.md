@@ -170,18 +170,22 @@ Resolver discovery from registry `NewResolver(node, resolver)` admits the resolv
 
 ### ENSv2 (`sepolia` profile)
 
-The `sepolia` profile admits four ENSv2 Sepolia dev families under `manifests/sepolia/ethereum/ens/`:[^v2-deploy-root][^v2-deploy-ethreg][^v2-deploy-ethrc][^v2-deploy-pres]
+The `sepolia` profile admits four ENSv2 families from the post-audit current Sepolia deployment under `manifests/sepolia/ethereum/ens/`, all in `deployment_epoch = "ens_v2_sepolia_post_audit"`:[^v2-deploy-root][^v2-deploy-ethreg][^v2-deploy-ethrc][^v2-deploy-pres]
 
-- `ens_v2_root_l1` — `RootRegistry` at `0x3a3e15a5d27ff6f05c844313312f2e72096d3ed3`, `start_block = 10462881`. Tokenized, resource-scoped permissioned registry seed for discovery and parent graph state.[^v2-pr-l22][^v2-pr-l28]
-- `ens_v2_registry_l1` — `ETHRegistry` at `0x796fff2e907449be8d5921bcc215b1b76d89d080`, `start_block = 10462895`, plus discovered `UserRegistry` proxy instances. `UserRegistryImpl` at `0xea93aff7375e8176053ab6ab36b57cab53cbf702` is implementation metadata, not a separate owner.[^v2-userreg-l15]
-- `ens_v2_registrar_l1` — `ETHRegistrar` at `0x68586418353b771cf2425ed14a07512aa880c532`, `start_block = 10462909`. Registrar events and commit/renew facts; registered-name resource identity links back to the registry resource.[^v2-ethrc-l49][^v2-ethrc-l173]
-- `ens_v2_resolver_l1` — `PermissionedResolver` resolver state, alias events, record-version events, resolver-scoped EAC permissions. `PermissionedResolverImpl` at `0xe566a1fbaf30ff7c39828fe99f955fc55544cb9c` is the initial implementation artifact.[^v2-pres-l38][^v2-pres-l70]
+- `ens_v2_root_l1` — `RootRegistry` at `0x11b5bfbe9078d826b1edbdd1cfc12f5828d9f50c`, `start_block = 11163319`. Tokenized, resource-scoped permissioned registry seed for discovery and parent graph state.[^v2-pr-l22][^v2-pr-l28]
+- `ens_v2_registry_l1` — `ETHRegistry` at `0x67b728a792e789a8978b30cf1b3b641f19354b43`, `start_block = 11163391`, plus discovered `UserRegistry` proxy instances. `UserRegistryImpl` at `0x840fa461059862ea466a711e8c98c8de732061c0` is implementation metadata, not a separate owner.[^v2-userreg-l15]
+- `ens_v2_registrar_l1` — `ETHRegistrar` at `0xa4449a0dd2b83007553d9b1d28b583a46a805a30`, `start_block = 11163403`. Admitted registration and renewal lifecycle facts; registered-name resource identity links back to the registry resource.[^v2-ethrc-l49][^v2-ethrc-l173]
+- `ens_v2_resolver_l1` — `PermissionedResolver` resolver state, alias events, admitted record-version events, and resolver-scoped EAC permissions. `PermissionedResolverImpl` at `0x7e4b2d59938930168024201752ee5503df402303` is the current implementation artifact.[^v2-pres-l38][^v2-pres-l70]
 
-Exact-name profile promotion is profile-scoped: only `exact_name_profile = "supported"` on `ens_v2_registrar_l1` in the `sepolia` root graduates `.eth` exact-name declared reads, backed by `ETHRegistry` resource/token state and `ETHRegistrar` lifecycle facts.[^v2-iperm-l22][^v2-events-l15][^v2-iethreg-l32] The promotion does not apply to mainnet, other Sepolia profiles, or any runtime that has not selected `manifests/sepolia`. Active rollout, raw preimage observations, resolver admission, or backfill completion do not graduate any other capability.
+The preceding `ens_v2_sepolia_dev` manifest versions remain checked in as `deprecated` historical records and citation evidence. Their addresses and ranges do not participate in the active post-audit watch or replay plan.
+
+Exact-name profile promotion is profile-scoped: only `exact_name_profile = "supported"` on the active `ens_v2_registrar_l1` version in the `sepolia` root graduates `.eth` exact-name declared reads, backed by `ETHRegistry` resource/token state and `ETHRegistrar` lifecycle facts.[^v2-iperm-l22][^v2-events-l15][^v2-iethreg-l32] The promotion does not apply to mainnet, another manifest profile, or any runtime that has not selected `manifests/sepolia`. Active rollout, raw preimage observations, resolver admission, or backfill completion do not graduate any other capability.
 
 Upstream events map to normalized adapter output: `TokenResource` → `TokenResourceLinked`, `TokenRegenerated` → `TokenRegenerated`, `SubregistryUpdated` → `SubregistryChanged`, `ParentUpdated` → `ParentChanged`, `AliasChanged` → `AliasChanged`, `EACRolesChanged` → resource- or resolver-scoped permission events.[^v2-iperm-l34][^v2-events-l49][^v2-events-l69][^v2-events-l75][^v2-iperm-resolver-l14][^v2-eac-l19] These are adapter semantics, not manifest schema fields.
 
-Other `sepolia-dev` artifacts (`UniversalResolverV2`, `ReverseRegistry`, `DNSAliasResolver`, `WrapperRegistryImpl`, `LockedMigrationController`, `HCAFactory`, `StandardRentPriceOracle`, `BatchRegistrar`, `MockUSDC`, `MockDAI`) remain outside admission until a doc-first update.
+The post-audit contracts add `RegistryCreated` and `URIUpdated` registry events, and `PermissionedResolver` adds the `DataChanged` / `NamedDataResource` data-record pair.[^v2-events-created][^v2-events-uri][^v2-pres-data] Those four events are intentionally absent from the active manifest ABI, so they do not produce normalized registry, record, or permission events and do not widen route coverage. The separately deployed `ETHRenewerV1` and `PublicResolverV2` are also outside contract and resolver-profile admission; `NameRenewed` intake remains limited to the admitted `ETHRegistrar` emitter.[^v2-deploy-renewer][^v2-deploy-public-resolver][^v2-iethrenewer-l21]
+
+All other current Sepolia artifacts — including universal/reverse resolution, wrapper, migration, factory, oracle, batch, and mock-payment surfaces — remain outside admission until a doc-first update.
 
 ### Basenames mainnet
 
@@ -277,9 +281,9 @@ Known historical starts cite a pinned upstream source. Targets without a pinned 
 | ENSv1 NameWrapper | `16925608` | [^v1-namewrapper-deploy] |
 | ENSv1 PublicResolver (latest) | `22764828` | [^v1-publicresolver-deploy] |
 | ENSv1 ReverseRegistrar | `16925606` | [^v1-revreg-deploy-l379] |
-| ENSv2 RootRegistry (`sepolia-dev`) | `10462881` | [^v2-deploy-root] |
-| ENSv2 ETHRegistry (`sepolia-dev`) | `10462895` | [^v2-deploy-ethreg] |
-| ENSv2 ETHRegistrar (`sepolia-dev`) | `10462909` | [^v2-deploy-ethrc] |
+| ENSv2 RootRegistry (post-audit Sepolia) | `11163319` | [^v2-deploy-root] |
+| ENSv2 ETHRegistry (post-audit Sepolia) | `11163391` | [^v2-deploy-ethreg] |
+| ENSv2 ETHRegistrar (post-audit Sepolia) | `11163403` | [^v2-deploy-ethrc] |
 
 ---
 
@@ -324,32 +328,38 @@ Known historical starts cite a pinned upstream source. Targets without a pinned 
 [^subgraph-ts-l238]: (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L238 @ ens_subgraph@723f1b6)
 [^subgraph-ts-l246]: (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L246 @ ens_subgraph@723f1b6)
 
-[^v2-deploy-root]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/RootRegistry.json:L2617 @ ens_v2@554c309)
-[^v2-deploy-ethreg]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2617 @ ens_v2@554c309)
-[^v2-deploy-ethrc]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L1922 @ ens_v2@554c309)
-[^v2-deploy-pres]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/PermissionedResolverImpl.json:L2 @ ens_v2@554c309)
+[^v2-deploy-root]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/RootRegistry.json:L2 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/deployments/sepolia/RootRegistry.json:L2792 @ ens_v2@48b3e2d)
+[^v2-deploy-ethreg]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L2 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L2792 @ ens_v2@48b3e2d)
+[^v2-deploy-ethrc]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistrar.json:L2 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistrar.json:L1372 @ ens_v2@48b3e2d)
+[^v2-deploy-pres]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/PermissionedResolverImpl.json:L2 @ ens_v2@48b3e2d)
+[^v2-deploy-renewer]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRenewerV1.json:L2 @ ens_v2@48b3e2d)
+[^v2-deploy-public-resolver]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/PublicResolverV2.json:L2 @ ens_v2@48b3e2d)
 
-[^v2-userreg-l15]: (upstream: .refs/ens_v2/contracts/src/registry/UserRegistry.sol:L15 @ ens_v2@554c309)
-[^v2-ethrc-l49]: (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L49 @ ens_v2@554c309)
-[^v2-ethrc-l173]: (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L173 @ ens_v2@554c309)
+[^v2-userreg-l15]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/UserRegistryImpl.json:L2 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/registry/UserRegistry.sol:L15 @ ens_v2@48b3e2d)
+[^v2-ethrc-l49]: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@48b3e2d)
+[^v2-ethrc-l173]: (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L151 @ ens_v2@48b3e2d)
 
-[^v2-pr-l22]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L22 @ ens_v2@554c309)
-[^v2-pr-l28]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L28 @ ens_v2@554c309)
+[^v2-pr-l22]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L23 @ ens_v2@48b3e2d)
+[^v2-pr-l28]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L29 @ ens_v2@48b3e2d)
 
-[^v2-pres-l38]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L38 @ ens_v2@554c309)
-[^v2-pres-l70]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L70 @ ens_v2@554c309)
+[^v2-pres-l38]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L33 @ ens_v2@48b3e2d)
+[^v2-pres-l70]: (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L19 @ ens_v2@48b3e2d)
+[^v2-pres-data]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L46 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L161 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L437 @ ens_v2@48b3e2d)
 
-[^v2-iperm-l22]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L22 @ ens_v2@554c309)
-[^v2-iperm-l34]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L34 @ ens_v2@554c309)
-[^v2-iperm-resolver-l14]: (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L14 @ ens_v2@554c309)
-[^v2-iethreg-l32]: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@554c309)
+[^v2-iperm-l22]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L23 @ ens_v2@48b3e2d)
+[^v2-iperm-l34]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L38 @ ens_v2@48b3e2d)
+[^v2-iperm-resolver-l14]: (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L19 @ ens_v2@48b3e2d)
+[^v2-iethreg-l32]: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@48b3e2d)
+[^v2-iethrenewer-l21]: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRenewer.sol:L21 @ ens_v2@48b3e2d)
 
-[^v2-events-l15]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L15 @ ens_v2@554c309)
-[^v2-events-l49]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L49 @ ens_v2@554c309)
-[^v2-events-l69]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L69 @ ens_v2@554c309)
-[^v2-events-l75]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L75 @ ens_v2@554c309)
+[^v2-events-created]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@48b3e2d)
+[^v2-events-l15]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L18 @ ens_v2@48b3e2d)
+[^v2-events-l49]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L56 @ ens_v2@48b3e2d)
+[^v2-events-l69]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L82 @ ens_v2@48b3e2d)
+[^v2-events-l75]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L88 @ ens_v2@48b3e2d)
+[^v2-events-uri]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L76 @ ens_v2@48b3e2d)
 
-[^v2-eac-l19]: (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L19 @ ens_v2@554c309)
+[^v2-eac-l19]: (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L22 @ ens_v2@48b3e2d)
 
 [^bn-readme-l22]: (upstream: .refs/basenames/README.md:L22 @ basenames@1809bbc)
 [^bn-readme-l28]: (upstream: .refs/basenames/README.md:L28 @ basenames@1809bbc)

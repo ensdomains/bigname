@@ -11,6 +11,7 @@ use super::rpc::{RpcClient, TxReceipt};
 const MIN_COMMITMENT_AGE: u64 = 60;
 const MAX_COMMITMENT_AGE: u64 = 86_400;
 pub const MIN_REGISTER_DURATION: u64 = 2_419_200;
+pub const GRACE_PERIOD: u64 = 2_419_200;
 
 const ROLE_REGISTRAR: usize = 0;
 pub const ROLE_UNREGISTER: usize = 12;
@@ -52,9 +53,8 @@ mod registrar_calls {
             address paymentToken,
             bytes32 referrer
         ) external returns (uint256);
-        function rentPrice(
+        function getRegisterPrice(
             string label,
-            address owner,
             uint64 duration,
             address paymentToken
         ) external view returns (uint256 base, uint256 premium);
@@ -86,23 +86,23 @@ mod registry_calls {
     }
 }
 
-/// Local ENSv2 sepolia-dev deployment from pinned hardhat artifacts.
+/// Local deployment of the current post-audit ENSv2 Sepolia contracts from
+/// pinned hardhat artifacts.
 ///
 /// Constructor signatures are pinned in upstream sources:
-/// - `SimpleRegistryMetadata(IHCAFactoryBasic)`
-///   (upstream: .refs/ens_v2/contracts/src/registry/SimpleRegistryMetadata.sol:L37 @ ens_v2@554c309)
-/// - `PermissionedRegistry(IHCAFactoryBasic,IRegistryMetadata,address,uint256)`
-///   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L96 @ ens_v2@554c309)
-/// - `MockERC20(string,uint8,IHCAFactoryBasic)`
-///   (upstream: .refs/ens_v2/contracts/test/mocks/MockERC20.sol:L21 @ ens_v2@554c309)
-/// - `StandardRentPriceOracle(address,IPermissionedRegistry,uint256[],DiscountPoint[],uint256,uint64,uint64,PaymentRatio[])`
-///   (upstream: .refs/ens_v2/contracts/src/registrar/StandardRentPriceOracle.sol:L124 @ ens_v2@554c309)
-/// - `ETHRegistrar(IPermissionedRegistry,IHCAFactoryBasic,address,uint64,uint64,uint64,IRentPriceOracle)`
-///   (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L88 @ ens_v2@554c309)
+/// - `LabelStore(IContractNamer)`
+///   (upstream: .refs/ens_v2/contracts/src/utils/LabelStore.sol:L26 @ ens_v2@48b3e2d)
+/// - `PermissionedRegistry(ILabelStore,address,uint256)`
+///   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L112 @ ens_v2@48b3e2d)
+/// - `MockERC20(string,uint8)`
+///   (upstream: .refs/ens_v2/contracts/test/mocks/MockERC20.sol:L18 @ ens_v2@48b3e2d)
+/// - `StandardRentPriceOracle(address,uint256[],DiscountPoint[],uint128,uint256,uint64,uint64,PaymentRatio[])`
+///   (upstream: .refs/ens_v2/contracts/src/registrar/StandardRentPriceOracle.sol:L157 @ ens_v2@48b3e2d)
+/// - `ETHRegistrar(address,IPermissionedRegistry,address,IRentPriceOracle,uint64,uint64,uint64,uint64)`
+///   (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L82 @ ens_v2@48b3e2d)
 pub struct EnsV2Deployment {
     pub deployer: Address,
-    pub hca_factory: Deployed,
-    pub metadata: Deployed,
+    pub label_store: Deployed,
     pub root_registry: Deployed,
     pub eth_registry: Deployed,
     pub eth_registrar: Deployed,
@@ -170,18 +170,11 @@ pub async fn deploy_ens_v2(rpc: &RpcClient, repo_root: &Path) -> Result<EnsV2Dep
     let accounts = rpc.accounts().await?;
     let deployer = *accounts.first().context("anvil exposes no accounts")?;
 
-    let hca_factory = deploy(
+    let label_store = deploy(
         rpc,
         deployer,
-        &load_ens_v2_artifact(repo_root, "HCAFactory")?,
-        &[],
-    )
-    .await?;
-    let metadata = deploy(
-        rpc,
-        deployer,
-        &load_ens_v2_artifact(repo_root, "SimpleRegistryMetadata")?,
-        &(hca_factory.address,).abi_encode_params(),
+        &load_ens_v2_artifact(repo_root, "LabelStore")?,
+        &(Address::ZERO,).abi_encode_params(),
     )
     .await?;
 
@@ -190,32 +183,24 @@ pub async fn deploy_ens_v2(rpc: &RpcClient, repo_root: &Path) -> Result<EnsV2Dep
         repo_root,
         deployer,
         "RootRegistry",
-        hca_factory.address,
-        metadata.address,
+        label_store.address,
     )
     .await?;
-    let eth_registry = deploy_registry(
-        rpc,
-        repo_root,
-        deployer,
-        "ETHRegistry",
-        hca_factory.address,
-        metadata.address,
-    )
-    .await?;
+    let eth_registry =
+        deploy_registry(rpc, repo_root, deployer, "ETHRegistry", label_store.address).await?;
 
     let mock_usdc = deploy(
         rpc,
         deployer,
         &load_ens_v2_artifact(repo_root, "MockUSDC")?,
-        &("USDC".to_owned(), U256::from(6_u8), hca_factory.address).abi_encode_params(),
+        &("USDC".to_owned(), U256::from(6_u8)).abi_encode_params(),
     )
     .await?;
     let mock_dai = deploy(
         rpc,
         deployer,
         &load_ens_v2_artifact(repo_root, "MockDAI")?,
-        &("DAI".to_owned(), U256::from(18_u8), hca_factory.address).abi_encode_params(),
+        &("DAI".to_owned(), U256::from(18_u8)).abi_encode_params(),
     )
     .await?;
 
@@ -223,7 +208,6 @@ pub async fn deploy_ens_v2(rpc: &RpcClient, repo_root: &Path) -> Result<EnsV2Dep
         rpc,
         repo_root,
         deployer,
-        eth_registry.address,
         mock_usdc.address,
         mock_dai.address,
     )
@@ -233,13 +217,14 @@ pub async fn deploy_ens_v2(rpc: &RpcClient, repo_root: &Path) -> Result<EnsV2Dep
         deployer,
         &load_ens_v2_artifact(repo_root, "ETHRegistrar")?,
         &(
-            eth_registry.address,
-            hca_factory.address,
             deployer,
+            eth_registry.address,
+            deployer,
+            price_oracle.address,
+            GRACE_PERIOD,
             MIN_COMMITMENT_AGE,
             MAX_COMMITMENT_AGE,
             MIN_REGISTER_DURATION,
-            price_oracle.address,
         )
             .abi_encode_params(),
     )
@@ -247,14 +232,14 @@ pub async fn deploy_ens_v2(rpc: &RpcClient, repo_root: &Path) -> Result<EnsV2Dep
 
     // Root-resource grants use the dedicated entrypoint: grantRoles rejects
     // ROOT_RESOURCE directly
-    // (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L30 @ ens_v2@554c309).
+    // (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L27 @ ens_v2@48b3e2d).
     send_checked(
         rpc,
         deployer,
         eth_registry.address,
         // Upstream grants REGISTRAR | RENEW so registrar renewals can move
         // registry expiry
-        // (upstream: .refs/ens_v2/contracts/deploy/03_ETHRegistrar.ts:L45 @ ens_v2@554c309).
+        // (upstream: .refs/ens_v2/contracts/deploy/03_ETHRegistrar.ts:L44 @ ens_v2@48b3e2d).
         &registry_calls::grantRootRolesCall {
             roleBitmap: role_bit(ROLE_REGISTRAR) | role_bit(ROLE_RENEW),
             account: eth_registrar.address,
@@ -266,8 +251,7 @@ pub async fn deploy_ens_v2(rpc: &RpcClient, repo_root: &Path) -> Result<EnsV2Dep
 
     Ok(EnsV2Deployment {
         deployer,
-        hca_factory,
-        metadata,
+        label_store,
         root_registry,
         eth_registry,
         eth_registrar,
@@ -279,7 +263,7 @@ pub async fn deploy_ens_v2(rpc: &RpcClient, repo_root: &Path) -> Result<EnsV2Dep
 /// Upstream's "grant all roles" bitmap: role bits occupy every fourth bit
 /// (one nibble per role), so a full grant is the repeating 0x1 nibble — not
 /// U256::MAX, whose off-pattern bits the access-control layer rejects
-/// (upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L11 @ ens_v2@554c309).
+/// (upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L79 @ ens_v2@48b3e2d).
 fn all_roles() -> U256 {
     U256::from_str_radix(
         "1111111111111111111111111111111111111111111111111111111111111111",
@@ -293,14 +277,13 @@ async fn deploy_registry(
     repo_root: &Path,
     deployer: Address,
     artifact_name: &str,
-    hca_factory: Address,
-    metadata: Address,
+    label_store: Address,
 ) -> Result<Deployed> {
     deploy(
         rpc,
         deployer,
         &load_ens_v2_artifact(repo_root, artifact_name)?,
-        &(hca_factory, metadata, deployer, all_roles()).abi_encode_params(),
+        &(label_store, deployer, all_roles()).abi_encode_params(),
     )
     .await
 }
@@ -309,18 +292,22 @@ async fn deploy_price_oracle(
     rpc: &RpcClient,
     repo_root: &Path,
     deployer: Address,
-    eth_registry: Address,
     mock_usdc: Address,
     mock_dai: Address,
 ) -> Result<Deployed> {
     let base_rates = vec![
         U256::ZERO,
         U256::ZERO,
-        U256::from(20_280_377_u64),
-        U256::from(5_070_095_u64),
-        U256::from(158_441_u64),
+        U256::from(20_294_267_u64),
+        U256::from(5_073_567_u64),
+        U256::from(253_679_u64),
     ];
-    let discount_points = vec![(31_557_600_u64, 0_u128); 6];
+    let discount_denominator = 10_u128.pow(38);
+    let discount_points = vec![
+        (63_115_200_u64, discount_denominator / 8 * 7),
+        (94_672_800_u64, discount_denominator / 16 * 11),
+        (189_345_600_u64, discount_denominator / 16 * 9),
+    ];
     let payment_ratios = vec![
         (mock_usdc, 1_u128, 1_000_000_u128),
         (mock_dai, 1_000_000_u128, 1_u128),
@@ -331,9 +318,9 @@ async fn deploy_price_oracle(
         &load_ens_v2_artifact(repo_root, "StandardRentPriceOracle")?,
         &(
             deployer,
-            eth_registry,
             base_rates,
             discount_points,
+            discount_denominator,
             U256::from(100_u64) * U256::from(10_u8).pow(U256::from(18_u8)),
             86_400_u64,
             1_814_400_u64,
@@ -384,7 +371,7 @@ pub async fn register_eth_name(
     .await?;
     rpc.increase_time(MIN_COMMITMENT_AGE + 1).await?;
 
-    let (base, premium) = rent_price(rpc, d, label, owner, duration_secs).await?;
+    let (base, premium) = register_price(rpc, d, label, duration_secs).await?;
     let cost = base + premium;
     let mint_amount = if cost == U256::ZERO {
         U256::from(1_000_000_u64)
@@ -473,27 +460,25 @@ async fn make_commitment(
         .context("decode ETHRegistrar.makeCommitment return")
 }
 
-async fn rent_price(
+async fn register_price(
     rpc: &RpcClient,
     d: &EnsV2Deployment,
     label: &str,
-    owner: Address,
     duration: u64,
 ) -> Result<(U256, U256)> {
     let raw = rpc
         .eth_call(
             d.eth_registrar.address,
-            &registrar_calls::rentPriceCall {
+            &registrar_calls::getRegisterPriceCall {
                 label: label.to_owned(),
-                owner,
                 duration,
                 paymentToken: d.mock_usdc.address,
             }
             .abi_encode(),
         )
         .await?;
-    let decoded = registrar_calls::rentPriceCall::abi_decode_returns(&raw)
-        .context("decode ETHRegistrar.rentPrice return")?;
+    let decoded = registrar_calls::getRegisterPriceCall::abi_decode_returns(&raw)
+        .context("decode ETHRegistrar.getRegisterPrice return")?;
     Ok((decoded.base, decoded.premium))
 }
 
@@ -506,13 +491,7 @@ pub async fn deploy_child_registry(
         rpc,
         d.deployer,
         &load_ens_v2_artifact(repo_root, "ETHRegistry")?,
-        &(
-            d.hca_factory.address,
-            d.metadata.address,
-            d.deployer,
-            all_roles(),
-        )
-            .abi_encode_params(),
+        &(d.label_store.address, d.deployer, all_roles()).abi_encode_params(),
     )
     .await
 }
@@ -687,7 +666,7 @@ pub fn role_bit(bit: usize) -> U256 {
 }
 
 /// Admin-half counterpart of a role bit
-/// (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L11 @ ens_v2@554c309).
+/// (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L6 @ ens_v2@48b3e2d).
 pub fn admin_role_bit(bit: usize) -> U256 {
     role_bit(bit) << 128
 }
@@ -696,7 +675,7 @@ mod erc1155_calls {
     use alloy_sol_types::sol;
 
     // The registry token is an ERC1155 singleton
-    // (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L230 @ ens_v2@554c309).
+    // (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L88 @ ens_v2@48b3e2d).
     sol! {
         function safeTransferFrom(address from, address to, uint256 id, uint256 value, bytes data) external;
     }
@@ -707,8 +686,8 @@ mod renew_calls {
 
     // Registrar renew pays and forwards; direct registry renew moves expiry
     // only and rejects reduction.
-    // (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L196 @ ens_v2@554c309)
-    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L249 @ ens_v2@554c309)
+    // (upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L84 @ ens_v2@48b3e2d)
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L214 @ ens_v2@48b3e2d)
     sol! {
         function renew(string label, uint64 duration, address paymentToken, bytes32 referrer) external;
     }
@@ -871,7 +850,7 @@ pub async fn grant_root_roles(
 }
 
 /// Revoke root-scope roles
-/// (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L158 @ ens_v2@554c309).
+/// (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L160 @ ens_v2@48b3e2d).
 pub async fn revoke_root_roles(
     rpc: &RpcClient,
     registry: Address,
@@ -895,7 +874,7 @@ pub async fn revoke_root_roles(
 
 /// Direct registry register with explicit role bitmap, registry, resolver,
 /// and expiry — reservations must pass owner=0 with an empty bitmap
-/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L184 @ ens_v2@554c309).
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L432 @ ens_v2@48b3e2d).
 #[allow(clippy::too_many_arguments)]
 pub async fn register_in_registry_with(
     rpc: &RpcClient,
@@ -944,10 +923,11 @@ mod resolver_calls {
     use alloy_sol_types::sol;
 
     // Writable v2 resolver (UUPS impl deployed directly for tests):
-    // constructor(hcaFactory) then initialize(admin, roleBitmap)
-    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L223 @ ens_v2@554c309).
+    // constructor(namer) then initialize(admin, roleBitmap, setters)
+    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L193 @ ens_v2@48b3e2d)
+    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L233 @ ens_v2@48b3e2d).
     sol! {
-        function initialize(address admin, uint256 roleBitmap) external;
+        function initialize(address admin, uint256 roleBitmap, bytes[] setters) external;
         function setText(bytes32 node, string key, string value) external;
         function clearRecords(bytes32 node) external;
     }
@@ -966,7 +946,7 @@ mod factory_calls {
 
     // User resolvers deploy behind VerifiableFactory proxies — the raw
     // implementation disables its initializers
-    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L177 @ ens_v2@554c309).
+    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L201 @ ens_v2@48b3e2d).
     sol! {
         function deployProxy(address implementation, uint256 salt, bytes data) external returns (address);
     }
@@ -984,7 +964,7 @@ pub async fn deploy_permissioned_resolver(
         rpc,
         d.deployer,
         &load_ens_v2_artifact(repo_root, "PermissionedResolverImpl")?,
-        &(d.hca_factory.address,).abi_encode_params(),
+        &(d.deployer,).abi_encode_params(),
     )
     .await?;
     let factory = deploy(
@@ -997,6 +977,7 @@ pub async fn deploy_permissioned_resolver(
     let init_data = resolver_calls::initializeCall {
         admin,
         roleBitmap: all_roles(),
+        setters: Vec::new(),
     }
     .abi_encode();
     let receipt = rpc

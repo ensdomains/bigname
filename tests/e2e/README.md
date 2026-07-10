@@ -35,7 +35,7 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml -- --test-thr
 
 1. **Chain** — `harness::anvil` starts a local node with a fixed genesis
    timestamp, presented to the indexer by provider label (`ethereum-mainnet`
-   for ENSv1 scenarios, `ethereum-sepolia` for ENSv2 sepolia-dev, and
+   for ENSv1 scenarios, `ethereum-sepolia` for ENSv2 post-audit Sepolia, and
    `base-mainnet` for Basenames). Chain identity is the provider label; the
    local numeric chain id is only for realistic receipts.
 2. **Contracts** — `harness::ens_v1` deploys an ENSv1 topology from prebuilt
@@ -50,7 +50,7 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml -- --test-thr
    the exponential-premium price oracle over upstream's own dummy USD oracle
    (upstream: .refs/ens_v1/contracts/ethregistrar/DummyOracle.sol:L3 @ ens_v1@91c966f),
    reverse registrars, name wrapper, and public resolver. `harness::ens_v2`
-   likewise loads prebuilt creation bytecode from the pinned `sepolia-dev`
+   likewise loads prebuilt creation bytecode from the pinned current `sepolia`
    deployment artifacts under `.refs/ens_v2`. These artifact-backed stacks
    avoid local recompilation, but scenario-local addresses, constructor
    arguments, and wiring are not a claim that the resulting deployment is
@@ -84,7 +84,7 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml -- --test-thr
    `manifests/mainnet/ethereum/basenames` because no L1-compatibility or
    execution-plane row runs yet. ENSv2 scenarios mirror the shipped
    `manifests/sepolia/ethereum/ens` families into a generated
-   `manifests-sepolia` root so the selected profile remains the sepolia-dev
+   `manifests-sepolia` root so the selected profile remains the post-audit Sepolia
    one. Cross-protocol scenarios structurally mirror the eleven currently
    checked-in mainnet families across both chains, including the two
    ethereum-chain glue families (`basenames_l1_compat`,
@@ -405,8 +405,8 @@ route inventory or a claim that every protocol transition is covered.
   `registerOnly` retains only the raw token mint and creates no registry node
   (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L237 @ basenames@1809bbc)
   (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L248 @ basenames@1809bbc).
-- `ens_v2::ens_v2_sepolia_dev_declared_matrix_end_to_end` — deploys the
-  admitted sepolia-dev ENSv2 root registry, ETH registry, registrar, rent
+- `ens_v2::ens_v2_sepolia_post_audit_declared_matrix_end_to_end` — deploys the
+  admitted post-audit Sepolia ENSv2 root registry, ETH registry, registrar, rent
   oracle, and payment-token artifacts from `.refs/ens_v2`, mirrors
   `manifests/sepolia/ethereum/ens`, registers `.eth` names through the
   commit/reveal ETHRegistrar, and asserts identity/registration/control
@@ -420,18 +420,19 @@ route inventory or a claim that every protocol transition is covered.
   both resource and token lineage: `unregister` burns the token and increments
   both `eacVersionId` and `tokenVersionId`, from which the registry
   reconstructs later resource and token IDs
-  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L237 @ ens_v2@554c309)
-  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L241 @ ens_v2@554c309)
-  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L242 @ ens_v2@554c309)
-  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L542 @ ens_v2@554c309)
-  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L547 @ ens_v2@554c309).
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L201 @ ens_v2@48b3e2d)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L205 @ ens_v2@48b3e2d)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L206 @ ens_v2@48b3e2d)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L637 @ ens_v2@48b3e2d)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L647 @ ens_v2@48b3e2d).
 - `ens_v2_turn_l::renewal_promotes_coverage_and_registry_edges_follow` —
-  registrar renewal derives both fragments and preserves the promoted
+  registrar renewal after registry expiry but within the post-audit grace period
+  derives both fragments and preserves the promoted
   exact-name coverage end to end; a direct
   registry renew emits `ExpiryUpdated` alone on the wire but derives both
   `ExpiryChanged` and a registry-family `RegistrationRenewed`; expiry
   reduction reverts upstream
-  (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L196 @ ens_v2@554c309).
+  (upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L84 @ ens_v2@48b3e2d).
 - `ens_v2_turn_l::resolver_and_subregistry_edges_follow_set_change_zero` —
   resolver set/change/zero and subregistry attach/detach derive NULL-edge
   detaches; pinned via backfill + replay because the composed live chain
@@ -439,7 +440,8 @@ route inventory or a claim that every protocol transition is covered.
   the backfill/live parity gap: backfill derives zero v2
   `PermissionChanged`.
 - `ens_v2_turn_l::expiry_passes_then_reregistration_advances_lineage` —
-  the event-silent expiry flip serves last-known active state with a past
+  after expiry and the post-audit grace period pass, the event-silent availability
+  flip serves last-known active state with a past
   expiry; re-registration advances the on-chain counters while BOTH intake
   paths refuse the cycle (live hang; backfill anchor-conflict abort,
   asserted verbatim).
@@ -448,7 +450,7 @@ route inventory or a claim that every protocol transition is covered.
   root-scope grant/revoke read from the resulting bitmap and clear
   `permissions_current`, and registry-level setParent derives
   `ParentChanged`
-  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L152 @ ens_v2@554c309).
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L171 @ ens_v2@48b3e2d).
 - `ens_v2_turn_l::reserved_labels_foreign_registrar_and_token_sale` —
   labelhash-keyed token-less reservations promote in place preserving
   expiry; a non-admitted root-role registrar derives registry-only facts
@@ -457,7 +459,7 @@ route inventory or a claim that every protocol transition is covered.
   facet stays at the seller (chipped).
 - `ens_v2_turn_l::discovered_v2_resolver_records_stay_unscanned` — a
   VerifiableFactory-proxied writable resolver
-  (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L177 @ ens_v2@554c309)
+  (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L201 @ ens_v2@48b3e2d)
   is discovery-admitted from the registry's `ResolverUpdated`, but zero raw
   logs are scanned at the discovered address in-session and zero record
   events derive — the discovered-registry scan gap extends to resolvers.

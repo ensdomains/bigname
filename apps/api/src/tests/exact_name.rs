@@ -835,7 +835,8 @@ async fn get_name_reads_rebuilt_basenames_exact_name_projection() -> Result<()> 
 }
 
 #[tokio::test]
-async fn get_name_reads_selected_sepolia_dev_ensv2_exact_name_profile_projection() -> Result<()> {
+async fn get_name_reads_selected_post_audit_sepolia_ensv2_exact_name_profile_projection()
+-> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = "ens:bob.alice.eth";
     let resource_id = Uuid::from_u128(0x8c10);
@@ -880,7 +881,7 @@ async fn get_name_reads_selected_sepolia_dev_ensv2_exact_name_profile_projection
                 .expect("request must build"),
         )
         .await
-        .context("ENSv2 sepolia-dev exact-name request failed")?;
+        .context("ENSv2 post-audit Sepolia exact-name request failed")?;
     let coverage_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
@@ -889,7 +890,7 @@ async fn get_name_reads_selected_sepolia_dev_ensv2_exact_name_profile_projection
                 .expect("request must build"),
         )
         .await
-        .context("ENSv2 sepolia-dev coverage request failed")?;
+        .context("ENSv2 post-audit Sepolia coverage request failed")?;
 
     assert_eq!(name_response.status(), StatusCode::OK);
     assert_eq!(coverage_response.status(), StatusCode::OK);
@@ -1296,7 +1297,7 @@ async fn seed_ensv2_exact_name_profile_manifests(database: &TestDatabase) -> Res
             "ens",
             "ens_v2_registry_l1",
             "ethereum-sepolia",
-            "ens_v2_sepolia_dev",
+            "ens_v2_sepolia_post_audit",
             11,
             "active",
             "ensip15@ens-normalize-0.1.1",
@@ -1307,7 +1308,7 @@ async fn seed_ensv2_exact_name_profile_manifests(database: &TestDatabase) -> Res
             "ens",
             "ens_v2_registrar_l1",
             "ethereum-sepolia",
-            "ens_v2_sepolia_dev",
+            "ens_v2_sepolia_post_audit",
             11,
             "active",
             "ensip15@ens-normalize-0.1.1",

@@ -301,11 +301,11 @@ async fn infer_active_manifest_deployment_profile(pool: &sqlx::PgPool) -> Result
         return Ok("mainnet".to_owned());
     }
 
-    let all_sepolia_dev = rows.iter().all(|(chain, deployment_epoch)| {
-        chain.ends_with("-sepolia") && deployment_epoch.ends_with("_sepolia_dev")
-    });
-    if all_sepolia_dev {
-        return Ok("sepolia-dev".to_owned());
+    let all_sepolia = rows
+        .iter()
+        .all(|(chain, _deployment_epoch)| chain.ends_with("-sepolia"));
+    if all_sepolia {
+        return Ok("sepolia".to_owned());
     }
 
     bail!(

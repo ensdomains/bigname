@@ -27,7 +27,7 @@ pub(super) fn build_exact_name_coverage(namespace: &str, events: &[RelevantEvent
                 "enumeration_basis": "exact_name_profile",
             });
         }
-        if has_ens_v2 && ens_v2_sepolia_dev_exact_name_supported(events) {
+        if has_ens_v2 && ens_v2_sepolia_post_audit_exact_name_supported(events) {
             return json!({
                 "status": "full",
                 "exhaustiveness": "authoritative",
@@ -56,7 +56,7 @@ pub(super) fn build_exact_name_coverage(namespace: &str, events: &[RelevantEvent
     })
 }
 
-fn ens_v2_sepolia_dev_exact_name_supported(events: &[RelevantEvent]) -> bool {
+fn ens_v2_sepolia_post_audit_exact_name_supported(events: &[RelevantEvent]) -> bool {
     let mut has_registry = false;
     let mut has_supported_registrar = false;
 

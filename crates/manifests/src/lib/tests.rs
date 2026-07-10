@@ -1667,7 +1667,7 @@ fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
     );
     assert_eq!(sepolia_repository.summary().namespace_count, 1);
     assert_eq!(sepolia_repository.summary().source_family_count, 4);
-    assert_eq!(sepolia_repository.summary().manifest_count, 5);
+    assert_eq!(sepolia_repository.summary().manifest_count, 9);
 
     let sepolia_source_versions = sepolia_repository
         .manifests()
@@ -1685,9 +1685,13 @@ fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
         vec![
             ("ens_v2_registrar_l1", "v1", 1),
             ("ens_v2_registrar_l1", "v2", 2),
+            ("ens_v2_registrar_l1", "v3", 3),
             ("ens_v2_registry_l1", "v1", 1),
+            ("ens_v2_registry_l1", "v2", 2),
             ("ens_v2_resolver_l1", "v1", 1),
+            ("ens_v2_resolver_l1", "v2", 2),
             ("ens_v2_root_l1", "v1", 1),
+            ("ens_v2_root_l1", "v2", 2),
         ]
     );
     assert!(!main_repository.manifests().iter().any(|loaded_manifest| {
@@ -1709,18 +1713,16 @@ fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
     for loaded_manifest in sepolia_repository.manifests() {
         assert_eq!(loaded_manifest.manifest.namespace, "ens");
         assert_eq!(loaded_manifest.manifest.chain, "ethereum-sepolia");
-        assert_eq!(
-            loaded_manifest.manifest.deployment_epoch,
-            "ens_v2_sepolia_dev"
-        );
-        if loaded_manifest.manifest.source_family == "ens_v2_registrar_l1"
-            && loaded_manifest.manifest.manifest_version == 1
-        {
+        if loaded_manifest.manifest.deployment_epoch == "ens_v2_sepolia_dev" {
             assert_eq!(
                 loaded_manifest.manifest.rollout_status,
                 RolloutStatus::Deprecated
             );
         } else {
+            assert_eq!(
+                loaded_manifest.manifest.deployment_epoch,
+                "ens_v2_sepolia_post_audit"
+            );
             assert_eq!(
                 loaded_manifest.manifest.rollout_status,
                 RolloutStatus::Active
@@ -1742,32 +1744,32 @@ fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
         })
         .collect::<BTreeMap<_, _>>();
 
-    let root_manifest = manifests_by_source_family_version[&("ens_v2_root_l1", 1)];
+    let root_manifest = manifests_by_source_family_version[&("ens_v2_root_l1", 2)];
     assert_eq!(root_manifest.roots.len(), 1);
     assert_eq!(root_manifest.roots[0].name, "RootRegistry");
     assert_eq!(
         normalize_address(&root_manifest.roots[0].address),
-        "0x3a3e15a5d27ff6f05c844313312f2e72096d3ed3"
+        "0x11b5bfbe9078d826b1edbdd1cfc12f5828d9f50c"
     );
     assert_eq!(root_manifest.contracts.len(), 1);
     assert_eq!(root_manifest.contracts[0].role, "root_registry");
     assert_eq!(
         normalize_address(&root_manifest.contracts[0].address),
-        "0x3a3e15a5d27ff6f05c844313312f2e72096d3ed3"
+        "0x11b5bfbe9078d826b1edbdd1cfc12f5828d9f50c"
     );
 
-    let registry_manifest = manifests_by_source_family_version[&("ens_v2_registry_l1", 1)];
+    let registry_manifest = manifests_by_source_family_version[&("ens_v2_registry_l1", 2)];
     assert_eq!(registry_manifest.roots.len(), 1);
     assert_eq!(registry_manifest.roots[0].name, "ETHRegistry");
     assert_eq!(
         normalize_address(&registry_manifest.roots[0].address),
-        "0x796fff2e907449be8d5921bcc215b1b76d89d080"
+        "0x67b728a792e789a8978b30cf1b3b641f19354b43"
     );
     assert_eq!(registry_manifest.contracts.len(), 1);
     assert_eq!(registry_manifest.contracts[0].role, "registry");
     assert_eq!(
         normalize_address(&registry_manifest.contracts[0].address),
-        "0x796fff2e907449be8d5921bcc215b1b76d89d080"
+        "0x67b728a792e789a8978b30cf1b3b641f19354b43"
     );
     assert_eq!(
         registry_manifest
@@ -1800,18 +1802,24 @@ fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
         CapabilitySupportStatus::Shadow
     );
 
-    let registrar_manifest = manifests_by_source_family_version[&("ens_v2_registrar_l1", 2)];
+    let registrar_manifest_v2 = manifests_by_source_family_version[&("ens_v2_registrar_l1", 2)];
+    assert_eq!(
+        registrar_manifest_v2.rollout_status,
+        RolloutStatus::Deprecated
+    );
+
+    let registrar_manifest = manifests_by_source_family_version[&("ens_v2_registrar_l1", 3)];
     assert_eq!(registrar_manifest.roots.len(), 1);
     assert_eq!(registrar_manifest.roots[0].name, "ETHRegistrar");
     assert_eq!(
         normalize_address(&registrar_manifest.roots[0].address),
-        "0x68586418353b771cf2425ed14a07512aa880c532"
+        "0xa4449a0dd2b83007553d9b1d28b583a46a805a30"
     );
     assert_eq!(registrar_manifest.contracts.len(), 1);
     assert_eq!(registrar_manifest.contracts[0].role, "registrar");
     assert_eq!(
         normalize_address(&registrar_manifest.contracts[0].address),
-        "0x68586418353b771cf2425ed14a07512aa880c532"
+        "0xa4449a0dd2b83007553d9b1d28b583a46a805a30"
     );
     assert_eq!(
         registrar_manifest.capability_flags["exact_name_profile"].status,
@@ -1826,8 +1834,40 @@ fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
             .collect::<Vec<_>>(),
         vec!["NameRegistered", "NameRenewed"]
     );
+    let name_registered = registrar_manifest
+        .abi
+        .events
+        .iter()
+        .find(|event| event.name == "NameRegistered")
+        .expect("post-audit registrar manifest must declare NameRegistered")
+        .parsed_event()?;
+    assert!(
+        name_registered
+            .inputs
+            .iter()
+            .any(|input| input.name == "referrer" && input.indexed),
+        "post-audit NameRegistered referrer must be indexed"
+    );
+    let name_renewed = registrar_manifest
+        .abi
+        .events
+        .iter()
+        .find(|event| event.name == "NameRenewed")
+        .expect("post-audit registrar manifest must declare NameRenewed")
+        .parsed_event()?;
+    assert!(
+        name_renewed
+            .inputs
+            .iter()
+            .any(|input| input.name == "referrer" && input.indexed),
+        "post-audit NameRenewed referrer must be indexed"
+    );
+    assert_eq!(
+        name_renewed.inputs.last().map(|input| input.name.as_str()),
+        Some("amount")
+    );
 
-    let resolver_manifest = manifests_by_source_family_version[&("ens_v2_resolver_l1", 1)];
+    let resolver_manifest = manifests_by_source_family_version[&("ens_v2_resolver_l1", 2)];
     assert!(resolver_manifest.roots.is_empty());
     assert!(resolver_manifest.contracts.is_empty());
     assert!(resolver_manifest.discovery_rules.is_empty());
@@ -1891,12 +1931,12 @@ async fn syncing_sepolia_profile_replaces_main_profile_without_mixing() -> Resul
 
     let summary = sync_repository(database.pool(), &sepolia_repository).await?;
     assert_eq!(summary.status, ManifestSyncStatus::Synced);
-    assert_eq!(summary.synced_manifest_count, 5);
+    assert_eq!(summary.synced_manifest_count, 9);
     assert_eq!(summary.active_manifest_count, 4);
-    assert_eq!(summary.root_count, 4);
-    assert_eq!(summary.contract_count, 4);
-    assert_eq!(summary.capability_count, 5);
-    assert_eq!(summary.discovery_rule_count, 3);
+    assert_eq!(summary.root_count, 7);
+    assert_eq!(summary.contract_count, 7);
+    assert_eq!(summary.capability_count, 8);
+    assert_eq!(summary.discovery_rule_count, 6);
     assert_eq!(
         summary.removed_manifest_count,
         main_repository.manifests().len()
@@ -1906,21 +1946,30 @@ async fn syncing_sepolia_profile_replaces_main_profile_without_mixing() -> Resul
         load_manifest_rollout_statuses(database.pool(), "ens").await?,
         vec![
             ("ens_v2_registrar_l1".to_owned(), "deprecated".to_owned()),
+            ("ens_v2_registrar_l1".to_owned(), "deprecated".to_owned()),
             ("ens_v2_registrar_l1".to_owned(), "active".to_owned()),
+            ("ens_v2_registry_l1".to_owned(), "deprecated".to_owned()),
             ("ens_v2_registry_l1".to_owned(), "active".to_owned()),
+            ("ens_v2_resolver_l1".to_owned(), "deprecated".to_owned()),
             ("ens_v2_resolver_l1".to_owned(), "active".to_owned()),
+            ("ens_v2_root_l1".to_owned(), "deprecated".to_owned()),
             ("ens_v2_root_l1".to_owned(), "active".to_owned()),
         ]
     );
     assert_eq!(
-        load_capability_flags_for_source_family(database.pool(), "ens", "ens_v2_registry_l1")
-            .await?,
+        load_capability_flags_for_source_family_version(
+            database.pool(),
+            "ens",
+            "ens_v2_registry_l1",
+            2,
+        )
+        .await?,
         BTreeMap::from([(
             "declared_children".to_owned(),
             CapabilityFlag {
                 status: CapabilitySupportStatus::Supported,
                 notes: Some(
-                    "sepolia-dev registry and discovered user registries are authoritative declared child inputs within the selected profile"
+                    "post-audit Sepolia ETHRegistry and discovered user registries are authoritative declared child inputs within the selected profile"
                         .to_owned(),
                 ),
             },
@@ -1950,6 +1999,36 @@ async fn syncing_sepolia_profile_replaces_main_profile_without_mixing() -> Resul
                 CapabilityFlag {
                     status: CapabilitySupportStatus::Shadow,
                     notes: Some("sepolia-dev registrar history remains downstream work".to_owned()),
+                },
+            ),
+        ])
+    );
+    assert_eq!(
+        load_capability_flags_for_source_family_version(
+            database.pool(),
+            "ens",
+            "ens_v2_registrar_l1",
+            3
+        )
+        .await?,
+        BTreeMap::from([
+            (
+                "exact_name_profile".to_owned(),
+                CapabilityFlag {
+                    status: CapabilitySupportStatus::Supported,
+                    notes: Some(
+                        "selected post-audit Sepolia exact-name profile reads are supported from admitted ETHRegistry and ETHRegistrar sources only"
+                            .to_owned(),
+                    ),
+                },
+            ),
+            (
+                "name_history".to_owned(),
+                CapabilityFlag {
+                    status: CapabilitySupportStatus::Shadow,
+                    notes: Some(
+                        "post-audit Sepolia registrar history remains downstream work".to_owned(),
+                    ),
                 },
             ),
         ])
@@ -2007,7 +2086,7 @@ async fn syncing_sepolia_profile_replaces_main_profile_without_mixing() -> Resul
     assert!(
         active_manifests
             .iter()
-            .all(|manifest| manifest.deployment_epoch == "ens_v2_sepolia_dev")
+            .all(|manifest| manifest.deployment_epoch == "ens_v2_sepolia_post_audit")
     );
     assert!(
         !active_manifests
@@ -2016,7 +2095,7 @@ async fn syncing_sepolia_profile_replaces_main_profile_without_mixing() -> Resul
     );
     assert!(active_manifests.iter().any(|manifest| {
         manifest.source_family == "ens_v2_registrar_l1"
-            && manifest.manifest_version == 2
+            && manifest.manifest_version == 3
             && manifest.capability_flags["exact_name_profile"].status
                 == CapabilitySupportStatus::Supported
     }));
@@ -2028,7 +2107,7 @@ async fn syncing_sepolia_profile_replaces_main_profile_without_mixing() -> Resul
             .all(|contract| contract.chain == "ethereum-sepolia")
     );
     assert!(!watched_contracts.iter().any(|contract| {
-        contract.address == normalize_address("0xe566a1fbaf30ff7c39828fe99f955fc55544cb9c")
+        contract.address == normalize_address("0x7e4b2d59938930168024201752ee5503df402303")
     }));
     assert!(!watched_contracts.iter().any(|contract| {
         contract.address == normalize_address("0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E")
@@ -2039,9 +2118,9 @@ async fn syncing_sepolia_profile_replaces_main_profile_without_mixing() -> Resul
         vec![WatchedChainPlan {
             chain: "ethereum-sepolia".to_owned(),
             addresses: vec![
-                "0x3a3e15a5d27ff6f05c844313312f2e72096d3ed3".to_owned(),
-                "0x68586418353b771cf2425ed14a07512aa880c532".to_owned(),
-                "0x796fff2e907449be8d5921bcc215b1b76d89d080".to_owned(),
+                "0x11b5bfbe9078d826b1edbdd1cfc12f5828d9f50c".to_owned(),
+                "0x67b728a792e789a8978b30cf1b3b641f19354b43".to_owned(),
+                "0xa4449a0dd2b83007553d9b1d28b583a46a805a30".to_owned(),
             ],
             manifest_root_entry_count: 3,
             manifest_contract_entry_count: 3,
@@ -2063,19 +2142,19 @@ async fn syncing_sepolia_profile_replaces_main_profile_without_mixing() -> Resul
     assert_eq!(admission_state.active_rule_count, 3);
     assert!(admission_state.has_authoritative_address(
         "ethereum-sepolia",
-        "0x3a3e15a5d27ff6f05c844313312f2e72096d3ed3"
+        "0x11b5bfbe9078d826b1edbdd1cfc12f5828d9f50c"
     ));
     assert!(admission_state.has_authoritative_address(
         "ethereum-sepolia",
-        "0x796fff2e907449be8d5921bcc215b1b76d89d080"
+        "0x67b728a792e789a8978b30cf1b3b641f19354b43"
     ));
     assert!(admission_state.has_authoritative_address(
         "ethereum-sepolia",
-        "0x68586418353b771cf2425ed14a07512aa880c532"
+        "0xa4449a0dd2b83007553d9b1d28b583a46a805a30"
     ));
     assert!(!admission_state.has_authoritative_address(
         "ethereum-sepolia",
-        "0xe566a1fbaf30ff7c39828fe99f955fc55544cb9c"
+        "0x7e4b2d59938930168024201752ee5503df402303"
     ));
 
     database.cleanup().await?;

@@ -75,14 +75,14 @@ fn assert_child_absent(body: &Value, logical_name_id: &str) {
     );
 }
 
-/// ENSv2 sepolia-dev matrix over admitted families only:
+/// ENSv2 post-audit Sepolia matrix over admitted families only:
 /// - registration through ETHRegistrar with exact-name coverage,
 /// - token regeneration from EAC role mutation while preserving resource identity,
 /// - registry role grant and revoke vocabulary,
 /// - subregistry attach and swap,
 /// - unregister followed by re-register as a new resource lineage.
 #[tokio::test]
-async fn ens_v2_sepolia_dev_declared_matrix_end_to_end() -> Result<()> {
+async fn ens_v2_sepolia_post_audit_declared_matrix_end_to_end() -> Result<()> {
     let sepolia = Anvil::spawn_ethereum_sepolia().await?;
     let rpc = sepolia.client();
     let repo_root = repo_root();
@@ -433,6 +433,10 @@ async fn ens_v2_sepolia_dev_declared_matrix_end_to_end() -> Result<()> {
         ens_v2::label_id("cycle"),
     )
     .await?;
+    // The post-audit registrar keeps an unregistered label unavailable until
+    // its grace period has elapsed.
+    // (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L259 @ ens_v2@48b3e2d).
+    rpc.increase_time(ens_v2::GRACE_PERIOD + 1).await?;
     let cycle_second = ens_v2::register_eth_name(
         &rpc,
         &deployment,

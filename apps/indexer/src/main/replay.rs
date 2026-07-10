@@ -230,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn deployment_profile_from_manifest_root_derives_legacy_profiles() {
+    fn deployment_profile_from_manifest_root_derives_selected_profile() {
         assert_eq!(
             deployment_profile_from_manifest_root(&PathBuf::from("manifests")),
             "mainnet"
@@ -242,10 +242,6 @@ mod tests {
         assert_eq!(
             deployment_profile_from_manifest_root(&PathBuf::from("manifests/sepolia")),
             "sepolia"
-        );
-        assert_eq!(
-            deployment_profile_from_manifest_root(&PathBuf::from("manifests-sepolia-dev")),
-            "sepolia-dev"
         );
         assert_eq!(
             deployment_profile_from_manifest_root(&PathBuf::from("custom-profile")),

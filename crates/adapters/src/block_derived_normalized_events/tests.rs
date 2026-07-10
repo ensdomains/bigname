@@ -232,11 +232,11 @@ fn manifest_abi_events(source_family: &str) -> Vec<Value> {
         SOURCE_FAMILY_ENS_V2_REGISTRAR_L1 => vec![
             json!({
                 "name": ABI_EVENT_NAME_REGISTERED,
-                "fragment": "event NameRegistered(uint256 indexed tokenId, string label, address owner, address subregistry, address resolver, uint64 duration, address paymentToken, bytes32 referrer, uint256 base, uint256 premium)",
+                "fragment": "event NameRegistered(uint256 indexed tokenId, string label, address owner, address subregistry, address resolver, uint64 duration, address paymentToken, bytes32 indexed referrer, uint256 base, uint256 premium)",
             }),
             json!({
                 "name": ABI_EVENT_NAME_RENEWED,
-                "fragment": "event NameRenewed(uint256 indexed tokenId, string label, uint64 duration, uint64 newExpiry, address paymentToken, bytes32 referrer, uint256 base)",
+                "fragment": "event NameRenewed(uint256 indexed tokenId, string label, uint64 duration, uint64 newExpiry, address paymentToken, bytes32 indexed referrer, uint256 amount)",
             }),
         ],
         SOURCE_FAMILY_ENS_V2_RESOLVER_L1 => vec![
@@ -815,6 +815,7 @@ fn ens_v2_registry_and_registrar_name_bearing_logs_emit_preimage_observations() 
                 "NameRenewed(uint256,string,uint64,uint64,address,bytes32,uint256)",
             ),
             hex_string(&abi_word_u64(1)),
+            hex_string(&[0u8; 32]),
         ],
         encode_ens_v2_registrar_name_renewed_data("renewed"),
     );
@@ -1401,7 +1402,6 @@ fn encode_ens_v2_registrar_name_renewed_data(label: &str) -> Vec<u8> {
             abi_word_u64(31_536_000),
             abi_word_u64(2_000_000_000),
             abi_word_address("0x0000000000000000000000000000000000000000"),
-            [0u8; 32],
             abi_word_u64(1),
         ],
     )
