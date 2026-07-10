@@ -21,6 +21,7 @@ struct TestDatabase {
     admin_pool: PgPool,
     pool: PgPool,
     database_name: String,
+    connect_options: PgConnectOptions,
 }
 
 impl TestDatabase {
@@ -55,9 +56,10 @@ impl TestDatabase {
             .await
             .with_context(|| format!("failed to create test database {database_name}"))?;
 
+        let connect_options = base_options.database(&database_name);
         let pool = PgPoolOptions::new()
             .max_connections(5)
-            .connect_with(base_options.database(&database_name))
+            .connect_with(connect_options.clone())
             .await
             .context("failed to connect backfill job test pool")?;
 
@@ -70,11 +72,31 @@ impl TestDatabase {
             admin_pool,
             pool,
             database_name,
+            connect_options,
         })
     }
 
     fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// A dedicated single-connection pool, pre-warmed so acquiring a
+    /// connection at use time is instant. Concurrency tests need one per
+    /// competing transaction: a shared pool serializes competitors inside
+    /// pool acquisition for the other transaction's whole lifetime, masking
+    /// the very races the tests exist to catch.
+    async fn dedicated_single_connection_pool(&self) -> Result<PgPool> {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(self.connect_options.clone())
+            .await
+            .context("failed to connect dedicated single-connection test pool")?;
+        drop(
+            pool.acquire()
+                .await
+                .context("failed to warm dedicated single-connection test pool")?,
+        );
+        Ok(pool)
     }
 
     async fn cleanup(self) -> Result<()> {
@@ -797,7 +819,7 @@ async fn load_coverage_fact_rows(
         SELECT chain_id, source_family, scope, address, covered_from_block, covered_to_block, derivation
         FROM backfill_coverage_facts
         WHERE backfill_job_id = $1
-        ORDER BY scope, source_family, address, covered_from_block
+        ORDER BY scope, source_family, address, covered_from_block, covered_to_block
         "#,
     )
     .bind(backfill_job_id)
@@ -1155,11 +1177,12 @@ async fn deleting_a_backfill_job_cascades_its_coverage_facts() -> Result<()> {
 #[tokio::test]
 async fn concurrent_final_range_completions_flip_the_job_and_record_facts_once() -> Result<()> {
     let database = TestDatabase::new().await?;
-    let created = create_backfill_job(
-        database.pool(),
-        &backfill_job_create("job-concurrent-final-ranges"),
-    )
-    .await?;
+    // Each completion gets its own pre-warmed single-connection pool so the
+    // two transactions genuinely overlap; on a shared pool the second
+    // completion sits in pool acquisition for the first transaction's whole
+    // lifetime, which serializes them and lets pre-fix code pass.
+    let first_pool = database.dedicated_single_connection_pool().await?;
+    let second_pool = database.dedicated_single_connection_pool().await?;
     let coverage_facts = |job: &BackfillJob| {
         vec![address_coverage_fact(
             "ens_v1_registry_l1",
@@ -1170,77 +1193,99 @@ async fn concurrent_final_range_completions_flip_the_job_and_record_facts_once()
         .into_iter()
     };
 
-    let first = reserve_backfill_range(
-        database.pool(),
-        created.job.backfill_job_id,
-        "worker-a",
-        "lease-a",
-        lease_deadline(),
-    )
-    .await?
-    .expect("first range must be reservable");
-    let second = reserve_backfill_range(
-        database.pool(),
-        created.job.backfill_job_id,
-        "worker-b",
-        "lease-b",
-        lease_deadline(),
-    )
-    .await?
-    .expect("second range must be reservable");
-    advance_backfill_range(database.pool(), first.backfill_range_id, "lease-a", 109).await?;
-    advance_backfill_range(database.pool(), second.backfill_range_id, "lease-b", 120).await?;
-
-    // The final two ranges complete concurrently: the job row lock must
-    // serialize them so exactly one transaction observes zero incomplete
-    // ranges and flips the job with its coverage facts. Without the lock,
-    // neither flips and the job is later completed fact-less by the
-    // reservation path.
-    let (first_result, second_result) = tokio::join!(
-        complete_backfill_range_recording_coverage(
+    // One interleaving is not a proof; repeat the scenario so a lost flip
+    // cannot slip through on a lucky schedule.
+    for iteration in 0..4 {
+        let created = create_backfill_job(
             database.pool(),
-            first.backfill_range_id,
-            "lease-a",
-            coverage_facts,
-        ),
-        complete_backfill_range_recording_coverage(
+            &backfill_job_create(&format!("job-concurrent-final-ranges-{iteration}")),
+        )
+        .await?;
+        let first_lease = format!("lease-a-{iteration}");
+        let second_lease = format!("lease-b-{iteration}");
+        let first = reserve_backfill_range(
+            database.pool(),
+            created.job.backfill_job_id,
+            "worker-a",
+            &first_lease,
+            lease_deadline(),
+        )
+        .await?
+        .expect("first range must be reservable");
+        let second = reserve_backfill_range(
+            database.pool(),
+            created.job.backfill_job_id,
+            "worker-b",
+            &second_lease,
+            lease_deadline(),
+        )
+        .await?
+        .expect("second range must be reservable");
+        advance_backfill_range(database.pool(), first.backfill_range_id, &first_lease, 109).await?;
+        advance_backfill_range(
             database.pool(),
             second.backfill_range_id,
-            "lease-b",
-            coverage_facts,
-        ),
-    );
-    assert_eq!(
-        first_result?.status,
-        BackfillLifecycleStatus::Completed,
-        "first range completion must succeed"
-    );
-    assert_eq!(
-        second_result?.status,
-        BackfillLifecycleStatus::Completed,
-        "second range completion must succeed"
-    );
-
-    let job = load_backfill_job(database.pool(), created.job.backfill_job_id)
-        .await?
-        .expect("job must exist");
-    assert_eq!(
-        job.status,
-        BackfillLifecycleStatus::Completed,
-        "the last concurrent range completion must flip the job"
-    );
-    assert_eq!(
-        load_coverage_fact_rows(database.pool(), created.job.backfill_job_id).await?,
-        vec![(
-            "eth-mainnet".to_owned(),
-            "ens_v1_registry_l1".to_owned(),
-            "address".to_owned(),
-            Some("0x0000000000000000000000000000000000000001".to_owned()),
-            100,
+            &second_lease,
             120,
-            "job_completion".to_owned(),
-        )]
-    );
+        )
+        .await?;
+        drop(first_pool.acquire().await?);
+        drop(second_pool.acquire().await?);
 
+        // The final two ranges complete concurrently: the job row lock must
+        // serialize them so exactly one transaction observes zero incomplete
+        // ranges and flips the job with its coverage facts. Without the
+        // lock, neither flips and the job is later completed fact-less by
+        // the reservation path.
+        let (first_result, second_result) = tokio::join!(
+            complete_backfill_range_recording_coverage(
+                &first_pool,
+                first.backfill_range_id,
+                &first_lease,
+                coverage_facts,
+            ),
+            complete_backfill_range_recording_coverage(
+                &second_pool,
+                second.backfill_range_id,
+                &second_lease,
+                coverage_facts,
+            ),
+        );
+        assert_eq!(
+            first_result?.status,
+            BackfillLifecycleStatus::Completed,
+            "first range completion must succeed (iteration {iteration})"
+        );
+        assert_eq!(
+            second_result?.status,
+            BackfillLifecycleStatus::Completed,
+            "second range completion must succeed (iteration {iteration})"
+        );
+
+        let job = load_backfill_job(database.pool(), created.job.backfill_job_id)
+            .await?
+            .expect("job must exist");
+        assert_eq!(
+            job.status,
+            BackfillLifecycleStatus::Completed,
+            "the last concurrent range completion must flip the job (iteration {iteration})"
+        );
+        assert_eq!(
+            load_coverage_fact_rows(database.pool(), created.job.backfill_job_id).await?,
+            vec![(
+                "eth-mainnet".to_owned(),
+                "ens_v1_registry_l1".to_owned(),
+                "address".to_owned(),
+                Some("0x0000000000000000000000000000000000000001".to_owned()),
+                100,
+                120,
+                "job_completion".to_owned(),
+            )],
+            "coverage facts must be recorded exactly once (iteration {iteration})"
+        );
+    }
+
+    first_pool.close().await;
+    second_pool.close().await;
     database.cleanup().await
 }
