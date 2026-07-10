@@ -25,9 +25,9 @@ pub(crate) use adapter_sync::{
 };
 #[allow(unused_imports)]
 pub(crate) use canonical::{
-    orphan_canonical_branch, poll_provider_heads, poll_provider_heads_with_adapter_sync,
-    reconcile_canonical_head, reconcile_fetched_heads, reconcile_fetched_heads_with_adapter_sync,
-    reconcile_intake_chain_task,
+    ChainCoverageFrontiers, orphan_canonical_branch, poll_provider_heads,
+    poll_provider_heads_with_adapter_sync, reconcile_canonical_head, reconcile_fetched_heads,
+    reconcile_fetched_heads_with_adapter_sync, reconcile_intake_chain_task,
 };
 #[allow(unused_imports)]
 pub(crate) use lineage::{

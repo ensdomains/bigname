@@ -1,7 +1,8 @@
 use anyhow::Result;
 use bigname_storage::{
-    CanonicalityState, ChainLineageBlock, CheckpointBlockRef, chain_lineage_contains_ancestor,
-    load_chain_lineage_block, load_chain_lineage_canonical_child_path,
+    CanonicalityState, ChainLineageBlock, CheckpointBlockRef,
+    chain_lineage_contains_canonical_ancestor_position, load_chain_lineage_block,
+    load_chain_lineage_canonical_child_path, load_highest_canonical_chain_lineage_block,
 };
 
 use crate::provider::{ChainProviderOps, ProviderBlock, ProviderHeadSnapshot};
@@ -15,6 +16,7 @@ use super::MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS;
 #[path = "stored_lineage/coverage.rs"]
 mod coverage;
 
+pub(crate) use coverage::ChainCoverageFrontiers;
 use coverage::stored_path_has_required_raw_fact_coverage;
 
 const MAX_STORED_ANCHOR_PARENT_FETCH_DEPTH: usize =
@@ -38,6 +40,7 @@ pub(super) fn stored_lineage_promotion_anchors(heads: &ProviderHeadSnapshot) -> 
     anchors
 }
 
+#[expect(clippy::too_many_arguments)]
 pub(super) async fn reconcile_large_checkpoint_gap_from_stored_lineage(
     pool: &sqlx::PgPool,
     provider: &(impl ChainProviderOps + ?Sized),
@@ -46,7 +49,7 @@ pub(super) async fn reconcile_large_checkpoint_gap_from_stored_lineage(
     current_canonical_number: i64,
     latest_head: &ProviderBlock,
     stored_anchor_candidates: &[ProviderBlock],
-    selected_raw_payload_addresses: &[String],
+    coverage_frontiers: &ChainCoverageFrontiers,
 ) -> Result<StoredLineagePromotion> {
     if latest_head.block_number <= current_canonical_number {
         return Ok(StoredLineagePromotion::NotApplicable);
@@ -56,7 +59,7 @@ pub(super) async fn reconcile_large_checkpoint_gap_from_stored_lineage(
         return Ok(StoredLineagePromotion::NotApplicable);
     }
 
-    let Some((stored_anchor, provider_anchor)) = select_stored_promotion_anchor(
+    let Some((stored_anchor, provider_anchor_hash)) = select_stored_promotion_anchor(
         pool,
         provider,
         chain,
@@ -66,7 +69,7 @@ pub(super) async fn reconcile_large_checkpoint_gap_from_stored_lineage(
     .await?
     else {
         return Ok(StoredLineagePromotion::Refused(format!(
-            "canonical gap of {live_gap_blocks} blocks for chain {chain} exceeds live gap fill limit {MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS}; stored-lineage checkpoint promotion requires a canonical/safe/finalized chain_lineage ancestor at or below the provider safe/finalized head within {MAX_STORED_ANCHOR_PARENT_FETCH_DEPTH} parent fetches; run hash-pinned backfill through a stored safe/finalized ancestor, then retry live reconciliation"
+            "canonical gap of {live_gap_blocks} blocks for chain {chain} exceeds live gap fill limit {MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS}; stored-lineage checkpoint promotion requires either the highest stored canonical block to match the provider's block at that height at or below the safe/finalized head, or a canonical/safe/finalized chain_lineage ancestor within {MAX_STORED_ANCHOR_PARENT_FETCH_DEPTH} parent fetches of the provider safe/finalized head; run hash-pinned backfill through a stored safe/finalized ancestor, then retry live reconciliation"
         )));
     };
     let anchor_gap_blocks = stored_anchor.block_number - current_canonical_number;
@@ -90,7 +93,8 @@ pub(super) async fn reconcile_large_checkpoint_gap_from_stored_lineage(
         pool,
         chain,
         &path,
-        selected_raw_payload_addresses,
+        coverage_frontiers,
+        stored_anchor.block_number,
     )
     .await
     {
@@ -104,17 +108,19 @@ pub(super) async fn reconcile_large_checkpoint_gap_from_stored_lineage(
         .expect("non-empty stored lineage promotion path");
     let target_is_anchor = target.block_hash == stored_anchor.block_hash;
     if !target_is_anchor
-        && !chain_lineage_contains_ancestor(
+        && !chain_lineage_contains_canonical_ancestor_position(
             pool,
             chain,
             &stored_anchor.block_hash,
+            stored_anchor.block_number,
+            target.block_number,
             &target.block_hash,
         )
         .await?
     {
         return Ok(StoredLineagePromotion::Refused(format!(
-            "canonical gap of {live_gap_blocks} blocks for chain {chain} exceeds live gap fill limit {MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS}; promoted target block {} is not a canonical ancestor of stored safe/finalized anchor {} (provider anchor hash {}); rerun hash-pinned backfill for the canonical range before retrying",
-            target.block_number, stored_anchor.block_number, provider_anchor.block_hash
+            "canonical gap of {live_gap_blocks} blocks for chain {chain} exceeds live gap fill limit {MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS}; promoted target block {} is not the unique canonical row at its height below stored safe/finalized anchor {} (provider anchor hash {provider_anchor_hash}); rerun hash-pinned backfill for the canonical range before retrying",
+            target.block_number, stored_anchor.block_number
         )));
     }
 
@@ -138,13 +144,53 @@ pub(super) async fn reconcile_large_checkpoint_gap_from_stored_lineage(
     }))
 }
 
+/// Two-strategy anchor search. Strategy 1 (primary, works for arbitrarily deep
+/// gaps): take the highest stored canonical lineage row; if the provider's
+/// block at that height has the same hash and the height is at or below the
+/// provider's safe/finalized candidates, the stored frontier itself anchors
+/// promotion — no parent walking and no provider-head proximity requirement.
+/// Strategy 2 (near-tip): walk parents from the safe/finalized candidates
+/// looking for a stored canonical row, for the case where the stored frontier
+/// is close to or above the candidates. Provider RPC failures in either
+/// strategy propagate as errors rather than being misreported as a missing
+/// stored anchor.
 async fn select_stored_promotion_anchor(
     pool: &sqlx::PgPool,
     provider: &(impl ChainProviderOps + ?Sized),
     chain: &str,
     current_canonical_number: i64,
     candidates: &[ProviderBlock],
-) -> Result<Option<(ChainLineageBlock, ProviderBlock)>> {
+) -> Result<Option<(ChainLineageBlock, String)>> {
+    let max_candidate_height = candidates
+        .iter()
+        .map(|candidate| candidate.block_number)
+        .max();
+    if let Some(max_candidate_height) = max_candidate_height
+        && let Some(stored_frontier) =
+            load_highest_canonical_chain_lineage_block(pool, chain).await?
+        && stored_frontier.block_number > current_canonical_number
+        && stored_frontier.block_number <= max_candidate_height
+    {
+        let resolved = provider
+            .fetch_block_hashes_by_numbers(&[stored_frontier.block_number])
+            .await?;
+        if let Some(provider_block) = resolved
+            .iter()
+            .find(|block| block.block_number == stored_frontier.block_number)
+        {
+            if provider_block
+                .block_hash
+                .eq_ignore_ascii_case(&stored_frontier.block_hash)
+            {
+                let provider_anchor_hash = provider_block.block_hash.clone();
+                return Ok(Some((stored_frontier, provider_anchor_hash)));
+            }
+            // Hash mismatch: the stored frontier tip is not on the provider's
+            // canonical chain (stale fork tip); fall back to the parent walk,
+            // which can still find a lower stored ancestor.
+        }
+    }
+
     for candidate in candidates {
         if candidate.block_number <= current_canonical_number {
             continue;
@@ -158,7 +204,8 @@ async fn select_stored_promotion_anchor(
                 && stored_lineage_matches_provider_block(&stored, &cursor)
                 && stored_anchor_is_canonical(stored.canonicality_state)
             {
-                return Ok(Some((stored, candidate.clone())));
+                let provider_anchor_hash = candidate.block_hash.clone();
+                return Ok(Some((stored, provider_anchor_hash)));
             }
             if parent_fetch_depth == MAX_STORED_ANCHOR_PARENT_FETCH_DEPTH {
                 break;
@@ -167,9 +214,7 @@ async fn select_stored_promotion_anchor(
             let Some(parent_hash) = cursor.parent_hash.clone() else {
                 break;
             };
-            let Ok(parent) = provider.fetch_block_by_hash(&parent_hash).await else {
-                break;
-            };
+            let parent = provider.fetch_block_by_hash(&parent_hash).await?;
             if parent.block_hash != parent_hash || parent.block_number >= cursor.block_number {
                 break;
             }

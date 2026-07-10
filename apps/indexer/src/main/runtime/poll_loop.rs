@@ -6,7 +6,7 @@ use tracing::{info, warn};
 use crate::normalized_replay_catchup::normalized_replay_cursors_complete;
 use crate::provider::ProviderRegistry;
 use crate::reconciliation::{
-    HeaderAuditMode, poll_provider_heads_with_adapter_sync,
+    ChainCoverageFrontiers, HeaderAuditMode, poll_provider_heads_with_adapter_sync,
     sync_live_adapter_backlog_after_normalized_replay,
 };
 use crate::replay::deployment_profile_from_manifest_root;
@@ -47,6 +47,10 @@ pub(crate) async fn run_poll_loop(
     event_silent_reverse_resolver_addresses: Vec<String>,
 ) -> Result<()> {
     let deployment_profile = deployment_profile_from_manifest_root(&manifests_root);
+    // Process-lifetime verified-coverage frontier cache: deep-gap promotion
+    // verifies fact coverage in large chunks once, then every poll cycle is an
+    // O(1) in-memory check.
+    let coverage_frontiers = ChainCoverageFrontiers::default();
     let mut live_poll_adapter_sync_restored_after_replay = false;
     let mut interval = tokio::time::interval(Duration::from_secs(poll_interval_secs));
     interval.tick().await;
@@ -422,6 +426,7 @@ pub(crate) async fn run_poll_loop(
                     effective_adapter_sync_on_live_poll,
                     header_audit_mode,
                     &event_silent_reverse_resolver_addresses,
+                    &coverage_frontiers,
                 )
                 .await?;
 

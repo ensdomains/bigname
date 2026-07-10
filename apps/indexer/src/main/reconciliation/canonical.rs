@@ -39,6 +39,7 @@ mod stored_lineage;
 use checkpoints::{checkpoint_update_for_head, fill_checkpoint_ancestor_path};
 use contiguous_gap::reconcile_contiguous_checkpoint_gap;
 use orphaning::orphan_reorg_losing_branch_payloads;
+pub(crate) use stored_lineage::ChainCoverageFrontiers;
 use stored_lineage::{
     StoredLineagePromotion, reconcile_large_checkpoint_gap_from_stored_lineage,
     stored_lineage_promotion_anchors,
@@ -62,10 +63,12 @@ pub(crate) async fn poll_provider_heads(
         true,
         HeaderAuditMode::Minimal,
         &[],
+        &ChainCoverageFrontiers::default(),
     )
     .await
 }
 
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn poll_provider_heads_with_adapter_sync(
     pool: &sqlx::PgPool,
     tasks: &mut Vec<IntakeChainTask>,
@@ -73,6 +76,7 @@ pub(crate) async fn poll_provider_heads_with_adapter_sync(
     adapter_sync_enabled: bool,
     header_audit_mode: HeaderAuditMode,
     event_silent_reverse_resolver_addresses: &[String],
+    coverage_frontiers: &ChainCoverageFrontiers,
 ) -> Result<()> {
     let mut next_tasks = tasks.clone();
     let mut any_change = false;
@@ -89,6 +93,7 @@ pub(crate) async fn poll_provider_heads_with_adapter_sync(
             adapter_sync_enabled,
             header_audit_mode,
             event_silent_reverse_resolver_addresses,
+            coverage_frontiers,
         )
         .await
         {
@@ -130,10 +135,12 @@ pub(crate) async fn reconcile_intake_chain_task(
         true,
         HeaderAuditMode::Minimal,
         &[],
+        &ChainCoverageFrontiers::default(),
     )
     .await
 }
 
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn reconcile_intake_chain_task_with_adapter_sync(
     pool: &sqlx::PgPool,
     task: &IntakeChainTask,
@@ -141,6 +148,7 @@ pub(crate) async fn reconcile_intake_chain_task_with_adapter_sync(
     adapter_sync_enabled: bool,
     header_audit_mode: HeaderAuditMode,
     event_silent_reverse_resolver_addresses: &[String],
+    coverage_frontiers: &ChainCoverageFrontiers,
 ) -> Result<Option<(IntakeChainTask, ChainReconciliationOutcome)>> {
     let heads = provider.fetch_chain_heads().await?;
     reconcile_fetched_heads_with_gap_policy(
@@ -151,6 +159,7 @@ pub(crate) async fn reconcile_intake_chain_task_with_adapter_sync(
         adapter_sync_enabled,
         header_audit_mode,
         event_silent_reverse_resolver_addresses,
+        coverage_frontiers,
     )
     .await
 }
@@ -170,10 +179,12 @@ pub(crate) async fn reconcile_fetched_heads(
         true,
         HeaderAuditMode::Minimal,
         &[],
+        &ChainCoverageFrontiers::default(),
     )
     .await
 }
 
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn reconcile_fetched_heads_with_adapter_sync(
     pool: &sqlx::PgPool,
     task: &IntakeChainTask,
@@ -182,6 +193,7 @@ pub(crate) async fn reconcile_fetched_heads_with_adapter_sync(
     adapter_sync_enabled: bool,
     header_audit_mode: HeaderAuditMode,
     event_silent_reverse_resolver_addresses: &[String],
+    coverage_frontiers: &ChainCoverageFrontiers,
 ) -> Result<Option<(IntakeChainTask, ChainReconciliationOutcome)>> {
     reconcile_fetched_heads_with_gap_policy(
         pool,
@@ -191,10 +203,12 @@ pub(crate) async fn reconcile_fetched_heads_with_adapter_sync(
         adapter_sync_enabled,
         header_audit_mode,
         event_silent_reverse_resolver_addresses,
+        coverage_frontiers,
     )
     .await
 }
 
+#[expect(clippy::too_many_arguments)]
 async fn reconcile_fetched_heads_with_gap_policy(
     pool: &sqlx::PgPool,
     task: &IntakeChainTask,
@@ -203,6 +217,7 @@ async fn reconcile_fetched_heads_with_gap_policy(
     adapter_sync_enabled: bool,
     header_audit_mode: HeaderAuditMode,
     event_silent_reverse_resolver_addresses: &[String],
+    coverage_frontiers: &ChainCoverageFrontiers,
 ) -> Result<Option<(IntakeChainTask, ChainReconciliationOutcome)>> {
     let stored_promotion_anchors = stored_lineage_promotion_anchors(heads);
     let canonical = reconcile_canonical_head(
@@ -213,7 +228,7 @@ async fn reconcile_fetched_heads_with_gap_policy(
         &heads.canonical,
         header_audit_mode,
         &stored_promotion_anchors,
-        &task.addresses,
+        coverage_frontiers,
     )
     .await?;
     let provider_head_change_set = head_change_set(task, heads, &canonical);
@@ -336,6 +351,7 @@ async fn reconcile_fetched_heads_with_gap_policy(
     )))
 }
 
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn reconcile_canonical_head(
     pool: &sqlx::PgPool,
     provider: &(impl ChainProviderOps + ?Sized),
@@ -344,7 +360,7 @@ pub(crate) async fn reconcile_canonical_head(
     latest_head: &ProviderBlock,
     header_audit_mode: HeaderAuditMode,
     stored_lineage_promotion_anchors: &[ProviderBlock],
-    selected_raw_payload_addresses: &[String],
+    coverage_frontiers: &ChainCoverageFrontiers,
 ) -> Result<CanonicalReconciliation> {
     let latest_hash = latest_head.block_hash.as_str();
     let current_canonical_hash = checkpoint.canonical_block_hash.as_deref();
@@ -416,7 +432,7 @@ pub(crate) async fn reconcile_canonical_head(
             current_canonical_number,
             latest_head,
             stored_lineage_promotion_anchors,
-            selected_raw_payload_addresses,
+            coverage_frontiers,
         )
         .await?
         {
