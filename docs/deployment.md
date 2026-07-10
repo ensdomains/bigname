@@ -406,47 +406,72 @@ as a fallback.
 
 Live checkpoint promotion can advance over a gap larger than the live fill limit
 only when a previous bounded backfill has already stored enough evidence. The
-indexer anchors the walk on the provider `safe` head, falling back to
-`finalized`, then walks that safe/finalized ancestry down to the highest stored
-`chain_lineage` block with canonical/safe/finalized state, within the bounded
+indexer selects a stored anchor with two strategies. Primary (works for
+arbitrarily deep gaps): it loads the highest stored canonical/safe/finalized
+`chain_lineage` row, fetches the provider block at exactly that height by
+number, and anchors directly on the stored frontier when the hashes match and
+the height is at or below the provider safe/finalized head — no parent
+walking and no provider-head proximity requirement. Fallback (near-tip): it
+walks the provider safe/finalized ancestry down to the highest stored
+canonical/safe/finalized `chain_lineage` block within the bounded
 stored-anchor parent-fetch depth of `4096` blocks
-(`MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS * 4`). The stored anchor may be below the
-provider safe/finalized head when Reth-db lineage is behind the node frontier;
-promotion still remains bounded to a block at or below the safe/finalized-
-validated stored ancestor. It then promotes at most one configured chunk per
-poll through the stored canonical child path and validates each promoted step
-before calling the normal checkpoint-advance path. The live canonical `latest`
-head is not required to be stored, and normally is not stored during an
-over-limit catch-up.
+(`MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS * 4`), for the case where the stored
+frontier is close to or above the safe candidates. Provider RPC failures in
+either strategy surface as provider errors, never as a missing-anchor
+refusal. Promotion then advances at most one configured chunk per poll
+through the stored canonical child path and validates each promoted step
+(the promoted target must be the unique canonical-marked row at its height
+below the anchor — an O(1) uniqueness probe over append-only lineage) before
+calling the normal checkpoint-advance path. The live canonical `latest` head
+is not required to be stored, and normally is not stored during an over-limit
+catch-up.
 
-For every promoted block, evidence must come from a completed backfill range
-whose persisted source identity proves the current log-producing watched
-`(source_family, address)` set active for that block. Full source identities
-prove this through `source_identity.selected_targets` and each target's
-`effective_from_block` / `effective_to_block` interval. Compact source
-identities prove it only when the stored `selected_targets_digest_v1` count,
-keccak digest (including the legacy source-family producer digest shape),
-first/last sample, selector kind, source family, and requested target set match
-the current persisted watch-plan preimage for that job range. ENSv1 resolver
-families are special: backfills record `generic_topic_scans` because resolver
-logs are scanned by topic across all emitters instead of enumerating every
-resolver address in `selected_targets`. A completed generic resolver topic scan
-covers active watched resolver-family emitters for its block range. Base
-Basenames registry Coinbase SQL scan-all jobs similarly cover
-`basenames_base_registry` by source-family event-signature scan-all identity.
-Explicitly selected log-producing non-generic targets must still be proven by
-the same `(source_family, address)` tuple in `selected_targets` or the matching
-compact digest; one source family's completed coverage never credits another
-family at the same address. Manifest source families that have no active ABI
-event topics, such as execution-only transport entrypoints, do not impose
-historical selected-log coverage for checkpoint promotion. This is why Reth-db
-backfills can promote after completion even though they do not write
-`raw_payload_cache_metadata` rows; retained payload metadata alone is not
-historic promotion evidence. Completed backfill coverage distinguishes
-"selected no logs in this block" from "this block was never fetched" only when
-the stored path is not ambiguous with another non-orphan same-height lineage
-row; orphaned repair residue does not make a block ambiguous. Lineage-only rows
-from checkpoint ancestor fills or crashed/incomplete backfills are refused.
+For every promoted block, fetch evidence must come from durable
+`backfill_coverage_facts` rows written when backfill jobs complete (or
+re-derived by `repair derive-backfill-coverage-facts` from legacy verbatim
+full-payload identities). Promotion never recomputes selector plans from
+persisted job identities — plan recomputation is invalidated by the very
+discovery that runs during long backfills. A watched log-producing
+`(source_family, address)` tuple is covered for an evaluated slice when its
+required interval (active window ∩ slice) is fully contained in a single
+address-scoped fact row for that exact tuple, or in a single family-scope
+fact row (`address IS NULL`) for its family — family-scope rows record
+topics-complete scans (ENSv1 generic resolver scans, Base Basenames registry
+Coinbase SQL scan-all) that cover every address of the family over the fact
+interval. Single-fact containment is a deliberate v1 limitation: coverage
+split across two adjacent fact rows for the same tuple does not credit, even
+when the rows abut (cross-fact interval-union coverage is a documented
+follow-up); the tail-recovery jobs each cover their whole range in one fact,
+so this does not constrain the current deployment. One source family's fact
+never credits another family at the same address. Manifest source families
+that have no active ABI event topics, such as execution-only transport
+entrypoints, do not impose historical selected-log coverage for checkpoint
+promotion.
+
+Coverage is verified by an indexed anti-join of the chain's watched tuples
+against `backfill_coverage_facts`, executed in large block chunks
+(`131072` blocks per verification query) that extend an in-process per-chain
+verified frontier as far ahead as the stored anchor; after the frontier
+covers a range once, every subsequent promotion step consults it in memory.
+The frontier is not persisted — a process restart re-verifies the gap in a
+handful of chunked queries. Verification also fails closed on topic-set
+drift: fact coverage is complete only relative to the family's manifest ABI
+event set at fetch time, so promotion compares the current manifest topic0
+set per family against the immutable topic plans persisted in completed
+topic-filtered (Coinbase SQL) jobs intersecting the range, refuses when they
+differ, and refuses topic-filtered generic-scan jobs that persisted no topic
+set at all. Address-enumerated hash-pinned fetches are topic-unfiltered and
+immune to drift.
+
+Fact-based coverage means Reth-db backfills can promote after completion even
+though they do not write `raw_payload_cache_metadata` rows; retained payload
+metadata alone is not historic promotion evidence. Fact coverage
+distinguishes "selected no logs in this block" from "this block was never
+fetched" only when the stored path is not ambiguous with another non-orphan
+same-height lineage row; orphaned repair residue does not make a block
+ambiguous. Incomplete or crashed backfills write no facts (facts are written
+in the same transaction as the job completion flip), so their lineage-only
+residue is refused.
 Event-silent reverse-resolver indexing is a live-tip concern: ordinary live
 reconciliation retains direct-call transaction and receipt facts from full-block
 payloads for the built-in Ethereum Mainnet event-silent reverse resolver set and
@@ -460,23 +485,24 @@ reverse-resolver observations are recorded from live block payloads.
 
 Actionable refusal classes:
 
-- Missing stored safe/finalized anchor: run hash-pinned backfill through the
-  provider safe/finalized ancestry for that chain, then retry live
-  reconciliation. The provider safe/finalized head itself does not need to be in
-  `chain_lineage`; a stored canonical/safe/finalized ancestor below it is enough
-  only when it is reachable within the bounded `4096`-block stored-anchor
-  parent walk. If the frontier is farther below safe/finalized, run another
-  hash-pinned catch-up chunk so the stored frontier enters that window.
+- Missing stored anchor: the stored frontier's hash did not match the
+  provider's block at that height (stale fork tip) and no stored
+  canonical/safe/finalized ancestor was reachable within the bounded
+  `4096`-block parent walk. Run hash-pinned backfill so the stored canonical
+  frontier reflects the provider's canonical chain, then retry. The provider
+  safe/finalized head itself does not need to be in `chain_lineage`.
 - Incomplete lineage path or duplicate canonical children: rerun hash-pinned
   backfill for the missing range; if duplicate canonical rows remain at one
   height, repair/orphan the losing lineage before retrying.
-- Lineage-only block without completed range coverage:
-  rerun hash-pinned backfill for the current log-producing watched address set
-  and let the range complete, ensure the job's full or compact source identity
-  matches the current watch-plan target intervals for the promoted range, ensure
-  generic resolver jobs include `generic_topic_scans`, and ensure Base
-  Basenames registry Coinbase SQL jobs use the scan-all event-signature
-  identity.
+- Watched tuples without single-fact coverage: the refusal names the
+  violating `(source_family, address, block-range)` tuples. Run hash-pinned
+  or Coinbase SQL backfill for those tuples so completion writes facts, or
+  run `repair derive-backfill-coverage-facts` for already-completed legacy
+  jobs whose identity carries the fetched targets verbatim, then retry.
+- Manifest ABI topic0 set changed after a relied-upon topic-filtered job (or
+  a topic-filtered job persisted no topic set): re-run the affected range on
+  the current manifest so fresh facts assert coverage relative to the current
+  event set.
 - Same-height non-orphan fork ambiguity: repair/orphan the losing lineage row,
   then retry. Numeric completed-range coverage is accepted only when the stored
   promoted path has no competing non-orphan row at the same height.
