@@ -65,10 +65,11 @@ pub(super) async fn complete_reserved_range_recording_plan_coverage(
 /// executor's own in-memory selector plan so the recorded coverage can never
 /// drift from what the job actually fetched. Families fetched via
 /// topics-complete scans (the ENSv1 generic resolver scope and the Basenames
-/// registry scan-all shape) yield one family-scope fact clamped to the span of
-/// the plan's targets for that family — the scan-all planner skips windows
-/// with no selected targets, so blocks outside that span were never fetched —
-/// and their per-address targets are excluded because the fetch was not
+/// registry scan-all shape) yield one family-scope fact per merged union
+/// segment of their targets' clamped effective windows — the scan-all planner
+/// skips windows holding no selected targets, so neither blocks outside every
+/// window nor gaps between disjoint windows were fetched — and their
+/// per-address targets are excluded because the fetch was not
 /// address-enumerated. Every other selected target yields an address-scope
 /// fact clamped to the job range, skipping empty intersections.
 fn job_completion_coverage_facts<'a>(
@@ -85,34 +86,31 @@ fn job_completion_coverage_facts<'a>(
         family_scan_source_families.insert(SOURCE_FAMILY_BASENAMES_BASE_REGISTRY);
     }
 
-    let mut family_scan_spans = BTreeMap::<&'a str, (i64, i64)>::new();
+    let mut family_scan_windows = BTreeMap::<&'a str, Vec<(i64, i64)>>::new();
     for target in &source_plan.selected_targets {
         if !family_scan_source_families.contains(target.source_family.as_str()) {
             continue;
         }
-        let span = family_scan_spans
+        family_scan_windows
             .entry(target.source_family.as_str())
-            .or_insert((target.effective_from_block, target.effective_to_block));
-        span.0 = span.0.min(target.effective_from_block);
-        span.1 = span.1.max(target.effective_to_block);
+            .or_default()
+            .push((target.effective_from_block, target.effective_to_block));
     }
-    let family_facts = family_scan_spans.into_iter().filter_map(
-        move |(source_family, (span_from_block, span_to_block))| {
-            let (covered_from_block, covered_to_block) = covered_block_interval(
-                span_from_block,
-                span_to_block,
-                job_start_block,
-                job_end_block,
-            )?;
-            Some(BackfillCoverageFactWrite {
-                source_family: source_family.to_owned(),
-                scope: BackfillCoverageFactScope::Family,
-                address: None,
-                covered_from_block,
-                covered_to_block,
-            })
-        },
-    );
+    let family_facts = family_scan_windows
+        .into_iter()
+        .flat_map(move |(source_family, windows)| {
+            merged_covered_block_segments(windows, job_start_block, job_end_block)
+                .into_iter()
+                .map(
+                    move |(covered_from_block, covered_to_block)| BackfillCoverageFactWrite {
+                        source_family: source_family.to_owned(),
+                        scope: BackfillCoverageFactScope::Family,
+                        address: None,
+                        covered_from_block,
+                        covered_to_block,
+                    },
+                )
+        });
     let address_facts = source_plan
         .selected_targets
         .iter()
@@ -149,6 +147,34 @@ pub(crate) fn covered_block_interval(
     let covered_from_block = effective_from_block.max(job_start_block);
     let covered_to_block = effective_to_block.min(job_end_block);
     (covered_from_block <= covered_to_block).then_some((covered_from_block, covered_to_block))
+}
+
+/// Clamp each effective window to the job range first, then merge the
+/// surviving windows (overlapping or block-adjacent) into union segments.
+/// Clamping before folding matters: windows individually disjoint from the
+/// job range contribute nothing, and gaps between disjoint windows are never
+/// claimed.
+pub(crate) fn merged_covered_block_segments(
+    windows: impl IntoIterator<Item = (i64, i64)>,
+    job_start_block: i64,
+    job_end_block: i64,
+) -> Vec<(i64, i64)> {
+    let mut clamped = windows
+        .into_iter()
+        .filter_map(|(from_block, to_block)| {
+            covered_block_interval(from_block, to_block, job_start_block, job_end_block)
+        })
+        .collect::<Vec<_>>();
+    clamped.sort_unstable();
+
+    let mut segments: Vec<(i64, i64)> = Vec::new();
+    for (from_block, to_block) in clamped {
+        match segments.last_mut() {
+            Some(last) if from_block <= last.1.saturating_add(1) => last.1 = last.1.max(to_block),
+            _ => segments.push((from_block, to_block)),
+        }
+    }
+    segments
 }
 
 #[cfg(test)]
@@ -299,6 +325,102 @@ mod tests {
             job_completion_coverage_facts(&disjoint_span, true, 10, 20).count(),
             0,
             "a family span disjoint from the job range must not claim coverage"
+        );
+    }
+
+    #[test]
+    fn family_targets_individually_disjoint_from_the_job_range_claim_nothing() {
+        // Both windows miss the job range, but their hull [5, 40] spans it:
+        // hull-then-intersect would mint a family fact over blocks that were
+        // never fetched.
+        let source_plan = source_plan(
+            "base-mainnet",
+            vec![
+                target(
+                    "basenames_base_registry",
+                    1,
+                    "0x1111111111111111111111111111111111111111",
+                    5,
+                    8,
+                ),
+                target(
+                    "basenames_base_registry",
+                    2,
+                    "0x2222222222222222222222222222222222222222",
+                    30,
+                    40,
+                ),
+            ],
+        );
+
+        assert_eq!(
+            job_completion_coverage_facts(&source_plan, true, 10, 20).count(),
+            0,
+            "windows individually disjoint from the job range must not claim family coverage"
+        );
+    }
+
+    #[test]
+    fn family_facts_split_on_interior_gaps_between_target_windows() {
+        let source_plan = source_plan(
+            "base-mainnet",
+            vec![
+                target(
+                    "basenames_base_registry",
+                    1,
+                    "0x1111111111111111111111111111111111111111",
+                    10,
+                    12,
+                ),
+                target(
+                    "basenames_base_registry",
+                    2,
+                    "0x2222222222222222222222222222222222222222",
+                    16,
+                    20,
+                ),
+                target(
+                    "basenames_base_registry",
+                    3,
+                    "0x3333333333333333333333333333333333333333",
+                    13,
+                    13,
+                ),
+            ],
+        );
+
+        let facts = job_completion_coverage_facts(&source_plan, true, 5, 25).collect::<Vec<_>>();
+
+        assert_eq!(
+            facts
+                .iter()
+                .map(|fact| (fact.scope, (fact.covered_from_block, fact.covered_to_block)))
+                .collect::<Vec<_>>(),
+            vec![
+                (BackfillCoverageFactScope::Family, (10, 13)),
+                (BackfillCoverageFactScope::Family, (16, 20)),
+            ],
+            "adjacent windows merge but the unfetched gap between segments must stay unclaimed"
+        );
+    }
+
+    #[test]
+    fn merged_covered_block_segments_clamp_before_merging() {
+        assert_eq!(
+            merged_covered_block_segments(vec![(5, 8), (30, 40)], 10, 20),
+            Vec::<(i64, i64)>::new()
+        );
+        assert_eq!(
+            merged_covered_block_segments(vec![(16, 30), (1, 12), (13, 14)], 10, 20),
+            vec![(10, 14), (16, 20)]
+        );
+        assert_eq!(
+            merged_covered_block_segments(vec![(1, 100)], 10, 20),
+            vec![(10, 20)]
+        );
+        assert_eq!(
+            merged_covered_block_segments(std::iter::empty(), 10, 20),
+            Vec::<(i64, i64)>::new()
         );
     }
 
