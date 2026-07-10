@@ -13,6 +13,49 @@ pub async fn load_chain_lineage_block(
     load_chain_lineage_block_internal(pool, chain_id, block_hash).await
 }
 
+/// Load the highest canonical-marked (canonical/safe/finalized) stored lineage
+/// row for a chain — the stored frontier that deep-gap promotion anchors on.
+pub async fn load_highest_canonical_chain_lineage_block(
+    pool: &PgPool,
+    chain_id: &str,
+) -> Result<Option<ChainLineageBlock>> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            lineage.chain_id,
+            lineage.block_hash,
+            lineage.parent_hash,
+            lineage.block_number,
+            lineage.block_timestamp,
+            audit.logs_bloom,
+            audit.transactions_root,
+            audit.receipts_root,
+            audit.state_root,
+            lineage.canonicality_state::TEXT AS canonicality_state
+        FROM chain_lineage AS lineage
+        LEFT JOIN chain_header_audit AS audit
+          ON audit.chain_id = lineage.chain_id
+         AND audit.block_hash = lineage.block_hash
+        WHERE lineage.chain_id = $1
+          AND lineage.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+        ORDER BY lineage.block_number DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(chain_id)
+    .fetch_optional(pool)
+    .await
+    .with_context(|| {
+        format!("failed to load highest canonical lineage row for chain {chain_id}")
+    })?;
+
+    row.map(decode_lineage_block).transpose()
+}
+
 pub(crate) async fn ensure_chain_lineage_block(
     executor: &mut sqlx::Transaction<'_, Postgres>,
     chain_id: &str,

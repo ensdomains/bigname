@@ -19,7 +19,9 @@ pub use coverage_facts::{
 pub use create::create_backfill_job;
 pub use fail::{fail_backfill_job, fail_backfill_range};
 pub use lease::{advance_backfill_range, reserve_backfill_range};
-pub use read::{load_backfill_job, load_backfill_ranges};
+pub use read::{
+    load_backfill_job, load_backfill_ranges, load_completed_backfill_jobs_intersecting_range,
+};
 pub use types::{
     BackfillJob, BackfillJobCreate, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange,
     BackfillRangeSpec,
