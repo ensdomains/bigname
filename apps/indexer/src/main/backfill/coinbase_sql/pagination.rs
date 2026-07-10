@@ -1,4 +1,5 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
+use tracing::debug;
 
 use super::{
     client::{CoinbaseSqlClient, CoinbaseSqlQueryResponse},
@@ -64,21 +65,7 @@ pub(super) async fn fetch_all_pages(
         record_response_stats(&mut stats, &response);
         let page_len = response.rows.len();
 
-        for row in response.rows {
-            let row_cursor = CoinbaseSqlLogCursor::from(&row);
-            if let Some(previous) = previous_cursor
-                && !row_cursor.strictly_after(previous)
-            {
-                bail!(
-                    "Coinbase SQL rows were not strictly ordered at block {}, transaction index {}, log index {}",
-                    row.block_number,
-                    row.transaction_index,
-                    row.log_index
-                );
-            }
-            previous_cursor = Some(row_cursor);
-            rows.push(row);
-        }
+        append_page_rows(&mut rows, &mut previous_cursor, response.rows, &mut stats)?;
 
         if page_len < page_limit {
             break;
@@ -90,6 +77,121 @@ pub(super) async fn fetch_all_pages(
     }
 
     Ok(CoinbaseSqlFetchedPages { rows, stats })
+}
+
+/// Fold one page of rows into the accumulated result, enforcing strict cursor
+/// ordering. The query is a UNION ALL of a decoded-logs arm and an
+/// encoded-logs arm ordered only by (block_number, transaction_index,
+/// log_index); the arms are meant to be disjoint, but decode-pipeline lag can
+/// transiently surface the same physical log in both, delivering the same
+/// cursor tuple twice in arbitrary adjacent order. Such benign duplicates are
+/// dropped (preferring the decoded shape); anything else out of order still
+/// fails the fetch. State persists across pages so a duplicate arriving at a
+/// page head is reconciled against the previous page's tail — page cursors
+/// are exclusive lower bounds, so equal tuples are normally never re-fetched.
+pub(super) fn append_page_rows(
+    rows: &mut Vec<CoinbaseSqlLogRow>,
+    previous_cursor: &mut Option<CoinbaseSqlLogCursor>,
+    page_rows: Vec<CoinbaseSqlLogRow>,
+    stats: &mut CoinbaseSqlFetchStats,
+) -> Result<()> {
+    for row in page_rows {
+        let row_cursor = CoinbaseSqlLogCursor::from(&row);
+        if let Some(previous) = *previous_cursor {
+            if row_cursor == previous {
+                let kept = rows
+                    .last_mut()
+                    .context("Coinbase SQL duplicate row arrived before any kept row")?;
+                reconcile_union_duplicate(kept, row, stats)?;
+                continue;
+            }
+            if !row_cursor.strictly_after(previous) {
+                bail!(
+                    "Coinbase SQL rows were not strictly ordered at block {}, transaction index {}, log index {}",
+                    row.block_number,
+                    row.transaction_index,
+                    row.log_index
+                );
+            }
+        }
+        *previous_cursor = Some(row_cursor);
+        rows.push(row);
+    }
+
+    Ok(())
+}
+
+/// Resolve a row that repeats the previously kept row's cursor tuple. Byte-
+/// identical repeats and encoded/decoded shapes of the same physical log are
+/// benign union duplicates: keep the decoded shape (it carries the event
+/// signature and synthesized data) regardless of arrival order. Any other
+/// repeat is genuine corruption and fails exactly like disorder.
+fn reconcile_union_duplicate(
+    kept: &mut CoinbaseSqlLogRow,
+    duplicate: CoinbaseSqlLogRow,
+    stats: &mut CoinbaseSqlFetchStats,
+) -> Result<()> {
+    if *kept == duplicate {
+        stats.union_duplicate_count += 1;
+        debug!(
+            block_number = duplicate.block_number,
+            transaction_index = duplicate.transaction_index,
+            log_index = duplicate.log_index,
+            "dropped identical Coinbase SQL union duplicate row"
+        );
+        return Ok(());
+    }
+
+    if rows_are_same_underlying_log(kept, &duplicate) {
+        // The decoded arm carries an event_signature; the encoded arm selects
+        // NULL for it (and NULL parameters, so its data is synthesized later
+        // from the validation provider).
+        match (
+            kept.event_signature.is_some(),
+            duplicate.event_signature.is_some(),
+        ) {
+            (true, false) => {
+                stats.union_duplicate_count += 1;
+                debug!(
+                    block_number = duplicate.block_number,
+                    transaction_index = duplicate.transaction_index,
+                    log_index = duplicate.log_index,
+                    "dropped encoded Coinbase SQL union duplicate row; decoded row already kept"
+                );
+                return Ok(());
+            }
+            (false, true) => {
+                stats.union_duplicate_count += 1;
+                debug!(
+                    block_number = duplicate.block_number,
+                    transaction_index = duplicate.transaction_index,
+                    log_index = duplicate.log_index,
+                    "replaced encoded Coinbase SQL union duplicate row with its decoded row"
+                );
+                *kept = duplicate;
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
+    bail!(
+        "Coinbase SQL rows were not strictly ordered at block {}, transaction index {}, log index {}",
+        duplicate.block_number,
+        duplicate.transaction_index,
+        duplicate.log_index
+    )
+}
+
+/// Whether two rows sharing a cursor tuple describe the same physical log:
+/// everything that identifies the log on-chain must match; only the
+/// decode-dependent fields (event_signature and the data synthesized from
+/// parameters) may differ between the union arms.
+fn rows_are_same_underlying_log(a: &CoinbaseSqlLogRow, b: &CoinbaseSqlLogRow) -> bool {
+    a.block_hash == b.block_hash
+        && a.transaction_hash == b.transaction_hash
+        && a.emitting_address == b.emitting_address
+        && a.topics == b.topics
 }
 
 fn record_response_stats(stats: &mut CoinbaseSqlFetchStats, response: &CoinbaseSqlQueryResponse) {

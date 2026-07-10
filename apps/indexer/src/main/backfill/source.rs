@@ -62,6 +62,10 @@ pub(crate) struct CoinbaseSqlFetchStats {
     pub(crate) page_count: usize,
     pub(crate) row_count: usize,
     pub(crate) retry_count: usize,
+    /// Benign UNION-arm duplicates dropped during pagination: the same
+    /// physical log transiently present in both the decoded and encoded log
+    /// sets (decode-pipeline lag), or byte-identical repeats.
+    pub(crate) union_duplicate_count: usize,
 }
 
 impl CoinbaseSqlFetchStats {
@@ -75,6 +79,7 @@ impl CoinbaseSqlFetchStats {
         self.page_count += other.page_count;
         self.row_count += other.row_count;
         self.retry_count += other.retry_count;
+        self.union_duplicate_count += other.union_duplicate_count;
     }
 }
 

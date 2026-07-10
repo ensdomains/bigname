@@ -557,7 +557,6 @@ fn log_coinbase_sql_payload_fetch(
     validation_mode: CoinbaseSqlValidationMode,
     payload: &HistoricalLogPayload,
 ) {
-    let raw_log_count = historical_payload_log_count(payload);
     info!(
         service = "indexer",
         command = "backfill",
@@ -569,8 +568,9 @@ fn log_coinbase_sql_payload_fetch(
         coinbase_sql_page_count = payload.source_stats.page_count,
         coinbase_sql_row_count = payload.source_stats.row_count,
         coinbase_sql_retry_count = payload.source_stats.retry_count,
+        coinbase_sql_union_duplicate_count = payload.source_stats.union_duplicate_count,
         coinbase_sql_log_block_count = payload.logs_by_block.len(),
-        raw_log_count,
+        raw_log_count = historical_payload_log_count(payload),
         validation_filter_count = payload.validation_filters.len(),
         "Coinbase SQL payload fetched"
     );
