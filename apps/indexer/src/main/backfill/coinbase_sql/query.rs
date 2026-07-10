@@ -79,7 +79,13 @@ pub(super) fn build_query(
     // `a UNION ALL b` to the LAST arm only, so the unwrapped shape left the
     // decoded arm unordered (nondeterministic per execution) and never
     // applied the page limit globally — both of which the cursor pagination
-    // relies on.
+    // relies on. The sort key is not unique across arms: a decode-transition
+    // twin (same log in both arms) sorts adjacently in arbitrary arm order,
+    // and a page boundary splitting the pair can keep the encoded twin while
+    // the strict cursor excludes the decoded one — the row then degrades to
+    // the validation-provider synthesis path (one extra lookup, same data).
+    // A decoded-first tie-breaker column would remove that cost but deviates
+    // from the live-proven query shape; adopt only with fresh live proof.
     Ok(format!(
         r#"WITH active_transactions AS (
   SELECT
