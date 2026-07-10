@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 use bigname_storage::{
@@ -7,7 +7,7 @@ use bigname_storage::{
 };
 use serde_json::Value;
 
-use crate::backfill::covered_block_interval;
+use crate::backfill::{covered_block_interval, merged_covered_block_segments};
 
 const FORMAT_SELECTED_TARGETS_DIGEST: &str = "selected_targets_digest_v1";
 const FORMAT_SELECTED_TARGETS_DIGEST_WITH_GENERIC_TOPIC_SCANS: &str =
@@ -27,9 +27,13 @@ pub(crate) struct LegacyBackfillCoverageFactsOutcome {
 }
 
 /// Derive coverage facts for an already-completed job from its persisted
-/// full-payload `source_identity` (fnv1a64-era payloads included). Compact
-/// digest identities are refused: the fetched target set is not recoverable
-/// from a digest, so those jobs must be re-completed on fact-writing code.
+/// verbatim-target `source_identity` (fnv1a64-era full payloads included).
+/// Refused shapes: compact digests (the fetched target set is not recoverable
+/// from a digest) and family-scan-only identities (they do not persist the
+/// family target spans needed for sound family facts) — both require
+/// re-running the job on fact-writing code. Family facts for
+/// `generic_topic_scans` families use the same clamp-and-merge segments as
+/// live completion, derived from the persisted targets of that family.
 pub(crate) async fn derive_legacy_backfill_coverage_facts(
     pool: &sqlx::PgPool,
     backfill_job_id: i64,
@@ -83,66 +87,50 @@ fn legacy_coverage_facts_from_source_identity(
     let payload_format = source_identity
         .get("source_identity_payload_format")
         .and_then(Value::as_str);
-    if matches!(
-        payload_format,
+    match payload_format {
         Some(FORMAT_SELECTED_TARGETS_DIGEST)
-            | Some(FORMAT_SELECTED_TARGETS_DIGEST_WITH_GENERIC_TOPIC_SCANS)
-    ) {
-        bail!(
+        | Some(FORMAT_SELECTED_TARGETS_DIGEST_WITH_GENERIC_TOPIC_SCANS) => bail!(
             "backfill job {} persisted a compact selected-targets digest identity ({}); the fetched target set cannot be recovered from a digest, so the job must be re-completed on fact-writing code",
             job.backfill_job_id,
             payload_format.unwrap_or_default()
-        );
-    }
-
-    let family_scan_source_families = family_scan_source_families(source_identity);
-    let selected_targets = source_identity
-        .get("selected_targets")
-        .map(|targets| {
-            targets.as_array().with_context(|| {
-                format!(
-                    "backfill job {} selected_targets must be a JSON array",
-                    job.backfill_job_id
-                )
-            })
-        })
-        .transpose()?;
-    let identity_is_family_scan_only = match payload_format {
-        None | Some(FORMAT_SELECTED_TARGETS_WITH_GENERIC_TOPIC_SCANS) => {
-            if selected_targets.is_none() {
-                bail!(
-                    "backfill job {} source_identity does not carry selected_targets verbatim; coverage cannot be derived from it",
-                    job.backfill_job_id
-                );
-            }
-            false
-        }
+        ),
         Some(FORMAT_GENERIC_RESOLVER_EVENT_TOPICS)
-        | Some(FORMAT_BASENAMES_REGISTRY_SCAN_ALL_EVENT_SIGNATURES) => true,
+        | Some(FORMAT_BASENAMES_REGISTRY_SCAN_ALL_EVENT_SIGNATURES) => bail!(
+            "backfill job {} persisted a family-scan identity ({}) that does not persist the family target spans needed for sound family facts, so the job must be re-completed on fact-writing code",
+            job.backfill_job_id,
+            payload_format.unwrap_or_default()
+        ),
+        None | Some(FORMAT_SELECTED_TARGETS_WITH_GENERIC_TOPIC_SCANS) => {}
         Some(other) => bail!(
             "backfill job {} persisted an unsupported source_identity_payload_format {other}; coverage cannot be derived from it",
             job.backfill_job_id
         ),
-    };
-
-    let mut facts = family_scan_source_families
-        .into_iter()
-        .map(|source_family| BackfillCoverageFactWrite {
-            source_family,
-            scope: BackfillCoverageFactScope::Family,
-            address: None,
-            covered_from_block: job.range_start_block_number,
-            covered_to_block: job.range_end_block_number,
-        })
-        .collect::<Vec<_>>();
-    if facts.is_empty() && identity_is_family_scan_only {
-        bail!(
-            "backfill job {} declares a family-scan identity but no scanned source family could be derived from it",
-            job.backfill_job_id
-        );
     }
 
-    for (index, target) in selected_targets.into_iter().flatten().enumerate() {
+    let selected_targets = source_identity
+        .get("selected_targets")
+        .with_context(|| {
+            format!(
+                "backfill job {} source_identity does not carry selected_targets verbatim; coverage cannot be derived from it",
+                job.backfill_job_id
+            )
+        })?
+        .as_array()
+        .with_context(|| {
+            format!(
+                "backfill job {} selected_targets must be a JSON array",
+                job.backfill_job_id
+            )
+        })?;
+
+    // Live producers filter family-scanned targets out of the persisted
+    // selected_targets, so family facts here only materialize when the
+    // identity carries such targets; absent windows conservatively yield no
+    // family coverage.
+    let family_scan_source_families = generic_topic_scan_source_families(source_identity);
+    let mut family_scan_windows = BTreeMap::<String, Vec<(i64, i64)>>::new();
+    let mut facts = Vec::new();
+    for (index, target) in selected_targets.iter().enumerate() {
         let context = || {
             format!(
                 "backfill job {} selected_targets[{index}]",
@@ -166,6 +154,13 @@ fn legacy_coverage_facts_from_source_identity(
             .and_then(Value::as_i64)
             .with_context(|| format!("{} must carry effective_to_block", context()))?;
 
+        if family_scan_source_families.contains(source_family) {
+            family_scan_windows
+                .entry(source_family.to_owned())
+                .or_default()
+                .push((effective_from_block, effective_to_block));
+            continue;
+        }
         let Some((covered_from_block, covered_to_block)) = covered_block_interval(
             effective_from_block,
             effective_to_block,
@@ -183,27 +178,29 @@ fn legacy_coverage_facts_from_source_identity(
         });
     }
 
+    for (source_family, windows) in family_scan_windows {
+        for (covered_from_block, covered_to_block) in merged_covered_block_segments(
+            windows,
+            job.range_start_block_number,
+            job.range_end_block_number,
+        ) {
+            facts.push(BackfillCoverageFactWrite {
+                source_family: source_family.clone(),
+                scope: BackfillCoverageFactScope::Family,
+                address: None,
+                covered_from_block,
+                covered_to_block,
+            });
+        }
+    }
+
     Ok(facts)
 }
 
-/// Source families the job fetched topics-complete for every address, mirrored
-/// from the producer identity shapes: the Basenames registry scan-all payload,
-/// the pure generic-resolver payload, and `generic_topic_scans` declarations
-/// attached to selected-target payloads.
-fn family_scan_source_families(source_identity: &Value) -> BTreeSet<String> {
+/// Source families the job fetched topics-complete for every address, per the
+/// `generic_topic_scans` declarations attached to verbatim-target payloads.
+fn generic_topic_scan_source_families(source_identity: &Value) -> BTreeSet<String> {
     let mut source_families = BTreeSet::new();
-    let payload_format = source_identity
-        .get("source_identity_payload_format")
-        .and_then(Value::as_str);
-    if matches!(
-        payload_format,
-        Some(FORMAT_BASENAMES_REGISTRY_SCAN_ALL_EVENT_SIGNATURES)
-            | Some(FORMAT_GENERIC_RESOLVER_EVENT_TOPICS)
-    ) && let Some(source_family) = source_identity.get("source_family").and_then(Value::as_str)
-    {
-        source_families.insert(source_family.to_owned());
-    }
-
     for scan in source_identity
         .get("generic_topic_scans")
         .and_then(Value::as_array)

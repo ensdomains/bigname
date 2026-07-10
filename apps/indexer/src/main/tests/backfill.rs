@@ -6040,7 +6040,7 @@ async fn load_coverage_fact_rows(
         SELECT chain_id, source_family, scope, address, covered_from_block, covered_to_block, derivation
         FROM backfill_coverage_facts
         WHERE backfill_job_id = $1
-        ORDER BY scope, source_family, address, covered_from_block
+        ORDER BY scope, source_family, address, covered_from_block, covered_to_block
         "#,
     )
     .bind(backfill_job_id)
@@ -6166,9 +6166,15 @@ async fn legacy_coverage_derivation_covers_full_payload_identities() -> Result<(
 }
 
 #[tokio::test]
-async fn legacy_coverage_derivation_credits_generic_and_scan_all_family_scans() -> Result<()> {
+async fn legacy_coverage_derivation_merges_generic_family_windows_and_refuses_scan_all()
+-> Result<()> {
     let database = TestDatabase::new().await?;
     create_backfill_job_tables(database.pool()).await?;
+    // Live producers filter generic-scanned targets out of selected_targets;
+    // this synthetic identity carries them to prove family facts come from
+    // the same clamp-and-merge segments as live completion (and are excluded
+    // from address facts). Real jobs of this shape persist no such windows
+    // and therefore conservatively yield no family facts.
     let generic_job_id = insert_completed_backfill_job(
         database.pool(),
         "legacy-generic-topic-scans",
@@ -6183,6 +6189,27 @@ async fn legacy_coverage_derivation_credits_generic_and_scan_all_family_scans() 
                     "address": "0x1111111111111111111111111111111111111111",
                     "effective_from_block": 100,
                     "effective_to_block": 120
+                },
+                {
+                    "source_family": "ens_v1_resolver_l1",
+                    "contract_instance_id": "1abbca82-a3c4-4fcf-860b-d1eccfd10977",
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "effective_from_block": 90,
+                    "effective_to_block": 105
+                },
+                {
+                    "source_family": "ens_v1_resolver_l1",
+                    "contract_instance_id": "2abbca82-a3c4-4fcf-860b-d1eccfd10977",
+                    "address": "0x3333333333333333333333333333333333333333",
+                    "effective_from_block": 110,
+                    "effective_to_block": 112
+                },
+                {
+                    "source_family": "ens_v1_resolver_l1",
+                    "contract_instance_id": "3abbca82-a3c4-4fcf-860b-d1eccfd10977",
+                    "address": "0x4444444444444444444444444444444444444444",
+                    "effective_from_block": 130,
+                    "effective_to_block": 140
                 }
             ],
             "generic_topic_scans": [
@@ -6200,8 +6227,8 @@ async fn legacy_coverage_derivation_credits_generic_and_scan_all_family_scans() 
     let outcome =
         repair::derive_legacy_backfill_coverage_facts(database.pool(), generic_job_id).await?;
     assert_eq!(outcome.address_fact_count, 1);
-    assert_eq!(outcome.family_fact_count, 1);
-    assert_eq!(outcome.inserted_fact_count, 2);
+    assert_eq!(outcome.family_fact_count, 2);
+    assert_eq!(outcome.inserted_fact_count, 3);
     assert_eq!(
         load_coverage_fact_rows(database.pool(), generic_job_id).await?,
         vec![
@@ -6220,10 +6247,21 @@ async fn legacy_coverage_derivation_credits_generic_and_scan_all_family_scans() 
                 "family".to_owned(),
                 None,
                 100,
-                120,
+                105,
                 "legacy_full_payload_identity".to_owned(),
             ),
-        ]
+            (
+                "ethereum-mainnet".to_owned(),
+                "ens_v1_resolver_l1".to_owned(),
+                "family".to_owned(),
+                None,
+                110,
+                112,
+                "legacy_full_payload_identity".to_owned(),
+            ),
+        ],
+        "family facts must be the merged clamped segments of the persisted resolver windows, \
+         with the out-of-range window dropped and resolver targets excluded from address facts"
     );
 
     let scan_all_job_id = insert_completed_backfill_job(
@@ -6241,23 +6279,19 @@ async fn legacy_coverage_derivation_credits_generic_and_scan_all_family_scans() 
     )
     .await?;
 
-    let outcome =
-        repair::derive_legacy_backfill_coverage_facts(database.pool(), scan_all_job_id).await?;
-    assert_eq!(outcome.address_fact_count, 0);
-    assert_eq!(outcome.family_fact_count, 1);
-    assert_eq!(outcome.inserted_fact_count, 1);
+    let error = repair::derive_legacy_backfill_coverage_facts(database.pool(), scan_all_job_id)
+        .await
+        .expect_err("scan-all identities persist no family target spans and must be refused");
+    assert!(
+        error
+            .to_string()
+            .contains("does not persist the family target spans"),
+        "unexpected error: {error:#}"
+    );
     assert_eq!(
         load_coverage_fact_rows(database.pool(), scan_all_job_id).await?,
-        vec![(
-            "ethereum-mainnet".to_owned(),
-            "basenames_base_registry".to_owned(),
-            "family".to_owned(),
-            None,
-            100,
-            120,
-            "legacy_full_payload_identity".to_owned(),
-        )],
-        "a scan-all identity must credit the registry family over the full job range"
+        Vec::new(),
+        "a refused scan-all derivation must not write facts"
     );
 
     database.cleanup().await

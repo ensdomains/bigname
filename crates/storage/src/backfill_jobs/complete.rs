@@ -181,6 +181,14 @@ pub(super) fn warn_backfill_job_completed_without_coverage_facts(
     job: &BackfillJob,
     completion_path: &str,
 ) {
+    warn_backfill_job_coverage_fact_gap(
+        job,
+        completion_path,
+        "backfill job completed without coverage facts",
+    );
+}
+
+fn warn_backfill_job_coverage_fact_gap(job: &BackfillJob, completion_path: &str, headline: &str) {
     let payload_format = job
         .source_identity
         .get("source_identity_payload_format")
@@ -190,18 +198,26 @@ pub(super) fn warn_backfill_job_completed_without_coverage_facts(
         Some("selected_targets_digest_v1")
             | Some("selected_targets_digest_with_generic_topic_scans_v1")
     );
+    // Only recommend the repair command for identity shapes it derives
+    // soundly: verbatim selected_targets payloads. Family-scan-only shapes do
+    // not persist the family target spans, so their coverage is unrecoverable.
+    let guidance = if compact_digest_identity {
+        "; its compact digest identity makes coverage unrecoverable without re-running the job on fact-writing code"
+    } else if matches!(
+        payload_format,
+        None | Some("selected_targets_with_generic_topic_scans_v1")
+    ) {
+        "; run repair derive-backfill-coverage-facts to derive coverage from its verbatim selected_targets"
+    } else {
+        "; its identity does not persist the family target spans needed for sound coverage facts, so re-run the job on fact-writing code"
+    };
     warn!(
         backfill_job_id = job.backfill_job_id,
         chain_id = %job.chain_id,
         completion_path,
         source_identity_payload_format = payload_format.unwrap_or_default(),
         compact_digest_identity,
-        "backfill job completed without coverage facts{}",
-        if compact_digest_identity {
-            "; its compact digest identity makes coverage unrecoverable without re-running the job on fact-writing code"
-        } else {
-            "; run repair derive-backfill-coverage-facts if its source_identity carries the fetched targets verbatim"
-        }
+        "{headline}{guidance}",
     );
 }
 
@@ -222,7 +238,7 @@ where
     }
 
     let job = set_backfill_job_completed(executor, backfill_job_id).await?;
-    write_backfill_coverage_facts_from_iter(
+    let inserted_fact_count = write_backfill_coverage_facts_from_iter(
         executor,
         job.backfill_job_id,
         &job.chain_id,
@@ -230,6 +246,16 @@ where
         coverage_facts(&job),
     )
     .await?;
+    // Catches every flip that ends up fact-less through this path: the
+    // exported complete_backfill_range's empty iterator, and recording
+    // completions whose derivation yielded nothing.
+    if inserted_fact_count == 0 {
+        warn_backfill_job_coverage_fact_gap(
+            &job,
+            "complete_backfill_range",
+            "backfill job completion recorded zero coverage facts",
+        );
+    }
     Ok(())
 }
 
