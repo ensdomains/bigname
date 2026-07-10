@@ -223,6 +223,27 @@ The Phase 5 primary-name rows use ENSv1's Base L2ReverseRegistrar
 | CCIP-Read success / failure / proof mismatch (local mock gateway) | statuses distinguish; failures never fabricate values | blocked(local mock gateway coverage needs a deployable offchain resolver/gateway pair from pins; the simple ENSv1 mock resolver is test source without a harness deployment artifact (upstream: .refs/ens_v1/contracts/test/mocks/MockOffchainResolver.sol:L15 @ ens_v1@91c966f), while shipped offchain resolver artifacts require DNSSEC/gateway-verifier topology not deployed by the ENSv1 e2e stack) |
 | Cache invalidation on record change, topology change, reorg | stale verified answers do not survive | blocked(record-change refresh requires a supported same-DB live ingest plus projection replay to move the selected snapshot and record boundary after the on-chain mutation; worker invalidation commands can delete exact stale boundaries but do not refresh the snapshot or re-execute against the post-change block by themselves) |
 
+### Cross-protocol composition (mainnet profile)
+
+The shipped `mainnet` profile is one corpus spanning ENSv1 on `ethereum`,
+Basenames on `base-mainnet`, and two glue families on the ethereum chain
+(`basenames_l1_compat` v1 and `basenames_execution` v2, both active).
+Every scenario above runs a single-protocol, single-chain corpus, so the
+composed shape production actually ships has no e2e validation, and the
+glue families fell outside both per-protocol audits by construction.
+Non-goal: ENSv1↔ENSv2 same-corpus composition — the sepolia profile is
+ENSv2-only, so that crossing is fenced by profile separation on top of the
+blocked migration row; revisit only if a profile ever admits both.
+
+| Scenario | Key assertions | Status |
+| --- | --- | --- |
+| Composed-corpus equivalence | one corpus, both anvils, full mainnet-profile mirror (ENSv1 ethereum + Basenames base-mainnet + the ethereum-chain glue families): each protocol's route snapshots equal its single-protocol baseline, and per-chain checkpoints advance independently | planned(9) |
+| base.eth namespace handoff | L1 `base.eth` declared state (ENSv1 registry) coexists with Base-authoritative `*.base.eth` children; the exact-name/children boundary sits where the manifests say, with no cross-chain leakage in either direction | planned(9) |
+| One address, two protocols | names registered on both chains by one address in one corpus: address-scoped collections union with chain-scoped surfaces and no identity bleed — the ADR-0002 scoping claim, currently only ever tested one chain at a time | planned(9) |
+| Primary-name coexistence | the same address holds a mainnet `addr.reverse` claim and a Base `80002105.reverse` claim in one corpus; each chain's declared candidate stays correct | planned(9) |
+| Cross-chain perturbations | reorg one chain of a two-chain corpus — the other chain's canonicality untouched; backfill parity holds per chain | planned(9) |
+| L1-compat declared side | the active `basenames_l1_compat` family's watch/admission exercised (what the corpus derives at the L1Resolver address) while the CCIP transport hop stays blocked | planned(9) |
+
 ## Perturbation multipliers (phase 3, cross-cutting)
 
 These wrap *existing* scenarios rather than adding new ones — each scenario
@@ -258,6 +279,7 @@ bodies embed `chain_positions`.
 | ENSv2 sepolia-dev deployment module + profile generation | 7 | covered: `harness::ens_v2`, `manifests-sepolia` mirror, and `ethereum-sepolia` checkpoint target |
 | Mock CCIP gateway (local HTTP server) | 6 | request/response digests must land in execution traces |
 | Execution RPC wiring (`--chain-rpc-url` on API/worker pointed at anvil) | 6 | UniversalResolver artifact bytecode is pinned for both v1 and v2 |
+| Merged mainnet-profile mirror + dual-anvil pipeline run | 9 | union of the ENSv1 and Basenames target sets including the ethereum-chain glue families; the pipeline runner already accepts a `chain_rpc_urls` list |
 
 ## Phasing
 
@@ -286,6 +308,7 @@ matrix.
 | 6 | Execution plane | done — direct path covered with layer-3 trace assertions and two review points; wildcard/alias/CCIP/cache-invalidation blocked with pin-level reasons |
 | 7 | ENSv2 declared-state matrix | done — covered except alias/shared-subregistry/migration blocked rows, with three review points (coverage promotion, discovered-registry scan, re-registration intake wedge) |
 | 8 | Audit-driven matrix extensions: the missing transitions and admission blocked rows from the 2026-07-10 completeness audit | open — highest-risk first moves: ENSv2 renewal (closes the coverage-promotion review point), born-wrapped registration, and the Basenames UpgradeableRegistrarController path |
+| 9 | Cross-protocol composition (mainnet profile): merged-profile mirror, dual-anvil corpus, composition rows | open — gated on the merged mainnet-profile harness capability |
 
 ## CI tiers
 
