@@ -1,5 +1,7 @@
 use anyhow::{Context, Result, bail};
+use serde_json::Value;
 use sqlx::{PgPool, Postgres};
+use tracing::warn;
 
 use super::{
     coverage_facts::{
@@ -9,7 +11,7 @@ use super::{
     decode::{decode_backfill_job, decode_backfill_range},
     read::{
         incomplete_range_count, load_backfill_job_for_update, load_backfill_range_for_update,
-        load_backfill_ranges_for_update,
+        load_backfill_range_job_id, load_backfill_ranges_for_update,
     },
     sql::{backfill_job_returning_sql, backfill_range_returning_sql},
     types::{BackfillJob, BackfillLifecycleStatus, BackfillRange},
@@ -49,6 +51,20 @@ where
         .begin()
         .await
         .context("failed to open transaction for backfill range completion")?;
+
+    // Lock the job before the range (matching complete_backfill_job's lock
+    // order) so concurrent completions of the final two ranges serialize.
+    // Otherwise, under READ COMMITTED, neither transaction's incomplete-range
+    // count reaches zero, and the job is later flipped by the reservation path
+    // without coverage facts.
+    let backfill_job_id = load_backfill_range_job_id(&mut *transaction, backfill_range_id)
+        .await?
+        .with_context(|| format!("missing backfill range {backfill_range_id}"))?;
+    load_backfill_job_for_update(&mut *transaction, backfill_job_id)
+        .await?
+        .with_context(|| {
+            format!("missing backfill job {backfill_job_id} for range {backfill_range_id}")
+        })?;
 
     let current = load_backfill_range_for_update(&mut *transaction, backfill_range_id)
         .await?
@@ -148,6 +164,7 @@ pub async fn complete_backfill_job(pool: &PgPool, backfill_job_id: i64) -> Resul
     .with_context(|| format!("failed to complete ranges for backfill job {backfill_job_id}"))?;
 
     let job = set_backfill_job_completed(&mut transaction, backfill_job_id).await?;
+    warn_backfill_job_completed_without_coverage_facts(&job, "complete_backfill_job");
 
     transaction
         .commit()
@@ -155,6 +172,37 @@ pub async fn complete_backfill_job(pool: &PgPool, backfill_job_id: i64) -> Resul
         .context("failed to commit backfill job completion")?;
 
     Ok(job)
+}
+
+/// Every job completed without coverage facts leaves a durable gap that
+/// checkpoint promotion cannot prove over; make those flips loud so operators
+/// can re-derive (or rerun) before promotion stalls on the missing tuples.
+pub(super) fn warn_backfill_job_completed_without_coverage_facts(
+    job: &BackfillJob,
+    completion_path: &str,
+) {
+    let payload_format = job
+        .source_identity
+        .get("source_identity_payload_format")
+        .and_then(Value::as_str);
+    let compact_digest_identity = matches!(
+        payload_format,
+        Some("selected_targets_digest_v1")
+            | Some("selected_targets_digest_with_generic_topic_scans_v1")
+    );
+    warn!(
+        backfill_job_id = job.backfill_job_id,
+        chain_id = %job.chain_id,
+        completion_path,
+        source_identity_payload_format = payload_format.unwrap_or_default(),
+        compact_digest_identity,
+        "backfill job completed without coverage facts{}",
+        if compact_digest_identity {
+            "; its compact digest identity makes coverage unrecoverable without re-running the job on fact-writing code"
+        } else {
+            "; run repair derive-backfill-coverage-facts if its source_identity carries the fetched targets verbatim"
+        }
+    );
 }
 
 async fn maybe_complete_backfill_job<F, I>(
@@ -166,6 +214,8 @@ where
     F: FnOnce(&BackfillJob) -> I,
     I: Iterator<Item = BackfillCoverageFactWrite>,
 {
+    // The caller holds the job row lock, so this count cannot race a
+    // concurrent completion of another range of the same job.
     let incomplete_count = incomplete_range_count(&mut **executor, backfill_job_id).await?;
     if incomplete_count != 0 {
         return Ok(());

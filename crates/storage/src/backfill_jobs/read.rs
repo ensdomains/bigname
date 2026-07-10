@@ -20,6 +20,30 @@ pub async fn load_backfill_ranges(
     load_backfill_ranges_internal(pool, backfill_job_id).await
 }
 
+/// Resolve a range's parent job id without locking either row, so callers can
+/// take the job lock before the range lock.
+pub(super) async fn load_backfill_range_job_id<'e, E>(
+    executor: E,
+    backfill_range_id: i64,
+) -> Result<Option<i64>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let row =
+        sqlx::query("SELECT backfill_job_id FROM backfill_ranges WHERE backfill_range_id = $1")
+            .bind(backfill_range_id)
+            .fetch_optional(executor)
+            .await
+            .with_context(|| {
+                format!("failed to resolve job for backfill range {backfill_range_id}")
+            })?;
+    row.map(|row| {
+        row.try_get::<i64, _>("backfill_job_id")
+            .context("missing backfill_job_id from backfill range row")
+    })
+    .transpose()
+}
+
 pub(super) async fn incomplete_range_count<'e, E>(executor: E, backfill_job_id: i64) -> Result<i64>
 where
     E: Executor<'e, Database = Postgres>,
