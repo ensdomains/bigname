@@ -4,6 +4,8 @@ use std::io::{self, Write};
 mod coinbase_sql_execution;
 #[path = "reservation_execution/lease_heartbeat.rs"]
 mod lease_heartbeat;
+#[path = "reservation_execution/scan_all.rs"]
+mod scan_all;
 
 use alloy_primitives::{Keccak256, hex};
 use anyhow::{Context, Result, bail};
@@ -21,8 +23,12 @@ use sqlx::types::time::OffsetDateTime;
 use tracing::info;
 
 use crate::{
-    ens_v1_resolver::SOURCE_FAMILY_ENS_V1_RESOLVER_L1, provider::ChainProviderOps,
-    source_scope::watched_source_plan_uses_generic_resolver_scope,
+    ens_v1_resolver::SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+    provider::ChainProviderOps,
+    source_scope::{
+        watched_source_plan_uses_basenames_registry_scan_all,
+        watched_source_plan_uses_generic_resolver_scope,
+    },
 };
 
 use super::{
@@ -41,6 +47,12 @@ pub(crate) use coinbase_sql_execution::{
 };
 pub(super) use lease_heartbeat::{
     run_with_backfill_lease_heartbeat, validate_hash_pinned_chunk_blocks,
+};
+pub(crate) use scan_all::effective_hash_pinned_adapter_sync_mode;
+use scan_all::{
+    basenames_registry_scan_all_topics_source_identity_payload,
+    coinbase_sql_basenames_registry_scan_all_source_identity_payload,
+    coinbase_sql_uses_basenames_registry_scan_all,
 };
 
 const HASH_PINNED_BACKFILL_SCAN_MODE: &str = "hash_pinned_block";
@@ -165,6 +177,9 @@ pub(crate) fn hash_pinned_backfill_range_specs(
 pub(crate) fn backfill_job_source_identity_payload(
     source_plan: &WatchedSourceSelectorPlan,
 ) -> Result<Value> {
+    if watched_source_plan_uses_basenames_registry_scan_all(source_plan) {
+        return basenames_registry_scan_all_topics_source_identity_payload(source_plan);
+    }
     if watched_source_plan_uses_generic_resolver_scope(source_plan) {
         return generic_topic_scan_source_identity_payload(source_plan);
     }
@@ -252,28 +267,6 @@ pub(crate) fn coinbase_sql_backfill_job_source_identity_payload(
         );
 
     Ok(payload)
-}
-
-fn coinbase_sql_uses_basenames_registry_scan_all(
-    source_plan: &WatchedSourceSelectorPlan,
-    topic_plan: &BackfillTopicPlan,
-) -> bool {
-    source_plan.selector_kind == WatchedSourceSelectorKind::SourceFamily
-        && source_plan.source_family.as_deref() == Some("basenames_base_registry")
-        && !topic_plan
-            .event_signatures_for_source_family("basenames_base_registry")
-            .is_empty()
-}
-
-fn coinbase_sql_basenames_registry_scan_all_source_identity_payload(
-    source_plan: &WatchedSourceSelectorPlan,
-) -> Result<Value> {
-    Ok(json!({
-        "selector_kind": source_plan.selector_kind.as_str(),
-        "source_family": &source_plan.source_family,
-        "requested_watched_targets": &source_plan.requested_watched_targets,
-        "source_identity_payload_format": "basenames_registry_scan_all_event_signatures_v1",
-    }))
 }
 
 fn generic_topic_scan_source_identity_payload(
@@ -386,7 +379,8 @@ pub(crate) async fn run_resumable_hash_pinned_backfill_job(
     provider: &(impl ChainProviderOps + ?Sized),
     mut config: BackfillJobRunConfig,
 ) -> Result<BackfillJobRunOutcome> {
-    config.adapter_sync_mode = config.adapter_sync_mode.hash_pinned_backfill_mode();
+    config.adapter_sync_mode =
+        effective_hash_pinned_adapter_sync_mode(source_plan, config.adapter_sync_mode);
     validate_hash_pinned_chunk_blocks(config.hash_pinned_chunk_blocks)?;
     let watched_chain = &source_plan.watched_chain_plan;
     let record = create_hash_pinned_backfill_job(pool, source_plan, &config).await?;
@@ -590,7 +584,7 @@ pub(super) async fn run_reserved_hash_pinned_backfill_range(
         &active_range,
         config,
         source_plan,
-        false,
+        watched_source_plan_uses_basenames_registry_scan_all(source_plan),
         "backfill range completion failed",
     )
     .await

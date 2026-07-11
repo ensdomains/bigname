@@ -7,9 +7,13 @@ use bigname_manifests::{
     load_active_manifest_abi_events_by_chain_and_source_families, load_discovery_admission_epoch,
     load_log_producing_source_families, load_watched_contracts_by_addresses,
 };
-use bigname_storage::{ChainLineageBlock, load_completed_backfill_jobs_intersecting_range};
-use serde_json::Value;
+use bigname_storage::ChainLineageBlock;
 use sqlx::Row;
+
+#[path = "coverage/topic_drift.rs"]
+mod topic_drift;
+
+use topic_drift::ensure_family_topic_sets_undrifted;
 
 /// Frontier extensions verify coverage in chunks of this many blocks, so a
 /// deep gap costs a handful of anti-join queries once and every promotion
@@ -312,84 +316,6 @@ fn uncovered_tuples_refusal(
     )
 }
 
-/// Fail closed on topic-set drift: coverage facts assert fetches that were
-/// topics-complete relative to the family's manifest ABI event set at fetch
-/// time. If a family's current topic0 set differs from the set persisted in
-/// any completed topic-filtered job intersecting the evaluated range — or a
-/// topic-filtered job did not persist its set at all — the facts may
-/// overclaim relative to the current ABI, so promotion refuses naming the
-/// family. Address-enumerated hash-pinned fetches are topic-unfiltered and
-/// immune.
-async fn ensure_family_topic_sets_undrifted(
-    pool: &sqlx::PgPool,
-    chain: &str,
-    current_topic0s_by_family: &BTreeMap<String, BTreeSet<String>>,
-    from_block: i64,
-    to_block: i64,
-) -> std::result::Result<(), String> {
-    if current_topic0s_by_family.is_empty() {
-        return Ok(());
-    }
-    let jobs = load_completed_backfill_jobs_intersecting_range(pool, chain, from_block, to_block)
-        .await
-        .map_err(|error| error.to_string())?;
-    if jobs.is_empty() {
-        return Ok(());
-    }
-
-    let relied_families = current_topic0s_by_family
-        .keys()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
-    for job in &jobs {
-        if let Some(persisted_by_family) = job
-            .source_identity
-            .get("coinbase_sql_topic_plan")
-            .and_then(|plan| plan.get("topic0s_by_source_family"))
-            .and_then(Value::as_object)
-        {
-            for (source_family, topics) in persisted_by_family {
-                if !relied_families.contains(source_family.as_str()) {
-                    continue;
-                }
-                let persisted = topics
-                    .as_array()
-                    .map(|topics| {
-                        topics
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .map(str::to_ascii_lowercase)
-                            .collect::<BTreeSet<_>>()
-                    })
-                    .unwrap_or_default();
-                let current = current_topic0s_by_family
-                    .get(source_family)
-                    .cloned()
-                    .unwrap_or_default();
-                if persisted != current {
-                    return Err(format!(
-                        "source family {source_family} manifest ABI topic0 set changed after completed backfill job {} was fetched (persisted {} topic0s, current {}); its coverage facts may overclaim relative to the current ABI — re-run the affected range on the current manifest before promoting",
-                        job.backfill_job_id,
-                        persisted.len(),
-                        current.len()
-                    ));
-                }
-            }
-        }
-
-        for scanned_family in topic_filtered_families_without_persisted_sets(&job.source_identity) {
-            if relied_families.contains(scanned_family.as_str()) {
-                return Err(format!(
-                    "source family {scanned_family} was fetched by topic-filtered scan in completed backfill job {} without a persisted topic set; drift relative to the current manifest ABI cannot be ruled out — re-run the affected range on the current manifest before promoting",
-                    job.backfill_job_id
-                ));
-            }
-        }
-    }
-
-    Ok(())
-}
-
 /// Current manifest topic0 sets per log-producing family; also the input to
 /// the frontier memo's ABI fingerprint.
 async fn load_current_topic0s_by_family(
@@ -432,38 +358,6 @@ fn topic_set_fingerprint(current_topic0s_by_family: &BTreeMap<String, BTreeSet<S
         fingerprint.push(';');
     }
     fingerprint
-}
-
-/// Families a job fetched through topic-filtered generic scans whose identity
-/// does not persist the topic set in force (hash-pinned generic resolver
-/// scans; `coinbase_sql_topic_plan`-bearing identities are checked above).
-fn topic_filtered_families_without_persisted_sets(source_identity: &Value) -> Vec<String> {
-    if source_identity.get("coinbase_sql_topic_plan").is_some() {
-        return Vec::new();
-    }
-
-    let mut families = Vec::new();
-    if source_identity
-        .get("source_identity_payload_format")
-        .and_then(Value::as_str)
-        == Some("generic_resolver_event_topics_v1")
-        && let Some(source_family) = source_identity.get("source_family").and_then(Value::as_str)
-    {
-        families.push(source_family.to_owned());
-    }
-    for scan in source_identity
-        .get("generic_topic_scans")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        if let Some(source_family) = scan.get("source_family").and_then(Value::as_str) {
-            families.push(source_family.to_owned());
-        }
-    }
-    families.sort_unstable();
-    families.dedup();
-    families
 }
 
 /// Every stored canonical log emitted by a watched address inside the path

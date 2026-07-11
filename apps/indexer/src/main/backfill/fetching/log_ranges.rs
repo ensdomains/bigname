@@ -5,9 +5,15 @@ use bigname_manifests::WatchedSourceSelectorPlan;
 use tracing::info;
 
 use crate::{
+    basenames_registry::{
+        SOURCE_FAMILY_BASENAMES_BASE_REGISTRY, basenames_registry_scan_all_topic0s,
+    },
     ens_v1_resolver::{SOURCE_FAMILY_ENS_V1_RESOLVER_L1, generic_resolver_record_topic0s},
     provider::{ChainProviderOps, ProviderLog, ProviderResolvedBlock},
-    source_scope::watched_source_plan_uses_generic_resolver_scope,
+    source_scope::{
+        watched_source_plan_uses_basenames_registry_scan_all,
+        watched_source_plan_uses_generic_resolver_scope,
+    },
 };
 
 use super::super::{
@@ -27,6 +33,7 @@ pub(super) async fn fetch_backfill_logs_by_safe_ranges(
     range: BackfillBlockRange,
 ) -> Result<BTreeMap<i64, Vec<ProviderLog>>> {
     if let Some(topic_scan) = source_family_topic_scan(source_plan) {
+        let scanned_source_family = topic_scan.scanned_source_family;
         let mut logs_by_block = fetch_topic_first_logs_by_safe_ranges(
             provider,
             source_plan,
@@ -42,14 +49,14 @@ pub(super) async fn fetch_backfill_logs_by_safe_ranges(
             source_plan,
             resolved_blocks,
             range,
-            true,
+            Some(scanned_source_family),
         )
         .await?;
         merge_logs_by_block(&mut logs_by_block, address_scoped_logs);
         return Ok(logs_by_block);
     }
 
-    fetch_address_scoped_logs_by_safe_ranges(provider, source_plan, resolved_blocks, range, false)
+    fetch_address_scoped_logs_by_safe_ranges(provider, source_plan, resolved_blocks, range, None)
         .await
 }
 
@@ -58,14 +65,14 @@ async fn fetch_address_scoped_logs_by_safe_ranges(
     source_plan: &WatchedSourceSelectorPlan,
     resolved_blocks: &[ProviderResolvedBlock],
     range: BackfillBlockRange,
-    omit_generic_resolver_targets: bool,
+    omitted_source_family: Option<&'static str>,
 ) -> Result<BTreeMap<i64, Vec<ProviderLog>>> {
     let mut logs_by_block = BTreeMap::new();
-    let requests = if omit_generic_resolver_targets {
+    let requests = if let Some(omitted_source_family) = omitted_source_family {
         selected_log_range_requests_without_source_family(
             source_plan,
             resolved_blocks,
-            SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+            omitted_source_family,
         )
     } else {
         selected_log_range_requests(source_plan, resolved_blocks)
@@ -186,7 +193,7 @@ pub(super) fn selected_addresses_for_materialized_block(
     block_number: i64,
     block_logs: &[ProviderLog],
 ) -> BTreeSet<String> {
-    if scans_all_resolver_event_emitters(source_plan) {
+    if scans_all_source_family_event_emitters(source_plan) {
         block_logs
             .iter()
             .map(|log| log.address.to_ascii_lowercase())
@@ -206,23 +213,34 @@ pub(super) fn uses_topic_first_source_family_scan(source_plan: &WatchedSourceSel
 struct SourceFamilyTopicScan {
     topic0s: Vec<String>,
     scan_all_emitters: bool,
+    /// The family whose targets are fetched by the topic scan and therefore
+    /// omitted from the address-scoped complement fetch.
+    scanned_source_family: &'static str,
 }
 
 fn source_family_topic_scan(
     source_plan: &WatchedSourceSelectorPlan,
 ) -> Option<SourceFamilyTopicScan> {
-    if !watched_source_plan_uses_generic_resolver_scope(source_plan) {
-        return None;
+    if watched_source_plan_uses_generic_resolver_scope(source_plan) {
+        return Some(SourceFamilyTopicScan {
+            topic0s: generic_resolver_record_topic0s(),
+            scan_all_emitters: true,
+            scanned_source_family: SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+        });
     }
-
-    Some(SourceFamilyTopicScan {
-        topic0s: generic_resolver_record_topic0s(),
-        scan_all_emitters: true,
-    })
+    if watched_source_plan_uses_basenames_registry_scan_all(source_plan) {
+        return Some(SourceFamilyTopicScan {
+            topic0s: basenames_registry_scan_all_topic0s(),
+            scan_all_emitters: true,
+            scanned_source_family: SOURCE_FAMILY_BASENAMES_BASE_REGISTRY,
+        });
+    }
+    None
 }
 
-fn scans_all_resolver_event_emitters(source_plan: &WatchedSourceSelectorPlan) -> bool {
+fn scans_all_source_family_event_emitters(source_plan: &WatchedSourceSelectorPlan) -> bool {
     watched_source_plan_uses_generic_resolver_scope(source_plan)
+        || watched_source_plan_uses_basenames_registry_scan_all(source_plan)
 }
 
 fn merge_logs_by_block(
@@ -255,6 +273,7 @@ fn same_log_identity(left: &ProviderLog, right: &ProviderLog) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::basenames_registry::basenames_registry_scan_all_topic0s;
     use bigname_manifests::{
         WatchedBackfillTarget, WatchedChainPlan, WatchedSourceSelectorKind,
         WatchedSourceSelectorPlan,
@@ -276,23 +295,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn basenames_registry_materialization_uses_all_active_addresses_not_log_emitters() {
-        let addresses = [
-            "0x0000000000000000000000000000000000000001",
-            "0x0000000000000000000000000000000000000002",
-            "0x0000000000000000000000000000000000000003",
-        ];
-        let source_plan = WatchedSourceSelectorPlan {
+    fn source_family_plan(source_family: &str, addresses: &[&str]) -> WatchedSourceSelectorPlan {
+        WatchedSourceSelectorPlan {
             chain: "base-mainnet".to_owned(),
             selector_kind: WatchedSourceSelectorKind::SourceFamily,
-            source_family: Some("basenames_base_registry".to_owned()),
+            source_family: Some(source_family.to_owned()),
             requested_watched_targets: Vec::new(),
             selected_targets: addresses
                 .iter()
                 .enumerate()
                 .map(|(index, address)| WatchedBackfillTarget {
-                    source_family: "basenames_base_registry".to_owned(),
+                    source_family: source_family.to_owned(),
                     contract_instance_id: Uuid::from_u128(index as u128 + 1),
                     address: (*address).to_owned(),
                     effective_from_block: 10,
@@ -309,7 +322,17 @@ mod tests {
                 manifest_contract_entry_count: addresses.len(),
                 discovery_edge_entry_count: 0,
             },
-        };
+        }
+    }
+
+    #[test]
+    fn address_scanned_family_materialization_uses_all_active_addresses_not_log_emitters() {
+        let addresses = [
+            "0x0000000000000000000000000000000000000001",
+            "0x0000000000000000000000000000000000000002",
+            "0x0000000000000000000000000000000000000003",
+        ];
+        let source_plan = source_family_plan("basenames_base_registrar", &addresses);
         let selected_target_index = SelectedTargetIntervalIndex::from_source_plan(&source_plan);
         let block_logs = vec![provider_log(addresses[1], 10)];
 
@@ -328,9 +351,38 @@ mod tests {
                 .map(|address| (*address).to_owned())
                 .collect::<BTreeSet<_>>()
         );
-        assert_ne!(
-            selected_addresses,
-            BTreeSet::from([addresses[1].to_owned()])
+    }
+
+    #[test]
+    fn basenames_registry_scan_all_uses_topic_scan_without_address_enumeration() {
+        let addresses = [
+            "0x0000000000000000000000000000000000000001",
+            "0x0000000000000000000000000000000000000002",
+        ];
+        let source_plan = source_family_plan("basenames_base_registry", &addresses);
+
+        let topic_scan = source_family_topic_scan(&source_plan)
+            .expect("a Basenames registry source-family plan must use the topic scan");
+        assert!(topic_scan.scan_all_emitters);
+        assert_eq!(
+            topic_scan.scanned_source_family,
+            SOURCE_FAMILY_BASENAMES_BASE_REGISTRY
         );
+        assert_eq!(topic_scan.topic0s, basenames_registry_scan_all_topic0s());
+        assert!(uses_topic_first_source_family_scan(&source_plan));
+
+        // Materialization scopes observations to the block's log emitters —
+        // watched emitters are not enumerable under a scan-all fetch.
+        let selected_target_index = SelectedTargetIntervalIndex::from_source_plan(&source_plan);
+        let emitter = "0x00000000000000000000000000000000000000ee";
+        let block_logs = vec![provider_log(emitter, 10)];
+        let selected_addresses = selected_addresses_for_materialized_block(
+            &source_plan,
+            &selected_target_index,
+            true,
+            10,
+            &block_logs,
+        );
+        assert_eq!(selected_addresses, BTreeSet::from([emitter.to_owned()]));
     }
 }

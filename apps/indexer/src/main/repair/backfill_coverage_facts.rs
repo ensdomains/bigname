@@ -17,6 +17,7 @@ const FORMAT_SELECTED_TARGETS_WITH_GENERIC_TOPIC_SCANS: &str =
 const FORMAT_GENERIC_RESOLVER_EVENT_TOPICS: &str = "generic_resolver_event_topics_v1";
 const FORMAT_BASENAMES_REGISTRY_SCAN_ALL_EVENT_SIGNATURES: &str =
     "basenames_registry_scan_all_event_signatures_v1";
+const FORMAT_BASENAMES_REGISTRY_SCAN_ALL_TOPICS: &str = "basenames_registry_scan_all_topics_v1";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LegacyBackfillCoverageFactsOutcome {
@@ -100,6 +101,30 @@ fn legacy_coverage_facts_from_source_identity(
             job.backfill_job_id,
             payload_format.unwrap_or_default()
         ),
+        // The hash-pinned scan-all fetches its persisted topic0 set across
+        // every block of every range (no window skipping, unlike the Coinbase
+        // SQL scan-all planner), so a full-job-range family fact is sound.
+        Some(FORMAT_BASENAMES_REGISTRY_SCAN_ALL_TOPICS) => {
+            let families = source_identity
+                .get("topic0s_by_source_family")
+                .and_then(Value::as_object)
+                .with_context(|| {
+                    format!(
+                        "backfill job {} scan-all-topics identity must persist topic0s_by_source_family",
+                        job.backfill_job_id
+                    )
+                })?;
+            return Ok(families
+                .keys()
+                .map(|source_family| BackfillCoverageFactWrite {
+                    source_family: source_family.clone(),
+                    scope: BackfillCoverageFactScope::Family,
+                    address: None,
+                    covered_from_block: job.range_start_block_number,
+                    covered_to_block: job.range_end_block_number,
+                })
+                .collect());
+        }
         None | Some(FORMAT_SELECTED_TARGETS_WITH_GENERIC_TOPIC_SCANS) => {}
         Some(other) => bail!(
             "backfill job {} persisted an unsupported source_identity_payload_format {other}; coverage cannot be derived from it",
