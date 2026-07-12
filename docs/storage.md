@@ -576,7 +576,11 @@ read by promotion.
   spurious promotion refusal: requirement tuples are by construction inside
   the union of the family's target windows.
 - Repair derivability: identities that persist the fetched target set
-  verbatim (fnv1a64-era full payloads) re-derive completely. Compact digest
+  verbatim (fnv1a64-era full payloads) re-derive completely, as does the
+  hash-pinned registry scan-all identity
+  (`basenames_registry_scan_all_topics_v1`), which persists its topic0 set
+  verbatim — repair derives a full-job-range family fact from it (unlike its
+  cbsql counterpart below, which persists no spans and is refused). Compact digest
   identities (`selected_targets_digest_v1` and its generic-scan variant)
   are refused — the target set is unrecoverable from a digest. Family-scan
   identities that do not persist the scanned family's target windows
