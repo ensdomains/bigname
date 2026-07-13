@@ -44,15 +44,26 @@ pub(super) async fn fetch_backfill_logs_by_safe_ranges(
             topic_scan,
         )
         .await?;
-        let address_scoped_logs = fetch_address_scoped_logs_by_safe_ranges(
-            provider,
-            source_plan,
-            resolved_blocks,
-            range,
-            Some(scanned_source_family),
-        )
-        .await?;
-        merge_logs_by_block(&mut logs_by_block, address_scoped_logs);
+        // Skip the address-scoped complement when every selected target
+        // belongs to the scanned family: the complement is empty by
+        // construction, and building it would linear-scan the full target
+        // set per resolved block (3.84M registry targets x 4096 blocks per
+        // chunk never completes).
+        let complement_has_targets = source_plan
+            .selected_targets
+            .iter()
+            .any(|target| target.source_family != scanned_source_family);
+        if complement_has_targets {
+            let address_scoped_logs = fetch_address_scoped_logs_by_safe_ranges(
+                provider,
+                source_plan,
+                resolved_blocks,
+                range,
+                Some(scanned_source_family),
+            )
+            .await?;
+            merge_logs_by_block(&mut logs_by_block, address_scoped_logs);
+        }
         return Ok(logs_by_block);
     }
 
