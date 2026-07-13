@@ -13,8 +13,6 @@ mod ens_v2_permissions;
 mod ens_v2_registrar;
 mod ens_v2_registry;
 mod ens_v2_resolver;
-// dead_code: the decode core lands ahead of its sync-loop consumer.
-#[allow(dead_code)]
 mod entrypoint_user_operation;
 mod evm_abi;
 mod manifest_normalized_events;
@@ -60,6 +58,10 @@ pub use ens_v2_registry::{
 pub use ens_v2_resolver::{
     EnsV2ResolverKindSyncSummary, EnsV2ResolverSyncSummary, sync_ens_v2_resolver,
     sync_ens_v2_resolver_through_block,
+};
+pub use entrypoint_user_operation::{
+    EntrypointUserOperationKindSyncSummary, EntrypointUserOperationSyncSummary,
+    sync_entrypoint_user_operation, sync_entrypoint_user_operation_through_block,
 };
 pub use manifest_normalized_events::{
     ManifestNormalizedEventKindSyncSummary, ManifestNormalizedEventSyncSummary,
