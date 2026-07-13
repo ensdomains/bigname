@@ -13,6 +13,9 @@ mod ens_v2_permissions;
 mod ens_v2_registrar;
 mod ens_v2_registry;
 mod ens_v2_resolver;
+// dead_code: the decode core lands ahead of its sync-loop consumer.
+#[allow(dead_code)]
+mod entrypoint_user_operation;
 mod evm_abi;
 mod manifest_normalized_events;
 mod normalized_event_support;
