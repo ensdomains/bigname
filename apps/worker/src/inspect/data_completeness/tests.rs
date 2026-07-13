@@ -1,12 +1,13 @@
 use super::evaluate::{CheckStatus, DEFAULT_MAX_HEAD_LAG_BLOCKS, evaluate_data_completeness};
 use bigname_manifests::{WatchedContract, WatchedContractSource};
 use bigname_storage::{
-    ChainCompletenessRow, DataCompletenessRead, ObservedCodeAddress, ProjectionApplyCursorRow,
-    ReplayCursorRow,
+    ChainCompletenessRow, DataCompletenessRead, NameCurrentCount, NormalizedEventCount,
+    ObservedCodeAddress, ProjectionApplyCursorRow, ReplayCursorRow,
 };
 use uuid::Uuid;
 
 const CHAIN: &str = "ethereum-sepolia";
+const NAMESPACE: &str = "ens";
 const REGISTRY: &str = "0x796fff2e907449be8d5921bcc215b1b76d89d080";
 const RESOLVER: &str = "0xe99638b40e4fff0129d56f03b55b6bbc4bbe49b5";
 const APPLY_CURSOR: &str = "normalized_events_to_projection_invalidations";
@@ -31,6 +32,21 @@ fn observed(address: &str) -> ObservedCodeAddress {
     }
 }
 
+fn events(chain: &str, namespace: &str, count: i64) -> NormalizedEventCount {
+    NormalizedEventCount {
+        chain_id: chain.to_owned(),
+        namespace: namespace.to_owned(),
+        count,
+    }
+}
+
+fn names(namespace: &str, count: i64) -> NameCurrentCount {
+    NameCurrentCount {
+        namespace: namespace.to_owned(),
+        count,
+    }
+}
+
 fn chain_row(
     canonical: i64,
     lineage_head: i64,
@@ -43,6 +59,7 @@ fn chain_row(
         lineage_head_block_number: Some(lineage_head),
         lineage_floor_block_number: Some(floor),
         lineage_canonical_block_count: block_count,
+        duplicate_canonical_height_count: 0,
         canonical_raw_log_head_block_number: Some(floor),
         raw_log_head_block_number: Some(floor),
     }
@@ -86,8 +103,8 @@ fn healthy_read() -> DataCompletenessRead {
         pending_projection_invalidation_count: 0,
         projection_invalidation_dead_letter_count: 0,
         observed_code_addresses: vec![observed(REGISTRY)],
-        normalized_event_count: 100,
-        name_current_count: 10,
+        normalized_event_counts: vec![events(CHAIN, NAMESPACE, 100)],
+        name_current_counts: vec![names(NAMESPACE, 10)],
     }
 }
 
@@ -125,7 +142,7 @@ fn discovered_target_without_code_observation_fails_watch_set_coverage() {
     assert_eq!(report.normalization_healthy(), CheckStatus::Pass);
     assert_eq!(report.normalization_caught_up(), CheckStatus::Pass);
     assert_eq!(report.projection_drained(), CheckStatus::Pass);
-    assert_eq!(report.content_present(), CheckStatus::Pass);
+    assert_eq!(report.active_dataset_non_empty(), CheckStatus::Pass);
 }
 
 #[test]
@@ -328,14 +345,137 @@ fn projection_invalidation_dead_letter_fails() {
 #[test]
 fn empty_projections_fail_even_when_every_cursor_is_drained() {
     let mut read = healthy_read();
-    read.normalized_event_count = 0;
-    read.name_current_count = 0;
+    read.normalized_event_counts = vec![];
+    read.name_current_counts = vec![];
     read.projection_apply_cursors = vec![apply_cursor(0)];
     read.max_projection_change_id = None;
     let report = evaluate(&read, &registry_only());
 
     assert_eq!(report.projection_drained(), CheckStatus::Pass);
-    assert_eq!(report.content_present(), CheckStatus::Fail);
+    assert_eq!(report.active_dataset_non_empty(), CheckStatus::Fail);
+    assert_eq!(report.active_chains_without_events, vec![CHAIN.to_owned()]);
+    assert!(!report.data_complete());
+}
+
+/// A stale checkpoint writer or mixed restore can leave the canonical checkpoint behind the
+/// retained lineage head, giving a negative lag that `lag <= max` would accept.
+#[test]
+fn negative_head_lag_fails_frontier() {
+    let mut read = healthy_read();
+    read.chains = vec![chain_row(900, 1_000, 1, 1_000)];
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.frontiers[0].head_lag_blocks, Some(-100));
+    assert_eq!(report.frontier_at_head(), CheckStatus::Fail);
+    assert!(!report.data_complete());
+}
+
+/// A chain the active watch set declares but that is absent from checkpoints and lineage
+/// produces no storage row, so every per-chain check would pass by absence.
+#[test]
+fn manifest_declared_chain_without_storage_fails_frontier() {
+    let mut read = healthy_read();
+    // Storage has a foreign chain; the watched registry chain has no row at all.
+    read.chains = vec![ChainCompletenessRow {
+        chain_id: "base-mainnet".to_owned(),
+        ..chain_row(1_000, 1_000, 1, 1_000)
+    }];
+    let report = evaluate(&read, &registry_only());
+
+    let synthesized = report
+        .frontiers
+        .iter()
+        .find(|frontier| frontier.chain_id == CHAIN)
+        .expect("synthesized frontier for the declared chain");
+    assert!(synthesized.missing_from_storage);
+    assert_eq!(synthesized.head_lag_blocks, None);
+    assert_eq!(report.frontier_at_head(), CheckStatus::Fail);
+    assert!(!report.data_complete());
+}
+
+/// Two non-orphaned canonical hashes at one height is a canonicality violation the distinct
+/// block-number contiguity count cannot see.
+#[test]
+fn duplicate_canonical_height_fails_contiguity() {
+    let mut read = healthy_read();
+    read.chains = vec![ChainCompletenessRow {
+        duplicate_canonical_height_count: 1,
+        ..chain_row(1_000, 1_000, 1, 1_000)
+    }];
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.lineage_contiguous(), CheckStatus::Fail);
+    assert_eq!(report.frontiers[0].duplicate_canonical_height_count, 1);
+    assert!(!report.data_complete());
+}
+
+/// A live-tail-only database is internally consistent — contiguous span, caught-up cursors,
+/// non-empty projections — but its lineage floor sits above the earliest declared start, so
+/// history is truncated.
+#[test]
+fn lineage_floor_above_declared_start_fails_history() {
+    let mut read = healthy_read();
+    read.chains = vec![chain_row(1_000, 1_000, 900, 101)];
+    read.replay_cursors = vec![replay_cursor(1_000, None)];
+    // Registry declares a start at block 500, below the retained lineage floor of 900.
+    let mut early = watched(REGISTRY, WatchedContractSource::ManifestContract);
+    early.active_from_block_number = Some(500);
+    let report = evaluate(&read, &[early]);
+
+    assert_eq!(report.history_from_declared_start(), CheckStatus::Fail);
+    assert_eq!(report.chains_history_truncated.len(), 1);
+    assert_eq!(report.chains_history_truncated[0].declared_start_block, 500);
+    assert_eq!(
+        report.chains_history_truncated[0].lineage_floor_block,
+        Some(900)
+    );
+    // The gate would otherwise pass: the truncated span is itself contiguous.
+    assert_eq!(report.lineage_contiguous(), CheckStatus::Pass);
+    assert!(!report.data_complete());
+}
+
+/// A target with no finite declared start imposes no history floor.
+#[test]
+fn target_without_finite_start_imposes_no_history_floor() {
+    let mut read = healthy_read();
+    read.chains = vec![chain_row(1_000, 1_000, 900, 101)];
+    read.replay_cursors = vec![replay_cursor(1_000, None)];
+    let mut open_ended = watched(REGISTRY, WatchedContractSource::ManifestContract);
+    open_ended.active_from_block_number = None;
+    let report = evaluate(&read, &[open_ended]);
+
+    assert_eq!(report.history_from_declared_start(), CheckStatus::Pass);
+    assert!(report.chains_history_truncated.is_empty());
+}
+
+/// Rows from another chain satisfy a global count while a newly active chain has zero. The
+/// content check must be scoped to the active dataset.
+#[test]
+fn foreign_chain_content_does_not_satisfy_an_empty_active_chain() {
+    let mut read = healthy_read();
+    // All normalized events and names belong to a chain the active watch set does not cover.
+    read.normalized_event_counts = vec![events("base-mainnet", NAMESPACE, 500)];
+    read.name_current_counts = vec![names(NAMESPACE, 20)];
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.active_dataset_non_empty(), CheckStatus::Fail);
+    assert_eq!(report.active_chains_without_events, vec![CHAIN.to_owned()]);
+    assert!(!report.data_complete());
+}
+
+/// An active chain with events in a namespace that has no name_current rows fails: names did
+/// not materialize for that namespace.
+#[test]
+fn active_namespace_without_names_fails_content() {
+    let mut read = healthy_read();
+    read.name_current_counts = vec![];
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.active_dataset_non_empty(), CheckStatus::Fail);
+    assert_eq!(
+        report.active_namespaces_without_names,
+        vec![NAMESPACE.to_owned()]
+    );
     assert!(!report.data_complete());
 }
 

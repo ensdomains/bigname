@@ -18,6 +18,10 @@ pub struct ChainCompletenessRow {
     pub lineage_head_block_number: Option<i64>,
     pub lineage_floor_block_number: Option<i64>,
     pub lineage_canonical_block_count: i64,
+    /// Block heights carrying more than one non-orphaned canonical/safe/finalized lineage
+    /// row. The distinct-block-number contiguity count cannot see these, so they are counted
+    /// separately; a non-zero value is a canonicality violation, not a gap.
+    pub duplicate_canonical_height_count: i64,
     pub canonical_raw_log_head_block_number: Option<i64>,
     pub raw_log_head_block_number: Option<i64>,
 }
@@ -45,6 +49,22 @@ pub struct ObservedCodeAddress {
     pub address: String,
 }
 
+/// Non-empty `normalized_events` count for one `(chain_id, namespace)`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NormalizedEventCount {
+    pub chain_id: String,
+    pub namespace: String,
+    pub count: i64,
+}
+
+/// Non-empty `name_current` count for one namespace. `name_current` carries no chain, so a
+/// namespace is the finest dimension a name projection can be scoped to.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NameCurrentCount {
+    pub namespace: String,
+    pub count: i64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DataCompletenessRead {
     pub chains: Vec<ChainCompletenessRow>,
@@ -60,8 +80,12 @@ pub struct DataCompletenessRead {
     /// retries. A non-zero count is a terminal projection failure.
     pub projection_invalidation_dead_letter_count: i64,
     pub observed_code_addresses: Vec<ObservedCodeAddress>,
-    pub normalized_event_count: i64,
-    pub name_current_count: i64,
+    /// `normalized_events` counts grouped by `(chain_id, namespace)`, so content can be
+    /// required per active chain instead of globally where another chain's rows would satisfy
+    /// a total.
+    pub normalized_event_counts: Vec<NormalizedEventCount>,
+    /// `name_current` counts grouped by namespace.
+    pub name_current_counts: Vec<NameCurrentCount>,
 }
 
 pub async fn load_data_completeness(pool: &sqlx::PgPool) -> Result<DataCompletenessRead> {
@@ -78,8 +102,8 @@ pub async fn load_data_completeness(pool: &sqlx::PgPool) -> Result<DataCompleten
         )
         .await?,
         observed_code_addresses: load_observed_code_addresses(pool).await?,
-        normalized_event_count: count_table(pool, "normalized_events").await?,
-        name_current_count: count_table(pool, "name_current").await?,
+        normalized_event_counts: load_normalized_event_counts(pool).await?,
+        name_current_counts: load_name_current_counts(pool).await?,
     })
 }
 
@@ -130,6 +154,21 @@ async fn load_chain_completeness(pool: &sqlx::PgPool) -> Result<Vec<ChainComplet
             FROM raw_logs
             WHERE canonicality_state <> 'orphaned'::canonicality_state
             GROUP BY chain_id
+        ),
+        duplicate_canonical_height AS (
+            SELECT chain_id, COUNT(*) AS duplicate_canonical_height_count
+            FROM (
+                SELECT chain_id, block_number
+                FROM chain_lineage
+                WHERE canonicality_state IN (
+                    'canonical'::canonicality_state,
+                    'safe'::canonicality_state,
+                    'finalized'::canonicality_state
+                )
+                GROUP BY chain_id, block_number
+                HAVING COUNT(*) > 1
+            ) duplicated
+            GROUP BY chain_id
         )
         SELECT
             known_chains.chain_id,
@@ -137,11 +176,15 @@ async fn load_chain_completeness(pool: &sqlx::PgPool) -> Result<Vec<ChainComplet
             lineage.lineage_head_block_number,
             lineage.lineage_floor_block_number,
             COALESCE(lineage.lineage_canonical_block_count, 0) AS lineage_canonical_block_count,
+            COALESCE(duplicate_canonical_height.duplicate_canonical_height_count, 0)
+                AS duplicate_canonical_height_count,
             canonical_raw_log_head.canonical_raw_log_head_block_number,
             raw_log_head.raw_log_head_block_number
         FROM known_chains
         LEFT JOIN chain_checkpoints ON chain_checkpoints.chain_id = known_chains.chain_id
         LEFT JOIN lineage ON lineage.chain_id = known_chains.chain_id
+        LEFT JOIN duplicate_canonical_height
+          ON duplicate_canonical_height.chain_id = known_chains.chain_id
         LEFT JOIN canonical_raw_log_head
           ON canonical_raw_log_head.chain_id = known_chains.chain_id
         LEFT JOIN raw_log_head ON raw_log_head.chain_id = known_chains.chain_id
@@ -165,6 +208,10 @@ async fn load_chain_completeness(pool: &sqlx::PgPool) -> Result<Vec<ChainComplet
                 lineage_canonical_block_count: crate::sql_row::get(
                     &row,
                     "lineage_canonical_block_count",
+                )?,
+                duplicate_canonical_height_count: crate::sql_row::get(
+                    &row,
+                    "duplicate_canonical_height_count",
                 )?,
                 canonical_raw_log_head_block_number: crate::sql_row::get(
                     &row,
@@ -272,4 +319,51 @@ async fn count_table(pool: &sqlx::PgPool, table: &'static str) -> Result<i64> {
         .fetch_one(pool)
         .await
         .with_context(|| format!("failed to count {table}"))
+}
+
+async fn load_normalized_event_counts(pool: &sqlx::PgPool) -> Result<Vec<NormalizedEventCount>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT chain_id, namespace, COUNT(*)::BIGINT AS count
+        FROM normalized_events
+        GROUP BY chain_id, namespace
+        ORDER BY chain_id, namespace
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to load normalized-event counts")?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(NormalizedEventCount {
+                chain_id: crate::sql_row::get(&row, "chain_id")?,
+                namespace: crate::sql_row::get(&row, "namespace")?,
+                count: crate::sql_row::get(&row, "count")?,
+            })
+        })
+        .collect()
+}
+
+async fn load_name_current_counts(pool: &sqlx::PgPool) -> Result<Vec<NameCurrentCount>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT namespace, COUNT(*)::BIGINT AS count
+        FROM name_current
+        GROUP BY namespace
+        ORDER BY namespace
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to load name-current counts")?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(NameCurrentCount {
+                namespace: crate::sql_row::get(&row, "namespace")?,
+                count: crate::sql_row::get(&row, "count")?,
+            })
+        })
+        .collect()
 }

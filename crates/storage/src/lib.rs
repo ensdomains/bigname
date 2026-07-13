@@ -112,8 +112,8 @@ pub use children::{
     stream_canonical_declared_child_sources, upsert_children_current_rows,
 };
 pub use data_completeness::{
-    ChainCompletenessRow, DataCompletenessRead, ObservedCodeAddress, ProjectionApplyCursorRow,
-    ReplayCursorRow, load_data_completeness,
+    ChainCompletenessRow, DataCompletenessRead, NameCurrentCount, NormalizedEventCount,
+    ObservedCodeAddress, ProjectionApplyCursorRow, ReplayCursorRow, load_data_completeness,
 };
 pub use evm_primitives::{normalize_evm_address, normalize_evm_b256};
 pub use execution::{

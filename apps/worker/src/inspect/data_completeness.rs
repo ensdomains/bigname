@@ -44,6 +44,7 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
                     "canonical_block_number": frontier.canonical_block_number,
                     "lineage_head_block_number": frontier.lineage_head_block_number,
                     "head_lag_blocks": frontier.head_lag_blocks,
+                    "missing_from_storage": frontier.missing_from_storage,
                 })).collect::<Vec<_>>(),
             })),
             check("reconciliation_lineage_contiguous", report.lineage_contiguous(), json!({
@@ -51,6 +52,14 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
                     "chain": frontier.chain_id.as_str(),
                     "contiguous": frontier.contiguous,
                     "missing_block_count": frontier.missing_block_count,
+                    "duplicate_canonical_height_count": frontier.duplicate_canonical_height_count,
+                })).collect::<Vec<_>>(),
+            })),
+            check("reconciliation_history_from_declared_start", report.history_from_declared_start(), json!({
+                "truncated_chains": report.chains_history_truncated.iter().map(|gap| json!({
+                    "chain": gap.chain.as_str(),
+                    "declared_start_block": gap.declared_start_block,
+                    "lineage_floor_block": gap.lineage_floor_block,
                 })).collect::<Vec<_>>(),
             })),
             check("watch_set_code_observation_coverage", report.watch_set_observed(), json!({
@@ -79,9 +88,11 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
             check("projection_no_dead_letters", report.projection_no_dead_letters(), json!({
                 "dead_letter_count": report.projection_invalidation_dead_letter_count,
             })),
-            check("projections_non_empty", report.content_present(), json!({
-                "normalized_event_count": report.normalized_event_count,
-                "name_current_count": report.name_current_count,
+            check("active_dataset_non_empty", report.active_dataset_non_empty(), json!({
+                "normalized_event_total": report.normalized_event_total,
+                "name_current_total": report.name_current_total,
+                "active_chains_without_events": report.active_chains_without_events.clone(),
+                "active_namespaces_without_names": report.active_namespaces_without_names.clone(),
             })),
         ],
     })
