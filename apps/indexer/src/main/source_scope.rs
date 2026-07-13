@@ -114,6 +114,18 @@ impl SourceScope {
     }
 }
 
+/// A `source_family` selector plan for the Basenames registry runs as a
+/// hash-pinned scan-all: topic0-filtered log fetches across all emitters
+/// (the family carries millions of discovered targets, so per-address
+/// enumeration is infeasible), mirroring the Coinbase SQL scan-all shape.
+pub(crate) fn watched_source_plan_uses_basenames_registry_scan_all(
+    source_plan: &WatchedSourceSelectorPlan,
+) -> bool {
+    source_plan.selector_kind == bigname_manifests::WatchedSourceSelectorKind::SourceFamily
+        && source_plan.source_family.as_deref()
+            == Some(crate::basenames_registry::SOURCE_FAMILY_BASENAMES_BASE_REGISTRY)
+}
+
 pub(crate) fn watched_source_plan_uses_generic_resolver_scope(
     source_plan: &WatchedSourceSelectorPlan,
 ) -> bool {
