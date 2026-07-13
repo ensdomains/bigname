@@ -10,6 +10,7 @@ mod checkpoints;
 mod children;
 mod evm_primitives;
 mod execution;
+mod gas_sponsorship;
 mod history;
 mod identity;
 mod identity_facade;
@@ -25,6 +26,7 @@ mod raw_calls;
 mod raw_children;
 mod raw_code;
 mod raw_payload_cache;
+mod raw_transaction_inputs;
 mod record_inventory;
 mod resolution_support;
 mod resolver;
@@ -126,6 +128,12 @@ pub use execution::{
     load_resolution_execution_outcome_at_snapshot, upsert_execution_outcome,
     upsert_execution_outcome_in_transaction, upsert_execution_trace,
     upsert_execution_trace_in_transaction,
+};
+pub use gas_sponsorship::{
+    GasSponsorshipCurrentRow, GasSponsorshipGlobalCurrentRow, clear_gas_sponsorship_current,
+    clear_gas_sponsorship_global_current, delete_gas_sponsorship_current,
+    load_gas_sponsorship_current, load_gas_sponsorship_global_current,
+    upsert_gas_sponsorship_current_rows, upsert_gas_sponsorship_global_current_row,
 };
 pub use history::{
     EventHistoryAddressFilter, EventHistoryFilter, HistoryChainPositionSample, HistoryCursor,
@@ -238,6 +246,9 @@ pub use raw_payload_cache::{
     RawPayloadCacheDigestVerification, RawPayloadCacheMetadata, RawPayloadCacheMetadataUpsert,
     list_raw_payload_cache_metadata_by_block_hash, load_raw_payload_cache_metadata,
     upsert_raw_payload_cache_metadata, verify_raw_payload_cache_digest,
+};
+pub use raw_transaction_inputs::{
+    RawTransactionInput, load_raw_transaction_inputs, upsert_raw_transaction_inputs,
 };
 pub use record_inventory::{
     RecordInventoryCurrentRow, clear_record_inventory_current,
