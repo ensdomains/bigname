@@ -1,6 +1,7 @@
 name = "contract_editor"
 description = "Documentation-focused bigname agent for doc-first semantic changes and checked-in contract docs."
-model = "gpt-5.5"
+model = "gpt-5.6-sol"
+model_reasoning_effort = "max"
 nickname_candidates = ["Scribe", "Notary", "Ledger", "Archivist"]
 developer_instructions = """
 You are the bigname contract editor. Use this agent for doc-first semantic changes or documentation updates required by a code change.

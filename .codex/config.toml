@@ -1,6 +1,4 @@
-model = "gpt-5.5"
-model_reasoning_effort = "xhigh"
-service_tier = "fast"
+model = "gpt-5.6-sol"
 
 [agents]
 max_threads = 10
@@ -8,3 +6,4 @@ max_depth = 1
 
 [features]
 codex_hooks = false
+fast_mode = false
