@@ -67,9 +67,17 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
             })),
             check("normalization_caught_up_to_raw_head", report.normalization_caught_up(), json!({
                 "lagging_cursors": report.lagging_replay_cursors.iter().map(cursor_lag).collect::<Vec<_>>(),
+                "chains_missing_raw_fact_cursor": report.chains_missing_raw_fact_cursor.clone(),
             })),
             check("projection_apply_drained", report.projection_drained(), json!({
                 "lagging_cursors": report.lagging_projection_cursors.iter().map(cursor_lag).collect::<Vec<_>>(),
+                "apply_cursor_missing_for_non_empty_change_log": report.projection_apply_cursor_missing,
+            })),
+            check("projection_invalidations_drained", report.projection_invalidations_drained(), json!({
+                "pending_invalidation_count": report.pending_projection_invalidation_count,
+            })),
+            check("projection_no_dead_letters", report.projection_no_dead_letters(), json!({
+                "dead_letter_count": report.projection_invalidation_dead_letter_count,
             })),
             check("projections_non_empty", report.content_present(), json!({
                 "normalized_event_count": report.normalized_event_count,

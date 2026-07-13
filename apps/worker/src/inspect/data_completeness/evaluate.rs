@@ -8,6 +8,12 @@ pub(super) const DEFAULT_MAX_HEAD_LAG_BLOCKS: i64 = 8;
 
 pub(super) const RAW_FACT_NORMALIZED_EVENTS_CURSOR: &str = "raw_fact_normalized_events";
 
+/// A chain that has this cursor ran closure/dependency replay, which latches the
+/// `raw_fact_normalized_events` cursor's target permanently below the live head; newer logs
+/// are swept by the backlog cursor and then live adapter sync. On such a chain the raw-fact
+/// cursor is caught up when it reaches its own latched target, not the raw-log head.
+pub(super) const POST_REPLAY_LIVE_ADAPTER_BACKLOG_CURSOR: &str = "post_replay_live_adapter_backlog";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum CheckStatus {
     Pass,
@@ -44,6 +50,9 @@ pub(super) struct UnobservedTarget {
     pub(super) source_family: String,
 }
 
+/// `behind_by` is the block or change-id distance to the applicable target, best-effort:
+/// a missing `last_completed` is treated as `-1`, and a latched cursor with no target uses
+/// the `-1` sentinel because there is no target to measure against.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct CursorLag {
     pub(super) label: String,
@@ -58,7 +67,11 @@ pub(super) struct DataCompletenessReport {
     pub(super) unobserved_targets: Vec<UnobservedTarget>,
     pub(super) failed_replay_cursors: Vec<String>,
     pub(super) lagging_replay_cursors: Vec<CursorLag>,
+    pub(super) chains_missing_raw_fact_cursor: Vec<String>,
     pub(super) lagging_projection_cursors: Vec<CursorLag>,
+    pub(super) projection_apply_cursor_missing: bool,
+    pub(super) pending_projection_invalidation_count: i64,
+    pub(super) projection_invalidation_dead_letter_count: i64,
     pub(super) normalized_event_count: i64,
     pub(super) name_current_count: i64,
 }
@@ -77,7 +90,9 @@ impl DataCompletenessReport {
     }
 
     pub(super) fn watch_set_observed(&self) -> CheckStatus {
-        CheckStatus::from_pass(self.unobserved_targets.is_empty())
+        CheckStatus::from_pass(
+            self.active_watched_target_count > 0 && self.unobserved_targets.is_empty(),
+        )
     }
 
     pub(super) fn normalization_healthy(&self) -> CheckStatus {
@@ -85,11 +100,24 @@ impl DataCompletenessReport {
     }
 
     pub(super) fn normalization_caught_up(&self) -> CheckStatus {
-        CheckStatus::from_pass(self.lagging_replay_cursors.is_empty())
+        CheckStatus::from_pass(
+            self.lagging_replay_cursors.is_empty()
+                && self.chains_missing_raw_fact_cursor.is_empty(),
+        )
     }
 
     pub(super) fn projection_drained(&self) -> CheckStatus {
-        CheckStatus::from_pass(self.lagging_projection_cursors.is_empty())
+        CheckStatus::from_pass(
+            self.lagging_projection_cursors.is_empty() && !self.projection_apply_cursor_missing,
+        )
+    }
+
+    pub(super) fn projection_invalidations_drained(&self) -> CheckStatus {
+        CheckStatus::from_pass(self.pending_projection_invalidation_count == 0)
+    }
+
+    pub(super) fn projection_no_dead_letters(&self) -> CheckStatus {
+        CheckStatus::from_pass(self.projection_invalidation_dead_letter_count == 0)
     }
 
     pub(super) fn content_present(&self) -> CheckStatus {
@@ -104,6 +132,8 @@ impl DataCompletenessReport {
             self.normalization_healthy(),
             self.normalization_caught_up(),
             self.projection_drained(),
+            self.projection_invalidations_drained(),
+            self.projection_no_dead_letters(),
             self.content_present(),
         ]
         .iter()
@@ -152,11 +182,25 @@ pub(super) fn evaluate_data_completeness(
         })
         .collect::<Vec<_>>();
 
-    let raw_log_heads = read
+    let canonical_raw_log_head = read
         .chains
         .iter()
-        .map(|chain| (chain.chain_id.as_str(), chain.raw_log_head_block_number))
-        .collect::<Vec<_>>();
+        .map(|chain| {
+            (
+                chain.chain_id.as_str(),
+                chain.canonical_raw_log_head_block_number,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    // A (deployment_profile, chain_id) with a backlog cursor ran closure replay, so its
+    // raw-fact cursor is latched to its own target rather than the raw-log head.
+    let latched_keys = read
+        .replay_cursors
+        .iter()
+        .filter(|cursor| cursor.cursor_kind == POST_REPLAY_LIVE_ADAPTER_BACKLOG_CURSOR)
+        .map(|cursor| (cursor.deployment_profile.as_str(), cursor.chain_id.as_str()))
+        .collect::<BTreeSet<_>>();
 
     let failed_replay_cursors = read
         .replay_cursors
@@ -168,31 +212,61 @@ pub(super) fn evaluate_data_completeness(
     let lagging_replay_cursors = read
         .replay_cursors
         .iter()
-        .filter(|cursor| cursor.cursor_kind == RAW_FACT_NORMALIZED_EVENTS_CURSOR)
-        .filter_map(|cursor| {
-            let raw_log_head = raw_log_heads
-                .iter()
-                .find(|(chain_id, _)| *chain_id == cursor.chain_id)
-                .and_then(|(_, head)| *head)?;
-            let completed = cursor.last_completed_block_number.unwrap_or(-1);
-            (completed < raw_log_head).then(|| CursorLag {
-                label: cursor_label(cursor),
-                behind_by: raw_log_head - completed,
-            })
+        .filter_map(|cursor| match cursor.cursor_kind.as_str() {
+            RAW_FACT_NORMALIZED_EVENTS_CURSOR => {
+                let key = (cursor.deployment_profile.as_str(), cursor.chain_id.as_str());
+                if latched_keys.contains(&key) {
+                    latched_cursor_lag(cursor)
+                } else {
+                    // Non-latched: caught up when replay reached the canonical raw-log head.
+                    let head = canonical_raw_log_head
+                        .get(cursor.chain_id.as_str())
+                        .copied()
+                        .flatten()?;
+                    let completed = cursor.last_completed_block_number.unwrap_or(-1);
+                    (completed < head).then(|| CursorLag {
+                        label: cursor_label(cursor),
+                        behind_by: head - completed,
+                    })
+                }
+            }
+            POST_REPLAY_LIVE_ADAPTER_BACKLOG_CURSOR => latched_cursor_lag(cursor),
+            _ => None,
         })
+        .collect::<Vec<_>>();
+
+    // Fix: a chain with retained canonical raw logs but no raw-fact cursor row would pass
+    // vacuously, since a missing cursor produces no lag entry. Require the cursor to exist.
+    let chains_with_raw_fact_cursor = read
+        .replay_cursors
+        .iter()
+        .filter(|cursor| cursor.cursor_kind == RAW_FACT_NORMALIZED_EVENTS_CURSOR)
+        .map(|cursor| cursor.chain_id.as_str())
+        .collect::<BTreeSet<_>>();
+
+    let chains_missing_raw_fact_cursor = read
+        .chains
+        .iter()
+        .filter(|chain| chain.canonical_raw_log_head_block_number.is_some())
+        .filter(|chain| !chains_with_raw_fact_cursor.contains(chain.chain_id.as_str()))
+        .map(|chain| chain.chain_id.clone())
         .collect::<Vec<_>>();
 
     let lagging_projection_cursors = read
         .projection_apply_cursors
         .iter()
         .filter_map(|cursor| {
-            let max_change_id = cursor.max_change_id?;
+            let max_change_id = read.max_projection_change_id?;
             (cursor.last_change_id < max_change_id).then(|| CursorLag {
                 label: cursor.cursor_name.clone(),
                 behind_by: max_change_id - cursor.last_change_id,
             })
         })
         .collect::<Vec<_>>();
+
+    // A non-empty change log with no apply cursor row means nothing has consumed it.
+    let projection_apply_cursor_missing =
+        read.max_projection_change_id.is_some() && read.projection_apply_cursors.is_empty();
 
     DataCompletenessReport {
         max_head_lag_blocks,
@@ -201,9 +275,31 @@ pub(super) fn evaluate_data_completeness(
         unobserved_targets,
         failed_replay_cursors,
         lagging_replay_cursors,
+        chains_missing_raw_fact_cursor,
         lagging_projection_cursors,
+        projection_apply_cursor_missing,
+        pending_projection_invalidation_count: read.pending_projection_invalidation_count,
+        projection_invalidation_dead_letter_count: read.projection_invalidation_dead_letter_count,
         normalized_event_count: read.normalized_event_count,
         name_current_count: read.name_current_count,
+    }
+}
+
+/// A latched cursor is caught up only when it has both a completed block and a target and
+/// has reached that target. A missing `last_completed` counts as lagging; a missing target
+/// is unverifiable and fails closed with the `-1` sentinel distance.
+fn latched_cursor_lag(cursor: &bigname_storage::ReplayCursorRow) -> Option<CursorLag> {
+    let completed = cursor.last_completed_block_number.unwrap_or(-1);
+    match cursor.target_block_number {
+        Some(target) if completed >= target => None,
+        Some(target) => Some(CursorLag {
+            label: cursor_label(cursor),
+            behind_by: target - completed,
+        }),
+        None => Some(CursorLag {
+            label: cursor_label(cursor),
+            behind_by: -1,
+        }),
     }
 }
 
