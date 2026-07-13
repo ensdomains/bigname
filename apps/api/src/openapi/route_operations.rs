@@ -8,8 +8,8 @@ use crate::routes::{
 use crate::{
     AppState, Router, address_history, address_names, coverage_current, events,
     explain_authority_control_current, explain_resolution_execution_current,
-    explain_surface_binding_current, get, health, identity_lookup, name_children, name_current,
-    name_profile,
+    explain_surface_binding_current, gas_sponsorship, get, health, identity_lookup, name_children,
+    name_current, name_profile,
     name_history, name_records, name_roles, names, namespace_manifests, namespace_metadata, post,
     primary_names, public_status, resolver_overview, resource_history, resource_lookup, resource_permissions,
     roles,
@@ -50,6 +50,7 @@ impl ApiRouteDefinition {
             ApiRouteId::NameRecords => router.route(self.path, get(name_records)),
             ApiRouteId::NameRoles => router.route(self.path, get(name_roles)),
             ApiRouteId::Events => router.route(self.path, get(events)),
+            ApiRouteId::GasSponsorship => router.route(self.path, get(gas_sponsorship)),
             ApiRouteId::Roles => router.route(self.path, get(roles)),
             ApiRouteId::ResourceLookup => router.route(self.path, get(resource_lookup)),
             ApiRouteId::ResolverOverview => router.route(self.path, get(resolver_overview)),

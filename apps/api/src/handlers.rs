@@ -14,6 +14,8 @@ mod handler_app_facing_resolver_overview;
 mod handler_app_facing_roles;
 #[path = "handlers/exact_name.rs"]
 mod handler_exact_name;
+#[path = "handlers/gas_sponsorship.rs"]
+mod handler_gas_sponsorship;
 #[path = "handlers/health.rs"]
 mod handler_health;
 #[path = "handlers/history.rs"]
@@ -39,6 +41,7 @@ use self::{
         coverage_current, explain_authority_control_current, explain_surface_binding_current,
         name_current,
     },
+    handler_gas_sponsorship::gas_sponsorship,
     handler_health::health,
     handler_history::{address_history, name_history, resource_history},
     handler_namespaces::{namespace_manifests, namespace_metadata},

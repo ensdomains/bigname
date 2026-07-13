@@ -64,6 +64,81 @@ pub(super) fn mixed_response_schema(data_schema: JsonValue) -> JsonValue {
     })
 }
 
+pub(super) fn gas_sponsorship_response_schema() -> JsonValue {
+    json!({
+        "type": "object",
+        "required": [
+            "data",
+            "name_accounting",
+            "global_accounting",
+            "coverage",
+            "chain_positions",
+            "consistency",
+            "last_updated",
+        ],
+        "properties": {
+            "data": {
+                "type": "object",
+                "required": ["namespace", "name"],
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" },
+                },
+            },
+            "name_accounting": {
+                "type": "object",
+                "required": [
+                    "logical_name_id",
+                    "namehash",
+                    "lease_start_at",
+                    "registered_seconds_total",
+                    "earned_updates",
+                    "spent_updates",
+                    "last_sponsored_write_at",
+                ],
+                "properties": {
+                    "logical_name_id": { "type": "string" },
+                    "namehash": { "type": ["string", "null"] },
+                    "lease_start_at": { "type": ["string", "null"], "format": "date-time" },
+                    "registered_seconds_total": { "type": "integer" },
+                    "earned_updates": { "type": "integer" },
+                    "spent_updates": { "type": "integer" },
+                    "last_sponsored_write_at": { "type": ["string", "null"], "format": "date-time" },
+                },
+            },
+            "global_accounting": {
+                "type": "object",
+                "required": [
+                    "sponsored_op_count",
+                    "attributed_op_count",
+                    "failed_op_count",
+                    "gas_wei_total",
+                    "failed_gas_wei_total",
+                    "usd_e8_total",
+                    "unpriced_wei_total",
+                ],
+                "properties": {
+                    "sponsored_op_count": { "type": "integer" },
+                    "attributed_op_count": { "type": "integer" },
+                    "failed_op_count": { "type": "integer" },
+                    "gas_wei_total": { "type": "string" },
+                    "failed_gas_wei_total": { "type": "string" },
+                    "usd_e8_total": { "type": "string" },
+                    "unpriced_wei_total": { "type": "string" },
+                },
+            },
+            "provenance": schema_ref("Provenance"),
+            "coverage": schema_ref("CoverageResponse"),
+            "chain_positions": schema_ref("ChainPositions"),
+            "consistency": schema_ref("Consistency"),
+            "last_updated": {
+                "type": "string",
+                "format": "date-time",
+            },
+        },
+    })
+}
+
 pub(super) fn primary_name_response_schema() -> JsonValue {
     json!({
         "type": "object",

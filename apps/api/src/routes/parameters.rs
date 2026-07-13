@@ -401,6 +401,8 @@ pub(crate) const EXPLAIN_RESOLUTION_EXECUTION_PARAMETERS: &[ApiRouteParameter] =
 
 pub(crate) const NAMESPACE_PATH_PARAMETERS: &[ApiRouteParameter] = &[NAMESPACE_PATH];
 
+pub(crate) const GAS_SPONSORSHIP_PARAMETERS: &[ApiRouteParameter] = &[NAMESPACE_PATH, NAME_PATH];
+
 pub(crate) const NAME_CHILDREN_PARAMETERS: &[ApiRouteParameter] = &[
     NAMESPACE_PATH,
     NAME_PATH,

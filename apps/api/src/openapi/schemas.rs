@@ -11,8 +11,8 @@ mod identity;
 mod identity_native;
 
 use super::responses::{
-    declared_response_schema, mixed_response_schema, paginated_declared_response_schema,
-    primary_name_response_schema,
+    declared_response_schema, gas_sponsorship_response_schema, mixed_response_schema,
+    paginated_declared_response_schema, primary_name_response_schema,
 };
 use identity::{
     identity_status_schema, indexing_status_response_schema, name_record_status_schema,
@@ -221,6 +221,7 @@ pub(super) fn openapi_components() -> JsonValue {
                     schema_ref("ExactNameData"),
                 ],
             })),
+            "GasSponsorshipResponse": gas_sponsorship_response_schema(),
             "PrimaryNameResponse": primary_name_response_schema(),
             "CollectionResponse": paginated_declared_response_schema(
                 json!({

@@ -722,6 +722,132 @@
         ],
         "type": "object"
       },
+      "GasSponsorshipResponse": {
+        "properties": {
+          "chain_positions": {
+            "$ref": "#/components/schemas/ChainPositions"
+          },
+          "consistency": {
+            "$ref": "#/components/schemas/Consistency"
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/CoverageResponse"
+          },
+          "data": {
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "namespace": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "namespace",
+              "name"
+            ],
+            "type": "object"
+          },
+          "global_accounting": {
+            "properties": {
+              "attributed_op_count": {
+                "type": "integer"
+              },
+              "failed_gas_wei_total": {
+                "type": "string"
+              },
+              "failed_op_count": {
+                "type": "integer"
+              },
+              "gas_wei_total": {
+                "type": "string"
+              },
+              "sponsored_op_count": {
+                "type": "integer"
+              },
+              "unpriced_wei_total": {
+                "type": "string"
+              },
+              "usd_e8_total": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "sponsored_op_count",
+              "attributed_op_count",
+              "failed_op_count",
+              "gas_wei_total",
+              "failed_gas_wei_total",
+              "usd_e8_total",
+              "unpriced_wei_total"
+            ],
+            "type": "object"
+          },
+          "last_updated": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "name_accounting": {
+            "properties": {
+              "earned_updates": {
+                "type": "integer"
+              },
+              "last_sponsored_write_at": {
+                "format": "date-time",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "lease_start_at": {
+                "format": "date-time",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "logical_name_id": {
+                "type": "string"
+              },
+              "namehash": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "registered_seconds_total": {
+                "type": "integer"
+              },
+              "spent_updates": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "logical_name_id",
+              "namehash",
+              "lease_start_at",
+              "registered_seconds_total",
+              "earned_updates",
+              "spent_updates",
+              "last_sponsored_write_at"
+            ],
+            "type": "object"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/Provenance"
+          }
+        },
+        "required": [
+          "data",
+          "name_accounting",
+          "global_accounting",
+          "coverage",
+          "chain_positions",
+          "consistency",
+          "last_updated"
+        ],
+        "type": "object"
+      },
       "HealthResponse": {
         "properties": {
           "phase": {
@@ -2752,6 +2878,81 @@
         "summary": "Persisted verified execution explain for one exact-name resolution request",
         "tags": [
           "Explain"
+        ]
+      }
+    },
+    "/v1/gas-sponsorship/{namespace}/{name}": {
+      "get": {
+        "operationId": "gas_sponsorship",
+        "parameters": [
+          {
+            "description": "Supported namespace identifier.",
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "enum": [
+                "ens",
+                "basenames"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "ENSIP-15 normalized name within the namespace; non-normalized exact path input returns 400 invalid_input.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GasSponsorshipResponse"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Requested resource was not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal error"
+          }
+        },
+        "summary": "Per-name sponsored-update accounting plus namespace-wide sponsored-gas totals",
+        "tags": [
+          "Names"
         ]
       }
     },

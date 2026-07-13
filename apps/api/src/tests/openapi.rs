@@ -213,6 +213,7 @@ fn openapi_document_publishes_only_shipped_routes() {
             "/v1/explain/names/{namespace}/{name}/authority-control".to_owned(),
             "/v1/explain/names/{namespace}/{name}/surface-binding".to_owned(),
             "/v1/explain/resolutions/{namespace}/{name}/execution".to_owned(),
+            "/v1/gas-sponsorship/{namespace}/{name}".to_owned(),
             "/v1/history/addresses/{address}".to_owned(),
             "/v1/history/names/{namespace}/{name}".to_owned(),
             "/v1/history/resources/{resource_id}".to_owned(),

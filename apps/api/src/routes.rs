@@ -141,6 +141,7 @@ pub(crate) enum ApiRouteId {
     NameRecords,
     NameRoles,
     Events,
+    GasSponsorship,
     Roles,
     ResourceLookup,
     ResolverOverview,
@@ -343,6 +344,18 @@ pub(crate) const API_ROUTE_DEFINITIONS: &[ApiRouteDefinition] = &[
             NAME_PROFILE_PARAMETERS,
             "NameProfileResponse",
             ApiRouteErrorResponses::conflict(true),
+        ),
+    ),
+    ApiRouteDefinition::public_get(
+        ApiRouteId::GasSponsorship,
+        "/v1/gas-sponsorship/{namespace}/{name}",
+        ApiRouteContract::new(
+            "gas_sponsorship",
+            "Per-name sponsored-update accounting plus namespace-wide sponsored-gas totals",
+            "Names",
+            GAS_SPONSORSHIP_PARAMETERS,
+            "GasSponsorshipResponse",
+            ApiRouteErrorResponses::new(true, true),
         ),
     ),
     ApiRouteDefinition::public_get(

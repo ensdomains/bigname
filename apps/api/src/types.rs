@@ -296,6 +296,19 @@ pub(crate) struct ResolutionResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct GasSponsorshipResponse {
+    pub(crate) data: JsonValue,
+    pub(crate) name_accounting: JsonValue,
+    pub(crate) global_accounting: JsonValue,
+    #[serde(default, skip_serializing_if = "json_value_is_null")]
+    pub(crate) provenance: JsonValue,
+    pub(crate) coverage: JsonValue,
+    pub(crate) chain_positions: JsonValue,
+    pub(crate) consistency: String,
+    pub(crate) last_updated: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct PrimaryNameResponse {
     pub(crate) data: JsonValue,
     pub(crate) declared_state: Option<JsonValue>,
