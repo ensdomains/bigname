@@ -37,9 +37,37 @@ Check each before creating a job. Two are hard gates.
 3. **Volume headroom.** A running deployment cannot reclaim `raw_code_hashes`
    rows written under the old policy — raw facts are immutable. Size the job
    against free space before starting.
-4. **No leaked backfill lease.** A `backfill_jobs` row stuck in `running` holds a
-   lease. Inspect `status`, `updated_at`, and `failure_reason` before adding
-   work.
+4. **No live range lease from another worker.** Leases live on
+   `backfill_ranges`, not `backfill_jobs`. Inspect the range status and all
+   three lease fields before adding work:
+
+   ```sql
+   SELECT br.backfill_job_id,
+          br.backfill_range_id,
+          br.range_start_block_number,
+          br.range_end_block_number,
+          br.checkpoint_block_number,
+          br.status,
+          br.lease_owner,
+          br.lease_token,
+          br.lease_expires_at,
+          (br.lease_expires_at <= now()) AS expired_and_reclaimable,
+          br.updated_at,
+          br.failure_reason
+   FROM backfill_ranges br
+   WHERE br.status IN (
+       'reserved'::backfill_lifecycle_status,
+       'running'::backfill_lifecycle_status
+   )
+   ORDER BY br.lease_expires_at, br.backfill_job_id, br.backfill_range_id;
+   ```
+
+   A `reserved` or `running` range with `lease_expires_at > now()` has a live
+   lease and must be allowed to finish or be stopped deliberately. A range with
+   `lease_expires_at <= now()` is safely reclaimable by the normal reservation
+   path, which atomically replaces the expired token and owner. Do not clear
+   lease fields by hand: table checks require `lease_token`, `lease_owner`, and
+   `lease_expires_at` together for `reserved` and `running` ranges.
 
 ## Why one pass is not enough
 
@@ -54,11 +82,15 @@ The consequence: a single whole-chain pass over a deployment whose discovery
 graph is incomplete will admit new targets and leave their history unindexed.
 Iterate until a pass admits no new targets and the coverage check is clean.
 
-For source families with a topic-signature scan the circularity does not apply,
-because ingest identity is the topic plan rather than a moving address list. The
-ENSv1 generic resolver scan (`apps/indexer/src/main/ens_v1_resolver.rs:4`) and
-the Basenames registry scan ([`../chain-intake.md`](../chain-intake.md) § Backfill
-contract) already work this way.
+The topic-scan exception is narrow. The hash-pinned provider path scans ENSv1
+generic resolver event topics across all emitters, so that specific source is
+not circular (`apps/indexer/src/main/backfill/fetching/log_ranges.rs`). The
+Basenames registry becomes address-free only for a Coinbase SQL source-family
+job with `--source-family basenames_base_registry` and an active manifest ABI
+topic plan (`apps/indexer/src/main/backfill/coinbase_sql/planner.rs`). A
+whole-active-watched-chain Coinbase SQL job remains address-filtered, as does a
+hash-pinned whole-chain Base job. Those jobs still require the iterative passes
+in this runbook.
 
 ## Procedure
 
@@ -74,23 +106,49 @@ re-covered safely under a fresh idempotency key
 
 ```sh
 bigname-indexer backfill \
+  --manifests-root manifests/sepolia \
   --chain ethereum-sepolia \
   --from-block <lowest admitted start across active targets> \
   --to-block <finalized head> \
+  --hash-pinned-adapter-sync inline \
   --idempotency-key recovery-<iso8601>-<n>
 ```
+
+Pin `--manifests-root` to the chain's deployment profile. The CLI default is
+`manifests/mainnet`, which is not the correct corpus for the Sepolia example.
 
 Bound `--to-block` at the finalized head, not the canonical head, so the range
 cannot be reorged out from under the job.
 
-**3. Let normalization catch up.** Discovery edges are written from normalized
-events, so new targets only appear after replay drains. Watch
-`normalized_replay_cursors`: `next_block_number > target_block_number` and
-`last_failure_at IS NULL`.
+**3. Let the inline adapter sync finish.** The command pins
+`--hash-pinned-adapter-sync inline`, so each completed chunk writes normalized
+events and discovery edges directly. Manual `auto` mode has the same effective
+inline behavior, but spelling it out keeps the runbook independent of that
+mapping. Inline backfill does not advance `normalized_replay_cursors`; do not
+wait on that table. Wait for every range belonging to the job to reach
+`completed`:
 
-**4. Check for newly admitted targets.** If the active watched set grew, return
-to step 2 with a fresh idempotency key. The new pass covers the targets the
-previous pass discovered.
+```sql
+SELECT status,
+       COUNT(*) AS range_count,
+       MIN(checkpoint_block_number) AS min_checkpoint,
+       MAX(checkpoint_block_number) AS max_checkpoint,
+       MAX(updated_at) AS last_updated_at
+FROM backfill_ranges
+WHERE backfill_job_id = <backfill_job_id>
+GROUP BY status
+ORDER BY status;
+```
+
+Discovery edges and the active watched set may grow while the job runs. The
+authoritative signal is the watched-set comparison in step 4 after all ranges
+complete.
+
+**4. Check for newly admitted targets.** Rerun the active watched-range query in
+[Verification](#verification) and compare `(source_family,
+contract_instance_id, address, scan_from_block, scan_to_block)`. If the set
+grew, return to step 2 with a fresh idempotency key. The new pass covers the
+targets the previous pass discovered.
 
 **5. Stop when a pass admits nothing new and the coverage check is clean.**
 
@@ -121,33 +179,217 @@ procedure runs the range more than once.
 
 ## Verification
 
-Coverage is per target, not per deployment. For each active watched target
-compare the highest block it has an ingested non-orphaned log for against what
-the chain holds above that block.
+Coverage is per active watched target and per active range, not per deployment.
+The stored maximum log block is not a frontier: a late-admitted target may have
+live-tailed rows near head while still missing older logs below that maximum.
+Verification must scan from the target's effective active-range start and prove
+every provider-returned log through the verification head is stored.
 
-The floor for a target with **no** ingested logs is its admission block minus
-one, not the chain head. Treating "no rows" as "nothing missing" is the failure
-this runbook exists to correct: a target that was never watched has no rows, and
-a naive `onchain_max > ingested_max` comparison silently skips it.
+The backfill selector derives its universe from `load_watched_contracts`: active
+manifest declarations plus active admitted discovery edges. Use the same shape
+for verification. Set these `psql` variables to the completed job's chain,
+declared lower bound, and finalized verification head:
 
 ```sql
--- Per-target ingested frontier. Targets with no rows come back NULL and must be
--- scanned from their admission block, not skipped.
-SELECT cia.address,
-       MAX(rl.block_number) AS ingested_max_block
-FROM contract_instance_addresses cia
+\set job_chain 'ethereum-sepolia'
+\set job_from_block 10462881
+\set verification_head 12345678
+
+WITH watched_contracts AS (
+    SELECT
+        mv.chain,
+        mv.source_family,
+        cia.address,
+        mci.contract_instance_id,
+        CASE
+            WHEN manifest_range.start_block IS NULL
+                THEN cia.active_from_block_number
+            WHEN cia.active_from_block_number IS NULL
+                THEN manifest_range.start_block
+            ELSE GREATEST(
+                manifest_range.start_block,
+                cia.active_from_block_number
+            )
+        END AS active_from_block_number,
+        cia.active_to_block_number
+    FROM manifest_versions mv
+    JOIN manifest_contract_instances mci
+      ON mci.manifest_id = mv.manifest_id
+    LEFT JOIN LATERAL (
+        SELECT (entry ->> 'start_block')::BIGINT AS start_block
+        FROM jsonb_array_elements(
+            CASE
+                WHEN mci.declaration_kind = 'root'
+                    THEN mv.manifest_payload -> 'roots'
+                ELSE mv.manifest_payload -> 'contracts'
+            END
+        ) entry
+        WHERE (
+                mci.declaration_kind = 'root'
+                AND entry ->> 'name' = mci.declaration_name
+              )
+           OR (
+                mci.declaration_kind = 'contract'
+                AND entry ->> 'role' = mci.declaration_name
+              )
+        ORDER BY start_block NULLS LAST
+        LIMIT 1
+    ) manifest_range ON TRUE
+    JOIN contract_instance_addresses cia
+      ON cia.contract_instance_id = mci.contract_instance_id
+     AND cia.chain_id = :'job_chain'
+     AND cia.deactivated_at IS NULL
+    WHERE mv.rollout_status = 'active'
+      AND mv.chain = :'job_chain'
+
+    UNION
+
+    SELECT
+        de.chain_id AS chain,
+        COALESCE(target_mv.source_family, mv.source_family) AS source_family,
+        cia.address,
+        de.to_contract_instance_id AS contract_instance_id,
+        CASE
+            WHEN de.active_from_block_number IS NULL
+                THEN cia.active_from_block_number
+            WHEN cia.active_from_block_number IS NULL
+                THEN de.active_from_block_number
+            ELSE GREATEST(
+                de.active_from_block_number,
+                cia.active_from_block_number
+            )
+        END AS active_from_block_number,
+        CASE
+            WHEN de.active_to_block_number IS NULL
+                THEN cia.active_to_block_number
+            WHEN cia.active_to_block_number IS NULL
+                THEN de.active_to_block_number
+            ELSE LEAST(
+                de.active_to_block_number,
+                cia.active_to_block_number
+            )
+        END AS active_to_block_number
+    FROM discovery_edges de
+    JOIN manifest_versions mv
+      ON mv.manifest_id = de.source_manifest_id
+    LEFT JOIN manifest_versions target_mv
+      ON target_mv.rollout_status = 'active'
+     AND target_mv.namespace = mv.namespace
+     AND target_mv.chain = de.chain_id
+     AND target_mv.deployment_epoch = mv.deployment_epoch
+     AND target_mv.source_family = CASE
+         WHEN de.edge_kind = 'resolver'
+          AND mv.source_family = 'ens_v1_registry_l1'
+             THEN 'ens_v1_resolver_l1'
+         WHEN de.edge_kind = 'resolver'
+          AND mv.source_family = 'ens_v2_registry_l1'
+             THEN 'ens_v2_resolver_l1'
+         WHEN de.edge_kind = 'resolver'
+          AND mv.source_family = 'basenames_base_registry'
+             THEN 'basenames_base_resolver'
+         ELSE NULL
+     END
+    JOIN contract_instance_addresses cia
+      ON cia.contract_instance_id = de.to_contract_instance_id
+     AND cia.chain_id = :'job_chain'
+     AND cia.deactivated_at IS NULL
+    WHERE mv.rollout_status = 'active'
+      AND de.chain_id = :'job_chain'
+      AND de.deactivated_at IS NULL
+      AND de.edge_kind <> 'migration'
+      AND (
+          de.edge_kind <> 'resolver'
+          OR mv.source_family NOT IN (
+              'ens_v1_registry_l1',
+              'ens_v2_registry_l1',
+              'basenames_base_registry'
+          )
+          OR target_mv.manifest_id IS NOT NULL
+      )
+      AND (
+          de.active_from_block_number IS NULL
+          OR cia.active_to_block_number IS NULL
+          OR de.active_from_block_number <= cia.active_to_block_number
+      )
+      AND (
+          cia.active_from_block_number IS NULL
+          OR de.active_to_block_number IS NULL
+          OR cia.active_from_block_number <= de.active_to_block_number
+      )
+),
+target_ranges AS (
+    SELECT DISTINCT
+        chain,
+        source_family,
+        contract_instance_id,
+        LOWER(address) AS address,
+        GREATEST(
+            COALESCE(active_from_block_number, :job_from_block),
+            :job_from_block
+        ) AS scan_from_block,
+        LEAST(
+            COALESCE(active_to_block_number, :verification_head),
+            :verification_head
+        ) AS scan_to_block
+    FROM watched_contracts
+)
+SELECT tr.chain,
+       tr.source_family,
+       tr.contract_instance_id,
+       tr.address,
+       tr.scan_from_block,
+       tr.scan_to_block,
+       COUNT(rl.raw_log_id) AS stored_non_orphaned_log_count
+FROM target_ranges tr
 LEFT JOIN raw_logs rl
-  ON LOWER(rl.emitting_address) = cia.address
+  ON rl.chain_id = tr.chain
+ AND LOWER(rl.emitting_address) = tr.address
+ AND rl.block_number BETWEEN tr.scan_from_block AND tr.scan_to_block
  AND rl.canonicality_state <> 'orphaned'::canonicality_state
-WHERE cia.deactivated_at IS NULL
-GROUP BY cia.address
-ORDER BY ingested_max_block NULLS FIRST;
+WHERE tr.scan_from_block <= tr.scan_to_block
+GROUP BY tr.chain,
+         tr.source_family,
+         tr.contract_instance_id,
+         tr.address,
+         tr.scan_from_block,
+         tr.scan_to_block
+ORDER BY tr.source_family,
+         tr.contract_instance_id,
+         tr.scan_from_block,
+         tr.scan_to_block;
 ```
 
-Then, for each target, ask the provider for the first log strictly above that
-floor within the target's active range. Use a single bounded `eth_getLogs`; do
-not use the reorg-safe range helpers, which resolve every block hash in the range
-and are unaffordable across a never-ingested target's full history.
+`active_from_block_number = NULL` has the same finite-job behavior as the
+selector: `job_from_block` becomes the effective lower bound. That proves only
+the explicitly declared job range, not unknown history below it. Do not claim
+whole-history coverage for such a target until its historical start is pinned.
+
+For each returned target range, issue bounded `eth_getLogs` windows beginning
+at `scan_from_block`, filtered to that address, and compare every returned log
+identity with `raw_logs` on the same chain. For one provider result, the storage
+check is:
+
+```sql
+SELECT EXISTS (
+    SELECT 1
+    FROM raw_logs rl
+    WHERE rl.chain_id = :'job_chain'
+      AND LOWER(rl.emitting_address) = LOWER('<target_address>')
+      AND LOWER(rl.block_hash) = LOWER('<provider_block_hash>')
+      AND LOWER(rl.transaction_hash) = LOWER('<provider_transaction_hash>')
+      AND rl.log_index = <provider_log_index>
+      AND rl.canonicality_state <> 'orphaned'::canonicality_state
+) AS ingested;
+```
+
+If every provider log in a window is present, advance to the next contiguous
+window; do not jump to the highest stored block. The first `false` proves a
+historical hole, so stop scanning that target and schedule another pass. A
+target is clean only after contiguous windows cover its entire
+`[scan_from_block, scan_to_block]` range without a missing provider log. Use
+bounded look-ahead windows and stop on the first miss; do not use the reorg-safe
+range helpers, which resolve every block hash and are unaffordable across a
+never-ingested target's full history.
 
 A useful whole-deployment smoke check: no raw log should exist only because it
 shared a transaction with a manifest-declared emitter. If every row in `raw_logs`
@@ -176,5 +418,6 @@ being written per block rather than per emission.
   newly admitted targets without a restart, so live coverage self-corrects going
   forward; only history needs another pass.
 - **Never-ingested targets are the expensive case.** Their scan window is their
-  entire active range. Bound the look-ahead and stop at the first hit; presence
-  of a hole is a boolean, and its size does not change what you do next.
+  entire active range. Bound the look-ahead and stop at the first missing
+  provider log; presence of a hole is a boolean, and its size does not change
+  what you do next.
