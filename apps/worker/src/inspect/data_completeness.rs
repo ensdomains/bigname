@@ -53,6 +53,7 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
                     "contiguous": frontier.contiguous,
                     "missing_block_count": frontier.missing_block_count,
                     "duplicate_canonical_height_count": frontier.duplicate_canonical_height_count,
+                    "disconnected_canonical_parent_count": frontier.disconnected_canonical_parent_count,
                 })).collect::<Vec<_>>(),
             })),
             check("reconciliation_history_from_declared_start", report.history_from_declared_start(), json!({
@@ -70,6 +71,14 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
                 "active_watched_target_count": report.active_watched_target_count,
                 "unobserved_target_count": report.unobserved_targets.len(),
                 "unobserved_targets": report.unobserved_targets.iter().take(20).map(|target| json!({
+                    "chain": target.chain.as_str(),
+                    "address": target.address.as_str(),
+                    "source_family": target.source_family.as_str(),
+                })).collect::<Vec<_>>(),
+            })),
+            check("manifest_declared_targets_present", report.manifest_declared_targets_present(), json!({
+                "missing_address_target_count": report.manifest_targets_missing_address.len(),
+                "missing_address_targets": report.manifest_targets_missing_address.iter().take(20).map(|target| json!({
                     "chain": target.chain.as_str(),
                     "address": target.address.as_str(),
                     "source_family": target.source_family.as_str(),

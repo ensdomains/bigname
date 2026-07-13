@@ -84,6 +84,11 @@ justification = "Base rederive delete batching keeps FK-safe step candidate SQL,
 review_justification = "Explicit review accepted this file above 900 LOC for the live Base rederive performance fix because splitting the delete-step SQL during the maintenance window would broaden the change; future work should split or shrink it."
 
 [[files]]
+path = "crates/storage/src/data_completeness.rs"
+loc = 701
+justification = "Data-completeness read: one gate-scoped SQL loader per completeness signal (chain frontiers with contiguity and parent-linkage, replay and apply cursors, in-range code observations, manifest-declared targets, per-namespace event and name counts, deferred-index validity) plus their row types, kept in one module so the gate's reads review together; splitting the loaders is deferred."
+
+[[files]]
 path = "crates/storage/src/identity/write_fast.rs"
 loc = 808
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."

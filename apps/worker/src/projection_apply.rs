@@ -16,7 +16,7 @@ use crate::record_inventory;
 
 pub(crate) use derive::{normalized_event_cursor_exists, seed_normalized_event_cursor_if_absent};
 
-const NORMALIZED_EVENT_CURSOR: &str = "normalized_events_to_projection_invalidations";
+pub(crate) const NORMALIZED_EVENT_CURSOR: &str = "normalized_events_to_projection_invalidations";
 const NORMALIZED_EVENT_DERIVE_BATCH_LIMIT: i64 = 5_000;
 const PROJECTION_APPLY_BATCH_LIMIT: i64 = 25;
 const FAILURE_RETRY_DELAY: &str = "60 seconds";

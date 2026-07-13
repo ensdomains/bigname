@@ -113,9 +113,9 @@ pub use children::{
 };
 pub use data_completeness::{
     BackfillLifecycleRow, ChainCompletenessRow, DEFERRED_NORMALIZED_EVENT_INDEXES,
-    DataCompletenessRead, ManifestChainNamespace, NameCurrentCount, NormalizedEventCount,
-    ObservedCodeAddress, ProjectionApplyCursorRow, ProjectionReplayMarker, ReplayCursorRow,
-    load_data_completeness,
+    DataCompletenessRead, ManifestChainNamespace, ManifestDeclaredTarget, NameCurrentCount,
+    NormalizedEventCount, ObservedCodeAddress, ProjectionApplyCursorRow, ProjectionReplayMarker,
+    ReplayCursorRow, load_data_completeness,
 };
 pub use evm_primitives::{normalize_evm_address, normalize_evm_b256};
 pub use execution::{

@@ -52,18 +52,19 @@ as an advisory, not gated.
 | Check | Passes when |
 | --- | --- |
 | `reconciliation_frontier_at_head` | every active chain has a head lag within `±--max-head-lag-blocks` (default 8) between the stored canonical checkpoint and the canonical lineage head, and every active chain has a frontier row at all |
-| `reconciliation_lineage_contiguous` | distinct non-orphaned block numbers equal `head - floor + 1` (no gap in the reconciled span) and no block height carries more than one canonical/safe/finalized lineage row |
+| `reconciliation_lineage_contiguous` | distinct non-orphaned block numbers equal `head - floor + 1` (no gap in the reconciled span), no block height carries more than one canonical/safe/finalized lineage row, and every canonical row above the floor links by `parent_hash` to a canonical row at the preceding height |
 | `reconciliation_history_from_declared_start` | for every active watched chain, the retained lineage floor is at or below the earliest finite start block its active targets declare; a chain whose targets are all open-ended fails, since no floor can be established |
-| `watch_set_code_observation_coverage` | there is at least one active watched target, and every **active** watched target — manifest-declared contracts unioned with active discovery edges — has at least one non-orphaned `raw_code_hashes` row |
+| `watch_set_code_observation_coverage` | there is at least one active watched target, and every **active** watched target — manifest-declared contracts unioned with active discovery edges — has at least one non-orphaned `raw_code_hashes` observation at or after its declared start block (its active range) |
+| `manifest_declared_targets_present` | every active manifest-declared contract instance has a live (`deactivated_at IS NULL`) `contract_instance_addresses` row, so a declared target cannot vanish from the watch view instead of being reported |
 | `normalization_no_failure` | no `normalized_replay_cursors` row carries a `last_failure_reason` |
 | `normalization_caught_up_to_raw_head` | every active chain with retained canonical raw logs has a `raw_fact_normalized_events` cursor, and each replay cursor has reached its applicable target (see below) |
-| `projection_apply_drained` | the change log is empty, or an apply cursor exists and each `projection_apply_cursors.last_change_id` has reached `max(projection_normalized_event_changes.change_id)` |
+| `projection_apply_drained` | the change log is empty, or the `normalized_events_to_projection_invalidations` apply cursor exists and its `last_change_id` has reached `max(projection_normalized_event_changes.change_id)` |
 | `projection_invalidations_drained` | `projection_invalidations` is empty — every enqueued invalidation has been applied and deleted |
 | `projection_no_dead_letters` | `projection_invalidation_dead_letters` is empty — no invalidation exhausted its retries |
 | `projection_replay_complete` | every current projection has a `current_projection_replay_status` marker at the newest replay version present, matching the worker's bootstrap handoff |
-| `active_dataset_non_empty` | every `(chain, namespace)` an active manifest declares has non-orphaned `normalized_events`, and every such namespace has `name_current` rows |
+| `active_dataset_non_empty` | every `(chain, namespace)` an active manifest that declares normalized-event outputs carries has non-orphaned `normalized_events`, and every such namespace has `name_current` rows |
 | `normalized_events_chain_id_present` | no non-orphaned `normalized_events` row has a NULL `chain_id` |
-| `deferred_projection_indexes_present` | the eight deferred `normalized_events` projection indexes all exist (a fresh replay drops them and rebuilds them after catch-up) |
+| `deferred_projection_indexes_present` | the eight deferred `normalized_events` projection indexes all exist and are valid (`indisvalid`/`indisready`); a fresh replay drops them and rebuilds them after catch-up |
 
 `watch_set_code_observation_coverage` is the check with teeth, and the reason the command
 exists. Most others are *relative* invariants: each compares a stage to the stage before
@@ -110,8 +111,17 @@ passing because there was no cursor to measure.
 
 It works because code observations are keyed on the watch set rather than on activity: a
 watched target acquires a code observation from the live tailer's baseline pass even if it
-never emits a log. A target with zero non-orphaned observations was therefore never
-watched. See [`chain-intake.md`](../chain-intake.md).
+never emits a log. A target with zero non-orphaned observations at or after its declared
+start block was therefore never watched over its active range — a pre-admission observation
+of a reused address does not stand in for it. See [`chain-intake.md`](../chain-intake.md).
+
+`manifest_declared_targets_present` closes the authority gap one level up. The watch view
+reads a target's address from its `contract_instance_addresses` row, so a partial restore
+that lost or deactivated that row drops the declared target from the view entirely — it never
+becomes an unobserved target, and a sibling target's presence keeps coverage green. This check
+reads the active manifest-declared instances (`manifest_contract_instances` for active
+`manifest_versions`, seeded with an address row at manifest load) directly and fails on any
+that no longer have a live address row.
 
 ### Frontier, history, and content against the declared world
 
@@ -137,10 +147,14 @@ only against the previous pipeline stage:
 - **Content.** `active_dataset_non_empty` derives the expected `(chain, namespace)` set from
   active `manifest_versions` rows — the declared authority — not from observed events, so a
   chain declared to produce two namespaces fails if one has no rows even when the other does.
-  Each expected pair must have non-orphaned `normalized_events` (by `chain_id`), and each
-  expected namespace must have `name_current` rows. `name_current` carries no chain column,
-  so names are scoped to the namespace — the finest dimension a name projection has; a name
-  in a namespace shared across chains is not attributed to a specific one.
+  Only manifests that declare normalized-event outputs (a non-empty `abi.events` entry with a
+  `normalized_events` mapping) contribute to the expected set; execution and transport manifests
+  such as the checked-in `basenames_execution` and `basenames_l1_compat` declare a namespace
+  without event sources, so `(ethereum-mainnet, basenames)` is not required to have normalized
+  events on their account. Each expected pair must have non-orphaned `normalized_events` (by
+  `chain_id`), and each expected namespace must have `name_current` rows. `name_current` carries
+  no chain column, so names are scoped to the namespace — the finest dimension a name projection
+  has; a name in a namespace shared across chains is not attributed to a specific one.
 
 ### Projections rebuilt, and structural integrity
 
@@ -169,6 +183,11 @@ otherwise abort the read), so they are surfaced here as a data-integrity fault.
   `BIGNAME_INDEXER_HASH_PINNED_BACKFILL_ADAPTER_SYNC` and the resulting
   `RuntimeWatchScope`; `manifest_declared_only` excludes discovery edges. Verify with
   `inspect watch-plan --json`.
+- **`manifest_declared_targets_present` fails.** An active manifest-declared instance in
+  `missing_address_targets` has no live `contract_instance_addresses` row, so the watch view
+  cannot surface it and `watch_set_code_observation_coverage` never sees it. This is the shape
+  of a partial restore that dropped or deactivated address rows; reseed the manifests
+  (`manifest_declaration_seed`) or restore the missing address rows before promoting.
 - **Coverage fails on a database warmed by backfill alone.** Backfill only observes a
   block's selected log emitters. A watched target that never emits acquires its single
   baseline observation from the live tailer, on canonical head reconciliation. Let the
@@ -187,6 +206,11 @@ otherwise abort the read), so they are surfaced here as a data-integrity fault.
   Two or more non-orphaned lineage rows share one block height. That is a canonicality
   violation — at most one hash per height may be canonical — not a gap, and it points at a
   reorg-repair or canonicality-assignment bug rather than missing intake.
+- **`reconciliation_lineage_contiguous` fails with a non-zero `disconnected_canonical_parent_count`.**
+  A canonical row above the floor has a `parent_hash` that points to no canonical row at the
+  preceding height — the retained canonical branch is complete by height but broken by hash.
+  The distinct-block-number span count cannot see this; it is the shape of a restore or
+  reorg-repair that stitched a branch back together without a consistent parent chain.
 - **`reconciliation_history_from_declared_start` fails.** The chain's lineage floor is above
   the earliest block its watched targets declare, so history is truncated. Common on a
   restore that kept only a recent window; the reported `declared_start_block` and
@@ -199,8 +223,11 @@ otherwise abort the read), so they are surfaced here as a data-integrity fault.
   is mid projection-bootstrap: some projections have replay markers at the newest version but
   not all. `name_current` is published first, so a candidate with only it is early in the
   rebuild.
-- **`deferred_projection_indexes_present` fails.** A fresh replay dropped the listed indexes
-  and the rebuild pass has not run. Data is complete; let catch-up finish before promoting.
+- **`deferred_projection_indexes_present` fails.** A listed index is absent, or present but
+  invalid — a `CREATE INDEX CONCURRENTLY` rebuild that failed part-way leaves a catalog entry
+  `pg_indexes` still lists while `pg_index.indisvalid` is false and the index is unusable. Either
+  way a fresh replay's rebuild pass has not completed. Data is complete; let catch-up finish (and
+  reindex any invalid index) before promoting.
 - **`normalized_events_chain_id_present` fails.** Non-orphaned normalized events have a NULL
   `chain_id` — a decode or write fault. Those rows are not attributable to a chain.
 - **`projection_invalidations_drained` or `projection_no_dead_letters` fails while

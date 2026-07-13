@@ -3,8 +3,9 @@ use crate::replay::ALL_CURRENT_PROJECTION_ORDER;
 use bigname_manifests::{WatchedContract, WatchedContractSource};
 use bigname_storage::{
     BackfillLifecycleRow, ChainCompletenessRow, DEFERRED_NORMALIZED_EVENT_INDEXES,
-    DataCompletenessRead, ManifestChainNamespace, NameCurrentCount, NormalizedEventCount,
-    ObservedCodeAddress, ProjectionApplyCursorRow, ProjectionReplayMarker, ReplayCursorRow,
+    DataCompletenessRead, ManifestChainNamespace, ManifestDeclaredTarget, NameCurrentCount,
+    NormalizedEventCount, ObservedCodeAddress, ProjectionApplyCursorRow, ProjectionReplayMarker,
+    ReplayCursorRow,
 };
 use uuid::Uuid;
 
@@ -13,6 +14,9 @@ const NAMESPACE: &str = "ens";
 const REGISTRY: &str = "0x796fff2e907449be8d5921bcc215b1b76d89d080";
 const RESOLVER: &str = "0xe99638b40e4fff0129d56f03b55b6bbc4bbe49b5";
 const APPLY_CURSOR: &str = "normalized_events_to_projection_invalidations";
+/// A default observation block comfortably above every `active_from` the fixtures declare, so
+/// coverage passes unless a test deliberately observes below a target's declared start.
+const OBSERVED_BLOCK: i64 = 1_000_000;
 
 fn manifest_ns(chain: &str, namespace: &str) -> ManifestChainNamespace {
     ManifestChainNamespace {
@@ -52,9 +56,14 @@ fn watched(address: &str, source: WatchedContractSource) -> WatchedContract {
 }
 
 fn observed(address: &str) -> ObservedCodeAddress {
+    observed_at_block(address, OBSERVED_BLOCK)
+}
+
+fn observed_at_block(address: &str, observed_block_number: i64) -> ObservedCodeAddress {
     ObservedCodeAddress {
         chain_id: CHAIN.to_owned(),
         address: address.to_owned(),
+        observed_block_number,
     }
 }
 
@@ -86,6 +95,7 @@ fn chain_row(
         lineage_floor_block_number: Some(floor),
         lineage_canonical_block_count: block_count,
         duplicate_canonical_height_count: 0,
+        disconnected_canonical_parent_count: 0,
         canonical_raw_log_head_block_number: Some(floor),
         raw_log_head_block_number: Some(floor),
     }
@@ -153,6 +163,7 @@ fn healthy_read() -> DataCompletenessRead {
         backfill_lifecycle: vec![],
         present_deferred_projection_indexes: all_deferred_indexes(),
         manifest_chain_namespaces: vec![manifest_ns(CHAIN, NAMESPACE)],
+        manifest_declared_targets_missing_address: vec![],
     }
 }
 
@@ -789,4 +800,116 @@ fn backfill_failures_are_advisory() {
     assert_eq!(report.backfill_advisory[0].failed_job_count, 22);
     // Advisory only: backfill failures do not fail the gate.
     assert!(report.data_complete());
+}
+
+fn other_apply_cursor(last_change_id: i64) -> ProjectionApplyCursorRow {
+    ProjectionApplyCursorRow {
+        cursor_name: "some_unrelated_cursor".to_owned(),
+        last_change_id,
+    }
+}
+
+/// A restore that keeps an unrelated apply-cursor row while dropping the real
+/// `normalized_events_to_projection_invalidations` cursor must not read as drained: presence is
+/// keyed to the expected cursor name, not to the table being non-empty. A stale row at or above
+/// `max(change_id)` previously masked the missing real cursor.
+#[test]
+fn stale_apply_cursor_does_not_mask_missing_real_cursor() {
+    let mut read = healthy_read();
+    read.projection_apply_cursors = vec![other_apply_cursor(42)];
+    read.max_projection_change_id = Some(42);
+    let report = evaluate(&read, &registry_only());
+
+    assert!(report.projection_apply_cursor_missing);
+    assert_eq!(report.projection_drained(), CheckStatus::Fail);
+    assert!(!report.data_complete());
+}
+
+/// Lag is measured only on the real apply cursor. A stale unrelated cursor far behind the change
+/// log is not counted, and with the real cursor caught up the check passes.
+#[test]
+fn stale_apply_cursor_behind_is_not_counted_as_lag() {
+    let mut read = healthy_read();
+    read.projection_apply_cursors = vec![apply_cursor(42), other_apply_cursor(0)];
+    read.max_projection_change_id = Some(42);
+    let report = evaluate(&read, &registry_only());
+
+    assert!(!report.projection_apply_cursor_missing);
+    assert!(report.lagging_projection_cursors.is_empty());
+    assert_eq!(report.projection_drained(), CheckStatus::Pass);
+    assert!(report.data_complete());
+}
+
+/// A warmed or restored database can retain a pre-admission code observation of the same
+/// address. The only observation sits below the target's declared start, so coverage must not
+/// treat the target as observed.
+#[test]
+fn observation_below_active_from_does_not_satisfy_coverage() {
+    let mut read = healthy_read();
+    let mut target = watched(REGISTRY, WatchedContractSource::ManifestContract);
+    target.active_from_block_number = Some(1_000);
+    read.observed_code_addresses = vec![observed_at_block(REGISTRY, 900)];
+    let report = evaluate(&read, &[target]);
+
+    assert_eq!(report.watch_set_observed(), CheckStatus::Fail);
+    assert_eq!(report.unobserved_targets.len(), 1);
+    assert_eq!(report.unobserved_targets[0].address, REGISTRY);
+    assert!(!report.data_complete());
+}
+
+/// An observation at or after the declared start is within the active range and satisfies
+/// coverage.
+#[test]
+fn observation_at_active_from_satisfies_coverage() {
+    let mut read = healthy_read();
+    let mut target = watched(REGISTRY, WatchedContractSource::ManifestContract);
+    target.active_from_block_number = Some(1_000);
+    read.observed_code_addresses = vec![observed_at_block(REGISTRY, 1_000)];
+    let report = evaluate(&read, &[target]);
+
+    assert_eq!(report.watch_set_observed(), CheckStatus::Pass);
+    assert!(report.unobserved_targets.is_empty());
+}
+
+/// A canonical branch complete by height but broken by parent hash — one row per height, yet a
+/// row's parent does not point to the previous canonical hash — fails contiguity even though the
+/// span count and the duplicate-height count are both clean.
+#[test]
+fn disconnected_canonical_parent_fails_contiguity() {
+    let mut read = healthy_read();
+    read.chains = vec![ChainCompletenessRow {
+        disconnected_canonical_parent_count: 1,
+        ..chain_row(1_000, 1_000, 1, 1_000)
+    }];
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.lineage_contiguous(), CheckStatus::Fail);
+    assert_eq!(report.frontiers[0].disconnected_canonical_parent_count, 1);
+    assert_eq!(report.frontiers[0].missing_block_count, 0);
+    assert!(!report.data_complete());
+}
+
+/// A manifest-declared target whose `contract_instance_addresses` row was lost in a partial
+/// restore never reaches the watch view, so it cannot surface as an unobserved target. The
+/// dedicated check gates on it directly, catching the coverage-authority gap a sibling target's
+/// presence would otherwise hide.
+#[test]
+fn manifest_declared_target_missing_address_fails() {
+    let mut read = healthy_read();
+    read.manifest_declared_targets_missing_address = vec![ManifestDeclaredTarget {
+        chain: CHAIN.to_owned(),
+        address: RESOLVER.to_owned(),
+        source_family: "ens_v2_resolver_l1".to_owned(),
+    }];
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(
+        report.manifest_declared_targets_present(),
+        CheckStatus::Fail
+    );
+    assert_eq!(report.manifest_targets_missing_address.len(), 1);
+    assert_eq!(report.manifest_targets_missing_address[0].address, RESOLVER);
+    // The watch-set coverage check is blind to it: the target never entered the watch view.
+    assert_eq!(report.watch_set_observed(), CheckStatus::Pass);
+    assert!(!report.data_complete());
 }

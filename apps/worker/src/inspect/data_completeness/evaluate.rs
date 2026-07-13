@@ -2,6 +2,7 @@ mod report;
 
 pub(super) use report::{CheckStatus, CursorLag, DataCompletenessReport};
 
+use crate::projection_apply::NORMALIZED_EVENT_CURSOR;
 use crate::replay::ALL_CURRENT_PROJECTION_ORDER;
 use bigname_manifests::WatchedContract;
 use bigname_storage::{DEFERRED_NORMALIZED_EVENT_INDEXES, DataCompletenessRead};
@@ -43,11 +44,19 @@ pub(super) fn evaluate_data_completeness(
     watched_contracts: &[WatchedContract],
     max_head_lag_blocks: i64,
 ) -> DataCompletenessReport {
+    // Highest non-orphaned observation block per (chain, address). Coverage requires an
+    // observation within a target's active range, so a pre-admission observation of the same
+    // address does not satisfy a target whose declared start is later.
     let observed = read
         .observed_code_addresses
         .iter()
-        .map(|entry| (entry.chain_id.as_str(), entry.address.as_str()))
-        .collect::<BTreeSet<_>>();
+        .map(|entry| {
+            (
+                (entry.chain_id.as_str(), entry.address.as_str()),
+                entry.observed_block_number,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
 
     // load_watched_contracts returns one row per source entry, so a target can repeat across
     // source families; coverage is a property of the (chain, address) pair.
@@ -66,11 +75,31 @@ pub(super) fn evaluate_data_completeness(
 
     let unobserved_targets = active_targets
         .iter()
-        .filter(|((chain, address), _)| !observed.contains(&(*chain, address.as_str())))
+        .filter(|((chain, address), contract)| {
+            !observed
+                .get(&(*chain, address.as_str()))
+                .is_some_and(|observed_block| {
+                    contract
+                        .active_from_block_number
+                        .is_none_or(|start| *observed_block >= start)
+                })
+        })
         .map(|((chain, address), contract)| UnobservedTarget {
             chain: (*chain).to_owned(),
             address: address.clone(),
             source_family: contract.source_family.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    // Active manifest-declared instances whose address row was lost never reach the watch view,
+    // so they cannot appear as unobserved targets; the storage read surfaces them directly.
+    let manifest_targets_missing_address = read
+        .manifest_declared_targets_missing_address
+        .iter()
+        .map(|target| UnobservedTarget {
+            chain: target.chain.clone(),
+            address: target.address.clone(),
+            source_family: target.source_family.clone(),
         })
         .collect::<Vec<_>>();
 
@@ -226,9 +255,13 @@ pub(super) fn evaluate_data_completeness(
         .map(|chain| chain.chain_id.clone())
         .collect::<Vec<_>>();
 
+    // Continuous apply consumes exactly the NORMALIZED_EVENT_CURSOR row, so lag and presence are
+    // keyed to that name; a stale or unrelated cursor row left by a restore cannot stand in for
+    // it, whether by masking the missing real cursor or by reading as caught up in its place.
     let lagging_projection_cursors = read
         .projection_apply_cursors
         .iter()
+        .filter(|cursor| cursor.cursor_name == NORMALIZED_EVENT_CURSOR)
         .filter_map(|cursor| {
             let max_change_id = read.max_projection_change_id?;
             (cursor.last_change_id < max_change_id).then(|| CursorLag {
@@ -238,8 +271,11 @@ pub(super) fn evaluate_data_completeness(
         })
         .collect::<Vec<_>>();
 
-    let projection_apply_cursor_missing =
-        read.max_projection_change_id.is_some() && read.projection_apply_cursors.is_empty();
+    let projection_apply_cursor_missing = read.max_projection_change_id.is_some()
+        && !read
+            .projection_apply_cursors
+            .iter()
+            .any(|cursor| cursor.cursor_name == NORMALIZED_EVENT_CURSOR);
 
     // Projection replay markers: require all current projections present at the newest replay
     // version in the database. The version is read from the data, not hardcoded, so a candidate
@@ -334,6 +370,7 @@ pub(super) fn evaluate_data_completeness(
         foreign_chains,
         active_watched_target_count: active_targets.len(),
         unobserved_targets,
+        manifest_targets_missing_address,
         chains_history_truncated,
         chains_without_finite_start,
         failed_replay_cursors,
@@ -388,6 +425,7 @@ fn missing_chain_frontier(chain_id: &str) -> ChainFrontier {
         contiguous: false,
         missing_block_count: 0,
         duplicate_canonical_height_count: 0,
+        disconnected_canonical_parent_count: 0,
         missing_from_storage: true,
     }
 }
@@ -413,9 +451,11 @@ fn chain_frontier(chain: &bigname_storage::ChainCompletenessRow) -> ChainFrontie
         head_lag_blocks,
         contiguous: expected_block_count.is_some()
             && missing_block_count == 0
-            && chain.duplicate_canonical_height_count == 0,
+            && chain.duplicate_canonical_height_count == 0
+            && chain.disconnected_canonical_parent_count == 0,
         missing_block_count,
         duplicate_canonical_height_count: chain.duplicate_canonical_height_count,
+        disconnected_canonical_parent_count: chain.disconnected_canonical_parent_count,
         missing_from_storage: false,
     }
 }
