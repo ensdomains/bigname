@@ -7,7 +7,7 @@ use crate::runtime::{
     log_ens_v1_reverse_claim_sync_summary, log_ens_v1_subregistry_discovery_sync_summary,
     log_ens_v1_unwrapped_authority_sync_summary, log_ens_v2_permissions_sync_summary,
     log_ens_v2_registrar_sync_summary, log_ens_v2_registry_resource_surface_sync_summary,
-    log_ens_v2_resolver_sync_summary,
+    log_ens_v2_resolver_sync_summary, log_entrypoint_user_operation_sync_summary,
 };
 
 use super::sync_logging::log_adapter_call_timing;
@@ -247,6 +247,36 @@ pub(crate) async fn sync_full_closure_normalized_events_from_persisted_raw_paylo
             summary.total_inserted_count,
         );
         trim_allocator_after_full_closure_adapter("ens_v2_permissions");
+    }
+
+    if adapters.contains(&NormalizedEventReplayAdapter::EntrypointUserOperation) {
+        let adapter_started = Instant::now();
+        let summary = bigname_adapters::sync_entrypoint_user_operation_through_block(
+            pool,
+            chain,
+            target_block_number,
+        )
+        .await?;
+        log_adapter_call_timing(
+            chain,
+            "entrypoint_user_operation",
+            "sync_entrypoint_user_operation_through_block",
+            0,
+            0,
+            summary.scanned_log_count,
+            summary.matched_log_count,
+            summary.total_synced_count,
+            summary.total_inserted_count,
+            adapter_started.elapsed().as_millis(),
+        );
+        log_entrypoint_user_operation_sync_summary(chain, &summary);
+        aggregate.add_counts(
+            summary.scanned_log_count,
+            summary.matched_log_count,
+            summary.total_synced_count,
+            summary.total_inserted_count,
+        );
+        trim_allocator_after_full_closure_adapter("entrypoint_user_operation");
     }
 
     Ok(aggregate)

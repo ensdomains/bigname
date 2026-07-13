@@ -63,6 +63,7 @@ fn implemented_full_closure_contracts_are_enumerated() {
         NormalizedEventReplayAdapter::EnsV2Registrar,
         NormalizedEventReplayAdapter::EnsV2Resolver,
         NormalizedEventReplayAdapter::EnsV2Permissions,
+        NormalizedEventReplayAdapter::EntrypointUserOperation,
     ]);
     assert_eq!(actual, expected);
     assert!(
@@ -86,6 +87,7 @@ fn full_closure_reemitted_adapters_include_base_reverse_claim_dependency() {
         NormalizedEventReplayAdapter::EnsV2Registrar,
         NormalizedEventReplayAdapter::EnsV2Resolver,
         NormalizedEventReplayAdapter::EnsV2Permissions,
+        NormalizedEventReplayAdapter::EntrypointUserOperation,
     ]);
     assert_eq!(actual, expected);
 }
@@ -192,6 +194,8 @@ fn adapter_for_producer_path(path: &str) -> NormalizedEventReplayAdapter {
         NormalizedEventReplayAdapter::EnsV2Resolver
     } else if path.contains("ens_v2_permissions") {
         NormalizedEventReplayAdapter::EnsV2Permissions
+    } else if path.contains("entrypoint_user_operation") {
+        NormalizedEventReplayAdapter::EntrypointUserOperation
     } else if path.contains("manifest_normalized_events") {
         NormalizedEventReplayAdapter::ManifestNormalizedEvents
     } else {

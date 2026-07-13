@@ -27,9 +27,9 @@ pub(crate) use logging::{
     log_ens_v1_reverse_claim_sync_summary, log_ens_v1_subregistry_discovery_sync_summary,
     log_ens_v1_unwrapped_authority_sync_summary, log_ens_v2_permissions_sync_summary,
     log_ens_v2_registrar_sync_summary, log_ens_v2_registry_resource_surface_sync_summary,
-    log_ens_v2_resolver_sync_summary, log_intake_chain_tasks,
-    log_manifest_normalized_event_summary, log_manifest_runtime_state, log_manifest_summary,
-    log_manifest_sync_summary, log_provider_registry, log_watched_chain_plan,
+    log_ens_v2_resolver_sync_summary, log_entrypoint_user_operation_sync_summary,
+    log_intake_chain_tasks, log_manifest_normalized_event_summary, log_manifest_runtime_state,
+    log_manifest_summary, log_manifest_sync_summary, log_provider_registry, log_watched_chain_plan,
     log_watched_contract_summary,
 };
 #[allow(unused_imports)]

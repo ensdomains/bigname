@@ -31,6 +31,11 @@ loc = 796
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]
+path = "apps/indexer/src/main/reconciliation/replay/classification.rs"
+loc = 618
+justification = "Central adapter replay-contract table; grows one bounded entry per normalized-event producer."
+
+[[files]]
 path = "apps/indexer/src/main/reconciliation/adapter_sync.rs"
 loc = 708
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."

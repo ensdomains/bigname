@@ -5,7 +5,7 @@ use super::logging::{
     log_ens_v1_reverse_claim_sync_summary, log_ens_v1_subregistry_discovery_sync_summary,
     log_ens_v1_unwrapped_authority_sync_summary, log_ens_v2_permissions_sync_summary,
     log_ens_v2_registrar_sync_summary, log_ens_v2_registry_resource_surface_sync_summary,
-    log_ens_v2_resolver_sync_summary,
+    log_ens_v2_resolver_sync_summary, log_entrypoint_user_operation_sync_summary,
 };
 
 pub(crate) async fn sync_adapter_owned_raw_log_state(
@@ -82,6 +82,16 @@ pub(crate) async fn sync_adapter_owned_raw_log_state(
                 )
             })?;
         log_ens_v2_permissions_sync_summary(&chain.chain, &summary);
+
+        let summary = bigname_adapters::sync_entrypoint_user_operation(pool, &chain.chain)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to sync gas-sponsorship facts from stored raw logs for chain {}",
+                    chain.chain
+                )
+            })?;
+        log_entrypoint_user_operation_sync_summary(&chain.chain, &summary);
     }
 
     Ok(())

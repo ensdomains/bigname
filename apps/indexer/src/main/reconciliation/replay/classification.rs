@@ -39,6 +39,14 @@ const ENS_V2_REGISTRAR_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V2_REGISTR
 const ENS_V2_RESOLVER_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V2_RESOLVER_L1];
 const ENS_V2_PERMISSIONS_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V2_RESOLVER_L1];
 
+const SOURCE_FAMILY_ENS_GAS_SPONSORSHIP_L1: &str = "ens_gas_sponsorship_l1";
+const ENS_GAS_SPONSORSHIP_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_GAS_SPONSORSHIP_L1];
+const ENS_GAS_SPONSORSHIP_DEPENDENCY_SOURCE_FAMILIES: &[&str] = &[
+    SOURCE_FAMILY_ENS_V2_ROOT_L1,
+    SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
+    SOURCE_FAMILY_ENS_GAS_SPONSORSHIP_L1,
+];
+
 #[rustfmt::skip]
 const ENS_V2_REGISTRAR_DEPENDENCY_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V2_ROOT_L1, SOURCE_FAMILY_ENS_V2_REGISTRY_L1, SOURCE_FAMILY_ENS_V2_REGISTRAR_L1];
 #[rustfmt::skip]
@@ -75,6 +83,7 @@ pub(crate) enum NormalizedEventReplayAdapter {
     EnsV2Registrar,
     EnsV2Resolver,
     EnsV2Permissions,
+    EntrypointUserOperation,
     ManifestNormalizedEvents,
 }
 
@@ -89,6 +98,7 @@ impl NormalizedEventReplayAdapter {
             Self::EnsV2Registrar => "ens_v2_registrar",
             Self::EnsV2Resolver => "ens_v2_resolver",
             Self::EnsV2Permissions => "ens_v2_permissions",
+            Self::EntrypointUserOperation => "entrypoint_user_operation",
             Self::ManifestNormalizedEvents => "manifest_normalized_events",
         }
     }
@@ -216,6 +226,18 @@ pub(crate) const NORMALIZED_EVENT_REPLAY_CONTRACTS: &[AdapterReplayContract] = &
         restricted_replay_proof_tests: &[],
         closure_replay_supported: true,
         replay_note: "permission resources and role events depend on prior resolver resource hint observations in canonical order",
+    },
+    AdapterReplayContract {
+        adapter: NormalizedEventReplayAdapter::EntrypointUserOperation,
+        model: ReplayDependencyModel::ContextualDependencyRequired,
+        raw_fact_replay_participant: true,
+        source_families: ENS_GAS_SPONSORSHIP_SOURCE_FAMILIES,
+        closure_source_families: ENS_GAS_SPONSORSHIP_DEPENDENCY_SOURCE_FAMILIES,
+        dependency_adapters: ENS_V2_REGISTRY_DEPENDENCY,
+        producer_paths: &["crates/adapters/src/entrypoint_user_operation"],
+        restricted_replay_proof_tests: &[],
+        closure_replay_supported: true,
+        replay_note: "sponsored-write rows resolve logical_name_id through stable name_surfaces and consume retained raw_transaction_inputs alongside the selected raw log",
     },
     AdapterReplayContract {
         adapter: NormalizedEventReplayAdapter::ManifestNormalizedEvents,

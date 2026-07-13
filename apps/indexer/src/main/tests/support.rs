@@ -573,6 +573,22 @@ impl TestDatabase {
                 "#,
         )
         .execute(&pool)
+        .await?;
+    sqlx::query(
+        r#"
+                CREATE TABLE raw_transaction_inputs (
+                    chain_id TEXT NOT NULL,
+                    block_hash TEXT NOT NULL,
+                    block_number BIGINT NOT NULL,
+                    transaction_hash TEXT NOT NULL,
+                    input BYTEA NOT NULL,
+                    canonicality_state canonicality_state NOT NULL DEFAULT 'observed',
+                    observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    PRIMARY KEY (chain_id, block_hash, transaction_hash)
+                )
+                "#,
+        )
+        .execute(&pool)
         .await
         .context("failed to create raw_transactions table for indexer tests")?;
         sqlx::query(

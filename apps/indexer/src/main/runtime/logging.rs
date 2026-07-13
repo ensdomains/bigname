@@ -3,7 +3,7 @@ use bigname_adapters::{
     EnsV1SubregistryDiscoverySyncSummary, EnsV1UnwrappedAuthoritySyncSummary,
     EnsV2PermissionsSyncSummary, EnsV2RegistrarSyncSummary,
     EnsV2RegistryResourceSurfaceSyncSummary, EnsV2ResolverSyncSummary,
-    ManifestNormalizedEventSyncSummary,
+    EntrypointUserOperationSyncSummary, ManifestNormalizedEventSyncSummary,
 };
 use bigname_manifests::{
     ManifestLoadStatus, ManifestLoadSummary, ManifestSyncStatus, ManifestSyncSummary,
@@ -320,6 +320,26 @@ pub(crate) fn log_ens_v2_registry_resource_surface_sync_summary(
         discovery_inserted_edge_count = summary.inserted_edge_count,
         discovery_deactivated_edge_count = summary.deactivated_edge_count,
         "ENSv2 registry resource/surface state synced from stored raw logs"
+    );
+}
+
+pub(crate) fn log_entrypoint_user_operation_sync_summary(
+    chain: &str,
+    summary: &EntrypointUserOperationSyncSummary,
+) {
+    if summary.scanned_log_count == 0 && summary.total_synced_count == 0 {
+        return;
+    }
+
+    info!(
+        service = "indexer",
+        chain,
+        scanned_raw_log_count = summary.scanned_log_count,
+        matched_raw_log_count = summary.matched_log_count,
+        normalized_event_sync_total_count = summary.total_synced_count,
+        normalized_event_inserted_total_count = summary.total_inserted_count,
+        normalized_event_kind_count = summary.by_kind.len(),
+        "gas-sponsorship facts synced from stored raw logs"
     );
 }
 
