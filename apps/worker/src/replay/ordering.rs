@@ -6,12 +6,16 @@ pub const ALL_CURRENT_PROJECTION_ORDER: &[&str] = &[
     "resolver_current",
     "address_names_current",
     "primary_names_current",
+    "gas_sponsorship_current",
+    "gas_sponsorship_global_current",
 ];
 
 pub const ALL_CURRENT_PROJECTION_JSON_ORDER: &[&str] = &[
     "address_names_current",
     "children_current",
     "coverage_current",
+    "gas_sponsorship_current",
+    "gas_sponsorship_global_current",
     "name_current",
     "permissions_current",
     "primary_names_current",

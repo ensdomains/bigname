@@ -323,6 +323,50 @@ pub(super) async fn load_api_visible_projection_snapshot(
         .await?,
     );
 
+    rows.insert(
+        "gas_sponsorship_current",
+        projection_rows(
+            pool,
+            r#"
+            SELECT jsonb_build_object(
+                'logical_name_id', logical_name_id,
+                'namespace', namespace,
+                'normalized_name', normalized_name,
+                'namehash', namehash,
+                'registered_seconds_total', registered_seconds_total,
+                'earned_updates', earned_updates,
+                'spent_updates', spent_updates,
+                'manifest_version', manifest_version
+            ) AS row
+            FROM gas_sponsorship_current
+            ORDER BY logical_name_id
+            "#,
+        )
+        .await?,
+    );
+    rows.insert(
+        "gas_sponsorship_global_current",
+        projection_rows(
+            pool,
+            r#"
+            SELECT jsonb_build_object(
+                'namespace', namespace,
+                'sponsored_op_count', sponsored_op_count,
+                'attributed_op_count', attributed_op_count,
+                'failed_op_count', failed_op_count,
+                'gas_wei_total', gas_wei_total::text,
+                'failed_gas_wei_total', failed_gas_wei_total::text,
+                'usd_e8_total', usd_e8_total::text,
+                'unpriced_wei_total', unpriced_wei_total::text,
+                'manifest_version', manifest_version
+            ) AS row
+            FROM gas_sponsorship_global_current
+            ORDER BY namespace
+            "#,
+        )
+        .await?,
+    );
+
     Ok(ProjectionSnapshot { rows })
 }
 
@@ -733,6 +777,70 @@ pub(super) async fn insert_stale_projection_rows(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await
     .context("failed to insert stale primary_names_current row")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO gas_sponsorship_current (
+            logical_name_id,
+            namespace,
+            normalized_name,
+            namehash,
+            registered_seconds_total,
+            earned_updates,
+            spent_updates,
+            provenance,
+            coverage,
+            chain_positions,
+            canonicality_summary,
+            manifest_version,
+            last_recomputed_at
+        )
+        VALUES (
+            'ens:stale.eth',
+            'ens',
+            'stale.eth',
+            '0x00000000000000000000000000000000000000000000000000000000000057a1',
+            0,
+            0,
+            0,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            1,
+            '2026-04-20T00:00:00Z'::timestamptz
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to insert stale gas_sponsorship_current row")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO gas_sponsorship_global_current (
+            namespace,
+            provenance,
+            coverage,
+            chain_positions,
+            canonicality_summary,
+            manifest_version,
+            last_recomputed_at
+        )
+        VALUES (
+            'stale-namespace',
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            1,
+            '2026-04-20T00:00:00Z'::timestamptz
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to insert stale gas_sponsorship_global_current row")?;
 
     Ok(())
 }

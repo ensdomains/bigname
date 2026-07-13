@@ -4,6 +4,7 @@ mod children;
 mod cli;
 mod commands;
 mod execution;
+mod gas_sponsorship;
 mod healthcheck;
 mod inspect;
 mod manifest_drift;

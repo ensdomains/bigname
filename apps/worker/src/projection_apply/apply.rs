@@ -7,7 +7,8 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::{
-    address_names, children, name_current, permissions, primary_name, record_inventory, resolver,
+    address_names, children, gas_sponsorship, name_current, permissions, primary_name,
+    record_inventory, resolver,
 };
 
 use super::{
@@ -213,6 +214,8 @@ fn claimed_invalidation_apply_key(invalidation: &ClaimedInvalidation) -> (u16, u
         "resolver_current" => 50,
         "address_names_current" => 60,
         "primary_names_current" => 70,
+        "gas_sponsorship_current" => 80,
+        "gas_sponsorship_global_current" => 81,
         _ => 1000,
     };
     let namespace_rank = if invalidation.projection == "name_current"
@@ -301,6 +304,19 @@ async fn apply_one(
                 Some(coin_type),
             )
             .await?;
+        }
+        "gas_sponsorship_current" => {
+            gas_sponsorship::rebuild_gas_sponsorship_current(
+                pool,
+                Some(&invalidation.projection_key),
+            )
+            .await?;
+        }
+        "gas_sponsorship_global_current" => {
+            let namespace = optional_payload_str(&invalidation.key_payload, "namespace")
+                .or_else(|| nonblank_str(&invalidation.projection_key))
+                .context("gas_sponsorship_global_current invalidation missing namespace")?;
+            gas_sponsorship::rebuild_gas_sponsorship_global_current(pool, Some(namespace)).await?;
         }
         projection => bail!("unsupported projection invalidation family {projection}"),
     }

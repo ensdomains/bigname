@@ -55,6 +55,18 @@ fn all_current_projection_json_summary_has_frozen_shape_order_counts_and_totals(
                 upserted_row_count: 1,
                 deleted_row_count: 0,
             },
+            CurrentProjectionReplayStepSummary {
+                projection: "gas_sponsorship_current",
+                requested_key_count: 1,
+                upserted_row_count: 1,
+                deleted_row_count: 0,
+            },
+            CurrentProjectionReplayStepSummary {
+                projection: "gas_sponsorship_global_current",
+                requested_key_count: 1,
+                upserted_row_count: 1,
+                deleted_row_count: 0,
+            },
         ],
     };
 
@@ -80,6 +92,8 @@ fn all_current_projection_json_summary_has_frozen_shape_order_counts_and_totals(
         ("address_names_current", (2, 3, 0)),
         ("children_current", (1, 1, 0)),
         ("coverage_current", (0, 0, 0)),
+        ("gas_sponsorship_current", (1, 1, 0)),
+        ("gas_sponsorship_global_current", (1, 1, 0)),
         ("name_current", (2, 2, 0)),
         ("permissions_current", (1, 1, 0)),
         ("primary_names_current", (1, 1, 0)),
@@ -106,8 +120,8 @@ fn all_current_projection_json_summary_has_frozen_shape_order_counts_and_totals(
     }
 
     assert_json_object_fields(&value["totals"], ["requested", "upserted", "deleted"]);
-    assert_eq!(value["totals"]["requested"].as_u64(), Some(9));
-    assert_eq!(value["totals"]["upserted"].as_u64(), Some(10));
+    assert_eq!(value["totals"]["requested"].as_u64(), Some(11));
+    assert_eq!(value["totals"]["upserted"].as_u64(), Some(12));
     assert_eq!(value["totals"]["deleted"].as_u64(), Some(0));
 
     Ok(())

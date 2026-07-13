@@ -5,8 +5,9 @@ mod execution_invalidation;
 
 use crate::cli::*;
 use crate::{
-    address_names, automatic_projection_replay, children, healthcheck, inspect, manifest_drift,
-    name_current, permissions, primary_name, raw_facts, record_inventory, replay, resolver,
+    address_names, automatic_projection_replay, children, gas_sponsorship, healthcheck, inspect,
+    manifest_drift, name_current, permissions, primary_name, raw_facts, record_inventory, replay,
+    resolver,
 };
 use execution_invalidation::execution_command;
 
@@ -25,6 +26,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
         Command::AddressNamesCurrent(args) => address_names_current(args).await,
         Command::ChildrenCurrent(args) => children_current(args).await,
         Command::Execution(args) => execution_command(args).await,
+        Command::GasSponsorship(args) => gas_sponsorship_command(args).await,
         Command::Inspect(args) => inspect::inspect_command(args).await,
         Command::LabelPreimages(args) => label_preimages_command(args).await,
         Command::ManifestDrift(args) => manifest_drift_command(args).await,
@@ -304,6 +306,53 @@ async fn replay_all_current_projections(args: AllCurrentProjectionsArgs) -> Resu
         total_upserted_row_count = summary.total_upserted_row_count(),
         total_deleted_row_count = summary.total_deleted_row_count(),
         "all current projections replay completed"
+    );
+
+    Ok(())
+}
+
+async fn gas_sponsorship_command(args: GasSponsorshipArgs) -> Result<()> {
+    match args.command {
+        GasSponsorshipCommand::Rebuild(args) => rebuild_gas_sponsorship(args).await,
+        GasSponsorshipCommand::RebuildGlobal(args) => rebuild_gas_sponsorship_global(args).await,
+    }
+}
+
+async fn rebuild_gas_sponsorship(args: GasSponsorshipRebuildArgs) -> Result<()> {
+    let (pool, _rederive_guard) = connect_worker_writer(&args.database).await?;
+    clear_projection_replay_marker(&pool, "gas_sponsorship_current").await?;
+    let summary =
+        gas_sponsorship::rebuild_gas_sponsorship_current(&pool, args.logical_name_id.as_deref())
+            .await?;
+
+    info!(
+        service = "worker",
+        projection = "gas_sponsorship_current",
+        requested_name_count = summary.requested_name_count,
+        upserted_row_count = summary.upserted_row_count,
+        deleted_row_count = summary.deleted_row_count,
+        logical_name_id = args.logical_name_id.as_deref().unwrap_or("all"),
+        "gas_sponsorship_current rebuild completed"
+    );
+
+    Ok(())
+}
+
+async fn rebuild_gas_sponsorship_global(args: GasSponsorshipRebuildGlobalArgs) -> Result<()> {
+    let (pool, _rederive_guard) = connect_worker_writer(&args.database).await?;
+    clear_projection_replay_marker(&pool, "gas_sponsorship_global_current").await?;
+    let summary =
+        gas_sponsorship::rebuild_gas_sponsorship_global_current(&pool, args.namespace.as_deref())
+            .await?;
+
+    info!(
+        service = "worker",
+        projection = "gas_sponsorship_global_current",
+        requested_namespace_count = summary.requested_namespace_count,
+        upserted_row_count = summary.upserted_row_count,
+        deleted_row_count = summary.deleted_row_count,
+        namespace = args.namespace.as_deref().unwrap_or("all"),
+        "gas_sponsorship_global_current rebuild completed"
     );
 
     Ok(())

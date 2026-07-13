@@ -5,7 +5,8 @@ use sqlx::PgPool;
 use tracing::info;
 
 use crate::{
-    address_names, children, name_current, permissions, primary_name, record_inventory, resolver,
+    address_names, children, gas_sponsorship, name_current, permissions, primary_name,
+    record_inventory, resolver,
 };
 
 use super::{
@@ -171,6 +172,16 @@ async fn rebuild_all_current_projections_inner(
         )
         .await?,
     );
+    steps.push(replay_step!(
+        "gas_sponsorship_current",
+        gas_sponsorship::rebuild_gas_sponsorship_current(pool, None),
+        requested_name_count
+    ));
+    steps.push(replay_step!(
+        "gas_sponsorship_global_current",
+        gas_sponsorship::rebuild_gas_sponsorship_global_current(pool, None),
+        requested_namespace_count
+    ));
 
     debug_assert_eq!(
         steps.iter().map(|step| step.projection).collect::<Vec<_>>(),

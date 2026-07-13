@@ -22,6 +22,7 @@ pub(crate) enum Command {
     AddressNamesCurrent(AddressNamesCurrentArgs),
     ChildrenCurrent(ChildrenCurrentArgs),
     Execution(ExecutionArgs),
+    GasSponsorship(GasSponsorshipArgs),
     Inspect(inspect::InspectArgs),
     LabelPreimages(LabelPreimagesArgs),
     ManifestDrift(ManifestDriftArgs),
@@ -200,6 +201,34 @@ pub(crate) enum LabelPreimagesCommand {
 #[derive(Subcommand, Debug)]
 pub(crate) enum ManifestDriftCommand {
     Audit(ManifestDriftAuditArgs),
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct GasSponsorshipArgs {
+    #[command(subcommand)]
+    pub(crate) command: GasSponsorshipCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum GasSponsorshipCommand {
+    Rebuild(GasSponsorshipRebuildArgs),
+    RebuildGlobal(GasSponsorshipRebuildGlobalArgs),
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct GasSponsorshipRebuildArgs {
+    #[command(flatten)]
+    pub(crate) database: DatabaseConfig,
+    #[arg(long)]
+    pub(crate) logical_name_id: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct GasSponsorshipRebuildGlobalArgs {
+    #[command(flatten)]
+    pub(crate) database: DatabaseConfig,
+    #[arg(long)]
+    pub(crate) namespace: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
