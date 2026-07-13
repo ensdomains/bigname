@@ -1,8 +1,10 @@
 use super::evaluate::{CheckStatus, DEFAULT_MAX_HEAD_LAG_BLOCKS, evaluate_data_completeness};
+use crate::replay::ALL_CURRENT_PROJECTION_ORDER;
 use bigname_manifests::{WatchedContract, WatchedContractSource};
 use bigname_storage::{
-    ChainCompletenessRow, DataCompletenessRead, NameCurrentCount, NormalizedEventCount,
-    ObservedCodeAddress, ProjectionApplyCursorRow, ReplayCursorRow,
+    BackfillLifecycleRow, ChainCompletenessRow, DEFERRED_NORMALIZED_EVENT_INDEXES,
+    DataCompletenessRead, ManifestChainNamespace, NameCurrentCount, NormalizedEventCount,
+    ObservedCodeAddress, ProjectionApplyCursorRow, ProjectionReplayMarker, ReplayCursorRow,
 };
 use uuid::Uuid;
 
@@ -11,6 +13,30 @@ const NAMESPACE: &str = "ens";
 const REGISTRY: &str = "0x796fff2e907449be8d5921bcc215b1b76d89d080";
 const RESOLVER: &str = "0xe99638b40e4fff0129d56f03b55b6bbc4bbe49b5";
 const APPLY_CURSOR: &str = "normalized_events_to_projection_invalidations";
+
+fn manifest_ns(chain: &str, namespace: &str) -> ManifestChainNamespace {
+    ManifestChainNamespace {
+        chain: chain.to_owned(),
+        namespace: namespace.to_owned(),
+    }
+}
+
+fn all_projection_markers(version: i32) -> Vec<ProjectionReplayMarker> {
+    ALL_CURRENT_PROJECTION_ORDER
+        .iter()
+        .map(|projection| ProjectionReplayMarker {
+            replay_version: version,
+            projection: (*projection).to_owned(),
+        })
+        .collect()
+}
+
+fn all_deferred_indexes() -> Vec<String> {
+    DEFERRED_NORMALIZED_EVENT_INDEXES
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect()
+}
 
 fn watched(address: &str, source: WatchedContractSource) -> WatchedContract {
     WatchedContract {
@@ -65,24 +91,41 @@ fn chain_row(
     }
 }
 
-fn replay_cursor(last_completed: i64, failure: Option<&str>) -> ReplayCursorRow {
+// A raw-fact cursor caught up to `target`: replay is complete when next > target.
+fn replay_cursor(target: i64, failure: Option<&str>) -> ReplayCursorRow {
     ReplayCursorRow {
         deployment_profile: "sepolia".to_owned(),
         chain_id: CHAIN.to_owned(),
         cursor_kind: "raw_fact_normalized_events".to_owned(),
-        last_completed_block_number: Some(last_completed),
-        target_block_number: Some(last_completed),
+        next_block_number: Some(target + 1),
+        target_block_number: Some(target),
+        last_completed_block_number: Some(target),
         last_failure_reason: failure.map(str::to_owned),
     }
 }
 
-fn backlog_cursor(last_completed: i64, target: i64) -> ReplayCursorRow {
+// A cursor whose `next` was rewound below `target` while `last_completed` stays high.
+fn rewound_cursor(next: i64, target: i64, last_completed: i64) -> ReplayCursorRow {
+    ReplayCursorRow {
+        deployment_profile: "sepolia".to_owned(),
+        chain_id: CHAIN.to_owned(),
+        cursor_kind: "raw_fact_normalized_events".to_owned(),
+        next_block_number: Some(next),
+        target_block_number: Some(target),
+        last_completed_block_number: Some(last_completed),
+        last_failure_reason: None,
+    }
+}
+
+// A backlog cursor caught up to `target` when `next > target`.
+fn backlog_cursor(next: i64, target: i64) -> ReplayCursorRow {
     ReplayCursorRow {
         deployment_profile: "sepolia".to_owned(),
         chain_id: CHAIN.to_owned(),
         cursor_kind: "post_replay_live_adapter_backlog".to_owned(),
-        last_completed_block_number: Some(last_completed),
+        next_block_number: Some(next),
         target_block_number: Some(target),
+        last_completed_block_number: Some(next - 1),
         last_failure_reason: None,
     }
 }
@@ -105,6 +148,11 @@ fn healthy_read() -> DataCompletenessRead {
         observed_code_addresses: vec![observed(REGISTRY)],
         normalized_event_counts: vec![events(CHAIN, NAMESPACE, 100)],
         name_current_counts: vec![names(NAMESPACE, 10)],
+        normalized_events_null_chain_id_count: 0,
+        projection_replay_markers: all_projection_markers(6),
+        backfill_lifecycle: vec![],
+        present_deferred_projection_indexes: all_deferred_indexes(),
+        manifest_chain_namespaces: vec![manifest_ns(CHAIN, NAMESPACE)],
     }
 }
 
@@ -353,14 +401,30 @@ fn empty_projections_fail_even_when_every_cursor_is_drained() {
 
     assert_eq!(report.projection_drained(), CheckStatus::Pass);
     assert_eq!(report.active_dataset_non_empty(), CheckStatus::Fail);
-    assert_eq!(report.active_chains_without_events, vec![CHAIN.to_owned()]);
+    assert_eq!(
+        report.active_chain_namespaces_without_events[0].chain,
+        CHAIN
+    );
     assert!(!report.data_complete());
 }
 
-/// A stale checkpoint writer or mixed restore can leave the canonical checkpoint behind the
-/// retained lineage head, giving a negative lag that `lag <= max` would accept.
+/// The wave-2 zero floor false-failed live databases, where reconcile commits canonical
+/// lineage before advancing the checkpoint. A small negative lag is tolerated; a larger one
+/// (a genuinely stale checkpoint writer) still fails.
 #[test]
-fn negative_head_lag_fails_frontier() {
+fn small_negative_head_lag_is_tolerated() {
+    let mut read = healthy_read();
+    read.chains = vec![chain_row(996, 1_000, 1, 1_000)];
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.frontiers[0].head_lag_blocks, Some(-4));
+    assert_eq!(report.frontier_at_head(), CheckStatus::Pass);
+}
+
+/// A stale checkpoint writer or mixed restore leaves the checkpoint far behind the lineage
+/// head, giving a negative lag beyond tolerance.
+#[test]
+fn large_negative_head_lag_fails_frontier() {
     let mut read = healthy_read();
     read.chains = vec![chain_row(900, 1_000, 1, 1_000)];
     let report = evaluate(&read, &registry_only());
@@ -434,9 +498,10 @@ fn lineage_floor_above_declared_start_fails_history() {
     assert!(!report.data_complete());
 }
 
-/// A target with no finite declared start imposes no history floor.
+/// A chain whose active targets are all open-ended has no finite start to establish a floor,
+/// so the history check fails closed rather than passing vacuously.
 #[test]
-fn target_without_finite_start_imposes_no_history_floor() {
+fn chain_with_only_open_ended_starts_fails_history() {
     let mut read = healthy_read();
     read.chains = vec![chain_row(1_000, 1_000, 900, 101)];
     read.replay_cursors = vec![replay_cursor(1_000, None)];
@@ -444,8 +509,29 @@ fn target_without_finite_start_imposes_no_history_floor() {
     open_ended.active_from_block_number = None;
     let report = evaluate(&read, &[open_ended]);
 
+    assert_eq!(report.history_from_declared_start(), CheckStatus::Fail);
+    assert_eq!(report.chains_without_finite_start[0].chain, CHAIN);
+    assert_eq!(
+        report.chains_without_finite_start[0].open_ended_target_count,
+        1
+    );
+    assert!(!report.data_complete());
+}
+
+/// A chain with at least one finite start still uses that as the floor, ignoring open-ended
+/// siblings.
+#[test]
+fn mixed_starts_use_the_finite_floor() {
+    let mut read = healthy_read();
+    read.chains = vec![chain_row(1_000, 1_000, 1, 1_000)];
+    let finite = watched(REGISTRY, WatchedContractSource::ManifestContract);
+    let mut open_ended = watched(RESOLVER, WatchedContractSource::DiscoveryEdge);
+    open_ended.active_from_block_number = None;
+    read.observed_code_addresses = vec![observed(REGISTRY), observed(RESOLVER)];
+    let report = evaluate(&read, &[finite, open_ended]);
+
     assert_eq!(report.history_from_declared_start(), CheckStatus::Pass);
-    assert!(report.chains_history_truncated.is_empty());
+    assert!(report.chains_without_finite_start.is_empty());
 }
 
 /// Rows from another chain satisfy a global count while a newly active chain has zero. The
@@ -459,7 +545,14 @@ fn foreign_chain_content_does_not_satisfy_an_empty_active_chain() {
     let report = evaluate(&read, &registry_only());
 
     assert_eq!(report.active_dataset_non_empty(), CheckStatus::Fail);
-    assert_eq!(report.active_chains_without_events, vec![CHAIN.to_owned()]);
+    assert_eq!(
+        report.active_chain_namespaces_without_events[0].chain,
+        CHAIN
+    );
+    assert_eq!(
+        report.active_chain_namespaces_without_events[0].namespace,
+        NAMESPACE
+    );
     assert!(!report.data_complete());
 }
 
@@ -498,7 +591,7 @@ fn latched_chain_read() -> DataCompletenessRead {
 #[test]
 fn latched_chain_at_targets_is_caught_up() {
     let mut read = latched_chain_read();
-    read.replay_cursors = vec![replay_cursor(1_000, None), backlog_cursor(2_000, 2_000)];
+    read.replay_cursors = vec![replay_cursor(1_000, None), backlog_cursor(2_001, 2_000)];
     let report = evaluate(&read, &registry_only());
 
     assert_eq!(report.normalization_caught_up(), CheckStatus::Pass);
@@ -515,4 +608,185 @@ fn latched_chain_with_backlog_short_of_target_fails() {
     assert_eq!(report.normalization_caught_up(), CheckStatus::Fail);
     assert_eq!(report.lagging_replay_cursors[0].behind_by, 100);
     assert!(!report.data_complete());
+}
+
+/// A reorg rewind lowers `next_block_number` below the target while `last_completed` stays at
+/// its high-water mark. The gate must read `next`/`target`, not `last_completed`.
+#[test]
+fn rewound_cursor_below_target_fails_even_with_high_last_completed() {
+    let mut read = healthy_read();
+    read.chains = vec![ChainCompletenessRow {
+        canonical_raw_log_head_block_number: Some(1_000),
+        raw_log_head_block_number: Some(1_000),
+        ..chain_row(1_000, 1_000, 1, 1_000)
+    }];
+    read.replay_cursors = vec![rewound_cursor(500, 1_000, 1_000)];
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.normalization_caught_up(), CheckStatus::Fail);
+    assert_eq!(report.lagging_replay_cursors[0].behind_by, 500);
+    assert!(!report.data_complete());
+}
+
+/// A candidate mid projection-bootstrap has published name_current (first in order) but not
+/// the other projections, so not all markers are present at the newest replay version.
+#[test]
+fn incomplete_projection_replay_markers_fail() {
+    let mut read = healthy_read();
+    read.projection_replay_markers = vec![ProjectionReplayMarker {
+        replay_version: 6,
+        projection: "name_current".to_owned(),
+    }];
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.projection_replay_complete(), CheckStatus::Fail);
+    assert!(
+        report
+            .missing_projection_replay_markers
+            .contains(&"children_current".to_owned())
+    );
+    assert!(!report.data_complete());
+}
+
+/// No replay markers at all means projections were never rebuilt.
+#[test]
+fn no_projection_replay_markers_fail() {
+    let mut read = healthy_read();
+    read.projection_replay_markers = vec![];
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.projection_replay_version, None);
+    assert_eq!(report.projection_replay_complete(), CheckStatus::Fail);
+    assert!(!report.data_complete());
+}
+
+/// Markers are judged at the newest replay version present, so a candidate built by an older
+/// image with all projections at its version passes.
+#[test]
+fn complete_markers_at_older_version_pass() {
+    let mut read = healthy_read();
+    read.projection_replay_markers = all_projection_markers(5);
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.projection_replay_version, Some(5));
+    assert_eq!(report.projection_replay_complete(), CheckStatus::Pass);
+    assert!(report.data_complete());
+}
+
+/// A NULL `chain_id` normalized event is a data-integrity fault.
+#[test]
+fn null_chain_id_normalized_events_fail() {
+    let mut read = healthy_read();
+    read.normalized_events_null_chain_id_count = 3;
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(
+        report.normalized_events_chain_id_present(),
+        CheckStatus::Fail
+    );
+    assert!(!report.data_complete());
+}
+
+/// A fresh replay drops the deferred projection indexes; an absent one marks a mid-replay
+/// candidate not yet ready to serve.
+#[test]
+fn missing_deferred_projection_index_fails() {
+    let mut read = healthy_read();
+    read.present_deferred_projection_indexes = all_deferred_indexes()
+        .into_iter()
+        .filter(|name| name != "normalized_events_namespace_idx")
+        .collect();
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(
+        report.deferred_projection_indexes_present(),
+        CheckStatus::Fail
+    );
+    assert!(
+        report
+            .missing_deferred_projection_indexes
+            .contains(&"normalized_events_namespace_idx".to_owned())
+    );
+    assert!(!report.data_complete());
+}
+
+/// A chain declared to produce two namespaces fails when one has no events, even though the
+/// other does — the expectation comes from declared manifests, not observed events.
+#[test]
+fn declared_namespace_with_no_events_fails_content() {
+    let mut read = healthy_read();
+    read.manifest_chain_namespaces =
+        vec![manifest_ns(CHAIN, "ens"), manifest_ns(CHAIN, "basenames")];
+    // Only ens has events and names; basenames declared but empty.
+    read.normalized_event_counts = vec![events(CHAIN, "ens", 100)];
+    read.name_current_counts = vec![names("ens", 10)];
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.active_dataset_non_empty(), CheckStatus::Fail);
+    assert!(
+        report
+            .active_chain_namespaces_without_events
+            .iter()
+            .any(|entry| entry.namespace == "basenames")
+    );
+    assert!(!report.data_complete());
+}
+
+/// A chain declared only by an active manifest version (no watched-contract rows, e.g. a
+/// partial restore losing contract_instance_addresses) still gets a gating frontier.
+#[test]
+fn manifest_only_chain_gets_a_frontier() {
+    let mut read = healthy_read();
+    read.chains = vec![];
+    read.manifest_chain_namespaces = vec![manifest_ns(CHAIN, NAMESPACE)];
+    let report = evaluate(&read, &registry_only());
+
+    let frontier = report
+        .frontiers
+        .iter()
+        .find(|frontier| frontier.chain_id == CHAIN)
+        .expect("frontier for the manifest-declared chain");
+    assert!(frontier.missing_from_storage);
+    assert_eq!(report.frontier_at_head(), CheckStatus::Fail);
+}
+
+/// A foreign or retired chain with residual storage rows is an advisory, not a gate failure.
+#[test]
+fn foreign_chain_is_advisory_not_gating() {
+    let mut read = healthy_read();
+    read.chains = vec![
+        chain_row(1_000, 1_000, 1, 1_000),
+        ChainCompletenessRow {
+            chain_id: "retired-chain".to_owned(),
+            ..chain_row(1_000, 1_000, 1, 1_000)
+        },
+    ];
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.foreign_chains, vec!["retired-chain".to_owned()]);
+    assert!(
+        report
+            .frontiers
+            .iter()
+            .all(|frontier| frontier.chain_id != "retired-chain")
+    );
+    assert!(report.data_complete());
+}
+
+/// Backfill failures are surfaced as an advisory with counts, not gated.
+#[test]
+fn backfill_failures_are_advisory() {
+    let mut read = healthy_read();
+    read.backfill_lifecycle = vec![BackfillLifecycleRow {
+        deployment_profile: "sepolia".to_owned(),
+        failed_job_count: 22,
+        failed_range_count: 22,
+        incomplete_range_count: 274,
+        expired_lease_range_count: 1,
+    }];
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.backfill_advisory[0].failed_job_count, 22);
+    // Advisory only: backfill failures do not fail the gate.
+    assert!(report.data_complete());
 }

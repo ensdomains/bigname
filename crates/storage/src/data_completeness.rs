@@ -1,5 +1,8 @@
 use anyhow::{Context, Result};
 
+#[cfg(test)]
+mod tests;
+
 /// Per-chain intake frontiers.
 ///
 /// `lineage_canonical_block_count` counts distinct non-orphaned block numbers, so a
@@ -31,9 +34,42 @@ pub struct ReplayCursorRow {
     pub deployment_profile: String,
     pub chain_id: String,
     pub cursor_kind: String,
-    pub last_completed_block_number: Option<i64>,
+    /// The completion authority. Replay is complete for a cursor's target when
+    /// `next_block_number > target_block_number`; a reorg rewind lowers `next_block_number`
+    /// but leaves `last_completed_block_number` at its high-water mark, so the gate reads the
+    /// `next`/`target` pair and treats `last_completed_block_number` as reporting detail only.
+    pub next_block_number: Option<i64>,
     pub target_block_number: Option<i64>,
+    pub last_completed_block_number: Option<i64>,
     pub last_failure_reason: Option<String>,
+}
+
+/// A completed `current_projection_replay_status` marker for one `(replay_version, projection)`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectionReplayMarker {
+    pub replay_version: i32,
+    pub projection: String,
+}
+
+/// Backfill lifecycle counts, scoped by deployment profile. Reported as an advisory rather
+/// than gated: without coverage-fact reconciliation a `failed` range cannot be distinguished
+/// from one superseded by a later successful retry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BackfillLifecycleRow {
+    pub deployment_profile: String,
+    pub failed_job_count: i64,
+    pub failed_range_count: i64,
+    pub incomplete_range_count: i64,
+    pub expired_lease_range_count: i64,
+}
+
+/// A `(chain, namespace)` an active manifest version declares. The expected content set is
+/// derived from these rather than from observed events, so a chain declared to produce a
+/// namespace with no rows is not masked by a namespace that does have rows.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ManifestChainNamespace {
+    pub chain: String,
+    pub namespace: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -80,13 +116,40 @@ pub struct DataCompletenessRead {
     /// retries. A non-zero count is a terminal projection failure.
     pub projection_invalidation_dead_letter_count: i64,
     pub observed_code_addresses: Vec<ObservedCodeAddress>,
-    /// `normalized_events` counts grouped by `(chain_id, namespace)`, so content can be
-    /// required per active chain instead of globally where another chain's rows would satisfy
-    /// a total.
+    /// Non-orphaned `normalized_events` counts grouped by `(chain_id, namespace)`, so content
+    /// can be required per active chain instead of globally where another chain's rows would
+    /// satisfy a total. NULL `chain_id` rows are excluded here and counted separately.
     pub normalized_event_counts: Vec<NormalizedEventCount>,
     /// `name_current` counts grouped by namespace.
     pub name_current_counts: Vec<NameCurrentCount>,
+    /// Non-orphaned `normalized_events` rows with a NULL `chain_id` — a data-integrity fault
+    /// that would otherwise abort the per-chain read.
+    pub normalized_events_null_chain_id_count: i64,
+    /// Completed current-projection replay markers. The gate requires all current projections
+    /// present at the newest replay version, matching the worker's bootstrap handoff.
+    pub projection_replay_markers: Vec<ProjectionReplayMarker>,
+    /// Per-profile backfill lifecycle counts (advisory).
+    pub backfill_lifecycle: Vec<BackfillLifecycleRow>,
+    /// Deferred `normalized_events` projection indexes that currently exist. A fresh replay
+    /// drops them and a later pass rebuilds them, so an absent index marks a mid-replay
+    /// candidate.
+    pub present_deferred_projection_indexes: Vec<String>,
+    /// `(chain, namespace)` declared by active manifest versions — the expected content set.
+    pub manifest_chain_namespaces: Vec<ManifestChainNamespace>,
 }
+
+/// The deferred `normalized_events` projection indexes, owned by the replay drop/rebuild path
+/// in `apps/indexer/src/main/normalized_replay_catchup/indexes.rs`.
+pub const DEFERRED_NORMALIZED_EVENT_INDEXES: &[&str] = &[
+    "normalized_events_namespace_idx",
+    "normalized_events_kind_idx",
+    "normalized_events_manifest_idx",
+    "normalized_events_chain_position_idx",
+    "normalized_events_name_projection_replay_idx",
+    "normalized_events_resource_projection_replay_idx",
+    "normalized_events_name_relevant_projection_idx",
+    "normalized_events_record_inventory_resource_replay_idx",
+];
 
 pub async fn load_data_completeness(pool: &sqlx::PgPool) -> Result<DataCompletenessRead> {
     Ok(DataCompletenessRead {
@@ -104,6 +167,12 @@ pub async fn load_data_completeness(pool: &sqlx::PgPool) -> Result<DataCompleten
         observed_code_addresses: load_observed_code_addresses(pool).await?,
         normalized_event_counts: load_normalized_event_counts(pool).await?,
         name_current_counts: load_name_current_counts(pool).await?,
+        normalized_events_null_chain_id_count: load_normalized_events_null_chain_id_count(pool)
+            .await?,
+        projection_replay_markers: load_projection_replay_markers(pool).await?,
+        backfill_lifecycle: load_backfill_lifecycle(pool).await?,
+        present_deferred_projection_indexes: load_present_deferred_projection_indexes(pool).await?,
+        manifest_chain_namespaces: load_manifest_chain_namespaces(pool).await?,
     })
 }
 
@@ -230,8 +299,9 @@ async fn load_replay_cursors(pool: &sqlx::PgPool) -> Result<Vec<ReplayCursorRow>
             deployment_profile,
             chain_id,
             cursor_kind,
-            last_completed_block_number,
+            next_block_number,
             target_block_number,
+            last_completed_block_number,
             NULLIF(last_failure_reason, '') AS last_failure_reason
         FROM normalized_replay_cursors
         ORDER BY deployment_profile, chain_id, cursor_kind
@@ -247,11 +317,12 @@ async fn load_replay_cursors(pool: &sqlx::PgPool) -> Result<Vec<ReplayCursorRow>
                 deployment_profile: crate::sql_row::get(&row, "deployment_profile")?,
                 chain_id: crate::sql_row::get(&row, "chain_id")?,
                 cursor_kind: crate::sql_row::get(&row, "cursor_kind")?,
+                next_block_number: crate::sql_row::get(&row, "next_block_number")?,
+                target_block_number: crate::sql_row::get(&row, "target_block_number")?,
                 last_completed_block_number: crate::sql_row::get(
                     &row,
                     "last_completed_block_number",
                 )?,
-                target_block_number: crate::sql_row::get(&row, "target_block_number")?,
                 last_failure_reason: crate::sql_row::get(&row, "last_failure_reason")?,
             })
         })
@@ -326,6 +397,8 @@ async fn load_normalized_event_counts(pool: &sqlx::PgPool) -> Result<Vec<Normali
         r#"
         SELECT chain_id, namespace, COUNT(*)::BIGINT AS count
         FROM normalized_events
+        WHERE chain_id IS NOT NULL
+          AND canonicality_state <> 'orphaned'::canonicality_state
         GROUP BY chain_id, namespace
         ORDER BY chain_id, namespace
         "#,
@@ -363,6 +436,145 @@ async fn load_name_current_counts(pool: &sqlx::PgPool) -> Result<Vec<NameCurrent
             Ok(NameCurrentCount {
                 namespace: crate::sql_row::get(&row, "namespace")?,
                 count: crate::sql_row::get(&row, "count")?,
+            })
+        })
+        .collect()
+}
+
+async fn load_normalized_events_null_chain_id_count(pool: &sqlx::PgPool) -> Result<i64> {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM normalized_events
+        WHERE chain_id IS NULL
+          AND canonicality_state <> 'orphaned'::canonicality_state
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .context("failed to count normalized events with a null chain id")
+}
+
+async fn load_projection_replay_markers(
+    pool: &sqlx::PgPool,
+) -> Result<Vec<ProjectionReplayMarker>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT DISTINCT replay_version, projection
+        FROM current_projection_replay_status
+        ORDER BY replay_version, projection
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to load current projection replay markers")?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(ProjectionReplayMarker {
+                replay_version: crate::sql_row::get(&row, "replay_version")?,
+                projection: crate::sql_row::get(&row, "projection")?,
+            })
+        })
+        .collect()
+}
+
+async fn load_backfill_lifecycle(pool: &sqlx::PgPool) -> Result<Vec<BackfillLifecycleRow>> {
+    let rows = sqlx::query(
+        r#"
+        WITH profiles AS (
+            SELECT DISTINCT deployment_profile FROM backfill_jobs
+        ),
+        failed_jobs AS (
+            SELECT deployment_profile, COUNT(*) AS failed_job_count
+            FROM backfill_jobs
+            WHERE status = 'failed'
+            GROUP BY deployment_profile
+        ),
+        ranges AS (
+            SELECT
+                job.deployment_profile,
+                COUNT(*) FILTER (WHERE r.status = 'failed') AS failed_range_count,
+                COUNT(*) FILTER (WHERE r.status IN ('pending', 'reserved', 'running'))
+                    AS incomplete_range_count,
+                COUNT(*) FILTER (
+                    WHERE r.status IN ('reserved', 'running')
+                      AND r.lease_expires_at IS NOT NULL
+                      AND r.lease_expires_at < now()
+                ) AS expired_lease_range_count
+            FROM backfill_ranges r
+            JOIN backfill_jobs job ON job.backfill_job_id = r.backfill_job_id
+            GROUP BY job.deployment_profile
+        )
+        SELECT
+            profiles.deployment_profile,
+            COALESCE(failed_jobs.failed_job_count, 0)::BIGINT AS failed_job_count,
+            COALESCE(ranges.failed_range_count, 0)::BIGINT AS failed_range_count,
+            COALESCE(ranges.incomplete_range_count, 0)::BIGINT AS incomplete_range_count,
+            COALESCE(ranges.expired_lease_range_count, 0)::BIGINT AS expired_lease_range_count
+        FROM profiles
+        LEFT JOIN failed_jobs ON failed_jobs.deployment_profile = profiles.deployment_profile
+        LEFT JOIN ranges ON ranges.deployment_profile = profiles.deployment_profile
+        ORDER BY profiles.deployment_profile
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to load backfill lifecycle counts")?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(BackfillLifecycleRow {
+                deployment_profile: crate::sql_row::get(&row, "deployment_profile")?,
+                failed_job_count: crate::sql_row::get(&row, "failed_job_count")?,
+                failed_range_count: crate::sql_row::get(&row, "failed_range_count")?,
+                incomplete_range_count: crate::sql_row::get(&row, "incomplete_range_count")?,
+                expired_lease_range_count: crate::sql_row::get(&row, "expired_lease_range_count")?,
+            })
+        })
+        .collect()
+}
+
+async fn load_present_deferred_projection_indexes(pool: &sqlx::PgPool) -> Result<Vec<String>> {
+    let expected = DEFERRED_NORMALIZED_EVENT_INDEXES
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect::<Vec<_>>();
+    sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT indexname
+        FROM pg_indexes
+        WHERE schemaname = 'public'
+          AND indexname = ANY($1::TEXT[])
+        ORDER BY indexname
+        "#,
+    )
+    .bind(&expected)
+    .fetch_all(pool)
+    .await
+    .context("failed to load present deferred projection indexes")
+}
+
+async fn load_manifest_chain_namespaces(
+    pool: &sqlx::PgPool,
+) -> Result<Vec<ManifestChainNamespace>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT DISTINCT chain, namespace
+        FROM manifest_versions
+        WHERE rollout_status = 'active'
+        ORDER BY chain, namespace
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to load active manifest chain namespaces")?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(ManifestChainNamespace {
+                chain: crate::sql_row::get(&row, "chain")?,
+                namespace: crate::sql_row::get(&row, "namespace")?,
             })
         })
         .collect()

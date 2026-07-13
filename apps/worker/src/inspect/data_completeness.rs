@@ -61,6 +61,10 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
                     "declared_start_block": gap.declared_start_block,
                     "lineage_floor_block": gap.lineage_floor_block,
                 })).collect::<Vec<_>>(),
+                "chains_without_finite_start": report.chains_without_finite_start.iter().map(|chain| json!({
+                    "chain": chain.chain.as_str(),
+                    "open_ended_target_count": chain.open_ended_target_count,
+                })).collect::<Vec<_>>(),
             })),
             check("watch_set_code_observation_coverage", report.watch_set_observed(), json!({
                 "active_watched_target_count": report.active_watched_target_count,
@@ -88,13 +92,36 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
             check("projection_no_dead_letters", report.projection_no_dead_letters(), json!({
                 "dead_letter_count": report.projection_invalidation_dead_letter_count,
             })),
+            check("projection_replay_complete", report.projection_replay_complete(), json!({
+                "replay_version": report.projection_replay_version,
+                "missing_projections": report.missing_projection_replay_markers.clone(),
+            })),
             check("active_dataset_non_empty", report.active_dataset_non_empty(), json!({
                 "normalized_event_total": report.normalized_event_total,
                 "name_current_total": report.name_current_total,
-                "active_chains_without_events": report.active_chains_without_events.clone(),
-                "active_namespaces_without_names": report.active_namespaces_without_names.clone(),
+                "chain_namespaces_without_events": report.active_chain_namespaces_without_events.iter().map(|entry| json!({
+                    "chain": entry.chain.as_str(),
+                    "namespace": entry.namespace.as_str(),
+                })).collect::<Vec<_>>(),
+                "namespaces_without_names": report.active_namespaces_without_names.clone(),
+            })),
+            check("normalized_events_chain_id_present", report.normalized_events_chain_id_present(), json!({
+                "null_chain_id_count": report.normalized_events_null_chain_id_count,
+            })),
+            check("deferred_projection_indexes_present", report.deferred_projection_indexes_present(), json!({
+                "missing_indexes": report.missing_deferred_projection_indexes.clone(),
             })),
         ],
+        "advisories": {
+            "foreign_chains": report.foreign_chains.clone(),
+            "backfill_lifecycle": report.backfill_advisory.iter().map(|row| json!({
+                "deployment_profile": row.deployment_profile.as_str(),
+                "failed_job_count": row.failed_job_count,
+                "failed_range_count": row.failed_range_count,
+                "incomplete_range_count": row.incomplete_range_count,
+                "expired_lease_range_count": row.expired_lease_range_count,
+            })).collect::<Vec<_>>(),
+        },
     })
 }
 
