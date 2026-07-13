@@ -249,7 +249,9 @@ fn source_family_topic_scan(
     None
 }
 
-fn scans_all_source_family_event_emitters(source_plan: &WatchedSourceSelectorPlan) -> bool {
+pub(crate) fn scans_all_source_family_event_emitters(
+    source_plan: &WatchedSourceSelectorPlan,
+) -> bool {
     watched_source_plan_uses_generic_resolver_scope(source_plan)
         || watched_source_plan_uses_basenames_registry_scan_all(source_plan)
 }

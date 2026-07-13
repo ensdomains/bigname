@@ -27,6 +27,7 @@ mod canonicality;
 mod historical;
 #[path = "fetching/log_ranges.rs"]
 mod log_ranges;
+pub(crate) use log_ranges::scans_all_source_family_event_emitters;
 #[path = "fetching/materialization.rs"]
 mod materialization;
 #[path = "fetching/sparse.rs"]

@@ -71,6 +71,21 @@ pub(super) fn coinbase_sql_basenames_registry_scan_all_source_identity_payload(
 /// The Basenames registry scan-all replays its closure from stored raw logs
 /// (like the Coinbase SQL scan-all), so inline adapter sync is forced to
 /// raw-only for this job shape.
+/// Chunk address vector for the hash-pinned fetch. Scan-all plans fetch
+/// address-free, so cloning the ~3.8M active registry addresses per chunk
+/// would be pure waste; only address-scoped plans build the vector.
+pub(super) fn chunk_addresses_for_plan(
+    source_plan: &WatchedSourceSelectorPlan,
+    cursor: &mut super::super::selection::SelectedTargetRangeCursor,
+    chunk_range: super::super::BackfillBlockRange,
+) -> Vec<String> {
+    if super::super::fetching::scans_all_source_family_event_emitters(source_plan) {
+        Vec::new()
+    } else {
+        cursor.active_addresses_for_monotonic_range(chunk_range.from_block, chunk_range.to_block)
+    }
+}
+
 pub(crate) fn effective_hash_pinned_adapter_sync_mode(
     source_plan: &WatchedSourceSelectorPlan,
     requested_mode: BackfillAdapterSyncMode,

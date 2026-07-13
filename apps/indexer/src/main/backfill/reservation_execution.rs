@@ -1,13 +1,12 @@
-use std::io::{self, Write};
-
 #[path = "reservation_execution/coinbase_sql.rs"]
 mod coinbase_sql_execution;
+#[path = "reservation_execution/digest.rs"]
+mod digest;
 #[path = "reservation_execution/lease_heartbeat.rs"]
 mod lease_heartbeat;
 #[path = "reservation_execution/scan_all.rs"]
 mod scan_all;
 
-use alloy_primitives::{Keccak256, hex};
 use anyhow::{Context, Result, bail};
 use bigname_manifests::{
     WatchedBackfillTarget, WatchedSourceSelectorKind, WatchedSourceSelectorPlan,
@@ -17,7 +16,6 @@ use bigname_storage::{
     BackfillRangeSpec, advance_backfill_range, create_backfill_job, load_backfill_job,
     reserve_backfill_range,
 };
-use serde::Serialize;
 use serde_json::{Value, json};
 use sqlx::types::time::OffsetDateTime;
 use tracing::info;
@@ -39,6 +37,7 @@ use super::{
     fetching::{load_backfill_canonicality_evidence, run_hash_pinned_backfill_range},
     selection::{SelectedTargetIntervalIndex, SelectedTargetRangeCursor},
 };
+use digest::keccak256_json_digest;
 
 pub(crate) use coinbase_sql_execution::{
     effective_coinbase_sql_adapter_sync_mode,
@@ -338,41 +337,6 @@ fn selected_targets_sample(selected_targets: &[WatchedBackfillTarget]) -> Value 
     })
 }
 
-fn keccak256_json_digest<T>(value: &T) -> Result<String>
-where
-    T: Serialize + ?Sized,
-{
-    let mut writer = Keccak256Writer::default();
-    serde_json::to_writer(&mut writer, value).context("failed to serialize JSON digest input")?;
-    Ok(format!("keccak256:{}", hex_string(&writer.finalize())))
-}
-
-#[derive(Default)]
-struct Keccak256Writer {
-    hasher: Keccak256,
-}
-
-impl Keccak256Writer {
-    fn finalize(self) -> [u8; 32] {
-        self.hasher.finalize().0
-    }
-}
-
-impl Write for Keccak256Writer {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.hasher.update(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-fn hex_string(bytes: &[u8]) -> String {
-    format!("0x{}", hex::encode(bytes))
-}
-
 pub(crate) async fn run_resumable_hash_pinned_backfill_job(
     pool: &sqlx::PgPool,
     source_plan: &WatchedSourceSelectorPlan,
@@ -510,8 +474,11 @@ pub(super) async fn run_reserved_hash_pinned_backfill_range(
             .unwrap_or(active_range.range_end_block_number)
             .min(active_range.range_end_block_number);
         let chunk_range = BackfillBlockRange::new(block_number, chunk_end)?;
-        let selected_target_addresses_for_chunk = selected_target_range_cursor
-            .active_addresses_for_monotonic_range(chunk_range.from_block, chunk_range.to_block);
+        let selected_target_addresses_for_chunk = scan_all::chunk_addresses_for_plan(
+            source_plan,
+            &mut selected_target_range_cursor,
+            chunk_range,
+        );
         let chunk_outcome = match run_with_backfill_lease_heartbeat(
             pool,
             &active_range,
