@@ -82,15 +82,33 @@ The consequence: a single whole-chain pass over a deployment whose discovery
 graph is incomplete will admit new targets and leave their history unindexed.
 Iterate until a pass admits no new targets and the coverage check is clean.
 
-The topic-scan exception is narrow. The hash-pinned provider path scans ENSv1
-generic resolver event topics across all emitters, so that specific source is
-not circular (`apps/indexer/src/main/backfill/fetching/log_ranges.rs`). The
-Basenames registry becomes address-free only for a Coinbase SQL source-family
-job with `--source-family basenames_base_registry` and an active manifest ABI
-topic plan (`apps/indexer/src/main/backfill/coinbase_sql/planner.rs`). A
-whole-active-watched-chain Coinbase SQL job remains address-filtered, as does a
-hash-pinned whole-chain Base job. Those jobs still require the iterative passes
-in this runbook.
+The topic-scan exception is keyed to the source-family selector, not to a
+particular provider. Two source families avoid the circularity by scanning event
+topics across all emitters instead of an address list, so a job that selects one
+of them covers targets it has not yet discovered:
+
+- ENSv1 generic resolver events scan-all on the hash-pinned provider path
+  (`apps/indexer/src/main/backfill/fetching/log_ranges.rs`).
+- The Basenames registry family (`basenames_base_registry`) scans-all on a
+  source-family job — `--source-family basenames_base_registry` — on both the
+  Coinbase SQL path and, since #149, the hash-pinned path. The hash-pinned
+  scan-all issues a topic0-filtered `eth_getLogs` over the registry manifest ABI
+  event signatures with no address filter, and persists a target-set-independent
+  job identity (`basenames_registry_scan_all_topics_v1`), so mid-job discovery
+  expansion cannot invalidate it. Selection is by
+  `watched_source_plan_uses_basenames_registry_scan_all`
+  (`apps/indexer/src/main/source_scope.rs`,
+  `apps/indexer/src/main/backfill/reservation_execution/scan_all.rs`).
+
+The exception applies only when `selector_kind = source_family`. A
+`whole_active_watched_chain` job — Coinbase SQL or hash-pinned — remains
+address-filtered and circular, and still requires the iterative passes in this
+runbook. The registrar and resolver families are address-scanned on every path.
+So the fastest route to full Basenames-registry coverage is a targeted
+`--source-family basenames_base_registry` pass, which converges in a single pass
+rather than by iteration; the whole-chain procedure below still iterates for
+every address-scanned family. The hash-pinned scan-all requires a deployed image
+built from `main` at or after #149.
 
 ## Procedure
 
