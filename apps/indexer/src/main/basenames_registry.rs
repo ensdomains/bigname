@@ -4,7 +4,7 @@ pub(crate) const SOURCE_FAMILY_BASENAMES_BASE_REGISTRY: &str = "basenames_base_r
 
 /// The Basenames registry family's full manifest ABI event set. The
 /// Basenames L2 registry inherits the canonical ENS registry event surface
-/// unchanged (upstream: .refs/basenames/src/L2/Registry.sol:14 `contract
+/// unchanged (upstream: .refs/basenames/src/L2/Registry.sol:L14 `contract
 /// Registry is ENS` @ basenames@1809bbc; event declarations:
 /// .refs/ens_v1/contracts/registry/ENS.sol:L6-L15 @ ens_v1@91c966f). The
 /// hash-pinned scan-all fetches these topic0s across all emitters, so the set

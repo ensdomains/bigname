@@ -221,6 +221,16 @@ pub(crate) fn coinbase_sql_backfill_job_source_identity_payload(
     let mut payload = if coinbase_sql_uses_basenames_registry_scan_all(source_plan, topic_plan) {
         coinbase_sql_basenames_registry_scan_all_source_identity_payload(source_plan)?
     } else {
+        if watched_source_plan_uses_basenames_registry_scan_all(source_plan) {
+            // A registry-family plan whose Coinbase SQL topic plan is empty
+            // would fetch address-scoped, so the hash-pinned scan-all
+            // identity (which asserts a topics-complete scan) must not be
+            // minted for it.
+            bail!(
+                "Coinbase SQL registry-family backfill has an empty topic plan; \
+                 refusing to mint a scan-all identity for an address-scoped fetch"
+            );
+        }
         backfill_job_source_identity_payload(source_plan)?
     };
     let object = payload
