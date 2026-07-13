@@ -47,6 +47,8 @@ For `[[contracts]]`, `proxy_kind` is required. `proxy_kind = "none"` omits `impl
 
 For `[[discovery_rules]]`, the only authorable `admission` value is `reachable_from_root` — the discovered edge is authoritative while its `from_role` endpoint remains reachable from an active manifest root under an allowed rule. Internal labels like `manifest_declared` and `manifest_successor` are storage tags, not authored values.
 
+`requires_transaction_input` is an optional top-level boolean, default `false`. When `true`, intake durably persists the input calldata of every transaction that carries a matched log from this manifest's watched contracts, as an immutable raw fact alongside the selected transaction row. The flag is the only path that makes transaction calldata durable — families without it never retain input bytes, keeping calldata retention scoped to the declaring family's matched transactions. Adapters that decode transaction input consume only these retained rows; they do not fetch transaction bodies themselves.
+
 `[abi]` is optional. When present, it declares the Solidity ABI fragments that this manifest version authorizes for adapter, execution, or watch-plan use. ABI entries are source-family metadata; they do not by themselves graduate public capability support.
 
 ### `capability_flags`
@@ -183,6 +185,18 @@ Upstream events map to normalized adapter output: `TokenResource` → `TokenReso
 
 Other `sepolia-dev` artifacts (`UniversalResolverV2`, `ReverseRegistry`, `DNSAliasResolver`, `WrapperRegistryImpl`, `LockedMigrationController`, `HCAFactory`, `StandardRentPriceOracle`, `BatchRegistrar`, `MockUSDC`, `MockDAI`) remain outside admission until a doc-first update.
 
+### ENS gas sponsorship (`sepolia` profile)
+
+`ens_gas_sponsorship_l1` owns sponsored-write accounting intake for the gas-sponsorship read model. It is not an ENSv2 deployment-artifact admission; its watched contracts are third-party infrastructure the sponsorship product depends on:
+
+- `entrypoint` — the ERC-4337 EntryPoint v0.7 at `0x0000000071727De22E5E9d8BAf0edAc6f37da032`, watched for `UserOperationEvent` and `BeforeExecution`. The interface and calldata layout are pinned under `.refs/erc4337`; the address is the deterministic-deployer EntryPoint v0.7 address, verified on-chain (code present on `ethereum-sepolia` from block `5328753`, checked 2026-07-13). (upstream: .refs/erc4337/contracts/interfaces/IEntryPoint.sol:L29 @ erc4337@7af70c8) (upstream: .refs/erc4337/contracts/interfaces/IEntryPoint.sol:L97 @ erc4337@7af70c8)
+- `sponsoring_paymaster` — the sponsorship paymaster address whose topic-3 match selects sponsored operations. The adapter filters `UserOperationEvent.paymaster` against this role; the entry is declarative configuration, not a watched emitter.
+- `eth_usd_feed` — the Chainlink ETH/USD phase aggregator emitting `AnswerUpdated`, resolved as `aggregator()` of the documented ETH/USD proxy for the chain and verified on-chain (`description() = "ETH / USD"`, `decimals() = 8`). Proxy rotation to a new phase aggregator is a manifest version bump. (upstream: .refs/chainlink/contracts/src/v0.8/shared/interfaces/AggregatorInterface.sol:L16 @ chainlink@05ead33)
+
+The family declares `requires_transaction_input = true`: per-operation name attribution decodes the containing transaction's `handleOps` calldata (`PackedUserOperation.callData`), so matched transactions retain input bytes as immutable raw facts. (upstream: .refs/erc4337/contracts/interfaces/IEntryPoint.sol:L154 @ erc4337@7af70c8) (upstream: .refs/erc4337/contracts/interfaces/PackedUserOperation.sol:L18 @ erc4337@7af70c8)
+
+The family owns the `SponsoredUserOperationObserved`, `SponsoredNameWriteObserved`, and `PriceFeedAnswerUpdated` normalized kinds and the `gas_sponsorship_current` / `gas_sponsorship_global_current` projections behind `GET /v1/gas-sponsorship/{namespace}/{name}`. It owns no name identity, registration, resolver, or primary-name truth.
+
 ### Basenames mainnet
 
 Basenames mainnet admits six families:[^bn-readme-l22][^bn-readme-l28][^bn-readme-l29][^bn-readme-l30][^bn-readme-l33][^bn-readme-l34][^bn-readme-l36][^bn-readme-l37][^bn-readme-l69][^bn-readme-l70]
@@ -280,6 +294,8 @@ Known historical starts cite a pinned upstream source. Targets without a pinned 
 | ENSv2 RootRegistry (`sepolia-dev`) | `10462881` | [^v2-deploy-root] |
 | ENSv2 ETHRegistry (`sepolia-dev`) | `10462895` | [^v2-deploy-ethreg] |
 | ENSv2 ETHRegistrar (`sepolia-dev`) | `10462909` | [^v2-deploy-ethrc] |
+| ERC-4337 EntryPoint v0.7 (`ethereum-sepolia`) | `5328753` | on-chain `eth_getCode` first-presence search, 2026-07-13 |
+| Chainlink ETH/USD aggregator (`ethereum-sepolia`) | `2675462` | on-chain `eth_getCode` first-presence search, 2026-07-13 |
 
 ---
 

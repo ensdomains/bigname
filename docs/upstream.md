@@ -16,6 +16,9 @@ bigname anchors every ENSv1, ENSv2, Basenames, admitted upstream app-metadata, r
 | `ponder` | `ponder-sh/ponder` | `c8f6935f` | Reference EVM indexer framework |
 | `graph_node` | `graphprotocol/graph-node` | `aefe1737` | Reference Graph Node indexer |
 | `reth` | `paradigmxyz/reth` | `88505c7f` | Reference Ethereum execution client |
+| `erc4337` | `eth-infinitism/account-abstraction` | `7af70c89` | ERC-4337 EntryPoint interface and PackedUserOperation layout (v0.7.0 release) |
+| `chainlink` | `smartcontractkit/chainlink` | `05ead33c` | Chainlink aggregator interfaces for price-feed event shapes (v2.19.0 release) |
+| `erc7579` | `erc7579/erc7579-implementation` | `99cbd344` | ERC-7579 account execute interface and execution-mode encoding |
 
 Full pin records (including per-ref `authoritative_for` lists) live in `.refs/MANIFEST.toml`. Sync with `scripts/sync-refs`.
 

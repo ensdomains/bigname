@@ -134,6 +134,7 @@ ENS:
 - `ens_v2_registrar_l1`
 - `ens_v2_resolver_l1`
 - `ens_execution`
+- `ens_gas_sponsorship_l1`
 
 Basenames:
 
@@ -160,6 +161,7 @@ Family ownership is fixed:
 - ENSv2 exact-name profile support is only promoted in the `sepolia-dev` profile when `ens_v2_registrar_l1` declares `exact_name_profile = "supported"`. Other profiles or capability states stay unsupported or shadow.
 - Basenames mainnet authority splits across `basenames_base_registry` (`registry` at `0xb94704422c2a1e396835a571837aa5ae53285a95`), `basenames_base_registrar` (`registrar` at `0x03c4738ee98ae44591e1a4a4f3cab6641d95dd9a`, with `legacy_registrar_controller` at `0x4cCb0BB02FCABA27e82a56646E81d8c5bC4119a5` and `upgradeable_registrar_controller` proxy at `0xa7d2607c6BD39Ae9521e514026CBB078405Ab322` admitted for label-bearing registration and renewal observations), and `basenames_base_resolver` (`resolver` at `0xC6d566A56A1aFf6508b41f6c90ff131615583BCD`).[^bn-readme-l28][^bn-readme-l29][^bn-readme-l30][^bn-readme-l34][^bn-readme-l37][^bn-registry-l10][^bn-baseregistrar-l15][^bn-registrar-controller-l180][^bn-registrar-controller-l187][^bn-upgradeable-registrar-controller-l191][^bn-upgradeable-registrar-controller-l198][^bn-l2resolver-l22] `basenames_base_primary` uses the ENSv1 Base `L2ReverseRegistrar` at `0x0000000000D8e504002cC26E3Ec46D81971C1664` for declared primary-name value intake at Base coin type `2147492101`; the Basenames `ReverseRegistrar` at `0x79ea96012eea67a83431f1701b3dff7e37f9e282` is not the primary-name value authority.[^v1-l2rev-base-deploy][^v1-l2rev-base-args][^v1-l2rev-event][^v1-l2rev-nameforaddr][^bn-readme-l33][^bn-revreg-l12][^bn-revreg-l150] `basenames_l1_compat` and `basenames_execution` both reference the L1 Resolver at `0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31` for transport and execution respectively.[^bn-readme-l22][^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]
 - Basenames dynamic Base resolver discovery treats canonical nonzero `NewResolver` from admitted registry emitters as binding updates and `basenames_base_resolver` instances; resolver-local fact consumption requires `L2Resolver`-compatible profile admission.[^bn-registry-l19][^bn-registry-l132][^bn-registry-l223][^bn-l2resolver-l4][^bn-l2resolver-l16][^bn-l2resolver-l29][^bn-l2resolver-l182][^bn-l2resolver-l193][^bn-l2resolver-l209][^bn-l2resolver-l225]
+- `ens_gas_sponsorship_l1` owns sponsored-write accounting intake: ERC-4337 EntryPoint `UserOperationEvent` and `BeforeExecution` observations filtered to the manifest-declared sponsoring paymaster, per-operation name attribution decoded from the containing transaction's `handleOps` calldata, and ETH/USD `AnswerUpdated` observations from the manifest-declared Chainlink aggregator. (upstream: .refs/erc4337/contracts/interfaces/IEntryPoint.sol:L29 @ erc4337@7af70c8) (upstream: .refs/erc4337/contracts/interfaces/IEntryPoint.sol:L97 @ erc4337@7af70c8) (upstream: .refs/erc4337/contracts/interfaces/IEntryPoint.sol:L154 @ erc4337@7af70c8) (upstream: .refs/erc4337/contracts/interfaces/PackedUserOperation.sol:L18 @ erc4337@7af70c8) (upstream: .refs/chainlink/contracts/src/v0.8/shared/interfaces/AggregatorInterface.sol:L16 @ chainlink@05ead33) The family owns no name identity, registration authority, resolver truth, or primary-name truth; its attribution rows reference surfaces owned by the registrar, resolver, and reverse families.
 
 ## Source manifests
 
@@ -212,7 +214,7 @@ Stages per chain:
 7. projection updates
 8. execution-cache invalidation
 
-Postgres is the hot indexed and replay-focused store. Lineage anchors, selected target logs and their same-transaction sibling replay context, replay-required call snapshots, code-hash observations, and compact payload-cache metadata are durable. Large block payloads, non-indexed transaction or receipt bodies, and non-audit raw-log staging rows are evictable cache once their replay contract is satisfied. Empty historical blocks retain only lineage anchors and audit metadata.
+Postgres is the hot indexed and replay-focused store. Lineage anchors, selected target logs and their same-transaction sibling replay context, replay-required call snapshots, code-hash observations, and compact payload-cache metadata are durable. Selected transaction input calldata is durable only for transactions carrying a matched log of a source family whose manifest declares `requires_transaction_input`; all other transaction bodies stay non-durable. Large block payloads, non-indexed transaction or receipt bodies, and non-audit raw-log staging rows are evictable cache once their replay contract is satisfied. Empty historical blocks retain only lineage anchors and audit metadata.
 
 Backfill enters as bounded persisted jobs with resumable range checkpoints and uses the same stages as live intake. Backfill checkpoint state is operational worker state — it does not promote canonical, safe, or finalized chain checkpoints.
 
@@ -220,9 +222,9 @@ Reconciliation, fetch, notification, and historical-backfill detail live in [`ch
 
 ## Immutable facts and rebuildable state
 
-Immutable: blocks, transactions, receipts, logs, contract code hashes, manifests, discovery edges, normalized events, normalization results, preimage observations, selected `eth_call` snapshots, CCIP request/response digests, verification outcomes, metadata responses, sync cursors. For large payloads the durable fact may be selected replay fields plus optional cache metadata or a digest, not the full body — compaction can evict non-critical bytes after replay facts are extracted.
+Immutable: blocks, transactions, receipts, logs, contract code hashes, manifests, discovery edges, normalized events, normalization results, preimage observations, selected transaction inputs for calldata-admitting source families, selected `eth_call` snapshots, CCIP request/response digests, verification outcomes, metadata responses, sync cursors. For large payloads the durable fact may be selected replay fields plus optional cache metadata or a digest, not the full body — compaction can evict non-critical bytes after replay facts are extracted.
 
-Rebuildable: current name-surface snapshot, surface-binding snapshot, authority/registration snapshot, control snapshot, permissions snapshot, resolver topology, record inventory, record cache, primary-name snapshot, reverse and address indexes, resource-role indexes, resolver indexes, history materializations, coverage snapshots, execution cache, subscriptions/feeds.
+Rebuildable: current name-surface snapshot, surface-binding snapshot, authority/registration snapshot, control snapshot, permissions snapshot, resolver topology, record inventory, record cache, primary-name snapshot, reverse and address indexes, resource-role indexes, resolver indexes, history materializations, coverage snapshots, gas-sponsorship accounting snapshots, execution cache, subscriptions/feeds.
 
 Every projected row carries provenance pointers, manifest version, canonicality state, and chain-position context.
 
@@ -251,6 +253,8 @@ Permissions: `PermissionChanged`, `RootPermissionChanged`, `PermissionScopeChang
 Reverse and primary: `ReverseChanged`, `PrimaryNameClaimed`, `PrimaryNameVerified`, `PrimaryNameInvalidated`.
 
 Execution and coverage: `VerifiedResolutionObserved`, `VerifiedResolutionInvalidated`, `CoverageChanged`.
+
+Gas sponsorship: `SponsoredUserOperationObserved`, `SponsoredNameWriteObserved`, `PriceFeedAnswerUpdated`. One `SponsoredUserOperationObserved` row per EntryPoint `UserOperationEvent` whose paymaster topic matches the manifest-declared sponsoring paymaster, carrying gas cost, success, and attribution status. One `SponsoredNameWriteObserved` row per attributed (operation, node) pair decoded from that operation's `handleOps` calldata; rows are emitted for successful and failed operations alike, so a failed sponsored operation still debits the name its calldata targeted. One `PriceFeedAnswerUpdated` row per declared-aggregator `AnswerUpdated` log. (upstream: .refs/erc4337/contracts/interfaces/IEntryPoint.sol:L29 @ erc4337@7af70c8) (upstream: .refs/erc4337/contracts/interfaces/PackedUserOperation.sol:L18 @ erc4337@7af70c8) (upstream: .refs/chainlink/contracts/src/v0.8/shared/interfaces/AggregatorInterface.sol:L16 @ chainlink@05ead33)
 
 ENSv2 mappings:
 

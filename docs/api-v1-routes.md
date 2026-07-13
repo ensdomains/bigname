@@ -12,7 +12,7 @@ Use the route groups as integration guidance, not just documentation order:
 | Canonical product reads | `/v1/names*`, `/v1/profiles/names/*`, `/v1/addresses/{address}/names`, `/v1/primary-names*`, `/v1/resources/{resource_id}/permissions`, `/v1/events` | New app, explorer, and public API integrations that want bigname-native semantics. |
 | Metadata/control plane | `/v1/namespaces/*`, `/v1/manifests/*`, `/healthz` | Namespace, manifest, and process/database liveness introspection. |
 | Diagnostics/provenance | `/v1/coverage/*`, `/v1/explain/*` | Completeness, freshness, derivation, persisted execution, and audit detail. |
-| Specialist adjuncts | `/v1/roles`, `/v1/names/*/roles`, `/v1/resources/lookup`, `/v1/history/*`, `/v1/resolvers/*/overview` | Supported surfaces for specialist workflows; prefer canonical product reads for new integrations when they fit. |
+| Specialist adjuncts | `/v1/roles`, `/v1/names/*/roles`, `/v1/resources/lookup`, `/v1/history/*`, `/v1/resolvers/*/overview`, `/v1/gas-sponsorship/*` | Supported surfaces for specialist workflows; prefer canonical product reads for new integrations when they fit. |
 
 Exact-name path segments must already be in ENSIP-15 normalized form. Unnormalizable input and normalizable-but-unnormalized input both return `400 invalid_input`.
 
@@ -646,6 +646,28 @@ Local to the requested tuple. Not the single-name `Coverage` from `GET /v1/cover
 - Out of class: `coverage.status=unsupported`, `exhaustiveness=not_applicable`, `source_classes_considered=[]`, `enumeration_basis=primary_name_lookup`, `unsupported_reason="primary-name exact-tuple persisted readback is not supported for the requested tuple"`. Out-of-class verified objects use `verified_primary_name.status=unsupported`.
 
 Persisted class membership, ENS/60 fallback availability, and result-object status are separate: `claimed_primary_name.status` describes the answer, while route-level coverage describes whether the answer came from the persisted exact-tuple class, the on-demand ENS/60 reverse RPC class, or neither.
+
+## `GET /v1/gas-sponsorship/{namespace}/{name}`
+
+Per-name sponsored-update accounting plus global sponsored-gas totals, read by the gas-sponsorship predicate on every sponsorship decision. One request answers both "how many sponsored updates has this name earned and spent" and "how much has the global pool consumed".
+
+No query parameters. Head-only; no `at`, `chain_positions`, or `consistency`.
+
+`data`: `namespace`, `name`, plus two objects:
+
+- `name_accounting` — from `gas_sponsorship_current` for the exact surface: `logical_name_id`, `namehash`, `lease_start_at`, `registered_seconds_total`, `earned_updates`, `spent_updates`, `last_sponsored_write_at`.
+- `global_accounting` — from `gas_sponsorship_global_current` for the namespace: `sponsored_op_count`, `attributed_op_count`, `failed_op_count`, `gas_wei_total`, `failed_gas_wei_total`, `usd_e8_total`, `unpriced_wei_total`.
+
+Rules:
+
+- `earned_updates = floor(5 × registered_seconds_total / 31_536_000)` where `registered_seconds_total` sums purchased registration and renewal duration since the latest lease-starting registration event. A lapse followed by re-registration starts a fresh ledger: events before the latest lease start contribute to neither earned nor spent.
+- Duration sources are registrar-derivation registration/renewal events only. ENSv2 registrar events carry `duration` directly; ENSv1 registrar events contribute `after_state.expiry − before_state.expiry` for renewals and `after_state.expiry − block_timestamp` for grants. Registry-derivation `RegistrationRenewed` rows are excluded so a single renewal never double-counts. (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@554c309) (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L53 @ ens_v2@554c309)
+- `spent_updates` counts distinct sponsored user operations attributed to the name by decoded calldata since the latest lease start — successful and failed operations alike. A failed sponsored operation consumed sponsor gas for the name its calldata targeted, so it debits that name.
+- `global_accounting` sums every `SponsoredUserOperationObserved` row for the namespace regardless of attribution: `gas_wei_total` accumulates `actualGasCost`, `usd_e8_total` converts each operation at the latest `PriceFeedAnswerUpdated` answer at or before the operation's block on the same chain (integer floor at 8 decimals), and `unpriced_wei_total` holds operations before the first retained price observation. `failed_*` fields carve out `success = false` operations inside the same totals.
+- The sponsorship pool cap itself is a consumer-side constant; this route serves totals, not a cap verdict.
+- A valid, normalized name with no accounting rows returns `200` with a zeroed `name_accounting` (`lease_start_at = null`) — the predicate needs a decisive answer, and zero earned already denies sponsorship. `global_accounting` zero-fills the same way before the first sponsored operation.
+- Unsupported public namespace returns `404 not_found`. Unnormalizable name input returns `400 invalid_input`.
+- Coverage: `coverage.status=partial` with `source_classes_considered=["ens_gas_sponsorship_l1","ens_v1_registrar_l1","ens_v2_registrar_l1"]`, `exhaustiveness=not_applicable`, `enumeration_basis=gas_sponsorship_lookup`. Names outside `.eth` second-level surfaces still answer (earned stays 0 without registrar events).
 
 ## App-facing examples
 

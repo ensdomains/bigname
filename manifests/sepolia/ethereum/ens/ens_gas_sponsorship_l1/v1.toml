@@ -1,0 +1,85 @@
+# Gas-sponsorship accounting intake for the ENSv2 Sepolia profile: ERC-4337
+# EntryPoint sponsored-operation observations, per-operation name attribution
+# from handleOps calldata, and the ETH/USD price feed used to express
+# cumulative sponsored gas in USD.
+#
+# EntryPoint v0.7 interface, events, and calldata layout:
+# (upstream: .refs/erc4337/contracts/interfaces/IEntryPoint.sol:L29 @ erc4337@7af70c8)
+# (upstream: .refs/erc4337/contracts/interfaces/IEntryPoint.sol:L97 @ erc4337@7af70c8)
+# (upstream: .refs/erc4337/contracts/interfaces/IEntryPoint.sol:L154 @ erc4337@7af70c8)
+# (upstream: .refs/erc4337/contracts/interfaces/PackedUserOperation.sol:L18 @ erc4337@7af70c8)
+# The EntryPoint address is the deterministic-deployer v0.7 deployment, shared
+# across chains; verified on-chain for ethereum-sepolia (code present from
+# block 5328753, eth_getCode first-presence search, 2026-07-13).
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_gas_sponsorship_l1"
+chain = "ethereum-sepolia"
+deployment_epoch = "ens_v2_sepolia_dev"
+rollout_status = "shadow"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+# Per-operation name attribution decodes handleOps transaction calldata, so
+# matched transactions retain input bytes as durable raw facts
+# (docs/manifests.md § requires_transaction_input, docs/storage.md § Raw-log
+# retention modes).
+requires_transaction_input = true
+roots = []
+discovery_rules = []
+
+[capability_flags]
+gas_sponsorship_accounting = { status = "shadow", notes = "sponsored-write accounting is indexed in shadow before the predicate read path depends on it" }
+
+[[contracts]]
+role = "entrypoint"
+address = "0x0000000071727De22E5E9d8BAf0edAc6f37da032"
+proxy_kind = "none"
+# First code presence on ethereum-sepolia, eth_getCode binary search 2026-07-13.
+start_block = 5328753
+
+# Declarative sponsorship-paymaster selector: the adapter matches
+# UserOperationEvent topic 3 (paymaster) against this role. PLACEHOLDER —
+# the zero address matches no real paymaster, so shadow intake stays inert.
+# Replace with the sponsorship paymaster deployment address before
+# rollout_status leaves "shadow".
+[[contracts]]
+role = "sponsoring_paymaster"
+address = "0x0000000000000000000000000000000000000000"
+proxy_kind = "none"
+
+# Chainlink ETH/USD phase aggregator for ethereum-sepolia. AnswerUpdated is
+# emitted by the phase aggregator, not the proxy; this address is
+# aggregator() of the documented ETH/USD proxy
+# 0x694AA1769357215DE4FAC081bf1f309aDC325306, verified on-chain 2026-07-13
+# (description() = "ETH / USD", decimals() = 8). A proxy phase rotation is a
+# manifest version bump.
+# (upstream: .refs/chainlink/contracts/src/v0.8/shared/interfaces/AggregatorInterface.sol:L16 @ chainlink@05ead33)
+[[contracts]]
+role = "eth_usd_feed"
+address = "0x719E22E3D4b690E5d96cCb40619180B5427F14AE"
+proxy_kind = "none"
+# First code presence on ethereum-sepolia, eth_getCode binary search 2026-07-13.
+start_block = 2675462
+
+# UserOperationEvent: one per executed user operation; paymaster is topic 3.
+# (upstream: .refs/erc4337/contracts/interfaces/IEntryPoint.sol:L29 @ erc4337@7af70c8)
+[[abi.events]]
+name = "UserOperationEvent"
+fragment = "event UserOperationEvent(bytes32 indexed userOpHash, address indexed sender, address indexed paymaster, uint256 nonce, bool success, uint256 actualGasCost, uint256 actualGasUsed)"
+emitter_roles = ["entrypoint"]
+normalized_events = ["SponsoredUserOperationObserved", "SponsoredNameWriteObserved"]
+
+# BeforeExecution marks the validation/execution boundary inside handleOps;
+# consumed as the per-operation log-window anchor, no normalized kind of its own.
+# (upstream: .refs/erc4337/contracts/interfaces/IEntryPoint.sol:L97 @ erc4337@7af70c8)
+[[abi.events]]
+name = "BeforeExecution"
+fragment = "event BeforeExecution()"
+emitter_roles = ["entrypoint"]
+
+# AnswerUpdated: current answer is topic 1 (8-decimal USD per ETH).
+# (upstream: .refs/chainlink/contracts/src/v0.8/shared/interfaces/AggregatorInterface.sol:L16 @ chainlink@05ead33)
+[[abi.events]]
+name = "AnswerUpdated"
+fragment = "event AnswerUpdated(int256 indexed current, uint256 indexed roundId, uint256 updatedAt)"
+emitter_roles = ["eth_usd_feed"]
+normalized_events = ["PriceFeedAnswerUpdated"]

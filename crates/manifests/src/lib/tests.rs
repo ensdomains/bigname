@@ -1666,8 +1666,8 @@ fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
         ManifestLoadStatus::Loaded
     );
     assert_eq!(sepolia_repository.summary().namespace_count, 1);
-    assert_eq!(sepolia_repository.summary().source_family_count, 4);
-    assert_eq!(sepolia_repository.summary().manifest_count, 5);
+    assert_eq!(sepolia_repository.summary().source_family_count, 5);
+    assert_eq!(sepolia_repository.summary().manifest_count, 6);
 
     let sepolia_source_versions = sepolia_repository
         .manifests()
@@ -1683,6 +1683,7 @@ fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
     assert_eq!(
         sepolia_source_versions,
         vec![
+            ("ens_gas_sponsorship_l1", "v1", 1),
             ("ens_v2_registrar_l1", "v1", 1),
             ("ens_v2_registrar_l1", "v2", 2),
             ("ens_v2_registry_l1", "v1", 1),
@@ -1719,6 +1720,11 @@ fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
             assert_eq!(
                 loaded_manifest.manifest.rollout_status,
                 RolloutStatus::Deprecated
+            );
+        } else if loaded_manifest.manifest.source_family == "ens_gas_sponsorship_l1" {
+            assert_eq!(
+                loaded_manifest.manifest.rollout_status,
+                RolloutStatus::Shadow
             );
         } else {
             assert_eq!(
@@ -1891,11 +1897,11 @@ async fn syncing_sepolia_profile_replaces_main_profile_without_mixing() -> Resul
 
     let summary = sync_repository(database.pool(), &sepolia_repository).await?;
     assert_eq!(summary.status, ManifestSyncStatus::Synced);
-    assert_eq!(summary.synced_manifest_count, 5);
+    assert_eq!(summary.synced_manifest_count, 6);
     assert_eq!(summary.active_manifest_count, 4);
     assert_eq!(summary.root_count, 4);
-    assert_eq!(summary.contract_count, 4);
-    assert_eq!(summary.capability_count, 5);
+    assert_eq!(summary.contract_count, 7);
+    assert_eq!(summary.capability_count, 6);
     assert_eq!(summary.discovery_rule_count, 3);
     assert_eq!(
         summary.removed_manifest_count,
@@ -1905,6 +1911,7 @@ async fn syncing_sepolia_profile_replaces_main_profile_without_mixing() -> Resul
     assert_eq!(
         load_manifest_rollout_statuses(database.pool(), "ens").await?,
         vec![
+            ("ens_gas_sponsorship_l1".to_owned(), "shadow".to_owned()),
             ("ens_v2_registrar_l1".to_owned(), "deprecated".to_owned()),
             ("ens_v2_registrar_l1".to_owned(), "active".to_owned()),
             ("ens_v2_registry_l1".to_owned(), "active".to_owned()),

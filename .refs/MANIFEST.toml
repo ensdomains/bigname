@@ -105,3 +105,30 @@ authoritative_for = [
   "cross-check scope for block-hash-first intake and RPC block selection in docs/chain-intake.md",
   "comparison source for execution-client storage and canonical head behavior",
 ]
+
+[refs.erc4337]
+repo = "https://github.com/eth-infinitism/account-abstraction"
+commit = "7af70c8993a6f42973f520ae0752386a5032abe7"
+purpose = "Canonical ERC-4337 account-abstraction contracts at the v0.7.0 release tag: EntryPoint interface, events, and the PackedUserOperation calldata layout."
+authoritative_for = [
+  "EntryPoint event and handleOps calldata shapes consumed by ens_gas_sponsorship_l1",
+  "UserOperationEvent/BeforeExecution fragments in manifests/*/ethereum/ens/ens_gas_sponsorship_l1",
+  "PackedUserOperation decode rules for the entrypoint_user_operation adapter",
+]
+
+[refs.chainlink]
+repo = "https://github.com/smartcontractkit/chainlink"
+commit = "05ead33c6a0d71eab13576a8c3b56f9d99748c52"
+purpose = "Chainlink core repository at the v2.19.0 release tag. Authoritative only for aggregator interface event shapes; feed deployment addresses are operational metadata verified on-chain."
+authoritative_for = [
+  "AggregatorInterface.AnswerUpdated fragment in manifests/*/ethereum/ens/ens_gas_sponsorship_l1",
+  "price-feed event semantics referenced by gas_sponsorship projection docs",
+]
+
+[refs.erc7579]
+repo = "https://github.com/erc7579/erc7579-implementation"
+commit = "99cbd34479b9d125651316ff2d92f38611ddf665"
+purpose = "ERC-7579 modular smart account reference implementation: the execute(mode, executionCalldata) account interface and execution-mode/calldata encoding unwrapped by sponsored-operation attribution."
+authoritative_for = [
+  "IERC7579Account.execute shape and ModeLib/ExecutionLib encoding decoded by the entrypoint_user_operation adapter",
+]

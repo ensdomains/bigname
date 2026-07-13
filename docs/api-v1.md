@@ -399,6 +399,7 @@ The actual published routes are listed below. Per-route semantics are in [`api-v
 | `GET /v1/history/names/{namespace}/{name}` | Surface or combined history. |
 | `GET /v1/history/resources/{resource_id}` | Resource history. |
 | `GET /v1/history/addresses/{address}` | Address activity history. |
+| `GET /v1/gas-sponsorship/{namespace}/{name}` | Per-name earned/spent sponsored-update accounting plus global sponsored-gas totals for the sponsorship predicate; compact view only. |
 
 The running API also serves `GET /`, `GET /docs`, and `GET /openapi.json` as helpers. They aren't `v1` business routes and don't appear in `docs/api-v1.openapi.json` as path entries.
 
