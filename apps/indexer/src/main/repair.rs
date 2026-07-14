@@ -12,6 +12,8 @@ use crate::{
     reconciliation::{keccak256_hex, parse_hex_bytes},
 };
 
+#[path = "repair/backfill_coverage_facts.rs"]
+mod backfill_coverage_facts;
 #[path = "repair/name_surface_normalization.rs"]
 mod name_surface_normalization;
 #[path = "repair/raw_code_hashes.rs"]
@@ -20,6 +22,7 @@ mod raw_code_hashes;
 pub(crate) const DEFAULT_ENS_V1_TEXT_RECORD_REPAIR_CHUNK_BLOCKS: i64 = 5_000;
 pub(crate) const DEFAULT_ENS_V1_TEXT_RECORD_REPAIR_PAGE_SIZE: i64 = 10_000;
 
+pub(crate) use backfill_coverage_facts::derive_legacy_backfill_coverage_facts;
 pub(crate) use name_surface_normalization::{
     DEFAULT_NAME_SURFACE_NORMALIZATION_REPAIR_PAGE_SIZE, NameSurfaceNormalizationRepairConfig,
     repair_name_surface_normalization,

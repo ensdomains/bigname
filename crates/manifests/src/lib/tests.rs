@@ -5713,3 +5713,77 @@ async fn rebuilds_watched_plan_from_active_contract_instance_address_ranges() ->
     database.cleanup().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn discovery_admission_epoch_bumps_on_every_edge_mutation() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    test_dir.write_manifest(
+        "ens",
+        "ens_v2_registry_l1",
+        "v1",
+        &manifest_contents(
+            "active",
+            "0x0000000000000000000000000000000000000001",
+            "0x00000000000000000000000000000000000000AA",
+            Some("0x00000000000000000000000000000000000000DD"),
+        ),
+    )?;
+    let repository = load_repository(&test_dir.path)?;
+    assert_eq!(
+        load_discovery_admission_epoch(database.pool(), chain).await?,
+        0
+    );
+
+    // Manifest sync inserts the managed erc1967 proxy edge — the epoch must
+    // move in the same pass.
+    sync_repository(database.pool(), &repository).await?;
+    let epoch_after_managed_insert = load_discovery_admission_epoch(database.pool(), chain).await?;
+    assert!(
+        epoch_after_managed_insert >= 1,
+        "managed-edge insert must bump the discovery admission epoch, got {epoch_after_managed_insert}"
+    );
+
+    // A reconciled observation insert bumps again.
+    let summary = reconcile_discovery_observations(
+        database.pool(),
+        "epoch-test-observation",
+        &[DiscoveryObservation {
+            chain: chain.to_owned(),
+            from_address: "0x00000000000000000000000000000000000000AA".to_owned(),
+            to_address: "0x00000000000000000000000000000000000000BB".to_owned(),
+            edge_kind: "subregistry".to_owned(),
+            discovery_source: "epoch-test-observation".to_owned(),
+            active_from_block_number: Some(10),
+            active_from_block_hash: None,
+            active_to_block_number: None,
+            active_to_block_hash: None,
+            provenance: serde_json::json!({
+                "provider": "epoch-test",
+                "observation_key": "epoch-test-edge",
+            }),
+        }],
+    )
+    .await?;
+    assert_eq!(summary.inserted_edge_count, 1);
+    let epoch_after_observation_insert =
+        load_discovery_admission_epoch(database.pool(), chain).await?;
+    assert!(
+        epoch_after_observation_insert > epoch_after_managed_insert,
+        "observation insert must bump the epoch ({epoch_after_managed_insert} -> {epoch_after_observation_insert})"
+    );
+
+    // Reconciling the same source with no remaining observations deactivates
+    // the edge — deactivation bumps too.
+    let summary =
+        reconcile_discovery_observations(database.pool(), "epoch-test-observation", &[]).await?;
+    assert_eq!(summary.deactivated_edge_count, 1);
+    let epoch_after_deactivation = load_discovery_admission_epoch(database.pool(), chain).await?;
+    assert!(
+        epoch_after_deactivation > epoch_after_observation_insert,
+        "edge deactivation must bump the epoch ({epoch_after_observation_insert} -> {epoch_after_deactivation})"
+    );
+
+    database.cleanup().await
+}

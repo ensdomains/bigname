@@ -12,12 +12,70 @@ pub async fn load_backfill_job(pool: &PgPool, backfill_job_id: i64) -> Result<Op
     load_backfill_job_internal(pool, backfill_job_id).await
 }
 
+/// Load completed backfill jobs for a chain whose declared block range
+/// intersects `[from_block, to_block]` — the jobs whose coverage facts a
+/// promotion slice can rely on (fact intervals are clamped to their job's
+/// range at derivation time).
+pub async fn load_completed_backfill_jobs_intersecting_range(
+    pool: &PgPool,
+    chain_id: &str,
+    from_block: i64,
+    to_block: i64,
+) -> Result<Vec<BackfillJob>> {
+    let select_sql = backfill_job_select_sql(
+        r#"
+        WHERE chain_id = $1
+          AND status = 'completed'::backfill_lifecycle_status
+          AND range_start_block_number <= $3
+          AND range_end_block_number >= $2
+        "#,
+        "ORDER BY backfill_job_id",
+    );
+    let rows = sqlx::query(&select_sql)
+        .bind(chain_id)
+        .bind(from_block)
+        .bind(to_block)
+        .fetch_all(pool)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load completed backfill jobs for chain {chain_id} intersecting {from_block}..={to_block}"
+            )
+        })?;
+
+    rows.into_iter().map(decode_backfill_job).collect()
+}
+
 /// Load child ranges for one backfill job in declared range order.
 pub async fn load_backfill_ranges(
     pool: &PgPool,
     backfill_job_id: i64,
 ) -> Result<Vec<BackfillRange>> {
     load_backfill_ranges_internal(pool, backfill_job_id).await
+}
+
+/// Resolve a range's parent job id without locking either row, so callers can
+/// take the job lock before the range lock.
+pub(super) async fn load_backfill_range_job_id<'e, E>(
+    executor: E,
+    backfill_range_id: i64,
+) -> Result<Option<i64>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let row =
+        sqlx::query("SELECT backfill_job_id FROM backfill_ranges WHERE backfill_range_id = $1")
+            .bind(backfill_range_id)
+            .fetch_optional(executor)
+            .await
+            .with_context(|| {
+                format!("failed to resolve job for backfill range {backfill_range_id}")
+            })?;
+    row.map(|row| {
+        row.try_get::<i64, _>("backfill_job_id")
+            .context("missing backfill_job_id from backfill range row")
+    })
+    .transpose()
 }
 
 pub(super) async fn incomplete_range_count<'e, E>(executor: E, backfill_job_id: i64) -> Result<i64>
@@ -81,6 +139,10 @@ where
     row.map(decode_backfill_job).transpose()
 }
 
+/// Lock-order invariant: any transaction that locks both a job row and rows
+/// of its ranges must take the job lock first (resolving the job id with a
+/// plain SELECT when only a range id is at hand). Every writer observes this,
+/// so range-level operations racing job-level operations cannot deadlock.
 pub(super) async fn load_backfill_job_for_update<'e, E>(
     executor: E,
     backfill_job_id: i64,

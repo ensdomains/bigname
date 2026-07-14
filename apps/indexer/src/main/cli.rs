@@ -427,9 +427,18 @@ pub(crate) enum ReplayCommand {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum RepairCommand {
+    DeriveBackfillCoverageFacts(RepairDeriveBackfillCoverageFactsArgs),
     EnsV1TextRecords(RepairEnsV1TextRecordsArgs),
     NameSurfaceNormalization(RepairNameSurfaceNormalizationArgs),
     RawCodeHashes(RepairRawCodeHashesArgs),
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct RepairDeriveBackfillCoverageFactsArgs {
+    #[command(flatten)]
+    pub(crate) database: DatabaseConfig,
+    #[arg(long = "backfill-job-id")]
+    pub(crate) backfill_job_id: i64,
 }
 
 #[derive(Args, Debug)]

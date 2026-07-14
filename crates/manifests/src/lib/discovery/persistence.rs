@@ -1,4 +1,7 @@
 use anyhow::{Context, Result};
+use std::collections::BTreeSet;
+
+use super::admission_epoch::bump_discovery_admission_epochs;
 use sqlx::PgPool;
 
 use super::loading::load_discovery_admission_state;
@@ -147,6 +150,11 @@ pub async fn persist_discovery_observation(
 
     if inserted_edge_count > 0 {
         reconcile_active_contract_instance_addresses(transaction.as_mut()).await?;
+        bump_discovery_admission_epochs(
+            transaction.as_mut(),
+            &BTreeSet::from([observation.chain.clone()]),
+        )
+        .await?;
     }
 
     transaction

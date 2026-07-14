@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
+use std::collections::BTreeSet;
+
+use crate::discovery::bump_discovery_admission_epochs;
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -315,10 +318,12 @@ async fn reconcile_managed_edges(
         .collect::<HashSet<_>>();
 
     let mut cleared_edge_count = 0;
+    let mut mutated_chains = BTreeSet::new();
     for existing_edge in existing_edges {
         if desired_set.contains(&existing_edge.spec) {
             continue;
         }
+        mutated_chains.insert(existing_edge.spec.chain.clone());
 
         sqlx::query(
             r#"
@@ -344,6 +349,7 @@ async fn reconcile_managed_edges(
         if existing_set.contains(desired_edge) {
             continue;
         }
+        mutated_chains.insert(desired_edge.chain.clone());
 
         sqlx::query(
             r#"
@@ -380,28 +386,48 @@ async fn reconcile_managed_edges(
         })?;
     }
 
+    bump_discovery_admission_epochs(executor, &mutated_chains).await?;
+
     Ok(cleared_edge_count)
 }
 
 async fn deactivate_discovery_edges_without_active_source_manifest(
     executor: &mut sqlx::postgres::PgConnection,
 ) -> Result<usize> {
-    let result = sqlx::query(
+    // Aggregate server-side: a stale manifest can own millions of edges, and
+    // materializing one returned row per edge would buffer them all in the
+    // sync transaction.
+    let deactivated_counts_by_chain = sqlx::query_as::<_, (String, i64)>(
         r#"
-        UPDATE discovery_edges de
-        SET deactivated_at = now()
-        WHERE de.deactivated_at IS NULL
-          AND NOT EXISTS (
-              SELECT 1
-              FROM manifest_versions mv
-              WHERE mv.manifest_id = de.source_manifest_id
-                AND mv.rollout_status = 'active'
-          )
+        WITH deactivated AS (
+            UPDATE discovery_edges de
+            SET deactivated_at = now()
+            WHERE de.deactivated_at IS NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM manifest_versions mv
+                  WHERE mv.manifest_id = de.source_manifest_id
+                    AND mv.rollout_status = 'active'
+              )
+            RETURNING de.chain_id
+        )
+        SELECT chain_id, COUNT(*)::BIGINT AS deactivated_count
+        FROM deactivated
+        GROUP BY chain_id
         "#,
     )
-    .execute(&mut *executor)
+    .fetch_all(&mut *executor)
     .await
     .context("failed to deactivate discovery edges without an active source manifest")?;
+    let deactivated_edge_count = deactivated_counts_by_chain
+        .iter()
+        .map(|(_, count)| *count as usize)
+        .sum();
+    let mutated_chains = deactivated_counts_by_chain
+        .into_iter()
+        .map(|(chain, _)| chain)
+        .collect::<BTreeSet<_>>();
+    bump_discovery_admission_epochs(executor, &mutated_chains).await?;
 
-    Ok(result.rows_affected() as usize)
+    Ok(deactivated_edge_count)
 }

@@ -139,14 +139,12 @@ async fn rebuild_all_primary_names(pool: &PgPool) -> Result<PrimaryNamesCurrentR
     let invalidation_targets =
         load_full_rebuild_claim_change_invalidation_targets(&mut conn, &stage_table).await?;
     invalidate_verified_primary_name_claim_changes(pool, &invalidation_targets).await?;
-    let (_deleted_row_count, published_row_count) = publish_stage_table(
-        &mut conn,
-        "primary_names_current",
-        &stage_table,
-        PRIMARY_NAMES_CURRENT_COLUMNS,
-        None,
-    )
-    .await?;
+    // Publish through the trigger-disabled path: the per-row identity-feed
+    // triggers take one advisory lock per address and exhaust the lock table
+    // at full-rebuild scale; the sidecars are rebuilt in bulk instead.
+    let (_deleted_row_count, published_row_count) =
+        bigname_storage::publish_primary_names_current_full_rebuild(&mut conn, &stage_table)
+            .await?;
     drop_stage_table(&mut conn, &stage_table).await?;
     debug_assert_eq!(published_row_count as usize, upserted_row_count);
 

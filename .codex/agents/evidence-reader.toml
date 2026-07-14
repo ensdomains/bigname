@@ -1,6 +1,7 @@
 name = "evidence_reader"
 description = "Read-only bigname source-evidence agent for pinned upstream citations, comparison evidence, and divergence notes."
-model = "gpt-5.5"
+model = "gpt-5.6-sol"
+model_reasoning_effort = "max"
 sandbox_mode = "read-only"
 nickname_candidates = ["Ledger", "Notary", "Source", "Anchor"]
 developer_instructions = """

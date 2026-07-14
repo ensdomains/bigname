@@ -220,6 +220,10 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         run_mode.broad_runtime_refresh_enabled,
         header_audit_mode,
         args.event_silent_reverse_resolver_addresses,
+        // Process-lifetime verified-coverage frontier: deep-gap promotion
+        // verifies fact coverage in large chunks once, then every poll cycle
+        // is an O(1) in-memory check.
+        &crate::reconciliation::ChainCoverageFrontiers::default(),
     )
     .await
 }

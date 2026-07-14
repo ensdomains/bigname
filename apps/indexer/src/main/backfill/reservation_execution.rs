@@ -1,37 +1,43 @@
-use std::io::{self, Write};
-
 #[path = "reservation_execution/coinbase_sql.rs"]
 mod coinbase_sql_execution;
+#[path = "reservation_execution/digest.rs"]
+mod digest;
 #[path = "reservation_execution/lease_heartbeat.rs"]
 mod lease_heartbeat;
+#[path = "reservation_execution/scan_all.rs"]
+mod scan_all;
 
-use alloy_primitives::{Keccak256, hex};
 use anyhow::{Context, Result, bail};
 use bigname_manifests::{
     WatchedBackfillTarget, WatchedSourceSelectorKind, WatchedSourceSelectorPlan,
 };
 use bigname_storage::{
     BackfillJobCreate, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange,
-    BackfillRangeSpec, advance_backfill_range, complete_backfill_range, create_backfill_job,
-    load_backfill_job, reserve_backfill_range,
+    BackfillRangeSpec, advance_backfill_range, create_backfill_job, load_backfill_job,
+    reserve_backfill_range,
 };
-use serde::Serialize;
 use serde_json::{Value, json};
 use sqlx::types::time::OffsetDateTime;
 use tracing::info;
 
 use crate::{
-    ens_v1_resolver::SOURCE_FAMILY_ENS_V1_RESOLVER_L1, provider::ChainProviderOps,
-    source_scope::watched_source_plan_uses_generic_resolver_scope,
+    ens_v1_resolver::SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+    provider::ChainProviderOps,
+    source_scope::{
+        watched_source_plan_uses_basenames_registry_scan_all,
+        watched_source_plan_uses_generic_resolver_scope,
+    },
 };
 
 use super::{
     BackfillBlockRange, BackfillJobRunConfig, BackfillJobRunOutcome, BackfillTopicPlan,
     CoinbaseSqlBackfillConfig,
+    coverage_facts::complete_reserved_range_recording_plan_coverage,
     failure_recording::{ReservedRangeFailure, record_reserved_range_failure},
     fetching::{load_backfill_canonicality_evidence, run_hash_pinned_backfill_range},
     selection::{SelectedTargetIntervalIndex, SelectedTargetRangeCursor},
 };
+use digest::keccak256_json_digest;
 
 pub(crate) use coinbase_sql_execution::{
     effective_coinbase_sql_adapter_sync_mode,
@@ -40,6 +46,12 @@ pub(crate) use coinbase_sql_execution::{
 };
 pub(super) use lease_heartbeat::{
     run_with_backfill_lease_heartbeat, validate_hash_pinned_chunk_blocks,
+};
+pub(crate) use scan_all::effective_hash_pinned_adapter_sync_mode;
+use scan_all::{
+    basenames_registry_scan_all_topics_source_identity_payload,
+    coinbase_sql_basenames_registry_scan_all_source_identity_payload,
+    coinbase_sql_uses_basenames_registry_scan_all,
 };
 
 const HASH_PINNED_BACKFILL_SCAN_MODE: &str = "hash_pinned_block";
@@ -164,6 +176,9 @@ pub(crate) fn hash_pinned_backfill_range_specs(
 pub(crate) fn backfill_job_source_identity_payload(
     source_plan: &WatchedSourceSelectorPlan,
 ) -> Result<Value> {
+    if watched_source_plan_uses_basenames_registry_scan_all(source_plan) {
+        return basenames_registry_scan_all_topics_source_identity_payload(source_plan);
+    }
     if watched_source_plan_uses_generic_resolver_scope(source_plan) {
         return generic_topic_scan_source_identity_payload(source_plan);
     }
@@ -206,6 +221,16 @@ pub(crate) fn coinbase_sql_backfill_job_source_identity_payload(
     let mut payload = if coinbase_sql_uses_basenames_registry_scan_all(source_plan, topic_plan) {
         coinbase_sql_basenames_registry_scan_all_source_identity_payload(source_plan)?
     } else {
+        if watched_source_plan_uses_basenames_registry_scan_all(source_plan) {
+            // A registry-family plan whose Coinbase SQL topic plan is empty
+            // would fetch address-scoped, so the hash-pinned scan-all
+            // identity (which asserts a topics-complete scan) must not be
+            // minted for it.
+            bail!(
+                "Coinbase SQL registry-family backfill has an empty topic plan; \
+                 refusing to mint a scan-all identity for an address-scoped fetch"
+            );
+        }
         backfill_job_source_identity_payload(source_plan)?
     };
     let object = payload
@@ -251,28 +276,6 @@ pub(crate) fn coinbase_sql_backfill_job_source_identity_payload(
         );
 
     Ok(payload)
-}
-
-fn coinbase_sql_uses_basenames_registry_scan_all(
-    source_plan: &WatchedSourceSelectorPlan,
-    topic_plan: &BackfillTopicPlan,
-) -> bool {
-    source_plan.selector_kind == WatchedSourceSelectorKind::SourceFamily
-        && source_plan.source_family.as_deref() == Some("basenames_base_registry")
-        && !topic_plan
-            .event_signatures_for_source_family("basenames_base_registry")
-            .is_empty()
-}
-
-fn coinbase_sql_basenames_registry_scan_all_source_identity_payload(
-    source_plan: &WatchedSourceSelectorPlan,
-) -> Result<Value> {
-    Ok(json!({
-        "selector_kind": source_plan.selector_kind.as_str(),
-        "source_family": &source_plan.source_family,
-        "requested_watched_targets": &source_plan.requested_watched_targets,
-        "source_identity_payload_format": "basenames_registry_scan_all_event_signatures_v1",
-    }))
 }
 
 fn generic_topic_scan_source_identity_payload(
@@ -344,48 +347,14 @@ fn selected_targets_sample(selected_targets: &[WatchedBackfillTarget]) -> Value 
     })
 }
 
-fn keccak256_json_digest<T>(value: &T) -> Result<String>
-where
-    T: Serialize + ?Sized,
-{
-    let mut writer = Keccak256Writer::default();
-    serde_json::to_writer(&mut writer, value).context("failed to serialize JSON digest input")?;
-    Ok(format!("keccak256:{}", hex_string(&writer.finalize())))
-}
-
-#[derive(Default)]
-struct Keccak256Writer {
-    hasher: Keccak256,
-}
-
-impl Keccak256Writer {
-    fn finalize(self) -> [u8; 32] {
-        self.hasher.finalize().0
-    }
-}
-
-impl Write for Keccak256Writer {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.hasher.update(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-fn hex_string(bytes: &[u8]) -> String {
-    format!("0x{}", hex::encode(bytes))
-}
-
 pub(crate) async fn run_resumable_hash_pinned_backfill_job(
     pool: &sqlx::PgPool,
     source_plan: &WatchedSourceSelectorPlan,
     provider: &(impl ChainProviderOps + ?Sized),
     mut config: BackfillJobRunConfig,
 ) -> Result<BackfillJobRunOutcome> {
-    config.adapter_sync_mode = config.adapter_sync_mode.hash_pinned_backfill_mode();
+    config.adapter_sync_mode =
+        effective_hash_pinned_adapter_sync_mode(source_plan, config.adapter_sync_mode);
     validate_hash_pinned_chunk_blocks(config.hash_pinned_chunk_blocks)?;
     let watched_chain = &source_plan.watched_chain_plan;
     let record = create_hash_pinned_backfill_job(pool, source_plan, &config).await?;
@@ -515,8 +484,11 @@ pub(super) async fn run_reserved_hash_pinned_backfill_range(
             .unwrap_or(active_range.range_end_block_number)
             .min(active_range.range_end_block_number);
         let chunk_range = BackfillBlockRange::new(block_number, chunk_end)?;
-        let selected_target_addresses_for_chunk = selected_target_range_cursor
-            .active_addresses_for_monotonic_range(chunk_range.from_block, chunk_range.to_block);
+        let selected_target_addresses_for_chunk = scan_all::chunk_addresses_for_plan(
+            source_plan,
+            &mut selected_target_range_cursor,
+            chunk_range,
+        );
         let chunk_outcome = match run_with_backfill_lease_heartbeat(
             pool,
             &active_range,
@@ -584,23 +556,15 @@ pub(super) async fn run_reserved_hash_pinned_backfill_range(
             .context("backfill block number overflowed while advancing range")?;
     }
 
-    if let Err(error) =
-        complete_backfill_range(pool, active_range.backfill_range_id, &config.lease_token).await
-    {
-        return Err(record_reserved_range_failure(ReservedRangeFailure {
-            pool,
-            reserved_range: &active_range,
-            config,
-            failure_reason: "backfill range completion failed",
-            block_number: None,
-            attempted_range: None,
-            phase: "range_completion",
-            error,
-        })
-        .await);
-    }
-
-    Ok(())
+    complete_reserved_range_recording_plan_coverage(
+        pool,
+        &active_range,
+        config,
+        source_plan,
+        watched_source_plan_uses_basenames_registry_scan_all(source_plan),
+        "backfill range completion failed",
+    )
+    .await
 }
 pub(super) fn backfill_lease_duration_secs(lease_expires_at: OffsetDateTime) -> Result<i64> {
     let duration_secs = lease_expires_at

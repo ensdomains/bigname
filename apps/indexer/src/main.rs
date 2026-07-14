@@ -4,6 +4,8 @@ mod backfill;
 #[allow(dead_code, unused_imports)]
 #[path = "main/tests/backfill.rs"]
 mod backfill_tests;
+#[path = "main/basenames_registry.rs"]
+mod basenames_registry;
 #[path = "main/bootstrap_backfill.rs"]
 mod bootstrap_backfill;
 #[path = "main/cli.rs"]
@@ -82,8 +84,8 @@ use provider::{
 use reconciliation::*;
 use repair::{
     EnsV1TextRecordRepairConfig, NameSurfaceNormalizationRepairConfig,
-    repair_ens_v1_text_records_from_provider, repair_name_surface_normalization,
-    repair_raw_code_hashes_command,
+    derive_legacy_backfill_coverage_facts, repair_ens_v1_text_records_from_provider,
+    repair_name_surface_normalization, repair_raw_code_hashes_command,
 };
 pub(crate) use replay::{
     backfill_lease_expires_at, default_backfill_lease_owner, deployment_profile_from_manifest_root,
@@ -370,6 +372,26 @@ async fn run_rewind(args: RewindArgs) -> Result<rewind::RewindOutcome> {
 
 async fn run_repair(args: RepairArgs) -> Result<()> {
     match args.command {
+        RepairCommand::DeriveBackfillCoverageFacts(args) => {
+            let (pool, _rederive_guard) =
+                bigname_storage::connect_with_base_normalized_rederive_writer_guard(
+                    &args.database,
+                    "bigname-indexer",
+                )
+                .await?;
+            let outcome =
+                derive_legacy_backfill_coverage_facts(&pool, args.backfill_job_id).await?;
+            tracing::info!(
+                service = "indexer",
+                command = "repair derive-backfill-coverage-facts",
+                backfill_job_id = outcome.backfill_job_id,
+                address_fact_count = outcome.address_fact_count,
+                family_fact_count = outcome.family_fact_count,
+                inserted_fact_count = outcome.inserted_fact_count,
+                "legacy backfill coverage fact derivation completed"
+            );
+            Ok(())
+        }
         RepairCommand::EnsV1TextRecords(args) => {
             let (pool, _rederive_guard) =
                 bigname_storage::connect_with_base_normalized_rederive_writer_guard(

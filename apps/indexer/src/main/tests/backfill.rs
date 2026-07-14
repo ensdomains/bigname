@@ -413,8 +413,7 @@ async fn source_family_compact_source_identity_reuses_legacy_full_backfill_job()
 }
 
 #[test]
-fn basenames_registry_source_identity_changes_when_discovery_expands_before_checkpoint()
--> Result<()> {
+fn basenames_registry_hash_pinned_scan_all_identity_ignores_discovery_expansion() -> Result<()> {
     let source_plan = WatchedSourceSelectorPlan {
         chain: "base-mainnet".to_owned(),
         selector_kind: WatchedSourceSelectorKind::SourceFamily,
@@ -456,11 +455,85 @@ fn basenames_registry_source_identity_changes_when_discovery_expands_before_chec
             .iter()
             .any(|target| target.effective_from_block <= checkpoint_block_number)
     );
-    assert_ne!(
-        expanded_payload.get("source_identity_hash"),
-        original_payload.get("source_identity_hash")
+    // The hash-pinned scan-all fetches every emitter by topic, so the
+    // identity deliberately does not depend on the enumerated target set —
+    // discovery expansion mid-job cannot invalidate it (mirroring the
+    // Coinbase SQL scan-all identity below).
+    assert_eq!(
+        original_payload
+            .get("source_identity_payload_format")
+            .and_then(Value::as_str),
+        Some("basenames_registry_scan_all_topics_v1")
     );
-    assert_ne!(expanded_payload, original_payload);
+    assert!(original_payload.get("selected_targets").is_none());
+    assert!(original_payload.get("selected_targets_digest").is_none());
+    assert_eq!(
+        original_payload
+            .get("topic0s_by_source_family")
+            .and_then(|topics| topics.get("basenames_base_registry"))
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(4),
+        "the fetched topic0 set must be persisted verbatim"
+    );
+    assert_eq!(expanded_payload, original_payload);
+
+    Ok(())
+}
+
+/// The registry family's discovered target set (3.8M addresses live) is far
+/// past the compact-digest threshold; the scan-all branch must win before the
+/// digest fallback so identity stays target-count-independent at scale.
+#[test]
+fn basenames_registry_hash_pinned_scan_all_identity_beats_compact_digest_at_scale() -> Result<()> {
+    let small_plan = WatchedSourceSelectorPlan {
+        chain: "base-mainnet".to_owned(),
+        selector_kind: WatchedSourceSelectorKind::SourceFamily,
+        source_family: Some("basenames_base_registry".to_owned()),
+        requested_watched_targets: Vec::new(),
+        selected_targets: vec![WatchedBackfillTarget {
+            source_family: "basenames_base_registry".to_owned(),
+            contract_instance_id: Uuid::from_u128(1),
+            address: "0x0000000000000000000000000000000000000001".to_owned(),
+            effective_from_block: 18_735_838,
+            effective_to_block: 46_636_366,
+        }],
+        watched_chain_plan: WatchedChainPlan {
+            chain: "base-mainnet".to_owned(),
+            addresses: Vec::new(),
+            manifest_root_entry_count: 0,
+            manifest_contract_entry_count: 0,
+            discovery_edge_entry_count: 0,
+        },
+    };
+    let mut large_plan = small_plan.clone();
+    large_plan.selected_targets = (0..=backfill::COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD)
+        .map(|index| WatchedBackfillTarget {
+            source_family: "basenames_base_registry".to_owned(),
+            contract_instance_id: Uuid::from_u128(index as u128 + 1),
+            address: format!("0x{:040x}", index + 1),
+            effective_from_block: 18_735_838,
+            effective_to_block: 46_636_366,
+        })
+        .collect();
+    assert!(
+        large_plan.selected_targets.len()
+            > backfill::COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD
+    );
+
+    let large_payload = backfill::backfill_job_source_identity_payload(&large_plan)?;
+    assert_eq!(
+        large_payload
+            .get("source_identity_payload_format")
+            .and_then(Value::as_str),
+        Some("basenames_registry_scan_all_topics_v1"),
+        "the scan-all identity must win over the compact selected-targets digest"
+    );
+    assert!(large_payload.get("selected_targets_digest").is_none());
+    assert_eq!(
+        large_payload,
+        backfill::backfill_job_source_identity_payload(&small_plan)?
+    );
 
     Ok(())
 }
@@ -741,6 +814,21 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
     assert_eq!(ranges[0].checkpoint_block_number, 43);
     assert_eq!(ranges[0].attempt_count, 1);
 
+    assert_eq!(source_plan.selected_targets.len(), 1);
+    let watched_target = &source_plan.selected_targets[0];
+    assert_eq!(
+        load_coverage_fact_rows(database.pool(), outcome.backfill_job_id).await?,
+        vec![(
+            "ethereum-mainnet".to_owned(),
+            watched_target.source_family.clone(),
+            "address".to_owned(),
+            Some(watched_target.address.to_ascii_lowercase()),
+            watched_target.effective_from_block.max(42),
+            watched_target.effective_to_block.min(43),
+            "job_completion".to_owned(),
+        )]
+    );
+
     let rerun = run_resumable_hash_pinned_backfill_job(
         database.pool(),
         &source_plan,
@@ -752,6 +840,11 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
     assert_eq!(rerun.reserved_range_count, 0);
     assert_eq!(rerun.completed_range_count, 0);
     assert_eq!(rerun.resolved_block_count, 0);
+    assert_eq!(
+        table_count(database.pool(), "backfill_coverage_facts").await?,
+        1,
+        "idempotent rerun must not duplicate coverage facts"
+    );
 
     let widened_error = run_resumable_hash_pinned_backfill_job(
         database.pool(),
@@ -1412,10 +1505,10 @@ async fn source_scoped_backfill_empty_historical_blocks_skip_payload_cache_metad
     assert_eq!(outcome.raw_log_count, 0);
     assert_eq!(outcome.raw_transaction_count, 0);
     assert_eq!(outcome.raw_receipt_count, 0);
-    assert_eq!(outcome.raw_code_hash_count, 1);
+    assert_eq!(outcome.raw_code_hash_count, 0);
     assert_eq!(table_count(database.pool(), "chain_lineage").await?, 1);
     assert_eq!(table_count(database.pool(), "chain_lineage").await?, 1);
-    assert_eq!(table_count(database.pool(), "raw_code_hashes").await?, 1);
+    assert_eq!(table_count(database.pool(), "raw_code_hashes").await?, 0);
     assert_eq!(table_count(database.pool(), "raw_logs").await?, 0);
     assert_eq!(table_count(database.pool(), "raw_transactions").await?, 0);
     assert_eq!(table_count(database.pool(), "raw_receipts").await?, 0);
@@ -1658,7 +1751,8 @@ async fn raw_only_hash_pinned_backfill_skips_adapter_replay_after_raw_persistenc
 }
 
 #[tokio::test]
-async fn raw_only_sparse_backfill_retains_tx_sibling_logs_and_code_observations() -> Result<()> {
+async fn raw_only_sparse_backfill_retains_tx_sibling_logs_and_scopes_code_observations_to_emitters()
+-> Result<()> {
     let database = TestDatabase::new().await?;
     create_backfill_job_tables(database.pool()).await?;
     let contract_instance_id = Uuid::from_u128(9_255);
@@ -1721,7 +1815,7 @@ async fn raw_only_sparse_backfill_retains_tx_sibling_logs_and_code_observations(
             .await?;
 
     assert_eq!(outcome.raw_log_count, 2);
-    assert_eq!(outcome.raw_code_hash_count, 2);
+    assert_eq!(outcome.raw_code_hash_count, 1);
     assert_eq!(
         sqlx::query_as::<_, (String, i64)>(
             "SELECT emitting_address, log_index FROM raw_logs ORDER BY log_index"
@@ -1739,10 +1833,7 @@ async fn raw_only_sparse_backfill_retains_tx_sibling_logs_and_code_observations(
         )
         .fetch_all(database.pool())
         .await?,
-        vec![
-            (block.block_number, selected_address.to_owned()),
-            (next_block.block_number, selected_address.to_owned()),
-        ]
+        vec![(block.block_number, selected_address.to_owned())]
     );
 
     server.abort();
@@ -3074,6 +3165,239 @@ async fn source_scoped_backfill_dynamic_resolver_basenames_selected_targets_are_
     .await
 }
 
+/// End-to-end shape of the hash-pinned Basenames-registry scan-all: the
+/// eth_getLogs filter carries the registry topic0 set and no address list
+/// (3.8M discovered registry targets make address enumeration infeasible),
+/// logs from undiscovered emitters are retained, and completion writes a
+/// family-scope coverage fact clamped to the watched target windows.
+#[tokio::test]
+async fn hash_pinned_basenames_registry_scan_all_backfills_by_topic_and_writes_family_fact()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let contract_instance_id = Uuid::from_u128(9_400);
+    let registry_address = "0x0000000000000000000000000000000000000009";
+    let undiscovered_emitter = "0x00000000000000000000000000000000000000aa";
+
+    insert_watched_manifest_contract(
+        database.pool(),
+        9_400,
+        "basenames",
+        "base-mainnet",
+        "basenames_base_registry",
+        contract_instance_id,
+        registry_address,
+    )
+    .await?;
+    // Watched window ends at 42 while the job runs 42..43: the scan and the
+    // family fact must both clamp to the merged watched windows.
+    set_contract_instance_address_range(database.pool(), contract_instance_id, Some(42), Some(42))
+        .await?;
+
+    let range = BackfillBlockRange::new(42, 43)?;
+    let source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "base-mainnet",
+        WatchedSourceSelector::SourceFamily("basenames_base_registry".to_owned()),
+        range.from_block,
+        range.to_block,
+    )
+    .await?;
+    assert!(
+        crate::source_scope::watched_source_plan_uses_basenames_registry_scan_all(&source_plan),
+        "a source-family registry plan must select the scan-all shape"
+    );
+
+    let block_42 = provider_block(
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
+        42,
+    );
+    let block_43 = provider_block(
+        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        43,
+    );
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        vec![
+            ProviderBlockFixture {
+                block: block_42.clone(),
+                logs: vec![
+                    rpc_registry_new_owner_log_payload(
+                        &block_42,
+                        registry_address,
+                        &base_eth_node(),
+                        "alpha",
+                        "0x00000000000000000000000000000000000000b1",
+                        0,
+                    ),
+                    rpc_registry_new_owner_log_payload(
+                        &block_42,
+                        undiscovered_emitter,
+                        &base_eth_node(),
+                        "beta",
+                        "0x00000000000000000000000000000000000000b2",
+                        1,
+                    ),
+                ],
+            },
+            ProviderBlockFixture {
+                block: block_43.clone(),
+                logs: vec![rpc_registry_new_owner_log_payload(
+                    &block_43,
+                    undiscovered_emitter,
+                    &base_eth_node(),
+                    "gamma",
+                    "0x00000000000000000000000000000000000000b3",
+                    0,
+                )],
+            },
+        ],
+        Arc::clone(&requests),
+    )
+    .await?;
+
+    let outcome = run_resumable_hash_pinned_backfill_job(
+        database.pool(),
+        &source_plan,
+        &provider,
+        backfill_job_config(range, "basenames-registry-scan-all", "lease-registry-scan")?,
+    )
+    .await?;
+    assert_eq!(
+        outcome.raw_log_count, 3,
+        "the scan-all must fetch the whole reserved range (no window skipping) and retain \
+         the undiscovered emitter's logs"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_logs WHERE emitting_address = $1")
+            .bind(undiscovered_emitter)
+            .fetch_one(database.pool())
+            .await?,
+        2,
+        "scan-all must retain logs from emitters missing from the discovered target set"
+    );
+
+    let job = load_backfill_job(database.pool(), outcome.backfill_job_id)
+        .await?
+        .expect("scan-all job must exist");
+    assert_eq!(
+        job.source_identity
+            .get("source_identity_payload_format")
+            .and_then(Value::as_str),
+        Some("basenames_registry_scan_all_topics_v1")
+    );
+
+    assert_eq!(
+        load_coverage_fact_rows(database.pool(), outcome.backfill_job_id).await?,
+        vec![(
+            "base-mainnet".to_owned(),
+            "basenames_base_registry".to_owned(),
+            "family".to_owned(),
+            None,
+            42,
+            42,
+            "job_completion".to_owned(),
+        )],
+        "completion must write exactly one family-scope fact clamped to the watched windows"
+    );
+
+    let recorded_requests = requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .clone();
+    let log_requests = recorded_requests
+        .iter()
+        .filter(|request| {
+            request.method == "eth_getLogs"
+                && request
+                    .params
+                    .first()
+                    .and_then(Value::as_object)
+                    .is_some_and(|filter| filter.contains_key("fromBlock"))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !log_requests.is_empty(),
+        "the registry scan-all must fetch logs by block range"
+    );
+    for request in &log_requests {
+        let log_filter = request
+            .params
+            .first()
+            .and_then(Value::as_object)
+            .expect("registry scan-all log request must include a filter");
+        assert!(
+            !log_filter.contains_key("address"),
+            "the registry scan-all must not enumerate emitter addresses"
+        );
+        assert_eq!(
+            support_log_filter_topic0s(log_filter)
+                .expect("the registry scan-all must constrain topic0"),
+            crate::basenames_registry::basenames_registry_scan_all_topic0s()
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            "the registry scan-all must filter by the family's full manifest topic0 set"
+        );
+        assert_eq!(
+            log_filter.get("fromBlock").and_then(Value::as_str),
+            Some("0x2a"),
+            "the scan-all must cover the reserved range start"
+        );
+        assert_eq!(
+            log_filter.get("toBlock").and_then(Value::as_str),
+            Some("0x2b"),
+            "the scan-all must cover the whole reserved range, not just the watched windows"
+        );
+    }
+
+    server.abort();
+    database.cleanup().await
+}
+
+/// The scan-all replays its adapter closure from stored raw logs, so inline
+/// adapter sync must be forced to raw-only for this job shape only.
+#[test]
+fn basenames_registry_scan_all_forces_raw_only_adapter_sync() {
+    let registry_plan = WatchedSourceSelectorPlan {
+        chain: "base-mainnet".to_owned(),
+        selector_kind: WatchedSourceSelectorKind::SourceFamily,
+        source_family: Some("basenames_base_registry".to_owned()),
+        requested_watched_targets: Vec::new(),
+        selected_targets: Vec::new(),
+        watched_chain_plan: WatchedChainPlan {
+            chain: "base-mainnet".to_owned(),
+            addresses: Vec::new(),
+            manifest_root_entry_count: 0,
+            manifest_contract_entry_count: 0,
+            discovery_edge_entry_count: 0,
+        },
+    };
+    let mut registrar_plan = registry_plan.clone();
+    registrar_plan.source_family = Some("basenames_base_registrar".to_owned());
+
+    for requested in [
+        backfill::BackfillAdapterSyncMode::Auto,
+        backfill::BackfillAdapterSyncMode::Inline,
+        backfill::BackfillAdapterSyncMode::RawOnly,
+    ] {
+        assert_eq!(
+            backfill::effective_hash_pinned_adapter_sync_mode(&registry_plan, requested),
+            backfill::BackfillAdapterSyncMode::RawOnly,
+            "registry scan-all must force raw-only adapter sync for requested mode {requested:?}"
+        );
+    }
+    assert_eq!(
+        backfill::effective_hash_pinned_adapter_sync_mode(
+            &registrar_plan,
+            backfill::BackfillAdapterSyncMode::Auto
+        ),
+        backfill::BackfillAdapterSyncMode::Inline,
+        "address-scoped families must keep the requested hash-pinned mode"
+    );
+}
+
 #[tokio::test]
 async fn source_scoped_backfill_enforces_selected_target_effective_ranges_during_intake()
 -> Result<()> {
@@ -3201,6 +3525,30 @@ async fn source_scoped_backfill_enforces_selected_target_effective_ranges_during
     .await?;
     assert_eq!(outcome.raw_log_count, 4);
     assert_eq!(outcome.raw_code_hash_count, 2);
+    assert_eq!(
+        load_coverage_fact_rows(database.pool(), outcome.backfill_job_id).await?,
+        vec![
+            (
+                "ethereum-mainnet".to_owned(),
+                "ens_v2_registry_l1".to_owned(),
+                "address".to_owned(),
+                Some(first_address.to_owned()),
+                42,
+                42,
+                "job_completion".to_owned(),
+            ),
+            (
+                "ethereum-mainnet".to_owned(),
+                "ens_v2_registry_l1".to_owned(),
+                "address".to_owned(),
+                Some(second_address.to_owned()),
+                43,
+                43,
+                "job_completion".to_owned(),
+            ),
+        ],
+        "coverage facts must record each selected target's effective window clamped to the job range"
+    );
     assert_eq!(
         sqlx::query_as::<_, (Vec<i64>, Vec<String>)>(
             "SELECT ARRAY_AGG(block_number ORDER BY block_number, log_index), ARRAY_AGG(emitting_address ORDER BY block_number, log_index) FROM raw_logs"
@@ -3762,7 +4110,7 @@ async fn explicit_watched_targets_are_sorted_idempotent_and_validated() -> Resul
             .and_then(Value::as_str),
         Some("ens_v2_registrar_l1")
     );
-    assert_eq!(outcome.raw_code_hash_count, 2);
+    assert_eq!(outcome.raw_code_hash_count, 1);
 
     let reordered_plan = load_watched_source_selector_plan(
         database.pool(),
@@ -5326,7 +5674,7 @@ async fn assert_dynamic_resolver_backfill_scope_behavior(
     assert_eq!(outcome.raw_log_count, 10);
     assert_eq!(
         outcome.raw_code_hash_count,
-        if generic_ensv1_resolver { 7 } else { 6 }
+        if generic_ensv1_resolver { 7 } else { 4 }
     );
 
     let job = load_backfill_job(database.pool(), outcome.backfill_job_id)
@@ -5336,6 +5684,44 @@ async fn assert_dynamic_resolver_backfill_scope_behavior(
         job.source_identity,
         backfill::backfill_job_source_identity_payload(&source_plan)?
     );
+    let coverage_fact_rows =
+        load_coverage_fact_rows(database.pool(), outcome.backfill_job_id).await?;
+    if generic_ensv1_resolver {
+        assert_eq!(
+            coverage_fact_rows,
+            vec![(
+                fixture.chain.to_owned(),
+                fixture.resolver_source_family.to_owned(),
+                "family".to_owned(),
+                None,
+                42,
+                43,
+                "job_completion".to_owned(),
+            )],
+            "a generic resolver scan must credit the family over its targets' effective span instead of per-address facts"
+        );
+    } else {
+        assert_eq!(
+            coverage_fact_rows,
+            [
+                selected_resolver_address,
+                pending_resolver_address,
+                unsupported_resolver_address,
+            ]
+            .map(|address| (
+                fixture.chain.to_owned(),
+                fixture.resolver_source_family.to_owned(),
+                "address".to_owned(),
+                Some(address.to_owned()),
+                42,
+                43,
+                "job_completion".to_owned(),
+            ))
+            .to_vec(),
+            "address-enumerated resolver scans must record per-target facts clamped to their effective windows"
+        );
+    }
+
     let source_identity = serde_json::to_string(&job.source_identity)
         .context("dynamic resolver source identity must serialize")?;
     let forbidden_targets = vec![
@@ -5447,8 +5833,6 @@ async fn assert_dynamic_resolver_backfill_scope_behavior(
                 pending_resolver_address.to_owned(),
                 unsupported_resolver_address.to_owned(),
                 selected_resolver_address.to_owned(),
-                pending_resolver_address.to_owned(),
-                unsupported_resolver_address.to_owned(),
             ]
         }
     );
@@ -5467,7 +5851,7 @@ async fn assert_dynamic_resolver_backfill_scope_behavior(
         if generic_ensv1_resolver {
             vec![42, 42, 42, 42, 42, 42, 43]
         } else {
-            vec![42, 42, 42, 43, 43, 43]
+            vec![42, 42, 42, 43]
         }
     );
     assert_eq!(
@@ -5624,7 +6008,7 @@ async fn assert_dynamic_resolver_backfill_scope_behavior(
         .collect::<Vec<_>>();
     assert_eq!(
         code_requests.len(),
-        if generic_ensv1_resolver { 7 } else { 6 }
+        if generic_ensv1_resolver { 7 } else { 4 }
     );
     assert_eq!(
         code_requests
@@ -5647,8 +6031,6 @@ async fn assert_dynamic_resolver_backfill_scope_behavior(
                 Some(pending_resolver_address),
                 Some(unsupported_resolver_address),
                 Some(selected_resolver_address),
-                Some(pending_resolver_address),
-                Some(unsupported_resolver_address),
             ]
         }
     );
@@ -5680,8 +6062,6 @@ async fn assert_dynamic_resolver_backfill_scope_behavior(
                 Some(block_42.block_hash.clone()),
                 Some(block_42.block_hash.clone()),
                 Some(block_42.block_hash.clone()),
-                Some(block_43.block_hash.clone()),
-                Some(block_43.block_hash.clone()),
                 Some(block_43.block_hash.clone()),
             ]
         }
@@ -5944,7 +6324,27 @@ async fn create_backfill_job_tables(pool: &PgPool) -> Result<()> {
     .await
     .context("failed to create backfill_ranges_active_lease_token_idx for indexer tests")?;
 
+    create_backfill_coverage_facts_table(pool).await?;
+
     Ok(())
+}
+
+async fn load_coverage_fact_rows(
+    pool: &PgPool,
+    backfill_job_id: i64,
+) -> Result<Vec<(String, String, String, Option<String>, i64, i64, String)>> {
+    sqlx::query_as(
+        r#"
+        SELECT chain_id, source_family, scope, address, covered_from_block, covered_to_block, derivation
+        FROM backfill_coverage_facts
+        WHERE backfill_job_id = $1
+        ORDER BY scope, source_family, address, covered_from_block, covered_to_block
+        "#,
+    )
+    .bind(backfill_job_id)
+    .fetch_all(pool)
+    .await
+    .context("failed to load coverage fact rows")
 }
 
 fn parse_rpc_block_number(value: &str) -> i64 {
@@ -5958,4 +6358,422 @@ async fn table_count(pool: &PgPool, table_name: &str) -> Result<i64> {
         .fetch_one(pool)
         .await
         .with_context(|| format!("failed to count {table_name} rows"))
+}
+
+async fn insert_completed_backfill_job(
+    pool: &PgPool,
+    idempotency_key: &str,
+    source_identity: Value,
+) -> Result<i64> {
+    let created = create_backfill_job(
+        pool,
+        &BackfillJobCreate {
+            deployment_profile: "mainnet".to_owned(),
+            chain_id: "ethereum-mainnet".to_owned(),
+            source_identity,
+            scan_mode: "hash_pinned_block".to_owned(),
+            range_start_block_number: 100,
+            range_end_block_number: 120,
+            idempotency_key: idempotency_key.to_owned(),
+            ranges: Vec::new(),
+        },
+    )
+    .await?;
+    let lease_token = format!("lease-{idempotency_key}");
+    let reserved = bigname_storage::reserve_backfill_range(
+        pool,
+        created.job.backfill_job_id,
+        "worker-legacy",
+        &lease_token,
+        OffsetDateTime::from_unix_timestamp(OffsetDateTime::now_utc().unix_timestamp() + 300)
+            .context("lease deadline must be valid")?,
+    )
+    .await?
+    .context("synthetic job range must be reservable")?;
+    bigname_storage::advance_backfill_range(pool, reserved.backfill_range_id, &lease_token, 120)
+        .await?;
+    bigname_storage::complete_backfill_range(pool, reserved.backfill_range_id, &lease_token)
+        .await?;
+    Ok(created.job.backfill_job_id)
+}
+
+#[tokio::test]
+async fn legacy_coverage_derivation_covers_full_payload_identities() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let backfill_job_id = insert_completed_backfill_job(
+        database.pool(),
+        "legacy-full-payload",
+        json!({
+            "selector_kind": "watched_target_set",
+            "source_family": null,
+            "requested_watched_targets": [
+                { "contract_instance_id": "0abbca82-a3c4-4fcf-860b-d1eccfd10977" }
+            ],
+            "selected_targets": [
+                {
+                    "source_family": "basenames_base_registry",
+                    "contract_instance_id": "0abbca82-a3c4-4fcf-860b-d1eccfd10977",
+                    "address": "0xF9bBA2F07a2c95FC4225f1CaeC76E6bf04B463E9",
+                    "effective_from_block": 90,
+                    "effective_to_block": 110
+                },
+                {
+                    "source_family": "basenames_base_registrar",
+                    "contract_instance_id": "1abbca82-a3c4-4fcf-860b-d1eccfd10977",
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "effective_from_block": 121,
+                    "effective_to_block": 130
+                }
+            ],
+            "source_identity_hash": "fnv1a64:67379b1d8040bfc2"
+        }),
+    )
+    .await?;
+
+    let outcome =
+        repair::derive_legacy_backfill_coverage_facts(database.pool(), backfill_job_id).await?;
+    assert_eq!(outcome.backfill_job_id, backfill_job_id);
+    assert_eq!(outcome.address_fact_count, 1);
+    assert_eq!(outcome.family_fact_count, 0);
+    assert_eq!(outcome.inserted_fact_count, 1);
+    assert_eq!(
+        load_coverage_fact_rows(database.pool(), backfill_job_id).await?,
+        vec![(
+            "ethereum-mainnet".to_owned(),
+            "basenames_base_registry".to_owned(),
+            "address".to_owned(),
+            Some("0xf9bba2f07a2c95fc4225f1caec76e6bf04b463e9".to_owned()),
+            100,
+            110,
+            "legacy_full_payload_identity".to_owned(),
+        )],
+        "legacy derivation must clamp effective windows to the job range, lowercase addresses, and skip out-of-range targets"
+    );
+
+    let repeated =
+        repair::derive_legacy_backfill_coverage_facts(database.pool(), backfill_job_id).await?;
+    assert_eq!(repeated.inserted_fact_count, 0);
+    assert_eq!(
+        table_count(database.pool(), "backfill_coverage_facts").await?,
+        1,
+        "re-derivation must be idempotent"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn legacy_coverage_derivation_merges_generic_family_windows_and_refuses_scan_all()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    // Live producers filter generic-scanned targets out of selected_targets;
+    // this synthetic identity carries them to prove family facts come from
+    // the same clamp-and-merge segments as live completion (and are excluded
+    // from address facts). Real jobs of this shape persist no such windows
+    // and therefore conservatively yield no family facts.
+    let generic_job_id = insert_completed_backfill_job(
+        database.pool(),
+        "legacy-generic-topic-scans",
+        json!({
+            "selector_kind": "whole_active_watched_chain",
+            "source_family": null,
+            "requested_watched_targets": [],
+            "selected_targets": [
+                {
+                    "source_family": "ens_v1_registry_l1",
+                    "contract_instance_id": "0abbca82-a3c4-4fcf-860b-d1eccfd10977",
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "effective_from_block": 100,
+                    "effective_to_block": 120
+                },
+                {
+                    "source_family": "ens_v1_resolver_l1",
+                    "contract_instance_id": "1abbca82-a3c4-4fcf-860b-d1eccfd10977",
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "effective_from_block": 90,
+                    "effective_to_block": 105
+                },
+                {
+                    "source_family": "ens_v1_resolver_l1",
+                    "contract_instance_id": "2abbca82-a3c4-4fcf-860b-d1eccfd10977",
+                    "address": "0x3333333333333333333333333333333333333333",
+                    "effective_from_block": 110,
+                    "effective_to_block": 112
+                },
+                {
+                    "source_family": "ens_v1_resolver_l1",
+                    "contract_instance_id": "3abbca82-a3c4-4fcf-860b-d1eccfd10977",
+                    "address": "0x4444444444444444444444444444444444444444",
+                    "effective_from_block": 130,
+                    "effective_to_block": 140
+                }
+            ],
+            "generic_topic_scans": [
+                {
+                    "source_family": "ens_v1_resolver_l1",
+                    "source_identity_payload_format": "generic_resolver_event_topics_v1"
+                }
+            ],
+            "source_identity_payload_format": "selected_targets_with_generic_topic_scans_v1",
+            "source_identity_hash": "keccak256:0x1111111111111111111111111111111111111111111111111111111111111111"
+        }),
+    )
+    .await?;
+
+    let outcome =
+        repair::derive_legacy_backfill_coverage_facts(database.pool(), generic_job_id).await?;
+    assert_eq!(outcome.address_fact_count, 1);
+    assert_eq!(outcome.family_fact_count, 2);
+    assert_eq!(outcome.inserted_fact_count, 3);
+    assert_eq!(
+        load_coverage_fact_rows(database.pool(), generic_job_id).await?,
+        vec![
+            (
+                "ethereum-mainnet".to_owned(),
+                "ens_v1_registry_l1".to_owned(),
+                "address".to_owned(),
+                Some("0x1111111111111111111111111111111111111111".to_owned()),
+                100,
+                120,
+                "legacy_full_payload_identity".to_owned(),
+            ),
+            (
+                "ethereum-mainnet".to_owned(),
+                "ens_v1_resolver_l1".to_owned(),
+                "family".to_owned(),
+                None,
+                100,
+                105,
+                "legacy_full_payload_identity".to_owned(),
+            ),
+            (
+                "ethereum-mainnet".to_owned(),
+                "ens_v1_resolver_l1".to_owned(),
+                "family".to_owned(),
+                None,
+                110,
+                112,
+                "legacy_full_payload_identity".to_owned(),
+            ),
+        ],
+        "family facts must be the merged clamped segments of the persisted resolver windows, \
+         with the out-of-range window dropped and resolver targets excluded from address facts"
+    );
+
+    let scan_all_job_id = insert_completed_backfill_job(
+        database.pool(),
+        "legacy-basenames-scan-all",
+        json!({
+            "selector_kind": "source_family",
+            "source_family": "basenames_base_registry",
+            "requested_watched_targets": [],
+            "source_identity_payload_format": "basenames_registry_scan_all_event_signatures_v1",
+            "backfill_provider": "coinbase_cdp_sql",
+            "scan_mode": "coinbase_sql_hash_pinned_logs_v1",
+            "source_identity_hash": "keccak256:0x2222222222222222222222222222222222222222222222222222222222222222"
+        }),
+    )
+    .await?;
+
+    let error = repair::derive_legacy_backfill_coverage_facts(database.pool(), scan_all_job_id)
+        .await
+        .expect_err("scan-all identities persist no family target spans and must be refused");
+    assert!(
+        error
+            .to_string()
+            .contains("does not persist the family target spans"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(
+        load_coverage_fact_rows(database.pool(), scan_all_job_id).await?,
+        Vec::new(),
+        "a refused scan-all derivation must not write facts"
+    );
+
+    // The hash-pinned scan-all persists its topic0 set verbatim and fetches
+    // it across every block of the job range, so repair derives a sound
+    // full-range family fact (unlike the Coinbase SQL scan-all above).
+    let hash_pinned_scan_all_job_id = insert_completed_backfill_job(
+        database.pool(),
+        "legacy-basenames-hash-pinned-scan-all",
+        json!({
+            "selector_kind": "source_family",
+            "source_family": "basenames_base_registry",
+            "requested_watched_targets": [],
+            "source_identity_payload_format": "basenames_registry_scan_all_topics_v1",
+            "topic0s_by_source_family": {
+                "basenames_base_registry": crate::basenames_registry::basenames_registry_scan_all_topic0s(),
+            },
+            "event_signatures_by_source_family": {
+                "basenames_base_registry": crate::basenames_registry::basenames_registry_scan_all_event_signatures(),
+            },
+            "source_identity_hash": "keccak256:0x5555555555555555555555555555555555555555555555555555555555555555"
+        }),
+    )
+    .await?;
+
+    let outcome =
+        repair::derive_legacy_backfill_coverage_facts(database.pool(), hash_pinned_scan_all_job_id)
+            .await?;
+    assert_eq!(outcome.address_fact_count, 0);
+    assert_eq!(outcome.family_fact_count, 1);
+    assert_eq!(
+        load_coverage_fact_rows(database.pool(), hash_pinned_scan_all_job_id).await?,
+        vec![(
+            "ethereum-mainnet".to_owned(),
+            "basenames_base_registry".to_owned(),
+            "family".to_owned(),
+            None,
+            100,
+            120,
+            "legacy_full_payload_identity".to_owned(),
+        )],
+        "the hash-pinned scan-all identity must yield a family fact over the full job range"
+    );
+
+    // The live producer shape: generic_topic_scans declared, but the scanned
+    // family's targets were filtered out of the persisted selected_targets.
+    // Deriving only the address facts would silently omit the family fetch.
+    let target_less_job_id = insert_completed_backfill_job(
+        database.pool(),
+        "legacy-generic-scan-without-targets",
+        json!({
+            "selector_kind": "whole_active_watched_chain",
+            "source_family": null,
+            "requested_watched_targets": [],
+            "selected_targets": [
+                {
+                    "source_family": "ens_v1_registry_l1",
+                    "contract_instance_id": "0abbca82-a3c4-4fcf-860b-d1eccfd10977",
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "effective_from_block": 100,
+                    "effective_to_block": 120
+                }
+            ],
+            "generic_topic_scans": [
+                {
+                    "source_family": "ens_v1_resolver_l1",
+                    "source_identity_payload_format": "generic_resolver_event_topics_v1"
+                }
+            ],
+            "source_identity_payload_format": "selected_targets_with_generic_topic_scans_v1",
+            "source_identity_hash": "keccak256:0x6666666666666666666666666666666666666666666666666666666666666666"
+        }),
+    )
+    .await?;
+
+    let error = repair::derive_legacy_backfill_coverage_facts(database.pool(), target_less_job_id)
+        .await
+        .expect_err("generic scans without persisted family targets must be refused");
+    assert!(
+        error.to_string().contains("refuses partial coverage"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(
+        load_coverage_fact_rows(database.pool(), target_less_job_id).await?,
+        Vec::new(),
+        "a refused target-less generic-scan derivation must not write facts, not even the derivable address portion"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn legacy_coverage_derivation_refuses_compact_digests_and_incomplete_jobs() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let compact_job_id = insert_completed_backfill_job(
+        database.pool(),
+        "legacy-compact-digest",
+        json!({
+            "selector_kind": "source_family",
+            "source_family": "basenames_base_registry",
+            "requested_watched_targets": [],
+            "selected_target_count": 1_218_984,
+            "selected_targets_digest_algorithm": "keccak256",
+            "selected_targets_digest": "keccak256:0x3333333333333333333333333333333333333333333333333333333333333333",
+            "source_identity_payload_format": "selected_targets_digest_v1",
+            "source_identity_hash": "keccak256:0x4444444444444444444444444444444444444444444444444444444444444444"
+        }),
+    )
+    .await?;
+
+    let error = repair::derive_legacy_backfill_coverage_facts(database.pool(), compact_job_id)
+        .await
+        .expect_err("compact digest identities must be refused");
+    assert!(
+        error
+            .to_string()
+            .contains("must be re-completed on fact-writing code"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(
+        table_count(database.pool(), "backfill_coverage_facts").await?,
+        0,
+        "a refused derivation must not write facts"
+    );
+
+    let pending = create_backfill_job(
+        database.pool(),
+        &BackfillJobCreate {
+            deployment_profile: "mainnet".to_owned(),
+            chain_id: "ethereum-mainnet".to_owned(),
+            source_identity: json!({
+                "selector_kind": "watched_target_set",
+                "source_family": null,
+                "requested_watched_targets": [],
+                "selected_targets": [],
+                "source_identity_hash": "fnv1a64:0000000000000000"
+            }),
+            scan_mode: "hash_pinned_block".to_owned(),
+            range_start_block_number: 100,
+            range_end_block_number: 120,
+            idempotency_key: "legacy-still-pending".to_owned(),
+            ranges: Vec::new(),
+        },
+    )
+    .await?;
+    let error =
+        repair::derive_legacy_backfill_coverage_facts(database.pool(), pending.job.backfill_job_id)
+            .await
+            .expect_err("non-completed jobs must be refused");
+    assert!(
+        error
+            .to_string()
+            .contains("can only be derived for completed jobs"),
+        "unexpected error: {error:#}"
+    );
+
+    let unknown_format_job_id = insert_completed_backfill_job(
+        database.pool(),
+        "legacy-unknown-format",
+        json!({
+            "selector_kind": "source_family",
+            "source_family": "basenames_base_registry",
+            "requested_watched_targets": [],
+            "selected_targets": [],
+            "source_identity_payload_format": "selected_targets_bloom_filter_v9",
+            "source_identity_hash": "keccak256:0x5555555555555555555555555555555555555555555555555555555555555555"
+        }),
+    )
+    .await?;
+    let error =
+        repair::derive_legacy_backfill_coverage_facts(database.pool(), unknown_format_job_id)
+            .await
+            .expect_err("unknown identity payload formats must be refused");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported source_identity_payload_format"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(
+        table_count(database.pool(), "backfill_coverage_facts").await?,
+        0,
+        "a refused unknown-format derivation must not write facts"
+    );
+
+    database.cleanup().await
 }

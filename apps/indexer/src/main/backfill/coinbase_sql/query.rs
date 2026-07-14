@@ -74,6 +74,18 @@ pub(super) fn build_query(
     let log_action_expr = active_action_expression("l.action");
     let tx_action_expr = active_action_expression("action");
 
+    // The union of the decoded and encoded arms is wrapped in a subquery
+    // before ORDER BY/LIMIT: ClickHouse binds a trailing ORDER BY/LIMIT after
+    // `a UNION ALL b` to the LAST arm only, so the unwrapped shape left the
+    // decoded arm unordered (nondeterministic per execution) and never
+    // applied the page limit globally — both of which the cursor pagination
+    // relies on. The sort key is not unique across arms: a decode-transition
+    // twin (same log in both arms) sorts adjacently in arbitrary arm order,
+    // and a page boundary splitting the pair can keep the encoded twin while
+    // the strict cursor excludes the decoded one — the row then degrades to
+    // the validation-provider synthesis path (one extra lookup, same data).
+    // A decoded-first tie-breaker column would remove that cost but deviates
+    // from the live-proven query shape; adopt only with fresh live proof.
     Ok(format!(
         r#"WITH active_transactions AS (
   SELECT
@@ -209,30 +221,42 @@ active_encoded_logs AS (
   WHERE e.action_sum > 0
 )
 SELECT
-  l.block_number AS block_number,
-  l.block_hash AS block_hash,
-  l.transaction_hash AS transaction_hash,
-  l.transaction_index AS transaction_index,
-  l.log_index AS log_index,
-  l.emitting_address AS emitting_address,
-  l.event_signature AS event_signature,
-  l.parameters AS parameters,
-  l.topics AS topics
-FROM active_decoded_logs l
-WHERE {output_predicates}
-UNION ALL
-SELECT
-  l.block_number AS block_number,
-  l.block_hash AS block_hash,
-  l.transaction_hash AS transaction_hash,
-  l.transaction_index AS transaction_index,
-  l.log_index AS log_index,
-  l.emitting_address AS emitting_address,
-  l.event_signature AS event_signature,
-  l.parameters AS parameters,
-  l.topics AS topics
-FROM active_encoded_logs l
-WHERE {output_predicates}
+  u.block_number AS block_number,
+  u.block_hash AS block_hash,
+  u.transaction_hash AS transaction_hash,
+  u.transaction_index AS transaction_index,
+  u.log_index AS log_index,
+  u.emitting_address AS emitting_address,
+  u.event_signature AS event_signature,
+  u.parameters AS parameters,
+  u.topics AS topics
+FROM (
+  SELECT
+    l.block_number AS block_number,
+    l.block_hash AS block_hash,
+    l.transaction_hash AS transaction_hash,
+    l.transaction_index AS transaction_index,
+    l.log_index AS log_index,
+    l.emitting_address AS emitting_address,
+    l.event_signature AS event_signature,
+    l.parameters AS parameters,
+    l.topics AS topics
+  FROM active_decoded_logs l
+  WHERE {output_predicates}
+  UNION ALL
+  SELECT
+    l.block_number AS block_number,
+    l.block_hash AS block_hash,
+    l.transaction_hash AS transaction_hash,
+    l.transaction_index AS transaction_index,
+    l.log_index AS log_index,
+    l.emitting_address AS emitting_address,
+    l.event_signature AS event_signature,
+    l.parameters AS parameters,
+    l.topics AS topics
+  FROM active_encoded_logs l
+  WHERE {output_predicates}
+) u
 ORDER BY block_number, transaction_index, log_index
 LIMIT {limit}"#,
         from_block = pack.from_block,

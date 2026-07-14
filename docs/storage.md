@@ -349,7 +349,7 @@ rebuild.
 The system of record splits into six layers.
 
 1. `chain_lineage` — block ancestry, fork points, hash-first reconciliation, head promotion, one durable header-anchor row per observed block hash.
-2. `raw_facts` — hot indexed replay facts: selected/admitted target logs, the minimum transaction/receipt fields needed to decode them, code-hash observations, fetched call snapshots, optional header/log audit extensions, compact payload-cache metadata.
+2. `raw_facts` — hot indexed replay facts: selected/admitted target logs, the minimum transaction/receipt fields needed to decode them, code-hash observations, fetched call snapshots, optional header/log audit extensions, compact payload-cache metadata. Code-hash observations are activity-scoped, not a per-block grid: a block admits `raw_code_hashes` rows only for that block's selected log emitters, plus the live tailer's one-time baseline for a watched address with no stored observation. Consumers read the latest non-orphaned observation per target; the code at an intervening block is a read-side answer, never a materialized raw fact. See [`chain-intake.md`](chain-intake.md).
 3. `manifests_and_discovery` — source manifests, discovered edges, rollout flags.
 4. `identity_and_events` — `NameSurface`, `SurfaceBinding`, `resources`, `token_lineages`, and append-only `normalized_events`.
 5. `projections` — current-state and collection read models.
@@ -521,9 +521,79 @@ Very large source-family jobs and whole-active watched-chain jobs may persist co
 
 Idempotency validation has one compatibility bridge for jobs created before compact identity was introduced: a legacy full-payload identity and a `selected_targets_digest_v1` identity may match even when their `source_identity_hash` values differ, but only when every selector/provider field outside the selected-target representation and hash matches exactly and the compact count, digest, and sample recompute from the full `selected_targets` set. A different target set, topic plan, scan/provider field, range, chain, profile, scan mode, or idempotency key remains an immutable-job conflict.
 
+When whole-chain or mixed-source backfill uses generic ENSv1 resolver topic scanning, the persisted identity records that scan in `generic_topic_scans` with `source_identity_payload_format=generic_resolver_event_topics_v1`. The address-scoped portion may be stored as `selected_targets_with_generic_topic_scans_v1` or, when compact, `selected_targets_digest_with_generic_topic_scans_v1`; in both forms `selected_targets`, `selected_target_count`, digest, and sample intentionally exclude the resolver-family targets covered by the generic topic scan while `source_identity_hash` covers the selected-target identity plus the generic scan declaration.
+
 Backfill idempotency is derived from deployment profile, chain, finite range, scan family, and source identity. It must not include the local manifest root path: moving the same selected manifest corpus between filesystem locations does not create new raw backfill work. Bootstrap checkpoint reuse follows the same rule by matching persisted source identity and contiguous range coverage rather than the literal idempotency-key text.
 
+Historic checkpoint promotion consumes durable `backfill_coverage_facts`
+rows (see below) instead of recomputing coverage from persisted job source
+identities. Coverage is keyed by active `(source_family, address)` intervals,
+so a tuple is required only for blocks where it is active, one source
+family's coverage never credits another family at the same address, and
+family-scope fact rows credit every address of that family over the fact
+interval. Retained full-block payload metadata is cache evidence, not a
+substitute for fetch coverage. Watched source families with no active ABI
+event topics do not impose historical selected-log coverage, because there
+are no selected log facts for backfill to prove. Event-silent
+reverse-resolver direct-call indexing is scoped to ordinary live-tip
+reconciliation: live intake retains direct-call transactions and receipts
+from the current live block payload and records durable observations for
+later current-state hydration, but historic stored-lineage promotion does not
+require or synthesize per-block event-silent reverse-resolver state. That
+reverse resolver data is latest-only by design.
+
 `effective_to_block` is finite for every persisted selected target — backfill jobs are finite at creation time. Bootstrap ranges start at each eligible target's manifest/discovery admitted start and end at the finite provider head observed at job creation. A watched target whose manifest-declared `start_block` is unknown is skipped by bootstrap; it leaves no synthetic block-zero, provider-history, recent-window, or job-start range in `backfill_*`.
+
+### Backfill coverage facts
+
+`backfill_coverage_facts` records, per completed job, which watched
+`(source_family, address)` tuples had their logs fetched over which block
+interval — durable fetch evidence derived from the job's own in-memory
+selector plan at completion time, in the same transaction as the job status
+flip. These rows exist to back checkpoint promotion, which will consume them
+instead of recomputing selector plans from persisted identities once the
+promotion rework (PR #125) lands; until then they are written but not yet
+read by promotion.
+
+- Scope semantics: `scope=address` rows carry the lowercased emitting
+  address and cover exactly that tuple. `scope=family` rows carry a NULL
+  address and mean every address of the family is covered by a
+  topics-complete fetch over the row's interval (ENSv1 generic resolver
+  scans and Base Basenames registry Coinbase SQL scan-all).
+- Derivation kinds: `job_completion` rows are written by the completing
+  job from its in-memory plan; `legacy_full_payload_identity` rows are
+  re-derived by `repair derive-backfill-coverage-facts` from persisted
+  verbatim-target identities of already-completed jobs.
+- Append-only discipline: no code path UPDATEs a fact row. Re-derivation is
+  idempotent through `ON CONFLICT DO NOTHING` against the tuple key
+  `(backfill_job_id, source_family, scope, address, covered_from_block,
+  covered_to_block)` (`NULLS NOT DISTINCT`); the same derivation re-run
+  inserts nothing.
+- Family facts are clamped to the merged union segments of the family's
+  target effective windows intersected with the job range — a deliberate
+  under-claim relative to the raw job range, because the Coinbase SQL
+  scan-all planner skips windows holding no targets. It cannot cause a
+  spurious promotion refusal: requirement tuples are by construction inside
+  the union of the family's target windows.
+- Repair derivability: identities that persist the fetched target set
+  verbatim (fnv1a64-era full payloads) re-derive completely, as does the
+  hash-pinned registry scan-all identity
+  (`basenames_registry_scan_all_topics_v1`), which persists its topic0 set
+  verbatim — repair derives a full-job-range family fact from it (unlike its
+  cbsql counterpart below, which persists no spans and is refused). Compact digest
+  identities (`selected_targets_digest_v1` and its generic-scan variant)
+  are refused — the target set is unrecoverable from a digest. Family-scan
+  identities that do not persist the scanned family's target windows
+  (`basenames_registry_scan_all_event_signatures_v1`,
+  `generic_resolver_event_topics_v1`, and
+  `selected_targets_with_generic_topic_scans_v1` whose producers filtered
+  the generic families' targets out of `selected_targets`) are refused
+  rather than deriving partial coverage; those jobs must be re-run on
+  fact-writing code.
+- `backfill_coverage_facts.backfill_job_id` cascades on job delete. Once
+  checkpoint promotion relies on facts, deleting or pruning completed
+  `backfill_jobs` rows silently destroys promotion evidence — job pruning
+  is forbidden.
 
 ### Backfill range checkpoint vs chain checkpoint
 

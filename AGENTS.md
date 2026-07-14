@@ -8,6 +8,11 @@ bigname is a versioned indexing and read API for ENS, ENSv2, and Basenames. The 
 - If a task changes public semantics, shared IDs or enums, coverage meaning, manifest schema, workstream ownership, or replacement meaning, update the relevant docs first or in the same change.
 - Prefer cohesive end-to-end slices — a full capability with its tests and wiring, not a commit-sized edge. Do not build disguised legacy API parity or new planning docs unless semantics changed.
 
+## Communication
+
+- In docs, code comments, reviews, task writeups, plans, and agent output, describe the system in language that an engineer familiar with ENS and the project's stated scope can understand without first learning bigname-specific terminology.
+- Prefer standard ENS, Ethereum, and indexing terms over project-specific jargon. When a bigname-specific term is necessary, define it in plain language on first use and explain the behavior it represents.
+
 ## Boundaries
 
 - Adapters write identity rows and normalized events, not projection rows.

@@ -28,7 +28,7 @@ use super::{
     BackfillCanonicalityEvidence, RawOnlySparseBackfillTiming,
     materialization::{
         fetch_full_payload_bundles_for_log_blocks, materialize_backfill_block_payloads,
-        missing_transaction_receipt_requests_from_raw_facts,
+        missing_transaction_receipt_requests_from_raw_facts, selected_seed_log_addresses,
     },
     selected_addresses_for_materialized_block, uses_topic_first_source_family_scan,
 };
@@ -318,8 +318,12 @@ pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
             logs.extend(materialized_payloads.logs);
         }
 
-        if !selected_addresses.is_empty() {
-            code_observation_plan.record(&raw_block, &selected_addresses);
+        let code_observation_addresses =
+            selected_seed_log_addresses(&selection_logs, &selected_addresses)
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+        if !code_observation_addresses.is_empty() {
+            code_observation_plan.record(&raw_block, &code_observation_addresses);
         }
 
         raw_blocks_by_hash.insert(raw_block.block_hash.clone(), raw_block.clone());

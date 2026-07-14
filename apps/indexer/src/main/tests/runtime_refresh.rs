@@ -1388,10 +1388,7 @@ async fn runtime_refresh_adds_ensv1_resolver_watch_target_without_manifest_reloa
     )
     .await?;
 
-    let (refreshed_state, refreshed_tasks) = refresh_runtime_state_from_storage_discovery(
-        database.pool(),
-        &initial_state,
-    )
+    let (refreshed_state, refreshed_tasks) = refresh_runtime_state_from_storage_discovery(database.pool(), &initial_state)
     .await?
     .expect(
         "stored ENSv1 resolver discovery must refresh the watched plan without manifest reload",

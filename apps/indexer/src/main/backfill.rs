@@ -2,6 +2,8 @@
 mod coinbase_sql;
 #[path = "backfill/concurrent_execution.rs"]
 mod concurrent_execution;
+#[path = "backfill/coverage_facts.rs"]
+mod coverage_facts;
 #[path = "backfill/failure_recording.rs"]
 mod failure_recording;
 #[path = "backfill/fetching.rs"]
@@ -30,6 +32,7 @@ pub(crate) use concurrent_execution::{
     run_resumable_coinbase_sql_backfill_job_concurrently,
     run_resumable_hash_pinned_backfill_job_concurrently,
 };
+pub(crate) use coverage_facts::{covered_block_interval, merged_covered_block_segments};
 #[cfg(test)]
 pub(crate) use fetching::load_backfill_canonicality_evidence;
 #[allow(unused_imports)]
@@ -38,6 +41,8 @@ pub(crate) use fetching::{materialize_historical_payload_range, run_hash_pinned_
 pub(crate) use reservation_execution::COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD;
 #[cfg(test)]
 pub(crate) use reservation_execution::coinbase_sql_backfill_job_source_identity_payload;
+#[cfg(test)]
+pub(crate) use reservation_execution::effective_hash_pinned_adapter_sync_mode;
 pub(crate) use reservation_execution::{
     DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS, backfill_job_source_identity_payload,
     create_hash_pinned_backfill_job, hash_pinned_backfill_range_specs,
