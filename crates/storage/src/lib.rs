@@ -112,10 +112,10 @@ pub use children::{
     stream_canonical_declared_child_sources, upsert_children_current_rows,
 };
 pub use data_completeness::{
-    BackfillLifecycleRow, ChainCompletenessRow, DEFERRED_NORMALIZED_EVENT_INDEXES,
-    DataCompletenessRead, ManifestChainNamespace, NameCurrentCount, NormalizedEventCount,
-    ObservedCodeAddress, ProjectionApplyCursorRow, ProjectionReplayMarker, ReplayCursorRow,
-    load_data_completeness,
+    ActiveManifestEventSource, BackfillLifecycleRow, ChainCompletenessRow,
+    DEFERRED_NORMALIZED_EVENT_INDEXES, DataCompletenessRead, ManifestChainNamespace,
+    ManifestDeclaredTarget, NameCurrentCount, ObservedCodeAddress, ProjectionApplyCursorRow,
+    ProjectionReplayMarker, ReplayCursorRow, load_data_completeness,
 };
 pub use evm_primitives::{normalize_evm_address, normalize_evm_b256};
 pub use execution::{

@@ -49,32 +49,232 @@ async fn duplicate_canonical_heights_are_counted() -> Result<()> {
     database.cleanup().await
 }
 
-/// Orphaned events and NULL-chain events must not satisfy the per-chain content check; the
-/// NULL rows are counted separately as a data-integrity signal.
+/// A complete set of heights is not a connected branch when a child does not point to the
+/// canonical hash at the preceding height.
 #[tokio::test]
-async fn orphaned_and_null_chain_events_excluded_from_counts() -> Result<()> {
+async fn disconnected_canonical_parents_are_counted() -> Result<()> {
     let database = test_database().await?;
     let pool = database.pool();
     sqlx::query(
         r#"
-        INSERT INTO normalized_events
-            (event_identity, namespace, event_kind, source_family,
-             manifest_version, derivation_kind, chain_id, canonicality_state)
+        INSERT INTO chain_lineage
+            (chain_id, block_hash, parent_hash, block_number, block_timestamp,
+             canonicality_state)
         VALUES
-            ('e1', 'ens', 'k', 'sf', 1, 'd', 'ethereum-sepolia', 'canonical'::canonicality_state),
-            ('e2', 'ens', 'k', 'sf', 1, 'd', 'ethereum-sepolia', 'orphaned'::canonicality_state),
-            ('e3', 'ens', 'k', 'sf', 1, 'd', NULL, 'canonical'::canonicality_state)
+            ('ethereum-sepolia', '0xaa', '0x99', 100, now(), 'canonical'),
+            ('ethereum-sepolia', '0xbb', '0xdead', 101, now(), 'canonical')
         "#,
     )
     .execute(pool)
     .await?;
 
     let read = load_data_completeness(pool).await?;
-    let ens = read
-        .normalized_event_counts
+    let chain = read
+        .chains
         .iter()
-        .find(|entry| entry.chain_id == "ethereum-sepolia" && entry.namespace == "ens");
-    assert_eq!(ens.map(|entry| entry.count), Some(1));
+        .find(|chain| chain.chain_id == "ethereum-sepolia")
+        .expect("chain row");
+    assert_eq!(chain.lineage_canonical_block_count, 2);
+    assert_eq!(chain.disconnected_canonical_parent_count, 1);
+
+    database.cleanup().await
+}
+
+/// Code coverage needs the observation height so the evaluator can reject observations from
+/// before a target's inclusive active start.
+#[tokio::test]
+async fn latest_code_observation_block_is_loaded() -> Result<()> {
+    let database = test_database().await?;
+    let pool = database.pool();
+    sqlx::query(
+        r#"
+        INSERT INTO raw_code_hashes
+            (chain_id, block_hash, block_number, contract_address, code_hash,
+             code_byte_length, canonicality_state)
+        VALUES
+            ('ethereum-sepolia', '0xaa', 10, '0xabc', '0x01', 1, 'canonical'),
+            ('ethereum-sepolia', '0xbb', 20, '0xAbC', '0x02', 1, 'canonical'),
+            ('ethereum-sepolia', '0xcc', 30, '0xabc', '0x03', 1, 'orphaned')
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    let read = load_data_completeness(pool).await?;
+    assert_eq!(read.observed_code_addresses.len(), 1);
+    assert_eq!(
+        read.observed_code_addresses[0].max_observed_block_number,
+        20
+    );
+
+    database.cleanup().await
+}
+
+/// Direct manifest declarations are loaded without depending on the materialized
+/// `contract_instance_addresses` row.
+#[tokio::test]
+async fn manifest_declared_target_is_loaded_without_address_row() -> Result<()> {
+    let database = test_database().await?;
+    let pool = database.pool();
+    let manifest_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO manifest_versions
+            (manifest_version, namespace, source_family, chain, deployment_epoch,
+             rollout_status, normalizer_version, file_path, manifest_payload)
+        VALUES
+            (1, 'ens', 'ens_v2_registry_l1', 'ethereum-sepolia', 'e', 'active',
+             'n', 'f', '{"contracts":[{"role":"registry","address":"0xAbC","start_block":42}]}'::jsonb)
+        RETURNING manifest_id
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+    let contract_instance_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000042")?;
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instances
+            (contract_instance_id, chain_id, contract_kind)
+        VALUES ($1, 'ethereum-sepolia', 'registry')
+        "#,
+    )
+    .bind(contract_instance_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_contract_instances
+            (manifest_id, declaration_kind, declaration_name, contract_instance_id,
+             declared_address, role, proxy_kind)
+        VALUES ($1, 'contract', 'registry', $2, '0xAbC', 'registry', 'none')
+        "#,
+    )
+    .bind(manifest_id)
+    .bind(contract_instance_id)
+    .execute(pool)
+    .await?;
+
+    let read = load_data_completeness(pool).await?;
+    assert_eq!(read.manifest_declared_targets.len(), 1);
+    assert_eq!(read.manifest_declared_targets[0].address, "0xabc");
+    assert_eq!(
+        read.manifest_declared_targets[0].active_from_block_number,
+        Some(42)
+    );
+
+    database.cleanup().await
+}
+
+/// Only active manifests that declare normalized adapter output form content expectations,
+/// and residual rows from a deprecated manifest ID do not count for the active identity.
+#[tokio::test]
+async fn active_event_sources_are_counted_by_exact_manifest_identity() -> Result<()> {
+    let database = test_database().await?;
+    let pool = database.pool();
+    let active_event_manifest_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO manifest_versions
+            (manifest_version, namespace, source_family, chain, deployment_epoch,
+             rollout_status, normalizer_version, file_path, manifest_payload)
+        VALUES
+            (2, 'ens', 'registry', 'ethereum-sepolia', 'e', 'active', 'n', 'active',
+             '{"abi":{"events":[{"normalized_events":["ResolverChanged"]}]}}'::jsonb)
+        RETURNING manifest_id
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+    let deprecated_manifest_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO manifest_versions
+            (manifest_version, namespace, source_family, chain, deployment_epoch,
+             rollout_status, normalizer_version, file_path, manifest_payload)
+        VALUES
+            (1, 'ens', 'registry', 'ethereum-sepolia', 'e', 'deprecated', 'n', 'old',
+             '{"abi":{"events":[{"normalized_events":["ResolverChanged"]}]}}'::jsonb)
+        RETURNING manifest_id
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_versions
+            (manifest_version, namespace, source_family, chain, deployment_epoch,
+             rollout_status, normalizer_version, file_path, manifest_payload)
+        VALUES
+            (1, 'basenames', 'basenames_execution', 'ethereum-mainnet', 'e',
+             'active', 'n', 'metadata', '{}'::jsonb)
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_events
+            (event_identity, namespace, event_kind, source_family, manifest_version,
+             source_manifest_id, chain_id, derivation_kind, canonicality_state)
+        VALUES
+            ('stale', 'ens', 'ResolverChanged', 'registry', 1, $1,
+             'ethereum-sepolia', 'raw_log', 'canonical')
+        "#,
+    )
+    .bind(deprecated_manifest_id)
+    .execute(pool)
+    .await?;
+
+    let read = load_data_completeness(pool).await?;
+    assert_eq!(read.active_manifest_event_sources.len(), 1);
+    let source = &read.active_manifest_event_sources[0];
+    assert_eq!(source.manifest_id, active_event_manifest_id);
+    assert_eq!(source.normalized_event_count, 0);
+
+    database.cleanup().await
+}
+
+/// Orphaned events and NULL-chain events must not satisfy the per-chain content check; the
+/// NULL rows are counted separately as a data-integrity signal.
+#[tokio::test]
+async fn orphaned_and_null_chain_events_excluded_from_counts() -> Result<()> {
+    let database = test_database().await?;
+    let pool = database.pool();
+    let manifest_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO manifest_versions
+            (manifest_version, namespace, source_family, chain, deployment_epoch,
+             rollout_status, normalizer_version, file_path, manifest_payload)
+        VALUES
+            (1, 'ens', 'sf', 'ethereum-sepolia', 'e', 'active', 'n', 'f',
+             '{"abi":{"events":[{"normalized_events":["ResolverChanged"]}]}}'::jsonb)
+        RETURNING manifest_id
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_events
+            (event_identity, namespace, event_kind, source_family,
+             manifest_version, source_manifest_id, derivation_kind, chain_id,
+             canonicality_state)
+        VALUES
+            ('e1', 'ens', 'ResolverChanged', 'sf', 1, $1, 'd',
+             'ethereum-sepolia', 'canonical'::canonicality_state),
+            ('e2', 'ens', 'ResolverChanged', 'sf', 1, $1, 'd',
+             'ethereum-sepolia', 'orphaned'::canonicality_state),
+            ('e3', 'ens', 'ResolverChanged', 'sf', 1, $1, 'd',
+             NULL, 'canonical'::canonicality_state)
+        "#,
+    )
+    .bind(manifest_id)
+    .execute(pool)
+    .await?;
+
+    let read = load_data_completeness(pool).await?;
+    assert_eq!(read.active_manifest_event_sources.len(), 1);
+    assert_eq!(
+        read.active_manifest_event_sources[0].normalized_event_count,
+        1
+    );
     assert_eq!(read.normalized_events_null_chain_id_count, 1);
 
     database.cleanup().await
@@ -152,6 +352,63 @@ async fn deferred_projection_indexes_present_on_migrated_database() -> Result<()
     assert_eq!(
         read.present_deferred_projection_indexes.len(),
         super::DEFERRED_NORMALIZED_EVENT_INDEXES.len()
+    );
+
+    database.cleanup().await
+}
+
+/// A failed concurrent build leaves a named `pg_indexes` entry with `indisvalid = false`.
+/// The completeness read must not report that unusable index as present.
+#[tokio::test]
+async fn invalid_deferred_projection_index_is_not_present() -> Result<()> {
+    let database = test_database().await?;
+    let pool = database.pool();
+    sqlx::query("DROP INDEX normalized_events_namespace_idx")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_events
+            (event_identity, namespace, event_kind, source_family,
+             manifest_version, derivation_kind)
+        VALUES
+            ('invalid-index-1', 'ens', 'k', 'sf', 1, 'd'),
+            ('invalid-index-2', 'ens', 'k', 'sf', 1, 'd')
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    let build_error = sqlx::query(
+        "CREATE UNIQUE INDEX CONCURRENTLY normalized_events_namespace_idx \
+         ON normalized_events (namespace)",
+    )
+    .execute(pool)
+    .await;
+    assert!(
+        build_error.is_err(),
+        "duplicate rows must fail the unique build"
+    );
+
+    let catalog_state = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT index_state.indisvalid
+        FROM pg_index index_state
+        WHERE index_state.indexrelid = 'normalized_events_namespace_idx'::regclass
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+    assert!(
+        !catalog_state,
+        "failed build must leave an invalid catalog entry"
+    );
+
+    let read = load_data_completeness(pool).await?;
+    assert!(
+        !read
+            .present_deferred_projection_indexes
+            .contains(&"normalized_events_namespace_idx".to_owned())
     );
 
     database.cleanup().await

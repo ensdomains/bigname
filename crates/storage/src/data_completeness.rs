@@ -1,5 +1,9 @@
 use anyhow::{Context, Result};
 
+mod content;
+
+use content::*;
+
 #[cfg(test)]
 mod tests;
 
@@ -25,6 +29,9 @@ pub struct ChainCompletenessRow {
     /// row. The distinct-block-number contiguity count cannot see these, so they are counted
     /// separately; a non-zero value is a canonicality violation, not a gap.
     pub duplicate_canonical_height_count: i64,
+    /// Canonical/safe/finalized rows above the retained floor whose `parent_hash` does not
+    /// resolve to the canonical/safe/finalized row at the preceding height.
+    pub disconnected_canonical_parent_count: i64,
     pub canonical_raw_log_head_block_number: Option<i64>,
     pub raw_log_head_block_number: Option<i64>,
 }
@@ -63,13 +70,35 @@ pub struct BackfillLifecycleRow {
     pub expired_lease_range_count: i64,
 }
 
-/// A `(chain, namespace)` an active manifest version declares. The expected content set is
-/// derived from these rather than from observed events, so a chain declared to produce a
-/// namespace with no rows is not masked by a namespace that does have rows.
+/// A `(chain, namespace)` an active manifest version declares. These declarations ensure
+/// manifest-only chains remain in the gate's active-chain set even if a partial restore lost
+/// their materialized watch rows.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ManifestChainNamespace {
     pub chain: String,
     pub namespace: String,
+}
+
+/// A contract address declared directly by an active manifest. This remains authoritative
+/// even when a partial restore has lost its materialized `contract_instance_addresses` row.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ManifestDeclaredTarget {
+    pub chain: String,
+    pub source_family: String,
+    pub address: String,
+    pub active_from_block_number: Option<i64>,
+}
+
+/// One active manifest source that declares normalized adapter output, together with the
+/// count of matching non-orphaned normalized events written under that exact manifest ID.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActiveManifestEventSource {
+    pub manifest_id: i64,
+    pub manifest_version: i64,
+    pub chain: String,
+    pub namespace: String,
+    pub source_family: String,
+    pub normalized_event_count: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -83,14 +112,7 @@ pub struct ProjectionApplyCursorRow {
 pub struct ObservedCodeAddress {
     pub chain_id: String,
     pub address: String,
-}
-
-/// Non-empty `normalized_events` count for one `(chain_id, namespace)`.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NormalizedEventCount {
-    pub chain_id: String,
-    pub namespace: String,
-    pub count: i64,
+    pub max_observed_block_number: i64,
 }
 
 /// Non-empty `name_current` count for one namespace. `name_current` carries no chain, so a
@@ -116,10 +138,10 @@ pub struct DataCompletenessRead {
     /// retries. A non-zero count is a terminal projection failure.
     pub projection_invalidation_dead_letter_count: i64,
     pub observed_code_addresses: Vec<ObservedCodeAddress>,
-    /// Non-orphaned `normalized_events` counts grouped by `(chain_id, namespace)`, so content
-    /// can be required per active chain instead of globally where another chain's rows would
-    /// satisfy a total. NULL `chain_id` rows are excluded here and counted separately.
-    pub normalized_event_counts: Vec<NormalizedEventCount>,
+    /// Direct active-manifest declarations, independently of the materialized watch view.
+    pub manifest_declared_targets: Vec<ManifestDeclaredTarget>,
+    /// Event-producing active manifest sources and exact-identity content counts.
+    pub active_manifest_event_sources: Vec<ActiveManifestEventSource>,
     /// `name_current` counts grouped by namespace.
     pub name_current_counts: Vec<NameCurrentCount>,
     /// Non-orphaned `normalized_events` rows with a NULL `chain_id` — a data-integrity fault
@@ -134,7 +156,7 @@ pub struct DataCompletenessRead {
     /// drops them and a later pass rebuilds them, so an absent index marks a mid-replay
     /// candidate.
     pub present_deferred_projection_indexes: Vec<String>,
-    /// `(chain, namespace)` declared by active manifest versions — the expected content set.
+    /// `(chain, namespace)` declared by active manifest versions — active-chain authority.
     pub manifest_chain_namespaces: Vec<ManifestChainNamespace>,
 }
 
@@ -165,7 +187,8 @@ pub async fn load_data_completeness(pool: &sqlx::PgPool) -> Result<DataCompleten
         )
         .await?,
         observed_code_addresses: load_observed_code_addresses(pool).await?,
-        normalized_event_counts: load_normalized_event_counts(pool).await?,
+        manifest_declared_targets: load_manifest_declared_targets(pool).await?,
+        active_manifest_event_sources: load_active_manifest_event_sources(pool).await?,
         name_current_counts: load_name_current_counts(pool).await?,
         normalized_events_null_chain_id_count: load_normalized_events_null_chain_id_count(pool)
             .await?,
@@ -184,18 +207,22 @@ async fn load_chain_completeness(pool: &sqlx::PgPool) -> Result<Vec<ChainComplet
             UNION
             SELECT DISTINCT chain_id FROM chain_lineage
         ),
-        lineage AS (
-            SELECT
-                chain_id,
-                MAX(block_number) AS lineage_head_block_number,
-                MIN(block_number) AS lineage_floor_block_number,
-                COUNT(DISTINCT block_number) AS lineage_canonical_block_count
+        canonical_lineage AS (
+            SELECT chain_id, block_hash, parent_hash, block_number
             FROM chain_lineage
             WHERE canonicality_state IN (
                 'canonical'::canonicality_state,
                 'safe'::canonicality_state,
                 'finalized'::canonicality_state
             )
+        ),
+        lineage AS (
+            SELECT
+                chain_id,
+                MAX(block_number) AS lineage_head_block_number,
+                MIN(block_number) AS lineage_floor_block_number,
+                COUNT(DISTINCT block_number) AS lineage_canonical_block_count
+            FROM canonical_lineage
             GROUP BY chain_id
         ),
         canonical_raw_log_head AS (
@@ -228,16 +255,23 @@ async fn load_chain_completeness(pool: &sqlx::PgPool) -> Result<Vec<ChainComplet
             SELECT chain_id, COUNT(*) AS duplicate_canonical_height_count
             FROM (
                 SELECT chain_id, block_number
-                FROM chain_lineage
-                WHERE canonicality_state IN (
-                    'canonical'::canonicality_state,
-                    'safe'::canonicality_state,
-                    'finalized'::canonicality_state
-                )
+                FROM canonical_lineage
                 GROUP BY chain_id, block_number
                 HAVING COUNT(*) > 1
             ) duplicated
             GROUP BY chain_id
+        ),
+        disconnected_canonical_parent AS (
+            SELECT child.chain_id, COUNT(*) AS disconnected_canonical_parent_count
+            FROM canonical_lineage child
+            JOIN lineage span ON span.chain_id = child.chain_id
+            LEFT JOIN canonical_lineage parent
+              ON parent.chain_id = child.chain_id
+             AND parent.block_hash = child.parent_hash
+             AND parent.block_number = child.block_number - 1
+            WHERE child.block_number > span.lineage_floor_block_number
+              AND parent.block_hash IS NULL
+            GROUP BY child.chain_id
         )
         SELECT
             known_chains.chain_id,
@@ -247,6 +281,8 @@ async fn load_chain_completeness(pool: &sqlx::PgPool) -> Result<Vec<ChainComplet
             COALESCE(lineage.lineage_canonical_block_count, 0) AS lineage_canonical_block_count,
             COALESCE(duplicate_canonical_height.duplicate_canonical_height_count, 0)
                 AS duplicate_canonical_height_count,
+            COALESCE(disconnected_canonical_parent.disconnected_canonical_parent_count, 0)
+                AS disconnected_canonical_parent_count,
             canonical_raw_log_head.canonical_raw_log_head_block_number,
             raw_log_head.raw_log_head_block_number
         FROM known_chains
@@ -254,6 +290,8 @@ async fn load_chain_completeness(pool: &sqlx::PgPool) -> Result<Vec<ChainComplet
         LEFT JOIN lineage ON lineage.chain_id = known_chains.chain_id
         LEFT JOIN duplicate_canonical_height
           ON duplicate_canonical_height.chain_id = known_chains.chain_id
+        LEFT JOIN disconnected_canonical_parent
+          ON disconnected_canonical_parent.chain_id = known_chains.chain_id
         LEFT JOIN canonical_raw_log_head
           ON canonical_raw_log_head.chain_id = known_chains.chain_id
         LEFT JOIN raw_log_head ON raw_log_head.chain_id = known_chains.chain_id
@@ -281,6 +319,10 @@ async fn load_chain_completeness(pool: &sqlx::PgPool) -> Result<Vec<ChainComplet
                 duplicate_canonical_height_count: crate::sql_row::get(
                     &row,
                     "duplicate_canonical_height_count",
+                )?,
+                disconnected_canonical_parent_count: crate::sql_row::get(
+                    &row,
+                    "disconnected_canonical_parent_count",
                 )?,
                 canonical_raw_log_head_block_number: crate::sql_row::get(
                     &row,
@@ -360,222 +402,4 @@ async fn load_max_projection_change_id(pool: &sqlx::PgPool) -> Result<Option<i64
     .fetch_one(pool)
     .await
     .context("failed to load max projection change id")
-}
-
-async fn load_observed_code_addresses(pool: &sqlx::PgPool) -> Result<Vec<ObservedCodeAddress>> {
-    let rows = sqlx::query(
-        r#"
-        SELECT DISTINCT chain_id, lower(contract_address) AS address
-        FROM raw_code_hashes
-        WHERE canonicality_state <> 'orphaned'::canonicality_state
-        ORDER BY chain_id, address
-        "#,
-    )
-    .fetch_all(pool)
-    .await
-    .context("failed to load observed code-hash addresses")?;
-
-    rows.into_iter()
-        .map(|row| {
-            Ok(ObservedCodeAddress {
-                chain_id: crate::sql_row::get(&row, "chain_id")?,
-                address: crate::sql_row::get(&row, "address")?,
-            })
-        })
-        .collect()
-}
-
-async fn count_table(pool: &sqlx::PgPool, table: &'static str) -> Result<i64> {
-    sqlx::query_scalar::<_, i64>(&format!("SELECT COUNT(*)::BIGINT FROM {table}"))
-        .fetch_one(pool)
-        .await
-        .with_context(|| format!("failed to count {table}"))
-}
-
-async fn load_normalized_event_counts(pool: &sqlx::PgPool) -> Result<Vec<NormalizedEventCount>> {
-    let rows = sqlx::query(
-        r#"
-        SELECT chain_id, namespace, COUNT(*)::BIGINT AS count
-        FROM normalized_events
-        WHERE chain_id IS NOT NULL
-          AND canonicality_state <> 'orphaned'::canonicality_state
-        GROUP BY chain_id, namespace
-        ORDER BY chain_id, namespace
-        "#,
-    )
-    .fetch_all(pool)
-    .await
-    .context("failed to load normalized-event counts")?;
-
-    rows.into_iter()
-        .map(|row| {
-            Ok(NormalizedEventCount {
-                chain_id: crate::sql_row::get(&row, "chain_id")?,
-                namespace: crate::sql_row::get(&row, "namespace")?,
-                count: crate::sql_row::get(&row, "count")?,
-            })
-        })
-        .collect()
-}
-
-async fn load_name_current_counts(pool: &sqlx::PgPool) -> Result<Vec<NameCurrentCount>> {
-    let rows = sqlx::query(
-        r#"
-        SELECT namespace, COUNT(*)::BIGINT AS count
-        FROM name_current
-        GROUP BY namespace
-        ORDER BY namespace
-        "#,
-    )
-    .fetch_all(pool)
-    .await
-    .context("failed to load name-current counts")?;
-
-    rows.into_iter()
-        .map(|row| {
-            Ok(NameCurrentCount {
-                namespace: crate::sql_row::get(&row, "namespace")?,
-                count: crate::sql_row::get(&row, "count")?,
-            })
-        })
-        .collect()
-}
-
-async fn load_normalized_events_null_chain_id_count(pool: &sqlx::PgPool) -> Result<i64> {
-    sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT COUNT(*)::BIGINT
-        FROM normalized_events
-        WHERE chain_id IS NULL
-          AND canonicality_state <> 'orphaned'::canonicality_state
-        "#,
-    )
-    .fetch_one(pool)
-    .await
-    .context("failed to count normalized events with a null chain id")
-}
-
-async fn load_projection_replay_markers(
-    pool: &sqlx::PgPool,
-) -> Result<Vec<ProjectionReplayMarker>> {
-    let rows = sqlx::query(
-        r#"
-        SELECT DISTINCT replay_version, projection
-        FROM current_projection_replay_status
-        ORDER BY replay_version, projection
-        "#,
-    )
-    .fetch_all(pool)
-    .await
-    .context("failed to load current projection replay markers")?;
-
-    rows.into_iter()
-        .map(|row| {
-            Ok(ProjectionReplayMarker {
-                replay_version: crate::sql_row::get(&row, "replay_version")?,
-                projection: crate::sql_row::get(&row, "projection")?,
-            })
-        })
-        .collect()
-}
-
-async fn load_backfill_lifecycle(pool: &sqlx::PgPool) -> Result<Vec<BackfillLifecycleRow>> {
-    let rows = sqlx::query(
-        r#"
-        WITH profiles AS (
-            SELECT DISTINCT deployment_profile FROM backfill_jobs
-        ),
-        failed_jobs AS (
-            SELECT deployment_profile, COUNT(*) AS failed_job_count
-            FROM backfill_jobs
-            WHERE status = 'failed'
-            GROUP BY deployment_profile
-        ),
-        ranges AS (
-            SELECT
-                job.deployment_profile,
-                COUNT(*) FILTER (WHERE r.status = 'failed') AS failed_range_count,
-                COUNT(*) FILTER (WHERE r.status IN ('pending', 'reserved', 'running'))
-                    AS incomplete_range_count,
-                COUNT(*) FILTER (
-                    WHERE r.status IN ('reserved', 'running')
-                      AND r.lease_expires_at IS NOT NULL
-                      AND r.lease_expires_at < now()
-                ) AS expired_lease_range_count
-            FROM backfill_ranges r
-            JOIN backfill_jobs job ON job.backfill_job_id = r.backfill_job_id
-            GROUP BY job.deployment_profile
-        )
-        SELECT
-            profiles.deployment_profile,
-            COALESCE(failed_jobs.failed_job_count, 0)::BIGINT AS failed_job_count,
-            COALESCE(ranges.failed_range_count, 0)::BIGINT AS failed_range_count,
-            COALESCE(ranges.incomplete_range_count, 0)::BIGINT AS incomplete_range_count,
-            COALESCE(ranges.expired_lease_range_count, 0)::BIGINT AS expired_lease_range_count
-        FROM profiles
-        LEFT JOIN failed_jobs ON failed_jobs.deployment_profile = profiles.deployment_profile
-        LEFT JOIN ranges ON ranges.deployment_profile = profiles.deployment_profile
-        ORDER BY profiles.deployment_profile
-        "#,
-    )
-    .fetch_all(pool)
-    .await
-    .context("failed to load backfill lifecycle counts")?;
-
-    rows.into_iter()
-        .map(|row| {
-            Ok(BackfillLifecycleRow {
-                deployment_profile: crate::sql_row::get(&row, "deployment_profile")?,
-                failed_job_count: crate::sql_row::get(&row, "failed_job_count")?,
-                failed_range_count: crate::sql_row::get(&row, "failed_range_count")?,
-                incomplete_range_count: crate::sql_row::get(&row, "incomplete_range_count")?,
-                expired_lease_range_count: crate::sql_row::get(&row, "expired_lease_range_count")?,
-            })
-        })
-        .collect()
-}
-
-async fn load_present_deferred_projection_indexes(pool: &sqlx::PgPool) -> Result<Vec<String>> {
-    let expected = DEFERRED_NORMALIZED_EVENT_INDEXES
-        .iter()
-        .map(|name| (*name).to_owned())
-        .collect::<Vec<_>>();
-    sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT indexname
-        FROM pg_indexes
-        WHERE schemaname = 'public'
-          AND indexname = ANY($1::TEXT[])
-        ORDER BY indexname
-        "#,
-    )
-    .bind(&expected)
-    .fetch_all(pool)
-    .await
-    .context("failed to load present deferred projection indexes")
-}
-
-async fn load_manifest_chain_namespaces(
-    pool: &sqlx::PgPool,
-) -> Result<Vec<ManifestChainNamespace>> {
-    let rows = sqlx::query(
-        r#"
-        SELECT DISTINCT chain, namespace
-        FROM manifest_versions
-        WHERE rollout_status = 'active'
-        ORDER BY chain, namespace
-        "#,
-    )
-    .fetch_all(pool)
-    .await
-    .context("failed to load active manifest chain namespaces")?;
-
-    rows.into_iter()
-        .map(|row| {
-            Ok(ManifestChainNamespace {
-                chain: crate::sql_row::get(&row, "chain")?,
-                namespace: crate::sql_row::get(&row, "namespace")?,
-            })
-        })
-        .collect()
 }

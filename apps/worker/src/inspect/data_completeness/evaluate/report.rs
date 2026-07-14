@@ -28,6 +28,7 @@ pub(in crate::inspect::data_completeness) struct ChainFrontier {
     pub(in crate::inspect::data_completeness) contiguous: bool,
     pub(in crate::inspect::data_completeness) missing_block_count: i64,
     pub(in crate::inspect::data_completeness) duplicate_canonical_height_count: i64,
+    pub(in crate::inspect::data_completeness) disconnected_canonical_parent_count: i64,
     pub(in crate::inspect::data_completeness) missing_from_storage: bool,
 }
 
@@ -36,6 +37,8 @@ pub(in crate::inspect::data_completeness) struct UnobservedTarget {
     pub(in crate::inspect::data_completeness) chain: String,
     pub(in crate::inspect::data_completeness) address: String,
     pub(in crate::inspect::data_completeness) source_family: String,
+    pub(in crate::inspect::data_completeness) active_from_block_number: Option<i64>,
+    pub(in crate::inspect::data_completeness) max_observed_block_number: Option<i64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -54,9 +57,12 @@ pub(in crate::inspect::data_completeness) struct ChainWithoutFiniteStart {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(in crate::inspect::data_completeness) struct MissingNamespaceContent {
+pub(in crate::inspect::data_completeness) struct MissingManifestContent {
+    pub(in crate::inspect::data_completeness) manifest_id: i64,
+    pub(in crate::inspect::data_completeness) manifest_version: i64,
     pub(in crate::inspect::data_completeness) chain: String,
     pub(in crate::inspect::data_completeness) namespace: String,
+    pub(in crate::inspect::data_completeness) source_family: String,
 }
 
 /// `behind_by` is the block or change-id distance to the applicable target, best-effort:
@@ -86,8 +92,8 @@ pub(in crate::inspect::data_completeness) struct DataCompletenessReport {
     pub(in crate::inspect::data_completeness) projection_invalidation_dead_letter_count: i64,
     pub(in crate::inspect::data_completeness) projection_replay_version: Option<i32>,
     pub(in crate::inspect::data_completeness) missing_projection_replay_markers: Vec<String>,
-    pub(in crate::inspect::data_completeness) active_chain_namespaces_without_events:
-        Vec<MissingNamespaceContent>,
+    pub(in crate::inspect::data_completeness) active_manifest_sources_without_events:
+        Vec<MissingManifestContent>,
     pub(in crate::inspect::data_completeness) active_namespaces_without_names: Vec<String>,
     pub(in crate::inspect::data_completeness) normalized_events_null_chain_id_count: i64,
     pub(in crate::inspect::data_completeness) missing_deferred_projection_indexes: Vec<String>,
@@ -157,7 +163,7 @@ impl DataCompletenessReport {
 
     pub(in crate::inspect::data_completeness) fn active_dataset_non_empty(&self) -> CheckStatus {
         CheckStatus::from_pass(
-            self.active_chain_namespaces_without_events.is_empty()
+            self.active_manifest_sources_without_events.is_empty()
                 && self.active_namespaces_without_names.is_empty(),
         )
     }

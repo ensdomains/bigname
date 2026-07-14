@@ -53,6 +53,7 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
                     "contiguous": frontier.contiguous,
                     "missing_block_count": frontier.missing_block_count,
                     "duplicate_canonical_height_count": frontier.duplicate_canonical_height_count,
+                    "disconnected_canonical_parent_count": frontier.disconnected_canonical_parent_count,
                 })).collect::<Vec<_>>(),
             })),
             check("reconciliation_history_from_declared_start", report.history_from_declared_start(), json!({
@@ -73,6 +74,8 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
                     "chain": target.chain.as_str(),
                     "address": target.address.as_str(),
                     "source_family": target.source_family.as_str(),
+                    "active_from_block_number": target.active_from_block_number,
+                    "max_observed_block_number": target.max_observed_block_number,
                 })).collect::<Vec<_>>(),
             })),
             check("normalization_no_failure", report.normalization_healthy(), json!({
@@ -84,6 +87,7 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
             })),
             check("projection_apply_drained", report.projection_drained(), json!({
                 "lagging_cursors": report.lagging_projection_cursors.iter().map(cursor_lag).collect::<Vec<_>>(),
+                "required_cursor": crate::projection_apply::NORMALIZED_EVENT_CURSOR,
                 "apply_cursor_missing_for_non_empty_change_log": report.projection_apply_cursor_missing,
             })),
             check("projection_invalidations_drained", report.projection_invalidations_drained(), json!({
@@ -99,9 +103,12 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
             check("active_dataset_non_empty", report.active_dataset_non_empty(), json!({
                 "normalized_event_total": report.normalized_event_total,
                 "name_current_total": report.name_current_total,
-                "chain_namespaces_without_events": report.active_chain_namespaces_without_events.iter().map(|entry| json!({
+                "manifest_sources_without_events": report.active_manifest_sources_without_events.iter().map(|entry| json!({
+                    "manifest_id": entry.manifest_id,
+                    "manifest_version": entry.manifest_version,
                     "chain": entry.chain.as_str(),
                     "namespace": entry.namespace.as_str(),
+                    "source_family": entry.source_family.as_str(),
                 })).collect::<Vec<_>>(),
                 "namespaces_without_names": report.active_namespaces_without_names.clone(),
             })),

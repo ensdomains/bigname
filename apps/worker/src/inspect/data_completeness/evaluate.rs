@@ -2,11 +2,11 @@ mod report;
 
 pub(super) use report::{CheckStatus, CursorLag, DataCompletenessReport};
 
-use crate::replay::ALL_CURRENT_PROJECTION_ORDER;
+use crate::{projection_apply::NORMALIZED_EVENT_CURSOR, replay::ALL_CURRENT_PROJECTION_ORDER};
 use bigname_manifests::WatchedContract;
 use bigname_storage::{DEFERRED_NORMALIZED_EVENT_INDEXES, DataCompletenessRead};
 use report::{
-    ChainFrontier, ChainWithoutFiniteStart, HistoryTruncation, MissingNamespaceContent,
+    ChainFrontier, ChainWithoutFiniteStart, HistoryTruncation, MissingManifestContent,
     UnobservedTarget,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -38,6 +38,12 @@ struct ChainStartInfo {
     target_count: usize,
 }
 
+#[derive(Clone)]
+struct ActiveTargetInfo {
+    source_family: String,
+    active_from_block_number: Option<i64>,
+}
+
 pub(super) fn evaluate_data_completeness(
     read: &DataCompletenessRead,
     watched_contracts: &[WatchedContract],
@@ -46,56 +52,90 @@ pub(super) fn evaluate_data_completeness(
     let observed = read
         .observed_code_addresses
         .iter()
-        .map(|entry| (entry.chain_id.as_str(), entry.address.as_str()))
-        .collect::<BTreeSet<_>>();
+        .map(|entry| {
+            (
+                (entry.chain_id.clone(), entry.address.to_ascii_lowercase()),
+                entry.max_observed_block_number,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
 
-    // load_watched_contracts returns one row per source entry, so a target can repeat across
-    // source families; coverage is a property of the (chain, address) pair.
-    let mut active_targets = BTreeMap::<(&str, String), &WatchedContract>::new();
+    // Direct manifest declarations remain authority even if a partial restore lost the
+    // contract_instance_addresses row that normally materializes them into the watch view.
+    // Entries are deduplicated before deriving per-address coverage and per-chain history.
+    let mut active_target_entries = BTreeSet::<(String, String, String, Option<i64>)>::new();
     for contract in watched_contracts
         .iter()
         .filter(|contract| is_active(contract))
     {
-        active_targets
-            .entry((
-                contract.chain.as_str(),
-                contract.address.to_ascii_lowercase(),
-            ))
-            .or_insert(contract);
+        active_target_entries.insert((
+            contract.chain.clone(),
+            contract.address.to_ascii_lowercase(),
+            contract.source_family.clone(),
+            contract.active_from_block_number,
+        ));
+    }
+    for target in &read.manifest_declared_targets {
+        active_target_entries.insert((
+            target.chain.clone(),
+            target.address.to_ascii_lowercase(),
+            target.source_family.clone(),
+            target.active_from_block_number,
+        ));
+    }
+
+    // Coverage is address-scoped. If multiple active source entries share an address, the
+    // latest finite start is the strictest lower bound and proves every active entry was
+    // observed after its admission.
+    let mut active_targets = BTreeMap::<(String, String), ActiveTargetInfo>::new();
+    for (chain, address, source_family, active_from_block_number) in &active_target_entries {
+        let target = active_targets
+            .entry((chain.clone(), address.clone()))
+            .or_insert_with(|| ActiveTargetInfo {
+                source_family: source_family.clone(),
+                active_from_block_number: *active_from_block_number,
+            });
+        if active_from_block_number > &target.active_from_block_number {
+            target.source_family = source_family.clone();
+            target.active_from_block_number = *active_from_block_number;
+        }
     }
 
     let unobserved_targets = active_targets
         .iter()
-        .filter(|((chain, address), _)| !observed.contains(&(*chain, address.as_str())))
-        .map(|((chain, address), contract)| UnobservedTarget {
-            chain: (*chain).to_owned(),
-            address: address.clone(),
-            source_family: contract.source_family.clone(),
+        .filter_map(|((chain, address), target)| {
+            let max_observed_block_number =
+                observed.get(&(chain.clone(), address.clone())).copied();
+            let covered = match target.active_from_block_number {
+                Some(start) => max_observed_block_number.is_some_and(|block| block >= start),
+                None => max_observed_block_number.is_some(),
+            };
+            (!covered).then(|| UnobservedTarget {
+                chain: chain.clone(),
+                address: address.clone(),
+                source_family: target.source_family.clone(),
+                active_from_block_number: target.active_from_block_number,
+                max_observed_block_number,
+            })
         })
         .collect::<Vec<_>>();
 
-    // Per-chain declared start information across active watched targets.
+    // Per-chain declared start information across the deduplicated active source entries.
     let mut chain_starts = BTreeMap::<String, ChainStartInfo>::new();
-    for contract in watched_contracts
-        .iter()
-        .filter(|contract| is_active(contract))
-    {
-        let info = chain_starts.entry(contract.chain.clone()).or_default();
+    for (chain, _, _, active_from_block_number) in &active_target_entries {
+        let info = chain_starts.entry(chain.clone()).or_default();
         info.target_count += 1;
-        match contract.active_from_block_number {
+        match active_from_block_number {
             Some(start) => {
                 info.finite_min_start = Some(
                     info.finite_min_start
-                        .map_or(start, |current| current.min(start)),
+                        .map_or(*start, |current| current.min(*start)),
                 );
             }
             None => info.open_ended_target_count += 1,
         }
     }
 
-    // Chain authority: the watch view plus active manifest versions directly, so a partial
-    // restore that lost contract_instance_addresses rows cannot delete a chain from its own
-    // expectations.
     let manifest_chains = read
         .manifest_chain_namespaces
         .iter()
@@ -226,9 +266,12 @@ pub(super) fn evaluate_data_completeness(
         .map(|chain| chain.chain_id.clone())
         .collect::<Vec<_>>();
 
-    let lagging_projection_cursors = read
+    let expected_projection_cursor = read
         .projection_apply_cursors
         .iter()
+        .find(|cursor| cursor.cursor_name == NORMALIZED_EVENT_CURSOR);
+    let lagging_projection_cursors = expected_projection_cursor
+        .into_iter()
         .filter_map(|cursor| {
             let max_change_id = read.max_projection_change_id?;
             (cursor.last_change_id < max_change_id).then(|| CursorLag {
@@ -239,7 +282,7 @@ pub(super) fn evaluate_data_completeness(
         .collect::<Vec<_>>();
 
     let projection_apply_cursor_missing =
-        read.max_projection_change_id.is_some() && read.projection_apply_cursors.is_empty();
+        read.max_projection_change_id.is_some() && expected_projection_cursor.is_none();
 
     // Projection replay markers: require all current projections present at the newest replay
     // version in the database. The version is read from the data, not hardcoded, so a candidate
@@ -269,49 +312,34 @@ pub(super) fn evaluate_data_completeness(
             .collect(),
     };
 
-    // Content expectation from declared authority: every (chain, namespace) an active manifest
-    // declares must have non-orphaned normalized events, and every such namespace must have
-    // name_current rows.
-    let events_by_chain_namespace = read
-        .normalized_event_counts
+    // Content expectations come only from active manifest sources that declare normalized
+    // adapter output. Counts are joined to the exact source_manifest_id by storage, so rows
+    // from deprecated manifests cannot satisfy a newly active source.
+    let active_manifest_sources_without_events = read
+        .active_manifest_event_sources
         .iter()
-        .map(|entry| {
-            (
-                (entry.chain_id.as_str(), entry.namespace.as_str()),
-                entry.count,
-            )
+        .filter(|source| source.normalized_event_count == 0)
+        .map(|source| MissingManifestContent {
+            manifest_id: source.manifest_id,
+            manifest_version: source.manifest_version,
+            chain: source.chain.clone(),
+            namespace: source.namespace.clone(),
+            source_family: source.source_family.clone(),
         })
-        .collect::<BTreeMap<_, _>>();
+        .collect::<Vec<_>>();
     let names_by_namespace = read
         .name_current_counts
         .iter()
         .map(|entry| (entry.namespace.as_str(), entry.count))
         .collect::<BTreeMap<_, _>>();
-
-    let active_chain_namespaces_without_events = read
-        .manifest_chain_namespaces
-        .iter()
-        .filter(|entry| {
-            events_by_chain_namespace
-                .get(&(entry.chain.as_str(), entry.namespace.as_str()))
-                .copied()
-                .unwrap_or(0)
-                == 0
-        })
-        .map(|entry| MissingNamespaceContent {
-            chain: entry.chain.clone(),
-            namespace: entry.namespace.clone(),
-        })
-        .collect::<Vec<_>>();
-
     let active_namespaces_without_names = read
-        .manifest_chain_namespaces
+        .active_manifest_event_sources
         .iter()
-        .map(|entry| entry.namespace.as_str())
+        .map(|source| source.namespace.as_str())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .filter(|namespace| names_by_namespace.get(namespace).copied().unwrap_or(0) == 0)
-        .map(|namespace| namespace.to_owned())
+        .map(str::to_owned)
         .collect::<Vec<_>>();
 
     let present_indexes = read
@@ -325,7 +353,11 @@ pub(super) fn evaluate_data_completeness(
         .map(|index| (*index).to_owned())
         .collect::<Vec<_>>();
 
-    let normalized_event_total = read.normalized_event_counts.iter().map(|e| e.count).sum();
+    let normalized_event_total = read
+        .active_manifest_event_sources
+        .iter()
+        .map(|source| source.normalized_event_count)
+        .sum();
     let name_current_total = read.name_current_counts.iter().map(|e| e.count).sum();
 
     DataCompletenessReport {
@@ -345,7 +377,7 @@ pub(super) fn evaluate_data_completeness(
         projection_invalidation_dead_letter_count: read.projection_invalidation_dead_letter_count,
         projection_replay_version,
         missing_projection_replay_markers,
-        active_chain_namespaces_without_events,
+        active_manifest_sources_without_events,
         active_namespaces_without_names,
         normalized_events_null_chain_id_count: read.normalized_events_null_chain_id_count,
         missing_deferred_projection_indexes,
@@ -388,6 +420,7 @@ fn missing_chain_frontier(chain_id: &str) -> ChainFrontier {
         contiguous: false,
         missing_block_count: 0,
         duplicate_canonical_height_count: 0,
+        disconnected_canonical_parent_count: 0,
         missing_from_storage: true,
     }
 }
@@ -413,9 +446,11 @@ fn chain_frontier(chain: &bigname_storage::ChainCompletenessRow) -> ChainFrontie
         head_lag_blocks,
         contiguous: expected_block_count.is_some()
             && missing_block_count == 0
-            && chain.duplicate_canonical_height_count == 0,
+            && chain.duplicate_canonical_height_count == 0
+            && chain.disconnected_canonical_parent_count == 0,
         missing_block_count,
         duplicate_canonical_height_count: chain.duplicate_canonical_height_count,
+        disconnected_canonical_parent_count: chain.disconnected_canonical_parent_count,
         missing_from_storage: false,
     }
 }

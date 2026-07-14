@@ -2,9 +2,10 @@ use super::evaluate::{CheckStatus, DEFAULT_MAX_HEAD_LAG_BLOCKS, evaluate_data_co
 use crate::replay::ALL_CURRENT_PROJECTION_ORDER;
 use bigname_manifests::{WatchedContract, WatchedContractSource};
 use bigname_storage::{
-    BackfillLifecycleRow, ChainCompletenessRow, DEFERRED_NORMALIZED_EVENT_INDEXES,
-    DataCompletenessRead, ManifestChainNamespace, NameCurrentCount, NormalizedEventCount,
-    ObservedCodeAddress, ProjectionApplyCursorRow, ProjectionReplayMarker, ReplayCursorRow,
+    ActiveManifestEventSource, BackfillLifecycleRow, ChainCompletenessRow,
+    DEFERRED_NORMALIZED_EVENT_INDEXES, DataCompletenessRead, ManifestChainNamespace,
+    ManifestDeclaredTarget, NameCurrentCount, ObservedCodeAddress, ProjectionApplyCursorRow,
+    ProjectionReplayMarker, ReplayCursorRow,
 };
 use uuid::Uuid;
 
@@ -55,14 +56,31 @@ fn observed(address: &str) -> ObservedCodeAddress {
     ObservedCodeAddress {
         chain_id: CHAIN.to_owned(),
         address: address.to_owned(),
+        max_observed_block_number: 1_000,
     }
 }
 
-fn events(chain: &str, namespace: &str, count: i64) -> NormalizedEventCount {
-    NormalizedEventCount {
-        chain_id: chain.to_owned(),
-        namespace: namespace.to_owned(),
-        count,
+fn manifest_target(address: &str, start: Option<i64>) -> ManifestDeclaredTarget {
+    ManifestDeclaredTarget {
+        chain: CHAIN.to_owned(),
+        source_family: "ens_v2_registry_l1".to_owned(),
+        address: address.to_owned(),
+        active_from_block_number: start,
+    }
+}
+
+fn active_event_source(
+    manifest_id: i64,
+    source_family: &str,
+    normalized_event_count: i64,
+) -> ActiveManifestEventSource {
+    ActiveManifestEventSource {
+        manifest_id,
+        manifest_version: 1,
+        chain: CHAIN.to_owned(),
+        namespace: NAMESPACE.to_owned(),
+        source_family: source_family.to_owned(),
+        normalized_event_count,
     }
 }
 
@@ -86,6 +104,7 @@ fn chain_row(
         lineage_floor_block_number: Some(floor),
         lineage_canonical_block_count: block_count,
         duplicate_canonical_height_count: 0,
+        disconnected_canonical_parent_count: 0,
         canonical_raw_log_head_block_number: Some(floor),
         raw_log_head_block_number: Some(floor),
     }
@@ -146,7 +165,8 @@ fn healthy_read() -> DataCompletenessRead {
         pending_projection_invalidation_count: 0,
         projection_invalidation_dead_letter_count: 0,
         observed_code_addresses: vec![observed(REGISTRY)],
-        normalized_event_counts: vec![events(CHAIN, NAMESPACE, 100)],
+        manifest_declared_targets: vec![manifest_target(REGISTRY, Some(1))],
+        active_manifest_event_sources: vec![active_event_source(1, "ens_v2_registry_l1", 100)],
         name_current_counts: vec![names(NAMESPACE, 10)],
         normalized_events_null_chain_id_count: 0,
         projection_replay_markers: all_projection_markers(6),
@@ -214,11 +234,48 @@ fn watch_set_coverage_matches_addresses_case_insensitively() {
     assert!(evaluate(&healthy_read(), &watched_contracts).data_complete());
 }
 
+/// A code observation from before the target's active range does not prove the target was
+/// watched after admission.
+#[test]
+fn pre_admission_code_observation_does_not_cover_active_target() {
+    let mut read = healthy_read();
+    read.observed_code_addresses[0].max_observed_block_number = 99;
+    read.manifest_declared_targets[0].active_from_block_number = Some(100);
+    let mut registry = watched(REGISTRY, WatchedContractSource::ManifestContract);
+    registry.active_from_block_number = Some(100);
+    let report = evaluate(&read, &[registry]);
+
+    assert_eq!(report.watch_set_observed(), CheckStatus::Fail);
+    assert_eq!(report.unobserved_targets.len(), 1);
+    assert!(!report.data_complete());
+}
+
+/// Direct manifest declarations remain coverage authority if a partial restore loses the
+/// address-range row that normally materializes them into `load_watched_contracts`.
+#[test]
+fn manifest_declared_target_missing_from_watch_view_fails_coverage() {
+    let mut read = healthy_read();
+    read.manifest_declared_targets
+        .push(manifest_target(RESOLVER, Some(1)));
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.watch_set_observed(), CheckStatus::Fail);
+    assert!(
+        report
+            .unobserved_targets
+            .iter()
+            .any(|target| target.address == RESOLVER)
+    );
+    assert!(!report.data_complete());
+}
+
 /// A manifest-less restore reads zero watched contracts. The coverage check is the
 /// load-bearing one, so it must not pass vacuously when there is nothing to observe.
 #[test]
 fn empty_watch_set_fails_coverage() {
-    let report = evaluate(&healthy_read(), &[]);
+    let mut read = healthy_read();
+    read.manifest_declared_targets.clear();
+    let report = evaluate(&read, &[]);
 
     assert_eq!(report.active_watched_target_count, 0);
     assert_eq!(report.watch_set_observed(), CheckStatus::Fail);
@@ -365,6 +422,23 @@ fn non_empty_change_log_without_apply_cursor_fails() {
     assert!(!report.data_complete());
 }
 
+/// The continuous projection worker consumes only its named cursor. A stale cursor for some
+/// other consumer cannot prove that normalized-event changes have been scanned.
+#[test]
+fn unrelated_apply_cursor_does_not_satisfy_non_empty_change_log() {
+    let mut read = healthy_read();
+    read.projection_apply_cursors = vec![ProjectionApplyCursorRow {
+        cursor_name: "retired_projection_consumer".to_owned(),
+        last_change_id: 42,
+    }];
+    read.max_projection_change_id = Some(42);
+    let report = evaluate(&read, &registry_only());
+
+    assert!(report.projection_apply_cursor_missing);
+    assert_eq!(report.projection_drained(), CheckStatus::Fail);
+    assert!(!report.data_complete());
+}
+
 /// Cursor equal to the derive-scan frontier only means the scan finished. Pending
 /// invalidations are unapplied projection work.
 #[test]
@@ -393,7 +467,7 @@ fn projection_invalidation_dead_letter_fails() {
 #[test]
 fn empty_projections_fail_even_when_every_cursor_is_drained() {
     let mut read = healthy_read();
-    read.normalized_event_counts = vec![];
+    read.active_manifest_event_sources[0].normalized_event_count = 0;
     read.name_current_counts = vec![];
     read.projection_apply_cursors = vec![apply_cursor(0)];
     read.max_projection_change_id = None;
@@ -402,7 +476,7 @@ fn empty_projections_fail_even_when_every_cursor_is_drained() {
     assert_eq!(report.projection_drained(), CheckStatus::Pass);
     assert_eq!(report.active_dataset_non_empty(), CheckStatus::Fail);
     assert_eq!(
-        report.active_chain_namespaces_without_events[0].chain,
+        report.active_manifest_sources_without_events[0].chain,
         CHAIN
     );
     assert!(!report.data_complete());
@@ -473,6 +547,21 @@ fn duplicate_canonical_height_fails_contiguity() {
     assert!(!report.data_complete());
 }
 
+/// A height-complete lineage can still be disconnected when a child points at a different
+/// parent hash than the canonical row at the preceding height.
+#[test]
+fn disconnected_canonical_parent_fails_contiguity() {
+    let mut read = healthy_read();
+    read.chains = vec![ChainCompletenessRow {
+        disconnected_canonical_parent_count: 1,
+        ..chain_row(1_000, 1_000, 1, 1_000)
+    }];
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.lineage_contiguous(), CheckStatus::Fail);
+    assert!(!report.data_complete());
+}
+
 /// A live-tail-only database is internally consistent — contiguous span, caught-up cursors,
 /// non-empty projections — but its lineage floor sits above the earliest declared start, so
 /// history is truncated.
@@ -482,6 +571,7 @@ fn lineage_floor_above_declared_start_fails_history() {
     read.chains = vec![chain_row(1_000, 1_000, 900, 101)];
     read.replay_cursors = vec![replay_cursor(1_000, None)];
     // Registry declares a start at block 500, below the retained lineage floor of 900.
+    read.manifest_declared_targets[0].active_from_block_number = Some(500);
     let mut early = watched(REGISTRY, WatchedContractSource::ManifestContract);
     early.active_from_block_number = Some(500);
     let report = evaluate(&read, &[early]);
@@ -505,6 +595,7 @@ fn chain_with_only_open_ended_starts_fails_history() {
     let mut read = healthy_read();
     read.chains = vec![chain_row(1_000, 1_000, 900, 101)];
     read.replay_cursors = vec![replay_cursor(1_000, None)];
+    read.manifest_declared_targets[0].active_from_block_number = None;
     let mut open_ended = watched(REGISTRY, WatchedContractSource::ManifestContract);
     open_ended.active_from_block_number = None;
     let report = evaluate(&read, &[open_ended]);
@@ -539,20 +630,40 @@ fn mixed_starts_use_the_finite_floor() {
 #[test]
 fn foreign_chain_content_does_not_satisfy_an_empty_active_chain() {
     let mut read = healthy_read();
-    // All normalized events and names belong to a chain the active watch set does not cover.
-    read.normalized_event_counts = vec![events("base-mainnet", NAMESPACE, 500)];
+    read.active_manifest_event_sources[0].normalized_event_count = 0;
+    read.active_manifest_event_sources
+        .push(ActiveManifestEventSource {
+            manifest_id: 2,
+            manifest_version: 1,
+            chain: "base-mainnet".to_owned(),
+            namespace: NAMESPACE.to_owned(),
+            source_family: "foreign_registry".to_owned(),
+            normalized_event_count: 500,
+        });
     read.name_current_counts = vec![names(NAMESPACE, 20)];
     let report = evaluate(&read, &registry_only());
 
     assert_eq!(report.active_dataset_non_empty(), CheckStatus::Fail);
     assert_eq!(
-        report.active_chain_namespaces_without_events[0].chain,
+        report.active_manifest_sources_without_events[0].chain,
         CHAIN
     );
     assert_eq!(
-        report.active_chain_namespaces_without_events[0].namespace,
+        report.active_manifest_sources_without_events[0].namespace,
         NAMESPACE
     );
+    assert!(!report.data_complete());
+}
+
+/// Rows from a deprecated manifest ID cannot satisfy the exact active source that now owns
+/// event intake, even when chain, namespace, and source family are unchanged.
+#[test]
+fn deprecated_manifest_events_do_not_satisfy_active_source() {
+    let mut read = healthy_read();
+    read.active_manifest_event_sources = vec![active_event_source(2, "ens_v2_registry_l1", 0)];
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.active_dataset_non_empty(), CheckStatus::Fail);
     assert!(!report.data_complete());
 }
 
@@ -710,26 +821,41 @@ fn missing_deferred_projection_index_fails() {
     assert!(!report.data_complete());
 }
 
-/// A chain declared to produce two namespaces fails when one has no events, even though the
-/// other does — the expectation comes from declared manifests, not observed events.
+/// Two active event-producing manifest sources fail when one has no events, even though the
+/// other does — the expectation comes from declared source identities, not observed events.
 #[test]
 fn declared_namespace_with_no_events_fails_content() {
     let mut read = healthy_read();
     read.manifest_chain_namespaces =
         vec![manifest_ns(CHAIN, "ens"), manifest_ns(CHAIN, "basenames")];
-    // Only ens has events and names; basenames declared but empty.
-    read.normalized_event_counts = vec![events(CHAIN, "ens", 100)];
+    let mut basenames_source = active_event_source(2, "basenames_registry", 0);
+    basenames_source.namespace = "basenames".to_owned();
+    read.active_manifest_event_sources.push(basenames_source);
     read.name_current_counts = vec![names("ens", 10)];
     let report = evaluate(&read, &registry_only());
 
     assert_eq!(report.active_dataset_non_empty(), CheckStatus::Fail);
     assert!(
         report
-            .active_chain_namespaces_without_events
+            .active_manifest_sources_without_events
             .iter()
             .any(|entry| entry.namespace == "basenames")
     );
     assert!(!report.data_complete());
+}
+
+/// Active execution/transport metadata manifests do not participate in event intake and must
+/// not require normalized-event or name projection content.
+#[test]
+fn metadata_only_manifest_does_not_create_content_expectation() {
+    let mut read = healthy_read();
+    read.manifest_chain_namespaces = vec![
+        manifest_ns(CHAIN, NAMESPACE),
+        manifest_ns("ethereum-mainnet", "basenames"),
+    ];
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.active_dataset_non_empty(), CheckStatus::Pass);
 }
 
 /// A chain declared only by an active manifest version (no watched-contract rows, e.g. a
