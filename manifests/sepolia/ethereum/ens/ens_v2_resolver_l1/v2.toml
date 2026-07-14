@@ -1,7 +1,7 @@
-# ENSv2 post-audit PermissionedResolver source-family admission for the current
-# Sepolia deployment. PermissionedResolverImpl is implementation metadata for
-# discovered or explicitly admitted resolver instances, not an initial watched
-# root or contract address:
+# ENSv2 post-audit resolver source-family admission for the current Sepolia
+# deployment. PermissionedResolverImpl is implementation metadata for discovered
+# or explicitly admitted resolver instances, not an initial watched root or
+# contract address:
 # (upstream: .refs/ens_v2/contracts/deployments/sepolia/PermissionedResolverImpl.json:L2 @ ens_v2@48b3e2d)
 # (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L33 @ ens_v2@48b3e2d)
 # (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L87 @ ens_v2@48b3e2d)
@@ -21,7 +21,15 @@ discovery_rules = []
 
 # Resolver event ABI fragments consumed by ENSv2 resolver and permissions adapters.
 # DataChanged and NamedDataResource are intentionally outside record and permission
-# normalization, and PublicResolverV2 is not an admitted resolver profile.
+# normalization. PublicResolverV2 can be discovery-watched for configured generic record events but is not an admitted resolver profile; projection publishes no record values, retains only a current-emitter pending version boundary, and excludes non-current emitters.
+# Locked migration can select PublicResolverV2 before the registry emits ResolverUpdated:
+# (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L4 @ ens_v2@48b3e2d)
+# (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L23 @ ens_v2@48b3e2d)
+# (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L179 @ ens_v2@48b3e2d)
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/PublicResolverV2.json:L429 @ ens_v2@48b3e2d)
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/PublicResolverV2.json:L598 @ ens_v2@48b3e2d)
+# (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L139 @ ens_v2@48b3e2d)
+# (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L474 @ ens_v2@48b3e2d).
 # PermissionedResolver imports ENS resolver profile interfaces:
 # (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L4 @ ens_v2@48b3e2d)
 # (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L6 @ ens_v2@48b3e2d)

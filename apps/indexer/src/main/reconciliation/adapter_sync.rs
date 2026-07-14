@@ -15,6 +15,8 @@ use super::types::PersistedRawPayloadAdapterSyncSummary;
 
 #[path = "adapter_sync/backlog.rs"]
 mod backlog;
+#[path = "adapter_sync/ens_v2_registry.rs"]
+mod ens_v2_registry;
 #[path = "adapter_sync/full_closure.rs"]
 mod full_closure;
 #[path = "adapter_sync/mode.rs"]
@@ -24,6 +26,7 @@ mod scope;
 #[path = "adapter_sync/logging.rs"]
 mod sync_logging;
 pub(crate) use backlog::sync_live_adapter_backlog_after_normalized_replay;
+use ens_v2_registry::{ens_v2_registry_sync_operation, sync_ens_v2_registry_for_mode};
 pub(crate) use full_closure::sync_full_closure_normalized_events_from_persisted_raw_payloads;
 use mode::{
     PersistedRawPayloadAdapterSyncMode, adapter_selected_by_scope, ensure_raw_fact_adapter_allowed,
@@ -426,46 +429,12 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
             adapter_sync_mode = ?mode,
             "adapter sync call started"
         );
-        let ens_v2_registry_summary = match (mode, source_scope) {
-            (PersistedRawPayloadAdapterSyncMode::RawFactReplay { .. }, Some(source_scope)) => {
-                bigname_adapters::EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_source_scope_canonical_only(
-                    pool,
-                    chain,
-                    block_hashes,
-                    source_scope,
-                )
-                .await?
-            }
-            (PersistedRawPayloadAdapterSyncMode::RawFactReplay { .. }, None) => {
-                bigname_adapters::EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_canonical_only(
-                    pool,
-                    chain,
-                    block_hashes,
-                )
-                .await?
-            }
-            (_, Some(source_scope)) => {
-                bigname_adapters::EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_source_scope(
-                    pool,
-                    chain,
-                    block_hashes,
-                    source_scope,
-                )
-                .await?
-            }
-            (_, None) => {
-                bigname_adapters::EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes(
-                    pool,
-                    chain,
-                    block_hashes,
-                )
-                .await?
-            }
-        };
+        let ens_v2_registry_summary =
+            sync_ens_v2_registry_for_mode(pool, chain, block_hashes, source_scope, mode).await?;
         log_adapter_call_timing(
             chain,
             "ens_v2_registry_resource_surface",
-            "sync_for_block_hashes",
+            ens_v2_registry_sync_operation(mode),
             block_hashes.len(),
             source_scope_target_count,
             ens_v2_registry_summary.scanned_log_count,

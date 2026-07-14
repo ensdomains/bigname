@@ -15,6 +15,7 @@ mod identity;
 mod identity_facade;
 mod label_preimages;
 mod lineage;
+mod migration_indexes;
 mod name_current;
 mod normalized_events;
 mod permissions;
@@ -373,10 +374,10 @@ async fn connect_inner(config: &DatabaseConfig, application_name: Option<&str>) 
 
 /// Apply all checked-in migrations.
 pub async fn migrate(pool: &PgPool) -> Result<()> {
-    MIGRATOR
-        .run(pool)
-        .await
-        .context("failed to apply checked-in migrations")?;
+    migration_indexes::run_migrations_and_ensure_record_inventory_replay_index_ready(
+        pool, &MIGRATOR,
+    )
+    .await?;
     info!("checked-in migrations applied");
     let summary = backfill_label_preimages_from_existing_facts(pool, None)
         .await

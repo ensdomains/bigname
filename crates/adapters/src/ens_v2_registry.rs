@@ -25,12 +25,15 @@ use crate::adapter_manifest::load_required_active_manifest_event_topic0s_by_sign
 use crate::normalized_event_support::count_events_by_kind;
 use constants::*;
 use decode::build_registry_observation;
-use discovery::{latest_discovery_observations, reconcile_discovery_observations_by_source};
+use discovery::{latest_discovery_observations, reconcile_discovery_observation_history_for_chain};
 use emitters::{load_active_emitters, normalized_source_scope_targets};
-use events::{RegistryObservationContext, apply_registry_observation};
+use events::{
+    RegistryObservationContext, apply_registry_observation, hydrate_subregistry_event_target_ids,
+};
 use identity::{
     build_name_surface, build_resource, build_resource_events, build_surface_binding,
-    build_token_lineage, upsert_surface_bindings_close_before_open,
+    build_token_lineage, coalesce_name_surfaces_for_upsert, normalize_surface_bindings_for_upsert,
+    upsert_surface_bindings_close_before_open,
 };
 use load::{RawLogCanonicalityFilter, load_registry_raw_logs};
 use names::initial_registry_suffixes;
@@ -211,8 +214,13 @@ async fn sync_ens_v2_registry_resource_surface_with_scope(
             .collect::<HashSet<_>>()
     });
 
-    let active_emitters =
-        load_active_emitters(pool, chain, scoped_emitter_identities.as_ref()).await?;
+    let active_emitters = load_active_emitters(
+        pool,
+        chain,
+        scoped_emitter_identities.as_ref(),
+        !restrict_to_block_hashes,
+    )
+    .await?;
     if active_emitters.is_empty() {
         return Ok(EnsV2RegistryResourceSurfaceSyncSummary::empty(0));
     }
@@ -240,12 +248,6 @@ async fn sync_ens_v2_registry_resource_surface_with_scope(
     )
     .await?;
     let scanned_log_count = raw_logs.len();
-    if raw_logs.is_empty() {
-        return Ok(EnsV2RegistryResourceSurfaceSyncSummary::empty(
-            scanned_log_count,
-        ));
-    }
-
     let mut matched_log_count = 0usize;
     let mut registry_suffix_by_address = initial_registry_suffixes(&active_emitters);
     let mut registry_contract_by_address = active_emitters
@@ -277,10 +279,16 @@ async fn sync_ens_v2_registry_resource_surface_with_scope(
         apply_registry_observation(observation, &mut context)?;
     }
 
-    let latest_observations = latest_discovery_observations(observations)?;
-    let reconciliation = reconcile_discovery_observations_by_source(pool, &latest_observations)
-        .await
-        .with_context(|| format!("failed to reconcile ENSv2 discovery observations for {chain}"))?;
+    let latest_observations = latest_discovery_observations(observations.clone())?;
+    let reconciliation = reconcile_discovery_observation_history_for_chain(
+        pool,
+        chain,
+        &observations,
+        !restrict_to_block_hashes,
+    )
+    .await
+    .with_context(|| format!("failed to reconcile ENSv2 discovery observations for {chain}"))?;
+    hydrate_subregistry_event_target_ids(pool, &mut graph_events).await?;
 
     let mut token_lineages = Vec::<TokenLineage>::new();
     let mut resources = Vec::<Resource>::new();
@@ -304,6 +312,8 @@ async fn sync_ens_v2_registry_resource_surface_with_scope(
     }
 
     let by_kind = count_events_by_kind(&events);
+    coalesce_name_surfaces_for_upsert(&mut surfaces)?;
+    normalize_surface_bindings_for_upsert(pool, &mut bindings).await?;
     upsert_token_lineages(pool, &token_lineages).await?;
     upsert_resources(pool, &resources).await?;
     upsert_name_surfaces(pool, &surfaces).await?;

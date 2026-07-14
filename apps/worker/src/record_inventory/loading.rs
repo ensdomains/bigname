@@ -265,6 +265,7 @@ async fn load_logical_name_resolver_events(
 fn record_inventory_derivation_kinds() -> Vec<String> {
     vec![
         DERIVATION_KIND_DECLARED_AUTHORITY.to_owned(),
+        DERIVATION_KIND_ENS_V2_REGISTRY_RESOURCE_SURFACE.to_owned(),
         DERIVATION_KIND_ENS_V2_RESOLVER.to_owned(),
     ]
 }
@@ -276,6 +277,7 @@ fn resolver_event_namespaces() -> Vec<String> {
 fn resolver_local_source_families() -> Vec<String> {
     vec![
         SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
+        SOURCE_FAMILY_ENS_V2_RESOLVER_L1.to_owned(),
         SOURCE_FAMILY_BASENAMES_BASE_RESOLVER.to_owned(),
     ]
 }

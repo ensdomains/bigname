@@ -1,7 +1,7 @@
 use alloy_primitives::Address;
 use anyhow::{Context, Result};
 use serde_json::Value;
-use sqlx::types::Uuid;
+use sqlx::types::{Uuid, time::OffsetDateTime};
 
 use super::support;
 use crate::harness::{
@@ -206,7 +206,7 @@ async fn ens_v2_sepolia_post_audit_declared_matrix_end_to_end() -> Result<()> {
        SELECT 1 FROM normalized_events
        WHERE logical_name_id = 'ens:tree.eth'
          AND event_kind = 'SubregistryChanged'
-         AND canonicality_state = 'canonical'
+         AND canonicality_state IN ('canonical', 'safe', 'finalized')
     )";
     let first_run =
         support::ingest_ens_v2_sepolia_and_serve(&sepolia, &deployment, Some(first_ready_sql))
@@ -265,6 +265,52 @@ async fn ens_v2_sepolia_post_audit_declared_matrix_end_to_end() -> Result<()> {
     )
     .await?;
 
+    let cycle_first = ens_v2::register_eth_name(
+        &rpc,
+        &deployment,
+        ens_v2::RegisterEthName {
+            from: alice,
+            label: "cycle",
+            owner: alice,
+            duration_secs: YEAR,
+            subregistry: Address::ZERO,
+            resolver: Address::ZERO,
+        },
+    )
+    .await?;
+    ens_v2::unregister(
+        &rpc,
+        deployment.eth_registry.address,
+        deployment.deployer,
+        ens_v2::label_id("cycle"),
+    )
+    .await?;
+    // The post-audit registrar keeps an unregistered label unavailable until
+    // its grace period has elapsed.
+    // (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L259 @ ens_v2@48b3e2d).
+    rpc.increase_time(ens_v2::GRACE_PERIOD + 1).await?;
+    let cycle_second = ens_v2::register_eth_name(
+        &rpc,
+        &deployment,
+        ens_v2::RegisterEthName {
+            from: bob,
+            label: "cycle",
+            owner: bob,
+            duration_secs: YEAR,
+            subregistry: Address::ZERO,
+            resolver: Address::ZERO,
+        },
+    )
+    .await?;
+    assert_ne!(
+        cycle_first.resource_id, cycle_second.resource_id,
+        "unregister followed by re-register should advance the resource id"
+    );
+    assert_ne!(
+        cycle_first.token_id, cycle_second.token_id,
+        "unregister followed by re-register should advance the token lineage id"
+    );
+
     let final_ready_sql = format!(
         "SELECT
            EXISTS (
@@ -276,19 +322,19 @@ async fn ens_v2_sepolia_post_audit_declared_matrix_end_to_end() -> Result<()> {
              SELECT 1 FROM normalized_events
              WHERE logical_name_id = 'ens:alice.eth'
                AND event_kind = 'RegistrationGranted'
-               AND canonicality_state = 'canonical'
+               AND canonicality_state IN ('canonical', 'safe', 'finalized')
            )
            AND (
              SELECT count(*) >= 2 FROM normalized_events
              WHERE logical_name_id = 'ens:roles.eth'
                AND event_kind = 'TokenRegenerated'
-               AND canonicality_state = 'canonical'
+               AND canonicality_state IN ('canonical', 'safe', 'finalized')
            )
            AND EXISTS (
              SELECT 1 FROM normalized_events
              WHERE event_kind = 'PermissionChanged'
                AND source_family = 'ens_v2_registry_l1'
-               AND canonicality_state = 'canonical'
+               AND canonicality_state IN ('canonical', 'safe', 'finalized')
                AND after_state->>'subject' = '{carol}'
                AND after_state->'effective_powers' ? 'set_resolver'
            )
@@ -296,7 +342,13 @@ async fn ens_v2_sepolia_post_audit_declared_matrix_end_to_end() -> Result<()> {
              SELECT 1 FROM normalized_events
              WHERE logical_name_id = 'ens:tree.eth'
                AND event_kind = 'SubregistryChanged'
-               AND canonicality_state = 'canonical'
+               AND canonicality_state IN ('canonical', 'safe', 'finalized')
+           )
+           AND (
+             SELECT count(DISTINCT resource_id) = 2 FROM normalized_events
+             WHERE logical_name_id = 'ens:cycle.eth'
+               AND event_kind = 'RegistrationGranted'
+               AND canonicality_state IN ('canonical', 'safe', 'finalized')
            )
 ",
         registrar = deployment.eth_registrar.address,
@@ -404,60 +456,33 @@ async fn ens_v2_sepolia_post_audit_declared_matrix_end_to_end() -> Result<()> {
         "setSubregistry swap should not change the parent resource id"
     );
 
-    // REVIEW POINT / pinned wedge: the unregister -> re-register flow is
-    // exercised ON-CHAIN ONLY, after ingest. When these events are part of
-    // an ingested chain, the run loop's full-closure catch-up round fails
-    // permanently ("stable identity row cannot change observation anchor
-    // before orphaning" while refreshing the re-registered surface), which
-    // aborts every poll iteration and wedges intake before the checkpoint
-    // can advance. The on-chain identity assertions below pin the upstream
-    // contract (resource and token lineage advance); the ingestion half of
-    // this matrix row is blocked on the wedge, recorded in the ledger.
-    let cycle_first = ens_v2::register_eth_name(
-        &rpc,
-        &deployment,
-        ens_v2::RegisterEthName {
-            from: alice,
-            label: "cycle",
-            owner: alice,
-            duration_secs: YEAR,
-            subregistry: Address::ZERO,
-            resolver: Address::ZERO,
-        },
-    )
-    .await?;
-    ens_v2::unregister(
-        &rpc,
-        deployment.eth_registry.address,
-        deployment.deployer,
-        ens_v2::label_id("cycle"),
-    )
-    .await?;
-    // The post-audit registrar keeps an unregistered label unavailable until
-    // its grace period has elapsed.
-    // (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L259 @ ens_v2@48b3e2d).
-    rpc.increase_time(ens_v2::GRACE_PERIOD + 1).await?;
-    let cycle_second = ens_v2::register_eth_name(
-        &rpc,
-        &deployment,
-        ens_v2::RegisterEthName {
-            from: bob,
-            label: "cycle",
-            owner: bob,
-            duration_secs: YEAR,
-            subregistry: Address::ZERO,
-            resolver: Address::ZERO,
-        },
-    )
-    .await?;
-    assert_ne!(
-        cycle_first.resource_id, cycle_second.resource_id,
-        "unregister followed by re-register should advance the resource id"
+    let cycle_body = exact_name(&run, "cycle.eth").await?;
+    assert_eq!(
+        pointer(&cycle_body, "/declared_state/registration/registrant"),
+        bob_path,
+        "re-registered cycle.eth should serve the successor owner; body: {cycle_body}"
     );
-    assert_ne!(
-        cycle_first.token_id, cycle_second.token_id,
-        "unregister followed by re-register should advance the token lineage id"
+    let cycle_resource_id = resource_id_from_exact_name(&cycle_body)?;
+    let cycle_bindings: Vec<(Uuid, OffsetDateTime, Option<OffsetDateTime>)> = sqlx::query_as(
+        "SELECT resource_id, active_from, active_to FROM surface_bindings \
+         WHERE logical_name_id = 'ens:cycle.eth' \
+           AND canonicality_state IN ('canonical', 'safe', 'finalized') \
+         ORDER BY active_from, surface_binding_id",
+    )
+    .fetch_all(&run.db.pool)
+    .await?;
+    assert_eq!(
+        cycle_bindings.len(),
+        2,
+        "cycle.eth should retain both resource bindings"
     );
+    assert!(
+        cycle_bindings[0]
+            .2
+            .is_some_and(|closed_at| closed_at <= cycle_bindings[1].1)
+    );
+    assert_eq!(cycle_bindings[1].2, None);
+    assert_eq!(cycle_resource_id, cycle_bindings[1].0);
 
     run.db.cleanup().await?;
     Ok(())

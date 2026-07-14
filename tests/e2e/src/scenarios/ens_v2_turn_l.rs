@@ -1,7 +1,7 @@
 use alloy_primitives::{Address, U256, keccak256};
 use anyhow::{Context, Result};
 use serde_json::Value;
-use sqlx::types::Uuid;
+use sqlx::types::{Uuid, time::OffsetDateTime};
 
 use super::support;
 use crate::harness::{anvil::Anvil, ens_v2, repo_root};
@@ -393,12 +393,9 @@ async fn expiry_passes_then_reregistration_advances_lineage() -> Result<()> {
     // (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L291 @ ens_v2@48b3e2d).
     rpc.increase_time(ens_v2::GRACE_PERIOD + 1).await?;
 
-    // Re-register the available name. The on-chain identity contract holds
-    // (both counters advance inside register with no unregister event
-    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L452 @ ens_v2@48b3e2d)),
-    // but BOTH intake paths refuse the cycle: live catch-up hangs (the
-    // chipped anchor-conflict wedge) and backfill aborts explicitly on the
-    // same conflict — pinned below.
+    // Re-register the available name. Both counters advance inside register
+    // with no unregister event.
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L452 @ ens_v2@48b3e2d).
     ens_v2::register_eth_name(
         &rpc,
         &deployment,
@@ -419,21 +416,54 @@ async fn expiry_passes_then_reregistration_advances_lineage() -> Result<()> {
         "re-registration must advance the on-chain resource counter"
     );
 
-    let refusal = support::backfill_ens_v2_sepolia_and_replay_projections(
-        &anvil,
-        &deployment,
-        "ens-v2-expiry-reregistration",
-    )
-    .await;
-    let error = match refusal {
-        Ok(_) => anyhow::bail!("backfill must refuse the re-registration cycle"),
-        Err(err) => format!("{err:#}"),
-    };
-    assert!(
-        error.contains("cannot change observation anchor"),
-        "backfill refusal must be the pinned anchor conflict: {error}"
+    let ready_sql = "SELECT count(DISTINCT resource_id) = 2
+         FROM normalized_events
+         WHERE logical_name_id = 'ens:fleeting.eth'
+           AND event_kind = 'RegistrationGranted'
+           AND canonicality_state IN ('canonical', 'safe', 'finalized')";
+    let run =
+        support::ingest_ens_v2_sepolia_and_serve(&anvil, &deployment, Some(ready_sql)).await?;
+
+    let (status, body) = run
+        .api
+        .get_json("/v1/names/ens/fleeting.eth?chain=ethereum-sepolia")
+        .await?;
+    assert_eq!(
+        status, 200,
+        "re-registered exact-name lookup failed: {body}"
     );
-    Ok(())
+    assert_eq!(pointer(&body, "/coverage/status"), "full");
+    assert_eq!(pointer(&body, "/coverage/exhaustiveness"), "authoritative");
+    assert_eq!(
+        pointer(&body, "/declared_state/registration/registrant"),
+        format!("{carol:#x}"),
+        "re-registration should serve the successor owner: {body}"
+    );
+
+    let current_resource: Uuid = body
+        .pointer("/data/resource_id")
+        .and_then(Value::as_str)
+        .context("re-registered exact-name response should include resource_id")?
+        .parse()
+        .context("re-registered resource_id should be a UUID")?;
+    let bindings: Vec<(Uuid, OffsetDateTime, Option<OffsetDateTime>)> = sqlx::query_as(
+        "SELECT resource_id, active_from, active_to FROM surface_bindings \
+         WHERE logical_name_id = 'ens:fleeting.eth' \
+           AND canonicality_state IN ('canonical', 'safe', 'finalized') \
+         ORDER BY active_from, surface_binding_id",
+    )
+    .fetch_all(&run.db.pool)
+    .await?;
+    assert_eq!(
+        bindings.len(),
+        2,
+        "both fleeting.eth resource epochs should remain"
+    );
+    assert_eq!(bindings[0].2, Some(bindings[1].1));
+    assert_eq!(bindings[1].2, None);
+    assert_eq!(current_resource, bindings[1].0);
+
+    run.db.cleanup().await
 }
 
 /// Row 6: the root family's first exercised transitions — register `eth` at

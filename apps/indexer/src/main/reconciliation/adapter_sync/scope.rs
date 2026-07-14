@@ -4,6 +4,29 @@ use anyhow::{Context, Result, bail};
 
 use crate::ens_v1_resolver::{GENERIC_SOURCE_SCOPE_ADDRESS, SOURCE_FAMILY_ENS_V1_RESOLVER_L1};
 
+pub(super) async fn load_live_adapter_target_block_number(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    block_hashes: &[String],
+) -> Result<i64> {
+    let target_block_number: Option<i64> = sqlx::query_scalar(
+        r#"
+        SELECT MAX(block_number)
+        FROM chain_lineage
+        WHERE chain_id = $1
+          AND block_hash = ANY($2::TEXT[])
+        "#,
+    )
+    .bind(chain)
+    .bind(block_hashes)
+    .fetch_one(pool)
+    .await
+    .with_context(|| format!("failed to load live adapter target block for chain {chain}"))?;
+
+    target_block_number
+        .with_context(|| format!("live adapter block-hash selection is empty for chain {chain}"))
+}
+
 pub(super) async fn load_live_adapter_source_scope(
     pool: &sqlx::PgPool,
     chain: &str,

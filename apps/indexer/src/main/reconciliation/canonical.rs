@@ -231,8 +231,8 @@ async fn reconcile_fetched_heads_with_gap_policy(
         coverage_frontiers,
     )
     .await?;
+    let promotion_fence = coverage_frontiers.take_promotion_fence(&task.chain);
     let provider_head_change_set = head_change_set(task, heads, &canonical);
-
     if canonical.status == CanonicalReconciliationStatus::ReorgReconciled {
         orphan_reorg_losing_branch_payloads(
             pool,
@@ -322,7 +322,7 @@ async fn reconcile_fetched_heads_with_gap_policy(
         },
     )
     .await?;
-
+    ChainCoverageFrontiers::release_promotion_fence(promotion_fence).await?;
     if !head_change_set.canonical_head_changed
         && !head_change_set.safe_head_changed
         && !head_change_set.finalized_head_changed

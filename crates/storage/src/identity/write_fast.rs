@@ -8,6 +8,7 @@ use super::types::{Resource, SurfaceBinding, TokenLineage};
 
 mod name_surface;
 mod sql;
+mod surface_binding;
 
 pub(super) use name_surface::{
     bulk_upsert_name_surfaces_without_snapshots, insert_name_surfaces_do_nothing,
@@ -16,6 +17,10 @@ use sql::{
     canonicality_merge_sql, canonicality_merge_sql_from, stable_anchor_refresh_required_sql,
     stable_later_anchor_canonicality_refresh_allowed_sql, stable_provenance_merge_sql,
     surface_binding_active_to_merge_sql,
+};
+pub(super) use surface_binding::load_existing_surface_binding_ids;
+use surface_binding::{
+    ANCHOR_REFRESH_ASSIGNMENTS, ANCHOR_REFRESH_CHANGED, ANCHOR_REFRESH_COMPATIBILITY,
 };
 
 const IDENTITY_FAST_INSERT_BATCH_SIZE: usize = 10_000;
@@ -481,33 +486,6 @@ pub(super) async fn bulk_upsert_resources_without_snapshots(
     Ok(())
 }
 
-pub(super) async fn load_existing_surface_binding_ids(
-    executor: &mut sqlx::Transaction<'_, Postgres>,
-    bindings: &[SurfaceBinding],
-) -> Result<HashSet<Uuid>> {
-    let surface_binding_ids = bindings
-        .iter()
-        .map(|binding| binding.surface_binding_id)
-        .collect::<Vec<_>>();
-    if surface_binding_ids.is_empty() {
-        return Ok(HashSet::new());
-    }
-
-    let rows = sqlx::query_scalar::<_, Uuid>(
-        r#"
-        SELECT surface_binding_id
-        FROM surface_bindings
-        WHERE surface_binding_id = ANY($1::UUID[])
-        "#,
-    )
-    .bind(&surface_binding_ids)
-    .fetch_all(&mut **executor)
-    .await
-    .context("failed to load existing surface binding ids for batch upsert")?;
-
-    Ok(rows.into_iter().collect())
-}
-
 pub(super) async fn insert_surface_bindings_do_nothing(
     executor: &mut sqlx::Transaction<'_, Postgres>,
     bindings: &[SurfaceBinding],
@@ -736,6 +714,7 @@ pub(super) async fn bulk_upsert_surface_bindings_without_snapshots(
             ON CONFLICT (surface_binding_id) DO UPDATE
             SET
                 active_to = {active_to_merge},
+                {anchor_refresh_assignments}
                 canonicality_state = {canonicality_merge},
                 observed_at = now()
             WHERE
@@ -743,11 +722,11 @@ pub(super) async fn bulk_upsert_surface_bindings_without_snapshots(
                 AND surface_bindings.resource_id = EXCLUDED.resource_id
                 AND surface_bindings.binding_kind = EXCLUDED.binding_kind
                 AND surface_bindings.active_from = EXCLUDED.active_from
-                AND surface_bindings.chain_id = EXCLUDED.chain_id
-                AND surface_bindings.block_hash = EXCLUDED.block_hash
-                AND surface_bindings.block_number = EXCLUDED.block_number
                 AND surface_bindings.provenance = EXCLUDED.provenance
+                AND {anchor_refresh_compatibility}
                 AND (
+                    {anchor_refresh_changed}
+                    OR
                     surface_bindings.active_to IS DISTINCT FROM {active_to_merge}
                     OR surface_bindings.canonicality_state IS DISTINCT FROM {canonicality_merge}
                 )
@@ -776,6 +755,9 @@ pub(super) async fn bulk_upsert_surface_bindings_without_snapshots(
             "#,
             active_to_merge = active_to_merge,
             accepted_active_to_merge = accepted_active_to_merge,
+            anchor_refresh_assignments = ANCHOR_REFRESH_ASSIGNMENTS,
+            anchor_refresh_compatibility = ANCHOR_REFRESH_COMPATIBILITY,
+            anchor_refresh_changed = ANCHOR_REFRESH_CHANGED,
             canonicality_merge = canonicality_merge,
             accepted_canonicality_merge = accepted_canonicality_merge,
         );

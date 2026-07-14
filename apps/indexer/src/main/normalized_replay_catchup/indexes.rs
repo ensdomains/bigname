@@ -39,7 +39,7 @@ pub(super) async fn prepare_deferred_projection_indexes_for_fresh_replay(
         return Ok(());
     }
 
-    let already_deferred = any_index_missing(pool, DEFERRED_NORMALIZED_EVENT_INDEXES).await?
+    let already_deferred = any_index_not_ready(pool, DEFERRED_NORMALIZED_EVENT_INDEXES).await?
         || any_index_exists(pool, TEMPORARY_REPLAY_INDEXES).await?;
     let projection_tables_empty = current_projection_tables_empty(pool).await?;
     if !should_defer_projection_indexes(cursor, already_deferred, projection_tables_empty) {
@@ -140,12 +140,15 @@ async fn ensure_deferred_projection_indexes_ready(
     }
 
     create_deferred_projection_indexes(pool).await?;
+    if any_index_not_ready(pool, DEFERRED_NORMALIZED_EVENT_INDEXES).await? {
+        anyhow::bail!("deferred normalized replay projection indexes remain unready after rebuild");
+    }
     drop_temporary_replay_indexes(pool).await
 }
 
 async fn projection_indexes_need_restore(pool: &PgPool) -> Result<bool> {
     Ok(
-        any_index_missing(pool, DEFERRED_NORMALIZED_EVENT_INDEXES).await?
+        any_index_not_ready(pool, DEFERRED_NORMALIZED_EVENT_INDEXES).await?
             || any_index_exists(pool, TEMPORARY_REPLAY_INDEXES).await?,
     )
 }
@@ -304,9 +307,28 @@ async fn relation_exists(pool: &PgPool, relation: &str) -> Result<bool> {
     Ok(exists)
 }
 
-async fn any_index_missing(pool: &PgPool, indexes: &[&str]) -> Result<bool> {
+async fn index_is_ready(pool: &PgPool, index: &str) -> Result<bool> {
+    sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM pg_index
+            WHERE indexrelid = to_regclass($1)
+              AND indrelid = 'normalized_events'::regclass
+              AND indisvalid
+              AND indisready
+        )
+        "#,
+    )
+    .bind(index)
+    .fetch_one(pool)
+    .await
+    .with_context(|| format!("failed to inspect index readiness for {index}"))
+}
+
+async fn any_index_not_ready(pool: &PgPool, indexes: &[&str]) -> Result<bool> {
     for index in indexes {
-        if !relation_exists(pool, index).await? {
+        if !index_is_ready(pool, index).await? {
             return Ok(true);
         }
     }
@@ -392,6 +414,12 @@ async fn drop_deferred_projection_indexes(pool: &PgPool) -> Result<()> {
 }
 
 async fn create_deferred_projection_indexes(pool: &PgPool) -> Result<()> {
+    for index in DEFERRED_NORMALIZED_EVENT_INDEXES {
+        if relation_exists(pool, index).await? && !index_is_ready(pool, index).await? {
+            execute_ddl(pool, &format!("DROP INDEX CONCURRENTLY IF EXISTS {index}")).await?;
+        }
+    }
+
     execute_ddl(
         pool,
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_namespace_idx
@@ -491,6 +519,7 @@ async fn create_deferred_projection_indexes(pool: &PgPool) -> Result<()> {
            AND block_hash IS NOT NULL
            AND derivation_kind IN (
                'ens_v1_unwrapped_authority',
+               'ens_v2_registry_resource_surface',
                'ens_v2_resolver'
            )
            AND event_kind IN (

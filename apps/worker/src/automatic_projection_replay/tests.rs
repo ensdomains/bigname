@@ -90,6 +90,74 @@ fn active_index_build_probe_is_scoped_to_current_database() {
     );
 }
 
+#[tokio::test]
+async fn projection_replay_treats_invalid_required_index_as_missing() -> Result<()> {
+    let database = test_database().await?;
+    sqlx::query("DROP INDEX normalized_events_record_inventory_resource_replay_idx")
+        .execute(database.pool())
+        .await
+        .context("failed to drop required projection index for invalid-index test")?;
+    sqlx::query("CREATE TABLE invalid_projection_index_fixture (duplicate_value INTEGER NOT NULL)")
+        .execute(database.pool())
+        .await
+        .context("failed to create invalid-index fixture table")?;
+    sqlx::query("INSERT INTO invalid_projection_index_fixture (duplicate_value) VALUES (1), (1)")
+        .execute(database.pool())
+        .await
+        .context("failed to seed invalid-index fixture rows")?;
+
+    sqlx::query(
+        "CREATE UNIQUE INDEX CONCURRENTLY normalized_events_record_inventory_resource_replay_idx \
+         ON invalid_projection_index_fixture (duplicate_value)",
+    )
+    .execute(database.pool())
+    .await
+    .expect_err("duplicate fixture rows must leave an invalid concurrent index remnant");
+
+    let (is_valid, is_ready) = sqlx::query_as::<_, (bool, bool)>(
+        r#"
+        SELECT index.indisvalid, index.indisready
+        FROM pg_index AS index
+        WHERE index.indexrelid =
+            to_regclass('normalized_events_record_inventory_resource_replay_idx')
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await
+    .context("failed to inspect invalid required projection index")?;
+    assert!(!is_valid || !is_ready);
+    assert_eq!(
+        missing_projection_index_count(database.pool()).await?,
+        1,
+        "an existing but invalid required index must keep automatic replay unready"
+    );
+
+    let (first_retry, second_retry) = tokio::join!(
+        bigname_storage::migrate(database.pool()),
+        bigname_storage::migrate(database.pool())
+    );
+    first_retry.context("first migration retry must repair an invalid concurrent index remnant")?;
+    second_retry.context("concurrent migration retry must observe the serialized ready index")?;
+    assert_eq!(missing_projection_index_count(database.pool()).await?, 0);
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT index.indisvalid AND index.indisready
+            FROM pg_index AS index
+            WHERE index.indexrelid =
+                to_regclass('normalized_events_record_inventory_resource_replay_idx')
+              AND index.indrelid = 'normalized_events'::regclass
+            "#,
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "migration retry must replace the invalid remnant with the required ready index"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[test]
 fn projection_replay_runs_when_normalized_replay_and_indexes_are_ready() {
     assert!(ready_status().is_ready());

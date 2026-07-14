@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    time::Duration,
+};
 
 use anyhow::Result;
 use bigname_domain::normalization::{ENS_NORMALIZER_VERSION, normalize_name};
@@ -108,13 +111,16 @@ pub(super) fn closed_surface_binding_for_unregister(
     reference: &ObservationRef,
 ) -> Option<SurfaceBinding> {
     let link = state.resource.as_ref()?;
+    let active_from = event_position_timestamp(&link.linked_ref);
+    let observed_close = event_position_timestamp(reference);
+    let active_to = observed_close.max(active_from + Duration::from_micros(1));
     Some(SurfaceBinding {
         surface_binding_id: link.surface_binding_id,
         logical_name_id: state.name.logical_name_id.clone(),
         resource_id: link.resource_id,
         binding_kind: state.binding_kind,
-        active_from: event_position_timestamp(&link.linked_ref),
-        active_to: Some(event_position_timestamp(reference)),
+        active_from,
+        active_to: Some(active_to),
         chain_id: link.linked_ref.chain_id.clone(),
         block_hash: link.linked_ref.block_hash.clone(),
         block_number: link.linked_ref.block_number,
@@ -124,7 +130,7 @@ pub(super) fn closed_surface_binding_for_unregister(
             "logical_name_id": state.name.logical_name_id,
             "upstream_resource": link.upstream_resource,
             "token_id": link.observed_token_id,
-            "current_token_id": state.token_id,
+            "current_token_id": link.observed_token_id,
         }),
         canonicality_state: reference.canonicality_state,
     })

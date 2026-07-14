@@ -18,6 +18,10 @@ use super::{
     util::{deterministic_uuid, normalize_address, null_if_zero_address},
 };
 
+mod hydration;
+
+pub(super) use hydration::hydrate_subregistry_event_target_ids;
+
 pub(super) struct RegistryObservationContext<'a> {
     pub(super) registry_suffix_by_address: &'a mut HashMap<String, String>,
     pub(super) registry_contract_by_address: &'a mut HashMap<String, Uuid>,
@@ -412,6 +416,7 @@ pub(super) fn apply_registry_observation(
                 state.resource = Some(RegistryResourceLink {
                     upstream_resource,
                     observed_token_id: token_id.clone(),
+                    observed_expiry: state.expiry,
                     resource_id,
                     token_lineage_id,
                     surface_binding_id,

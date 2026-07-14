@@ -4,15 +4,19 @@ use std::sync::Mutex;
 use anyhow::Result;
 use bigname_manifests::{
     UncoveredWatchedTuple, find_uncovered_watched_tuples,
-    load_active_manifest_abi_events_by_chain_and_source_families, load_discovery_admission_epoch,
-    load_log_producing_source_families, load_watched_contracts_by_addresses,
+    load_active_manifest_abi_events_by_chain_and_source_families,
+    load_earliest_known_watched_block, load_log_producing_source_families,
 };
-use bigname_storage::{ChainLineageBlock, load_completed_backfill_jobs_intersecting_range};
-use serde_json::Value;
+use bigname_storage::ChainLineageBlock;
 use sqlx::Row;
 
+use super::admission_epoch_fence::StoredLineageAdmissionEpochFence;
+
+#[path = "coverage/raw_companions.rs"]
+mod raw_companions;
+
 /// Frontier extensions verify coverage in chunks of this many blocks, so a
-/// deep gap costs a handful of anti-join queries once and every promotion
+/// deep gap costs a handful of coverage queries once and every promotion
 /// cycle afterwards is an O(1) in-memory comparison.
 pub(crate) const COVERAGE_FRONTIER_VERIFICATION_CHUNK_BLOCKS: i64 = 131_072;
 const MAX_REPORTED_UNCOVERED_TUPLES: i64 = 20;
@@ -22,9 +26,10 @@ const MAX_REPORTED_UNCOVERED_TUPLES: i64 = 20;
 /// not persisted: a restart re-verifies in a handful of chunked queries.
 /// Interior mutability lets verification progress survive refusal and error
 /// paths within a poll cycle.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct ChainCoverageFrontiers {
     verified: Mutex<BTreeMap<String, VerifiedCoverageInterval>>,
+    promotion_fences: Mutex<BTreeMap<String, StoredLineageAdmissionEpochFence>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -63,10 +68,37 @@ impl ChainCoverageFrontiers {
             .expect("coverage frontier lock must not be poisoned")
             .remove(chain);
     }
+
+    pub(super) fn hold_promotion_fence(
+        &self,
+        chain: &str,
+        fence: StoredLineageAdmissionEpochFence,
+    ) {
+        self.promotion_fences
+            .lock()
+            .expect("promotion fence lock must not be poisoned")
+            .insert(chain.to_owned(), fence);
+    }
+
+    pub(crate) fn take_promotion_fence(
+        &self,
+        chain: &str,
+    ) -> Option<StoredLineageAdmissionEpochFence> {
+        self.promotion_fences
+            .lock()
+            .expect("promotion fence lock must not be poisoned")
+            .remove(chain)
+    }
 }
 
 #[cfg(test)]
 impl ChainCoverageFrontiers {
+    pub(crate) fn install_admission_epoch_fence_test_hook(
+        chain: &str,
+    ) -> super::admission_epoch_fence::AdmissionEpochFenceTestHook {
+        super::admission_epoch_fence::install_admission_epoch_fence_test_hook(chain)
+    }
+
     pub(crate) fn record_verified_for_tests(
         &self,
         chain: &str,
@@ -104,6 +136,7 @@ pub(super) async fn stored_path_has_required_raw_fact_coverage(
     path: &[ChainLineageBlock],
     coverage_frontiers: &ChainCoverageFrontiers,
     verify_ahead_through_block: i64,
+    discovery_admission_epoch: i64,
 ) -> std::result::Result<(), String> {
     if path.is_empty() {
         return Ok(());
@@ -131,10 +164,11 @@ pub(super) async fn stored_path_has_required_raw_fact_coverage(
         path_from,
         path_through,
         verify_ahead_through_block,
+        discovery_admission_epoch,
     )
     .await?;
 
-    ensure_selected_logs_have_raw_companions(pool, chain, path).await
+    raw_companions::ensure_selected_logs_have_raw_companions(pool, chain, path).await
 }
 
 /// Extend the chain's verified coverage frontier until it contains
@@ -151,6 +185,7 @@ async fn ensure_verified_coverage_frontier(
     required_from: i64,
     required_through: i64,
     verify_ahead_through_block: i64,
+    discovery_admission_epoch: i64,
 ) -> std::result::Result<(), String> {
     let log_producing_source_families = load_log_producing_source_families(pool, chain)
         .await
@@ -158,10 +193,7 @@ async fn ensure_verified_coverage_frontier(
     let current_topic0s_by_family =
         load_current_topic0s_by_family(pool, chain, &log_producing_source_families).await?;
     let topic_set_fingerprint = topic_set_fingerprint(&current_topic0s_by_family);
-    let discovery_admission_epoch = load_discovery_admission_epoch(pool, chain)
-        .await
-        .map_err(|error| error.to_string())?;
-
+    let mut required_from = required_from;
     let mut interval = coverage_frontiers.verified_interval(chain);
     if let Some(existing) = &interval
         && (required_from < existing.from_block
@@ -175,6 +207,22 @@ async fn ensure_verified_coverage_frontier(
         coverage_frontiers.reset(chain);
         interval = None;
     }
+    if interval.is_none()
+        && let Some(earliest_known_watched_block) = load_earliest_known_watched_block(
+            pool,
+            chain,
+            verify_ahead_through_block.max(required_through),
+            &log_producing_source_families,
+        )
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        // A process-local frontier reset (restart, deep reorg, ABI change, or
+        // discovery admission epoch change) must include known watched starts
+        // behind the checkpoint. Once verified, the memo retains this lower
+        // bound, so ordinary promotion polls do not rescan full history.
+        required_from = required_from.min(earliest_known_watched_block);
+    }
     if let Some(existing) = &interval
         && required_through <= existing.through_block
     {
@@ -185,7 +233,7 @@ async fn ensure_verified_coverage_frontier(
     let extension_from = interval
         .as_ref()
         .map_or(required_from, |existing| existing.through_block + 1);
-    if let Err(_look_ahead_drift) = ensure_family_topic_sets_undrifted(
+    if let Err(_look_ahead_drift) = super::topic_drift::ensure_family_topic_sets_undrifted(
         pool,
         chain,
         &current_topic0s_by_family,
@@ -198,7 +246,7 @@ async fn ensure_verified_coverage_frontier(
         // must not block promoting the covered prefix: recheck scoped to the
         // target, and if that passes, cap the look-ahead so the memo never
         // covers a span the drift guard did not clear.
-        ensure_family_topic_sets_undrifted(
+        super::topic_drift::ensure_family_topic_sets_undrifted(
             pool,
             chain,
             &current_topic0s_by_family,
@@ -308,86 +356,8 @@ fn uncovered_tuples_refusal(
         ""
     };
     format!(
-        "watched tuples over blocks {from_block}..={through_block} have no single backfill_coverage_facts row containing their required interval: {listed}{suffix}; run hash-pinned or Coinbase SQL backfill for those tuples (or repair derive-backfill-coverage-facts for legacy full-payload jobs) and retry"
+        "watched tuples over blocks {from_block}..={through_block} do not form gap-free coverage from exact address- or family-scoped backfill_coverage_facts: {listed}{suffix}; run hash-pinned or Coinbase SQL backfill for the missing tuple intervals (or repair derive-backfill-coverage-facts for legacy full-payload jobs) and retry"
     )
-}
-
-/// Fail closed on topic-set drift: coverage facts assert fetches that were
-/// topics-complete relative to the family's manifest ABI event set at fetch
-/// time. If a family's current topic0 set differs from the set persisted in
-/// any completed topic-filtered job intersecting the evaluated range — or a
-/// topic-filtered job did not persist its set at all — the facts may
-/// overclaim relative to the current ABI, so promotion refuses naming the
-/// family. Address-enumerated hash-pinned fetches are topic-unfiltered and
-/// immune.
-async fn ensure_family_topic_sets_undrifted(
-    pool: &sqlx::PgPool,
-    chain: &str,
-    current_topic0s_by_family: &BTreeMap<String, BTreeSet<String>>,
-    from_block: i64,
-    to_block: i64,
-) -> std::result::Result<(), String> {
-    if current_topic0s_by_family.is_empty() {
-        return Ok(());
-    }
-    let jobs = load_completed_backfill_jobs_intersecting_range(pool, chain, from_block, to_block)
-        .await
-        .map_err(|error| error.to_string())?;
-    if jobs.is_empty() {
-        return Ok(());
-    }
-
-    let relied_families = current_topic0s_by_family
-        .keys()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
-    for job in &jobs {
-        if let Some(persisted_by_family) = job
-            .source_identity
-            .get("coinbase_sql_topic_plan")
-            .and_then(|plan| plan.get("topic0s_by_source_family"))
-            .and_then(Value::as_object)
-        {
-            for (source_family, topics) in persisted_by_family {
-                if !relied_families.contains(source_family.as_str()) {
-                    continue;
-                }
-                let persisted = topics
-                    .as_array()
-                    .map(|topics| {
-                        topics
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .map(str::to_ascii_lowercase)
-                            .collect::<BTreeSet<_>>()
-                    })
-                    .unwrap_or_default();
-                let current = current_topic0s_by_family
-                    .get(source_family)
-                    .cloned()
-                    .unwrap_or_default();
-                if persisted != current {
-                    return Err(format!(
-                        "source family {source_family} manifest ABI topic0 set changed after completed backfill job {} was fetched (persisted {} topic0s, current {}); its coverage facts may overclaim relative to the current ABI — re-run the affected range on the current manifest before promoting",
-                        job.backfill_job_id,
-                        persisted.len(),
-                        current.len()
-                    ));
-                }
-            }
-        }
-
-        for scanned_family in topic_filtered_families_without_persisted_sets(&job.source_identity) {
-            if relied_families.contains(scanned_family.as_str()) {
-                return Err(format!(
-                    "source family {scanned_family} was fetched by topic-filtered scan in completed backfill job {} without a persisted topic set; drift relative to the current manifest ABI cannot be ruled out — re-run the affected range on the current manifest before promoting",
-                    job.backfill_job_id
-                ));
-            }
-        }
-    }
-
-    Ok(())
 }
 
 /// Current manifest topic0 sets per log-producing family; also the input to
@@ -432,200 +402,6 @@ fn topic_set_fingerprint(current_topic0s_by_family: &BTreeMap<String, BTreeSet<S
         fingerprint.push(';');
     }
     fingerprint
-}
-
-/// Families a job fetched through topic-filtered generic scans whose identity
-/// does not persist the topic set in force (hash-pinned generic resolver
-/// scans; `coinbase_sql_topic_plan`-bearing identities are checked above).
-fn topic_filtered_families_without_persisted_sets(source_identity: &Value) -> Vec<String> {
-    if source_identity.get("coinbase_sql_topic_plan").is_some() {
-        return Vec::new();
-    }
-
-    let mut families = Vec::new();
-    if source_identity
-        .get("source_identity_payload_format")
-        .and_then(Value::as_str)
-        == Some("generic_resolver_event_topics_v1")
-        && let Some(source_family) = source_identity.get("source_family").and_then(Value::as_str)
-    {
-        families.push(source_family.to_owned());
-    }
-    for scan in source_identity
-        .get("generic_topic_scans")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        if let Some(source_family) = scan.get("source_family").and_then(Value::as_str) {
-            families.push(source_family.to_owned());
-        }
-    }
-    families.sort_unstable();
-    families.dedup();
-    families
-}
-
-/// Every stored canonical log emitted by a watched address inside the path
-/// must carry its raw code-hash, transaction, and receipt companions. Scoped
-/// to the addresses that actually appear in the path's logs, so binds stay
-/// proportional to the path, not the watch set.
-async fn ensure_selected_logs_have_raw_companions(
-    pool: &sqlx::PgPool,
-    chain: &str,
-    path: &[ChainLineageBlock],
-) -> std::result::Result<(), String> {
-    let block_hashes = path
-        .iter()
-        .map(|block| block.block_hash.clone())
-        .collect::<Vec<_>>();
-    let emitting_addresses = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT DISTINCT LOWER(emitting_address)
-        FROM raw_logs
-        WHERE chain_id = $1
-          AND block_hash = ANY($2::TEXT[])
-          AND canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-        "#,
-    )
-    .bind(chain)
-    .bind(&block_hashes)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| error.to_string())?;
-    if emitting_addresses.is_empty() {
-        return Ok(());
-    }
-
-    let watched_targets = emitting_addresses
-        .iter()
-        .map(|address| (chain.to_owned(), address.clone()))
-        .collect::<Vec<_>>();
-    let selected_addresses = load_watched_contracts_by_addresses(pool, &watched_targets)
-        .await
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .map(|contract| contract.address.to_ascii_lowercase())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    if selected_addresses.is_empty() {
-        return Ok(());
-    }
-
-    let row = sqlx::query(
-        r#"
-        WITH selected_log_emitters AS (
-            SELECT DISTINCT
-                raw_logs.block_hash,
-                LOWER(raw_logs.emitting_address) AS emitting_address
-            FROM raw_logs
-            WHERE raw_logs.chain_id = $1
-              AND raw_logs.block_hash = ANY($2::TEXT[])
-              AND LOWER(raw_logs.emitting_address) = ANY($3::TEXT[])
-              AND raw_logs.canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
-        ),
-        selected_log_transactions AS (
-            SELECT DISTINCT
-                raw_logs.block_hash,
-                raw_logs.transaction_hash,
-                raw_logs.transaction_index
-            FROM raw_logs
-            WHERE raw_logs.chain_id = $1
-              AND raw_logs.block_hash = ANY($2::TEXT[])
-              AND LOWER(raw_logs.emitting_address) = ANY($3::TEXT[])
-              AND raw_logs.canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
-        )
-        SELECT
-            (
-                SELECT COUNT(*)::BIGINT
-                FROM selected_log_emitters
-                WHERE NOT EXISTS (
-                    SELECT 1
-                    FROM raw_code_hashes
-                    WHERE raw_code_hashes.chain_id = $1
-                      AND raw_code_hashes.block_hash = selected_log_emitters.block_hash
-                      AND LOWER(raw_code_hashes.contract_address) = selected_log_emitters.emitting_address
-                      AND raw_code_hashes.canonicality_state IN (
-                          'canonical'::canonicality_state,
-                          'safe'::canonicality_state,
-                          'finalized'::canonicality_state
-                      )
-                )
-            ) AS selected_log_emitter_missing_code_count,
-            (
-                SELECT COUNT(*)::BIGINT
-                FROM selected_log_transactions
-                WHERE NOT EXISTS (
-                    SELECT 1
-                    FROM raw_transactions
-                    WHERE raw_transactions.chain_id = $1
-                      AND raw_transactions.block_hash = selected_log_transactions.block_hash
-                      AND raw_transactions.transaction_hash = selected_log_transactions.transaction_hash
-                      AND raw_transactions.transaction_index = selected_log_transactions.transaction_index
-                      AND raw_transactions.canonicality_state IN (
-                          'canonical'::canonicality_state,
-                          'safe'::canonicality_state,
-                          'finalized'::canonicality_state
-                      )
-                )
-            ) AS selected_log_transaction_missing_count,
-            (
-                SELECT COUNT(*)::BIGINT
-                FROM selected_log_transactions
-                WHERE NOT EXISTS (
-                    SELECT 1
-                    FROM raw_receipts
-                    WHERE raw_receipts.chain_id = $1
-                      AND raw_receipts.block_hash = selected_log_transactions.block_hash
-                      AND raw_receipts.transaction_hash = selected_log_transactions.transaction_hash
-                      AND raw_receipts.transaction_index = selected_log_transactions.transaction_index
-                      AND raw_receipts.canonicality_state IN (
-                          'canonical'::canonicality_state,
-                          'safe'::canonicality_state,
-                          'finalized'::canonicality_state
-                      )
-                )
-            ) AS selected_log_receipt_missing_count
-        "#,
-    )
-    .bind(chain)
-    .bind(&block_hashes)
-    .bind(&selected_addresses)
-    .fetch_one(pool)
-    .await
-    .map_err(|error| error.to_string())?;
-
-    let missing_code_hashes: i64 = row
-        .try_get("selected_log_emitter_missing_code_count")
-        .map_err(|error| error.to_string())?;
-    let missing_transactions: i64 = row
-        .try_get("selected_log_transaction_missing_count")
-        .map_err(|error| error.to_string())?;
-    let missing_receipts: i64 = row
-        .try_get("selected_log_receipt_missing_count")
-        .map_err(|error| error.to_string())?;
-    if missing_code_hashes != 0 || missing_transactions != 0 || missing_receipts != 0 {
-        return Err(format!(
-            "stored lineage selected logs over {}..={} are missing raw code/transaction/receipt companion rows (missing code: {missing_code_hashes}, transactions: {missing_transactions}, receipts: {missing_receipts}); rerun hash-pinned backfill for the selected range before retrying",
-            path_start_number(path),
-            path_end_number(path)
-        ));
-    }
-
-    Ok(())
 }
 
 async fn same_height_fork_lineage_numbers(

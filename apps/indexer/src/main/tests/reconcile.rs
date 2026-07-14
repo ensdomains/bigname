@@ -1049,6 +1049,409 @@ async fn reconcile_fetched_heads_promotes_large_gap_from_stored_safe_lineage_wit
     Ok(())
 }
 
+/// Companion validation follows the watched tuple's historical block
+/// interval: missing companions for an in-interval log refuse promotion even
+/// after the tuple is retired, while unrelated logs after that interval do
+/// not widen the retained-fact requirement.
+#[tokio::test]
+async fn reconcile_fetched_heads_checks_historical_selected_log_companions_within_active_interval()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let chain = "base-mainnet";
+    let chunk = crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS;
+    let stored_safe_block_number = chunk + 3;
+    let live_latest_block_number = stored_safe_block_number + 17;
+    let blocks = linear_provider_blocks(live_latest_block_number);
+    let current = blocks
+        .first()
+        .expect("test chain must include a current block")
+        .clone();
+    let latest = blocks
+        .last()
+        .expect("test chain must include a latest block")
+        .clone();
+    let stored_safe = blocks
+        .iter()
+        .find(|block| block.block_number == stored_safe_block_number)
+        .expect("test chain must include the stored safe block")
+        .clone();
+    let promoted_target = blocks
+        .iter()
+        .find(|block| block.block_number == current.block_number + chunk)
+        .expect("test chain must include the first promoted target")
+        .clone();
+    let selected_log_block = blocks[9].clone();
+    let post_interval_log_block = blocks[10].clone();
+    for block in &blocks {
+        if block.block_number > stored_safe_block_number {
+            continue;
+        }
+        let state = if block.block_number == stored_safe_block_number {
+            CanonicalityState::Safe
+        } else {
+            CanonicalityState::Canonical
+        };
+        insert_chain_lineage_for_block(database.pool(), chain, block, state).await?;
+    }
+
+    let selected_address = "0x0000000000000000000000000000000000000001";
+    insert_reconcile_watched_manifest_contract(
+        database.pool(),
+        10_079,
+        "test",
+        chain,
+        "test_source_family",
+        Uuid::from_u128(10_079),
+        selected_address,
+    )
+    .await?;
+    insert_selected_raw_log_inputs(
+        database.pool(),
+        chain,
+        &[selected_log_block.clone(), post_interval_log_block.clone()],
+        selected_address,
+        false,
+    )
+    .await?;
+    insert_completed_backfill_range_coverage(
+        database.pool(),
+        chain,
+        current.block_number + 1,
+        stored_safe_block_number,
+        &[selected_address],
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET active_to_block_number = $1,
+            deactivated_at = now()
+        WHERE chain_id = $2
+          AND LOWER(address) = $3
+        "#,
+    )
+    .bind(selected_log_block.block_number)
+    .bind(chain)
+    .bind(selected_address)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        DELETE FROM raw_receipts
+        WHERE chain_id = $1
+          AND block_hash IN ($2, $3)
+        "#,
+    )
+    .bind(chain)
+    .bind(&selected_log_block.block_hash)
+    .bind(&post_interval_log_block.block_hash)
+    .execute(database.pool())
+    .await?;
+    insert_chain_checkpoint(
+        database.pool(),
+        &ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    )
+    .await?;
+    let (provider, server) = bundle_provider(vec![
+        latest.clone(),
+        stored_safe.clone(),
+        promoted_target.clone(),
+    ])
+    .await?;
+    let task = IntakeChainTask {
+        chain: chain.to_owned(),
+        addresses: vec![selected_address.to_owned()],
+        manifest_root_entry_count: 0,
+        manifest_contract_entry_count: 1,
+        discovery_edge_entry_count: 0,
+        checkpoint: ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    };
+    let coverage_frontiers = ChainCoverageFrontiers::default();
+
+    let error = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: latest.clone(),
+            safe: Some(stored_safe.clone()),
+            finalized: None,
+        },
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+        &coverage_frontiers,
+    )
+    .await
+    .expect_err("a retired tuple's in-interval selected log must retain its receipt companion");
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.contains("missing raw code/transaction/receipt companion rows")
+            && rendered.contains("receipts: 1"),
+        "unexpected historical missing-companion refusal: {rendered}"
+    );
+    assert_eq!(
+        bigname_storage::load_chain_checkpoint(database.pool(), chain)
+            .await?
+            .expect("checkpoint row must remain after companion refusal"),
+        task.checkpoint
+    );
+
+    insert_selected_raw_log_inputs(
+        database.pool(),
+        chain,
+        &[selected_log_block],
+        selected_address,
+        false,
+    )
+    .await?;
+    let (promoted_task, outcome) = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: latest,
+            safe: Some(stored_safe),
+            finalized: None,
+        },
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+        &coverage_frontiers,
+    )
+    .await
+    .context("post-interval logs without companions must not refuse promotion")?
+    .expect("the repaired historical interval must promote");
+    assert_eq!(
+        outcome.canonical_status,
+        CanonicalReconciliationStatus::StoredLineagePromoted
+    );
+    assert_eq!(
+        promoted_task.checkpoint.canonical_block_hash,
+        Some(promoted_target.block_hash)
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// A family-topic scan selects B's manifest topic and retains watched A's
+/// different-topic log only because both logs share a transaction. The
+/// transaction and receipt are shared companions, but only selected emitter B
+/// is supposed to carry a code observation.
+#[tokio::test]
+async fn reconcile_fetched_heads_ignores_unselected_watched_same_transaction_sibling_for_code()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let chain = "base-mainnet";
+    let chunk = crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS;
+    let stored_safe_block_number = chunk + 3;
+    let live_latest_block_number = stored_safe_block_number + 17;
+    let blocks = linear_provider_blocks(live_latest_block_number);
+    let current = blocks[0].clone();
+    let selected_log_block = blocks[9].clone();
+    let latest = blocks
+        .last()
+        .expect("test chain must include a latest block")
+        .clone();
+    let stored_safe = blocks
+        .iter()
+        .find(|block| block.block_number == stored_safe_block_number)
+        .expect("test chain must include the stored safe block")
+        .clone();
+    for block in blocks.iter().take(stored_safe_block_number as usize) {
+        let state = if block.block_number == stored_safe_block_number {
+            CanonicalityState::Safe
+        } else {
+            CanonicalityState::Canonical
+        };
+        insert_chain_lineage_for_block(database.pool(), chain, block, state).await?;
+    }
+
+    let selected_address = "0x00000000000000000000000000000000000000b2";
+    let sibling_address = "0x00000000000000000000000000000000000000a1";
+    let manifest_id = 10_080;
+    insert_reconcile_watched_manifest_contract(
+        database.pool(),
+        manifest_id,
+        "test",
+        chain,
+        "test_source_family",
+        Uuid::from_u128(10_080),
+        selected_address,
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        Uuid::from_u128(10_081),
+        chain,
+        "contract",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        Uuid::from_u128(10_081),
+        chain,
+        sibling_address,
+        Some(manifest_id),
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        manifest_id,
+        "SiblingContract",
+        Uuid::from_u128(10_081),
+        sibling_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+
+    insert_selected_raw_log_inputs(
+        database.pool(),
+        chain,
+        std::slice::from_ref(&selected_log_block),
+        selected_address,
+        false,
+    )
+    .await?;
+    let selected_topic = format!(
+        "{:#x}",
+        keccak256(b"NewResolver(bytes32,address)")
+    );
+    sqlx::query(
+        r#"
+        UPDATE raw_logs
+        SET topics = ARRAY[$1]::TEXT[]
+        WHERE chain_id = $2
+          AND block_hash = $3
+          AND LOWER(emitting_address) = $4
+        "#,
+    )
+    .bind(&selected_topic)
+    .bind(chain)
+    .bind(&selected_log_block.block_hash)
+    .bind(selected_address)
+    .execute(database.pool())
+    .await?;
+    let transaction_hash = format!("0x{:064x}", selected_log_block.block_number + 10_000);
+    bigname_storage::upsert_raw_logs(
+        database.pool(),
+        &[bigname_storage::RawLog {
+            chain_id: chain.to_owned(),
+            block_hash: selected_log_block.block_hash.clone(),
+            block_number: selected_log_block.block_number,
+            transaction_hash,
+            transaction_index: 0,
+            log_index: 1,
+            emitting_address: sibling_address.to_owned(),
+            topics: vec![
+                "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                    .to_owned(),
+            ],
+            data: vec![2],
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+
+    let family_job_id = insert_completed_backfill_range_coverage_with_source_identity(
+        database.pool(),
+        chain,
+        current.block_number + 1,
+        stored_safe_block_number,
+        json!({"source_identity_hash": "test:family-topic-scan-sibling"}),
+        "family-topic-scan-sibling",
+    )
+    .await?;
+    insert_backfill_coverage_fact_rows(
+        database.pool(),
+        family_job_id,
+        &[family_coverage_fact(
+            "test_source_family",
+            current.block_number + 1,
+            stored_safe_block_number,
+        )],
+    )
+    .await?;
+    insert_chain_checkpoint(
+        database.pool(),
+        &ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    )
+    .await?;
+    let (provider, server) = bundle_provider(vec![latest.clone(), stored_safe.clone()]).await?;
+    let task = IntakeChainTask {
+        chain: chain.to_owned(),
+        addresses: vec![selected_address.to_owned()],
+        manifest_root_entry_count: 0,
+        manifest_contract_entry_count: 2,
+        discovery_edge_entry_count: 0,
+        checkpoint: ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    };
+
+    let (_, outcome) = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: latest,
+            safe: Some(stored_safe),
+            finalized: None,
+        },
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+        &ChainCoverageFrontiers::default(),
+    )
+    .await
+    .expect("an unselected same-transaction sibling must not require a code observation")
+    .expect("selected B and its shared transaction companions must promote");
+    assert_eq!(
+        outcome.canonical_status,
+        CanonicalReconciliationStatus::StoredLineagePromoted
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn reconcile_fetched_heads_event_silent_catchup_promotes_then_live_tip_observes_current_call()
 -> Result<()> {
@@ -1677,7 +2080,7 @@ async fn reconcile_fetched_heads_refuses_watched_tuple_without_coverage_facts() 
     .expect_err("stored lineage promotion must refuse watched tuples without coverage facts");
     assert!(
         format!("{error:#}")
-            .contains("have no single backfill_coverage_facts row containing their required interval"),
+            .contains("do not form gap-free coverage"),
         "unexpected uncovered-tuple refusal error: {error:#}"
     );
     assert!(
@@ -2090,16 +2493,12 @@ async fn reconcile_fetched_heads_refuses_observed_same_height_fork_before_covera
     Ok(())
 }
 
-/// The promoted-target ancestry gate is now the O(1) positional uniqueness
-/// probe (`chain_lineage_contains_canonical_ancestor_position`), not a
-/// parent-hash walk: a stored safe anchor whose parents are unknown no longer
-/// blocks promotion as long as the promoted target is the unique
-/// canonical-marked row at its height (the path itself is already verified
-/// parent-linked from the checkpoint). The conservative same-height-duplicate
-/// refusal of the probe is asserted at storage level in
-/// `chain_lineage_positional_ancestry_matches_recursive_cte_for_unique_heights`.
+/// A stored safe anchor whose parents are unknown must not let a uniquely
+/// canonical-marked stale-fork path promote. The provider's block at the
+/// promoted height disagrees with the stored target here, even though both the
+/// target and the disconnected safe anchor retain canonical markings.
 #[tokio::test]
-async fn reconcile_fetched_heads_promotes_via_positional_ancestry_despite_unlinked_stored_anchor()
+async fn reconcile_fetched_heads_refuses_unlinked_stale_fork_target()
 -> Result<()> {
     let database = TestDatabase::new().await?;
     create_ops_catchup_backfill_job_tables(database.pool()).await?;
@@ -2134,6 +2533,14 @@ async fn reconcile_fetched_heads_promotes_via_positional_ancestry_despite_unlink
         Some(&stored_anchor.block_hash),
         live_latest_block_number,
     );
+    let stored_target = canonical_blocks
+        .last()
+        .expect("test chain must include a promotion target");
+    let provider_target = provider_block(
+        "0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffccc",
+        stored_target.parent_hash.as_deref(),
+        stored_target.block_number,
+    );
     insert_completed_backfill_range_coverage(
         database.pool(),
         chain,
@@ -2151,9 +2558,14 @@ async fn reconcile_fetched_heads_promotes_via_positional_ancestry_despite_unlink
         finalized_block_hash: None,
         finalized_block_number: None,
     };
-    let (provider, server) = bundle_provider(vec![latest.clone(), stored_anchor.clone()]).await?;
+    let (provider, server) = bundle_provider(vec![
+        latest.clone(),
+        stored_anchor.clone(),
+        provider_target,
+    ])
+    .await?;
 
-    let outcome = reconcile_canonical_head(
+    let error = reconcile_canonical_head(
         database.pool(),
         &provider,
         chain,
@@ -2163,20 +2575,12 @@ async fn reconcile_fetched_heads_promotes_via_positional_ancestry_despite_unlink
         std::slice::from_ref(&stored_anchor),
         &ChainCoverageFrontiers::default(),
     )
-    .await?;
-    assert_eq!(
-        outcome.status,
-        CanonicalReconciliationStatus::StoredLineagePromoted
+    .await
+    .expect_err("a provider-disputed stored target must refuse checkpoint promotion");
+    assert!(
+        format!("{error:#}").contains("provider block at the promoted height"),
+        "unexpected stale-fork refusal error: {error:#}"
     );
-    let promoted = outcome
-        .canonical
-        .expect("positional-ancestry promotion must return a checkpoint");
-    assert_eq!(
-        promoted.block_number,
-        current.block_number + crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
-        "promotion must stop at the verified canonical path target, not the unlinked anchor"
-    );
-    assert!(promoted.block_number < stored_anchor.block_number);
 
     server.abort();
     database.cleanup().await?;
@@ -2445,7 +2849,7 @@ async fn reconcile_fetched_heads_multi_family_address_requires_its_own_family_co
     .expect_err("family A's coverage fact must not credit family B's tuple for the same address");
     let rendered = format!("{error:#}");
     assert!(
-        rendered.contains("have no single backfill_coverage_facts row containing their required interval"),
+        rendered.contains("do not form gap-free coverage"),
         "unexpected cross-family refusal error: {rendered}"
     );
     assert!(
@@ -2633,7 +3037,7 @@ async fn reconcile_fetched_heads_refuses_coverage_fact_interval_missing_early_pa
     .expect_err("coverage must not pass before the fact interval starts");
     let rendered = format!("{error:#}");
     assert!(
-        rendered.contains("have no single backfill_coverage_facts row containing their required interval"),
+        rendered.contains("do not form gap-free coverage"),
         "unexpected interval-miss refusal error: {rendered}"
     );
     assert!(
@@ -2877,7 +3281,7 @@ async fn reconcile_fetched_heads_refuses_incomplete_backfill_crash_residue_witho
     .expect_err("stored lineage promotion must refuse incomplete crash-residue ranges");
     assert!(
         format!("{error:#}")
-            .contains("have no single backfill_coverage_facts row containing their required interval"),
+            .contains("do not form gap-free coverage"),
         "unexpected incomplete-range refusal error: {error:#}"
     );
     assert!(
@@ -3088,11 +3492,12 @@ async fn reconcile_fetched_heads_family_scope_fact_credits_all_addresses_of_that
     Ok(())
 }
 
-/// Coverage credit is single-fact containment: a required interval split
-/// across two adjacent fact rows does NOT credit the tuple (the cross-fact
-/// union is deliberately not computed). One containing fact promotes.
+/// The default ops-catchup shape completes one 32-block job at a time. Its
+/// independently persisted facts must form one gap-free coverage interval
+/// across a full 1,024-block stored-lineage promotion slice.
 #[tokio::test]
-async fn reconcile_fetched_heads_refuses_coverage_split_across_adjacent_facts() -> Result<()> {
+async fn reconcile_fetched_heads_promotes_coverage_spanning_default_ops_catchup_facts()
+-> Result<()> {
     let database = TestDatabase::new().await?;
     create_ops_catchup_backfill_job_tables(database.pool()).await?;
     let chain = "base-mainnet";
@@ -3135,23 +3540,32 @@ async fn reconcile_fetched_heads_refuses_coverage_split_across_adjacent_facts() 
         };
         insert_chain_lineage_for_block(database.pool(), chain, block, state).await?;
     }
-    let split_block_number = current.block_number + 500;
-    insert_completed_backfill_range_coverage(
-        database.pool(),
-        chain,
-        current.block_number + 1,
-        split_block_number,
-        &[selected_address],
-    )
-    .await?;
-    insert_completed_backfill_range_coverage(
-        database.pool(),
-        chain,
-        split_block_number + 1,
-        stored_safe_block_number,
-        &[selected_address],
-    )
-    .await?;
+    let promotion_through =
+        current.block_number + crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS;
+    let ops_chunk = crate::ops_catchup::DEFAULT_OPS_CATCHUP_CHUNK_BLOCKS;
+    assert_eq!(ops_chunk, 32, "regression must model the shipped ops-catchup default");
+    assert_eq!(
+        (promotion_through - current.block_number) / ops_chunk,
+        32,
+        "one promotion slice must span 32 default ops-catchup jobs"
+    );
+    let omitted_fact_from = current.block_number + ops_chunk * 10 + 1;
+    let omitted_fact_through = omitted_fact_from + ops_chunk - 1;
+    let mut fact_from = current.block_number + 1;
+    while fact_from <= promotion_through {
+        let fact_through = (fact_from + ops_chunk - 1).min(promotion_through);
+        if fact_from != omitted_fact_from {
+            insert_completed_backfill_range_coverage(
+                database.pool(),
+                chain,
+                fact_from,
+                fact_through,
+                &[selected_address],
+            )
+            .await?;
+        }
+        fact_from = fact_through + 1;
+    }
     insert_chain_checkpoint(
         database.pool(),
         &ChainCheckpoint {
@@ -3198,22 +3612,21 @@ async fn reconcile_fetched_heads_refuses_coverage_split_across_adjacent_facts() 
         &ChainCoverageFrontiers::default(),
     )
     .await
-    .expect_err("adjacent facts must not be unioned into coverage credit");
+    .expect_err("one missing ops-catchup fact must leave a promotion coverage gap");
     assert!(
-        format!("{error:#}")
-            .contains("have no single backfill_coverage_facts row containing their required interval"),
-        "unexpected split-fact refusal error: {error:#}"
+        format!("{error:#}").contains("do not form gap-free coverage"),
+        "unexpected fragmented-coverage refusal: {error:#}"
     );
 
-    // One fact containing the whole required interval credits the tuple.
     insert_completed_backfill_range_coverage(
         database.pool(),
         chain,
-        current.block_number + 1,
-        stored_safe_block_number,
+        omitted_fact_from,
+        omitted_fact_through,
         &[selected_address],
     )
     .await?;
+
     let (task, outcome) = reconcile_fetched_heads_with_adapter_sync(
         database.pool(),
         &task,
@@ -3229,7 +3642,7 @@ async fn reconcile_fetched_heads_refuses_coverage_split_across_adjacent_facts() 
         &ChainCoverageFrontiers::default(),
     )
     .await
-    .expect("a single containing fact must prove the stored lineage path")
+    .expect("contiguous default ops-catchup facts must prove the stored lineage path")
     .expect("stored lineage promotion must advance the checkpoint");
     assert_eq!(
         outcome.canonical_status,
@@ -3237,7 +3650,7 @@ async fn reconcile_fetched_heads_refuses_coverage_split_across_adjacent_facts() 
     );
     assert_eq!(
         task.checkpoint.canonical_block_number,
-        Some(current.block_number + crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS)
+        Some(promotion_through)
     );
 
     server.abort();
@@ -3402,7 +3815,7 @@ async fn reconcile_fetched_heads_verified_frontier_extends_incrementally_across_
     .expect_err("the slice with a coverage hole must refuse promotion");
     let rendered = format!("{error:#}");
     assert!(
-        rendered.contains("have no single backfill_coverage_facts row containing their required interval"),
+        rendered.contains("do not form gap-free coverage"),
         "unexpected frontier-hole refusal error: {rendered}"
     );
     assert!(
@@ -3848,10 +4261,10 @@ async fn chain_lineage_positional_ancestry_matches_recursive_cte_for_unique_heig
 }
 
 /// A completed topic-filtered job whose persisted topic0 set no longer equals
-/// the current manifest ABI set poisons the range: facts may overclaim, so
-/// promotion refuses even though fact coverage is complete.
+/// the current manifest ABI still refuses when its fact is needed solely by a
+/// retired tuple's closed historical interval.
 #[tokio::test]
-async fn reconcile_fetched_heads_refuses_promotion_on_manifest_topic_set_drift() -> Result<()> {
+async fn reconcile_fetched_heads_refuses_topic_drift_for_retired_historical_tuple() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_ops_catchup_backfill_job_tables(database.pool()).await?;
     let chain = "base-mainnet";
@@ -3894,17 +4307,26 @@ async fn reconcile_fetched_heads_refuses_promotion_on_manifest_topic_set_drift()
         };
         insert_chain_lineage_for_block(database.pool(), chain, block, state).await?;
     }
-    insert_completed_backfill_range_coverage(
-        database.pool(),
-        chain,
-        current.block_number + 1,
-        stored_safe_block_number,
-        &[selected_address],
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET active_to_block_number = $1,
+            deactivated_at = now()
+        WHERE chain_id = $2
+          AND LOWER(address) = $3
+        "#,
     )
-    .await?;
+    .bind(stored_safe_block_number)
+    .bind(chain)
+    .bind(selected_address)
+    .execute(database.pool())
+    .await
+    .context("failed to retire the historical topic-drift tuple")?;
     // A completed Coinbase-SQL job intersecting the range persisted a topic0
-    // set that no longer matches the current manifest ABI.
-    insert_completed_backfill_range_coverage_with_source_identity(
+    // set that no longer matches the current manifest ABI. Its own fact is
+    // the only evidence covering the watched tuple, so promotion relies on
+    // stale topic-filtered coverage and must refuse.
+    let drifted_job_id = insert_completed_backfill_range_coverage_with_source_identity(
         database.pool(),
         chain,
         current.block_number + 10,
@@ -3920,6 +4342,17 @@ async fn reconcile_fetched_heads_refuses_promotion_on_manifest_topic_set_drift()
             }
         }),
         "drifted-topic-plan",
+    )
+    .await?;
+    insert_backfill_coverage_fact_rows(
+        database.pool(),
+        drifted_job_id,
+        &[address_coverage_fact(
+            "test_source_family",
+            selected_address,
+            current.block_number + 1,
+            stored_safe_block_number,
+        )],
     )
     .await?;
     insert_chain_checkpoint(
@@ -3972,6 +4405,204 @@ async fn reconcile_fetched_heads_refuses_promotion_on_manifest_topic_set_drift()
     assert!(
         format!("{error:#}").contains("manifest ABI topic0 set changed after completed backfill job"),
         "unexpected topic-drift refusal error: {error:#}"
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// A stale topic-filtered job is retained for audit, but the gap-free union of
+/// later reruns whose persisted topics equal the current manifest ABI replaces
+/// its coverage. The stale job must not poison promotion forever.
+#[tokio::test]
+async fn reconcile_fetched_heads_promotes_after_current_topic_rerun_replaces_stale_coverage()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let chain = "base-mainnet";
+    let selected_address = "0x0000000000000000000000000000000000000001";
+    insert_reconcile_watched_manifest_contract(
+        database.pool(),
+        10_077,
+        "test",
+        chain,
+        "test_source_family",
+        Uuid::from_u128(10_077),
+        selected_address,
+    )
+    .await?;
+
+    let stored_safe_block_number = crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS + 3;
+    let live_latest_block_number = stored_safe_block_number + 17;
+    let blocks = linear_provider_blocks(live_latest_block_number);
+    let current = blocks
+        .first()
+        .expect("test chain must include a current block")
+        .clone();
+    let latest = blocks
+        .last()
+        .expect("test chain must include a latest block")
+        .clone();
+    let stored_safe = blocks
+        .iter()
+        .find(|block| block.block_number == stored_safe_block_number)
+        .expect("test chain must include the stored safe block")
+        .clone();
+    for block in &blocks {
+        if block.block_number > stored_safe_block_number {
+            continue;
+        }
+        let state = if block.block_number == stored_safe_block_number {
+            CanonicalityState::Safe
+        } else {
+            CanonicalityState::Canonical
+        };
+        insert_chain_lineage_for_block(database.pool(), chain, block, state).await?;
+    }
+
+    let covered_from = current.block_number + 1;
+    let stale_job_id = insert_completed_backfill_range_coverage_with_source_identity(
+        database.pool(),
+        chain,
+        covered_from,
+        stored_safe_block_number,
+        json!({
+            "source_identity_hash": "test:stale-topic-coverage",
+            "coinbase_sql_topic_plan": {
+                "topic0s_by_source_family": {
+                    "test_source_family": [
+                        "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                    ]
+                }
+            }
+        }),
+        "stale-topic-coverage",
+    )
+    .await?;
+    insert_backfill_coverage_fact_rows(
+        database.pool(),
+        stale_job_id,
+        &[address_coverage_fact(
+            "test_source_family",
+            selected_address,
+            covered_from,
+            stored_safe_block_number,
+        )],
+    )
+    .await?;
+
+    let current_topic0s = TEST_MANIFEST_EVENT_SIGNATURES
+        .iter()
+        .map(|signature| format!("{:#x}", keccak256(signature.as_bytes())))
+        .collect::<Vec<_>>();
+    let replacement_split = covered_from + 500;
+    let first_replacement_job_id = insert_completed_backfill_range_coverage_with_source_identity(
+        database.pool(),
+        chain,
+        covered_from,
+        replacement_split,
+        json!({
+            "source_identity_hash": "test:current-topic-replacement-first",
+            "coinbase_sql_topic_plan": {
+                "topic0s_by_source_family": {
+                    "test_source_family": current_topic0s.clone()
+                }
+            }
+        }),
+        "current-topic-replacement-first",
+    )
+    .await?;
+    insert_backfill_coverage_fact_rows(
+        database.pool(),
+        first_replacement_job_id,
+        &[address_coverage_fact(
+            "test_source_family",
+            selected_address,
+            covered_from,
+            replacement_split,
+        )],
+    )
+    .await?;
+    let second_replacement_job_id = insert_completed_backfill_range_coverage_with_source_identity(
+        database.pool(),
+        chain,
+        replacement_split + 1,
+        stored_safe_block_number,
+        json!({
+            "source_identity_hash": "test:current-topic-replacement-second",
+            "coinbase_sql_topic_plan": {
+                "topic0s_by_source_family": {
+                    "test_source_family": current_topic0s
+                }
+            }
+        }),
+        "current-topic-replacement-second",
+    )
+    .await?;
+    insert_backfill_coverage_fact_rows(
+        database.pool(),
+        second_replacement_job_id,
+        &[address_coverage_fact(
+            "test_source_family",
+            selected_address,
+            replacement_split + 1,
+            stored_safe_block_number,
+        )],
+    )
+    .await?;
+
+    insert_chain_checkpoint(
+        database.pool(),
+        &ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    )
+    .await?;
+    let (provider, server) = bundle_provider(vec![latest.clone(), stored_safe.clone()]).await?;
+    let task = IntakeChainTask {
+        chain: chain.to_owned(),
+        addresses: vec![selected_address.to_owned()],
+        manifest_root_entry_count: 0,
+        manifest_contract_entry_count: 1,
+        discovery_edge_entry_count: 0,
+        checkpoint: ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    };
+
+    let (_, outcome) = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: latest,
+            safe: Some(stored_safe),
+            finalized: None,
+        },
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+        &ChainCoverageFrontiers::default(),
+    )
+    .await
+    .expect("a complete current-topic replacement must supersede stale coverage")
+    .expect("stored-lineage promotion must advance the checkpoint");
+    assert_eq!(
+        outcome.canonical_status,
+        CanonicalReconciliationStatus::StoredLineagePromoted
     );
 
     server.abort();
@@ -4185,9 +4816,229 @@ async fn reconcile_fetched_heads_refuses_uncovered_tuple_admitted_behind_the_fro
     .expect_err("the admitted tuple has no coverage facts and must refuse promotion");
     let rendered = format!("{error:#}");
     assert!(
-        rendered.contains("have no single backfill_coverage_facts row containing their required interval")
+        rendered.contains("do not form gap-free coverage")
             && rendered.contains(late_address),
         "refusal must name the admitted uncovered tuple: {rendered}"
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// A discovery admission may carry a known start before the checkpoint that
+/// was already advanced under an older watch set. Coverage only after that
+/// checkpoint must not let the next stored-lineage promotion skip the newly
+/// required earlier interval.
+#[tokio::test]
+async fn reconcile_fetched_heads_refuses_retroactive_admission_covered_only_after_checkpoint()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let chain = "base-mainnet";
+    let coverage_frontiers = ChainCoverageFrontiers::default();
+    let late_address = "0x0000000000000000000000000000000000000006";
+    let late_active_from = 100;
+    let (task, heads, provider, server) =
+        promote_one_covered_slice(&database, chain, &coverage_frontiers).await?;
+    let advanced_checkpoint = task
+        .checkpoint
+        .canonical_block_number
+        .expect("first promotion must advance the canonical checkpoint");
+    assert!(late_active_from < advanced_checkpoint);
+    admit_resolver_edge_observation(database.pool(), chain, late_address, late_active_from)
+        .await?;
+
+    let stored_anchor = heads
+        .safe
+        .as_ref()
+        .expect("promotion fixture must carry a stored safe anchor")
+        .block_number;
+    insert_completed_backfill_range_coverage(
+        database.pool(),
+        chain,
+        advanced_checkpoint + 1,
+        stored_anchor,
+        &[late_address],
+    )
+    .await?;
+
+    let error = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &heads,
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+        &coverage_frontiers,
+    )
+    .await
+    .expect_err("coverage after the checkpoint must not credit a retroactive admission");
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.contains("do not form gap-free coverage")
+            && rendered.contains(late_address)
+            && rendered.contains("blocks 100..="),
+        "retroactive admission refusal must name its uncovered earlier interval: {rendered}"
+    );
+
+    insert_completed_backfill_range_coverage(
+        database.pool(),
+        chain,
+        late_active_from,
+        advanced_checkpoint,
+        &[late_address],
+    )
+    .await?;
+    let (task, outcome) = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &heads,
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+        &coverage_frontiers,
+    )
+    .await
+    .expect("repairing the retroactive interval must restore promotion")
+    .expect("the repaired stored-lineage slice must advance the checkpoint");
+    assert_eq!(
+        outcome.canonical_status,
+        CanonicalReconciliationStatus::StoredLineagePromoted
+    );
+    assert_eq!(task.checkpoint.canonical_block_number, Some(2049));
+
+    // The successful epoch recheck memoizes the widened interval through the
+    // stored anchor. A later promotion step using the same frontier proceeds
+    // without turning the historical recheck into a per-poll scan.
+    let (task, outcome) = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &heads,
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+        &coverage_frontiers,
+    )
+    .await
+    .expect("a verified retroactive interval must remain memoized")
+    .expect("the next stored-lineage slice must advance the checkpoint");
+    assert_eq!(
+        outcome.canonical_status,
+        CanonicalReconciliationStatus::StoredLineagePromoted
+    );
+    assert_eq!(task.checkpoint.canonical_block_number, Some(3073));
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// The admission epoch is a commit fence, not just a memo key. A discovery
+/// transaction that grows the watch set after stored-lineage promotion has
+/// locked the epoch row cannot commit until the verified checkpoint advance
+/// completes. The next promotion observes the bumped epoch and refuses the
+/// newly admitted uncovered tuple.
+#[tokio::test]
+async fn reconcile_fetched_heads_fences_admission_epoch_through_checkpoint_advance()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let chain = "epoch-fence-testnet";
+    let chunk = crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS;
+    let coverage_frontiers = Arc::new(ChainCoverageFrontiers::default());
+    let late_address = "0x0000000000000000000000000000000000000005";
+    let late_active_from = chunk + 100;
+    let (task, heads, provider, server) =
+        promote_one_covered_slice(&database, chain, &coverage_frontiers).await?;
+
+    let hook = ChainCoverageFrontiers::install_admission_epoch_fence_test_hook(chain);
+    let reconcile_pool = database.pool().clone();
+    let reconcile_task = task.clone();
+    let reconcile_heads = heads.clone();
+    let reconcile_provider = provider.clone();
+    let reconcile_frontiers = coverage_frontiers.clone();
+    let reconcile = tokio::spawn(async move {
+        reconcile_fetched_heads_with_adapter_sync(
+            &reconcile_pool,
+            &reconcile_task,
+            &reconcile_provider,
+            &reconcile_heads,
+            false,
+            HeaderAuditMode::Minimal,
+            &[],
+            &reconcile_frontiers,
+        )
+        .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        hook.wait_until_acquired(),
+    )
+    .await
+    .context("stored-lineage promotion did not acquire the admission-epoch fence")?;
+
+    // Use a separate pool so the admission transaction reaches the locked
+    // epoch row instead of merely waiting for one of the reconciliation
+    // pool's two connections.
+    let admission_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with((*database.pool().connect_options()).clone())
+        .await
+        .context("failed to connect the concurrent admission test pool")?;
+    let admission_chain = chain.to_owned();
+    let admission_address = late_address.to_owned();
+    let mut admission = tokio::spawn(async move {
+        admit_resolver_edge_observation(
+            &admission_pool,
+            &admission_chain,
+            &admission_address,
+            late_active_from,
+        )
+        .await
+    });
+    let admission_was_blocked =
+        tokio::time::timeout(std::time::Duration::from_millis(250), &mut admission)
+            .await
+            .is_err();
+    hook.resume();
+    assert!(
+        admission_was_blocked,
+        "watch-set admission must not commit while the verified epoch is fenced"
+    );
+    let (task, outcome) = reconcile
+        .await
+        .context("stored-lineage reconciliation task panicked")??
+        .expect("the epoch-fenced covered slice must promote");
+    assert_eq!(
+        outcome.canonical_status,
+        CanonicalReconciliationStatus::StoredLineagePromoted
+    );
+    assert_eq!(task.checkpoint.canonical_block_number, Some(chunk * 2 + 1));
+    admission
+        .await
+        .context("concurrent admission task panicked")??;
+
+    let error = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &heads,
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+        &coverage_frontiers,
+    )
+    .await
+    .expect_err("the next promotion must reverify and refuse the admitted uncovered tuple");
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.contains("do not form gap-free coverage")
+            && rendered.contains(late_address),
+        "post-fence refusal must name the newly admitted uncovered tuple: {rendered}"
     );
 
     server.abort();
@@ -4314,7 +5165,7 @@ async fn reconcile_fetched_heads_manifest_abi_change_invalidates_the_frontier_me
     .expect_err("the fingerprint reset must surface the uncovered admitted tuple");
     let rendered = format!("{error:#}");
     assert!(
-        rendered.contains("have no single backfill_coverage_facts row containing their required interval")
+        rendered.contains("do not form gap-free coverage")
             && rendered.contains(late_address),
         "fingerprint-driven re-verification must name the uncovered tuple: {rendered}"
     );
@@ -4377,17 +5228,18 @@ async fn reconcile_fetched_heads_topic_drift_above_target_does_not_block_covered
         database.pool(),
         chain,
         current.block_number + 1,
-        stored_safe_block_number,
+        current.block_number + chunk,
         &[selected_address],
     )
     .await?;
-    // The drifted topic-plan job intersects only blocks ABOVE the first
-    // promotion target (current + chunk) but below the anchor.
-    insert_completed_backfill_range_coverage_with_source_identity(
+    // The stale job's own fact covers the next slice above the first
+    // promotion target. It is therefore irrelevant to the covered prefix but
+    // becomes relied-upon evidence once the crawl reaches that slice.
+    let drifted_job_id = insert_completed_backfill_range_coverage_with_source_identity(
         database.pool(),
         chain,
-        current.block_number + chunk + 50,
-        current.block_number + chunk + 60,
+        current.block_number + chunk + 1,
+        stored_safe_block_number,
         json!({
             "source_identity_hash": "test:drifted-above-target",
             "coinbase_sql_topic_plan": {
@@ -4399,6 +5251,17 @@ async fn reconcile_fetched_heads_topic_drift_above_target_does_not_block_covered
             }
         }),
         "drifted-above-target",
+    )
+    .await?;
+    insert_backfill_coverage_fact_rows(
+        database.pool(),
+        drifted_job_id,
+        &[address_coverage_fact(
+            "test_source_family",
+            selected_address,
+            current.block_number + chunk + 1,
+            stored_safe_block_number,
+        )],
     )
     .await?;
     insert_chain_checkpoint(
@@ -4696,7 +5559,7 @@ async fn manifest_growth_promotion_scenario(covered: bool) -> Result<()> {
         let rendered = format!("{error:#}");
         assert!(
             rendered
-                .contains("have no single backfill_coverage_facts row containing their required interval")
+                .contains("do not form gap-free coverage")
                 && rendered.contains(late_address),
             "refusal must name the manifest-grown uncovered tuple: {rendered}"
         );
@@ -4718,12 +5581,12 @@ async fn reconcile_fetched_heads_promotes_family_covered_tuple_grown_by_manifest
     manifest_growth_promotion_scenario(true).await
 }
 
-/// Scale guard for the coverage anti-join: 100k watched tuples with matching
-/// facts must verify clean, and the per-tuple containment probe must be
+/// Scale guard for the coverage query: 100k watched tuples with matching
+/// facts must verify clean, and the per-tuple fact probe must be
 /// index-backed (no sequential scan over backfill_coverage_facts).
 #[tokio::test]
 #[ignore = "scale guard; run explicitly"]
-async fn coverage_fact_anti_join_scale_guard() -> Result<()> {
+async fn coverage_fact_union_scale_guard() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_ops_catchup_backfill_job_tables(database.pool()).await?;
     let chain = "base-mainnet";

@@ -46,6 +46,8 @@ pub(super) fn surface_binding_active_to_merge_sql(
     format!(
         r#"
         CASE
+            WHEN {existing_table}.canonicality_state = 'orphaned'::canonicality_state THEN
+                {incoming_table}.active_to
             WHEN {existing_table}.active_to IS NOT NULL
              AND {incoming_table}.active_to IS NOT NULL THEN
                 LEAST({existing_table}.active_to, {incoming_table}.active_to)

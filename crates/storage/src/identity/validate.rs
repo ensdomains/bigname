@@ -247,14 +247,15 @@ pub(super) fn ensure_surface_binding_identity_matches(
     existing: &SurfaceBinding,
     incoming: &SurfaceBinding,
 ) -> Result<()> {
+    let anchor_matches = existing.chain_id == incoming.chain_id
+        && existing.block_hash == incoming.block_hash
+        && existing.block_number == incoming.block_number;
     if existing.logical_name_id != incoming.logical_name_id
         || existing.resource_id != incoming.resource_id
         || existing.binding_kind != incoming.binding_kind
         || existing.active_from != incoming.active_from
-        || existing.chain_id != incoming.chain_id
-        || existing.block_hash != incoming.block_hash
-        || existing.block_number != incoming.block_number
         || existing.provenance != incoming.provenance
+        || (!anchor_matches && existing.canonicality_state != crate::CanonicalityState::Orphaned)
     {
         bail!(
             "surface binding identity mismatch for {}",
@@ -263,4 +264,49 @@ pub(super) fn ensure_surface_binding_identity_matches(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use sqlx::types::{Uuid, time::OffsetDateTime};
+
+    use super::*;
+    use crate::CanonicalityState;
+
+    #[test]
+    fn orphaned_surface_binding_accepts_replacement_observation_anchor() {
+        let existing = binding(CanonicalityState::Orphaned, "0xlosing");
+        let incoming = binding(CanonicalityState::Finalized, "0xwinning");
+
+        ensure_surface_binding_identity_matches(&existing, &incoming)
+            .expect("an orphaned binding may refresh only its observation anchor");
+    }
+
+    #[test]
+    fn readable_surface_binding_rejects_replacement_observation_anchor() {
+        let existing = binding(CanonicalityState::Finalized, "0xstored");
+        let incoming = binding(CanonicalityState::Finalized, "0xdifferent");
+
+        let error = ensure_surface_binding_identity_matches(&existing, &incoming)
+            .expect_err("a readable binding must retain its original observation anchor");
+        assert!(error.to_string().contains("identity mismatch"));
+    }
+
+    fn binding(canonicality_state: CanonicalityState, block_hash: &str) -> SurfaceBinding {
+        SurfaceBinding {
+            surface_binding_id: Uuid::from_u128(1),
+            logical_name_id: "ens:alice.eth".to_owned(),
+            resource_id: Uuid::from_u128(2),
+            binding_kind: super::super::types::SurfaceBindingKind::DeclaredRegistryPath,
+            active_from: OffsetDateTime::from_unix_timestamp(1_717_172_700)
+                .expect("test timestamp should fit"),
+            active_to: None,
+            chain_id: "ethereum-sepolia".to_owned(),
+            block_hash: block_hash.to_owned(),
+            block_number: 10,
+            provenance: json!({"source": "same-stable-binding"}),
+            canonicality_state,
+        }
+    }
 }

@@ -494,7 +494,14 @@ async fn missing_projection_index_count(pool: &PgPool) -> Result<i64> {
     let query = format!(
         "SELECT COUNT(*)::bigint \
          FROM (VALUES {required_indexes}) AS required(index_name) \
-         WHERE to_regclass(required.index_name) IS NULL"
+         WHERE NOT EXISTS ( \
+             SELECT 1 \
+             FROM pg_index AS index \
+             WHERE index.indexrelid = to_regclass(required.index_name) \
+               AND index.indrelid = 'normalized_events'::regclass \
+               AND index.indisvalid \
+               AND index.indisready \
+         )"
     );
 
     sqlx::query_scalar::<_, i64>(&query)

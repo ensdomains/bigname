@@ -1314,6 +1314,118 @@ async fn derives_record_inventory_cross_resource_invalidations_for_logical_name_
 }
 
 #[tokio::test]
+async fn ensv2_registry_resolver_changes_invalidate_current_and_successor_record_inventory()
+-> Result<()> {
+    let database = test_database().await?;
+    let resolver_resource_id = Uuid::new_v4();
+    let successor_resource_id = Uuid::new_v4();
+    let observed_at = timestamp(1_800_001_000);
+
+    insert_resource(&database, resolver_resource_id).await?;
+    insert_resource(&database, successor_resource_id).await?;
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:ensv2-successor-record",
+            namespace: "ens",
+            logical_name_id: Some("ens:resolver-switch.eth"),
+            resource_id: Some(successor_resource_id),
+            event_kind: "RecordChanged",
+            source_family: "ens_v2_resolver_l1",
+            derivation_kind: "ens_v2_resolver",
+            chain_id: Some("ethereum-sepolia"),
+            block_number: Some(22),
+            block_hash: Some("0xensv2switch22"),
+            before_state: json!({}),
+            after_state: json!({
+                "record_key": "text:avatar",
+                "record_family": "text",
+                "selector_key": "avatar"
+            }),
+            observed_at,
+        },
+    )
+    .await?;
+    derive_normalized_event_invalidations(database.pool(), 100).await?;
+    sqlx::query("DELETE FROM projection_invalidations")
+        .execute(database.pool())
+        .await
+        .context("failed to clear successor setup invalidation")?;
+
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:ensv2-registry-resolver-switch",
+            namespace: "ens",
+            logical_name_id: Some("ens:resolver-switch.eth"),
+            resource_id: Some(resolver_resource_id),
+            event_kind: "ResolverChanged",
+            source_family: "ens_v2_registry_l1",
+            derivation_kind: "ens_v2_registry_resource_surface",
+            chain_id: Some("ethereum-sepolia"),
+            block_number: Some(21),
+            block_hash: Some("0xensv2switch21"),
+            before_state: json!({
+                "resolver": "0x0000000000000000000000000000000000000200"
+            }),
+            after_state: json!({
+                "resolver": "0x0000000000000000000000000000000000000201"
+            }),
+            observed_at,
+        },
+    )
+    .await?;
+
+    let summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
+    assert_eq!(summary.scanned_event_count, 1);
+    let invalidations = load_invalidations(&database).await?;
+    assert!(has_key(
+        &invalidations,
+        "record_inventory_current",
+        &resolver_resource_id.to_string()
+    ));
+    assert!(has_key(
+        &invalidations,
+        "record_inventory_current",
+        &successor_resource_id.to_string()
+    ));
+
+    sqlx::query("DELETE FROM projection_invalidations")
+        .execute(database.pool())
+        .await
+        .context("failed to clear ENSv2 resolver-switch invalidations")?;
+    sqlx::query(
+        r#"
+        UPDATE normalized_events
+        SET canonicality_state = 'orphaned'::canonicality_state,
+            observed_at = $2
+        WHERE event_identity = $1
+        "#,
+    )
+    .bind("projection-apply:ensv2-registry-resolver-switch")
+    .bind(timestamp(1_800_001_100))
+    .execute(database.pool())
+    .await
+    .context("failed to orphan ENSv2 registry resolver switch")?;
+
+    let summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
+    assert_eq!(summary.scanned_event_count, 1);
+    let invalidations = load_invalidations(&database).await?;
+    assert!(has_key(
+        &invalidations,
+        "record_inventory_current",
+        &resolver_resource_id.to_string()
+    ));
+    assert!(has_key(
+        &invalidations,
+        "record_inventory_current",
+        &successor_resource_id.to_string()
+    ));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn primary_hydration_blocking_work_ignores_unrelated_retry_delayed_failures() -> Result<()> {
     let database = test_database().await?;
 

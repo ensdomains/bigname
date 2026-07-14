@@ -3,10 +3,20 @@ use sqlx::{Postgres, QueryBuilder, types::Uuid};
 
 use crate::CONTRACT_KIND_CONTRACT;
 
-use super::super::types::ReconciledDiscoveryEdgeSpec;
+use super::super::types::{ObservationTerminalState, ReconciledDiscoveryEdgeSpec};
 
 const CONTRACT_INSTANCE_SEED_BATCH_SIZE: usize = 1000;
 const DISCOVERY_EDGE_INSERT_BATCH_SIZE: usize = 1000;
+
+pub(super) struct DiscoveryEdgeInsertSummary {
+    pub(super) inserted_count: usize,
+    pub(super) reactivated_count: usize,
+}
+
+pub(super) struct HistoricalDiscoveryEdgeSummary {
+    pub(super) inserted_count: usize,
+    pub(super) updated_count: usize,
+}
 
 #[derive(Clone, Debug)]
 pub(super) struct PendingContractInstanceSeed {
@@ -89,12 +99,70 @@ pub(super) async fn insert_pending_contract_instance_seeds(
 pub(super) async fn insert_reconciled_discovery_edges(
     executor: &mut sqlx::postgres::PgConnection,
     edges: &[&ReconciledDiscoveryEdgeSpec],
-) -> Result<usize> {
+) -> Result<DiscoveryEdgeInsertSummary> {
     if edges.is_empty() {
-        return Ok(0);
+        return Ok(DiscoveryEdgeInsertSummary {
+            inserted_count: 0,
+            reactivated_count: 0,
+        });
     }
 
-    for chunk in edges.chunks(DISCOVERY_EDGE_INSERT_BATCH_SIZE) {
+    let mut edges_to_insert = Vec::new();
+    let mut reactivated_count = 0;
+    for edge in edges {
+        let reactivated = sqlx::query_scalar::<_, i64>(
+            r#"
+            UPDATE discovery_edges
+            SET active_to_block_number = NULL,
+                active_to_block_hash = NULL,
+                deactivated_at = NULL
+            WHERE discovery_edge_id = (
+                SELECT discovery_edge_id
+                FROM discovery_edges
+                WHERE chain_id = $1
+                  AND edge_kind = $2
+                  AND from_contract_instance_id = $3
+                  AND to_contract_instance_id = $4
+                  AND discovery_source = $5
+                  AND source_manifest_id IS NOT DISTINCT FROM $6
+                  AND admission = $7
+                  AND active_from_block_number IS NOT DISTINCT FROM $8
+                  AND active_from_block_hash IS NOT DISTINCT FROM $9
+                  AND provenance = $10::JSONB
+                  AND deactivated_at IS NOT NULL
+                ORDER BY discovery_edge_id DESC
+                LIMIT 1
+                FOR UPDATE
+            )
+            RETURNING discovery_edge_id
+            "#,
+        )
+        .bind(&edge.chain)
+        .bind(&edge.edge_kind)
+        .bind(edge.from_contract_instance_id)
+        .bind(edge.to_contract_instance_id)
+        .bind(&edge.discovery_source)
+        .bind(edge.source_manifest_id)
+        .bind(&edge.admission)
+        .bind(edge.active_from_block_number)
+        .bind(edge.active_from_block_hash.as_deref())
+        .bind(&edge.provenance_json)
+        .fetch_optional(&mut *executor)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to reactivate reconciled discovery edge {} {} -> {}",
+                edge.edge_kind, edge.from_contract_instance_id, edge.to_contract_instance_id
+            )
+        })?;
+        if reactivated.is_some() {
+            reactivated_count += 1;
+        } else {
+            edges_to_insert.push(*edge);
+        }
+    }
+
+    for chunk in edges_to_insert.chunks(DISCOVERY_EDGE_INSERT_BATCH_SIZE) {
         let provenance_values = chunk
             .iter()
             .map(|edge| {
@@ -148,7 +216,166 @@ pub(super) async fn insert_reconciled_discovery_edges(
             .context("failed to bulk insert reconciled discovery edges")?;
     }
 
-    Ok(edges.len())
+    Ok(DiscoveryEdgeInsertSummary {
+        inserted_count: edges_to_insert.len(),
+        reactivated_count,
+    })
+}
+
+pub(super) async fn reconcile_historical_discovery_edges(
+    executor: &mut sqlx::postgres::PgConnection,
+    edges: &[(&ReconciledDiscoveryEdgeSpec, ObservationTerminalState)],
+) -> Result<HistoricalDiscoveryEdgeSummary> {
+    let mut inserted_count = 0;
+    let mut updated_count = 0;
+    for (edge, terminal_state) in edges {
+        let updated = sqlx::query_scalar::<_, i64>(
+            r#"
+            UPDATE discovery_edges
+            SET active_to_block_number = $11,
+                active_to_block_hash = $12,
+                deactivated_at = COALESCE(deactivated_at, now())
+            WHERE chain_id = $1
+              AND edge_kind = $2
+              AND from_contract_instance_id = $3
+              AND to_contract_instance_id = $4
+              AND discovery_source = $5
+              AND source_manifest_id IS NOT DISTINCT FROM $6
+              AND admission = $7
+              AND active_from_block_number IS NOT DISTINCT FROM $8
+              AND active_from_block_hash IS NOT DISTINCT FROM $9
+              AND provenance = $10::JSONB
+              AND (
+                  deactivated_at IS NULL
+                  OR active_to_block_number IS NULL
+                  OR active_to_block_number > $11
+              )
+            RETURNING discovery_edge_id
+            "#,
+        )
+        .bind(&edge.chain)
+        .bind(&edge.edge_kind)
+        .bind(edge.from_contract_instance_id)
+        .bind(edge.to_contract_instance_id)
+        .bind(&edge.discovery_source)
+        .bind(edge.source_manifest_id)
+        .bind(&edge.admission)
+        .bind(edge.active_from_block_number)
+        .bind(edge.active_from_block_hash.as_deref())
+        .bind(&edge.provenance_json)
+        .bind(terminal_state.block_number)
+        .bind(terminal_state.block_hash.as_deref())
+        .fetch_all(&mut *executor)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to close historical reconciled discovery edge {} {} -> {}",
+                edge.edge_kind, edge.from_contract_instance_id, edge.to_contract_instance_id
+            )
+        })?;
+        updated_count += updated.len();
+
+        let inserted = if updated.is_empty() {
+            sqlx::query_scalar::<_, i64>(
+                r#"
+            INSERT INTO discovery_edges (
+                chain_id,
+                edge_kind,
+                from_contract_instance_id,
+                to_contract_instance_id,
+                discovery_source,
+                source_manifest_id,
+                admission,
+                active_from_block_number,
+                active_from_block_hash,
+                active_to_block_number,
+                active_to_block_hash,
+                deactivated_at,
+                provenance
+            )
+            SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $11, $12, now(), $10::JSONB
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM discovery_edges
+                WHERE chain_id = $1
+                  AND edge_kind = $2
+                  AND from_contract_instance_id = $3
+                  AND to_contract_instance_id = $4
+                  AND discovery_source = $5
+                  AND source_manifest_id IS NOT DISTINCT FROM $6
+                  AND admission = $7
+                  AND active_from_block_number IS NOT DISTINCT FROM $8
+                  AND active_from_block_hash IS NOT DISTINCT FROM $9
+                  AND provenance = $10::JSONB
+            )
+            RETURNING discovery_edge_id
+            "#,
+            )
+            .bind(&edge.chain)
+            .bind(&edge.edge_kind)
+            .bind(edge.from_contract_instance_id)
+            .bind(edge.to_contract_instance_id)
+            .bind(&edge.discovery_source)
+            .bind(edge.source_manifest_id)
+            .bind(&edge.admission)
+            .bind(edge.active_from_block_number)
+            .bind(edge.active_from_block_hash.as_deref())
+            .bind(&edge.provenance_json)
+            .bind(terminal_state.block_number)
+            .bind(terminal_state.block_hash.as_deref())
+            .fetch_optional(&mut *executor)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to insert historical reconciled discovery edge {} {} -> {}",
+                    edge.edge_kind, edge.from_contract_instance_id, edge.to_contract_instance_id
+                )
+            })?
+        } else {
+            None
+        };
+        inserted_count += usize::from(inserted.is_some());
+
+        updated_count += sqlx::query(
+            r#"
+            UPDATE discovery_edges
+            SET active_to_block_number = $6,
+                active_to_block_hash = $7,
+                deactivated_at = COALESCE(deactivated_at, now())
+            WHERE chain_id = $1
+              AND discovery_source = $2
+              AND edge_kind = $3
+              AND from_contract_instance_id = $4
+              AND provenance ->> 'observation_key' = $5
+              AND active_from_block_number < $6
+              AND (
+                  active_to_block_number IS NULL
+                  OR active_to_block_number > $6
+              )
+            "#,
+        )
+        .bind(&edge.chain)
+        .bind(&edge.discovery_source)
+        .bind(&edge.edge_kind)
+        .bind(edge.from_contract_instance_id)
+        .bind(&edge.observation_key)
+        .bind(edge.active_from_block_number)
+        .bind(edge.active_from_block_hash.as_deref())
+        .execute(&mut *executor)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to close discovery predecessors before {} {} -> {}",
+                edge.edge_kind, edge.from_contract_instance_id, edge.to_contract_instance_id
+            )
+        })?
+        .rows_affected() as usize;
+    }
+
+    Ok(HistoricalDiscoveryEdgeSummary {
+        inserted_count,
+        updated_count,
+    })
 }
 
 /// Deactivate one reconciled discovery edge, closing its active window at the

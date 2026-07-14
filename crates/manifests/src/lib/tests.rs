@@ -1912,7 +1912,119 @@ fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
         .map(normalize_address)
         .collect::<Vec<_>>();
     assert!(!admitted_addresses.contains(&"0xe566a1fbaf30ff7c39828fe99f955fc55544cb9c".to_owned()));
+    assert!(!admitted_addresses.contains(&"0xd25f66dd4ff61486c2c5c1e6201a23576698d3df".to_owned()));
 
+    Ok(())
+}
+
+#[test]
+fn checked_in_ens_v2_public_resolver_boundary_separates_watch_from_profile_admission() -> Result<()>
+{
+    let manifests_doc = fs::read_to_string(checked_in_manifest_root("docs/manifests.md"))?;
+    assert!(
+        manifests_doc.contains(
+            "Resolver observations can discovery-admit `PublicResolverV2` as a watch-only contract instance and retain configured normalized facts, but they publish no selectors, cache values, or authoritative record coverage without explicit ENSv2 resolver-profile admission. A current-emitter `RecordVersionChanged` may remain only as an explicit `resolver_family_pending` boundary; non-current resolver emitters are always excluded."
+        ),
+        "ENSv2 docs must distinguish generic resolver watching from resolver-profile admission"
+    );
+
+    let resolver_manifest = fs::read_to_string(checked_in_manifest_root(
+        "manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v2.toml",
+    ))?;
+    assert!(
+        resolver_manifest.contains(
+            "PublicResolverV2 can be discovery-watched for configured generic record events but is not an admitted resolver profile; projection publishes no record values, retains only a current-emitter pending version boundary, and excludes non-current emitters."
+        ),
+        "the active ENSv2 resolver manifest must state the watch-only PublicResolverV2 boundary"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn ens_v2_public_resolver_discovery_is_watch_only_without_profile_capabilities() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+
+    let registry_address = "0x67b728a792e789a8978b30cf1b3b641f19354b43";
+    let public_resolver_address = "0xd25f66dd4ff61486c2c5c1e6201a23576698d3df";
+    let permissioned_resolver_address = "0x0000000000000000000000000000000000000201";
+    for (address, block_number, block_hash) in [
+        (
+            public_resolver_address,
+            100_i64,
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ),
+        (
+            permissioned_resolver_address,
+            110_i64,
+            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ),
+    ] {
+        let summary = persist_discovery_observation(
+            database.pool(),
+            &DiscoveryObservation {
+                chain: "ethereum-sepolia".to_owned(),
+                from_address: registry_address.to_owned(),
+                to_address: address.to_owned(),
+                edge_kind: "resolver".to_owned(),
+                discovery_source: "ens_v2_registry_resolver:ethereum-sepolia".to_owned(),
+                active_from_block_number: Some(block_number),
+                active_from_block_hash: Some(block_hash.to_owned()),
+                active_to_block_number: None,
+                active_to_block_hash: None,
+                provenance: serde_json::json!({
+                    "provider": "unit-test",
+                    "kind": "resolver",
+                    "observation_key": format!("registry:{registry_address}:resolver:{address}"),
+                }),
+            },
+        )
+        .await?;
+        assert_eq!(summary.admitted_edge_count, 1);
+        assert_eq!(summary.inserted_edge_count, 1);
+    }
+
+    let resolver_manifest_id =
+        active_manifest_id_for_source_family(database.pool(), "ens", "ens_v2_resolver_l1").await?;
+    let watched_contracts = load_watched_contracts(database.pool()).await?;
+    for address in [public_resolver_address, permissioned_resolver_address] {
+        let address = normalize_address(address);
+        assert!(watched_contracts.iter().any(|contract| {
+            contract.chain == "ethereum-sepolia"
+                && contract.source_family == "ens_v2_resolver_l1"
+                && contract.address == address
+                && contract.source == WatchedContractSource::DiscoveryEdge
+                && contract.source_manifest_id == Some(resolver_manifest_id)
+        }));
+    }
+
+    let public_resolver_direct_declaration_count = query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM manifest_contract_instances mci
+        JOIN manifest_versions mv ON mv.manifest_id = mci.manifest_id
+        JOIN contract_instance_addresses cia
+          ON cia.contract_instance_id = mci.contract_instance_id
+        WHERE mv.rollout_status = 'active'
+          AND cia.chain_id = 'ethereum-sepolia'
+          AND cia.address = $1
+        "#,
+    )
+    .bind(normalize_address(public_resolver_address))
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(public_resolver_direct_declaration_count, 0);
+    assert!(
+        load_capability_flags_for_source_family(database.pool(), "ens", "ens_v2_resolver_l1",)
+            .await?
+            .is_empty(),
+        "resolver-edge watching must not promote ENSv2 resolver-profile capabilities"
+    );
+
+    database.cleanup().await?;
     Ok(())
 }
 
@@ -2126,6 +2238,43 @@ async fn syncing_sepolia_profile_replaces_main_profile_without_mixing() -> Resul
             manifest_contract_entry_count: 3,
             discovery_edge_entry_count: 0,
         }]
+    );
+
+    assert_eq!(
+        load_required_watched_tuples(
+            database.pool(),
+            "ethereum-sepolia",
+            11_163_403,
+            11_164_000,
+            &[
+                "ens_v2_registrar_l1".to_owned(),
+                "ens_v2_registry_l1".to_owned(),
+                "ens_v2_resolver_l1".to_owned(),
+                "ens_v2_root_l1".to_owned(),
+            ],
+        )
+        .await?,
+        vec![
+            RequiredWatchedTuple {
+                source_family: "ens_v2_registrar_l1".to_owned(),
+                address: "0xa4449a0dd2b83007553d9b1d28b583a46a805a30".to_owned(),
+                required_from_block: 11_163_403,
+                required_to_block: 11_164_000,
+            },
+            RequiredWatchedTuple {
+                source_family: "ens_v2_registry_l1".to_owned(),
+                address: "0x67b728a792e789a8978b30cf1b3b641f19354b43".to_owned(),
+                required_from_block: 11_163_403,
+                required_to_block: 11_164_000,
+            },
+            RequiredWatchedTuple {
+                source_family: "ens_v2_root_l1".to_owned(),
+                address: "0x11b5bfbe9078d826b1edbdd1cfc12f5828d9f50c".to_owned(),
+                required_from_block: 11_163_403,
+                required_to_block: 11_164_000,
+            },
+        ],
+        "deprecated sepolia-dev declarations must not create open-ended coverage requirements"
     );
 
     let watched_summary = load_watched_contract_summary(database.pool()).await?;
@@ -4247,6 +4396,180 @@ async fn scoped_discovery_reconciliation_keeps_unrelated_active_addresses() -> R
 }
 
 #[tokio::test]
+async fn scoped_discovery_reconciliation_keeps_newer_assignment_current() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+
+    let discovery_source = "ens_v2_registry_subregistry:ethereum-sepolia";
+    let registry_address = "0x67b728a792e789a8978b30cf1b3b641f19354b43";
+    let older_address = "0x0000000000000000000000000000000000000a11";
+    let newer_address = "0x0000000000000000000000000000000000000b12";
+    let observation = |to_address: &str, block_number: i64| DiscoveryObservation {
+        chain: "ethereum-sepolia".to_owned(),
+        from_address: registry_address.to_owned(),
+        to_address: to_address.to_owned(),
+        edge_kind: "subregistry".to_owned(),
+        discovery_source: discovery_source.to_owned(),
+        active_from_block_number: Some(block_number),
+        active_from_block_hash: Some(format!("0x{block_number:064x}")),
+        active_to_block_number: None,
+        active_to_block_hash: None,
+        provenance: serde_json::json!({
+            "provider": "unit-test",
+            "observation_key": "registry-resource-7-subregistry",
+        }),
+    };
+
+    reconcile_scoped_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[observation(newer_address, 12)],
+    )
+    .await?;
+    reconcile_scoped_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[observation(older_address, 11)],
+    )
+    .await?;
+
+    let older_contract_instance_id = load_single_contract_instance_for_address(
+        database.pool(),
+        "ethereum-sepolia",
+        older_address,
+    )
+    .await?;
+    let newer_contract_instance_id = load_single_contract_instance_for_address(
+        database.pool(),
+        "ethereum-sepolia",
+        newer_address,
+    )
+    .await?;
+    let older_row = sqlx::query(
+        r#"
+        SELECT active_from_block_number, active_to_block_number, deactivated_at IS NULL AS active
+        FROM discovery_edges
+        WHERE discovery_source = $1
+          AND to_contract_instance_id = $2
+        "#,
+    )
+    .bind(discovery_source)
+    .bind(older_contract_instance_id)
+    .fetch_one(database.pool())
+    .await?;
+    let newer_row = sqlx::query(
+        r#"
+        SELECT active_from_block_number, active_to_block_number, deactivated_at IS NULL AS active
+        FROM discovery_edges
+        WHERE discovery_source = $1
+          AND to_contract_instance_id = $2
+        "#,
+    )
+    .bind(discovery_source)
+    .bind(newer_contract_instance_id)
+    .fetch_one(database.pool())
+    .await?;
+
+    assert_eq!(
+        older_row.try_get::<Option<i64>, _>("active_from_block_number")?,
+        Some(11)
+    );
+    assert_eq!(
+        older_row.try_get::<Option<i64>, _>("active_to_block_number")?,
+        Some(12)
+    );
+    assert!(!older_row.try_get::<bool, _>("active")?);
+    assert_eq!(
+        newer_row.try_get::<Option<i64>, _>("active_from_block_number")?,
+        Some(12)
+    );
+    assert_eq!(
+        newer_row.try_get::<Option<i64>, _>("active_to_block_number")?,
+        None
+    );
+    assert!(newer_row.try_get::<bool, _>("active")?);
+    assert_eq!(
+        query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM discovery_edges
+            WHERE active_from_block_number IS NOT NULL
+              AND active_to_block_number IS NOT NULL
+              AND active_to_block_number < active_from_block_number
+            "#,
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "discovery reconciliation must never create a negative block interval"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn scoped_discovery_reconciliation_inserts_middle_assignment_without_overlap() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+
+    let discovery_source = "ens_v2_registry_subregistry:ethereum-sepolia";
+    let registry_address = "0x67b728a792e789a8978b30cf1b3b641f19354b43";
+    let observation = |to_address: &str, block_number: i64| DiscoveryObservation {
+        chain: "ethereum-sepolia".to_owned(),
+        from_address: registry_address.to_owned(),
+        to_address: to_address.to_owned(),
+        edge_kind: "subregistry".to_owned(),
+        discovery_source: discovery_source.to_owned(),
+        active_from_block_number: Some(block_number),
+        active_from_block_hash: Some(format!("0x{block_number:064x}")),
+        active_to_block_number: None,
+        active_to_block_hash: None,
+        provenance: serde_json::json!({
+            "provider": "unit-test",
+            "observation_key": "registry-resource-chronology-subregistry",
+        }),
+    };
+
+    for (address, block_number) in [
+        ("0x00000000000000000000000000000000000000c3", 30),
+        ("0x00000000000000000000000000000000000000a1", 10),
+        ("0x00000000000000000000000000000000000000b2", 20),
+    ] {
+        reconcile_scoped_discovery_observations(
+            database.pool(),
+            discovery_source,
+            &[observation(address, block_number)],
+        )
+        .await?;
+    }
+
+    let intervals = sqlx::query_as::<_, (i64, Option<i64>, bool)>(
+        r#"
+        SELECT active_from_block_number, active_to_block_number, deactivated_at IS NULL
+        FROM discovery_edges
+        WHERE discovery_source = $1
+        ORDER BY active_from_block_number
+        "#,
+    )
+    .bind(discovery_source)
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        intervals,
+        vec![
+            (10, Some(20), false),
+            (20, Some(30), false),
+            (30, None, true)
+        ],
+        "out-of-order discovery replay must form adjacent non-overlapping intervals"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn reuses_contract_instance_ids_across_inactive_gaps() -> Result<()> {
     let test_dir = TestDir::new()?;
     let database = TestDatabase::new().await?;
@@ -5862,6 +6185,145 @@ async fn discovery_admission_epoch_bumps_on_every_edge_mutation() -> Result<()> 
     assert!(
         epoch_after_deactivation > epoch_after_observation_insert,
         "edge deactivation must bump the epoch ({epoch_after_observation_insert} -> {epoch_after_deactivation})"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn closed_historical_discovery_interval_remains_required_for_coverage() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let registry_address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+    let resolver_address = "0x0000000000000000000000000000000000000c01";
+    let registry_source_family = "ens_v1_registry_l1";
+    let resolver_source_family = "ens_v1_resolver_l1";
+
+    test_dir.write_manifest(
+        "ens",
+        registry_source_family,
+        "v3",
+        &checked_in_manifest_contents("ens", registry_source_family, "v3")?,
+    )?;
+    test_dir.write_manifest(
+        "ens",
+        resolver_source_family,
+        "v1",
+        &checked_in_manifest_contents("ens", resolver_source_family, "v1")?,
+    )?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+    let summary = persist_discovery_observation(
+        database.pool(),
+        &DiscoveryObservation {
+            chain: chain.to_owned(),
+            from_address: registry_address.to_owned(),
+            to_address: resolver_address.to_owned(),
+            edge_kind: "resolver".to_owned(),
+            discovery_source: "historical-coverage-test".to_owned(),
+            active_from_block_number: Some(100),
+            active_from_block_hash: Some(format!("0x{:064x}", 100)),
+            active_to_block_number: Some(160),
+            active_to_block_hash: Some(format!("0x{:064x}", 160)),
+            provenance: serde_json::json!({
+                "provider": "unit-test",
+                "observation_key": "historical-resolver",
+            }),
+        },
+    )
+    .await?;
+    let resolver_contract_instance_id = summary.admitted_edges[0]
+        .to_contract_instance_id
+        .expect("resolver discovery must admit a target contract instance");
+
+    sqlx::query(
+        r#"
+        UPDATE discovery_edges
+        SET deactivated_at = now()
+        WHERE to_contract_instance_id = $1
+          AND edge_kind = 'resolver'
+        "#,
+    )
+    .bind(resolver_contract_instance_id)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET deactivated_at = now()
+        WHERE contract_instance_id = $1
+        "#,
+    )
+    .bind(resolver_contract_instance_id)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE manifest_versions
+        SET rollout_status = 'shadow'
+        WHERE manifest_id = (
+            SELECT source_manifest_id
+            FROM discovery_edges
+            WHERE to_contract_instance_id = $1
+              AND edge_kind = 'resolver'
+            LIMIT 1
+        )
+        "#,
+    )
+    .bind(resolver_contract_instance_id)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE manifest_versions
+        SET rollout_status = 'shadow'
+        WHERE chain = $1
+          AND source_family = $2
+        "#,
+    )
+    .bind(chain)
+    .bind(resolver_source_family)
+    .execute(database.pool())
+    .await?;
+
+    let required = load_required_watched_tuples(
+        database.pool(),
+        chain,
+        120,
+        180,
+        &[resolver_source_family.to_owned()],
+    )
+    .await?;
+    assert_eq!(
+        required,
+        vec![RequiredWatchedTuple {
+            source_family: resolver_source_family.to_owned(),
+            address: normalize_address(resolver_address),
+            required_from_block: 120,
+            required_to_block: 160,
+        }],
+        "the public required-tuple loader must retain the closed historical interval"
+    );
+
+    let uncovered = find_uncovered_watched_tuples(
+        database.pool(),
+        chain,
+        120,
+        180,
+        &[resolver_source_family.to_owned()],
+        10,
+    )
+    .await?;
+    assert_eq!(
+        uncovered,
+        vec![UncoveredWatchedTuple {
+            source_family: resolver_source_family.to_owned(),
+            address: normalize_address(resolver_address),
+            required_from_block: 120,
+            required_to_block: 160,
+        }],
+        "a later deactivation must not erase a historically authoritative interval that intersects the promoted range"
     );
 
     database.cleanup().await

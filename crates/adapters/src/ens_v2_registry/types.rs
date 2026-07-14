@@ -85,6 +85,7 @@ pub(super) struct RegistryNameState {
 pub(super) struct RegistryResourceLink {
     pub(super) upstream_resource: String,
     pub(super) observed_token_id: String,
+    pub(super) observed_expiry: Option<u64>,
     pub(super) resource_id: Uuid,
     pub(super) token_lineage_id: Uuid,
     pub(super) surface_binding_id: Uuid,

@@ -137,6 +137,9 @@ impl ResolverProfileGate {
         let Some(source_family) = resolver_local_source_family(&event.source_family) else {
             return true;
         };
+        if source_family == SOURCE_FAMILY_ENS_V2_RESOLVER_L1 {
+            return false;
+        }
         if ignored_resolver_record_event(source_family, event) {
             return false;
         }
@@ -373,6 +376,9 @@ pub(super) fn resolver_source_family_for_resolver_event(
             Some(SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
         }
         SOURCE_FAMILY_ENS_V1_RESOLVER_L1 => Some(SOURCE_FAMILY_ENS_V1_RESOLVER_L1),
+        SOURCE_FAMILY_ENS_V2_REGISTRY_L1 | SOURCE_FAMILY_ENS_V2_RESOLVER_L1 => {
+            Some(SOURCE_FAMILY_ENS_V2_RESOLVER_L1)
+        }
         SOURCE_FAMILY_BASENAMES_BASE_REGISTRY => Some(SOURCE_FAMILY_BASENAMES_BASE_RESOLVER),
         SOURCE_FAMILY_BASENAMES_BASE_RESOLVER => Some(SOURCE_FAMILY_BASENAMES_BASE_RESOLVER),
         _ => None,
@@ -382,6 +388,7 @@ pub(super) fn resolver_source_family_for_resolver_event(
 pub(super) fn resolver_local_source_family(source_family: &str) -> Option<&'static str> {
     match source_family {
         SOURCE_FAMILY_ENS_V1_RESOLVER_L1 => Some(SOURCE_FAMILY_ENS_V1_RESOLVER_L1),
+        SOURCE_FAMILY_ENS_V2_RESOLVER_L1 => Some(SOURCE_FAMILY_ENS_V2_RESOLVER_L1),
         SOURCE_FAMILY_BASENAMES_BASE_RESOLVER => Some(SOURCE_FAMILY_BASENAMES_BASE_RESOLVER),
         _ => None,
     }

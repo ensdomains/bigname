@@ -2772,12 +2772,14 @@ async fn assert_basenames_deferred_verified_path_case_stays_selector_local(
         })?;
 
     assert_eq!(response.status(), StatusCode::OK, "case {}", case.label());
-    assert_eq!(
-        explain_response.status(),
-        StatusCode::NOT_FOUND,
-        "case {}",
-        case.label()
-    );
+    if explain_response.status() != StatusCode::NOT_FOUND {
+        let status = explain_response.status();
+        let payload: Value = read_json(explain_response).await?;
+        anyhow::bail!(
+            "expected deferred basenames explain response 404 for case {}, got {status}: {payload}",
+            case.label()
+        );
+    }
 
     let payload: ResolutionResponse = read_json(response).await?;
     assert_eq!(
@@ -3517,13 +3519,17 @@ async fn get_resolution_keeps_basenames_transport_explicit_without_ethereum_posi
         .context("missing-ethereum basenames execution explain request failed")?;
 
     assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert_eq!(explain_response.status(), StatusCode::NOT_FOUND);
+    if explain_response.status() != StatusCode::CONFLICT {
+        let status = explain_response.status();
+        let payload: Value = read_json(explain_response).await?;
+        anyhow::bail!("expected missing-ethereum basenames explain response 409, got {status}: {payload}");
+    }
 
     let payload: ErrorResponse = read_json(response).await?;
     assert_eq!(payload.error.code, "conflict");
 
     let explain_payload: ErrorResponse = read_json(explain_response).await?;
-    assert_eq!(explain_payload.error.code, "not_found");
+    assert_eq!(explain_payload.error.code, "conflict");
 
     database.cleanup().await?;
     Ok(())
@@ -3771,7 +3777,11 @@ async fn get_resolution_keeps_basenames_transport_explicit_without_projected_top
         let payload: Value = read_json(response).await?;
         anyhow::bail!("expected basenames profile response 200, got {status}: {payload}");
     }
-    assert_eq!(explain_response.status(), StatusCode::OK);
+    if explain_response.status() != StatusCode::OK {
+        let status = explain_response.status();
+        let payload: Value = read_json(explain_response).await?;
+        anyhow::bail!("expected missing-topology basenames explain response 200, got {status}: {payload}");
+    }
 
     let payload: ResolutionResponse = read_json(response).await?;
     let explain_payload: ResolutionResponse = read_json(explain_response).await?;
@@ -4015,7 +4025,11 @@ async fn get_resolution_keeps_out_of_class_basenames_transport_explicit() -> Res
         .context("out-of-class basenames execution explain request failed")?;
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(explain_response.status(), StatusCode::NOT_FOUND);
+    if explain_response.status() != StatusCode::NOT_FOUND {
+        let status = explain_response.status();
+        let payload: Value = read_json(explain_response).await?;
+        anyhow::bail!("expected out-of-class basenames explain response 404, got {status}: {payload}");
+    }
 
     let payload: ResolutionResponse = read_json(response).await?;
     assert_eq!(
@@ -5362,7 +5376,10 @@ async fn get_resolution_execution_explain_surfaces_persisted_avatar_answers_and_
         explain_payload.chain_positions,
         resolution_payload.chain_positions
     );
-    assert_eq!(explain_payload.consistency, "finalized");
+    assert_eq!(
+        explain_payload.consistency,
+        resolution_payload.consistency
+    );
     assert_eq!(resolution_payload.consistency, "head");
     assert_eq!(
         explain_payload.last_updated,

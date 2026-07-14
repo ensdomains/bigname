@@ -32,17 +32,12 @@ justification = "Phase 7 allowlist for an oversized production file; future chan
 
 [[files]]
 path = "apps/indexer/src/main/reconciliation/adapter_sync.rs"
-loc = 708
+loc = 677
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]
 path = "apps/indexer/src/main/reconciliation/canonical.rs"
 loc = 613
-justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
-
-[[files]]
-path = "apps/indexer/src/main/reconciliation/canonical/stored_lineage/coverage.rs"
-loc = 681
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]
@@ -85,7 +80,7 @@ review_justification = "Explicit review accepted this file above 900 LOC for the
 
 [[files]]
 path = "crates/storage/src/identity/write_fast.rs"
-loc = 808
+loc = 790
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]

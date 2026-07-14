@@ -1,5 +1,7 @@
 #[path = "reconciliation/bulk.rs"]
 mod bulk;
+#[path = "reconciliation/chronology.rs"]
+mod chronology;
 #[path = "reconciliation/existing.rs"]
 mod existing;
 #[path = "reconciliation/support.rs"]
@@ -32,7 +34,9 @@ use crate::{
 use self::bulk::{
     PendingContractInstanceSeed, deactivate_reconciled_discovery_edge,
     insert_pending_contract_instance_seeds, insert_reconciled_discovery_edges,
+    reconcile_historical_discovery_edges,
 };
+use self::chronology::ScopedDiscoveryChronology;
 use self::existing::{
     load_active_reconciled_discovery_descendant_edges, load_active_reconciled_discovery_edges,
     load_active_reconciled_discovery_edges_by_observation_keys,
@@ -171,11 +175,11 @@ pub async fn reconcile_discovery_observations(
         .iter()
         .filter(|desired_edge| !existing_set.contains(*desired_edge))
         .collect::<Vec<_>>();
-    let inserted_edge_count =
-        insert_reconciled_discovery_edges(transaction.as_mut(), &new_edges).await?;
+    let edge_insert = insert_reconciled_discovery_edges(transaction.as_mut(), &new_edges).await?;
+    let inserted_edge_count = edge_insert.inserted_count;
     mutated_chains.extend(new_edges.iter().map(|edge| edge.chain.clone()));
 
-    if inserted_edge_count > 0 || deactivated_edge_count > 0 {
+    if inserted_edge_count > 0 || edge_insert.reactivated_count > 0 || deactivated_edge_count > 0 {
         reconcile_active_contract_instance_addresses(transaction.as_mut()).await?;
     }
     bump_discovery_admission_epochs(transaction.as_mut(), &mutated_chains).await?;
@@ -252,17 +256,16 @@ pub async fn reconcile_scoped_discovery_observations(
     .await?;
 
     let desired_set = desired_edges.iter().cloned().collect::<HashSet<_>>();
-    let existing_set = existing_edges
-        .iter()
-        .map(|edge| edge.spec.clone())
-        .collect::<HashSet<_>>();
+    let chronology = ScopedDiscoveryChronology::classify(&desired_edges, &existing_edges);
     let mut deactivation_terminal_states_by_edge_id =
         BTreeMap::<i64, (String, ObservationTerminalState)>::new();
     let mut removed_parent_edges = Vec::<(String, Uuid, ObservationTerminalState)>::new();
     let mut affected_contract_instance_ids = HashSet::<Uuid>::new();
 
     for existing_edge in &existing_edges {
-        if desired_set.contains(&existing_edge.spec) {
+        if desired_set.contains(&existing_edge.spec)
+            || chronology.retains_newer_edge(existing_edge.discovery_edge_id)
+        {
             continue;
         }
         let Some(observation) = observations_by_key.get(&existing_edge.spec.observation_key) else {
@@ -330,20 +333,34 @@ pub async fn reconcile_scoped_discovery_observations(
         deactivated_edge_count += 1;
     }
 
-    let new_edges = desired_edges
+    let new_edges = &chronology.current_new_edges;
+    let historical_edges = &chronology.historical_edges;
+    for new_edge in new_edges
         .iter()
-        .filter(|desired_edge| !existing_set.contains(*desired_edge))
-        .collect::<Vec<_>>();
-    for new_edge in &new_edges {
+        .copied()
+        .chain(historical_edges.iter().map(|(edge, _)| *edge))
+    {
         affected_contract_instance_ids.insert(new_edge.from_contract_instance_id);
         affected_contract_instance_ids.insert(new_edge.to_contract_instance_id);
     }
+    let edge_insert = insert_reconciled_discovery_edges(transaction.as_mut(), &new_edges).await?;
+    let historical_edge_reconciliation =
+        reconcile_historical_discovery_edges(transaction.as_mut(), historical_edges).await?;
     let inserted_edge_count =
-        insert_reconciled_discovery_edges(transaction.as_mut(), &new_edges).await?;
+        edge_insert.inserted_count + historical_edge_reconciliation.inserted_count;
     mutated_chains.extend(new_edges.iter().map(|edge| edge.chain.clone()));
+    if historical_edge_reconciliation.inserted_count > 0
+        || historical_edge_reconciliation.updated_count > 0
+    {
+        mutated_chains.extend(historical_edges.iter().map(|(edge, _)| edge.chain.clone()));
+    }
     bump_discovery_admission_epochs(transaction.as_mut(), &mutated_chains).await?;
 
-    if inserted_edge_count > 0 || deactivated_edge_count > 0 {
+    if inserted_edge_count > 0
+        || edge_insert.reactivated_count > 0
+        || historical_edge_reconciliation.updated_count > 0
+        || deactivated_edge_count > 0
+    {
         reconcile_active_contract_instance_addresses_for_ids(
             transaction.as_mut(),
             &affected_contract_instance_ids,

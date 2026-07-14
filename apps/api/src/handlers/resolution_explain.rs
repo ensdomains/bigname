@@ -17,9 +17,10 @@ pub(super) async fn explain_resolution_execution_current(
     )
     .await?;
 
-    let record_inventory_current = load_supported_record_inventory_current_for_snapshot(
+    let record_inventory_current = load_record_inventory_current_for_route_snapshot(
         &state.pool,
         &row,
+        true,
         &selected_snapshot,
     )
     .await

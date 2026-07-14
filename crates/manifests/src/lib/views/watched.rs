@@ -1,5 +1,7 @@
 #[path = "watched/coverage.rs"]
 mod coverage;
+#[path = "watched/historical.rs"]
+mod historical;
 #[path = "watched/scoped.rs"]
 mod scoped;
 #[path = "watched/selection.rs"]
@@ -10,7 +12,11 @@ use sqlx::{PgPool, Row, postgres::PgRow};
 
 use crate::{WatchedContract, WatchedContractSource, normalize_address};
 
-pub use coverage::{UncoveredWatchedTuple, find_uncovered_watched_tuples};
+pub use coverage::{
+    RequiredWatchedTuple, UncoveredWatchedTuple, find_uncovered_watched_tuples,
+    load_earliest_known_watched_block, load_required_watched_tuples,
+};
+pub use historical::load_historical_watched_contracts_by_chain;
 pub use scoped::{
     load_watched_contracts_by_addresses, load_watched_contracts_by_source_family_and_addresses,
 };

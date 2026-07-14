@@ -213,13 +213,52 @@ impl IndexerRunSession {
         chain_rpc_urls: &[ChainRpcUrl<'_>],
         log_label: &str,
     ) -> Result<Self> {
+        Self::start_with_chain_rpc_urls_and_adapter_sync_mode(
+            repo_root,
+            database_url,
+            manifests_root,
+            chain_rpc_urls,
+            log_label,
+            None,
+        )
+    }
+
+    /// Start the production loop with live poll adapter sync enabled from the
+    /// first poll. This keeps automatic normalized replay catch-up out of the
+    /// assertion path so a test cannot pass after a later repair cycle.
+    pub fn start_with_live_poll_adapter_sync(
+        repo_root: &Path,
+        database_url: &str,
+        manifests_root: &Path,
+        chain_rpc_urls: &[ChainRpcUrl<'_>],
+        log_label: &str,
+    ) -> Result<Self> {
+        Self::start_with_chain_rpc_urls_and_adapter_sync_mode(
+            repo_root,
+            database_url,
+            manifests_root,
+            chain_rpc_urls,
+            log_label,
+            Some("auto"),
+        )
+    }
+
+    fn start_with_chain_rpc_urls_and_adapter_sync_mode(
+        repo_root: &Path,
+        database_url: &str,
+        manifests_root: &Path,
+        chain_rpc_urls: &[ChainRpcUrl<'_>],
+        log_label: &str,
+        adapter_sync_mode: Option<&str>,
+    ) -> Result<Self> {
         ensure_pipeline_binaries_built(repo_root);
         // Output goes to a log file, not a pipe: the run loop can out-write an
         // undrained pipe buffer and block, deadlocking the session.
         let log_path = indexer_log_path(log_label);
         let log_file = std::fs::File::create(&log_path).context("create indexer log file")?;
         let chain_rpc_urls = format_chain_rpc_urls(chain_rpc_urls);
-        let child = cargo()
+        let mut command = cargo();
+        command
             .current_dir(repo_root)
             .args([
                 "run",
@@ -242,7 +281,12 @@ impl IndexerRunSession {
                 // sync round; the default 30s cadence just slows tests down.
                 "--normalized-replay-catchup-poll-interval-secs",
                 "2",
-            ])
+            ]);
+        if let Some(adapter_sync_mode) = adapter_sync_mode {
+            command.args(["--hash-pinned-adapter-sync", adapter_sync_mode]);
+            command.env("BIGNAME_INDEXER_NORMALIZED_REPLAY_CATCHUP_ENABLED", "false");
+        }
+        let child = command
             .kill_on_drop(true)
             .stdout(std::process::Stdio::from(log_file.try_clone()?))
             .stderr(std::process::Stdio::from(log_file))

@@ -445,11 +445,9 @@ async fn normalized_replay_catchup_does_not_use_log_bound_as_stateful_boundary()
     assert_eq!(last_completed, Some(31));
     assert_eq!(next_block, 32);
     assert!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::BIGINT FROM normalized_events"
-        )
-        .fetch_one(database.pool())
-        .await?
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM normalized_events")
+            .fetch_one(database.pool())
+            .await?
             > 0
     );
     assert!(
@@ -781,10 +779,36 @@ async fn normalized_replay_catchup_rebuilds_deferred_indexes_when_configured_cha
 -> Result<()> {
     let database = TestDatabase::new().await?;
     create_normalized_replay_cursor_table(database.pool()).await?;
-    sqlx::query("DROP INDEX IF EXISTS normalized_events_namespace_idx")
+    sqlx::query("CREATE TABLE invalid_projection_index_fixture (duplicate_value INTEGER NOT NULL)")
         .execute(database.pool())
         .await
-        .context("failed to drop deferred normalized event index for test")?;
+        .context("failed to create invalid-index fixture table")?;
+    sqlx::query("INSERT INTO invalid_projection_index_fixture (duplicate_value) VALUES (1), (1)")
+        .execute(database.pool())
+        .await
+        .context("failed to seed invalid-index fixture rows")?;
+    sqlx::query(
+        "CREATE UNIQUE INDEX CONCURRENTLY normalized_events_namespace_idx \
+         ON invalid_projection_index_fixture (duplicate_value)",
+    )
+    .execute(database.pool())
+    .await
+    .expect_err("duplicate fixture rows must leave an invalid concurrent index remnant");
+    let (is_valid, is_ready) = sqlx::query_as::<_, (bool, bool)>(
+        r#"
+        SELECT index.indisvalid, index.indisready
+        FROM pg_index AS index
+        WHERE index.indexrelid = to_regclass('normalized_events_namespace_idx')
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await
+    .context("failed to inspect invalid deferred projection index")?;
+    assert!(!is_valid || !is_ready);
+    sqlx::query("DROP INDEX IF EXISTS normalized_events_record_inventory_resource_replay_idx")
+        .execute(database.pool())
+        .await
+        .context("failed to drop record inventory replay index for test")?;
     sqlx::query(
         r#"
         INSERT INTO normalized_replay_cursors (
@@ -822,10 +846,31 @@ async fn normalized_replay_catchup_rebuilds_deferred_indexes_when_configured_cha
 
     assert!(
         sqlx::query_scalar::<_, bool>(
-            "SELECT to_regclass('normalized_events_namespace_idx') IS NOT NULL"
+            r#"
+            SELECT index.indisvalid AND index.indisready
+            FROM pg_index AS index
+            WHERE index.indexrelid = to_regclass('normalized_events_namespace_idx')
+              AND index.indrelid = 'normalized_events'::regclass
+            "#,
         )
         .fetch_one(database.pool())
-        .await?
+        .await?,
+        "catch-up must replace invalid remnants with a ready index on normalized_events"
+    );
+    let record_inventory_predicate = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT pg_get_expr(index.indpred, index.indrelid)
+        FROM pg_index AS index
+        JOIN pg_class AS class ON class.oid = index.indexrelid
+        WHERE class.relname = 'normalized_events_record_inventory_resource_replay_idx'
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await
+    .context("failed to inspect restored record inventory replay index predicate")?;
+    assert!(
+        record_inventory_predicate.contains("ens_v2_registry_resource_surface"),
+        "restored record inventory replay index must cover ENSv2 registry resources: {record_inventory_predicate}"
     );
 
     database.cleanup().await?;

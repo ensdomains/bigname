@@ -26,7 +26,9 @@ use super::{
     upsert_token_lineages_without_snapshots,
 };
 use crate::{
-    CanonicalityState, ChainLineageBlock, default_database_url, upsert_chain_lineage_blocks,
+    CanonicalityState, ChainLineageBlock, NormalizedEvent, default_database_url,
+    mark_block_derived_normalized_events_range_orphaned, upsert_chain_lineage_blocks,
+    upsert_normalized_events_with_summary,
 };
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -509,7 +511,7 @@ async fn upsert_surface_binding_tightens_replayed_active_to() -> Result<()> {
 
     let tightened_binding = SurfaceBinding {
         active_to: Some(earlier_close),
-        ..initial_binding
+        ..initial_binding.clone()
     };
     assert_eq!(
         upsert_surface_bindings(database.pool(), std::slice::from_ref(&tightened_binding)).await?,
@@ -517,7 +519,21 @@ async fn upsert_surface_binding_tightens_replayed_active_to() -> Result<()> {
     );
     assert_eq!(
         load_surface_binding(database.pool(), surface_binding_id).await?,
-        Some(tightened_binding)
+        Some(tightened_binding.clone())
+    );
+
+    let attempted_reopen = SurfaceBinding {
+        active_to: None,
+        ..initial_binding
+    };
+    assert_eq!(
+        upsert_surface_bindings(database.pool(), &[attempted_reopen]).await?,
+        vec![tightened_binding.clone()]
+    );
+    assert_eq!(
+        load_surface_binding(database.pool(), surface_binding_id).await?,
+        Some(tightened_binding),
+        "replaying an open readable binding must not undo its established close"
     );
 
     database.cleanup().await
@@ -1354,7 +1370,7 @@ async fn no_snapshot_surface_binding_upsert_skips_idempotent_rewrite() -> Result
 
     let tightened_binding = SurfaceBinding {
         active_to: Some(earlier_close),
-        ..initial_binding
+        ..initial_binding.clone()
     };
     upsert_surface_bindings_without_snapshots(
         database.pool(),
@@ -1363,11 +1379,25 @@ async fn no_snapshot_surface_binding_upsert_skips_idempotent_rewrite() -> Result
     .await?;
     assert_eq!(
         load_surface_binding(database.pool(), surface_binding_id).await?,
-        Some(tightened_binding)
+        Some(tightened_binding.clone())
     );
     assert!(
         load_surface_binding_observed_at(database.pool(), surface_binding_id).await?
             > anchored_observed_at
+    );
+
+    upsert_surface_bindings_without_snapshots(
+        database.pool(),
+        &[SurfaceBinding {
+            active_to: None,
+            ..initial_binding
+        }],
+    )
+    .await?;
+    assert_eq!(
+        load_surface_binding(database.pool(), surface_binding_id).await?,
+        Some(tightened_binding),
+        "bulk replay of an open readable binding must not undo its established close"
     );
 
     database.cleanup().await
@@ -2074,6 +2104,205 @@ async fn orphaned_binding_can_coexist_with_overlapping_replacement_after_repair(
 }
 
 #[tokio::test]
+async fn orphaned_release_moves_predecessor_close_to_earliest_readable_successor() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain_id = "chain:release_reorg_successor";
+    let parent_hash = "0xparent_release_reorg_successor";
+    let losing_hash = "0xlosing_release_reorg_successor";
+    let winning_hash = "0xwinning_release_reorg_successor";
+    let logical_name_id = "ens:release-reorg.eth";
+    let predecessor_lineage_id = Uuid::from_u128(0xe116);
+    let predecessor_resource_id = Uuid::from_u128(0xe117);
+    let predecessor_binding_id = Uuid::from_u128(0xe118);
+    let successor_lineage_id = Uuid::from_u128(0xe119);
+    let successor_resource_id = Uuid::from_u128(0xe11a);
+    let successor_binding_id = Uuid::from_u128(0xe11b);
+    let predecessor_start = timestamp(1_717_172_400);
+    let losing_release = timestamp(1_717_172_500);
+    let winning_successor_start = timestamp(1_717_172_600);
+
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[
+            lineage_block(
+                chain_id,
+                parent_hash,
+                Some("0xgenesis_release_reorg_successor"),
+                10,
+                predecessor_start,
+                CanonicalityState::Finalized,
+            ),
+            lineage_block(
+                chain_id,
+                losing_hash,
+                Some(parent_hash),
+                20,
+                losing_release,
+                CanonicalityState::Finalized,
+            ),
+            lineage_block(
+                chain_id,
+                winning_hash,
+                Some(parent_hash),
+                30,
+                winning_successor_start,
+                CanonicalityState::Finalized,
+            ),
+        ],
+    )
+    .await?;
+    upsert_token_lineages(
+        database.pool(),
+        &[
+            TokenLineage {
+                token_lineage_id: predecessor_lineage_id,
+                chain_id: chain_id.to_owned(),
+                block_hash: parent_hash.to_owned(),
+                block_number: 10,
+                provenance: json!({"source": "predecessor"}),
+                canonicality_state: CanonicalityState::Finalized,
+            },
+            TokenLineage {
+                token_lineage_id: successor_lineage_id,
+                chain_id: chain_id.to_owned(),
+                block_hash: winning_hash.to_owned(),
+                block_number: 30,
+                provenance: json!({"source": "winning_successor"}),
+                canonicality_state: CanonicalityState::Finalized,
+            },
+        ],
+    )
+    .await?;
+    upsert_resources(
+        database.pool(),
+        &[
+            Resource {
+                resource_id: predecessor_resource_id,
+                token_lineage_id: Some(predecessor_lineage_id),
+                chain_id: chain_id.to_owned(),
+                block_hash: parent_hash.to_owned(),
+                block_number: 10,
+                provenance: json!({"source": "predecessor"}),
+                canonicality_state: CanonicalityState::Finalized,
+            },
+            Resource {
+                resource_id: successor_resource_id,
+                token_lineage_id: Some(successor_lineage_id),
+                chain_id: chain_id.to_owned(),
+                block_hash: winning_hash.to_owned(),
+                block_number: 30,
+                provenance: json!({"source": "winning_successor"}),
+                canonicality_state: CanonicalityState::Finalized,
+            },
+        ],
+    )
+    .await?;
+    upsert_name_surfaces(
+        database.pool(),
+        &[NameSurface {
+            logical_name_id: logical_name_id.to_owned(),
+            namespace: "ens".to_owned(),
+            input_name: "release-reorg.eth".to_owned(),
+            canonical_display_name: "release-reorg.eth".to_owned(),
+            normalized_name: "release-reorg.eth".to_owned(),
+            dns_encoded_name: vec![
+                13, b'r', b'e', b'l', b'e', b'a', b's', b'e', b'-', b'r', b'e', b'o', b'r', b'g',
+                3, b'e', b't', b'h', 0,
+            ],
+            namehash: "namehash:release-reorg.eth".to_owned(),
+            labelhashes: vec!["labelhash:release-reorg.eth".to_owned()],
+            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
+            normalization_warnings: json!([]),
+            normalization_errors: json!([]),
+            chain_id: chain_id.to_owned(),
+            block_hash: parent_hash.to_owned(),
+            block_number: 10,
+            provenance: json!({"source": "surface"}),
+            canonicality_state: CanonicalityState::Finalized,
+        }],
+    )
+    .await?;
+    upsert_surface_bindings(
+        database.pool(),
+        &[
+            SurfaceBinding {
+                surface_binding_id: predecessor_binding_id,
+                logical_name_id: logical_name_id.to_owned(),
+                resource_id: predecessor_resource_id,
+                binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+                active_from: predecessor_start,
+                active_to: Some(losing_release),
+                chain_id: chain_id.to_owned(),
+                block_hash: parent_hash.to_owned(),
+                block_number: 10,
+                provenance: json!({"source": "predecessor"}),
+                canonicality_state: CanonicalityState::Finalized,
+            },
+            SurfaceBinding {
+                surface_binding_id: successor_binding_id,
+                logical_name_id: logical_name_id.to_owned(),
+                resource_id: successor_resource_id,
+                binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+                active_from: winning_successor_start,
+                active_to: None,
+                chain_id: chain_id.to_owned(),
+                block_hash: winning_hash.to_owned(),
+                block_number: 30,
+                provenance: json!({"source": "winning_successor"}),
+                canonicality_state: CanonicalityState::Finalized,
+            },
+        ],
+    )
+    .await?;
+    upsert_normalized_events_with_summary(
+        database.pool(),
+        &[NormalizedEvent {
+            event_identity: "ensv2-release-losing-before-winning-successor".to_owned(),
+            namespace: "ens".to_owned(),
+            logical_name_id: Some(logical_name_id.to_owned()),
+            resource_id: Some(predecessor_resource_id),
+            event_kind: "RegistrationReleased".to_owned(),
+            source_family: "ens_v2_registry_l1".to_owned(),
+            manifest_version: 1,
+            source_manifest_id: None,
+            chain_id: Some(chain_id.to_owned()),
+            block_number: Some(20),
+            block_hash: Some(losing_hash.to_owned()),
+            transaction_hash: Some("0xlosingrelease".to_owned()),
+            log_index: Some(0),
+            raw_fact_ref: json!({"kind": "raw_log", "block_hash": losing_hash}),
+            derivation_kind: "ens_v2_registry_resource_surface".to_owned(),
+            canonicality_state: CanonicalityState::Finalized,
+            before_state: json!({"status": "registered"}),
+            after_state: json!({"status": "unregistered"}),
+        }],
+    )
+    .await?;
+
+    let orphaned_events = mark_block_derived_normalized_events_range_orphaned(
+        database.pool(),
+        chain_id,
+        losing_hash,
+        Some(parent_hash),
+    )
+    .await?;
+    assert_eq!(orphaned_events, 1);
+    mark_identity_rows_range_orphaned(database.pool(), chain_id, losing_hash, Some(parent_hash))
+        .await?;
+
+    let readable =
+        load_surface_bindings_by_logical_name_id(database.pool(), logical_name_id).await?;
+    assert_eq!(readable.len(), 2);
+    assert_eq!(
+        readable[0].active_to,
+        Some(winning_successor_start),
+        "orphaning the losing T1 release must move the predecessor close to the earliest readable successor at T2"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn orphaned_stable_identity_rows_can_be_reobserved_with_same_ids_on_winning_branch()
 -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -2083,6 +2312,9 @@ async fn orphaned_stable_identity_rows_can_be_reobserved_with_same_ids_on_winnin
     let winning_hash = "0xwinning_stable_identity_reorg";
     let token_lineage_id = Uuid::from_u128(0xe120);
     let resource_id = Uuid::from_u128(0xe121);
+    let surface_binding_id = Uuid::from_u128(0xe122);
+    let binding_active_from = timestamp(1_717_172_510);
+    let losing_binding_close = timestamp(1_717_172_520);
 
     upsert_chain_lineage_blocks(
         database.pool(),
@@ -2164,6 +2396,23 @@ async fn orphaned_stable_identity_rows_can_be_reobserved_with_same_ids_on_winnin
         }],
     )
     .await?;
+    upsert_surface_bindings_without_snapshots(
+        database.pool(),
+        &[SurfaceBinding {
+            surface_binding_id,
+            logical_name_id: "ens:stable.eth".to_owned(),
+            resource_id,
+            binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+            active_from: binding_active_from,
+            active_to: Some(losing_binding_close),
+            chain_id: chain_id.to_owned(),
+            block_hash: losing_hash.to_owned(),
+            block_number: 21,
+            provenance: json!({"source": "stable_binding"}),
+            canonicality_state: CanonicalityState::Finalized,
+        }],
+    )
+    .await?;
 
     let orphan_counts = mark_identity_rows_range_orphaned(
         database.pool(),
@@ -2178,7 +2427,7 @@ async fn orphaned_stable_identity_rows_can_be_reobserved_with_same_ids_on_winnin
             token_lineage_count: 1,
             resource_count: 1,
             name_surface_count: 1,
-            surface_binding_count: 0,
+            surface_binding_count: 1,
         }
     );
 
@@ -2219,6 +2468,19 @@ async fn orphaned_stable_identity_rows_can_be_reobserved_with_same_ids_on_winnin
         provenance: json!({"source": "winning_surface"}),
         canonicality_state: CanonicalityState::Finalized,
     };
+    let winning_binding = SurfaceBinding {
+        surface_binding_id,
+        logical_name_id: "ens:stable.eth".to_owned(),
+        resource_id,
+        binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+        active_from: binding_active_from,
+        active_to: None,
+        chain_id: chain_id.to_owned(),
+        block_hash: winning_hash.to_owned(),
+        block_number: 21,
+        provenance: json!({"source": "stable_binding"}),
+        canonicality_state: CanonicalityState::Finalized,
+    };
 
     upsert_token_lineages(
         database.pool(),
@@ -2227,6 +2489,11 @@ async fn orphaned_stable_identity_rows_can_be_reobserved_with_same_ids_on_winnin
     .await?;
     upsert_resources(database.pool(), std::slice::from_ref(&winning_resource)).await?;
     upsert_name_surfaces(database.pool(), std::slice::from_ref(&winning_surface)).await?;
+    upsert_surface_bindings_without_snapshots(
+        database.pool(),
+        std::slice::from_ref(&winning_binding),
+    )
+    .await?;
 
     assert_eq!(
         load_token_lineage(database.pool(), token_lineage_id).await?,
@@ -2241,6 +2508,10 @@ async fn orphaned_stable_identity_rows_can_be_reobserved_with_same_ids_on_winnin
         Some(winning_surface.clone())
     );
     assert_eq!(
+        load_surface_binding(database.pool(), surface_binding_id).await?,
+        Some(winning_binding.clone())
+    );
+    assert_eq!(
         load_token_lineage_including_noncanonical(database.pool(), token_lineage_id).await?,
         Some(winning_token_lineage)
     );
@@ -2251,6 +2522,10 @@ async fn orphaned_stable_identity_rows_can_be_reobserved_with_same_ids_on_winnin
     assert_eq!(
         load_name_surface_including_noncanonical(database.pool(), "ens:stable.eth").await?,
         Some(winning_surface)
+    );
+    assert_eq!(
+        load_surface_binding_including_noncanonical(database.pool(), surface_binding_id).await?,
+        Some(winning_binding)
     );
 
     database.cleanup().await

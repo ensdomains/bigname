@@ -212,8 +212,7 @@ pub async fn ingest_ens_v2_sepolia_at_current_head(
 }
 
 /// Sepolia twin of `backfill_and_replay_projections`: derive the ENSv2 chain
-/// via backfill and rebuild projections without a live run. Used where live
-/// re-ingest wedges (the chipped re-registration intake bug); no API — the
+/// via backfill and rebuild projections without a live run. No API — the
 /// backfill path promotes no canonical checkpoint.
 pub async fn backfill_ens_v2_sepolia_and_replay_projections(
     sepolia_anvil: &Anvil,
