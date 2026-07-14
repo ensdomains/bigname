@@ -14,7 +14,7 @@ const NAMESPACE: &str = "ens";
 const REGISTRY: &str = "0x796fff2e907449be8d5921bcc215b1b76d89d080";
 const RESOLVER: &str = "0xe99638b40e4fff0129d56f03b55b6bbc4bbe49b5";
 const APPLY_CURSOR: &str = "normalized_events_to_projection_invalidations";
-const DEPLOYMENT_PROFILE: &str = "sepolia-dev";
+const DEPLOYMENT_PROFILE: &str = "sepolia";
 
 fn manifest_ns(chain: &str, namespace: &str) -> ManifestChainNamespace {
     ManifestChainNamespace {
@@ -83,7 +83,7 @@ fn active_event_source(
         namespace: NAMESPACE.to_owned(),
         source_family: source_family.to_owned(),
         normalized_event_count,
-        normalized_events_missing_canonical_raw_log_count: 0,
+        normalized_events_missing_canonical_lineage_count: 0,
     }
 }
 
@@ -498,7 +498,7 @@ fn chain_with_raw_logs_but_no_replay_cursor_fails() {
 }
 
 /// A chain with no retained canonical raw logs has no cursor frontier to compare. The separate
-/// raw-fact retention check still rejects retained active normalized events without their facts.
+/// event-lineage check still rejects retained active normalized events without their anchors.
 #[test]
 fn chain_without_canonical_raw_logs_does_not_require_a_cursor() {
     let mut read = healthy_read();
@@ -514,16 +514,16 @@ fn chain_without_canonical_raw_logs_does_not_require_a_cursor() {
     assert!(report.chains_missing_raw_fact_cursor.is_empty());
 }
 
-/// Derived active content is not replay-safe when its exact canonical raw-log anchors vanished.
+/// Derived active content is not reorg-safe when its exact canonical lineage anchors vanished.
 #[test]
-fn active_normalized_events_missing_raw_logs_fail() {
+fn active_normalized_events_missing_lineage_fail() {
     let mut read = healthy_read();
-    read.active_manifest_event_sources[0].normalized_events_missing_canonical_raw_log_count = 3;
+    read.active_manifest_event_sources[0].normalized_events_missing_canonical_lineage_count = 3;
     let report = evaluate(&read, &registry_only());
 
-    assert_eq!(report.active_raw_facts_retained(), CheckStatus::Fail);
+    assert_eq!(report.active_event_lineage_retained(), CheckStatus::Fail);
     assert_eq!(
-        report.active_manifest_sources_with_missing_raw_facts[0].missing_canonical_raw_log_count,
+        report.active_manifest_sources_with_missing_lineage[0].missing_canonical_lineage_count,
         3
     );
     assert!(!report.data_complete());
@@ -794,7 +794,7 @@ fn foreign_chain_content_does_not_satisfy_an_empty_active_chain() {
             namespace: NAMESPACE.to_owned(),
             source_family: "foreign_registry".to_owned(),
             normalized_event_count: 500,
-            normalized_events_missing_canonical_raw_log_count: 0,
+            normalized_events_missing_canonical_lineage_count: 0,
         });
     read.name_current_counts = vec![names(NAMESPACE, 20)];
     let report = evaluate(&read, &registry_only());

@@ -11,12 +11,17 @@ pub(super) async fn load_observed_code_addresses(
     let rows = sqlx::query(
         r#"
         SELECT
-            chain_id,
-            lower(contract_address) AS address,
-            MAX(block_number) AS max_observed_block_number
-        FROM raw_code_hashes
-        WHERE canonicality_state <> 'orphaned'::canonicality_state
-        GROUP BY chain_id, lower(contract_address)
+            code.chain_id,
+            lower(code.contract_address) AS address,
+            MAX(code.block_number) AS max_observed_block_number
+        FROM raw_code_hashes code
+        JOIN chain_lineage lineage
+          ON lineage.chain_id = code.chain_id
+         AND lineage.block_hash = code.block_hash
+         AND lineage.block_number = code.block_number
+         AND lineage.canonicality_state <> 'orphaned'::canonicality_state
+        WHERE code.canonicality_state <> 'orphaned'::canonicality_state
+        GROUP BY code.chain_id, lower(code.contract_address)
         ORDER BY chain_id, address
         "#,
     )
@@ -71,9 +76,9 @@ pub(super) async fn load_active_manifest_event_sources(
             source.source_family,
             COUNT(event.normalized_event_id)::BIGINT AS normalized_event_count,
             COUNT(event.normalized_event_id) FILTER (
-                WHERE event.raw_fact_ref ->> 'kind' = 'raw_log'
-                  AND raw.raw_log_id IS NULL
-            )::BIGINT AS normalized_events_missing_canonical_raw_log_count
+                WHERE event.normalized_event_id IS NOT NULL
+                  AND lineage.block_hash IS NULL
+            )::BIGINT AS normalized_events_missing_canonical_lineage_count
         FROM active_event_sources source
         LEFT JOIN normalized_events event
           ON event.source_manifest_id = source.manifest_id
@@ -83,12 +88,11 @@ pub(super) async fn load_active_manifest_event_sources(
          AND event.source_family = source.source_family
          AND event.event_kind = ANY(source.normalized_event_kinds)
          AND event.canonicality_state <> 'orphaned'::canonicality_state
-        LEFT JOIN raw_logs raw
-          ON raw.chain_id = event.chain_id
-         AND raw.block_hash = event.block_hash
-         AND raw.transaction_hash = event.transaction_hash
-         AND raw.log_index = event.log_index
-         AND raw.canonicality_state IN (
+        LEFT JOIN chain_lineage lineage
+          ON lineage.chain_id = event.chain_id
+         AND lineage.block_hash = event.block_hash
+         AND lineage.block_number = event.block_number
+         AND lineage.canonicality_state IN (
              'canonical'::canonicality_state,
              'safe'::canonicality_state,
              'finalized'::canonicality_state
@@ -120,9 +124,9 @@ pub(super) async fn load_active_manifest_event_sources(
                 namespace: crate::sql_row::get(&row, "namespace")?,
                 source_family: crate::sql_row::get(&row, "source_family")?,
                 normalized_event_count: crate::sql_row::get(&row, "normalized_event_count")?,
-                normalized_events_missing_canonical_raw_log_count: crate::sql_row::get(
+                normalized_events_missing_canonical_lineage_count: crate::sql_row::get(
                     &row,
-                    "normalized_events_missing_canonical_raw_log_count",
+                    "normalized_events_missing_canonical_lineage_count",
                 )?,
             })
         })

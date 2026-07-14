@@ -66,13 +66,13 @@ pub(in crate::inspect::data_completeness) struct MissingManifestContent {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(in crate::inspect::data_completeness) struct MissingManifestRawFacts {
+pub(in crate::inspect::data_completeness) struct MissingManifestLineage {
     pub(in crate::inspect::data_completeness) manifest_id: i64,
     pub(in crate::inspect::data_completeness) manifest_version: i64,
     pub(in crate::inspect::data_completeness) chain: String,
     pub(in crate::inspect::data_completeness) namespace: String,
     pub(in crate::inspect::data_completeness) source_family: String,
-    pub(in crate::inspect::data_completeness) missing_canonical_raw_log_count: i64,
+    pub(in crate::inspect::data_completeness) missing_canonical_lineage_count: i64,
 }
 
 /// `behind_by` is the block or change-id distance to the applicable target, best-effort:
@@ -115,8 +115,8 @@ pub(in crate::inspect::data_completeness) struct DataCompletenessReport {
     pub(in crate::inspect::data_completeness) missing_projection_replay_markers: Vec<String>,
     pub(in crate::inspect::data_completeness) active_manifest_sources_without_events:
         Vec<MissingManifestContent>,
-    pub(in crate::inspect::data_completeness) active_manifest_sources_with_missing_raw_facts:
-        Vec<MissingManifestRawFacts>,
+    pub(in crate::inspect::data_completeness) active_manifest_sources_with_missing_lineage:
+        Vec<MissingManifestLineage>,
     pub(in crate::inspect::data_completeness) active_namespaces_without_names: Vec<String>,
     pub(in crate::inspect::data_completeness) normalized_events_null_chain_id_count: i64,
     pub(in crate::inspect::data_completeness) missing_deferred_projection_indexes: Vec<String>,
@@ -163,11 +163,10 @@ impl DataCompletenessReport {
         CheckStatus::from_pass(self.discovery_targets_missing_address.is_empty())
     }
 
-    pub(in crate::inspect::data_completeness) fn active_raw_facts_retained(&self) -> CheckStatus {
-        CheckStatus::from_pass(
-            self.active_manifest_sources_with_missing_raw_facts
-                .is_empty(),
-        )
+    pub(in crate::inspect::data_completeness) fn active_event_lineage_retained(
+        &self,
+    ) -> CheckStatus {
+        CheckStatus::from_pass(self.active_manifest_sources_with_missing_lineage.is_empty())
     }
 
     pub(in crate::inspect::data_completeness) fn normalization_healthy(&self) -> CheckStatus {
@@ -229,7 +228,7 @@ impl DataCompletenessReport {
             self.watch_set_observed(),
             self.manifest_declared_targets_present(),
             self.discovery_targets_present(),
-            self.active_raw_facts_retained(),
+            self.active_event_lineage_retained(),
             self.normalization_healthy(),
             self.normalization_caught_up(),
             self.projection_drained(),

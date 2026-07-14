@@ -11,7 +11,7 @@ use bigname_manifests::WatchedContract;
 use bigname_storage::{DEFERRED_NORMALIZED_EVENT_INDEXES, DataCompletenessRead};
 use helpers::{chain_frontier, cursor_label, missing_chain_frontier, replay_complete_lag};
 use report::{
-    ChainWithoutFiniteStart, HistoryTruncation, MissingManifestContent, MissingManifestRawFacts,
+    ChainWithoutFiniteStart, HistoryTruncation, MissingManifestContent, MissingManifestLineage,
     UnobservedTarget,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -380,18 +380,18 @@ pub(super) fn evaluate_data_completeness(
             source_family: source.source_family.clone(),
         })
         .collect::<Vec<_>>();
-    let active_manifest_sources_with_missing_raw_facts = read
+    let active_manifest_sources_with_missing_lineage = read
         .active_manifest_event_sources
         .iter()
-        .filter(|source| source.normalized_events_missing_canonical_raw_log_count > 0)
-        .map(|source| MissingManifestRawFacts {
+        .filter(|source| source.normalized_events_missing_canonical_lineage_count > 0)
+        .map(|source| MissingManifestLineage {
             manifest_id: source.manifest_id,
             manifest_version: source.manifest_version,
             chain: source.chain.clone(),
             namespace: source.namespace.clone(),
             source_family: source.source_family.clone(),
-            missing_canonical_raw_log_count: source
-                .normalized_events_missing_canonical_raw_log_count,
+            missing_canonical_lineage_count: source
+                .normalized_events_missing_canonical_lineage_count,
         })
         .collect::<Vec<_>>();
     let names_by_namespace = read
@@ -453,7 +453,7 @@ pub(super) fn evaluate_data_completeness(
         projection_replay_required_target_block: read.projection_replay_required_target_block,
         missing_projection_replay_markers,
         active_manifest_sources_without_events,
-        active_manifest_sources_with_missing_raw_facts,
+        active_manifest_sources_with_missing_lineage,
         active_namespaces_without_names,
         normalized_events_null_chain_id_count: read.normalized_events_null_chain_id_count,
         missing_deferred_projection_indexes,

@@ -3,6 +3,7 @@ use bigname_manifests::{
     WatchedSourceSelector, load_manifest_declared_watched_source_selector_plan,
     load_watched_chain_plan, load_watched_contracts_by_addresses,
 };
+use bigname_storage::load_active_manifest_deployment_profile;
 
 use super::scoped::replay_source_scope_from_requested_scope;
 use crate::{
@@ -19,7 +20,11 @@ pub(super) async fn ensure_replay_matches_deployment_profile_scope(
     request: &RawFactNormalizedEventReplayRequest,
     range: Option<(i64, i64)>,
 ) -> Result<()> {
-    let active_profile = infer_active_manifest_deployment_profile(pool).await?;
+    let Some(active_profile) = load_active_manifest_deployment_profile(pool).await? else {
+        bail!(
+            "deployment_profile cannot be enforced because the active manifest/discovery corpus does not match a supported deployment profile"
+        );
+    };
     if request.deployment_profile != active_profile {
         bail!(
             "deployment_profile {} does not match active manifest/discovery corpus profile {active_profile}",
@@ -275,40 +280,4 @@ async fn ensure_active_watched_chain_for_replay_profile(
     }
 
     Ok(())
-}
-
-async fn infer_active_manifest_deployment_profile(pool: &sqlx::PgPool) -> Result<String> {
-    let rows = sqlx::query_as::<_, (String, String)>(
-        r#"
-        SELECT DISTINCT chain, deployment_epoch
-        FROM manifest_versions
-        WHERE rollout_status = 'active'
-        ORDER BY chain, deployment_epoch
-        "#,
-    )
-    .fetch_all(pool)
-    .await
-    .context(
-        "failed to load active manifest/discovery corpus for replay deployment_profile enforcement",
-    )?;
-
-    if rows.is_empty() {
-        bail!("deployment_profile cannot be enforced because no active manifests are loaded");
-    }
-
-    let all_mainnet = rows.iter().all(|(chain, _)| chain.ends_with("-mainnet"));
-    if all_mainnet {
-        return Ok("mainnet".to_owned());
-    }
-
-    let all_sepolia_dev = rows.iter().all(|(chain, deployment_epoch)| {
-        chain.ends_with("-sepolia") && deployment_epoch.ends_with("_sepolia_dev")
-    });
-    if all_sepolia_dev {
-        return Ok("sepolia-dev".to_owned());
-    }
-
-    bail!(
-        "deployment_profile cannot be enforced because the active manifest/discovery corpus does not match a supported deployment profile"
-    );
 }

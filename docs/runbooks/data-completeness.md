@@ -55,10 +55,10 @@ retired chain and is reported as an advisory, not gated for the per-chain checks
 | `reconciliation_frontier_at_head` | every active chain has a head lag within `±--max-head-lag-blocks` (default 8) between the stored canonical checkpoint and the canonical lineage head, and every active chain has a frontier row at all |
 | `reconciliation_lineage_contiguous` | distinct canonical/safe/finalized block numbers equal `head - floor + 1`, no height has multiple canonical hashes, and every row above the retained floor points by `parent_hash` to the canonical/safe/finalized row at the preceding height |
 | `reconciliation_history_from_declared_start` | for every active watched chain, the retained lineage floor is at or below the earliest finite start block its active targets declare; a chain whose targets are all open-ended fails, since no floor can be established |
-| `watch_set_code_observation_coverage` | there is at least one active target, and every **active** target — direct active-manifest declarations unioned with the materialized watch view and active discovery edges — has a non-orphaned `raw_code_hashes` observation at or after its inclusive active start (when finite) |
-| `manifest_declared_targets_present` | every active manifest-payload root, contract, and proxy implementation has its matching materialized instance and live address; every proxy implementation also has the exact active managed `proxy_implementation` edge consumed by the watch view |
-| `discovery_targets_present` | every target endpoint of an active non-migration discovery edge has a live `contract_instance_addresses` row on the edge's chain |
-| `active_raw_facts_retained` | every matching non-orphaned, raw-log-backed normalized event for an active event-producing manifest source still resolves to its exact canonical/safe/finalized `raw_logs` anchor |
+| `watch_set_code_observation_coverage` | there is at least one active target, and every **active** target — direct active-manifest declarations unioned with the materialized watch view and active discovery edges — has a non-orphaned `raw_code_hashes` observation with an exact retained non-orphaned lineage anchor at or after its inclusive active start (when finite) |
+| `manifest_declared_targets_present` | every active manifest-payload root, contract, and proxy implementation has its matching materialized instance and open address; every proxy implementation also has the exact open managed `proxy_implementation` edge consumed by the watch view |
+| `discovery_targets_present` | every target endpoint of an open non-migration discovery edge has an open `contract_instance_addresses` row on the edge's chain; bounded edges are historical and impose no current target requirement |
+| `active_event_lineage_retained` | every matching non-orphaned normalized event for an active event-producing manifest source still resolves by exact chain, block hash, and block number to a canonical/safe/finalized `chain_lineage` anchor |
 | `normalization_no_failure` | no replay cursor for an active chain under the deployment profile inferred from the active manifest corpus carries a `last_failure_reason` |
 | `normalization_caught_up_to_raw_head` | the active manifest corpus resolves to one supported deployment profile; every active chain with retained canonical raw logs has that profile's `raw_fact_normalized_events` cursor, and each applicable cursor has reached its target (see below) |
 | `projection_apply_drained` | the change log is empty, or the `normalized_events_to_projection_invalidations` cursor exists and its `last_change_id` has reached `max(projection_normalized_event_changes.change_id)`; unrelated cursor rows do not count |
@@ -72,7 +72,7 @@ retired chain and is reported as an advisory, not gated for the per-chain checks
 `watch_set_code_observation_coverage` is the check with teeth, and the reason the command
 exists. Most others are *relative* invariants: each compares a stage to the stage before
 it, so they stay green while the pipeline faithfully processes an incomplete input.
-`reconciliation_history_from_declared_start`, `active_raw_facts_retained`,
+`reconciliation_history_from_declared_start`, `active_event_lineage_retained`,
 `active_dataset_non_empty`, and `projection_replay_complete` also compare against retained truth,
 the declared world, or the pipeline's own handoff authority rather than the previous stage.
 
@@ -92,7 +92,7 @@ use the non-orphaned head, which includes `observed` logs replay cannot yet touc
 head is reported only, so trailing unpromoted logs do not read as permanent lag.
 
 Cursor selection is keyed by both chain and the deployment profile inferred from the active
-manifest corpus, using the same `mainnet` / `sepolia-dev` classification as replay admission.
+manifest corpus, using the same `mainnet` / `sepolia` classification as replay admission.
 A cursor left by another profile cannot satisfy an active chain, and failures or lag on an
 inactive chain or a non-active profile are reported in `advisories.ignored_replay_cursors`
 instead of gating the serving corpus.
@@ -120,9 +120,10 @@ passing because there was no cursor to measure.
 
 It works because code observations are keyed on the watch set rather than on activity: a
 watched target acquires a code observation from the live tailer's baseline pass even if it
-never emits a log. Coverage preserves the latest non-orphaned observation block per
-`(chain, address)` and compares it with the target's inclusive active start; a pre-admission
-observation retained from an older range cannot satisfy a newly active target. Direct active
+never emits a log. Coverage preserves the latest non-orphaned observation block with a matching
+non-orphaned `chain_lineage` row per `(chain, address)` and compares it with the target's
+inclusive active start; an unanchored observation or one retained from a pre-admission range
+cannot satisfy a newly active target. Direct active
 manifest payload targets, including proxy implementation addresses, are read independently of
 `manifest_contract_instances` and `contract_instance_addresses`, so losing a materialized
 declaration or address row makes the target unobserved instead of removing it from the expected
@@ -131,16 +132,19 @@ strictest lower bound across those entries.
 
 `manifest_declared_targets_present` diagnoses the materialization edge separately. Every payload
 root or contract must have the matching `manifest_contract_instances` declaration; a proxy
-implementation must also have the matching implementation instance. A live address row only
-satisfies a target when its `chain_id` and lowercased address match the payload; a live row for
-the same instance on another chain or at another address does not count. Proxy implementations
-must additionally retain the exact active managed discovery edge that the source-graph writer
+implementation must also have the matching implementation instance. An open address row only
+satisfies a target when its `chain_id` and lowercased address match the payload; a row for the
+same instance on another chain or at another address does not count. An address with a finite
+`active_to_block_number` is closed even when `deactivated_at` is null. Proxy implementations
+must additionally retain the exact open managed discovery edge that the source-graph writer
 creates; the direct payload fallback cannot substitute for the runtime watch-plan edge.
 
 `discovery_targets_present` closes the corresponding gap for dynamic discovery. The active edge
-and its target `contract_instance_id` remain authority if a restore loses the target's live
-address row, even though `load_watched_contracts` can no longer render that target. The named
-check fails on the missing materialization rather than allowing coverage and history to shrink.
+and its target `contract_instance_id` remain authority if a restore loses the target's open
+address row, even though `load_watched_contracts` can no longer render that target. Only open
+edges impose this current-authority requirement: a finite `active_to_block_number` is legitimate
+retained discovery history. The named check fails on a missing or closed current materialization
+rather than allowing coverage and history to shrink.
 See [`chain-intake.md`](../chain-intake.md).
 
 ### Frontier, history, and content against the declared world
@@ -180,12 +184,13 @@ only against the previous pipeline stage:
   identity rule intentionally makes a manifest-version rollout fail until normalized events
   have been re-derived under the newly active `source_manifest_id`; residual rows from the
   previous version are not proof that the new declaration was indexed.
-- **Retained raw facts.** `active_raw_facts_retained` joins each matching active normalized event
-  whose `raw_fact_ref.kind` is `raw_log` back to `raw_logs` by chain, block hash, transaction hash,
-  and log index, and requires that raw row to remain canonical, safe, or finalized. Synthetic
-  block-boundary events are not misclassified as missing logs. Retaining log-derived events and
-  projections while dropping their raw logs is not complete: normalized replay and reorg repair
-  can no longer reproduce or retract the serving state.
+- **Retained event lineage.** `active_event_lineage_retained` joins every matching active
+  normalized event, including synthetic block-boundary events, back to `chain_lineage` by exact
+  chain, block hash, and block number and requires that anchor to remain canonical, safe, or
+  finalized. This is the durable reorg-repair authority. In the documented minimal retention
+  mode, `raw_logs` are replay staging and may be compacted after normalized replay and downstream
+  durability; that valid compaction does not fail this check. Log-audit mode may retain those
+  rows, but choosing it does not change the completeness contract.
 
 ### Projections rebuilt, and structural integrity
 
@@ -234,18 +239,18 @@ otherwise abort the read), so they are surfaced here as a data-integrity fault.
   `RuntimeWatchScope`; `manifest_declared_only` excludes discovery edges. Verify with
   `inspect watch-plan --json`.
 - **`manifest_declared_targets_present` fails.** An active payload target has no matching
-  materialized declaration/implementation instance or no live address row matching both its
-  declared chain and address, or a materialized proxy/implementation pair lacks its managed edge.
-  A missing declaration, missing proxy implementation, missing proxy edge, deactivated,
-  wrong-chain, or wrong-address row breaks the watch-view authority even if retained code
-  observations let the separate coverage check pass. Reseed manifests or repair the materialized
-  graph before promoting.
-- **`discovery_targets_present` fails.** An active discovery edge points to a contract instance
-  with no live address on that chain. Restore or rederive the target address before promoting;
-  deleting the edge merely to silence the check changes admission authority.
-- **`active_raw_facts_retained` fails.** Active raw-log-backed normalized content has lost one or
-  more exact canonical raw logs. Restore the immutable raw facts and re-run
-  normalization/projection repair; derived rows alone are not replay- or reorg-safe.
+  materialized declaration/implementation instance or no open address row matching both its
+  declared chain and address, or a materialized proxy/implementation pair lacks its open managed
+  edge. A missing declaration, missing proxy implementation, missing or bounded proxy edge,
+  deactivated, bounded, wrong-chain, or wrong-address row breaks the watch-view authority even if
+  retained code observations let the separate coverage check pass. Reseed manifests or repair
+  the materialized graph before promoting.
+- **`discovery_targets_present` fails.** An open discovery edge points to a contract instance
+  with no open address on that chain. Restore or rederive the target address before promoting;
+  closing or deleting a current edge merely to silence the check changes admission authority.
+- **`active_event_lineage_retained` fails.** Active normalized content has lost one or more exact
+  canonical lineage anchors. Restore `chain_lineage` and run reorg/projection repair as needed;
+  raw-log compaction by itself is not this failure.
 - **Coverage fails on a database warmed by backfill alone.** Backfill only observes a
   block's selected log emitters. A watched target that never emits acquires its single
   baseline observation from the live tailer, on canonical head reconciliation. Let the
@@ -256,7 +261,7 @@ otherwise abort the read), so they are surfaced here as a data-integrity fault.
   count is stale even though the cursors look drained.
 - **`normalization_caught_up_to_raw_head` reports no active deployment profile.** The active
   manifest corpus is empty or mixes chains/epochs that do not classify as the writer's
-  `mainnet` or `sepolia-dev` profile. Correct manifest rollout state before interpreting cursor
+  `mainnet` or `sepolia` profile. Correct manifest rollout state before interpreting cursor
   progress.
 - **`reconciliation_frontier_at_head` fails.** Head reconciliation has stalled, or the
   checkpoint and lineage have diverged by more than `±max` blocks. A large positive

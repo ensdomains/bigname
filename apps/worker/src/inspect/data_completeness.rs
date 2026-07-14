@@ -104,14 +104,14 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
                     "contract_instance_id": target.contract_instance_id,
                 })).collect::<Vec<_>>(),
             })),
-            check("active_raw_facts_retained", report.active_raw_facts_retained(), json!({
-                "manifest_sources_with_missing_raw_facts": report.active_manifest_sources_with_missing_raw_facts.iter().map(|entry| json!({
+            check("active_event_lineage_retained", report.active_event_lineage_retained(), json!({
+                "manifest_sources_with_missing_lineage": report.active_manifest_sources_with_missing_lineage.iter().map(|entry| json!({
                     "manifest_id": entry.manifest_id,
                     "manifest_version": entry.manifest_version,
                     "chain": entry.chain.as_str(),
                     "namespace": entry.namespace.as_str(),
                     "source_family": entry.source_family.as_str(),
-                    "missing_canonical_raw_log_count": entry.missing_canonical_raw_log_count,
+                    "missing_canonical_lineage_count": entry.missing_canonical_lineage_count,
                 })).collect::<Vec<_>>(),
             })),
             check("normalization_no_failure", report.normalization_healthy(), json!({

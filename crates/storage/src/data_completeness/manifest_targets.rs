@@ -67,7 +67,9 @@ manifest_targets AS (
 )
 "#;
 
-pub(super) async fn load_active_deployment_profile(pool: &sqlx::PgPool) -> Result<Option<String>> {
+pub async fn load_active_manifest_deployment_profile(
+    pool: &sqlx::PgPool,
+) -> Result<Option<String>> {
     let rows = sqlx::query(
         r#"
         SELECT DISTINCT chain, deployment_epoch
@@ -99,7 +101,7 @@ pub(super) async fn load_active_deployment_profile(pool: &sqlx::PgPool) -> Resul
     if rows.iter().all(|(chain, deployment_epoch)| {
         chain.ends_with("-sepolia") && deployment_epoch.ends_with("_sepolia_dev")
     }) {
-        return Ok(Some("sepolia-dev".to_owned()));
+        return Ok(Some("sepolia".to_owned()));
     }
 
     Ok(None)
@@ -150,6 +152,7 @@ pub(super) async fn load_manifest_declared_targets_missing_address(
                 AND declaration.declaration_name = target.declaration_name
                 AND lower(declaration.declared_address) = target.declared_address
                 AND address.deactivated_at IS NULL
+                AND address.active_to_block_number IS NULL
                 AND address.chain_id = target.chain
                 AND lower(address.address) = target.address
                 AND (
@@ -198,6 +201,7 @@ pub(super) async fn load_manifest_proxy_implementations_missing_edge(
                 AND edge.source_manifest_id = target.manifest_id
                 AND edge.admission = 'manifest_declared'
                 AND edge.deactivated_at IS NULL
+                AND edge.active_to_block_number IS NULL
           )
         ORDER BY target.chain, target.source_family, target.address, active_from_block_number"
     );
@@ -241,6 +245,7 @@ pub(super) async fn load_discovery_targets_missing_address(
          END
         WHERE source_manifest.rollout_status = 'active'
           AND edge.deactivated_at IS NULL
+          AND edge.active_to_block_number IS NULL
           AND edge.edge_kind <> 'migration'
           AND (
               edge.edge_kind <> 'resolver'
@@ -257,6 +262,7 @@ pub(super) async fn load_discovery_targets_missing_address(
               WHERE address.contract_instance_id = edge.to_contract_instance_id
                 AND address.chain_id = edge.chain_id
                 AND address.deactivated_at IS NULL
+                AND address.active_to_block_number IS NULL
           )
         ORDER BY chain, source_family, contract_instance_id
         "#,
