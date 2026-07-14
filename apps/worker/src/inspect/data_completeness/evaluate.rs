@@ -1,3 +1,4 @@
+mod helpers;
 mod report;
 
 pub(super) use report::{CheckStatus, CursorLag, DataCompletenessReport};
@@ -8,8 +9,9 @@ use crate::{
 };
 use bigname_manifests::WatchedContract;
 use bigname_storage::{DEFERRED_NORMALIZED_EVENT_INDEXES, DataCompletenessRead};
+use helpers::{chain_frontier, cursor_label, missing_chain_frontier, replay_complete_lag};
 use report::{
-    ChainFrontier, ChainWithoutFiniteStart, HistoryTruncation, MissingManifestContent,
+    ChainWithoutFiniteStart, HistoryTruncation, MissingManifestContent, MissingManifestRawFacts,
     UnobservedTarget,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -139,6 +141,19 @@ pub(super) fn evaluate_data_completeness(
                 .copied(),
         })
         .collect::<Vec<_>>();
+    let manifest_proxy_implementations_missing_edge = read
+        .manifest_proxy_implementations_missing_edge
+        .iter()
+        .map(|target| UnobservedTarget {
+            chain: target.chain.clone(),
+            address: target.address.clone(),
+            source_family: target.source_family.clone(),
+            active_from_block_number: target.active_from_block_number,
+            max_observed_block_number: observed
+                .get(&(target.chain.clone(), target.address.to_ascii_lowercase()))
+                .copied(),
+        })
+        .collect::<Vec<_>>();
 
     // Per-chain declared start information across the deduplicated active source entries.
     let mut chain_starts = BTreeMap::<String, ChainStartInfo>::new();
@@ -185,6 +200,17 @@ pub(super) fn evaluate_data_completeness(
         .filter(|chain| !active_chains.contains(&chain.chain_id))
         .map(|chain| chain.chain_id.clone())
         .collect::<Vec<_>>();
+    let active_deployment_profile = read.active_deployment_profile.as_deref();
+    let cursor_is_active = |cursor: &bigname_storage::ReplayCursorRow| {
+        active_deployment_profile == Some(cursor.deployment_profile.as_str())
+            && active_chains.contains(&cursor.chain_id)
+    };
+    let ignored_replay_cursors = read
+        .replay_cursors
+        .iter()
+        .filter(|cursor| !cursor_is_active(cursor))
+        .map(cursor_label)
+        .collect::<Vec<_>>();
 
     // History: a finite declared start requires the lineage floor to reach it; a chain whose
     // targets are all open-ended has no floor to check and fails closed.
@@ -228,6 +254,7 @@ pub(super) fn evaluate_data_completeness(
     let latched_keys = read
         .replay_cursors
         .iter()
+        .filter(|cursor| cursor_is_active(cursor))
         .filter(|cursor| cursor.cursor_kind == POST_REPLAY_LIVE_ADAPTER_BACKLOG_CURSOR)
         .map(|cursor| (cursor.deployment_profile.as_str(), cursor.chain_id.as_str()))
         .collect::<BTreeSet<_>>();
@@ -235,6 +262,7 @@ pub(super) fn evaluate_data_completeness(
     let failed_replay_cursors = read
         .replay_cursors
         .iter()
+        .filter(|cursor| cursor_is_active(cursor))
         .filter(|cursor| cursor.last_failure_reason.is_some())
         .map(cursor_label)
         .collect::<Vec<_>>();
@@ -242,7 +270,7 @@ pub(super) fn evaluate_data_completeness(
     let lagging_replay_cursors = read
         .replay_cursors
         .iter()
-        .filter(|cursor| active_chains.contains(cursor.chain_id.as_str()))
+        .filter(|cursor| cursor_is_active(cursor))
         .filter_map(|cursor| match cursor.cursor_kind.as_str() {
             RAW_FACT_NORMALIZED_EVENTS_CURSOR => {
                 let key = (cursor.deployment_profile.as_str(), cursor.chain_id.as_str());
@@ -273,6 +301,7 @@ pub(super) fn evaluate_data_completeness(
     let chains_with_raw_fact_cursor = read
         .replay_cursors
         .iter()
+        .filter(|cursor| cursor_is_active(cursor))
         .filter(|cursor| cursor.cursor_kind == RAW_FACT_NORMALIZED_EVENTS_CURSOR)
         .map(|cursor| cursor.chain_id.as_str())
         .collect::<BTreeSet<_>>();
@@ -303,10 +332,13 @@ pub(super) fn evaluate_data_completeness(
 
     let projection_apply_cursor_missing =
         read.max_projection_change_id.is_some() && expected_projection_cursor.is_none();
+    let projection_replay_target_coverage_required = expected_projection_cursor.is_none();
 
     // Projection replay markers: report the newest stored version for diagnosis, but require
     // all current projections at this worker's replay version, exactly as automatic bootstrap
-    // does. Each marker must also cover the target automatic bootstrap would request now.
+    // does. Before the durable apply cursor exists, each marker must also cover the target
+    // automatic bootstrap would request now; after handoff, apply/change/invalidation drain is
+    // the advancing authority and replay markers intentionally remain fixed.
     let projection_replay_version = read
         .projection_replay_markers
         .iter()
@@ -317,12 +349,13 @@ pub(super) fn evaluate_data_completeness(
         .iter()
         .filter(|marker| {
             marker.replay_version == CURRENT_PROJECTION_REPLAY_VERSION
-                && match read.projection_replay_required_target_block {
-                    Some(required) => marker
-                        .completed_normalized_target_block
-                        .is_some_and(|completed| completed >= required),
-                    None => true,
-                }
+                && (!projection_replay_target_coverage_required
+                    || match read.projection_replay_required_target_block {
+                        Some(required) => marker
+                            .completed_normalized_target_block
+                            .is_some_and(|completed| completed >= required),
+                        None => true,
+                    })
         })
         .map(|marker| marker.projection.as_str())
         .collect::<BTreeSet<_>>();
@@ -345,6 +378,20 @@ pub(super) fn evaluate_data_completeness(
             chain: source.chain.clone(),
             namespace: source.namespace.clone(),
             source_family: source.source_family.clone(),
+        })
+        .collect::<Vec<_>>();
+    let active_manifest_sources_with_missing_raw_facts = read
+        .active_manifest_event_sources
+        .iter()
+        .filter(|source| source.normalized_events_missing_canonical_raw_log_count > 0)
+        .map(|source| MissingManifestRawFacts {
+            manifest_id: source.manifest_id,
+            manifest_version: source.manifest_version,
+            chain: source.chain.clone(),
+            namespace: source.namespace.clone(),
+            source_family: source.source_family.clone(),
+            missing_canonical_raw_log_count: source
+                .normalized_events_missing_canonical_raw_log_count,
         })
         .collect::<Vec<_>>();
     let names_by_namespace = read
@@ -382,11 +429,15 @@ pub(super) fn evaluate_data_completeness(
 
     DataCompletenessReport {
         max_head_lag_blocks,
+        active_deployment_profile: read.active_deployment_profile.clone(),
         frontiers,
         foreign_chains,
+        ignored_replay_cursors,
         active_watched_target_count: active_targets.len(),
         unobserved_targets,
         manifest_targets_missing_address,
+        manifest_proxy_implementations_missing_edge,
+        discovery_targets_missing_address: read.discovery_targets_missing_address.clone(),
         chains_history_truncated,
         chains_without_finite_start,
         failed_replay_cursors,
@@ -398,82 +449,16 @@ pub(super) fn evaluate_data_completeness(
         projection_invalidation_dead_letter_count: read.projection_invalidation_dead_letter_count,
         projection_replay_version,
         projection_replay_required_version: CURRENT_PROJECTION_REPLAY_VERSION,
+        projection_replay_target_coverage_required,
         projection_replay_required_target_block: read.projection_replay_required_target_block,
         missing_projection_replay_markers,
         active_manifest_sources_without_events,
+        active_manifest_sources_with_missing_raw_facts,
         active_namespaces_without_names,
         normalized_events_null_chain_id_count: read.normalized_events_null_chain_id_count,
         missing_deferred_projection_indexes,
         backfill_advisory: read.backfill_lifecycle.clone(),
         normalized_event_total,
         name_current_total,
-    }
-}
-
-/// Replay is complete for a cursor's target when `next_block_number > target_block_number`.
-/// A reorg rewind lowers `next_block_number` below the target, so a stale high
-/// `last_completed_block_number` no longer reads as caught up. A missing bound fails closed.
-fn replay_complete_lag(cursor: &bigname_storage::ReplayCursorRow) -> Option<CursorLag> {
-    match (cursor.next_block_number, cursor.target_block_number) {
-        (Some(next), Some(target)) if next > target => None,
-        (next, Some(target)) => Some(CursorLag {
-            label: cursor_label(cursor),
-            behind_by: target - next.unwrap_or(-1),
-        }),
-        (_, None) => Some(CursorLag {
-            label: cursor_label(cursor),
-            behind_by: -1,
-        }),
-    }
-}
-
-fn cursor_label(cursor: &bigname_storage::ReplayCursorRow) -> String {
-    format!(
-        "{}/{}/{}",
-        cursor.deployment_profile, cursor.chain_id, cursor.cursor_kind
-    )
-}
-
-fn missing_chain_frontier(chain_id: &str) -> ChainFrontier {
-    ChainFrontier {
-        chain_id: chain_id.to_owned(),
-        canonical_block_number: None,
-        lineage_head_block_number: None,
-        head_lag_blocks: None,
-        contiguous: false,
-        missing_block_count: 0,
-        duplicate_canonical_height_count: 0,
-        disconnected_canonical_parent_count: 0,
-        missing_from_storage: true,
-    }
-}
-
-fn chain_frontier(chain: &bigname_storage::ChainCompletenessRow) -> ChainFrontier {
-    let head_lag_blocks = chain
-        .canonical_block_number
-        .zip(chain.lineage_head_block_number)
-        .map(|(canonical, lineage_head)| canonical - lineage_head);
-
-    let expected_block_count = chain
-        .lineage_head_block_number
-        .zip(chain.lineage_floor_block_number)
-        .map(|(head, floor)| head - floor + 1);
-    let missing_block_count = expected_block_count
-        .map(|expected| expected - chain.lineage_canonical_block_count)
-        .unwrap_or_default();
-
-    ChainFrontier {
-        chain_id: chain.chain_id.clone(),
-        canonical_block_number: chain.canonical_block_number,
-        lineage_head_block_number: chain.lineage_head_block_number,
-        head_lag_blocks,
-        contiguous: expected_block_count.is_some()
-            && missing_block_count == 0
-            && chain.duplicate_canonical_height_count == 0
-            && chain.disconnected_canonical_parent_count == 0,
-        missing_block_count,
-        duplicate_canonical_height_count: chain.duplicate_canonical_height_count,
-        disconnected_canonical_parent_count: chain.disconnected_canonical_parent_count,
-        missing_from_storage: false,
     }
 }

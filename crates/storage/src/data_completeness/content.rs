@@ -2,74 +2,8 @@ use anyhow::{Context, Result};
 
 use super::{
     ActiveManifestEventSource, BackfillLifecycleRow, DEFERRED_NORMALIZED_EVENT_INDEXES,
-    ManifestChainNamespace, ManifestDeclaredTarget, NameCurrentCount, ObservedCodeAddress,
-    ProjectionReplayMarker,
+    ManifestChainNamespace, NameCurrentCount, ObservedCodeAddress, ProjectionReplayMarker,
 };
-
-const ACTIVE_MANIFEST_TARGETS_CTE: &str = r#"
-WITH active_manifest_entries AS (
-    SELECT
-        manifest.manifest_id,
-        manifest.chain,
-        manifest.source_family,
-        'root'::TEXT AS declaration_kind,
-        entry ->> 'name' AS declaration_name,
-        lower(entry ->> 'address') AS declared_address,
-        (entry ->> 'start_block')::BIGINT AS start_block,
-        entry
-    FROM manifest_versions manifest
-    CROSS JOIN LATERAL jsonb_array_elements(
-        COALESCE(manifest.manifest_payload -> 'roots', '[]'::JSONB)
-    ) entry
-    WHERE manifest.rollout_status = 'active'
-
-    UNION ALL
-
-    SELECT
-        manifest.manifest_id,
-        manifest.chain,
-        manifest.source_family,
-        'contract'::TEXT AS declaration_kind,
-        entry ->> 'role' AS declaration_name,
-        lower(entry ->> 'address') AS declared_address,
-        (entry ->> 'start_block')::BIGINT AS start_block,
-        entry
-    FROM manifest_versions manifest
-    CROSS JOIN LATERAL jsonb_array_elements(
-        COALESCE(manifest.manifest_payload -> 'contracts', '[]'::JSONB)
-    ) entry
-    WHERE manifest.rollout_status = 'active'
-),
-manifest_targets AS (
-    SELECT
-        manifest_id,
-        chain,
-        source_family,
-        declaration_kind,
-        declaration_name,
-        declared_address,
-        'declaration'::TEXT AS target_kind,
-        declared_address AS address,
-        start_block
-    FROM active_manifest_entries
-
-    UNION ALL
-
-    SELECT
-        manifest_id,
-        chain,
-        source_family,
-        declaration_kind,
-        declaration_name,
-        declared_address,
-        'implementation'::TEXT AS target_kind,
-        lower(entry ->> 'implementation') AS address,
-        start_block
-    FROM active_manifest_entries
-    WHERE declaration_kind = 'contract'
-      AND entry ->> 'implementation' IS NOT NULL
-)
-"#;
 
 pub(super) async fn load_observed_code_addresses(
     pool: &sqlx::PgPool,
@@ -96,36 +30,6 @@ pub(super) async fn load_observed_code_addresses(
                 chain_id: crate::sql_row::get(&row, "chain_id")?,
                 address: crate::sql_row::get(&row, "address")?,
                 max_observed_block_number: crate::sql_row::get(&row, "max_observed_block_number")?,
-            })
-        })
-        .collect()
-}
-
-pub(super) async fn load_manifest_declared_targets(
-    pool: &sqlx::PgPool,
-) -> Result<Vec<ManifestDeclaredTarget>> {
-    let query = format!(
-        "{ACTIVE_MANIFEST_TARGETS_CTE}
-        SELECT DISTINCT
-            chain,
-            source_family,
-            address,
-            start_block AS active_from_block_number
-        FROM manifest_targets
-        ORDER BY chain, source_family, address, active_from_block_number"
-    );
-    let rows = sqlx::query(&query)
-        .fetch_all(pool)
-        .await
-        .context("failed to load active manifest-declared targets")?;
-
-    rows.into_iter()
-        .map(|row| {
-            Ok(ManifestDeclaredTarget {
-                chain: crate::sql_row::get(&row, "chain")?,
-                source_family: crate::sql_row::get(&row, "source_family")?,
-                address: crate::sql_row::get(&row, "address")?,
-                active_from_block_number: crate::sql_row::get(&row, "active_from_block_number")?,
             })
         })
         .collect()
@@ -165,7 +69,11 @@ pub(super) async fn load_active_manifest_event_sources(
             source.chain,
             source.namespace,
             source.source_family,
-            COUNT(event.normalized_event_id)::BIGINT AS normalized_event_count
+            COUNT(event.normalized_event_id)::BIGINT AS normalized_event_count,
+            COUNT(event.normalized_event_id) FILTER (
+                WHERE event.raw_fact_ref ->> 'kind' = 'raw_log'
+                  AND raw.raw_log_id IS NULL
+            )::BIGINT AS normalized_events_missing_canonical_raw_log_count
         FROM active_event_sources source
         LEFT JOIN normalized_events event
           ON event.source_manifest_id = source.manifest_id
@@ -175,6 +83,16 @@ pub(super) async fn load_active_manifest_event_sources(
          AND event.source_family = source.source_family
          AND event.event_kind = ANY(source.normalized_event_kinds)
          AND event.canonicality_state <> 'orphaned'::canonicality_state
+        LEFT JOIN raw_logs raw
+          ON raw.chain_id = event.chain_id
+         AND raw.block_hash = event.block_hash
+         AND raw.transaction_hash = event.transaction_hash
+         AND raw.log_index = event.log_index
+         AND raw.canonicality_state IN (
+             'canonical'::canonicality_state,
+             'safe'::canonicality_state,
+             'finalized'::canonicality_state
+         )
         GROUP BY
             source.manifest_id,
             source.manifest_version,
@@ -202,6 +120,10 @@ pub(super) async fn load_active_manifest_event_sources(
                 namespace: crate::sql_row::get(&row, "namespace")?,
                 source_family: crate::sql_row::get(&row, "source_family")?,
                 normalized_event_count: crate::sql_row::get(&row, "normalized_event_count")?,
+                normalized_events_missing_canonical_raw_log_count: crate::sql_row::get(
+                    &row,
+                    "normalized_events_missing_canonical_raw_log_count",
+                )?,
             })
         })
         .collect()
@@ -417,56 +339,6 @@ pub(super) async fn load_manifest_chain_namespaces(
             Ok(ManifestChainNamespace {
                 chain: crate::sql_row::get(&row, "chain")?,
                 namespace: crate::sql_row::get(&row, "namespace")?,
-            })
-        })
-        .collect()
-}
-
-pub(super) async fn load_manifest_declared_targets_missing_address(
-    pool: &sqlx::PgPool,
-) -> Result<Vec<ManifestDeclaredTarget>> {
-    let query = format!(
-        "{ACTIVE_MANIFEST_TARGETS_CTE}
-        SELECT DISTINCT
-            target.chain,
-            target.source_family,
-            target.address,
-            target.start_block AS active_from_block_number
-        FROM manifest_targets target
-        WHERE NOT EXISTS (
-            SELECT 1
-            FROM manifest_contract_instances declaration
-            JOIN contract_instance_addresses address
-              ON address.contract_instance_id = CASE target.target_kind
-                  WHEN 'declaration' THEN declaration.contract_instance_id
-                  ELSE declaration.implementation_contract_instance_id
-              END
-            WHERE declaration.manifest_id = target.manifest_id
-                AND declaration.declaration_kind = target.declaration_kind
-                AND declaration.declaration_name = target.declaration_name
-                AND lower(declaration.declared_address) = target.declared_address
-                AND address.deactivated_at IS NULL
-                AND address.chain_id = target.chain
-                AND lower(address.address) = target.address
-                AND (
-                    target.target_kind = 'declaration'
-                    OR lower(declaration.declared_implementation_address) = target.address
-                )
-        )
-        ORDER BY target.chain, target.source_family, target.address, active_from_block_number"
-    );
-    let rows = sqlx::query(&query)
-        .fetch_all(pool)
-        .await
-        .context("failed to load manifest-declared targets missing a matching live address row")?;
-
-    rows.into_iter()
-        .map(|row| {
-            Ok(ManifestDeclaredTarget {
-                chain: crate::sql_row::get(&row, "chain")?,
-                source_family: crate::sql_row::get(&row, "source_family")?,
-                address: crate::sql_row::get(&row, "address")?,
-                active_from_block_number: crate::sql_row::get(&row, "active_from_block_number")?,
             })
         })
         .collect()

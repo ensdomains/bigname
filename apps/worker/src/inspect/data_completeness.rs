@@ -87,11 +87,39 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
                     "active_from_block_number": target.active_from_block_number,
                     "max_observed_block_number": target.max_observed_block_number,
                 })).collect::<Vec<_>>(),
+                "missing_proxy_implementation_edge_count": report.manifest_proxy_implementations_missing_edge.len(),
+                "missing_proxy_implementation_edges": report.manifest_proxy_implementations_missing_edge.iter().take(20).map(|target| json!({
+                    "chain": target.chain.as_str(),
+                    "address": target.address.as_str(),
+                    "source_family": target.source_family.as_str(),
+                    "active_from_block_number": target.active_from_block_number,
+                    "max_observed_block_number": target.max_observed_block_number,
+                })).collect::<Vec<_>>(),
+            })),
+            check("discovery_targets_present", report.discovery_targets_present(), json!({
+                "missing_address_target_count": report.discovery_targets_missing_address.len(),
+                "missing_address_targets": report.discovery_targets_missing_address.iter().take(20).map(|target| json!({
+                    "chain": target.chain.as_str(),
+                    "source_family": target.source_family.as_str(),
+                    "contract_instance_id": target.contract_instance_id,
+                })).collect::<Vec<_>>(),
+            })),
+            check("active_raw_facts_retained", report.active_raw_facts_retained(), json!({
+                "manifest_sources_with_missing_raw_facts": report.active_manifest_sources_with_missing_raw_facts.iter().map(|entry| json!({
+                    "manifest_id": entry.manifest_id,
+                    "manifest_version": entry.manifest_version,
+                    "chain": entry.chain.as_str(),
+                    "namespace": entry.namespace.as_str(),
+                    "source_family": entry.source_family.as_str(),
+                    "missing_canonical_raw_log_count": entry.missing_canonical_raw_log_count,
+                })).collect::<Vec<_>>(),
             })),
             check("normalization_no_failure", report.normalization_healthy(), json!({
+                "active_deployment_profile": report.active_deployment_profile.as_deref(),
                 "failed_cursors": report.failed_replay_cursors.clone(),
             })),
             check("normalization_caught_up_to_raw_head", report.normalization_caught_up(), json!({
+                "active_deployment_profile": report.active_deployment_profile.as_deref(),
                 "lagging_cursors": report.lagging_replay_cursors.iter().map(cursor_lag).collect::<Vec<_>>(),
                 "chains_missing_raw_fact_cursor": report.chains_missing_raw_fact_cursor.clone(),
             })),
@@ -109,6 +137,7 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
             check("projection_replay_complete", report.projection_replay_complete(), json!({
                 "replay_version": report.projection_replay_version,
                 "required_replay_version": report.projection_replay_required_version,
+                "target_coverage_required": report.projection_replay_target_coverage_required,
                 "required_target_block": report.projection_replay_required_target_block,
                 "missing_projections": report.missing_projection_replay_markers.clone(),
             })),
@@ -133,6 +162,7 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
         ],
         "advisories": {
             "foreign_chains": report.foreign_chains.clone(),
+            "ignored_replay_cursors": report.ignored_replay_cursors.clone(),
             "backfill_lifecycle": report.backfill_advisory.iter().map(|row| json!({
                 "deployment_profile": row.deployment_profile.as_str(),
                 "failed_job_count": row.failed_job_count,

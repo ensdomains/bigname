@@ -3,9 +3,9 @@ use crate::replay::{ALL_CURRENT_PROJECTION_ORDER, CURRENT_PROJECTION_REPLAY_VERS
 use bigname_manifests::{WatchedContract, WatchedContractSource};
 use bigname_storage::{
     ActiveManifestEventSource, BackfillLifecycleRow, ChainCompletenessRow,
-    DEFERRED_NORMALIZED_EVENT_INDEXES, DataCompletenessRead, ManifestChainNamespace,
-    ManifestDeclaredTarget, NameCurrentCount, ObservedCodeAddress, ProjectionApplyCursorRow,
-    ProjectionReplayMarker, ReplayCursorRow,
+    DEFERRED_NORMALIZED_EVENT_INDEXES, DataCompletenessRead, DiscoveryTargetMissingAddress,
+    ManifestChainNamespace, ManifestDeclaredTarget, NameCurrentCount, ObservedCodeAddress,
+    ProjectionApplyCursorRow, ProjectionReplayMarker, ReplayCursorRow,
 };
 use uuid::Uuid;
 
@@ -14,6 +14,7 @@ const NAMESPACE: &str = "ens";
 const REGISTRY: &str = "0x796fff2e907449be8d5921bcc215b1b76d89d080";
 const RESOLVER: &str = "0xe99638b40e4fff0129d56f03b55b6bbc4bbe49b5";
 const APPLY_CURSOR: &str = "normalized_events_to_projection_invalidations";
+const DEPLOYMENT_PROFILE: &str = "sepolia-dev";
 
 fn manifest_ns(chain: &str, namespace: &str) -> ManifestChainNamespace {
     ManifestChainNamespace {
@@ -82,6 +83,7 @@ fn active_event_source(
         namespace: NAMESPACE.to_owned(),
         source_family: source_family.to_owned(),
         normalized_event_count,
+        normalized_events_missing_canonical_raw_log_count: 0,
     }
 }
 
@@ -114,7 +116,7 @@ fn chain_row(
 // A raw-fact cursor caught up to `target`: replay is complete when next > target.
 fn replay_cursor(target: i64, failure: Option<&str>) -> ReplayCursorRow {
     ReplayCursorRow {
-        deployment_profile: "sepolia".to_owned(),
+        deployment_profile: DEPLOYMENT_PROFILE.to_owned(),
         chain_id: CHAIN.to_owned(),
         cursor_kind: "raw_fact_normalized_events".to_owned(),
         next_block_number: Some(target + 1),
@@ -127,7 +129,7 @@ fn replay_cursor(target: i64, failure: Option<&str>) -> ReplayCursorRow {
 // A cursor whose `next` was rewound below `target` while `last_completed` stays high.
 fn rewound_cursor(next: i64, target: i64, last_completed: i64) -> ReplayCursorRow {
     ReplayCursorRow {
-        deployment_profile: "sepolia".to_owned(),
+        deployment_profile: DEPLOYMENT_PROFILE.to_owned(),
         chain_id: CHAIN.to_owned(),
         cursor_kind: "raw_fact_normalized_events".to_owned(),
         next_block_number: Some(next),
@@ -140,7 +142,7 @@ fn rewound_cursor(next: i64, target: i64, last_completed: i64) -> ReplayCursorRo
 // A backlog cursor caught up to `target` when `next > target`.
 fn backlog_cursor(next: i64, target: i64) -> ReplayCursorRow {
     ReplayCursorRow {
-        deployment_profile: "sepolia".to_owned(),
+        deployment_profile: DEPLOYMENT_PROFILE.to_owned(),
         chain_id: CHAIN.to_owned(),
         cursor_kind: "post_replay_live_adapter_backlog".to_owned(),
         next_block_number: Some(next),
@@ -160,6 +162,7 @@ fn apply_cursor(last_change_id: i64) -> ProjectionApplyCursorRow {
 fn healthy_read() -> DataCompletenessRead {
     DataCompletenessRead {
         chains: vec![chain_row(1_000, 1_000, 1, 1_000)],
+        active_deployment_profile: Some(DEPLOYMENT_PROFILE.to_owned()),
         replay_cursors: vec![replay_cursor(1, None)],
         projection_apply_cursors: vec![apply_cursor(42)],
         max_projection_change_id: Some(42),
@@ -176,6 +179,8 @@ fn healthy_read() -> DataCompletenessRead {
         present_deferred_projection_indexes: all_deferred_indexes(),
         manifest_chain_namespaces: vec![manifest_ns(CHAIN, NAMESPACE)],
         manifest_declared_targets_missing_address: vec![],
+        manifest_proxy_implementations_missing_edge: vec![],
+        discovery_targets_missing_address: vec![],
     }
 }
 
@@ -293,6 +298,46 @@ fn manifest_declared_target_missing_matching_address_fails_named_check() {
     assert!(!report.data_complete());
 }
 
+/// The proxy implementation address fallback cannot substitute for the managed source-graph
+/// edge that makes the implementation part of the runtime watch view.
+#[test]
+fn manifest_proxy_implementation_missing_edge_fails_named_check() {
+    let mut read = healthy_read();
+    let implementation = manifest_target(RESOLVER, Some(1));
+    read.manifest_declared_targets.push(implementation.clone());
+    read.manifest_proxy_implementations_missing_edge = vec![implementation];
+    read.observed_code_addresses.push(observed(RESOLVER));
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.watch_set_observed(), CheckStatus::Pass);
+    assert_eq!(
+        report.manifest_declared_targets_present(),
+        CheckStatus::Fail
+    );
+    assert_eq!(
+        report.manifest_proxy_implementations_missing_edge[0].address,
+        RESOLVER
+    );
+    assert!(!report.data_complete());
+}
+
+/// An active discovery edge remains watch authority even if its target address row vanished.
+/// The runtime view cannot render an address, so the structural check must fail explicitly.
+#[test]
+fn discovery_target_missing_address_fails_named_check() {
+    let mut read = healthy_read();
+    read.discovery_targets_missing_address = vec![DiscoveryTargetMissingAddress {
+        chain: CHAIN.to_owned(),
+        source_family: "ens_v2_resolver_l1".to_owned(),
+        contract_instance_id: Uuid::from_u128(42),
+    }];
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.discovery_targets_present(), CheckStatus::Fail);
+    assert_eq!(report.discovery_targets_missing_address.len(), 1);
+    assert!(!report.data_complete());
+}
+
 /// A manifest-less restore reads zero watched contracts. The coverage check is the
 /// load-bearing one, so it must not pass vacuously when there is nothing to observe.
 #[test]
@@ -346,6 +391,55 @@ fn replay_cursor_failure_reason_fails_normalization() {
 
     assert_eq!(report.normalization_healthy(), CheckStatus::Fail);
     assert_eq!(report.failed_replay_cursors.len(), 1);
+    assert!(!report.data_complete());
+}
+
+/// Failed cursor state for a retired chain is advisory state outside the active serving set.
+#[test]
+fn failed_replay_cursor_on_inactive_chain_is_ignored() {
+    let mut read = healthy_read();
+    read.replay_cursors.push(ReplayCursorRow {
+        deployment_profile: DEPLOYMENT_PROFILE.to_owned(),
+        chain_id: "retired-chain".to_owned(),
+        cursor_kind: "raw_fact_normalized_events".to_owned(),
+        next_block_number: Some(1),
+        target_block_number: Some(10),
+        last_completed_block_number: None,
+        last_failure_reason: Some("retired failure".to_owned()),
+    });
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.normalization_healthy(), CheckStatus::Pass);
+    assert!(report.failed_replay_cursors.is_empty());
+    assert_eq!(report.ignored_replay_cursors.len(), 1);
+    assert!(report.data_complete());
+}
+
+/// A caught-up cursor from a different deployment profile cannot stand in for the profile
+/// selected by the active manifest corpus.
+#[test]
+fn stale_profile_cursor_does_not_satisfy_active_profile() {
+    let mut read = healthy_read();
+    read.replay_cursors[0].deployment_profile = "retired-profile".to_owned();
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.normalization_caught_up(), CheckStatus::Fail);
+    assert_eq!(
+        report.chains_missing_raw_fact_cursor,
+        vec![CHAIN.to_owned()]
+    );
+    assert_eq!(report.ignored_replay_cursors.len(), 1);
+    assert!(!report.data_complete());
+}
+
+/// An unclassifiable active manifest corpus cannot select the writer's replay cursor profile.
+#[test]
+fn unresolved_active_deployment_profile_fails_normalization() {
+    let mut read = healthy_read();
+    read.active_deployment_profile = None;
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.normalization_caught_up(), CheckStatus::Fail);
     assert!(!report.data_complete());
 }
 
@@ -403,8 +497,8 @@ fn chain_with_raw_logs_but_no_replay_cursor_fails() {
     assert!(!report.data_complete());
 }
 
-/// A chain with no retained canonical raw logs has nothing to normalize, so a missing cursor
-/// there is not a gap.
+/// A chain with no retained canonical raw logs has no cursor frontier to compare. The separate
+/// raw-fact retention check still rejects retained active normalized events without their facts.
 #[test]
 fn chain_without_canonical_raw_logs_does_not_require_a_cursor() {
     let mut read = healthy_read();
@@ -418,6 +512,21 @@ fn chain_without_canonical_raw_logs_does_not_require_a_cursor() {
 
     assert_eq!(report.normalization_caught_up(), CheckStatus::Pass);
     assert!(report.chains_missing_raw_fact_cursor.is_empty());
+}
+
+/// Derived active content is not replay-safe when its exact canonical raw-log anchors vanished.
+#[test]
+fn active_normalized_events_missing_raw_logs_fail() {
+    let mut read = healthy_read();
+    read.active_manifest_event_sources[0].normalized_events_missing_canonical_raw_log_count = 3;
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.active_raw_facts_retained(), CheckStatus::Fail);
+    assert_eq!(
+        report.active_manifest_sources_with_missing_raw_facts[0].missing_canonical_raw_log_count,
+        3
+    );
+    assert!(!report.data_complete());
 }
 
 #[test]
@@ -685,6 +794,7 @@ fn foreign_chain_content_does_not_satisfy_an_empty_active_chain() {
             namespace: NAMESPACE.to_owned(),
             source_family: "foreign_registry".to_owned(),
             normalized_event_count: 500,
+            normalized_events_missing_canonical_raw_log_count: 0,
         });
     read.name_current_counts = vec![names(NAMESPACE, 20)];
     let report = evaluate(&read, &registry_only());
@@ -811,6 +921,8 @@ fn incomplete_projection_replay_markers_fail() {
 #[test]
 fn projection_replay_markers_below_required_target_fail() {
     let mut read = healthy_read();
+    read.projection_apply_cursors.clear();
+    read.max_projection_change_id = None;
     read.projection_replay_required_target_block = Some(1_001);
     let report = evaluate(&read, &registry_only());
 
@@ -820,7 +932,22 @@ fn projection_replay_markers_below_required_target_fail() {
         ALL_CURRENT_PROJECTION_ORDER.len()
     );
     assert_eq!(report.projection_replay_required_target_block, Some(1_001));
+    assert!(report.projection_replay_target_coverage_required);
     assert!(!report.data_complete());
+}
+
+/// Once the durable apply cursor exists, current-version markers prove bootstrap handoff and
+/// the drained apply/change-log checks own later normalized blocks. Marker targets do not move.
+#[test]
+fn drained_projection_apply_allows_target_to_advance_past_replay_markers() {
+    let mut read = healthy_read();
+    read.projection_replay_required_target_block = Some(1_001);
+    let report = evaluate(&read, &registry_only());
+
+    assert!(!report.projection_replay_target_coverage_required);
+    assert_eq!(report.projection_replay_complete(), CheckStatus::Pass);
+    assert_eq!(report.projection_drained(), CheckStatus::Pass);
+    assert!(report.data_complete());
 }
 
 /// No replay markers at all means projections were never rebuilt.
@@ -977,7 +1104,7 @@ fn foreign_chain_is_advisory_not_gating() {
 fn backfill_failures_are_advisory() {
     let mut read = healthy_read();
     read.backfill_lifecycle = vec![BackfillLifecycleRow {
-        deployment_profile: "sepolia".to_owned(),
+        deployment_profile: DEPLOYMENT_PROFILE.to_owned(),
         failed_job_count: 22,
         failed_range_count: 22,
         incomplete_range_count: 274,

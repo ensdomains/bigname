@@ -435,6 +435,96 @@ async fn manifest_proxy_implementation_is_a_declared_target() -> Result<()> {
     .await?;
     let read = load_data_completeness(pool).await?;
     assert!(read.manifest_declared_targets_missing_address.is_empty());
+    assert_eq!(read.manifest_proxy_implementations_missing_edge.len(), 1);
+    assert_eq!(
+        read.manifest_proxy_implementations_missing_edge[0].address,
+        "0ximplementation"
+    );
+
+    sqlx::query(
+        r#"
+        INSERT INTO discovery_edges
+            (chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id,
+             discovery_source, source_manifest_id, admission)
+        VALUES
+            ('ethereum-sepolia', 'proxy_implementation',
+             '66666666-6666-6666-6666-666666666666',
+             '77777777-7777-7777-7777-777777777777',
+             'manifest_declared_proxy', $1, 'manifest_declared')
+        "#,
+    )
+    .bind(manifest_id)
+    .execute(pool)
+    .await?;
+    let read = load_data_completeness(pool).await?;
+    assert!(read.manifest_proxy_implementations_missing_edge.is_empty());
+
+    database.cleanup().await
+}
+
+/// An active discovery edge remains watch authority when its target address materialization is
+/// missing; the completeness read must surface the endpoint rather than losing it in the view.
+#[tokio::test]
+async fn discovery_target_without_live_address_is_surfaced() -> Result<()> {
+    let database = test_database().await?;
+    let pool = database.pool();
+    let manifest_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO manifest_versions
+            (manifest_version, namespace, source_family, chain, deployment_epoch,
+             rollout_status, normalizer_version, file_path, manifest_payload)
+        VALUES
+            (1, 'ens', 'registry', 'ethereum-sepolia', 'ens_v2_sepolia_dev',
+             'active', 'n', 'f', '{}'::jsonb)
+        RETURNING manifest_id
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+        VALUES
+            ('88888888-8888-8888-8888-888888888888', 'ethereum-sepolia', 'contract'),
+            ('99999999-9999-9999-9999-999999999999', 'ethereum-sepolia', 'contract')
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO discovery_edges
+            (chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id,
+             discovery_source, source_manifest_id, admission)
+        VALUES
+            ('ethereum-sepolia', 'subregistry',
+             '88888888-8888-8888-8888-888888888888',
+             '99999999-9999-9999-9999-999999999999',
+             'registry_event', $1, 'reachable_from_root')
+        "#,
+    )
+    .bind(manifest_id)
+    .execute(pool)
+    .await?;
+
+    let read = load_data_completeness(pool).await?;
+    assert_eq!(read.discovery_targets_missing_address.len(), 1);
+    assert_eq!(
+        read.discovery_targets_missing_address[0].contract_instance_id,
+        uuid::Uuid::parse_str("99999999-9999-9999-9999-999999999999")?
+    );
+
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address)
+        VALUES
+            ('99999999-9999-9999-9999-999999999999', 'ethereum-sepolia', '0xDISCOVERED')
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    let read = load_data_completeness(pool).await?;
+    assert!(read.discovery_targets_missing_address.is_empty());
 
     database.cleanup().await
 }
@@ -502,6 +592,75 @@ async fn active_event_sources_are_counted_by_exact_manifest_identity() -> Result
     let source = &read.active_manifest_event_sources[0];
     assert_eq!(source.manifest_id, active_event_manifest_id);
     assert_eq!(source.normalized_event_count, 0);
+
+    database.cleanup().await
+}
+
+/// Active normalized content must retain its exact canonical raw-log anchors so replay and
+/// reorg repair remain possible after restore.
+#[tokio::test]
+async fn active_event_sources_report_missing_canonical_raw_logs() -> Result<()> {
+    let database = test_database().await?;
+    let pool = database.pool();
+    let manifest_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO manifest_versions
+            (manifest_version, namespace, source_family, chain, deployment_epoch,
+             rollout_status, normalizer_version, file_path, manifest_payload)
+        VALUES
+            (1, 'ens', 'registry', 'ethereum-sepolia', 'ens_v2_sepolia_dev',
+             'active', 'n', 'active',
+             '{"abi":{"events":[{"normalized_events":["ResolverChanged"]}]}}'::jsonb)
+        RETURNING manifest_id
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_events
+            (event_identity, namespace, event_kind, source_family, manifest_version,
+             source_manifest_id, chain_id, block_number, block_hash, transaction_hash,
+             log_index, raw_fact_ref, derivation_kind, canonicality_state)
+        VALUES
+            ('active-event', 'ens', 'ResolverChanged', 'registry', 1, $1,
+             'ethereum-sepolia', 42, '0xBLOCK', '0xTX', 3,
+             '{"kind":"raw_log"}'::jsonb, 'raw_log', 'canonical'),
+            ('boundary-event', 'ens', 'ResolverChanged', 'registry', 1, $1,
+             'ethereum-sepolia', 42, '0xBLOCK', NULL, NULL,
+             '{"kind":"raw_block"}'::jsonb, 'synthetic_boundary', 'canonical')
+        "#,
+    )
+    .bind(manifest_id)
+    .execute(pool)
+    .await?;
+
+    let read = load_data_completeness(pool).await?;
+    assert_eq!(
+        read.active_manifest_event_sources[0].normalized_events_missing_canonical_raw_log_count,
+        1
+    );
+    assert_eq!(
+        read.active_manifest_event_sources[0].normalized_event_count,
+        2
+    );
+
+    sqlx::query(
+        r#"
+        INSERT INTO raw_logs
+            (chain_id, block_hash, block_number, transaction_hash, transaction_index,
+             log_index, emitting_address, canonicality_state)
+        VALUES
+            ('ethereum-sepolia', '0xBLOCK', 42, '0xTX', 1, 3, '0xEMITTER', 'canonical')
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    let read = load_data_completeness(pool).await?;
+    assert_eq!(
+        read.active_manifest_event_sources[0].normalized_events_missing_canonical_raw_log_count,
+        0
+    );
 
     database.cleanup().await
 }
@@ -678,6 +837,34 @@ async fn active_manifest_chain_namespaces_are_loaded() -> Result<()> {
         read.chains
             .iter()
             .all(|chain| chain.chain_id != "ethereum-sepolia")
+    );
+
+    database.cleanup().await
+}
+
+/// Replay cursor selection uses the deployment profile implied by the active manifest corpus,
+/// matching the indexer's replay-admission writer boundary.
+#[tokio::test]
+async fn active_manifest_deployment_profile_is_inferred() -> Result<()> {
+    let database = test_database().await?;
+    let pool = database.pool();
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_versions
+            (manifest_version, namespace, source_family, chain, deployment_epoch,
+             rollout_status, normalizer_version, file_path, manifest_payload)
+        VALUES
+            (1, 'ens', 'registry', 'ethereum-sepolia', 'ens_v2_sepolia_dev',
+             'active', 'n', 'f', '{}'::jsonb)
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    let read = load_data_completeness(pool).await?;
+    assert_eq!(
+        read.active_deployment_profile.as_deref(),
+        Some("sepolia-dev")
     );
 
     database.cleanup().await

@@ -56,13 +56,15 @@ retired chain and is reported as an advisory, not gated for the per-chain checks
 | `reconciliation_lineage_contiguous` | distinct canonical/safe/finalized block numbers equal `head - floor + 1`, no height has multiple canonical hashes, and every row above the retained floor points by `parent_hash` to the canonical/safe/finalized row at the preceding height |
 | `reconciliation_history_from_declared_start` | for every active watched chain, the retained lineage floor is at or below the earliest finite start block its active targets declare; a chain whose targets are all open-ended fails, since no floor can be established |
 | `watch_set_code_observation_coverage` | there is at least one active target, and every **active** target — direct active-manifest declarations unioned with the materialized watch view and active discovery edges — has a non-orphaned `raw_code_hashes` observation at or after its inclusive active start (when finite) |
-| `manifest_declared_targets_present` | every active manifest-payload root, contract, and proxy implementation has its matching materialized instance plus a live `contract_instance_addresses` row whose chain and address match the payload |
-| `normalization_no_failure` | no `normalized_replay_cursors` row carries a `last_failure_reason` |
-| `normalization_caught_up_to_raw_head` | every active chain with retained canonical raw logs has a `raw_fact_normalized_events` cursor, and each replay cursor has reached its applicable target (see below) |
+| `manifest_declared_targets_present` | every active manifest-payload root, contract, and proxy implementation has its matching materialized instance and live address; every proxy implementation also has the exact active managed `proxy_implementation` edge consumed by the watch view |
+| `discovery_targets_present` | every target endpoint of an active non-migration discovery edge has a live `contract_instance_addresses` row on the edge's chain |
+| `active_raw_facts_retained` | every matching non-orphaned, raw-log-backed normalized event for an active event-producing manifest source still resolves to its exact canonical/safe/finalized `raw_logs` anchor |
+| `normalization_no_failure` | no replay cursor for an active chain under the deployment profile inferred from the active manifest corpus carries a `last_failure_reason` |
+| `normalization_caught_up_to_raw_head` | the active manifest corpus resolves to one supported deployment profile; every active chain with retained canonical raw logs has that profile's `raw_fact_normalized_events` cursor, and each applicable cursor has reached its target (see below) |
 | `projection_apply_drained` | the change log is empty, or the `normalized_events_to_projection_invalidations` cursor exists and its `last_change_id` has reached `max(projection_normalized_event_changes.change_id)`; unrelated cursor rows do not count |
 | `projection_invalidations_drained` | `projection_invalidations` is empty — every enqueued invalidation has been applied and deleted |
 | `projection_no_dead_letters` | `projection_invalidation_dead_letters` is empty — no invalidation exhausted its retries |
-| `projection_replay_complete` | every current projection has a `current_projection_replay_status` marker at this worker's `CURRENT_PROJECTION_REPLAY_VERSION` whose `completed_normalized_target_block` covers the target bootstrap would request now: the greater of the global raw-fact replay target and global persisted chain-checkpoint frontier |
+| `projection_replay_complete` | every current projection has a `current_projection_replay_status` marker at this worker's `CURRENT_PROJECTION_REPLAY_VERSION`; before a durable projection-apply cursor exists, each marker must also cover the target bootstrap would request now |
 | `active_dataset_non_empty` | every active manifest source whose ABI declares non-empty `normalized_events` output has a non-orphaned matching event under that exact `source_manifest_id`, manifest version, chain, namespace, source family, and declared event kind; every such namespace also has `name_current` rows |
 | `normalized_events_chain_id_present` | no non-orphaned `normalized_events` row has a NULL `chain_id` |
 | `deferred_projection_indexes_present` | the eight deferred `normalized_events` projection indexes all exist on `public.normalized_events` and have `pg_index.indisvalid = true` and `indisready = true` (a fresh replay drops them and rebuilds them after catch-up) |
@@ -70,9 +72,9 @@ retired chain and is reported as an advisory, not gated for the per-chain checks
 `watch_set_code_observation_coverage` is the check with teeth, and the reason the command
 exists. Most others are *relative* invariants: each compares a stage to the stage before
 it, so they stay green while the pipeline faithfully processes an incomplete input.
-`reconciliation_history_from_declared_start`, `active_dataset_non_empty`, and
-`projection_replay_complete` also compare against the declared world or the pipeline's own
-handoff authority rather than the previous stage.
+`reconciliation_history_from_declared_start`, `active_raw_facts_retained`,
+`active_dataset_non_empty`, and `projection_replay_complete` also compare against retained truth,
+the declared world, or the pipeline's own handoff authority rather than the previous stage.
 
 `projection_apply_drained` only proves the derive scan finished — that the apply cursor
 reached the change-log frontier. It does not prove the resulting invalidations were
@@ -88,6 +90,12 @@ cursor against the **canonical** raw-log head — the newest raw log whose linea
 canonical, safe, or finalized, mirroring the bounds replay actually consumes. It does not
 use the non-orphaned head, which includes `observed` logs replay cannot yet touch; that
 head is reported only, so trailing unpromoted logs do not read as permanent lag.
+
+Cursor selection is keyed by both chain and the deployment profile inferred from the active
+manifest corpus, using the same `mainnet` / `sepolia-dev` classification as replay admission.
+A cursor left by another profile cannot satisfy an active chain, and failures or lag on an
+inactive chain or a non-active profile are reported in `advisories.ignored_replay_cursors`
+instead of gating the serving corpus.
 
 A chain that ran closure or dependency replay is an exception. Its raw-fact cursor target
 is latched permanently below the live head; newer logs are carried by a one-shot
@@ -125,8 +133,15 @@ strictest lower bound across those entries.
 root or contract must have the matching `manifest_contract_instances` declaration; a proxy
 implementation must also have the matching implementation instance. A live address row only
 satisfies a target when its `chain_id` and lowercased address match the payload; a live row for
-the same instance on another chain or at another address does not count. See
-[`chain-intake.md`](../chain-intake.md).
+the same instance on another chain or at another address does not count. Proxy implementations
+must additionally retain the exact active managed discovery edge that the source-graph writer
+creates; the direct payload fallback cannot substitute for the runtime watch-plan edge.
+
+`discovery_targets_present` closes the corresponding gap for dynamic discovery. The active edge
+and its target `contract_instance_id` remain authority if a restore loses the target's live
+address row, even though `load_watched_contracts` can no longer render that target. The named
+check fails on the missing materialization rather than allowing coverage and history to shrink.
+See [`chain-intake.md`](../chain-intake.md).
 
 ### Frontier, history, and content against the declared world
 
@@ -165,6 +180,12 @@ only against the previous pipeline stage:
   identity rule intentionally makes a manifest-version rollout fail until normalized events
   have been re-derived under the newly active `source_manifest_id`; residual rows from the
   previous version are not proof that the new declaration was indexed.
+- **Retained raw facts.** `active_raw_facts_retained` joins each matching active normalized event
+  whose `raw_fact_ref.kind` is `raw_log` back to `raw_logs` by chain, block hash, transaction hash,
+  and log index, and requires that raw row to remain canonical, safe, or finalized. Synthetic
+  block-boundary events are not misclassified as missing logs. Retaining log-derived events and
+  projections while dropping their raw logs is not complete: normalized replay and reorg repair
+  can no longer reproduce or retract the serving state.
 
 ### Projections rebuilt, and structural integrity
 
@@ -173,18 +194,23 @@ only against the previous pipeline stage:
 `CURRENT_PROJECTION_REPLAY_VERSION`. The newest stored version is still reported as
 `replay_version` for diagnosis, while `required_replay_version` reports the version the gate
 requires. Each current-version marker's `completed_normalized_target_block` must also reach the
-target automatic bootstrap would use now:
-`max(global raw_fact_normalized_events target, furthest persisted chain checkpoint)`. Bootstrap
+target automatic bootstrap would use now —
+`max(global raw_fact_normalized_events target, furthest persisted chain checkpoint)` — only
+before a durable `normalized_events_to_projection_invalidations` apply cursor exists. Bootstrap
 publishes projections in order and `name_current` is first, so a candidate mid-bootstrap has
-`name_current` but not the rest; requiring all current-version markers and their target coverage
-matches the worker's own bootstrap authority. Complete markers from an older worker image are
-not accepted.
+`name_current` but not the rest. After handoff, the worker deliberately stops advancing replay
+markers: the apply cursor/change log and invalidation queue own later normalized blocks. At that
+point current-version marker presence plus the separately drained apply/change/invalidation
+checks is the writer's authority; comparing the old bootstrap marker target with a newer chain
+frontier would false-fail a healthy live database. Complete markers from an older worker image
+are never accepted.
 
-The replay target is intentionally global even though foreign or retired chains are advisory for
-the per-chain frontier, history, normalization, and coverage checks. Current projections and
-their replay marker are global, and the automatic replay writer computes the same unscoped
-maximum across persisted raw-fact cursors and chain checkpoints. Scoping only the inspector to
-active chains could approve a marker below the target that the writer would request.
+When target coverage is required before apply handoff, the replay target is intentionally global
+even though foreign or retired chains are advisory for the per-chain frontier, history,
+normalization, and coverage checks. Current projections and their replay marker are global, and
+the automatic replay writer computes the same unscoped maximum across persisted raw-fact cursors
+and chain checkpoints. Scoping only the inspector to active chains could approve a marker below
+the target that the writer would request.
 
 `deferred_projection_indexes_present` checks that the eight deferred `normalized_events`
 projection indexes exist on the expected table and are valid and ready in `pg_index`. A failed
@@ -209,10 +235,17 @@ otherwise abort the read), so they are surfaced here as a data-integrity fault.
   `inspect watch-plan --json`.
 - **`manifest_declared_targets_present` fails.** An active payload target has no matching
   materialized declaration/implementation instance or no live address row matching both its
-  declared chain and address. A missing declaration, missing proxy implementation, deactivated,
+  declared chain and address, or a materialized proxy/implementation pair lacks its managed edge.
+  A missing declaration, missing proxy implementation, missing proxy edge, deactivated,
   wrong-chain, or wrong-address row breaks the watch-view authority even if retained code
   observations let the separate coverage check pass. Reseed manifests or repair the materialized
-  rows before promoting.
+  graph before promoting.
+- **`discovery_targets_present` fails.** An active discovery edge points to a contract instance
+  with no live address on that chain. Restore or rederive the target address before promoting;
+  deleting the edge merely to silence the check changes admission authority.
+- **`active_raw_facts_retained` fails.** Active raw-log-backed normalized content has lost one or
+  more exact canonical raw logs. Restore the immutable raw facts and re-run
+  normalization/projection repair; derived rows alone are not replay- or reorg-safe.
 - **Coverage fails on a database warmed by backfill alone.** Backfill only observes a
   block's selected log emitters. A watched target that never emits acquires its single
   baseline observation from the live tailer, on canonical head reconciliation. Let the
@@ -221,6 +254,10 @@ otherwise abort the read), so they are surfaced here as a data-integrity fault.
 - **`normalization_no_failure` fails.** The adapter pass is crash-looping; the cursor
   records why. Normalization has stopped at the first affected block, so every downstream
   count is stale even though the cursors look drained.
+- **`normalization_caught_up_to_raw_head` reports no active deployment profile.** The active
+  manifest corpus is empty or mixes chains/epochs that do not classify as the writer's
+  `mainnet` or `sepolia-dev` profile. Correct manifest rollout state before interpreting cursor
+  progress.
 - **`reconciliation_frontier_at_head` fails.** Head reconciliation has stalled, or the
   checkpoint and lineage have diverged by more than `±max` blocks. A large positive
   `head_lag_blocks` means the lineage trails the checkpoint; a large negative value means the
@@ -245,10 +282,11 @@ otherwise abort the read), so they are surfaced here as a data-integrity fault.
   manifest identity do not satisfy it, even if the global event table is non-empty.
 - **`projection_replay_complete` fails with entries in `missing_projections`.** The candidate
   is mid projection-bootstrap, its marker belongs to a version other than
-  `required_replay_version`, or it completed below `required_target_block`. `name_current` is
-  published first, so a candidate with only it is early in the rebuild; old-version or
-  stale-target markers require replay under the current worker through the current bootstrap
-  target.
+  `required_replay_version`, or (before apply handoff) it completed below
+  `required_target_block`. `target_coverage_required` states whether the target comparison is
+  active. `name_current` is published first, so a candidate with only it is early in the rebuild;
+  old-version markers always require replay, while stale-target markers require replay only
+  before the durable apply cursor takes over.
 - **`deferred_projection_indexes_present` fails.** A fresh replay dropped the listed indexes,
   the rebuild pass has not run, or a concurrent build left a named but invalid catalog entry.
   Data may be complete, but the database is not serve-ready; rebuild valid indexes before
@@ -275,6 +313,9 @@ The `advisories` block reports state that is worth an operator's attention but d
 - **`foreign_chains`** — chains with residual checkpoint or lineage rows that the active watch
   set does not cover (a retired chain, or one whose manifest was removed while its chain state
   remained). Their per-chain checks are not gated; the listing is for cleanup.
+- **`ignored_replay_cursors`** — cursor labels outside the inferred active deployment profile or
+  active chain set. Their failures and lag do not gate serving, but the rows remain visible for
+  cleanup and profile-rollout diagnosis.
 - **`backfill_lifecycle`** — per-profile counts of `failed`, incomplete, and expired-lease
   backfill jobs and ranges. Backfill failures are *not* gated, because without coverage-fact
   reconciliation a `failed` range cannot be distinguished from one superseded by a later
@@ -284,12 +325,6 @@ The `advisories` block reports state that is worth an operator's attention but d
 
 ## Caveats
 
-- **Retired deployment profiles.** The gate reads replay cursors across every
-  `deployment_profile`. A stale cursor left by a retired profile — one no longer being
-  advanced — can fail `normalization_caught_up_to_raw_head` for a chain that the live profile
-  serves correctly. Remove cursor rows for retired profiles, or read the reported cursor
-  labels (`<profile>/<chain>/<kind>`) to confirm the lagging cursor belongs to the active
-  profile before treating the failure as real.
 - **Coinbase SQL sample-mode candidates.** In `sample` validation mode a Coinbase SQL backfill
   persists lineage only for the blocks whose logs it returned, while completing the whole
   range. The reconciled span is then sparse, so `reconciliation_lineage_contiguous` fails on a

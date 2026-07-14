@@ -1,4 +1,4 @@
-use bigname_storage::BackfillLifecycleRow;
+use bigname_storage::{BackfillLifecycleRow, DiscoveryTargetMissingAddress};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::inspect::data_completeness) enum CheckStatus {
@@ -65,6 +65,16 @@ pub(in crate::inspect::data_completeness) struct MissingManifestContent {
     pub(in crate::inspect::data_completeness) source_family: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(in crate::inspect::data_completeness) struct MissingManifestRawFacts {
+    pub(in crate::inspect::data_completeness) manifest_id: i64,
+    pub(in crate::inspect::data_completeness) manifest_version: i64,
+    pub(in crate::inspect::data_completeness) chain: String,
+    pub(in crate::inspect::data_completeness) namespace: String,
+    pub(in crate::inspect::data_completeness) source_family: String,
+    pub(in crate::inspect::data_completeness) missing_canonical_raw_log_count: i64,
+}
+
 /// `behind_by` is the block or change-id distance to the applicable target, best-effort:
 /// a missing bound is treated with a `-1` sentinel.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -76,12 +86,18 @@ pub(in crate::inspect::data_completeness) struct CursorLag {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::inspect::data_completeness) struct DataCompletenessReport {
     pub(in crate::inspect::data_completeness) max_head_lag_blocks: i64,
+    pub(in crate::inspect::data_completeness) active_deployment_profile: Option<String>,
     pub(in crate::inspect::data_completeness) frontiers: Vec<ChainFrontier>,
     pub(in crate::inspect::data_completeness) foreign_chains: Vec<String>,
+    pub(in crate::inspect::data_completeness) ignored_replay_cursors: Vec<String>,
     pub(in crate::inspect::data_completeness) active_watched_target_count: usize,
     pub(in crate::inspect::data_completeness) unobserved_targets: Vec<UnobservedTarget>,
     pub(in crate::inspect::data_completeness) manifest_targets_missing_address:
         Vec<UnobservedTarget>,
+    pub(in crate::inspect::data_completeness) manifest_proxy_implementations_missing_edge:
+        Vec<UnobservedTarget>,
+    pub(in crate::inspect::data_completeness) discovery_targets_missing_address:
+        Vec<DiscoveryTargetMissingAddress>,
     pub(in crate::inspect::data_completeness) chains_history_truncated: Vec<HistoryTruncation>,
     pub(in crate::inspect::data_completeness) chains_without_finite_start:
         Vec<ChainWithoutFiniteStart>,
@@ -94,10 +110,13 @@ pub(in crate::inspect::data_completeness) struct DataCompletenessReport {
     pub(in crate::inspect::data_completeness) projection_invalidation_dead_letter_count: i64,
     pub(in crate::inspect::data_completeness) projection_replay_version: Option<i32>,
     pub(in crate::inspect::data_completeness) projection_replay_required_version: i32,
+    pub(in crate::inspect::data_completeness) projection_replay_target_coverage_required: bool,
     pub(in crate::inspect::data_completeness) projection_replay_required_target_block: Option<i64>,
     pub(in crate::inspect::data_completeness) missing_projection_replay_markers: Vec<String>,
     pub(in crate::inspect::data_completeness) active_manifest_sources_without_events:
         Vec<MissingManifestContent>,
+    pub(in crate::inspect::data_completeness) active_manifest_sources_with_missing_raw_facts:
+        Vec<MissingManifestRawFacts>,
     pub(in crate::inspect::data_completeness) active_namespaces_without_names: Vec<String>,
     pub(in crate::inspect::data_completeness) normalized_events_null_chain_id_count: i64,
     pub(in crate::inspect::data_completeness) missing_deferred_projection_indexes: Vec<String>,
@@ -134,7 +153,21 @@ impl DataCompletenessReport {
     pub(in crate::inspect::data_completeness) fn manifest_declared_targets_present(
         &self,
     ) -> CheckStatus {
-        CheckStatus::from_pass(self.manifest_targets_missing_address.is_empty())
+        CheckStatus::from_pass(
+            self.manifest_targets_missing_address.is_empty()
+                && self.manifest_proxy_implementations_missing_edge.is_empty(),
+        )
+    }
+
+    pub(in crate::inspect::data_completeness) fn discovery_targets_present(&self) -> CheckStatus {
+        CheckStatus::from_pass(self.discovery_targets_missing_address.is_empty())
+    }
+
+    pub(in crate::inspect::data_completeness) fn active_raw_facts_retained(&self) -> CheckStatus {
+        CheckStatus::from_pass(
+            self.active_manifest_sources_with_missing_raw_facts
+                .is_empty(),
+        )
     }
 
     pub(in crate::inspect::data_completeness) fn normalization_healthy(&self) -> CheckStatus {
@@ -143,7 +176,8 @@ impl DataCompletenessReport {
 
     pub(in crate::inspect::data_completeness) fn normalization_caught_up(&self) -> CheckStatus {
         CheckStatus::from_pass(
-            self.lagging_replay_cursors.is_empty()
+            self.active_deployment_profile.is_some()
+                && self.lagging_replay_cursors.is_empty()
                 && self.chains_missing_raw_fact_cursor.is_empty(),
         )
     }
@@ -194,6 +228,8 @@ impl DataCompletenessReport {
             self.history_from_declared_start(),
             self.watch_set_observed(),
             self.manifest_declared_targets_present(),
+            self.discovery_targets_present(),
+            self.active_raw_facts_retained(),
             self.normalization_healthy(),
             self.normalization_caught_up(),
             self.projection_drained(),

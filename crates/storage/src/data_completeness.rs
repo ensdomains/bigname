@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
 
 mod content;
+mod manifest_targets;
 
 use content::*;
+use manifest_targets::*;
 
 #[cfg(test)]
 mod tests;
@@ -91,6 +93,15 @@ pub struct ManifestDeclaredTarget {
     pub active_from_block_number: Option<i64>,
 }
 
+/// An active discovery-edge endpoint whose contract instance has no matching live address row.
+/// The edge remains authoritative even though the materialized watch view cannot render it.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct DiscoveryTargetMissingAddress {
+    pub chain: String,
+    pub source_family: String,
+    pub contract_instance_id: uuid::Uuid,
+}
+
 /// One active manifest source that declares normalized adapter output, together with the
 /// count of matching non-orphaned normalized events written under that exact manifest ID.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -101,6 +112,9 @@ pub struct ActiveManifestEventSource {
     pub namespace: String,
     pub source_family: String,
     pub normalized_event_count: i64,
+    /// Matching raw-log-backed normalized events whose exact raw-log anchor is absent or is no
+    /// longer canonical/safe/finalized.
+    pub normalized_events_missing_canonical_raw_log_count: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -128,6 +142,9 @@ pub struct NameCurrentCount {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DataCompletenessRead {
     pub chains: Vec<ChainCompletenessRow>,
+    /// Deployment profile inferred from the active manifest corpus using the same authority as
+    /// replay admission (`mainnet` or `sepolia-dev`). `None` is unresolved and fails closed.
+    pub active_deployment_profile: Option<String>,
     pub replay_cursors: Vec<ReplayCursorRow>,
     pub projection_apply_cursors: Vec<ProjectionApplyCursorRow>,
     /// `MAX(change_id)` over `projection_normalized_event_changes`, loaded independently of
@@ -168,6 +185,11 @@ pub struct DataCompletenessRead {
     /// address row does not match the payload's chain and address. A non-empty list is a
     /// watch-authority gap.
     pub manifest_declared_targets_missing_address: Vec<ManifestDeclaredTarget>,
+    /// Materialized manifest proxy/implementation pairs that lack the active managed discovery
+    /// edge consumed by the runtime watch view.
+    pub manifest_proxy_implementations_missing_edge: Vec<ManifestDeclaredTarget>,
+    /// Active discovery-edge endpoints with no live address row on the edge's chain.
+    pub discovery_targets_missing_address: Vec<DiscoveryTargetMissingAddress>,
 }
 
 /// The deferred `normalized_events` projection indexes, owned by the replay drop/rebuild path
@@ -186,6 +208,7 @@ pub const DEFERRED_NORMALIZED_EVENT_INDEXES: &[&str] = &[
 pub async fn load_data_completeness(pool: &sqlx::PgPool) -> Result<DataCompletenessRead> {
     Ok(DataCompletenessRead {
         chains: load_chain_completeness(pool).await?,
+        active_deployment_profile: load_active_deployment_profile(pool).await?,
         replay_cursors: load_replay_cursors(pool).await?,
         projection_apply_cursors: load_projection_apply_cursors(pool).await?,
         max_projection_change_id: load_max_projection_change_id(pool).await?,
@@ -212,6 +235,9 @@ pub async fn load_data_completeness(pool: &sqlx::PgPool) -> Result<DataCompleten
             pool,
         )
         .await?,
+        manifest_proxy_implementations_missing_edge:
+            load_manifest_proxy_implementations_missing_edge(pool).await?,
+        discovery_targets_missing_address: load_discovery_targets_missing_address(pool).await?,
     })
 }
 
