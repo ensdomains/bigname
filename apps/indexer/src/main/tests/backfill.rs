@@ -413,8 +413,7 @@ async fn source_family_compact_source_identity_reuses_legacy_full_backfill_job()
 }
 
 #[test]
-fn basenames_registry_source_identity_changes_when_discovery_expands_before_checkpoint()
--> Result<()> {
+fn basenames_registry_hash_pinned_scan_all_identity_ignores_discovery_expansion() -> Result<()> {
     let source_plan = WatchedSourceSelectorPlan {
         chain: "base-mainnet".to_owned(),
         selector_kind: WatchedSourceSelectorKind::SourceFamily,
@@ -456,11 +455,85 @@ fn basenames_registry_source_identity_changes_when_discovery_expands_before_chec
             .iter()
             .any(|target| target.effective_from_block <= checkpoint_block_number)
     );
-    assert_ne!(
-        expanded_payload.get("source_identity_hash"),
-        original_payload.get("source_identity_hash")
+    // The hash-pinned scan-all fetches every emitter by topic, so the
+    // identity deliberately does not depend on the enumerated target set —
+    // discovery expansion mid-job cannot invalidate it (mirroring the
+    // Coinbase SQL scan-all identity below).
+    assert_eq!(
+        original_payload
+            .get("source_identity_payload_format")
+            .and_then(Value::as_str),
+        Some("basenames_registry_scan_all_topics_v1")
     );
-    assert_ne!(expanded_payload, original_payload);
+    assert!(original_payload.get("selected_targets").is_none());
+    assert!(original_payload.get("selected_targets_digest").is_none());
+    assert_eq!(
+        original_payload
+            .get("topic0s_by_source_family")
+            .and_then(|topics| topics.get("basenames_base_registry"))
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(4),
+        "the fetched topic0 set must be persisted verbatim"
+    );
+    assert_eq!(expanded_payload, original_payload);
+
+    Ok(())
+}
+
+/// The registry family's discovered target set (3.8M addresses live) is far
+/// past the compact-digest threshold; the scan-all branch must win before the
+/// digest fallback so identity stays target-count-independent at scale.
+#[test]
+fn basenames_registry_hash_pinned_scan_all_identity_beats_compact_digest_at_scale() -> Result<()> {
+    let small_plan = WatchedSourceSelectorPlan {
+        chain: "base-mainnet".to_owned(),
+        selector_kind: WatchedSourceSelectorKind::SourceFamily,
+        source_family: Some("basenames_base_registry".to_owned()),
+        requested_watched_targets: Vec::new(),
+        selected_targets: vec![WatchedBackfillTarget {
+            source_family: "basenames_base_registry".to_owned(),
+            contract_instance_id: Uuid::from_u128(1),
+            address: "0x0000000000000000000000000000000000000001".to_owned(),
+            effective_from_block: 18_735_838,
+            effective_to_block: 46_636_366,
+        }],
+        watched_chain_plan: WatchedChainPlan {
+            chain: "base-mainnet".to_owned(),
+            addresses: Vec::new(),
+            manifest_root_entry_count: 0,
+            manifest_contract_entry_count: 0,
+            discovery_edge_entry_count: 0,
+        },
+    };
+    let mut large_plan = small_plan.clone();
+    large_plan.selected_targets = (0..=backfill::COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD)
+        .map(|index| WatchedBackfillTarget {
+            source_family: "basenames_base_registry".to_owned(),
+            contract_instance_id: Uuid::from_u128(index as u128 + 1),
+            address: format!("0x{:040x}", index + 1),
+            effective_from_block: 18_735_838,
+            effective_to_block: 46_636_366,
+        })
+        .collect();
+    assert!(
+        large_plan.selected_targets.len()
+            > backfill::COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD
+    );
+
+    let large_payload = backfill::backfill_job_source_identity_payload(&large_plan)?;
+    assert_eq!(
+        large_payload
+            .get("source_identity_payload_format")
+            .and_then(Value::as_str),
+        Some("basenames_registry_scan_all_topics_v1"),
+        "the scan-all identity must win over the compact selected-targets digest"
+    );
+    assert!(large_payload.get("selected_targets_digest").is_none());
+    assert_eq!(
+        large_payload,
+        backfill::backfill_job_source_identity_payload(&small_plan)?
+    );
 
     Ok(())
 }
@@ -3090,6 +3163,239 @@ async fn source_scoped_backfill_dynamic_resolver_basenames_selected_targets_are_
         idempotency_key: "dynamic-resolver-basenames-selected-target-lock",
     })
     .await
+}
+
+/// End-to-end shape of the hash-pinned Basenames-registry scan-all: the
+/// eth_getLogs filter carries the registry topic0 set and no address list
+/// (3.8M discovered registry targets make address enumeration infeasible),
+/// logs from undiscovered emitters are retained, and completion writes a
+/// family-scope coverage fact clamped to the watched target windows.
+#[tokio::test]
+async fn hash_pinned_basenames_registry_scan_all_backfills_by_topic_and_writes_family_fact()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let contract_instance_id = Uuid::from_u128(9_400);
+    let registry_address = "0x0000000000000000000000000000000000000009";
+    let undiscovered_emitter = "0x00000000000000000000000000000000000000aa";
+
+    insert_watched_manifest_contract(
+        database.pool(),
+        9_400,
+        "basenames",
+        "base-mainnet",
+        "basenames_base_registry",
+        contract_instance_id,
+        registry_address,
+    )
+    .await?;
+    // Watched window ends at 42 while the job runs 42..43: the scan and the
+    // family fact must both clamp to the merged watched windows.
+    set_contract_instance_address_range(database.pool(), contract_instance_id, Some(42), Some(42))
+        .await?;
+
+    let range = BackfillBlockRange::new(42, 43)?;
+    let source_plan = load_watched_source_selector_plan(
+        database.pool(),
+        "base-mainnet",
+        WatchedSourceSelector::SourceFamily("basenames_base_registry".to_owned()),
+        range.from_block,
+        range.to_block,
+    )
+    .await?;
+    assert!(
+        crate::source_scope::watched_source_plan_uses_basenames_registry_scan_all(&source_plan),
+        "a source-family registry plan must select the scan-all shape"
+    );
+
+    let block_42 = provider_block(
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
+        42,
+    );
+    let block_43 = provider_block(
+        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        43,
+    );
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        vec![
+            ProviderBlockFixture {
+                block: block_42.clone(),
+                logs: vec![
+                    rpc_registry_new_owner_log_payload(
+                        &block_42,
+                        registry_address,
+                        &base_eth_node(),
+                        "alpha",
+                        "0x00000000000000000000000000000000000000b1",
+                        0,
+                    ),
+                    rpc_registry_new_owner_log_payload(
+                        &block_42,
+                        undiscovered_emitter,
+                        &base_eth_node(),
+                        "beta",
+                        "0x00000000000000000000000000000000000000b2",
+                        1,
+                    ),
+                ],
+            },
+            ProviderBlockFixture {
+                block: block_43.clone(),
+                logs: vec![rpc_registry_new_owner_log_payload(
+                    &block_43,
+                    undiscovered_emitter,
+                    &base_eth_node(),
+                    "gamma",
+                    "0x00000000000000000000000000000000000000b3",
+                    0,
+                )],
+            },
+        ],
+        Arc::clone(&requests),
+    )
+    .await?;
+
+    let outcome = run_resumable_hash_pinned_backfill_job(
+        database.pool(),
+        &source_plan,
+        &provider,
+        backfill_job_config(range, "basenames-registry-scan-all", "lease-registry-scan")?,
+    )
+    .await?;
+    assert_eq!(
+        outcome.raw_log_count, 3,
+        "the scan-all must fetch the whole reserved range (no window skipping) and retain \
+         the undiscovered emitter's logs"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_logs WHERE emitting_address = $1")
+            .bind(undiscovered_emitter)
+            .fetch_one(database.pool())
+            .await?,
+        2,
+        "scan-all must retain logs from emitters missing from the discovered target set"
+    );
+
+    let job = load_backfill_job(database.pool(), outcome.backfill_job_id)
+        .await?
+        .expect("scan-all job must exist");
+    assert_eq!(
+        job.source_identity
+            .get("source_identity_payload_format")
+            .and_then(Value::as_str),
+        Some("basenames_registry_scan_all_topics_v1")
+    );
+
+    assert_eq!(
+        load_coverage_fact_rows(database.pool(), outcome.backfill_job_id).await?,
+        vec![(
+            "base-mainnet".to_owned(),
+            "basenames_base_registry".to_owned(),
+            "family".to_owned(),
+            None,
+            42,
+            42,
+            "job_completion".to_owned(),
+        )],
+        "completion must write exactly one family-scope fact clamped to the watched windows"
+    );
+
+    let recorded_requests = requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .clone();
+    let log_requests = recorded_requests
+        .iter()
+        .filter(|request| {
+            request.method == "eth_getLogs"
+                && request
+                    .params
+                    .first()
+                    .and_then(Value::as_object)
+                    .is_some_and(|filter| filter.contains_key("fromBlock"))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !log_requests.is_empty(),
+        "the registry scan-all must fetch logs by block range"
+    );
+    for request in &log_requests {
+        let log_filter = request
+            .params
+            .first()
+            .and_then(Value::as_object)
+            .expect("registry scan-all log request must include a filter");
+        assert!(
+            !log_filter.contains_key("address"),
+            "the registry scan-all must not enumerate emitter addresses"
+        );
+        assert_eq!(
+            support_log_filter_topic0s(log_filter)
+                .expect("the registry scan-all must constrain topic0"),
+            crate::basenames_registry::basenames_registry_scan_all_topic0s()
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            "the registry scan-all must filter by the family's full manifest topic0 set"
+        );
+        assert_eq!(
+            log_filter.get("fromBlock").and_then(Value::as_str),
+            Some("0x2a"),
+            "the scan-all must cover the reserved range start"
+        );
+        assert_eq!(
+            log_filter.get("toBlock").and_then(Value::as_str),
+            Some("0x2b"),
+            "the scan-all must cover the whole reserved range, not just the watched windows"
+        );
+    }
+
+    server.abort();
+    database.cleanup().await
+}
+
+/// The scan-all replays its adapter closure from stored raw logs, so inline
+/// adapter sync must be forced to raw-only for this job shape only.
+#[test]
+fn basenames_registry_scan_all_forces_raw_only_adapter_sync() {
+    let registry_plan = WatchedSourceSelectorPlan {
+        chain: "base-mainnet".to_owned(),
+        selector_kind: WatchedSourceSelectorKind::SourceFamily,
+        source_family: Some("basenames_base_registry".to_owned()),
+        requested_watched_targets: Vec::new(),
+        selected_targets: Vec::new(),
+        watched_chain_plan: WatchedChainPlan {
+            chain: "base-mainnet".to_owned(),
+            addresses: Vec::new(),
+            manifest_root_entry_count: 0,
+            manifest_contract_entry_count: 0,
+            discovery_edge_entry_count: 0,
+        },
+    };
+    let mut registrar_plan = registry_plan.clone();
+    registrar_plan.source_family = Some("basenames_base_registrar".to_owned());
+
+    for requested in [
+        backfill::BackfillAdapterSyncMode::Auto,
+        backfill::BackfillAdapterSyncMode::Inline,
+        backfill::BackfillAdapterSyncMode::RawOnly,
+    ] {
+        assert_eq!(
+            backfill::effective_hash_pinned_adapter_sync_mode(&registry_plan, requested),
+            backfill::BackfillAdapterSyncMode::RawOnly,
+            "registry scan-all must force raw-only adapter sync for requested mode {requested:?}"
+        );
+    }
+    assert_eq!(
+        backfill::effective_hash_pinned_adapter_sync_mode(
+            &registrar_plan,
+            backfill::BackfillAdapterSyncMode::Auto
+        ),
+        backfill::BackfillAdapterSyncMode::Inline,
+        "address-scoped families must keep the requested hash-pinned mode"
+    );
 }
 
 #[tokio::test]
@@ -6284,6 +6590,47 @@ async fn legacy_coverage_derivation_merges_generic_family_windows_and_refuses_sc
         load_coverage_fact_rows(database.pool(), scan_all_job_id).await?,
         Vec::new(),
         "a refused scan-all derivation must not write facts"
+    );
+
+    // The hash-pinned scan-all persists its topic0 set verbatim and fetches
+    // it across every block of the job range, so repair derives a sound
+    // full-range family fact (unlike the Coinbase SQL scan-all above).
+    let hash_pinned_scan_all_job_id = insert_completed_backfill_job(
+        database.pool(),
+        "legacy-basenames-hash-pinned-scan-all",
+        json!({
+            "selector_kind": "source_family",
+            "source_family": "basenames_base_registry",
+            "requested_watched_targets": [],
+            "source_identity_payload_format": "basenames_registry_scan_all_topics_v1",
+            "topic0s_by_source_family": {
+                "basenames_base_registry": crate::basenames_registry::basenames_registry_scan_all_topic0s(),
+            },
+            "event_signatures_by_source_family": {
+                "basenames_base_registry": crate::basenames_registry::basenames_registry_scan_all_event_signatures(),
+            },
+            "source_identity_hash": "keccak256:0x5555555555555555555555555555555555555555555555555555555555555555"
+        }),
+    )
+    .await?;
+
+    let outcome =
+        repair::derive_legacy_backfill_coverage_facts(database.pool(), hash_pinned_scan_all_job_id)
+            .await?;
+    assert_eq!(outcome.address_fact_count, 0);
+    assert_eq!(outcome.family_fact_count, 1);
+    assert_eq!(
+        load_coverage_fact_rows(database.pool(), hash_pinned_scan_all_job_id).await?,
+        vec![(
+            "ethereum-mainnet".to_owned(),
+            "basenames_base_registry".to_owned(),
+            "family".to_owned(),
+            None,
+            100,
+            120,
+            "legacy_full_payload_identity".to_owned(),
+        )],
+        "the hash-pinned scan-all identity must yield a family fact over the full job range"
     );
 
     // The live producer shape: generic_topic_scans declared, but the scanned

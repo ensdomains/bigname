@@ -158,11 +158,7 @@ fn topic_status(
     source_family: &str,
     current_topic0s: &BTreeSet<String>,
 ) -> TopicStatus {
-    if let Some(persisted) = job
-        .source_identity
-        .get("coinbase_sql_topic_plan")
-        .and_then(|plan| plan.get("topic0s_by_source_family"))
-        .and_then(Value::as_object)
+    if let Some(persisted) = persisted_topic0s_by_source_family(&job.source_identity)
         .and_then(|families| families.get(source_family))
     {
         let persisted = persisted
@@ -196,6 +192,23 @@ fn topic_status(
     }
 
     TopicStatus::CurrentOrUnfiltered
+}
+
+/// Topic-filtered jobs persist their manifest topic0 sets either inside the
+/// Coinbase SQL plan or at the top level for hash-pinned Basenames registry
+/// scan-all. Both shapes carry the same family-to-topic-set contract.
+fn persisted_topic0s_by_source_family(
+    source_identity: &Value,
+) -> Option<&serde_json::Map<String, Value>> {
+    source_identity
+        .get("coinbase_sql_topic_plan")
+        .and_then(|plan| plan.get("topic0s_by_source_family"))
+        .and_then(Value::as_object)
+        .or_else(|| {
+            source_identity
+                .get("topic0s_by_source_family")
+                .and_then(Value::as_object)
+        })
 }
 
 async fn load_topic_coverage_facts(
@@ -292,7 +305,7 @@ fn facts_cover_interval<'a>(
 /// does not persist the topic set in force (hash-pinned generic resolver
 /// scans; `coinbase_sql_topic_plan`-bearing identities are checked above).
 fn topic_filtered_families_without_persisted_sets(source_identity: &Value) -> Vec<String> {
-    if source_identity.get("coinbase_sql_topic_plan").is_some() {
+    if persisted_topic0s_by_source_family(source_identity).is_some() {
         return Vec::new();
     }
 
@@ -318,4 +331,27 @@ fn topic_filtered_families_without_persisted_sets(source_identity: &Value) -> Ve
     families.sort_unstable();
     families.dedup();
     families
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::persisted_topic0s_by_source_family;
+
+    #[test]
+    fn topic_drift_reads_top_level_hash_pinned_scan_all_topics() {
+        let source_identity = json!({
+            "source_identity_payload_format": "basenames_registry_scan_all_topics_v1",
+            "topic0s_by_source_family": {
+                "basenames_base_registry": ["0x1234"]
+            }
+        });
+
+        let topics = persisted_topic0s_by_source_family(&source_identity)
+            .and_then(|families| families.get("basenames_base_registry"))
+            .and_then(serde_json::Value::as_array)
+            .expect("hash-pinned scan-all topics must be readable at the top level");
+        assert_eq!(topics, &[json!("0x1234")]);
+    }
 }

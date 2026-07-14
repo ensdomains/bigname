@@ -582,7 +582,8 @@ more complete reruns on the current manifest to restore promotion.
   address and cover exactly that tuple. `scope=family` rows carry a NULL
   address and mean every address of the family is covered by a
   topics-complete fetch over the row's interval (ENSv1 generic resolver
-  scans and Base Basenames registry Coinbase SQL scan-all).
+  scans and Base Basenames registry topic scan-all, whether Coinbase SQL or
+  hash-pinned).
 - Promotion coverage is the gap-free union of the exact tuple's address rows
   and its family's family-scope rows. Overlapping or adjacent intervals from
   separate completed jobs compose; a missing block, a different address, or a
@@ -611,7 +612,11 @@ more complete reruns on the current manifest to restore promotion.
   spurious promotion refusal: requirement tuples are by construction inside
   the union of the family's target windows.
 - Repair derivability: identities that persist the fetched target set
-  verbatim (fnv1a64-era full payloads) re-derive completely. Compact digest
+  verbatim (fnv1a64-era full payloads) re-derive completely, as does the
+  hash-pinned registry scan-all identity
+  (`basenames_registry_scan_all_topics_v1`), which persists its topic0 set
+  verbatim — repair derives a full-job-range family fact from it (unlike its
+  cbsql counterpart below, which persists no spans and is refused). Compact digest
   identities (`selected_targets_digest_v1` and its generic-scan variant)
   are refused — the target set is unrecoverable from a digest. Family-scan
   identities that do not persist the scanned family's target windows

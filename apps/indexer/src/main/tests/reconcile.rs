@@ -4610,6 +4610,141 @@ async fn reconcile_fetched_heads_promotes_after_current_topic_rerun_replaces_sta
     Ok(())
 }
 
+/// The hash-pinned Basenames registry scan-all persists its topic0 set at the
+/// top level of the source identity. When its family-scoped fact is required
+/// for promotion, the drift guard must read that shape and refuse stale
+/// evidence just as it does for a nested Coinbase SQL topic plan.
+#[tokio::test]
+async fn reconcile_fetched_heads_refuses_when_hash_pinned_scan_all_topic_drift_supplies_required_coverage()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let chain = "base-mainnet";
+    let selected_address = "0x0000000000000000000000000000000000000001";
+    insert_reconcile_watched_manifest_contract(
+        database.pool(),
+        10_078,
+        "test",
+        chain,
+        "test_source_family",
+        Uuid::from_u128(10_078),
+        selected_address,
+    )
+    .await?;
+
+    let stored_safe_block_number = crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS + 3;
+    let live_latest_block_number = stored_safe_block_number + 17;
+    let blocks = linear_provider_blocks(live_latest_block_number);
+    let current = blocks
+        .first()
+        .expect("test chain must include a current block")
+        .clone();
+    let latest = blocks
+        .last()
+        .expect("test chain must include a latest block")
+        .clone();
+    let stored_safe = blocks
+        .iter()
+        .find(|block| block.block_number == stored_safe_block_number)
+        .expect("test chain must include the stored safe block")
+        .clone();
+    for block in &blocks {
+        if block.block_number > stored_safe_block_number {
+            continue;
+        }
+        let state = if block.block_number == stored_safe_block_number {
+            CanonicalityState::Safe
+        } else {
+            CanonicalityState::Canonical
+        };
+        insert_chain_lineage_for_block(database.pool(), chain, block, state).await?;
+    }
+
+    let covered_from = current.block_number + 1;
+    let drifted_job_id = insert_completed_backfill_range_coverage_with_source_identity(
+        database.pool(),
+        chain,
+        covered_from,
+        stored_safe_block_number,
+        json!({
+            "source_identity_hash": "test:drifted-scan-all-topics",
+            "source_identity_payload_format": "basenames_registry_scan_all_topics_v1",
+            "topic0s_by_source_family": {
+                "test_source_family": [
+                    "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                ]
+            }
+        }),
+        "drifted-scan-all-topics",
+    )
+    .await?;
+    insert_backfill_coverage_fact_rows(
+        database.pool(),
+        drifted_job_id,
+        &[family_coverage_fact(
+            "test_source_family",
+            covered_from,
+            stored_safe_block_number,
+        )],
+    )
+    .await?;
+    insert_chain_checkpoint(
+        database.pool(),
+        &ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    )
+    .await?;
+    let (provider, server) = bundle_provider(vec![latest.clone(), stored_safe.clone()]).await?;
+    let task = IntakeChainTask {
+        chain: chain.to_owned(),
+        addresses: vec![selected_address.to_owned()],
+        manifest_root_entry_count: 0,
+        manifest_contract_entry_count: 1,
+        discovery_edge_entry_count: 0,
+        checkpoint: ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    };
+
+    let error = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: latest,
+            safe: Some(stored_safe),
+            finalized: None,
+        },
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+        &ChainCoverageFrontiers::default(),
+    )
+    .await
+    .expect_err("required stale top-level topic coverage must refuse promotion");
+    assert!(
+        format!("{error:#}").contains("manifest ABI topic0 set changed after completed backfill job"),
+        "unexpected topic-drift refusal error: {error:#}"
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
 /// Shared fixture for the watch-set-growth tests: full coverage for the
 /// initial tuple, one promoted slice against a shared frontier, then a second
 /// watched tuple appears with an active window starting inside the

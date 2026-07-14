@@ -32,7 +32,11 @@ pub(crate) async fn run_resumable_hash_pinned_backfill_job_concurrently(
     if worker_count == 0 {
         bail!("hash-pinned backfill worker count must be positive");
     }
-    config.adapter_sync_mode = config.adapter_sync_mode.hash_pinned_backfill_mode();
+    config.adapter_sync_mode =
+        super::reservation_execution::effective_hash_pinned_adapter_sync_mode(
+            source_plan,
+            config.adapter_sync_mode,
+        );
     validate_hash_pinned_chunk_blocks(config.hash_pinned_chunk_blocks)?;
     let watched_chain = &source_plan.watched_chain_plan;
     let record =

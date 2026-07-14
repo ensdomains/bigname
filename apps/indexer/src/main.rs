@@ -4,6 +4,8 @@ mod backfill;
 #[allow(dead_code, unused_imports)]
 #[path = "main/tests/backfill.rs"]
 mod backfill_tests;
+#[path = "main/basenames_registry.rs"]
+mod basenames_registry;
 #[path = "main/bootstrap_backfill.rs"]
 mod bootstrap_backfill;
 #[path = "main/cli.rs"]

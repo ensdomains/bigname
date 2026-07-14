@@ -27,6 +27,7 @@ mod canonicality;
 mod historical;
 #[path = "fetching/log_ranges.rs"]
 mod log_ranges;
+pub(crate) use log_ranges::scans_all_source_family_event_emitters;
 #[path = "fetching/materialization.rs"]
 mod materialization;
 #[path = "fetching/sparse.rs"]
@@ -70,9 +71,6 @@ pub(crate) async fn run_hash_pinned_backfill_range(
     header_audit_mode: HeaderAuditMode,
 ) -> Result<BackfillOutcome> {
     let watched_chain = &source_plan.watched_chain_plan;
-    let source_scope =
-        SourceScope::from_watched_source_plan(source_plan, range.from_block, range.to_block);
-    let adapter_sync_scope = source_scope.adapter_sync_scope();
     let total_started = Instant::now();
     let resolve_started = Instant::now();
     let resolved_blocks = resolve_backfill_range(provider, range).await?;
@@ -341,11 +339,19 @@ pub(crate) async fn run_hash_pinned_backfill_range(
             )
             .await?;
         } else {
+            // Built lazily: RawOnly jobs (scan-all shapes) never reach this
+            // branch, and constructing the scope clones every selected
+            // target once per chunk.
+            let source_scope = SourceScope::from_watched_source_plan(
+                source_plan,
+                range.from_block,
+                range.to_block,
+            );
             sync_adapter_state_from_scoped_persisted_raw_payloads(
                 pool,
                 &watched_chain.chain,
                 &block_hashes,
-                &adapter_sync_scope,
+                &source_scope.adapter_sync_scope(),
             )
             .await?;
         }
