@@ -1,5 +1,5 @@
 use super::evaluate::{CheckStatus, DEFAULT_MAX_HEAD_LAG_BLOCKS, evaluate_data_completeness};
-use crate::replay::ALL_CURRENT_PROJECTION_ORDER;
+use crate::replay::{ALL_CURRENT_PROJECTION_ORDER, CURRENT_PROJECTION_REPLAY_VERSION};
 use bigname_manifests::{WatchedContract, WatchedContractSource};
 use bigname_storage::{
     ActiveManifestEventSource, BackfillLifecycleRow, ChainCompletenessRow,
@@ -170,7 +170,7 @@ fn healthy_read() -> DataCompletenessRead {
         active_manifest_event_sources: vec![active_event_source(1, "ens_v2_registry_l1", 100)],
         name_current_counts: vec![names(NAMESPACE, 10)],
         normalized_events_null_chain_id_count: 0,
-        projection_replay_markers: all_projection_markers(6),
+        projection_replay_markers: all_projection_markers(CURRENT_PROJECTION_REPLAY_VERSION),
         projection_replay_required_target_block: Some(1_000),
         backfill_lifecycle: vec![],
         present_deferred_projection_indexes: all_deferred_indexes(),
@@ -791,7 +791,7 @@ fn rewound_cursor_below_target_fails_even_with_high_last_completed() {
 fn incomplete_projection_replay_markers_fail() {
     let mut read = healthy_read();
     read.projection_replay_markers = vec![ProjectionReplayMarker {
-        replay_version: 6,
+        replay_version: CURRENT_PROJECTION_REPLAY_VERSION,
         projection: "name_current".to_owned(),
         completed_normalized_target_block: Some(1_000),
     }];
@@ -835,17 +835,26 @@ fn no_projection_replay_markers_fail() {
     assert!(!report.data_complete());
 }
 
-/// Markers are judged at the newest replay version present, so a candidate built by an older
-/// image with all projections at its version passes.
+/// Complete markers from an older worker image do not satisfy the current worker's replay
+/// version, even when every projection and target is otherwise present.
 #[test]
-fn complete_markers_at_older_version_pass() {
+fn complete_markers_at_older_version_fail() {
     let mut read = healthy_read();
-    read.projection_replay_markers = all_projection_markers(5);
+    let older_version = CURRENT_PROJECTION_REPLAY_VERSION - 1;
+    read.projection_replay_markers = all_projection_markers(older_version);
     let report = evaluate(&read, &registry_only());
 
-    assert_eq!(report.projection_replay_version, Some(5));
-    assert_eq!(report.projection_replay_complete(), CheckStatus::Pass);
-    assert!(report.data_complete());
+    assert_eq!(report.projection_replay_version, Some(older_version));
+    assert_eq!(
+        report.projection_replay_required_version,
+        CURRENT_PROJECTION_REPLAY_VERSION
+    );
+    assert_eq!(report.projection_replay_complete(), CheckStatus::Fail);
+    assert_eq!(
+        report.missing_projection_replay_markers.len(),
+        ALL_CURRENT_PROJECTION_ORDER.len()
+    );
+    assert!(!report.data_complete());
 }
 
 /// A NULL `chain_id` normalized event is a data-integrity fault.

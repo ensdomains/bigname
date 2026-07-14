@@ -6,6 +6,71 @@ use super::{
     ProjectionReplayMarker,
 };
 
+const ACTIVE_MANIFEST_TARGETS_CTE: &str = r#"
+WITH active_manifest_entries AS (
+    SELECT
+        manifest.manifest_id,
+        manifest.chain,
+        manifest.source_family,
+        'root'::TEXT AS declaration_kind,
+        entry ->> 'name' AS declaration_name,
+        lower(entry ->> 'address') AS declared_address,
+        (entry ->> 'start_block')::BIGINT AS start_block,
+        entry
+    FROM manifest_versions manifest
+    CROSS JOIN LATERAL jsonb_array_elements(
+        COALESCE(manifest.manifest_payload -> 'roots', '[]'::JSONB)
+    ) entry
+    WHERE manifest.rollout_status = 'active'
+
+    UNION ALL
+
+    SELECT
+        manifest.manifest_id,
+        manifest.chain,
+        manifest.source_family,
+        'contract'::TEXT AS declaration_kind,
+        entry ->> 'role' AS declaration_name,
+        lower(entry ->> 'address') AS declared_address,
+        (entry ->> 'start_block')::BIGINT AS start_block,
+        entry
+    FROM manifest_versions manifest
+    CROSS JOIN LATERAL jsonb_array_elements(
+        COALESCE(manifest.manifest_payload -> 'contracts', '[]'::JSONB)
+    ) entry
+    WHERE manifest.rollout_status = 'active'
+),
+manifest_targets AS (
+    SELECT
+        manifest_id,
+        chain,
+        source_family,
+        declaration_kind,
+        declaration_name,
+        declared_address,
+        'declaration'::TEXT AS target_kind,
+        declared_address AS address,
+        start_block
+    FROM active_manifest_entries
+
+    UNION ALL
+
+    SELECT
+        manifest_id,
+        chain,
+        source_family,
+        declaration_kind,
+        declaration_name,
+        declared_address,
+        'implementation'::TEXT AS target_kind,
+        lower(entry ->> 'implementation') AS address,
+        start_block
+    FROM active_manifest_entries
+    WHERE declaration_kind = 'contract'
+      AND entry ->> 'implementation' IS NOT NULL
+)
+"#;
+
 pub(super) async fn load_observed_code_addresses(
     pool: &sqlx::PgPool,
 ) -> Result<Vec<ObservedCodeAddress>> {
@@ -39,43 +104,20 @@ pub(super) async fn load_observed_code_addresses(
 pub(super) async fn load_manifest_declared_targets(
     pool: &sqlx::PgPool,
 ) -> Result<Vec<ManifestDeclaredTarget>> {
-    let rows = sqlx::query(
-        r#"
+    let query = format!(
+        "{ACTIVE_MANIFEST_TARGETS_CTE}
         SELECT DISTINCT
-            manifest.chain,
-            manifest.source_family,
-            lower(declaration.declared_address) AS address,
-            manifest_range.start_block AS active_from_block_number
-        FROM manifest_versions manifest
-        JOIN manifest_contract_instances declaration
-          ON declaration.manifest_id = manifest.manifest_id
-        LEFT JOIN LATERAL (
-            SELECT (entry ->> 'start_block')::BIGINT AS start_block
-            FROM jsonb_array_elements(
-                CASE
-                    WHEN declaration.declaration_kind = 'root'
-                        THEN COALESCE(manifest.manifest_payload -> 'roots', '[]'::JSONB)
-                    ELSE COALESCE(manifest.manifest_payload -> 'contracts', '[]'::JSONB)
-                END
-            ) entry
-            WHERE (
-                    declaration.declaration_kind = 'root'
-                    AND entry ->> 'name' = declaration.declaration_name
-                )
-               OR (
-                    declaration.declaration_kind = 'contract'
-                    AND entry ->> 'role' = declaration.declaration_name
-                )
-            ORDER BY start_block NULLS LAST
-            LIMIT 1
-        ) manifest_range ON TRUE
-        WHERE manifest.rollout_status = 'active'
-        ORDER BY manifest.chain, manifest.source_family, address, active_from_block_number
-        "#,
-    )
-    .fetch_all(pool)
-    .await
-    .context("failed to load active manifest-declared targets")?;
+            chain,
+            source_family,
+            address,
+            start_block AS active_from_block_number
+        FROM manifest_targets
+        ORDER BY chain, source_family, address, active_from_block_number"
+    );
+    let rows = sqlx::query(&query)
+        .fetch_all(pool)
+        .await
+        .context("failed to load active manifest-declared targets")?;
 
     rows.into_iter()
         .map(|row| {
@@ -383,51 +425,40 @@ pub(super) async fn load_manifest_chain_namespaces(
 pub(super) async fn load_manifest_declared_targets_missing_address(
     pool: &sqlx::PgPool,
 ) -> Result<Vec<ManifestDeclaredTarget>> {
-    let rows = sqlx::query(
-        r#"
+    let query = format!(
+        "{ACTIVE_MANIFEST_TARGETS_CTE}
         SELECT DISTINCT
-            manifest.chain,
-            manifest.source_family,
-            lower(declaration.declared_address) AS address,
-            manifest_range.start_block AS active_from_block_number
-        FROM manifest_versions manifest
-        JOIN manifest_contract_instances declaration
-          ON declaration.manifest_id = manifest.manifest_id
-        LEFT JOIN LATERAL (
-            SELECT (entry ->> 'start_block')::BIGINT AS start_block
-            FROM jsonb_array_elements(
-                CASE
-                    WHEN declaration.declaration_kind = 'root'
-                        THEN COALESCE(manifest.manifest_payload -> 'roots', '[]'::JSONB)
-                    ELSE COALESCE(manifest.manifest_payload -> 'contracts', '[]'::JSONB)
-                END
-            ) entry
-            WHERE (
-                    declaration.declaration_kind = 'root'
-                    AND entry ->> 'name' = declaration.declaration_name
-                )
-               OR (
-                    declaration.declaration_kind = 'contract'
-                    AND entry ->> 'role' = declaration.declaration_name
-                )
-            ORDER BY start_block NULLS LAST
-            LIMIT 1
-        ) manifest_range ON TRUE
-        WHERE manifest.rollout_status = 'active'
-          AND NOT EXISTS (
-              SELECT 1
-              FROM contract_instance_addresses address
-              WHERE address.contract_instance_id = declaration.contract_instance_id
+            target.chain,
+            target.source_family,
+            target.address,
+            target.start_block AS active_from_block_number
+        FROM manifest_targets target
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM manifest_contract_instances declaration
+            JOIN contract_instance_addresses address
+              ON address.contract_instance_id = CASE target.target_kind
+                  WHEN 'declaration' THEN declaration.contract_instance_id
+                  ELSE declaration.implementation_contract_instance_id
+              END
+            WHERE declaration.manifest_id = target.manifest_id
+                AND declaration.declaration_kind = target.declaration_kind
+                AND declaration.declaration_name = target.declaration_name
+                AND lower(declaration.declared_address) = target.declared_address
                 AND address.deactivated_at IS NULL
-                AND address.chain_id = manifest.chain
-                AND lower(address.address) = lower(declaration.declared_address)
-          )
-        ORDER BY manifest.chain, manifest.source_family, address, active_from_block_number
-        "#,
-    )
-    .fetch_all(pool)
-    .await
-    .context("failed to load manifest-declared targets missing a matching live address row")?;
+                AND address.chain_id = target.chain
+                AND lower(address.address) = target.address
+                AND (
+                    target.target_kind = 'declaration'
+                    OR lower(declaration.declared_implementation_address) = target.address
+                )
+        )
+        ORDER BY target.chain, target.source_family, target.address, active_from_block_number"
+    );
+    let rows = sqlx::query(&query)
+        .fetch_all(pool)
+        .await
+        .context("failed to load manifest-declared targets missing a matching live address row")?;
 
     rows.into_iter()
         .map(|row| {

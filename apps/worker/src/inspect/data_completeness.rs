@@ -108,6 +108,7 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
             })),
             check("projection_replay_complete", report.projection_replay_complete(), json!({
                 "replay_version": report.projection_replay_version,
+                "required_replay_version": report.projection_replay_required_version,
                 "required_target_block": report.projection_replay_required_target_block,
                 "missing_projections": report.missing_projection_replay_markers.clone(),
             })),

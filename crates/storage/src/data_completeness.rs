@@ -80,8 +80,9 @@ pub struct ManifestChainNamespace {
     pub namespace: String,
 }
 
-/// A contract address declared directly by an active manifest. This remains authoritative
-/// even when a partial restore has lost its materialized `contract_instance_addresses` row.
+/// A root, contract, or proxy-implementation address declared by an active manifest payload.
+/// This remains authoritative even when a partial restore has lost its materialized
+/// `manifest_contract_instances` or `contract_instance_addresses` row.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ManifestDeclaredTarget {
     pub chain: String,
@@ -139,7 +140,7 @@ pub struct DataCompletenessRead {
     /// retries. A non-zero count is a terminal projection failure.
     pub projection_invalidation_dead_letter_count: i64,
     pub observed_code_addresses: Vec<ObservedCodeAddress>,
-    /// Direct active-manifest declarations, independently of the materialized watch view.
+    /// Direct active-manifest payload targets, independently of the materialized watch view.
     pub manifest_declared_targets: Vec<ManifestDeclaredTarget>,
     /// Event-producing active manifest sources and exact-identity content counts.
     pub active_manifest_event_sources: Vec<ActiveManifestEventSource>,
@@ -149,7 +150,7 @@ pub struct DataCompletenessRead {
     /// that would otherwise abort the per-chain read.
     pub normalized_events_null_chain_id_count: i64,
     /// Completed current-projection replay markers. The gate requires all current projections
-    /// present at the newest replay version with target coverage matching the worker's
+    /// present at the worker's current replay version with target coverage matching the worker's
     /// bootstrap handoff.
     pub projection_replay_markers: Vec<ProjectionReplayMarker>,
     /// The target a projection bootstrap would request now: the greater of the normalized
@@ -163,8 +164,9 @@ pub struct DataCompletenessRead {
     pub present_deferred_projection_indexes: Vec<String>,
     /// `(chain, namespace)` declared by active manifest versions — active-chain authority.
     pub manifest_chain_namespaces: Vec<ManifestChainNamespace>,
-    /// Active manifest-declared contract instances whose live address rows do not match the
-    /// declaration's chain and address. A non-empty list is a watch-authority gap.
+    /// Active manifest payload targets whose declaration/implementation instance or live
+    /// address row does not match the payload's chain and address. A non-empty list is a
+    /// watch-authority gap.
     pub manifest_declared_targets_missing_address: Vec<ManifestDeclaredTarget>,
 }
 

@@ -93,6 +93,7 @@ pub(in crate::inspect::data_completeness) struct DataCompletenessReport {
     pub(in crate::inspect::data_completeness) pending_projection_invalidation_count: i64,
     pub(in crate::inspect::data_completeness) projection_invalidation_dead_letter_count: i64,
     pub(in crate::inspect::data_completeness) projection_replay_version: Option<i32>,
+    pub(in crate::inspect::data_completeness) projection_replay_required_version: i32,
     pub(in crate::inspect::data_completeness) projection_replay_required_target_block: Option<i64>,
     pub(in crate::inspect::data_completeness) missing_projection_replay_markers: Vec<String>,
     pub(in crate::inspect::data_completeness) active_manifest_sources_without_events:
@@ -164,10 +165,7 @@ impl DataCompletenessReport {
     }
 
     pub(in crate::inspect::data_completeness) fn projection_replay_complete(&self) -> CheckStatus {
-        CheckStatus::from_pass(
-            self.projection_replay_version.is_some()
-                && self.missing_projection_replay_markers.is_empty(),
-        )
+        CheckStatus::from_pass(self.missing_projection_replay_markers.is_empty())
     }
 
     pub(in crate::inspect::data_completeness) fn active_dataset_non_empty(&self) -> CheckStatus {

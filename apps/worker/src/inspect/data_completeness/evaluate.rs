@@ -2,7 +2,10 @@ mod report;
 
 pub(super) use report::{CheckStatus, CursorLag, DataCompletenessReport};
 
-use crate::{projection_apply::NORMALIZED_EVENT_CURSOR, replay::ALL_CURRENT_PROJECTION_ORDER};
+use crate::{
+    projection_apply::NORMALIZED_EVENT_CURSOR,
+    replay::{ALL_CURRENT_PROJECTION_ORDER, CURRENT_PROJECTION_REPLAY_VERSION},
+};
 use bigname_manifests::WatchedContract;
 use bigname_storage::{DEFERRED_NORMALIZED_EVENT_INDEXES, DataCompletenessRead};
 use report::{
@@ -301,42 +304,33 @@ pub(super) fn evaluate_data_completeness(
     let projection_apply_cursor_missing =
         read.max_projection_change_id.is_some() && expected_projection_cursor.is_none();
 
-    // Projection replay markers: require all current projections at the newest replay version
-    // and require each stored completion target to cover the target automatic bootstrap would
-    // request now. The version is read from the data, not hardcoded, so a candidate built by an
-    // older image is judged complete at its own version.
+    // Projection replay markers: report the newest stored version for diagnosis, but require
+    // all current projections at this worker's replay version, exactly as automatic bootstrap
+    // does. Each marker must also cover the target automatic bootstrap would request now.
     let projection_replay_version = read
         .projection_replay_markers
         .iter()
         .map(|marker| marker.replay_version)
         .max();
-    let missing_projection_replay_markers = match projection_replay_version {
-        Some(version) => {
-            let present = read
-                .projection_replay_markers
-                .iter()
-                .filter(|marker| {
-                    marker.replay_version == version
-                        && match read.projection_replay_required_target_block {
-                            Some(required) => marker
-                                .completed_normalized_target_block
-                                .is_some_and(|completed| completed >= required),
-                            None => true,
-                        }
-                })
-                .map(|marker| marker.projection.as_str())
-                .collect::<BTreeSet<_>>();
-            ALL_CURRENT_PROJECTION_ORDER
-                .iter()
-                .filter(|projection| !present.contains(*projection))
-                .map(|projection| (*projection).to_owned())
-                .collect()
-        }
-        None => ALL_CURRENT_PROJECTION_ORDER
-            .iter()
-            .map(|projection| (*projection).to_owned())
-            .collect(),
-    };
+    let present_projection_replay_markers = read
+        .projection_replay_markers
+        .iter()
+        .filter(|marker| {
+            marker.replay_version == CURRENT_PROJECTION_REPLAY_VERSION
+                && match read.projection_replay_required_target_block {
+                    Some(required) => marker
+                        .completed_normalized_target_block
+                        .is_some_and(|completed| completed >= required),
+                    None => true,
+                }
+        })
+        .map(|marker| marker.projection.as_str())
+        .collect::<BTreeSet<_>>();
+    let missing_projection_replay_markers = ALL_CURRENT_PROJECTION_ORDER
+        .iter()
+        .filter(|projection| !present_projection_replay_markers.contains(*projection))
+        .map(|projection| (*projection).to_owned())
+        .collect();
 
     // Content expectations come only from active manifest sources that declare normalized
     // adapter output. Counts are joined to the exact source_manifest_id by storage, so rows
@@ -403,6 +397,7 @@ pub(super) fn evaluate_data_completeness(
         pending_projection_invalidation_count: read.pending_projection_invalidation_count,
         projection_invalidation_dead_letter_count: read.projection_invalidation_dead_letter_count,
         projection_replay_version,
+        projection_replay_required_version: CURRENT_PROJECTION_REPLAY_VERSION,
         projection_replay_required_target_block: read.projection_replay_required_target_block,
         missing_projection_replay_markers,
         active_manifest_sources_without_events,

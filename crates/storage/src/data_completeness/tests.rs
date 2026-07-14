@@ -196,7 +196,12 @@ async fn manifest_declared_targets_require_matching_live_address_rows() -> Resul
              rollout_status, normalizer_version, file_path, manifest_payload)
         VALUES
             (1, 'ens', 'ens_v2_registry_l1', 'ethereum-sepolia', 'e', 'active',
-             'n', 'f', '{}'::jsonb)
+             'n', 'f', '{"contracts":[
+                 {"role":"exact","address":"0xEXACT"},
+                 {"role":"deactivated","address":"0xGONE"},
+                 {"role":"wrong_address","address":"0xDECLARED"},
+                 {"role":"wrong_chain","address":"0xCHAIN"}
+             ]}'::jsonb)
         RETURNING manifest_id
         "#,
     )
@@ -258,6 +263,178 @@ async fn manifest_declared_targets_require_matching_live_address_rows() -> Resul
         ["0xchain", "0xdeclared", "0xgone"].into_iter().collect()
     );
     assert!(!missing.contains("0xexact"));
+
+    database.cleanup().await
+}
+
+/// The manifest payload is authority for direct declarations. Losing a materialized
+/// `manifest_contract_instances` child must leave the payload target in both the coverage
+/// universe and the explicit materialization-gap report.
+#[tokio::test]
+async fn manifest_payload_target_survives_missing_contract_instance_row() -> Result<()> {
+    let database = test_database().await?;
+    let pool = database.pool();
+    let manifest_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO manifest_versions
+            (manifest_version, namespace, source_family, chain, deployment_epoch,
+             rollout_status, normalizer_version, file_path, manifest_payload)
+        VALUES
+            (1, 'ens', 'ens_v2_registry_l1', 'ethereum-sepolia', 'e', 'active',
+             'n', 'f', '{
+                 "roots":[{"name":"root","address":"0xROOT","start_block":7}],
+                 "contracts":[{"role":"registry","address":"0xREGISTRY","start_block":11}]
+             }'::jsonb)
+        RETURNING manifest_id
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+        VALUES ('55555555-5555-5555-5555-555555555555', 'ethereum-sepolia', 'root')
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_contract_instances
+            (manifest_id, declaration_kind, declaration_name, contract_instance_id,
+             declared_address)
+        VALUES
+            ($1, 'root', 'root',
+             '55555555-5555-5555-5555-555555555555', '0xROOT')
+        "#,
+    )
+    .bind(manifest_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instance_addresses
+            (contract_instance_id, chain_id, address)
+        VALUES
+            ('55555555-5555-5555-5555-555555555555', 'ethereum-sepolia', '0xROOT')
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    let read = load_data_completeness(pool).await?;
+    let targets = read
+        .manifest_declared_targets
+        .iter()
+        .map(|target| (target.address.as_str(), target.active_from_block_number))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        targets,
+        [("0xregistry", Some(11)), ("0xroot", Some(7))]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(read.manifest_declared_targets_missing_address.len(), 1);
+    assert_eq!(
+        read.manifest_declared_targets_missing_address[0].address,
+        "0xregistry"
+    );
+
+    database.cleanup().await
+}
+
+/// A manifest-declared proxy implementation is a separate admitted and watched instance. Its
+/// payload address must remain a direct coverage target and require its own live address row.
+#[tokio::test]
+async fn manifest_proxy_implementation_is_a_declared_target() -> Result<()> {
+    let database = test_database().await?;
+    let pool = database.pool();
+    let manifest_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO manifest_versions
+            (manifest_version, namespace, source_family, chain, deployment_epoch,
+             rollout_status, normalizer_version, file_path, manifest_payload)
+        VALUES
+            (1, 'ens', 'ens_v2_registry_l1', 'ethereum-sepolia', 'e', 'active',
+             'n', 'f', '{"contracts":[{
+                 "role":"registry",
+                 "address":"0xPROXY",
+                 "proxy_kind":"uups",
+                 "implementation":"0xIMPLEMENTATION",
+                 "start_block":17
+             }]}'::jsonb)
+        RETURNING manifest_id
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+        VALUES
+            ('66666666-6666-6666-6666-666666666666', 'ethereum-sepolia', 'contract'),
+            ('77777777-7777-7777-7777-777777777777', 'ethereum-sepolia', 'contract')
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_contract_instances
+            (manifest_id, declaration_kind, declaration_name, contract_instance_id,
+             declared_address, role, proxy_kind, implementation_contract_instance_id,
+             declared_implementation_address)
+        VALUES
+            ($1, 'contract', 'registry',
+             '66666666-6666-6666-6666-666666666666', '0xPROXY', 'registry', 'uups',
+             '77777777-7777-7777-7777-777777777777', '0xIMPLEMENTATION')
+        "#,
+    )
+    .bind(manifest_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instance_addresses
+            (contract_instance_id, chain_id, address)
+        VALUES
+            ('66666666-6666-6666-6666-666666666666', 'ethereum-sepolia', '0xPROXY')
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    let read = load_data_completeness(pool).await?;
+    let targets = read
+        .manifest_declared_targets
+        .iter()
+        .map(|target| (target.address.as_str(), target.active_from_block_number))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        targets,
+        [("0ximplementation", Some(17)), ("0xproxy", Some(17))]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(read.manifest_declared_targets_missing_address.len(), 1);
+    assert_eq!(
+        read.manifest_declared_targets_missing_address[0].address,
+        "0ximplementation"
+    );
+
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instance_addresses
+            (contract_instance_id, chain_id, address)
+        VALUES
+            ('77777777-7777-7777-7777-777777777777',
+             'ethereum-sepolia', '0xIMPLEMENTATION')
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    let read = load_data_completeness(pool).await?;
+    assert!(read.manifest_declared_targets_missing_address.is_empty());
 
     database.cleanup().await
 }
@@ -409,8 +586,9 @@ async fn rewound_cursor_next_below_target_is_loaded() -> Result<()> {
     database.cleanup().await
 }
 
-/// Projection replay inspection carries both the writer's completed target and the target a
-/// bootstrap would request now, including the chain-checkpoint side of that maximum.
+/// Projection replay inspection carries both the writer's completed target and the global target
+/// a bootstrap would request now. Per-chain foreign-state advisories do not scope this marker:
+/// automatic projection replay uses the same unscoped checkpoint maximum.
 #[tokio::test]
 async fn projection_replay_marker_and_required_target_are_loaded() -> Result<()> {
     let database = test_database().await?;
@@ -428,10 +606,24 @@ async fn projection_replay_marker_and_required_target_are_loaded() -> Result<()>
     .await?;
     sqlx::query(
         r#"
+        INSERT INTO manifest_versions
+            (manifest_version, namespace, source_family, chain, deployment_epoch,
+             rollout_status, normalizer_version, file_path, manifest_payload)
+        VALUES
+            (1, 'ens', 'registry', 'ethereum-sepolia', 'e', 'active', 'n', 'active',
+             '{}'::jsonb)
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
         INSERT INTO chain_checkpoints
             (chain_id, canonical_block_hash, canonical_block_number,
              safe_block_hash, safe_block_number)
-        VALUES ('ethereum-sepolia', '0x100', 100, '0x140', 140)
+        VALUES
+            ('ethereum-sepolia', '0x100', 100, '0x140', 140),
+            ('retired-chain', '0x200', 200, NULL, NULL)
         "#,
     )
     .execute(pool)
@@ -448,7 +640,7 @@ async fn projection_replay_marker_and_required_target_are_loaded() -> Result<()>
     .await?;
 
     let read = load_data_completeness(pool).await?;
-    assert_eq!(read.projection_replay_required_target_block, Some(140));
+    assert_eq!(read.projection_replay_required_target_block, Some(200));
     assert_eq!(read.projection_replay_markers.len(), 1);
     assert_eq!(
         read.projection_replay_markers[0].completed_normalized_target_block,
