@@ -16,6 +16,8 @@ use report::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::backfill_coverage::BackfillCoverageGap;
+
 /// Blocks the reconciliation frontier may lead or trail the stored canonical checkpoint before
 /// the frontier check fails. Reconcile commits canonical lineage and then advances the
 /// checkpoint, so on a live database the lineage head routinely leads the checkpoint by a
@@ -52,6 +54,7 @@ struct ActiveTargetInfo {
 pub(super) fn evaluate_data_completeness(
     read: &DataCompletenessRead,
     watched_contracts: &[WatchedContract],
+    backfill_coverage_gaps: &[BackfillCoverageGap],
     max_head_lag_blocks: i64,
 ) -> DataCompletenessReport {
     let observed = read
@@ -440,6 +443,7 @@ pub(super) fn evaluate_data_completeness(
         discovery_targets_missing_address: read.discovery_targets_missing_address.clone(),
         chains_history_truncated,
         chains_without_finite_start,
+        backfill_coverage_gaps: backfill_coverage_gaps.to_vec(),
         failed_replay_cursors,
         lagging_replay_cursors,
         chains_missing_raw_fact_cursor,

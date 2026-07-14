@@ -1,3 +1,4 @@
+use super::backfill_coverage::BackfillCoverageGap;
 use super::evaluate::{CheckStatus, DEFAULT_MAX_HEAD_LAG_BLOCKS, evaluate_data_completeness};
 use crate::replay::{ALL_CURRENT_PROJECTION_ORDER, CURRENT_PROJECTION_REPLAY_VERSION};
 use bigname_manifests::{WatchedContract, WatchedContractSource};
@@ -103,6 +104,7 @@ fn chain_row(
     ChainCompletenessRow {
         chain_id: CHAIN.to_owned(),
         canonical_block_number: Some(canonical),
+        checkpoint_canonical_lineage_match: true,
         lineage_head_block_number: Some(lineage_head),
         lineage_floor_block_number: Some(floor),
         lineage_canonical_block_count: block_count,
@@ -188,7 +190,7 @@ fn evaluate(
     read: &DataCompletenessRead,
     watched_contracts: &[WatchedContract],
 ) -> super::evaluate::DataCompletenessReport {
-    evaluate_data_completeness(read, watched_contracts, DEFAULT_MAX_HEAD_LAG_BLOCKS)
+    evaluate_data_completeness(read, watched_contracts, &[], DEFAULT_MAX_HEAD_LAG_BLOCKS)
 }
 
 fn registry_only() -> Vec<WatchedContract> {
@@ -198,6 +200,26 @@ fn registry_only() -> Vec<WatchedContract> {
 #[test]
 fn healthy_database_is_data_complete() {
     assert!(evaluate(&healthy_read(), &registry_only()).data_complete());
+}
+
+/// Durable fetch coverage remains a promotion precondition for retained bounded-backfill
+/// lineage, even when every relative storage/content check is otherwise green.
+#[test]
+fn uncovered_retained_backfill_span_fails() {
+    let read = healthy_read();
+    let gaps = vec![BackfillCoverageGap {
+        chain: CHAIN.to_owned(),
+        source_family: "ens_v2_registry_l1".to_owned(),
+        address: REGISTRY.to_owned(),
+        required_from_block: 992,
+        required_to_block: 1_000,
+    }];
+    let report =
+        evaluate_data_completeness(&read, &registry_only(), &gaps, DEFAULT_MAX_HEAD_LAG_BLOCKS);
+
+    assert_eq!(report.stored_lineage_backfill_coverage(), CheckStatus::Fail);
+    assert_eq!(report.backfill_coverage_gaps, gaps);
+    assert!(!report.data_complete());
 }
 
 /// The 2026-07-06 shape: every cursor reports "done" because each measures itself against the
@@ -626,6 +648,20 @@ fn small_negative_head_lag_is_tolerated() {
 
     assert_eq!(report.frontiers[0].head_lag_blocks, Some(-4));
     assert_eq!(report.frontier_at_head(), CheckStatus::Pass);
+}
+
+/// A checkpoint number at the lineage head is not sufficient when its stored hash does not
+/// resolve to the retained serving-canonical branch anchor used by later reconciliation.
+#[test]
+fn checkpoint_hash_without_canonical_lineage_anchor_fails_frontier() {
+    let mut read = healthy_read();
+    read.chains[0].checkpoint_canonical_lineage_match = false;
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.frontiers[0].head_lag_blocks, Some(0));
+    assert!(!report.frontiers[0].checkpoint_canonical_lineage_match);
+    assert_eq!(report.frontier_at_head(), CheckStatus::Fail);
+    assert!(!report.data_complete());
 }
 
 /// A stale checkpoint writer or mixed restore leaves the checkpoint far behind the lineage

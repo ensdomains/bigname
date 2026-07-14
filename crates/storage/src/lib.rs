@@ -75,7 +75,8 @@ pub use backfill_jobs::{
     BackfillRangeSpec, advance_backfill_range, complete_backfill_job, complete_backfill_range,
     complete_backfill_range_recording_coverage, create_backfill_job, fail_backfill_job,
     fail_backfill_range, load_backfill_coverage_fact_counts, load_backfill_job,
-    load_backfill_ranges, load_completed_backfill_jobs_intersecting_range, reserve_backfill_range,
+    load_backfill_jobs_intersecting_range, load_backfill_ranges,
+    load_completed_backfill_jobs_intersecting_range, reserve_backfill_range,
     write_backfill_coverage_facts,
 };
 pub use base_normalized_rederive::{

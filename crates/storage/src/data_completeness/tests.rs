@@ -80,6 +80,53 @@ async fn disconnected_canonical_parents_are_counted() -> Result<()> {
     database.cleanup().await
 }
 
+/// Checkpoint progress is anchored by both number and hash. A same-height lineage row on a
+/// different hash, or an orphaned exact row, cannot prove the checkpoint's branch anchor.
+#[tokio::test]
+async fn checkpoint_hash_requires_exact_canonical_lineage_anchor() -> Result<()> {
+    let database = test_database().await?;
+    let pool = database.pool();
+    sqlx::query(
+        r#"
+        INSERT INTO chain_lineage
+            (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+        VALUES ('ethereum-sepolia', '0xRIGHT', 100, now(), 'canonical')
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO chain_checkpoints
+            (chain_id, canonical_block_hash, canonical_block_number)
+        VALUES ('ethereum-sepolia', '0xWRONG', 100)
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    let read = load_data_completeness(pool).await?;
+    assert!(!read.chains[0].checkpoint_canonical_lineage_match);
+
+    sqlx::query(
+        "UPDATE chain_checkpoints SET canonical_block_hash = '0xRIGHT' WHERE chain_id = 'ethereum-sepolia'",
+    )
+    .execute(pool)
+    .await?;
+    let read = load_data_completeness(pool).await?;
+    assert!(read.chains[0].checkpoint_canonical_lineage_match);
+
+    sqlx::query(
+        "UPDATE chain_lineage SET canonicality_state = 'orphaned' WHERE chain_id = 'ethereum-sepolia'",
+    )
+    .execute(pool)
+    .await?;
+    let read = load_data_completeness(pool).await?;
+    assert!(!read.chains[0].checkpoint_canonical_lineage_match);
+
+    database.cleanup().await
+}
+
 /// Code coverage needs the observation height so the evaluator can reject observations from
 /// before a target's inclusive active start.
 #[tokio::test]
@@ -534,12 +581,12 @@ async fn discovery_target_without_live_address_is_surfaced() -> Result<()> {
         r#"
         INSERT INTO discovery_edges
             (chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id,
-             discovery_source, source_manifest_id, admission)
+             discovery_source, source_manifest_id, admission, active_from_block_number)
         VALUES
             ('ethereum-sepolia', 'subregistry',
              '88888888-8888-8888-8888-888888888888',
              '99999999-9999-9999-9999-999999999999',
-             'registry_event', $1, 'reachable_from_root')
+             'registry_event', $1, 'reachable_from_root', 100)
         "#,
     )
     .bind(manifest_id)
@@ -570,6 +617,64 @@ async fn discovery_target_without_live_address_is_surfaced() -> Result<()> {
         r#"
         UPDATE contract_instance_addresses
         SET active_to_block_number = NULL
+        WHERE contract_instance_id = '99999999-9999-9999-9999-999999999999'
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    let read = load_data_completeness(pool).await?;
+    assert!(read.discovery_targets_missing_address.is_empty());
+
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET active_from_block_number = 900
+        WHERE contract_instance_id = '99999999-9999-9999-9999-999999999999'
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    let read = load_data_completeness(pool).await?;
+    assert_eq!(read.discovery_targets_missing_address.len(), 1);
+
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET active_from_block_number = 50
+        WHERE contract_instance_id = '99999999-9999-9999-9999-999999999999'
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    let read = load_data_completeness(pool).await?;
+    assert!(read.discovery_targets_missing_address.is_empty());
+
+    sqlx::query(
+        r#"
+        UPDATE discovery_edges
+        SET active_from_block_number = NULL
+        WHERE source_manifest_id = $1
+        "#,
+    )
+    .bind(manifest_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET active_from_block_number = 900
+        WHERE contract_instance_id = '99999999-9999-9999-9999-999999999999'
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    let read = load_data_completeness(pool).await?;
+    assert_eq!(read.discovery_targets_missing_address.len(), 1);
+
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET active_from_block_number = NULL
         WHERE contract_instance_id = '99999999-9999-9999-9999-999999999999'
         "#,
     )
@@ -658,6 +763,29 @@ async fn active_event_sources_are_counted_by_exact_manifest_identity() -> Result
         "#,
     )
     .bind(deprecated_manifest_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO chain_lineage
+            (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+        VALUES ('ethereum-sepolia', '0xOBSERVED', 42, now(), 'canonical')
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_events
+            (event_identity, namespace, event_kind, source_family, manifest_version,
+             source_manifest_id, chain_id, block_number, block_hash, derivation_kind,
+             canonicality_state)
+        VALUES
+            ('observed-active', 'ens', 'ResolverChanged', 'registry', 2, $1,
+             'ethereum-sepolia', 42, '0xOBSERVED', 'raw_log', 'observed')
+        "#,
+    )
+    .bind(active_event_manifest_id)
     .execute(pool)
     .await?;
 

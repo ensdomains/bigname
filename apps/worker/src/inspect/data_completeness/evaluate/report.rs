@@ -1,5 +1,7 @@
 use bigname_storage::{BackfillLifecycleRow, DiscoveryTargetMissingAddress};
 
+use super::super::backfill_coverage::BackfillCoverageGap;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::inspect::data_completeness) enum CheckStatus {
     Pass,
@@ -23,6 +25,7 @@ impl CheckStatus {
 pub(in crate::inspect::data_completeness) struct ChainFrontier {
     pub(in crate::inspect::data_completeness) chain_id: String,
     pub(in crate::inspect::data_completeness) canonical_block_number: Option<i64>,
+    pub(in crate::inspect::data_completeness) checkpoint_canonical_lineage_match: bool,
     pub(in crate::inspect::data_completeness) lineage_head_block_number: Option<i64>,
     pub(in crate::inspect::data_completeness) head_lag_blocks: Option<i64>,
     pub(in crate::inspect::data_completeness) contiguous: bool,
@@ -101,6 +104,7 @@ pub(in crate::inspect::data_completeness) struct DataCompletenessReport {
     pub(in crate::inspect::data_completeness) chains_history_truncated: Vec<HistoryTruncation>,
     pub(in crate::inspect::data_completeness) chains_without_finite_start:
         Vec<ChainWithoutFiniteStart>,
+    pub(in crate::inspect::data_completeness) backfill_coverage_gaps: Vec<BackfillCoverageGap>,
     pub(in crate::inspect::data_completeness) failed_replay_cursors: Vec<String>,
     pub(in crate::inspect::data_completeness) lagging_replay_cursors: Vec<CursorLag>,
     pub(in crate::inspect::data_completeness) chains_missing_raw_fact_cursor: Vec<String>,
@@ -128,9 +132,10 @@ pub(in crate::inspect::data_completeness) struct DataCompletenessReport {
 impl DataCompletenessReport {
     pub(in crate::inspect::data_completeness) fn frontier_at_head(&self) -> CheckStatus {
         CheckStatus::from_pass(self.frontiers.iter().all(|frontier| {
-            frontier.head_lag_blocks.is_some_and(|lag| {
-                (-self.max_head_lag_blocks..=self.max_head_lag_blocks).contains(&lag)
-            })
+            frontier.checkpoint_canonical_lineage_match
+                && frontier.head_lag_blocks.is_some_and(|lag| {
+                    (-self.max_head_lag_blocks..=self.max_head_lag_blocks).contains(&lag)
+                })
         }))
     }
 
@@ -148,6 +153,12 @@ impl DataCompletenessReport {
         CheckStatus::from_pass(
             self.active_watched_target_count > 0 && self.unobserved_targets.is_empty(),
         )
+    }
+
+    pub(in crate::inspect::data_completeness) fn stored_lineage_backfill_coverage(
+        &self,
+    ) -> CheckStatus {
+        CheckStatus::from_pass(self.backfill_coverage_gaps.is_empty())
     }
 
     pub(in crate::inspect::data_completeness) fn manifest_declared_targets_present(
@@ -225,6 +236,7 @@ impl DataCompletenessReport {
             self.frontier_at_head(),
             self.lineage_contiguous(),
             self.history_from_declared_start(),
+            self.stored_lineage_backfill_coverage(),
             self.watch_set_observed(),
             self.manifest_declared_targets_present(),
             self.discovery_targets_present(),

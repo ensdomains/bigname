@@ -3,9 +3,10 @@ use std::sync::Mutex;
 
 use anyhow::Result;
 use bigname_manifests::{
-    UncoveredWatchedTuple, find_uncovered_watched_tuples,
-    load_active_manifest_abi_events_by_chain_and_source_families, load_discovery_admission_epoch,
-    load_log_producing_source_families, load_watched_contracts_by_addresses,
+    UncoveredWatchedTuple, WATCHED_COVERAGE_VERIFICATION_CHUNK_BLOCKS,
+    find_uncovered_watched_tuples, load_active_manifest_abi_events_by_chain_and_source_families,
+    load_discovery_admission_epoch, load_log_producing_source_families,
+    load_watched_contracts_by_addresses,
 };
 use bigname_storage::ChainLineageBlock;
 use sqlx::Row;
@@ -15,10 +16,6 @@ mod topic_drift;
 
 use topic_drift::ensure_family_topic_sets_undrifted;
 
-/// Frontier extensions verify coverage in chunks of this many blocks, so a
-/// deep gap costs a handful of anti-join queries once and every promotion
-/// cycle afterwards is an O(1) in-memory comparison.
-pub(crate) const COVERAGE_FRONTIER_VERIFICATION_CHUNK_BLOCKS: i64 = 131_072;
 const MAX_REPORTED_UNCOVERED_TUPLES: i64 = 20;
 
 /// Process-lifetime, per-chain memo of the block interval whose watched-tuple
@@ -143,7 +140,7 @@ pub(super) async fn stored_path_has_required_raw_fact_coverage(
 
 /// Extend the chain's verified coverage frontier until it contains
 /// `[required_from, required_through]`, verifying in
-/// [`COVERAGE_FRONTIER_VERIFICATION_CHUNK_BLOCKS`] chunks that opportunistically
+/// [`WATCHED_COVERAGE_VERIFICATION_CHUNK_BLOCKS`] chunks that opportunistically
 /// look ahead as far as `verify_ahead_through_block` (the stored promotion
 /// anchor) so subsequent cycles are O(1). A violation in the look-ahead beyond
 /// the required target falls back to verifying exactly up to the target, so an
@@ -222,7 +219,7 @@ async fn ensure_verified_coverage_frontier(
     while through_block < required_through {
         let chunk_from = through_block + 1;
         let chunk_through = chunk_from
-            .saturating_add(COVERAGE_FRONTIER_VERIFICATION_CHUNK_BLOCKS - 1)
+            .saturating_add(WATCHED_COVERAGE_VERIFICATION_CHUNK_BLOCKS - 1)
             .min(verify_ahead_through_block);
         let violations = find_uncovered_watched_tuples(
             pool,

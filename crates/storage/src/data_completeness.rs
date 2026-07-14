@@ -25,6 +25,9 @@ mod tests;
 pub struct ChainCompletenessRow {
     pub chain_id: String,
     pub canonical_block_number: Option<i64>,
+    /// Whether the checkpoint's exact `(chain, block_hash, block_number)` resolves to a
+    /// canonical/safe/finalized lineage row. An empty checkpoint has no anchor to validate.
+    pub checkpoint_canonical_lineage_match: bool,
     pub lineage_head_block_number: Option<i64>,
     pub lineage_floor_block_number: Option<i64>,
     pub lineage_canonical_block_count: i64,
@@ -94,8 +97,9 @@ pub struct ManifestDeclaredTarget {
     pub active_from_block_number: Option<i64>,
 }
 
-/// An open discovery-edge endpoint whose contract instance has no matching open address row.
-/// The edge remains authoritative even though the materialized watch view cannot render it.
+/// An open discovery-edge endpoint whose contract instance has no matching open address row that
+/// preserves the edge's admitted start. The edge remains authoritative even though the
+/// materialized watch view cannot faithfully render it.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct DiscoveryTargetMissingAddress {
     pub chain: String,
@@ -104,7 +108,7 @@ pub struct DiscoveryTargetMissingAddress {
 }
 
 /// One active manifest source that declares normalized adapter output, together with the
-/// count of matching non-orphaned normalized events written under that exact manifest ID.
+/// count of matching serving-canonical normalized events written under that exact manifest ID.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActiveManifestEventSource {
     pub manifest_id: i64,
@@ -320,6 +324,10 @@ async fn load_chain_completeness(pool: &sqlx::PgPool) -> Result<Vec<ChainComplet
         SELECT
             known_chains.chain_id,
             chain_checkpoints.canonical_block_number,
+            CASE
+                WHEN chain_checkpoints.canonical_block_number IS NULL THEN TRUE
+                ELSE checkpoint_lineage.block_hash IS NOT NULL
+            END AS checkpoint_canonical_lineage_match,
             lineage.lineage_head_block_number,
             lineage.lineage_floor_block_number,
             COALESCE(lineage.lineage_canonical_block_count, 0) AS lineage_canonical_block_count,
@@ -331,6 +339,10 @@ async fn load_chain_completeness(pool: &sqlx::PgPool) -> Result<Vec<ChainComplet
             raw_log_head.raw_log_head_block_number
         FROM known_chains
         LEFT JOIN chain_checkpoints ON chain_checkpoints.chain_id = known_chains.chain_id
+        LEFT JOIN canonical_lineage checkpoint_lineage
+          ON checkpoint_lineage.chain_id = chain_checkpoints.chain_id
+         AND checkpoint_lineage.block_hash = chain_checkpoints.canonical_block_hash
+         AND checkpoint_lineage.block_number = chain_checkpoints.canonical_block_number
         LEFT JOIN lineage ON lineage.chain_id = known_chains.chain_id
         LEFT JOIN duplicate_canonical_height
           ON duplicate_canonical_height.chain_id = known_chains.chain_id
@@ -351,6 +363,10 @@ async fn load_chain_completeness(pool: &sqlx::PgPool) -> Result<Vec<ChainComplet
             Ok(ChainCompletenessRow {
                 chain_id: crate::sql_row::get(&row, "chain_id")?,
                 canonical_block_number: crate::sql_row::get(&row, "canonical_block_number")?,
+                checkpoint_canonical_lineage_match: crate::sql_row::get(
+                    &row,
+                    "checkpoint_canonical_lineage_match",
+                )?,
                 lineage_head_block_number: crate::sql_row::get(&row, "lineage_head_block_number")?,
                 lineage_floor_block_number: crate::sql_row::get(
                     &row,

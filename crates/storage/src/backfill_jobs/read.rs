@@ -22,13 +22,43 @@ pub async fn load_completed_backfill_jobs_intersecting_range(
     from_block: i64,
     to_block: i64,
 ) -> Result<Vec<BackfillJob>> {
+    load_backfill_jobs_intersecting_range_inner(pool, chain_id, from_block, to_block, true).await
+}
+
+/// Load every persisted backfill job for a chain whose declared block range intersects
+/// `[from_block, to_block]`. Unlike the completed-only promotion helper, this includes incomplete
+/// and failed jobs so inspection can recognize retained crash residue that still requires durable
+/// coverage evidence from a successful retry.
+pub async fn load_backfill_jobs_intersecting_range(
+    pool: &PgPool,
+    chain_id: &str,
+    from_block: i64,
+    to_block: i64,
+) -> Result<Vec<BackfillJob>> {
+    load_backfill_jobs_intersecting_range_inner(pool, chain_id, from_block, to_block, false).await
+}
+
+async fn load_backfill_jobs_intersecting_range_inner(
+    pool: &PgPool,
+    chain_id: &str,
+    from_block: i64,
+    to_block: i64,
+    completed_only: bool,
+) -> Result<Vec<BackfillJob>> {
+    let status_filter = if completed_only {
+        "AND status = 'completed'::backfill_lifecycle_status"
+    } else {
+        ""
+    };
     let select_sql = backfill_job_select_sql(
-        r#"
+        &format!(
+            r#"
         WHERE chain_id = $1
-          AND status = 'completed'::backfill_lifecycle_status
+          {status_filter}
           AND range_start_block_number <= $3
           AND range_end_block_number >= $2
-        "#,
+        "#
+        ),
         "ORDER BY backfill_job_id",
     );
     let rows = sqlx::query(&select_sql)
@@ -36,12 +66,13 @@ pub async fn load_completed_backfill_jobs_intersecting_range(
         .bind(from_block)
         .bind(to_block)
         .fetch_all(pool)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to load completed backfill jobs for chain {chain_id} intersecting {from_block}..={to_block}"
-            )
-        })?;
+    .await
+    .with_context(|| {
+        let status = if completed_only { "completed " } else { "" };
+        format!(
+            "failed to load {status}backfill jobs for chain {chain_id} intersecting {from_block}..={to_block}"
+        )
+    })?;
 
     rows.into_iter().map(decode_backfill_job).collect()
 }

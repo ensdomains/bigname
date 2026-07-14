@@ -87,7 +87,11 @@ pub(super) async fn load_active_manifest_event_sources(
          AND event.namespace = source.namespace
          AND event.source_family = source.source_family
          AND event.event_kind = ANY(source.normalized_event_kinds)
-         AND event.canonicality_state <> 'orphaned'::canonicality_state
+         AND event.canonicality_state IN (
+             'canonical'::canonicality_state,
+             'safe'::canonicality_state,
+             'finalized'::canonicality_state
+         )
         LEFT JOIN chain_lineage lineage
           ON lineage.chain_id = event.chain_id
          AND lineage.block_hash = event.block_hash

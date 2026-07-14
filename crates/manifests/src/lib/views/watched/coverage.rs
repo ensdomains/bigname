@@ -1,6 +1,10 @@
 use anyhow::{Context, Result};
 use sqlx::{PgPool, Row};
 
+/// Block chunk shared by stored-lineage promotion and read-only completeness inspection when
+/// reconciling watched tuples against durable backfill coverage facts.
+pub const WATCHED_COVERAGE_VERIFICATION_CHUNK_BLOCKS: i64 = 131_072;
+
 /// A watched (source_family, address) tuple whose required interval within the
 /// evaluated block range is not fully contained in any single
 /// `backfill_coverage_facts` row (address-scoped or family-scoped).

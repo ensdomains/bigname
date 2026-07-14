@@ -1,3 +1,4 @@
+mod backfill_coverage;
 mod evaluate;
 
 #[cfg(test)]
@@ -8,6 +9,7 @@ use bigname_manifests::load_watched_contracts;
 use serde_json::{Value, json};
 
 use super::{InspectDataCompletenessArgs, connect_read_only};
+use backfill_coverage::load_backfill_coverage_gaps;
 use evaluate::{
     CheckStatus, DEFAULT_MAX_HEAD_LAG_BLOCKS, DataCompletenessReport, evaluate_data_completeness,
 };
@@ -18,10 +20,16 @@ pub(in crate::inspect) async fn inspect_data_completeness(
     let pool = connect_read_only(&args.database).await?;
     let read = bigname_storage::load_data_completeness(&pool).await?;
     let watched_contracts = load_watched_contracts(&pool).await?;
+    let backfill_coverage_gaps = load_backfill_coverage_gaps(&pool, &read).await?;
     let max_head_lag_blocks = args
         .max_head_lag_blocks
         .unwrap_or(DEFAULT_MAX_HEAD_LAG_BLOCKS);
-    let report = evaluate_data_completeness(&read, &watched_contracts, max_head_lag_blocks);
+    let report = evaluate_data_completeness(
+        &read,
+        &watched_contracts,
+        &backfill_coverage_gaps,
+        max_head_lag_blocks,
+    );
 
     println!("{}", render_data_completeness(&report));
 
@@ -42,6 +50,7 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
                 "chains": report.frontiers.iter().map(|frontier| json!({
                     "chain": frontier.chain_id.as_str(),
                     "canonical_block_number": frontier.canonical_block_number,
+                    "checkpoint_canonical_lineage_match": frontier.checkpoint_canonical_lineage_match,
                     "lineage_head_block_number": frontier.lineage_head_block_number,
                     "head_lag_blocks": frontier.head_lag_blocks,
                     "missing_from_storage": frontier.missing_from_storage,
@@ -65,6 +74,16 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
                 "chains_without_finite_start": report.chains_without_finite_start.iter().map(|chain| json!({
                     "chain": chain.chain.as_str(),
                     "open_ended_target_count": chain.open_ended_target_count,
+                })).collect::<Vec<_>>(),
+            })),
+            check("stored_lineage_backfill_coverage", report.stored_lineage_backfill_coverage(), json!({
+                "uncovered_tuple_count": report.backfill_coverage_gaps.len(),
+                "uncovered_tuples": report.backfill_coverage_gaps.iter().map(|gap| json!({
+                    "chain": gap.chain.as_str(),
+                    "source_family": gap.source_family.as_str(),
+                    "address": gap.address.as_str(),
+                    "required_from_block": gap.required_from_block,
+                    "required_to_block": gap.required_to_block,
                 })).collect::<Vec<_>>(),
             })),
             check("watch_set_code_observation_coverage", report.watch_set_observed(), json!({

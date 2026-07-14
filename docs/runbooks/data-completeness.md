@@ -52,29 +52,31 @@ retired chain and is reported as an advisory, not gated for the per-chain checks
 
 | Check | Passes when |
 | --- | --- |
-| `reconciliation_frontier_at_head` | every active chain has a head lag within `±--max-head-lag-blocks` (default 8) between the stored canonical checkpoint and the canonical lineage head, and every active chain has a frontier row at all |
+| `reconciliation_frontier_at_head` | every active chain has a head lag within `±--max-head-lag-blocks` (default 8) between the stored canonical checkpoint and the canonical lineage head, the checkpoint's exact hash and number resolve to a canonical/safe/finalized lineage row, and every active chain has a frontier row at all |
 | `reconciliation_lineage_contiguous` | distinct canonical/safe/finalized block numbers equal `head - floor + 1`, no height has multiple canonical hashes, and every row above the retained floor points by `parent_hash` to the canonical/safe/finalized row at the preceding height |
 | `reconciliation_history_from_declared_start` | for every active watched chain, the retained lineage floor is at or below the earliest finite start block its active targets declare; a chain whose targets are all open-ended fails, since no floor can be established |
+| `stored_lineage_backfill_coverage` | every active log-producing watched tuple intersecting a persisted bounded-backfill range inside retained lineage is contained in a durable address- or family-scoped `backfill_coverage_facts` row over each shared promotion-verification chunk |
 | `watch_set_code_observation_coverage` | there is at least one active target, and every **active** target — direct active-manifest declarations unioned with the materialized watch view and active discovery edges — has a non-orphaned `raw_code_hashes` observation with an exact retained non-orphaned lineage anchor at or after its inclusive active start (when finite) |
 | `manifest_declared_targets_present` | every active manifest-payload root, contract, and proxy implementation has its matching materialized instance and open address; every proxy implementation also has the exact open managed `proxy_implementation` edge consumed by the watch view |
-| `discovery_targets_present` | every target endpoint of an open non-migration discovery edge has an open `contract_instance_addresses` row on the edge's chain; bounded edges are historical and impose no current target requirement |
-| `active_event_lineage_retained` | every matching non-orphaned normalized event for an active event-producing manifest source still resolves by exact chain, block hash, and block number to a canonical/safe/finalized `chain_lineage` anchor |
+| `discovery_targets_present` | every target endpoint of an open non-migration discovery edge has an open `contract_instance_addresses` row on the edge's chain whose start does not narrow the edge's admitted start; bounded edges are historical and impose no current target requirement |
+| `active_event_lineage_retained` | every matching canonical/safe/finalized normalized event for an active event-producing manifest source still resolves by exact chain, block hash, and block number to a canonical/safe/finalized `chain_lineage` anchor |
 | `normalization_no_failure` | no replay cursor for an active chain under the deployment profile inferred from the active manifest corpus carries a `last_failure_reason` |
 | `normalization_caught_up_to_raw_head` | the active manifest corpus resolves to one supported deployment profile; every active chain with retained canonical raw logs has that profile's `raw_fact_normalized_events` cursor, and each applicable cursor has reached its target (see below) |
 | `projection_apply_drained` | the change log is empty, or the `normalized_events_to_projection_invalidations` cursor exists and its `last_change_id` has reached `max(projection_normalized_event_changes.change_id)`; unrelated cursor rows do not count |
 | `projection_invalidations_drained` | `projection_invalidations` is empty — every enqueued invalidation has been applied and deleted |
 | `projection_no_dead_letters` | `projection_invalidation_dead_letters` is empty — no invalidation exhausted its retries |
 | `projection_replay_complete` | every current projection has a `current_projection_replay_status` marker at this worker's `CURRENT_PROJECTION_REPLAY_VERSION`; before a durable projection-apply cursor exists, each marker must also cover the target bootstrap would request now |
-| `active_dataset_non_empty` | every active manifest source whose ABI declares non-empty `normalized_events` output has a non-orphaned matching event under that exact `source_manifest_id`, manifest version, chain, namespace, source family, and declared event kind; every such namespace also has `name_current` rows |
+| `active_dataset_non_empty` | every active manifest source whose ABI declares non-empty `normalized_events` output has a canonical/safe/finalized matching event under that exact `source_manifest_id`, manifest version, chain, namespace, source family, and declared event kind; every such namespace also has `name_current` rows |
 | `normalized_events_chain_id_present` | no non-orphaned `normalized_events` row has a NULL `chain_id` |
 | `deferred_projection_indexes_present` | the eight deferred `normalized_events` projection indexes all exist on `public.normalized_events` and have `pg_index.indisvalid = true` and `indisready = true` (a fresh replay drops them and rebuilds them after catch-up) |
 
 `watch_set_code_observation_coverage` is the check with teeth, and the reason the command
 exists. Most others are *relative* invariants: each compares a stage to the stage before
 it, so they stay green while the pipeline faithfully processes an incomplete input.
-`reconciliation_history_from_declared_start`, `active_event_lineage_retained`,
-`active_dataset_non_empty`, and `projection_replay_complete` also compare against retained truth,
-the declared world, or the pipeline's own handoff authority rather than the previous stage.
+`reconciliation_history_from_declared_start`, `stored_lineage_backfill_coverage`,
+`active_event_lineage_retained`, `active_dataset_non_empty`, and
+`projection_replay_complete` also compare against retained truth, the declared world, or the
+pipeline's own handoff authority rather than the previous stage.
 
 `projection_apply_drained` only proves the derive scan finished — that the apply cursor
 reached the change-log frontier. It does not prove the resulting invalidations were
@@ -144,7 +146,12 @@ and its target `contract_instance_id` remain authority if a restore loses the ta
 address row, even though `load_watched_contracts` can no longer render that target. Only open
 edges impose this current-authority requirement: a finite `active_to_block_number` is legitimate
 retained discovery history. The named check fails on a missing or closed current materialization
-rather than allowing coverage and history to shrink.
+rather than allowing coverage and history to shrink. When the edge has a finite admitted start,
+the open address row must have no start or an equal/earlier start. When the edge start is unknown,
+the address start must also remain unknown; inventing a finite materialization start would silently
+discard an unbounded earlier interval. A later address start would otherwise make the runtime watch
+view take `GREATEST(edge_start, address_start)` and discard the edge's earlier required interval, so
+it is reported as a materialization gap.
 See [`chain-intake.md`](../chain-intake.md).
 
 ### Frontier, history, and content against the declared world
@@ -156,7 +163,10 @@ only against the previous pipeline stage:
   Reconcile commits canonical lineage and then advances the checkpoint, so on a live database
   the lineage head routinely leads the checkpoint by a small margin — a negative lag is a
   normal committed state, not a fault, and only a gap beyond `max` in either direction fails
-  (a checkpoint far behind the lineage is a stale checkpoint writer). The check also
+  (a checkpoint far behind the lineage is a stale checkpoint writer). A zero numeric lag still
+  fails when the checkpoint's `canonical_block_hash` does not join the canonical/safe/finalized
+  lineage row at that exact height; later reconciliation uses that hash as its branch anchor. The
+  check also
   synthesizes a failing frontier row for any active chain that has no checkpoint or lineage
   row at all, so a declared chain missing from storage (reported with
   `missing_from_storage: true`) cannot pass by absence.
@@ -170,10 +180,24 @@ only against the previous pipeline stage:
   *all* open-ended has no floor to establish and fails closed. Direct manifest-payload starts
   remain part of this union even when a materialized address row narrows its runtime
   `active_from_block_number`; the address row cannot raise the manifest's historical floor.
+- **Stored-path fetch coverage.** `stored_lineage_backfill_coverage` runs the same indexed
+  watched-tuple anti-join as stored-lineage checkpoint promotion over merged persisted backfill-job
+  ranges intersected with retained lineage. The job is the durable signal that a span came from
+  bounded backfill rather than ordinary provider-fetched live reconciliation. Incomplete and failed
+  jobs remain in scope because retained lineage can be crash residue that the writer refuses;
+  durable facts from a later successful retry can satisfy the interval. Evidence remains required
+  after the checkpoint consumes the span: a checkpoint regression or database restore can make it
+  promotion input again, and deleting facts must not preserve a completeness pass. The check uses
+  the writer's shared `131072`-block verification chunks and active
+  log-producing source-family authority. Each required tuple interval within a chunk must fit
+  inside one durable address-scoped fact for that exact family/address or one family-scoped fact.
+  Facts from a later successful retry can satisfy the interval, so failed job/range lifecycle rows
+  remain advisory. A chain with no bounded-backfill range inside retained lineage has no bounded
+  fetch span requiring facts and passes this check vacuously.
 - **Content.** `active_dataset_non_empty` derives expected event-producing sources from active
   manifest ABI entries whose `normalized_events` list is non-empty. Execution- or
   transport-only manifests with no declared normalized output do not create event-content
-  expectations. Each expected source must have a non-orphaned event matching its exact
+  expectations. Each expected source must have a canonical, safe, or finalized event matching its exact
   `source_manifest_id`, manifest version, chain, namespace, source family, and one of its
   declared event kinds. Rows from a deprecated manifest version therefore cannot make a newly
   active source pass. Each expected namespace must also have `name_current` rows.
@@ -185,9 +209,11 @@ only against the previous pipeline stage:
   have been re-derived under the newly active `source_manifest_id`; residual rows from the
   previous version are not proof that the new declaration was indexed.
 - **Retained event lineage.** `active_event_lineage_retained` joins every matching active
-  normalized event, including synthetic block-boundary events, back to `chain_lineage` by exact
-  chain, block hash, and block number and requires that anchor to remain canonical, safe, or
-  finalized. This is the durable reorg-repair authority. In the documented minimal retention
+  canonical/safe/finalized normalized event, including synthetic block-boundary events, back to
+  `chain_lineage` by exact chain, block hash, and block number and requires that anchor to remain
+  canonical, safe, or finalized. An `observed` event does not count as active serving content,
+  because projection readers consume only serving-canonical states. This is the durable
+  reorg-repair authority. In the documented minimal retention
   mode, `raw_logs` are replay staging and may be compacted after normalized replay and downstream
   durability; that valid compaction does not fail this check. Log-audit mode may retain those
   rows, but choosing it does not change the completeness contract.
@@ -246,8 +272,13 @@ otherwise abort the read), so they are surfaced here as a data-integrity fault.
   retained code observations let the separate coverage check pass. Reseed manifests or repair
   the materialized graph before promoting.
 - **`discovery_targets_present` fails.** An open discovery edge points to a contract instance
-  with no open address on that chain. Restore or rederive the target address before promoting;
-  closing or deleting a current edge merely to silence the check changes admission authority.
+  with no open address on that chain, or its address start is later than the edge's admitted
+  start. Restore or rederive the range-preserving target address before promoting; closing or
+  deleting a current edge merely to silence the check changes admission authority.
+- **`stored_lineage_backfill_coverage` fails.** A bounded-backfill range inside retained lineage
+  contains an active log-producing watched tuple whose required interval is not contained in one
+  durable coverage fact. Run hash-pinned or Coinbase SQL backfill for the reported tuple/range, or
+  derive facts for a compatible completed legacy job, before retrying promotion.
 - **`active_event_lineage_retained` fails.** Active normalized content has lost one or more exact
   canonical lineage anchors. Restore `chain_lineage` and run reorg/projection repair as needed;
   raw-log compaction by itself is not this failure.
@@ -268,7 +299,8 @@ otherwise abort the read), so they are surfaced here as a data-integrity fault.
   `head_lag_blocks` means the lineage trails the checkpoint; a large negative value means the
   checkpoint writer is stale and far behind the lineage (a small negative lag is normal — see
   above). A `missing_from_storage: true` chain is declared by the watch set but has no
-  frontier row.
+  frontier row. `checkpoint_canonical_lineage_match: false` with zero numeric lag means the
+  checkpoint hash is missing, orphaned, or points at a different branch at that height.
 - **`reconciliation_lineage_contiguous` fails with a non-zero `duplicate_canonical_height_count`.**
   Two or more non-orphaned lineage rows share one block height. That is a canonicality
   violation — at most one hash per height may be canonical — not a gap, and it points at a
@@ -283,8 +315,9 @@ otherwise abort the read), so they are surfaced here as a data-integrity fault.
   `lineage_floor_block` bound the missing span.
 - **`active_dataset_non_empty` fails with an entry in
   `manifest_sources_without_events`.** The exact active event-producing manifest source has no
-  matching non-orphaned normalized event. Rows from another chain, source family, or deprecated
-  manifest identity do not satisfy it, even if the global event table is non-empty.
+  matching canonical/safe/finalized normalized event. Observed rows, rows from another chain or
+  source family, and deprecated manifest identities do not satisfy it, even if the global event
+  table is non-empty.
 - **`projection_replay_complete` fails with entries in `missing_projections`.** The candidate
   is mid projection-bootstrap, its marker belongs to a version other than
   `required_replay_version`, or (before apply handoff) it completed below
@@ -322,10 +355,10 @@ The `advisories` block reports state that is worth an operator's attention but d
   active chain set. Their failures and lag do not gate serving, but the rows remain visible for
   cleanup and profile-rollout diagnosis.
 - **`backfill_lifecycle`** — per-profile counts of `failed`, incomplete, and expired-lease
-  backfill jobs and ranges. Backfill failures are *not* gated, because without coverage-fact
-  reconciliation a `failed` range cannot be distinguished from one superseded by a later
-  successful retry, and the data-level checks (frontier, history, coverage, content) already
-  gate on the resulting completeness. Treat a non-zero `failed_range_count` or
+  backfill jobs and ranges. Backfill lifecycle failures are *not* gated because a later successful
+  retry may supply the durable facts for the same required tuples; the separate
+  `stored_lineage_backfill_coverage` check gates the resulting promotion evidence. Treat a
+  non-zero `failed_range_count` or
   `expired_lease_range_count` as a prompt to investigate before promoting.
 
 ## Caveats
@@ -334,8 +367,8 @@ The `advisories` block reports state that is worth an operator's attention but d
   persists lineage only for the blocks whose logs it returned, while completing the whole
   range. The reconciled span is then sparse, so `reconciliation_lineage_contiguous` fails on a
   candidate that is legitimately complete for its sampled coverage. A sample-backed candidate
-  is not gate-promotable without a full-mode pass over the same range; the gate does not
-  reconcile sampled coverage facts.
+  is not gate-promotable without a full-mode pass over the same range; coverage facts cannot
+  substitute for the missing lineage rows.
 
 ## Scope
 

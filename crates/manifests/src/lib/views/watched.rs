@@ -10,7 +10,10 @@ use sqlx::{PgPool, Row, postgres::PgRow};
 
 use crate::{WatchedContract, WatchedContractSource, normalize_address};
 
-pub use coverage::{UncoveredWatchedTuple, find_uncovered_watched_tuples};
+pub use coverage::{
+    UncoveredWatchedTuple, WATCHED_COVERAGE_VERIFICATION_CHUNK_BLOCKS,
+    find_uncovered_watched_tuples,
+};
 pub use scoped::{
     load_watched_contracts_by_addresses, load_watched_contracts_by_source_family_and_addresses,
 };

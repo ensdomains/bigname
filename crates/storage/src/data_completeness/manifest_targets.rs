@@ -263,13 +263,17 @@ pub(super) async fn load_discovery_targets_missing_address(
                 AND address.chain_id = edge.chain_id
                 AND address.deactivated_at IS NULL
                 AND address.active_to_block_number IS NULL
+                AND (
+                    address.active_from_block_number IS NULL
+                    OR address.active_from_block_number <= edge.active_from_block_number
+                )
           )
         ORDER BY chain, source_family, contract_instance_id
         "#,
     )
     .fetch_all(pool)
     .await
-    .context("failed to load active discovery targets missing live address rows")?;
+    .context("failed to load active discovery targets missing range-preserving live addresses")?;
 
     rows.into_iter()
         .map(|row| {

@@ -29,6 +29,7 @@ pub(super) fn missing_chain_frontier(chain_id: &str) -> ChainFrontier {
     ChainFrontier {
         chain_id: chain_id.to_owned(),
         canonical_block_number: None,
+        checkpoint_canonical_lineage_match: false,
         lineage_head_block_number: None,
         head_lag_blocks: None,
         contiguous: false,
@@ -56,6 +57,7 @@ pub(super) fn chain_frontier(chain: &ChainCompletenessRow) -> ChainFrontier {
     ChainFrontier {
         chain_id: chain.chain_id.clone(),
         canonical_block_number: chain.canonical_block_number,
+        checkpoint_canonical_lineage_match: chain.checkpoint_canonical_lineage_match,
         lineage_head_block_number: chain.lineage_head_block_number,
         head_lag_blocks,
         contiguous: expected_block_count.is_some()
