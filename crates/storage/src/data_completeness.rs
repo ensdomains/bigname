@@ -56,6 +56,7 @@ pub struct ReplayCursorRow {
 pub struct ProjectionReplayMarker {
     pub replay_version: i32,
     pub projection: String,
+    pub completed_normalized_target_block: Option<i64>,
 }
 
 /// Backfill lifecycle counts, scoped by deployment profile. Reported as an advisory rather
@@ -148,8 +149,12 @@ pub struct DataCompletenessRead {
     /// that would otherwise abort the per-chain read.
     pub normalized_events_null_chain_id_count: i64,
     /// Completed current-projection replay markers. The gate requires all current projections
-    /// present at the newest replay version, matching the worker's bootstrap handoff.
+    /// present at the newest replay version with target coverage matching the worker's
+    /// bootstrap handoff.
     pub projection_replay_markers: Vec<ProjectionReplayMarker>,
+    /// The target a projection bootstrap would request now: the greater of the normalized
+    /// raw-fact replay target and the chain-checkpoint frontier.
+    pub projection_replay_required_target_block: Option<i64>,
     /// Per-profile backfill lifecycle counts (advisory).
     pub backfill_lifecycle: Vec<BackfillLifecycleRow>,
     /// Deferred `normalized_events` projection indexes that currently exist. A fresh replay
@@ -158,6 +163,9 @@ pub struct DataCompletenessRead {
     pub present_deferred_projection_indexes: Vec<String>,
     /// `(chain, namespace)` declared by active manifest versions — active-chain authority.
     pub manifest_chain_namespaces: Vec<ManifestChainNamespace>,
+    /// Active manifest-declared contract instances whose live address rows do not match the
+    /// declaration's chain and address. A non-empty list is a watch-authority gap.
+    pub manifest_declared_targets_missing_address: Vec<ManifestDeclaredTarget>,
 }
 
 /// The deferred `normalized_events` projection indexes, owned by the replay drop/rebuild path
@@ -193,9 +201,15 @@ pub async fn load_data_completeness(pool: &sqlx::PgPool) -> Result<DataCompleten
         normalized_events_null_chain_id_count: load_normalized_events_null_chain_id_count(pool)
             .await?,
         projection_replay_markers: load_projection_replay_markers(pool).await?,
+        projection_replay_required_target_block: load_projection_replay_required_target_block(pool)
+            .await?,
         backfill_lifecycle: load_backfill_lifecycle(pool).await?,
         present_deferred_projection_indexes: load_present_deferred_projection_indexes(pool).await?,
         manifest_chain_namespaces: load_manifest_chain_namespaces(pool).await?,
+        manifest_declared_targets_missing_address: load_manifest_declared_targets_missing_address(
+            pool,
+        )
+        .await?,
     })
 }
 

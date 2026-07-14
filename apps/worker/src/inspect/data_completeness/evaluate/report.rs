@@ -80,6 +80,8 @@ pub(in crate::inspect::data_completeness) struct DataCompletenessReport {
     pub(in crate::inspect::data_completeness) foreign_chains: Vec<String>,
     pub(in crate::inspect::data_completeness) active_watched_target_count: usize,
     pub(in crate::inspect::data_completeness) unobserved_targets: Vec<UnobservedTarget>,
+    pub(in crate::inspect::data_completeness) manifest_targets_missing_address:
+        Vec<UnobservedTarget>,
     pub(in crate::inspect::data_completeness) chains_history_truncated: Vec<HistoryTruncation>,
     pub(in crate::inspect::data_completeness) chains_without_finite_start:
         Vec<ChainWithoutFiniteStart>,
@@ -91,6 +93,7 @@ pub(in crate::inspect::data_completeness) struct DataCompletenessReport {
     pub(in crate::inspect::data_completeness) pending_projection_invalidation_count: i64,
     pub(in crate::inspect::data_completeness) projection_invalidation_dead_letter_count: i64,
     pub(in crate::inspect::data_completeness) projection_replay_version: Option<i32>,
+    pub(in crate::inspect::data_completeness) projection_replay_required_target_block: Option<i64>,
     pub(in crate::inspect::data_completeness) missing_projection_replay_markers: Vec<String>,
     pub(in crate::inspect::data_completeness) active_manifest_sources_without_events:
         Vec<MissingManifestContent>,
@@ -125,6 +128,12 @@ impl DataCompletenessReport {
         CheckStatus::from_pass(
             self.active_watched_target_count > 0 && self.unobserved_targets.is_empty(),
         )
+    }
+
+    pub(in crate::inspect::data_completeness) fn manifest_declared_targets_present(
+        &self,
+    ) -> CheckStatus {
+        CheckStatus::from_pass(self.manifest_targets_missing_address.is_empty())
     }
 
     pub(in crate::inspect::data_completeness) fn normalization_healthy(&self) -> CheckStatus {
@@ -186,6 +195,7 @@ impl DataCompletenessReport {
             self.lineage_contiguous(),
             self.history_from_declared_start(),
             self.watch_set_observed(),
+            self.manifest_declared_targets_present(),
             self.normalization_healthy(),
             self.normalization_caught_up(),
             self.projection_drained(),

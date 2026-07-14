@@ -56,15 +56,16 @@ not gated.
 | `reconciliation_lineage_contiguous` | distinct canonical/safe/finalized block numbers equal `head - floor + 1`, no height has multiple canonical hashes, and every row above the retained floor points by `parent_hash` to the canonical/safe/finalized row at the preceding height |
 | `reconciliation_history_from_declared_start` | for every active watched chain, the retained lineage floor is at or below the earliest finite start block its active targets declare; a chain whose targets are all open-ended fails, since no floor can be established |
 | `watch_set_code_observation_coverage` | there is at least one active target, and every **active** target — direct active-manifest declarations unioned with the materialized watch view and active discovery edges — has a non-orphaned `raw_code_hashes` observation at or after its inclusive active start (when finite) |
+| `manifest_declared_targets_present` | every active manifest-declared contract instance has a live `contract_instance_addresses` row whose chain and address match the declaration |
 | `normalization_no_failure` | no `normalized_replay_cursors` row carries a `last_failure_reason` |
 | `normalization_caught_up_to_raw_head` | every active chain with retained canonical raw logs has a `raw_fact_normalized_events` cursor, and each replay cursor has reached its applicable target (see below) |
 | `projection_apply_drained` | the change log is empty, or the `normalized_events_to_projection_invalidations` cursor exists and its `last_change_id` has reached `max(projection_normalized_event_changes.change_id)`; unrelated cursor rows do not count |
 | `projection_invalidations_drained` | `projection_invalidations` is empty — every enqueued invalidation has been applied and deleted |
 | `projection_no_dead_letters` | `projection_invalidation_dead_letters` is empty — no invalidation exhausted its retries |
-| `projection_replay_complete` | every current projection has a `current_projection_replay_status` marker at the newest replay version present, matching the worker's bootstrap handoff |
+| `projection_replay_complete` | every current projection has a `current_projection_replay_status` marker at the newest replay version present whose `completed_normalized_target_block` covers the target bootstrap would request now: the greater of the raw-fact replay target and chain-checkpoint frontier |
 | `active_dataset_non_empty` | every active manifest source whose ABI declares non-empty `normalized_events` output has a non-orphaned matching event under that exact `source_manifest_id`, manifest version, chain, namespace, source family, and declared event kind; every such namespace also has `name_current` rows |
 | `normalized_events_chain_id_present` | no non-orphaned `normalized_events` row has a NULL `chain_id` |
-| `deferred_projection_indexes_present` | the eight deferred `normalized_events` projection indexes all exist on `public.normalized_events` and have `pg_index.indisvalid = true` (a fresh replay drops them and rebuilds them after catch-up) |
+| `deferred_projection_indexes_present` | the eight deferred `normalized_events` projection indexes all exist on `public.normalized_events` and have `pg_index.indisvalid = true` and `indisready = true` (a fresh replay drops them and rebuilds them after catch-up) |
 
 `watch_set_code_observation_coverage` is the check with teeth, and the reason the command
 exists. Most others are *relative* invariants: each compares a stage to the stage before
@@ -116,7 +117,13 @@ never emits a log. Coverage preserves the latest non-orphaned observation block 
 observation retained from an older range cannot satisfy a newly active target. Direct active
 manifest declarations are read independently of `contract_instance_addresses`, so losing the
 materialized address row makes the declaration unobserved instead of removing it from the
-expected set. See [`chain-intake.md`](../chain-intake.md).
+expected set. When several active entries share an address, coverage uses the latest finite
+start, the strictest lower bound across those entries.
+
+`manifest_declared_targets_present` diagnoses the materialization edge separately. A live
+address row only satisfies a declaration when its `chain_id` and lowercased address match the
+manifest's chain and declared address; a live row for the same instance on another chain or at
+another address does not count. See [`chain-intake.md`](../chain-intake.md).
 
 ### Frontier, history, and content against the declared world
 
@@ -138,7 +145,9 @@ only against the previous pipeline stage:
   up over the short raw set, and projections are non-empty, so every other check passes. A
   target whose start block is open-ended (`active_from_block_number` is null) imposes no
   floor and is skipped, matching bootstrap's own authority; but a chain whose targets are
-  *all* open-ended has no floor to establish and fails closed.
+  *all* open-ended has no floor to establish and fails closed. Direct manifest-payload starts
+  remain part of this union even when a materialized address row narrows its runtime
+  `active_from_block_number`; the address row cannot raise the manifest's historical floor.
 - **Content.** `active_dataset_non_empty` derives expected event-producing sources from active
   manifest ABI entries whose `normalized_events` list is non-empty. Execution- or
   transport-only manifests with no declared normalized output do not create event-content
@@ -149,19 +158,25 @@ only against the previous pipeline stage:
   `name_current` carries no chain column, so names are scoped to the namespace — the finest
   dimension a name projection has; a name in a namespace shared across chains is not
   attributed to a specific one. Failed sources are reported in
-  `manifest_sources_without_events` with their manifest IDs and source families.
+  `manifest_sources_without_events` with their manifest IDs and source families. This exact
+  identity rule intentionally makes a manifest-version rollout fail until normalized events
+  have been re-derived under the newly active `source_manifest_id`; residual rows from the
+  previous version are not proof that the new declaration was indexed.
 
 ### Projections rebuilt, and structural integrity
 
 `projection_replay_complete` requires every current projection to have a marker in
-`current_projection_replay_status` at the newest replay version present. Bootstrap publishes
+`current_projection_replay_status` at the newest replay version present. Each marker's
+`completed_normalized_target_block` must also reach the target automatic bootstrap would use
+now: `max(raw_fact_normalized_events target, furthest chain checkpoint)`. Bootstrap publishes
 projections in order and `name_current` is first, so a candidate mid-bootstrap has
-`name_current` but not the rest; requiring all markers matches the worker's own handoff
-authority. The version is read from the data rather than hardcoded, so a database built by an
-older image is judged complete at its own version.
+`name_current` but not the rest; requiring all markers and their target coverage matches the
+worker's own handoff authority. The version is read from the data rather than hardcoded, so a
+database built by an older image is judged complete at its own version, but stale markers from
+an earlier target are not accepted.
 
 `deferred_projection_indexes_present` checks that the eight deferred `normalized_events`
-projection indexes exist on the expected table and are valid in `pg_index`. A failed
+projection indexes exist on the expected table and are valid and ready in `pg_index`. A failed
 `CREATE INDEX CONCURRENTLY` can leave a named but invalid catalog entry that PostgreSQL cannot
 use; that entry fails the check just like an absent index. A fresh replay drops the indexes for
 speed and a later pass rebuilds them after catch-up, so a missing or invalid index marks a
@@ -181,6 +196,11 @@ otherwise abort the read), so they are surfaced here as a data-integrity fault.
   `BIGNAME_INDEXER_HASH_PINNED_BACKFILL_ADAPTER_SYNC` and the resulting
   `RuntimeWatchScope`; `manifest_declared_only` excludes discovery edges. Verify with
   `inspect watch-plan --json`.
+- **`manifest_declared_targets_present` fails.** An active declaration has no live address row
+  matching both its declared chain and address. A missing, deactivated, wrong-chain, or
+  wrong-address row breaks the watch-view authority even if retained code observations let the
+  separate coverage check pass. Reseed manifests or repair the materialized address row before
+  promoting.
 - **Coverage fails on a database warmed by backfill alone.** Backfill only observes a
   block's selected log emitters. A watched target that never emits acquires its single
   baseline observation from the live tailer, on canonical head reconciliation. Let the
@@ -212,9 +232,10 @@ otherwise abort the read), so they are surfaced here as a data-integrity fault.
   matching non-orphaned normalized event. Rows from another chain, source family, or deprecated
   manifest identity do not satisfy it, even if the global event table is non-empty.
 - **`projection_replay_complete` fails with entries in `missing_projections`.** The candidate
-  is mid projection-bootstrap: some projections have replay markers at the newest version but
-  not all. `name_current` is published first, so a candidate with only it is early in the
-  rebuild.
+  is mid projection-bootstrap, or the listed projection's marker completed below the reported
+  `required_target_block`. `name_current` is published first, so a candidate with only it is
+  early in the rebuild; a complete marker set with stale targets requires replay through the
+  current bootstrap target.
 - **`deferred_projection_indexes_present` fails.** A fresh replay dropped the listed indexes,
   the rebuild pass has not run, or a concurrent build left a named but invalid catalog entry.
   Data may be complete, but the database is not serve-ready; rebuild valid indexes before

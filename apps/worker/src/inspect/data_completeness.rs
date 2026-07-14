@@ -78,6 +78,16 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
                     "max_observed_block_number": target.max_observed_block_number,
                 })).collect::<Vec<_>>(),
             })),
+            check("manifest_declared_targets_present", report.manifest_declared_targets_present(), json!({
+                "missing_address_target_count": report.manifest_targets_missing_address.len(),
+                "missing_address_targets": report.manifest_targets_missing_address.iter().take(20).map(|target| json!({
+                    "chain": target.chain.as_str(),
+                    "address": target.address.as_str(),
+                    "source_family": target.source_family.as_str(),
+                    "active_from_block_number": target.active_from_block_number,
+                    "max_observed_block_number": target.max_observed_block_number,
+                })).collect::<Vec<_>>(),
+            })),
             check("normalization_no_failure", report.normalization_healthy(), json!({
                 "failed_cursors": report.failed_replay_cursors.clone(),
             })),
@@ -98,6 +108,7 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
             })),
             check("projection_replay_complete", report.projection_replay_complete(), json!({
                 "replay_version": report.projection_replay_version,
+                "required_target_block": report.projection_replay_required_target_block,
                 "missing_projections": report.missing_projection_replay_markers.clone(),
             })),
             check("active_dataset_non_empty", report.active_dataset_non_empty(), json!({

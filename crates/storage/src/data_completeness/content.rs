@@ -214,7 +214,10 @@ pub(super) async fn load_projection_replay_markers(
 ) -> Result<Vec<ProjectionReplayMarker>> {
     let rows = sqlx::query(
         r#"
-        SELECT DISTINCT replay_version, projection
+        SELECT DISTINCT
+            replay_version,
+            projection,
+            completed_normalized_target_block
         FROM current_projection_replay_status
         ORDER BY replay_version, projection
         "#,
@@ -228,9 +231,42 @@ pub(super) async fn load_projection_replay_markers(
             Ok(ProjectionReplayMarker {
                 replay_version: crate::sql_row::get(&row, "replay_version")?,
                 projection: crate::sql_row::get(&row, "projection")?,
+                completed_normalized_target_block: crate::sql_row::get(
+                    &row,
+                    "completed_normalized_target_block",
+                )?,
             })
         })
         .collect()
+}
+
+/// Mirrors the target passed by automatic projection bootstrap: the greater of the raw-fact
+/// normalized replay target and every chain checkpoint's furthest canonicality frontier.
+pub(super) async fn load_projection_replay_required_target_block(
+    pool: &sqlx::PgPool,
+) -> Result<Option<i64>> {
+    sqlx::query_scalar::<_, Option<i64>>(
+        r#"
+        SELECT NULLIF(MAX(target_block), -1)
+        FROM (
+            SELECT COALESCE(MAX(target_block_number), -1) AS target_block
+            FROM normalized_replay_cursors
+            WHERE cursor_kind = 'raw_fact_normalized_events'
+
+            UNION ALL
+
+            SELECT COALESCE(MAX(GREATEST(
+                COALESCE(canonical_block_number, -1),
+                COALESCE(safe_block_number, -1),
+                COALESCE(finalized_block_number, -1)
+            )), -1) AS target_block
+            FROM chain_checkpoints
+        ) bootstrap_targets
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .context("failed to load required projection replay target block")
 }
 
 pub(super) async fn load_backfill_lifecycle(
@@ -309,6 +345,7 @@ pub(super) async fn load_present_deferred_projection_indexes(
           AND table_relation.relname = 'normalized_events'
           AND index_relation.relname = ANY($1::TEXT[])
           AND index_state.indisvalid
+          AND index_state.indisready
         ORDER BY index_relation.relname
         "#,
     )
@@ -338,6 +375,67 @@ pub(super) async fn load_manifest_chain_namespaces(
             Ok(ManifestChainNamespace {
                 chain: crate::sql_row::get(&row, "chain")?,
                 namespace: crate::sql_row::get(&row, "namespace")?,
+            })
+        })
+        .collect()
+}
+
+pub(super) async fn load_manifest_declared_targets_missing_address(
+    pool: &sqlx::PgPool,
+) -> Result<Vec<ManifestDeclaredTarget>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT DISTINCT
+            manifest.chain,
+            manifest.source_family,
+            lower(declaration.declared_address) AS address,
+            manifest_range.start_block AS active_from_block_number
+        FROM manifest_versions manifest
+        JOIN manifest_contract_instances declaration
+          ON declaration.manifest_id = manifest.manifest_id
+        LEFT JOIN LATERAL (
+            SELECT (entry ->> 'start_block')::BIGINT AS start_block
+            FROM jsonb_array_elements(
+                CASE
+                    WHEN declaration.declaration_kind = 'root'
+                        THEN COALESCE(manifest.manifest_payload -> 'roots', '[]'::JSONB)
+                    ELSE COALESCE(manifest.manifest_payload -> 'contracts', '[]'::JSONB)
+                END
+            ) entry
+            WHERE (
+                    declaration.declaration_kind = 'root'
+                    AND entry ->> 'name' = declaration.declaration_name
+                )
+               OR (
+                    declaration.declaration_kind = 'contract'
+                    AND entry ->> 'role' = declaration.declaration_name
+                )
+            ORDER BY start_block NULLS LAST
+            LIMIT 1
+        ) manifest_range ON TRUE
+        WHERE manifest.rollout_status = 'active'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM contract_instance_addresses address
+              WHERE address.contract_instance_id = declaration.contract_instance_id
+                AND address.deactivated_at IS NULL
+                AND address.chain_id = manifest.chain
+                AND lower(address.address) = lower(declaration.declared_address)
+          )
+        ORDER BY manifest.chain, manifest.source_family, address, active_from_block_number
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to load manifest-declared targets missing a matching live address row")?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(ManifestDeclaredTarget {
+                chain: crate::sql_row::get(&row, "chain")?,
+                source_family: crate::sql_row::get(&row, "source_family")?,
+                address: crate::sql_row::get(&row, "address")?,
+                active_from_block_number: crate::sql_row::get(&row, "active_from_block_number")?,
             })
         })
         .collect()

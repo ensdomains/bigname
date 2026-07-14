@@ -28,6 +28,7 @@ fn all_projection_markers(version: i32) -> Vec<ProjectionReplayMarker> {
         .map(|projection| ProjectionReplayMarker {
             replay_version: version,
             projection: (*projection).to_owned(),
+            completed_normalized_target_block: Some(1_000),
         })
         .collect()
 }
@@ -170,9 +171,11 @@ fn healthy_read() -> DataCompletenessRead {
         name_current_counts: vec![names(NAMESPACE, 10)],
         normalized_events_null_chain_id_count: 0,
         projection_replay_markers: all_projection_markers(6),
+        projection_replay_required_target_block: Some(1_000),
         backfill_lifecycle: vec![],
         present_deferred_projection_indexes: all_deferred_indexes(),
         manifest_chain_namespaces: vec![manifest_ns(CHAIN, NAMESPACE)],
+        manifest_declared_targets_missing_address: vec![],
     }
 }
 
@@ -266,6 +269,27 @@ fn manifest_declared_target_missing_from_watch_view_fails_coverage() {
             .iter()
             .any(|target| target.address == RESOLVER)
     );
+    assert!(!report.data_complete());
+}
+
+/// The direct manifest union keeps code coverage authoritative even when the materialized
+/// address row is missing. The separately named check still identifies that structural gap.
+#[test]
+fn manifest_declared_target_missing_matching_address_fails_named_check() {
+    let mut read = healthy_read();
+    let resolver = manifest_target(RESOLVER, Some(1));
+    read.manifest_declared_targets.push(resolver.clone());
+    read.manifest_declared_targets_missing_address = vec![resolver];
+    read.observed_code_addresses.push(observed(RESOLVER));
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.watch_set_observed(), CheckStatus::Pass);
+    assert_eq!(
+        report.manifest_declared_targets_present(),
+        CheckStatus::Fail
+    );
+    assert_eq!(report.manifest_targets_missing_address.len(), 1);
+    assert_eq!(report.manifest_targets_missing_address[0].address, RESOLVER);
     assert!(!report.data_complete());
 }
 
@@ -588,6 +612,28 @@ fn lineage_floor_above_declared_start_fails_history() {
     assert!(!report.data_complete());
 }
 
+/// A materialized address row may narrow the runtime watch range, but it cannot raise the
+/// manifest's historical start. History continues to use the direct declaration.
+#[test]
+fn watched_address_start_does_not_raise_manifest_history_start() {
+    let mut read = healthy_read();
+    read.chains = vec![chain_row(1_000, 1_000, 500, 501)];
+    read.replay_cursors = vec![replay_cursor(1_000, None)];
+    read.manifest_declared_targets[0].active_from_block_number = Some(100);
+    let mut narrowed_watch = watched(REGISTRY, WatchedContractSource::ManifestContract);
+    narrowed_watch.active_from_block_number = Some(900);
+    let report = evaluate(&read, &[narrowed_watch]);
+
+    assert_eq!(report.watch_set_observed(), CheckStatus::Pass);
+    assert_eq!(report.history_from_declared_start(), CheckStatus::Fail);
+    assert_eq!(report.chains_history_truncated[0].declared_start_block, 100);
+    assert_eq!(
+        report.chains_history_truncated[0].lineage_floor_block,
+        Some(500)
+    );
+    assert!(!report.data_complete());
+}
+
 /// A chain whose active targets are all open-ended has no finite start to establish a floor,
 /// so the history check fails closed rather than passing vacuously.
 #[test]
@@ -747,6 +793,7 @@ fn incomplete_projection_replay_markers_fail() {
     read.projection_replay_markers = vec![ProjectionReplayMarker {
         replay_version: 6,
         projection: "name_current".to_owned(),
+        completed_normalized_target_block: Some(1_000),
     }];
     let report = evaluate(&read, &registry_only());
 
@@ -756,6 +803,23 @@ fn incomplete_projection_replay_markers_fail() {
             .missing_projection_replay_markers
             .contains(&"children_current".to_owned())
     );
+    assert!(!report.data_complete());
+}
+
+/// Complete markers written for an earlier bootstrap target do not cover a normalized replay
+/// target that has since advanced.
+#[test]
+fn projection_replay_markers_below_required_target_fail() {
+    let mut read = healthy_read();
+    read.projection_replay_required_target_block = Some(1_001);
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.projection_replay_complete(), CheckStatus::Fail);
+    assert_eq!(
+        report.missing_projection_replay_markers.len(),
+        ALL_CURRENT_PROJECTION_ORDER.len()
+    );
+    assert_eq!(report.projection_replay_required_target_block, Some(1_001));
     assert!(!report.data_complete());
 }
 

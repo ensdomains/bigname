@@ -120,6 +120,23 @@ pub(super) fn evaluate_data_completeness(
         })
         .collect::<Vec<_>>();
 
+    // Keep the structural address-materialization check separate from code observation. The
+    // direct manifest union above prevents a missing address row from shrinking coverage, while
+    // this diagnostic identifies the broken authority edge itself.
+    let manifest_targets_missing_address = read
+        .manifest_declared_targets_missing_address
+        .iter()
+        .map(|target| UnobservedTarget {
+            chain: target.chain.clone(),
+            address: target.address.clone(),
+            source_family: target.source_family.clone(),
+            active_from_block_number: target.active_from_block_number,
+            max_observed_block_number: observed
+                .get(&(target.chain.clone(), target.address.to_ascii_lowercase()))
+                .copied(),
+        })
+        .collect::<Vec<_>>();
+
     // Per-chain declared start information across the deduplicated active source entries.
     let mut chain_starts = BTreeMap::<String, ChainStartInfo>::new();
     for (chain, _, _, active_from_block_number) in &active_target_entries {
@@ -284,9 +301,10 @@ pub(super) fn evaluate_data_completeness(
     let projection_apply_cursor_missing =
         read.max_projection_change_id.is_some() && expected_projection_cursor.is_none();
 
-    // Projection replay markers: require all current projections present at the newest replay
-    // version in the database. The version is read from the data, not hardcoded, so a candidate
-    // built by an older image is judged complete at its own version.
+    // Projection replay markers: require all current projections at the newest replay version
+    // and require each stored completion target to cover the target automatic bootstrap would
+    // request now. The version is read from the data, not hardcoded, so a candidate built by an
+    // older image is judged complete at its own version.
     let projection_replay_version = read
         .projection_replay_markers
         .iter()
@@ -297,7 +315,15 @@ pub(super) fn evaluate_data_completeness(
             let present = read
                 .projection_replay_markers
                 .iter()
-                .filter(|marker| marker.replay_version == version)
+                .filter(|marker| {
+                    marker.replay_version == version
+                        && match read.projection_replay_required_target_block {
+                            Some(required) => marker
+                                .completed_normalized_target_block
+                                .is_some_and(|completed| completed >= required),
+                            None => true,
+                        }
+                })
                 .map(|marker| marker.projection.as_str())
                 .collect::<BTreeSet<_>>();
             ALL_CURRENT_PROJECTION_ORDER
@@ -366,6 +392,7 @@ pub(super) fn evaluate_data_completeness(
         foreign_chains,
         active_watched_target_count: active_targets.len(),
         unobserved_targets,
+        manifest_targets_missing_address,
         chains_history_truncated,
         chains_without_finite_start,
         failed_replay_cursors,
@@ -376,6 +403,7 @@ pub(super) fn evaluate_data_completeness(
         pending_projection_invalidation_count: read.pending_projection_invalidation_count,
         projection_invalidation_dead_letter_count: read.projection_invalidation_dead_letter_count,
         projection_replay_version,
+        projection_replay_required_target_block: read.projection_replay_required_target_block,
         missing_projection_replay_markers,
         active_manifest_sources_without_events,
         active_namespaces_without_names,
