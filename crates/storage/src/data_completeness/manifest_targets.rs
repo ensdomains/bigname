@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 
-use super::{DiscoveryTargetMissingAddress, ManifestDeclaredTarget};
+use super::{
+    DiscoveryTargetMissingAddress, DiscoveryTargetMissingManifest, ManifestDeclaredTarget,
+};
 
 const ACTIVE_MANIFEST_TARGETS_CTE: &str = r#"
 WITH active_manifest_entries AS (
@@ -156,6 +158,10 @@ pub(super) async fn load_manifest_declared_targets_missing_address(
                 AND address.chain_id = target.chain
                 AND lower(address.address) = target.address
                 AND (
+                    address.active_from_block_number IS NULL
+                    OR address.active_from_block_number <= target.start_block
+                )
+                AND (
                     target.target_kind = 'declaration'
                     OR lower(declaration.declared_implementation_address) = target.address
                 )
@@ -165,7 +171,7 @@ pub(super) async fn load_manifest_declared_targets_missing_address(
     load_manifest_targets(
         pool,
         &query,
-        "failed to load manifest-declared targets missing a matching live address row",
+        "failed to load manifest-declared targets missing a range-preserving live address row",
     )
     .await
 }
@@ -202,6 +208,10 @@ pub(super) async fn load_manifest_proxy_implementations_missing_edge(
                 AND edge.admission = 'manifest_declared'
                 AND edge.deactivated_at IS NULL
                 AND edge.active_to_block_number IS NULL
+                AND (
+                    edge.active_from_block_number IS NULL
+                    OR edge.active_from_block_number <= target.start_block
+                )
           )
         ORDER BY target.chain, target.source_family, target.address, active_from_block_number"
     );
@@ -211,6 +221,60 @@ pub(super) async fn load_manifest_proxy_implementations_missing_edge(
         "failed to load manifest proxy implementations missing their managed edge",
     )
     .await
+}
+
+pub(super) async fn load_discovery_targets_missing_manifest(
+    pool: &sqlx::PgPool,
+) -> Result<Vec<DiscoveryTargetMissingManifest>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT DISTINCT
+            edge.chain_id AS chain,
+            CASE source_manifest.source_family
+                WHEN 'ens_v1_registry_l1' THEN 'ens_v1_resolver_l1'
+                WHEN 'ens_v2_registry_l1' THEN 'ens_v2_resolver_l1'
+                WHEN 'basenames_base_registry' THEN 'basenames_base_resolver'
+            END AS source_family,
+            edge.to_contract_instance_id AS contract_instance_id
+        FROM discovery_edges edge
+        JOIN manifest_versions source_manifest
+          ON source_manifest.manifest_id = edge.source_manifest_id
+         AND source_manifest.rollout_status = 'active'
+        LEFT JOIN manifest_versions target_manifest
+          ON target_manifest.rollout_status = 'active'
+         AND target_manifest.namespace = source_manifest.namespace
+         AND target_manifest.chain = edge.chain_id
+         AND target_manifest.deployment_epoch = source_manifest.deployment_epoch
+         AND target_manifest.source_family = CASE source_manifest.source_family
+             WHEN 'ens_v1_registry_l1' THEN 'ens_v1_resolver_l1'
+             WHEN 'ens_v2_registry_l1' THEN 'ens_v2_resolver_l1'
+             WHEN 'basenames_base_registry' THEN 'basenames_base_resolver'
+         END
+        WHERE edge.edge_kind = 'resolver'
+          AND source_manifest.source_family IN (
+              'ens_v1_registry_l1',
+              'ens_v2_registry_l1',
+              'basenames_base_registry'
+          )
+          AND edge.deactivated_at IS NULL
+          AND edge.active_to_block_number IS NULL
+          AND target_manifest.manifest_id IS NULL
+        ORDER BY chain, source_family, contract_instance_id
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to load active resolver discovery targets missing their target manifest")?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(DiscoveryTargetMissingManifest {
+                chain: crate::sql_row::get(&row, "chain")?,
+                source_family: crate::sql_row::get(&row, "source_family")?,
+                contract_instance_id: crate::sql_row::get(&row, "contract_instance_id")?,
+            })
+        })
+        .collect()
 }
 
 pub(super) async fn load_discovery_targets_missing_address(

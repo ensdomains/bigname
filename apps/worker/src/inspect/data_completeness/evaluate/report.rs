@@ -1,6 +1,8 @@
-use bigname_storage::{BackfillLifecycleRow, DiscoveryTargetMissingAddress};
+use bigname_storage::{
+    BackfillLifecycleRow, DiscoveryTargetMissingAddress, DiscoveryTargetMissingManifest,
+};
 
-use super::super::backfill_coverage::BackfillCoverageGap;
+use super::super::backfill_coverage::{BackfillCoverageGap, BackfillCoverageTopicDrift};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::inspect::data_completeness) enum CheckStatus {
@@ -101,15 +103,20 @@ pub(in crate::inspect::data_completeness) struct DataCompletenessReport {
         Vec<UnobservedTarget>,
     pub(in crate::inspect::data_completeness) discovery_targets_missing_address:
         Vec<DiscoveryTargetMissingAddress>,
+    pub(in crate::inspect::data_completeness) discovery_targets_missing_manifest:
+        Vec<DiscoveryTargetMissingManifest>,
     pub(in crate::inspect::data_completeness) chains_history_truncated: Vec<HistoryTruncation>,
     pub(in crate::inspect::data_completeness) chains_without_finite_start:
         Vec<ChainWithoutFiniteStart>,
     pub(in crate::inspect::data_completeness) backfill_coverage_gaps: Vec<BackfillCoverageGap>,
+    pub(in crate::inspect::data_completeness) backfill_coverage_topic_drifts:
+        Vec<BackfillCoverageTopicDrift>,
     pub(in crate::inspect::data_completeness) failed_replay_cursors: Vec<String>,
     pub(in crate::inspect::data_completeness) lagging_replay_cursors: Vec<CursorLag>,
     pub(in crate::inspect::data_completeness) chains_missing_raw_fact_cursor: Vec<String>,
     pub(in crate::inspect::data_completeness) lagging_projection_cursors: Vec<CursorLag>,
     pub(in crate::inspect::data_completeness) projection_apply_cursor_missing: bool,
+    pub(in crate::inspect::data_completeness) projection_apply_cursor_ahead_by: Option<i64>,
     pub(in crate::inspect::data_completeness) pending_projection_invalidation_count: i64,
     pub(in crate::inspect::data_completeness) projection_invalidation_dead_letter_count: i64,
     pub(in crate::inspect::data_completeness) projection_replay_version: Option<i32>,
@@ -158,7 +165,10 @@ impl DataCompletenessReport {
     pub(in crate::inspect::data_completeness) fn stored_lineage_backfill_coverage(
         &self,
     ) -> CheckStatus {
-        CheckStatus::from_pass(self.backfill_coverage_gaps.is_empty())
+        CheckStatus::from_pass(
+            self.backfill_coverage_gaps.is_empty()
+                && self.backfill_coverage_topic_drifts.is_empty(),
+        )
     }
 
     pub(in crate::inspect::data_completeness) fn manifest_declared_targets_present(
@@ -171,7 +181,10 @@ impl DataCompletenessReport {
     }
 
     pub(in crate::inspect::data_completeness) fn discovery_targets_present(&self) -> CheckStatus {
-        CheckStatus::from_pass(self.discovery_targets_missing_address.is_empty())
+        CheckStatus::from_pass(
+            self.discovery_targets_missing_address.is_empty()
+                && self.discovery_targets_missing_manifest.is_empty(),
+        )
     }
 
     pub(in crate::inspect::data_completeness) fn active_event_lineage_retained(
@@ -194,7 +207,9 @@ impl DataCompletenessReport {
 
     pub(in crate::inspect::data_completeness) fn projection_drained(&self) -> CheckStatus {
         CheckStatus::from_pass(
-            self.lagging_projection_cursors.is_empty() && !self.projection_apply_cursor_missing,
+            self.lagging_projection_cursors.is_empty()
+                && !self.projection_apply_cursor_missing
+                && self.projection_apply_cursor_ahead_by.is_none(),
         )
     }
 

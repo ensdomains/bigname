@@ -3,9 +3,9 @@ use std::collections::BTreeSet;
 use anyhow::{Context, Result};
 use bigname_manifests::{
     WATCHED_COVERAGE_VERIFICATION_CHUNK_BLOCKS, find_uncovered_watched_tuples,
-    load_log_producing_source_families,
+    load_active_manifest_topic0s_by_chain_and_source_families, load_log_producing_source_families,
 };
-use bigname_storage::DataCompletenessRead;
+use bigname_storage::{DataCompletenessRead, ensure_backfill_family_topic_sets_undrifted};
 use sqlx::PgPool;
 
 const MAX_REPORTED_UNCOVERED_TUPLES: usize = 20;
@@ -19,22 +19,38 @@ pub(super) struct BackfillCoverageGap {
     pub(super) required_to_block: i64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct BackfillCoverageTopicDrift {
+    pub(super) chain: String,
+    pub(super) required_from_block: i64,
+    pub(super) required_to_block: i64,
+    pub(super) reason: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct BackfillCoverageInspection {
+    pub(super) gaps: Vec<BackfillCoverageGap>,
+    pub(super) topic_drifts: Vec<BackfillCoverageTopicDrift>,
+}
+
 /// Reconcile retained bounded-backfill spans against the same durable watched-tuple coverage
-/// authority used by stored-lineage checkpoint promotion. Incomplete and failed job intervals
-/// remain in scope because their retained lineage can be crash residue; facts from a later retry
-/// can satisfy the interval. Evidence remains required after a checkpoint consumes the span:
-/// checkpoint regression or database restore can make it promotion input again, and deleting the
-/// evidence must not silently preserve a completeness pass.
-pub(super) async fn load_backfill_coverage_gaps(
+/// authority used by stored-lineage checkpoint promotion, including its exact active-manifest
+/// topic-set drift guard before facts are trusted. Incomplete and failed job intervals remain in
+/// scope because their retained lineage can be crash residue; facts from a later retry can satisfy
+/// the interval. Evidence remains required after a checkpoint consumes the span: checkpoint
+/// regression or database restore can make it promotion input again, and deleting the evidence
+/// must not silently preserve a completeness pass.
+pub(super) async fn load_backfill_coverage(
     pool: &PgPool,
     read: &DataCompletenessRead,
-) -> Result<Vec<BackfillCoverageGap>> {
+) -> Result<BackfillCoverageInspection> {
     let active_chains = read
         .manifest_chain_namespaces
         .iter()
         .map(|entry| entry.chain.as_str())
         .collect::<BTreeSet<_>>();
     let mut gaps = Vec::new();
+    let mut topic_drifts = Vec::new();
 
     for chain in read
         .chains
@@ -83,8 +99,39 @@ pub(super) async fn load_backfill_coverage_gaps(
         if source_families.is_empty() {
             continue;
         }
+        let current_topic0s_by_family = load_active_manifest_topic0s_by_chain_and_source_families(
+            pool,
+            &chain.chain_id,
+            &source_families,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load current manifest topic sets for completeness coverage on {}",
+                chain.chain_id
+            )
+        })?;
 
         for (from_block, through_block) in retained_ranges {
+            if let Err(reason) = ensure_backfill_family_topic_sets_undrifted(
+                pool,
+                &chain.chain_id,
+                &current_topic0s_by_family,
+                from_block,
+                through_block,
+            )
+            .await
+            {
+                if topic_drifts.len() < MAX_REPORTED_UNCOVERED_TUPLES {
+                    topic_drifts.push(BackfillCoverageTopicDrift {
+                        chain: chain.chain_id.clone(),
+                        required_from_block: from_block,
+                        required_to_block: through_block,
+                        reason,
+                    });
+                }
+                continue;
+            }
             let mut chunk_from = from_block;
             while chunk_from <= through_block && gaps.len() < MAX_REPORTED_UNCOVERED_TUPLES {
                 let chunk_through = chunk_from
@@ -125,7 +172,7 @@ pub(super) async fn load_backfill_coverage_gaps(
         }
     }
 
-    Ok(gaps)
+    Ok(BackfillCoverageInspection { gaps, topic_drifts })
 }
 
 fn merged_retained_backfill_ranges(
@@ -161,7 +208,7 @@ mod tests {
     use anyhow::Result;
     use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 
-    use super::{load_backfill_coverage_gaps, merged_retained_backfill_ranges};
+    use super::{load_backfill_coverage, merged_retained_backfill_ranges};
 
     #[test]
     fn backfill_ranges_are_clamped_and_merged_inside_retained_lineage() {
@@ -246,10 +293,9 @@ mod tests {
         .await?;
 
         let read = bigname_storage::load_data_completeness(pool).await?;
-        assert!(
-            load_backfill_coverage_gaps(pool, &read).await?.is_empty(),
-            "provider-fetched live lineage without a bounded backfill must not require facts"
-        );
+        let inspection = load_backfill_coverage(pool, &read).await?;
+        assert!(inspection.gaps.is_empty());
+        assert!(inspection.topic_drifts.is_empty());
         let backfill_job_id = sqlx::query_scalar::<_, i64>(
             r#"
             INSERT INTO backfill_jobs
@@ -275,13 +321,14 @@ mod tests {
         .execute(pool)
         .await?;
         let read = bigname_storage::load_data_completeness(pool).await?;
-        let gaps = load_backfill_coverage_gaps(pool, &read).await?;
-        assert_eq!(gaps.len(), 1);
-        assert_eq!(gaps[0].chain, "ethereum-sepolia");
-        assert_eq!(gaps[0].source_family, "ens_v2_registry_l1");
-        assert_eq!(gaps[0].address, "0xabc");
-        assert_eq!(gaps[0].required_from_block, 101);
-        assert_eq!(gaps[0].required_to_block, 102);
+        let inspection = load_backfill_coverage(pool, &read).await?;
+        assert_eq!(inspection.gaps.len(), 1);
+        assert_eq!(inspection.gaps[0].chain, "ethereum-sepolia");
+        assert_eq!(inspection.gaps[0].source_family, "ens_v2_registry_l1");
+        assert_eq!(inspection.gaps[0].address, "0xabc");
+        assert_eq!(inspection.gaps[0].required_from_block, 101);
+        assert_eq!(inspection.gaps[0].required_to_block, 102);
+        assert!(inspection.topic_drifts.is_empty());
 
         sqlx::query(
             r#"
@@ -305,9 +352,29 @@ mod tests {
         .bind(backfill_job_id)
         .execute(pool)
         .await?;
+        let inspection = load_backfill_coverage(pool, &read).await?;
+        assert!(inspection.gaps.is_empty());
+        assert!(inspection.topic_drifts.is_empty());
+
+        sqlx::query(
+            r#"
+            UPDATE backfill_jobs
+            SET source_identity = '{
+                "topic0s_by_source_family": {"ens_v2_registry_l1": []}
+            }'::jsonb
+            WHERE backfill_job_id = $1
+            "#,
+        )
+        .bind(backfill_job_id)
+        .execute(pool)
+        .await?;
+        let inspection = load_backfill_coverage(pool, &read).await?;
+        assert!(inspection.gaps.is_empty());
+        assert_eq!(inspection.topic_drifts.len(), 1);
         assert!(
-            load_backfill_coverage_gaps(pool, &read).await?.is_empty(),
-            "a successful retry's exact durable fact must satisfy the retained backfill interval"
+            inspection.topic_drifts[0]
+                .reason
+                .contains("manifest ABI topic0 set changed")
         );
 
         database.cleanup().await

@@ -73,10 +73,10 @@ pub use backfill_jobs::{
     BackfillCoverageFactDerivation, BackfillCoverageFactScope, BackfillCoverageFactWrite,
     BackfillJob, BackfillJobCreate, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange,
     BackfillRangeSpec, advance_backfill_range, complete_backfill_job, complete_backfill_range,
-    complete_backfill_range_recording_coverage, create_backfill_job, fail_backfill_job,
-    fail_backfill_range, load_backfill_coverage_fact_counts, load_backfill_job,
-    load_backfill_jobs_intersecting_range, load_backfill_ranges,
-    load_completed_backfill_jobs_intersecting_range, reserve_backfill_range,
+    complete_backfill_range_recording_coverage, create_backfill_job,
+    ensure_backfill_family_topic_sets_undrifted, fail_backfill_job, fail_backfill_range,
+    load_backfill_coverage_fact_counts, load_backfill_job, load_backfill_jobs_intersecting_range,
+    load_backfill_ranges, load_completed_backfill_jobs_intersecting_range, reserve_backfill_range,
     write_backfill_coverage_facts,
 };
 pub use base_normalized_rederive::{
@@ -118,9 +118,9 @@ pub use children::{
 pub use data_completeness::{
     ActiveManifestEventSource, BackfillLifecycleRow, ChainCompletenessRow,
     DEFERRED_NORMALIZED_EVENT_INDEXES, DataCompletenessRead, DiscoveryTargetMissingAddress,
-    ManifestChainNamespace, ManifestDeclaredTarget, NameCurrentCount, ObservedCodeAddress,
-    ProjectionApplyCursorRow, ProjectionReplayMarker, ReplayCursorRow,
-    load_active_manifest_deployment_profile, load_data_completeness,
+    DiscoveryTargetMissingManifest, ManifestChainNamespace, ManifestDeclaredTarget,
+    NameCurrentCount, ObservedCodeAddress, ProjectionApplyCursorRow, ProjectionReplayMarker,
+    ReplayCursorRow, load_active_manifest_deployment_profile, load_data_completeness,
 };
 pub use evm_primitives::{normalize_evm_address, normalize_evm_b256};
 pub use execution::{

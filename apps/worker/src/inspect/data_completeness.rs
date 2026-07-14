@@ -9,7 +9,7 @@ use bigname_manifests::load_watched_contracts;
 use serde_json::{Value, json};
 
 use super::{InspectDataCompletenessArgs, connect_read_only};
-use backfill_coverage::load_backfill_coverage_gaps;
+use backfill_coverage::load_backfill_coverage;
 use evaluate::{
     CheckStatus, DEFAULT_MAX_HEAD_LAG_BLOCKS, DataCompletenessReport, evaluate_data_completeness,
 };
@@ -20,14 +20,14 @@ pub(in crate::inspect) async fn inspect_data_completeness(
     let pool = connect_read_only(&args.database).await?;
     let read = bigname_storage::load_data_completeness(&pool).await?;
     let watched_contracts = load_watched_contracts(&pool).await?;
-    let backfill_coverage_gaps = load_backfill_coverage_gaps(&pool, &read).await?;
+    let backfill_coverage = load_backfill_coverage(&pool, &read).await?;
     let max_head_lag_blocks = args
         .max_head_lag_blocks
         .unwrap_or(DEFAULT_MAX_HEAD_LAG_BLOCKS);
     let report = evaluate_data_completeness(
         &read,
         &watched_contracts,
-        &backfill_coverage_gaps,
+        &backfill_coverage,
         max_head_lag_blocks,
     );
 
@@ -85,6 +85,13 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
                     "required_from_block": gap.required_from_block,
                     "required_to_block": gap.required_to_block,
                 })).collect::<Vec<_>>(),
+                "topic_drift_count": report.backfill_coverage_topic_drifts.len(),
+                "topic_drifts": report.backfill_coverage_topic_drifts.iter().map(|drift| json!({
+                    "chain": drift.chain.as_str(),
+                    "required_from_block": drift.required_from_block,
+                    "required_to_block": drift.required_to_block,
+                    "reason": drift.reason.as_str(),
+                })).collect::<Vec<_>>(),
             })),
             check("watch_set_code_observation_coverage", report.watch_set_observed(), json!({
                 "active_watched_target_count": report.active_watched_target_count,
@@ -122,6 +129,12 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
                     "source_family": target.source_family.as_str(),
                     "contract_instance_id": target.contract_instance_id,
                 })).collect::<Vec<_>>(),
+                "missing_target_manifest_count": report.discovery_targets_missing_manifest.len(),
+                "missing_target_manifests": report.discovery_targets_missing_manifest.iter().take(20).map(|target| json!({
+                    "chain": target.chain.as_str(),
+                    "source_family": target.source_family.as_str(),
+                    "contract_instance_id": target.contract_instance_id,
+                })).collect::<Vec<_>>(),
             })),
             check("active_event_lineage_retained", report.active_event_lineage_retained(), json!({
                 "manifest_sources_with_missing_lineage": report.active_manifest_sources_with_missing_lineage.iter().map(|entry| json!({
@@ -146,6 +159,7 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
                 "lagging_cursors": report.lagging_projection_cursors.iter().map(cursor_lag).collect::<Vec<_>>(),
                 "required_cursor": crate::projection_apply::NORMALIZED_EVENT_CURSOR,
                 "apply_cursor_missing_for_non_empty_change_log": report.projection_apply_cursor_missing,
+                "apply_cursor_ahead_of_retained_change_log_by": report.projection_apply_cursor_ahead_by,
             })),
             check("projection_invalidations_drained", report.projection_invalidations_drained(), json!({
                 "pending_invalidation_count": report.pending_projection_invalidation_count,

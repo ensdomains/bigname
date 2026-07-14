@@ -16,7 +16,7 @@ use report::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::backfill_coverage::BackfillCoverageGap;
+use super::backfill_coverage::BackfillCoverageInspection;
 
 /// Blocks the reconciliation frontier may lead or trail the stored canonical checkpoint before
 /// the frontier check fails. Reconcile commits canonical lineage and then advances the
@@ -54,7 +54,7 @@ struct ActiveTargetInfo {
 pub(super) fn evaluate_data_completeness(
     read: &DataCompletenessRead,
     watched_contracts: &[WatchedContract],
-    backfill_coverage_gaps: &[BackfillCoverageGap],
+    backfill_coverage: &BackfillCoverageInspection,
     max_head_lag_blocks: i64,
 ) -> DataCompletenessReport {
     let observed = read
@@ -262,6 +262,19 @@ pub(super) fn evaluate_data_completeness(
         .map(|cursor| (cursor.deployment_profile.as_str(), cursor.chain_id.as_str()))
         .collect::<BTreeSet<_>>();
 
+    let raw_fact_targets = read
+        .replay_cursors
+        .iter()
+        .filter(|cursor| cursor_is_active(cursor))
+        .filter(|cursor| cursor.cursor_kind == RAW_FACT_NORMALIZED_EVENTS_CURSOR)
+        .map(|cursor| {
+            (
+                (cursor.deployment_profile.as_str(), cursor.chain_id.as_str()),
+                cursor.target_block_number,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
     let failed_replay_cursors = read
         .replay_cursors
         .iter()
@@ -296,7 +309,27 @@ pub(super) fn evaluate_data_completeness(
                     })
                 }
             }
-            POST_REPLAY_LIVE_ADAPTER_BACKLOG_CURSOR => replay_complete_lag(cursor),
+            POST_REPLAY_LIVE_ADAPTER_BACKLOG_CURSOR => {
+                let key = (cursor.deployment_profile.as_str(), cursor.chain_id.as_str());
+                let expected_start = raw_fact_targets
+                    .get(&key)
+                    .copied()
+                    .flatten()
+                    .and_then(|target| target.checked_add(1));
+                match expected_start {
+                    Some(expected) if cursor.range_start_block_number > expected => {
+                        Some(CursorLag {
+                            label: format!("{}:range_start", cursor_label(cursor)),
+                            behind_by: cursor.range_start_block_number - expected,
+                        })
+                    }
+                    Some(_) => replay_complete_lag(cursor),
+                    None => Some(CursorLag {
+                        label: format!("{}:range_start", cursor_label(cursor)),
+                        behind_by: -1,
+                    }),
+                }
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -335,6 +368,11 @@ pub(super) fn evaluate_data_completeness(
 
     let projection_apply_cursor_missing =
         read.max_projection_change_id.is_some() && expected_projection_cursor.is_none();
+    let projection_apply_cursor_ahead_by = expected_projection_cursor.and_then(|cursor| {
+        let retained_change_high_watermark = read.max_projection_change_id.unwrap_or(0);
+        (cursor.last_change_id > retained_change_high_watermark)
+            .then_some(cursor.last_change_id - retained_change_high_watermark)
+    });
     let projection_replay_target_coverage_required = expected_projection_cursor.is_none();
 
     // Projection replay markers: report the newest stored version for diagnosis, but require
@@ -441,14 +479,17 @@ pub(super) fn evaluate_data_completeness(
         manifest_targets_missing_address,
         manifest_proxy_implementations_missing_edge,
         discovery_targets_missing_address: read.discovery_targets_missing_address.clone(),
+        discovery_targets_missing_manifest: read.discovery_targets_missing_manifest.clone(),
         chains_history_truncated,
         chains_without_finite_start,
-        backfill_coverage_gaps: backfill_coverage_gaps.to_vec(),
+        backfill_coverage_gaps: backfill_coverage.gaps.clone(),
+        backfill_coverage_topic_drifts: backfill_coverage.topic_drifts.clone(),
         failed_replay_cursors,
         lagging_replay_cursors,
         chains_missing_raw_fact_cursor,
         lagging_projection_cursors,
         projection_apply_cursor_missing,
+        projection_apply_cursor_ahead_by,
         pending_projection_invalidation_count: read.pending_projection_invalidation_count,
         projection_invalidation_dead_letter_count: read.projection_invalidation_dead_letter_count,
         projection_replay_version,

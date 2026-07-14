@@ -6,6 +6,7 @@ mod fail;
 mod lease;
 mod read;
 mod sql;
+mod topic_drift;
 mod types;
 mod validate;
 
@@ -23,6 +24,7 @@ pub use read::{
     load_backfill_job, load_backfill_jobs_intersecting_range, load_backfill_ranges,
     load_completed_backfill_jobs_intersecting_range,
 };
+pub use topic_drift::ensure_backfill_family_topic_sets_undrifted;
 pub use types::{
     BackfillJob, BackfillJobCreate, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange,
     BackfillRangeSpec,

@@ -31,9 +31,9 @@ pub struct ChainCompletenessRow {
     pub lineage_head_block_number: Option<i64>,
     pub lineage_floor_block_number: Option<i64>,
     pub lineage_canonical_block_count: i64,
-    /// Block heights carrying more than one non-orphaned canonical/safe/finalized lineage
-    /// row. The distinct-block-number contiguity count cannot see these, so they are counted
-    /// separately; a non-zero value is a canonicality violation, not a gap.
+    /// Canonical/safe/finalized block heights carrying an additional non-orphaned hash. The
+    /// distinct-block-number contiguity count cannot see these competing forks, so they are
+    /// counted separately; a non-zero value is a canonicality violation, not a gap.
     pub duplicate_canonical_height_count: i64,
     /// Canonical/safe/finalized rows above the retained floor whose `parent_hash` does not
     /// resolve to the canonical/safe/finalized row at the preceding height.
@@ -47,6 +47,9 @@ pub struct ReplayCursorRow {
     pub deployment_profile: String,
     pub chain_id: String,
     pub cursor_kind: String,
+    /// Inclusive start of the cursor's admitted range. The post-replay backlog writer seeds
+    /// this to the raw-fact replay target plus one so the two cursor ranges remain contiguous.
+    pub range_start_block_number: i64,
     /// The completion authority. Replay is complete for a cursor's target when
     /// `next_block_number > target_block_number`; a reorg rewind lowers `next_block_number`
     /// but leaves `last_completed_block_number` at its high-water mark, so the gate reads the
@@ -107,6 +110,16 @@ pub struct DiscoveryTargetMissingAddress {
     pub contract_instance_id: uuid::Uuid,
 }
 
+/// An open resolver discovery edge whose registry source remains active while the resolver
+/// target manifest required by the runtime watch view is absent. The edge remains admission
+/// authority even though the materialized watch view can no longer assign its resolver family.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct DiscoveryTargetMissingManifest {
+    pub chain: String,
+    pub source_family: String,
+    pub contract_instance_id: uuid::Uuid,
+}
+
 /// One active manifest source that declares normalized adapter output, together with the
 /// count of matching serving-canonical normalized events written under that exact manifest ID.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -154,7 +167,8 @@ pub struct DataCompletenessRead {
     pub replay_cursors: Vec<ReplayCursorRow>,
     pub projection_apply_cursors: Vec<ProjectionApplyCursorRow>,
     /// `MAX(change_id)` over `projection_normalized_event_changes`, loaded independently of
-    /// the apply cursors so an absent cursor with a non-empty change log is detectable.
+    /// the apply cursors so an absent cursor with a non-empty change log and a cursor ahead of
+    /// retained history are both detectable. An empty log has an effective high-water mark of 0.
     pub max_projection_change_id: Option<i64>,
     /// Rows still queued in `projection_invalidations`. A successful apply deletes the row,
     /// so a fully applied projection queue is empty; a non-zero count is pending work.
@@ -194,8 +208,12 @@ pub struct DataCompletenessRead {
     /// Materialized manifest proxy/implementation pairs that lack the active managed discovery
     /// edge consumed by the runtime watch view.
     pub manifest_proxy_implementations_missing_edge: Vec<ManifestDeclaredTarget>,
-    /// Open discovery-edge endpoints with no open address row on the edge's chain.
+    /// Open discovery-edge endpoints with no range-preserving open address row on the edge's
+    /// chain.
     pub discovery_targets_missing_address: Vec<DiscoveryTargetMissingAddress>,
+    /// Open resolver edges whose active registry source has lost the active resolver manifest
+    /// required by the runtime watch view.
+    pub discovery_targets_missing_manifest: Vec<DiscoveryTargetMissingManifest>,
 }
 
 /// The deferred `normalized_events` projection indexes, owned by the replay drop/rebuild path
@@ -244,6 +262,7 @@ pub async fn load_data_completeness(pool: &sqlx::PgPool) -> Result<DataCompleten
         manifest_proxy_implementations_missing_edge:
             load_manifest_proxy_implementations_missing_edge(pool).await?,
         discovery_targets_missing_address: load_discovery_targets_missing_address(pool).await?,
+        discovery_targets_missing_manifest: load_discovery_targets_missing_manifest(pool).await?,
     })
 }
 
@@ -302,10 +321,14 @@ async fn load_chain_completeness(pool: &sqlx::PgPool) -> Result<Vec<ChainComplet
         duplicate_canonical_height AS (
             SELECT chain_id, COUNT(*) AS duplicate_canonical_height_count
             FROM (
-                SELECT chain_id, block_number
-                FROM canonical_lineage
-                GROUP BY chain_id, block_number
-                HAVING COUNT(*) > 1
+                SELECT canonical.chain_id, canonical.block_number
+                FROM canonical_lineage canonical
+                JOIN chain_lineage sibling
+                  ON sibling.chain_id = canonical.chain_id
+                 AND sibling.block_number = canonical.block_number
+                 AND sibling.canonicality_state <> 'orphaned'::canonicality_state
+                GROUP BY canonical.chain_id, canonical.block_number
+                HAVING COUNT(DISTINCT sibling.block_hash) > 1
             ) duplicated
             GROUP BY chain_id
         ),
@@ -401,6 +424,7 @@ async fn load_replay_cursors(pool: &sqlx::PgPool) -> Result<Vec<ReplayCursorRow>
             deployment_profile,
             chain_id,
             cursor_kind,
+            range_start_block_number,
             next_block_number,
             target_block_number,
             last_completed_block_number,
@@ -419,6 +443,7 @@ async fn load_replay_cursors(pool: &sqlx::PgPool) -> Result<Vec<ReplayCursorRow>
                 deployment_profile: crate::sql_row::get(&row, "deployment_profile")?,
                 chain_id: crate::sql_row::get(&row, "chain_id")?,
                 cursor_kind: crate::sql_row::get(&row, "cursor_kind")?,
+                range_start_block_number: crate::sql_row::get(&row, "range_start_block_number")?,
                 next_block_number: crate::sql_row::get(&row, "next_block_number")?,
                 target_block_number: crate::sql_row::get(&row, "target_block_number")?,
                 last_completed_block_number: crate::sql_row::get(

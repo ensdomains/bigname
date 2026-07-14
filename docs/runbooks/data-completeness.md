@@ -53,16 +53,16 @@ retired chain and is reported as an advisory, not gated for the per-chain checks
 | Check | Passes when |
 | --- | --- |
 | `reconciliation_frontier_at_head` | every active chain has a head lag within `±--max-head-lag-blocks` (default 8) between the stored canonical checkpoint and the canonical lineage head, the checkpoint's exact hash and number resolve to a canonical/safe/finalized lineage row, and every active chain has a frontier row at all |
-| `reconciliation_lineage_contiguous` | distinct canonical/safe/finalized block numbers equal `head - floor + 1`, no height has multiple canonical hashes, and every row above the retained floor points by `parent_hash` to the canonical/safe/finalized row at the preceding height |
+| `reconciliation_lineage_contiguous` | distinct canonical/safe/finalized block numbers equal `head - floor + 1`, no retained canonical height has an additional non-orphaned hash, and every row above the retained floor points by `parent_hash` to the canonical/safe/finalized row at the preceding height |
 | `reconciliation_history_from_declared_start` | for every active watched chain, the retained lineage floor is at or below the earliest finite start block its active targets declare; a chain whose targets are all open-ended fails, since no floor can be established |
-| `stored_lineage_backfill_coverage` | every active log-producing watched tuple intersecting a persisted bounded-backfill range inside retained lineage is contained in a durable address- or family-scoped `backfill_coverage_facts` row over each shared promotion-verification chunk |
+| `stored_lineage_backfill_coverage` | every active log-producing watched tuple intersecting a persisted bounded-backfill range inside retained lineage is contained in a durable address- or family-scoped `backfill_coverage_facts` row over each shared promotion-verification chunk, and each topic-filtered completed job in that range recorded the exact topic set the active manifest ABI still declares |
 | `watch_set_code_observation_coverage` | there is at least one active target, and every **active** target — direct active-manifest declarations unioned with the materialized watch view and active discovery edges — has a non-orphaned `raw_code_hashes` observation with an exact retained non-orphaned lineage anchor at or after its inclusive active start (when finite) |
-| `manifest_declared_targets_present` | every active manifest-payload root, contract, and proxy implementation has its matching materialized instance and open address; every proxy implementation also has the exact open managed `proxy_implementation` edge consumed by the watch view |
-| `discovery_targets_present` | every target endpoint of an open non-migration discovery edge has an open `contract_instance_addresses` row on the edge's chain whose start does not narrow the edge's admitted start; bounded edges are historical and impose no current target requirement |
+| `manifest_declared_targets_present` | every active manifest-payload root, contract, and proxy implementation has its matching materialized instance and open address whose start does not narrow the payload start; every proxy implementation also has the exact open managed `proxy_implementation` edge, with a range-preserving start, consumed by the watch view |
+| `discovery_targets_present` | every target endpoint of an open non-migration discovery edge has an open `contract_instance_addresses` row on the edge's chain whose start does not narrow the edge's admitted start, and every open resolver edge from an active registry source retains its matching active resolver target manifest; bounded edges are historical and impose no current target requirement |
 | `active_event_lineage_retained` | every matching canonical/safe/finalized normalized event for an active event-producing manifest source still resolves by exact chain, block hash, and block number to a canonical/safe/finalized `chain_lineage` anchor |
 | `normalization_no_failure` | no replay cursor for an active chain under the deployment profile inferred from the active manifest corpus carries a `last_failure_reason` |
-| `normalization_caught_up_to_raw_head` | the active manifest corpus resolves to one supported deployment profile; every active chain with retained canonical raw logs has that profile's `raw_fact_normalized_events` cursor, and each applicable cursor has reached its target (see below) |
-| `projection_apply_drained` | the change log is empty, or the `normalized_events_to_projection_invalidations` cursor exists and its `last_change_id` has reached `max(projection_normalized_event_changes.change_id)`; unrelated cursor rows do not count |
+| `normalization_caught_up_to_raw_head` | the active manifest corpus resolves to one supported deployment profile; every active chain with retained canonical raw logs has that profile's `raw_fact_normalized_events` cursor, each applicable cursor has reached its target, and a post-replay backlog starts no later than the raw-fact target plus one (see below) |
+| `projection_apply_drained` | the `normalized_events_to_projection_invalidations` cursor, when present, exactly equals the retained change-log high-water mark (`max(change_id)`, or zero for an empty log); a non-empty log also requires the cursor, and unrelated cursor rows do not count |
 | `projection_invalidations_drained` | `projection_invalidations` is empty — every enqueued invalidation has been applied and deleted |
 | `projection_no_dead_letters` | `projection_invalidation_dead_letters` is empty — no invalidation exhausted its retries |
 | `projection_replay_complete` | every current projection has a `current_projection_replay_status` marker at this worker's `CURRENT_PROJECTION_REPLAY_VERSION`; before a durable projection-apply cursor exists, each marker must also cover the target bootstrap would request now |
@@ -79,7 +79,9 @@ it, so they stay green while the pipeline faithfully processes an incomplete inp
 pipeline's own handoff authority rather than the previous stage.
 
 `projection_apply_drained` only proves the derive scan finished — that the apply cursor
-reached the change-log frontier. It does not prove the resulting invalidations were
+exactly matches the change-log frontier. A cursor behind the frontier has not derived all
+changes; a cursor ahead of it proves retained change-log history was lost, because derive only
+scans IDs greater than the cursor. It does not prove the resulting invalidations were
 applied, because those move through a separate claim/apply queue. `projection_invalidations_drained`
 and `projection_no_dead_letters` close that gap: the queue must be empty (a successful
 apply deletes the row) and nothing may have dead-lettered. All three must pass for
@@ -104,7 +106,9 @@ is latched permanently below the live head; newer logs are carried by a one-shot
 `post_replay_live_adapter_backlog` sweep and then live adapter sync. The gate detects the
 latch by the presence of a `post_replay_live_adapter_backlog` cursor row and, for such a
 chain, requires both the raw-fact cursor and the backlog cursor to have reached their own
-targets rather than the raw-log head. **Limitation:** the live tail beyond the backlog
+targets rather than the raw-log head. It also requires the backlog's inclusive range start to
+be no later than the raw-fact target plus one. An earlier start is a safe overlap; a later one
+leaves an unnormalized gap that completed cursors cannot reveal. **Limitation:** the live tail beyond the backlog
 target has no cursor, so the gate cannot verify it. This is one of the reasons a passing
 gate is necessary but not sufficient (see Scope).
 
@@ -139,11 +143,17 @@ satisfies a target when its `chain_id` and lowercased address match the payload;
 same instance on another chain or at another address does not count. An address with a finite
 `active_to_block_number` is closed even when `deactivated_at` is null. Proxy implementations
 must additionally retain the exact open managed discovery edge that the source-graph writer
-creates; the direct payload fallback cannot substitute for the runtime watch-plan edge.
+creates; the direct payload fallback cannot substitute for the runtime watch-plan edge. Both the
+address row and managed edge must start no later than the payload target (or remain open-ended
+when the payload start is unknown). Otherwise the runtime watch view's `GREATEST` start silently
+narrows the manifest-declared interval.
 
 `discovery_targets_present` closes the corresponding gap for dynamic discovery. The active edge
 and its target `contract_instance_id` remain authority if a restore loses the target's open
-address row, even though `load_watched_contracts` can no longer render that target. Only open
+address row or the active resolver manifest that assigns the target's source family, even though
+`load_watched_contracts` can no longer render that target. Resolver target manifests are matched
+to the active registry source by namespace, chain, deployment epoch, and the registry-to-resolver
+family mapping. Only open
 edges impose this current-authority requirement: a finite `active_to_block_number` is legitimate
 retained discovery history. The named check fails on a missing or closed current materialization
 rather than allowing coverage and history to shrink. When the edge has a finite admitted start,
@@ -191,6 +201,10 @@ only against the previous pipeline stage:
   the writer's shared `131072`-block verification chunks and active
   log-producing source-family authority. Each required tuple interval within a chunk must fit
   inside one durable address-scoped fact for that exact family/address or one family-scoped fact.
+  Before those facts are trusted, the inspector invokes the same topic-set drift guard as
+  stored-lineage promotion. For every intersecting completed topic-filtered job, its persisted
+  per-family topic set must exactly equal the active manifest ABI's current set; a missing
+  persisted set also fails closed. Address-enumerated, topic-unfiltered jobs are unaffected.
   Facts from a later successful retry can satisfy the interval, so failed job/range lifecycle rows
   remain advisory. A chain with no bounded-backfill range inside retained lineage has no bounded
   fetch span requiring facts and passes this check vacuously.
@@ -268,16 +282,19 @@ otherwise abort the read), so they are surfaced here as a data-integrity fault.
   materialized declaration/implementation instance or no open address row matching both its
   declared chain and address, or a materialized proxy/implementation pair lacks its open managed
   edge. A missing declaration, missing proxy implementation, missing or bounded proxy edge,
-  deactivated, bounded, wrong-chain, or wrong-address row breaks the watch-view authority even if
+  a later-than-declared address or edge start, deactivated, bounded, wrong-chain, or wrong-address
+  row breaks the watch-view authority even if
   retained code observations let the separate coverage check pass. Reseed manifests or repair
   the materialized graph before promoting.
 - **`discovery_targets_present` fails.** An open discovery edge points to a contract instance
   with no open address on that chain, or its address start is later than the edge's admitted
-  start. Restore or rederive the range-preserving target address before promoting; closing or
+  start, or an open resolver edge from an active registry has lost its matching active resolver
+  target manifest. Restore or rederive the range-preserving target address or manifest before promoting; closing or
   deleting a current edge merely to silence the check changes admission authority.
 - **`stored_lineage_backfill_coverage` fails.** A bounded-backfill range inside retained lineage
   contains an active log-producing watched tuple whose required interval is not contained in one
-  durable coverage fact. Run hash-pinned or Coinbase SQL backfill for the reported tuple/range, or
+  durable coverage fact, or a completed topic-filtered job's persisted topic set differs from the
+  current manifest ABI (or was not persisted). Run hash-pinned or Coinbase SQL backfill for the reported tuple/range on the current manifest, or
   derive facts for a compatible completed legacy job, before retrying promotion.
 - **`active_event_lineage_retained` fails.** Active normalized content has lost one or more exact
   canonical lineage anchors. Restore `chain_lineage` and run reorg/projection repair as needed;
@@ -302,8 +319,9 @@ otherwise abort the read), so they are surfaced here as a data-integrity fault.
   frontier row. `checkpoint_canonical_lineage_match: false` with zero numeric lag means the
   checkpoint hash is missing, orphaned, or points at a different branch at that height.
 - **`reconciliation_lineage_contiguous` fails with a non-zero `duplicate_canonical_height_count`.**
-  Two or more non-orphaned lineage rows share one block height. That is a canonicality
-  violation — at most one hash per height may be canonical — not a gap, and it points at a
+  A retained canonical/safe/finalized height also has another non-orphaned lineage hash. That is
+  a canonicality violation — every competing hash at a retained canonical height must be
+  orphaned — not a gap, and it points at a
   reorg-repair or canonicality-assignment bug rather than missing intake.
 - **`reconciliation_lineage_contiguous` fails with a non-zero
   `disconnected_canonical_parent_count`.** The retained heights are present, but one or more
@@ -336,6 +354,14 @@ otherwise abort the read), so they are surfaced here as a data-integrity fault.
   writes have not landed: invalidations are still queued, or some exhausted their retries and
   dead-lettered. Projections are stale or partial even though the apply cursor looks caught
   up.
+- **`projection_apply_drained` fails because the apply cursor is ahead.** Retained rows were
+  removed from `projection_normalized_event_changes` without rewinding or rebuilding the cursor.
+  Restore the missing change log or rebuild projections and reseed the handoff; do not advance or
+  delete rows merely to make the cursor and log agree.
+- **`normalization_caught_up_to_raw_head` fails on a `:range_start` cursor label.** The
+  post-replay backlog starts after `raw_fact_normalized_events.target_block_number + 1`, or the
+  raw-fact target needed to establish continuity is absent. Recreate the backlog from the replay
+  target so the normalized ranges overlap or meet before promotion.
 - **`watch_set_code_observation_coverage` fails with zero active watched targets.** The
   database has no manifests loaded — a restore that dropped or never applied them. The check
   fails rather than passing vacuously, since an ENS deployment always watches at least the

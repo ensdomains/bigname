@@ -17,10 +17,10 @@ async fn test_database() -> Result<TestDatabase> {
     .await
 }
 
-/// Two non-orphaned lineage rows at one block height are a canonicality violation the
+/// A serving-canonical height with any non-orphaned sibling is an ambiguous promotion path the
 /// distinct-block-number count cannot see; the dedicated CTE must count the height.
 #[tokio::test]
-async fn duplicate_canonical_heights_are_counted() -> Result<()> {
+async fn non_orphaned_same_height_forks_are_counted() -> Result<()> {
     let database = test_database().await?;
     let pool = database.pool();
     sqlx::query(
@@ -29,7 +29,7 @@ async fn duplicate_canonical_heights_are_counted() -> Result<()> {
             (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
         VALUES
             ('ethereum-sepolia', '0xaa', 100, now(), 'canonical'::canonicality_state),
-            ('ethereum-sepolia', '0xbb', 100, now(), 'canonical'::canonicality_state),
+            ('ethereum-sepolia', '0xbb', 100, now(), 'observed'::canonicality_state),
             ('ethereum-sepolia', '0xcc', 101, now(), 'canonical'::canonicality_state)
         "#,
     )
@@ -222,8 +222,8 @@ async fn manifest_declared_target_is_loaded_without_address_row() -> Result<()> 
         Some(42)
     );
 
-    // The materialized watch row may start later, but direct manifest history authority stays
-    // at the payload's declared start.
+    // Direct history authority stays at the payload start, and the materialized row must not
+    // narrow the runtime watch/coverage interval above it.
     sqlx::query(
         r#"
         INSERT INTO contract_instance_addresses
@@ -239,6 +239,19 @@ async fn manifest_declared_target_is_loaded_without_address_row() -> Result<()> 
         read.manifest_declared_targets[0].active_from_block_number,
         Some(42)
     );
+    assert_eq!(read.manifest_declared_targets_missing_address.len(), 1);
+
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET active_from_block_number = 42
+        WHERE contract_instance_id = $1
+        "#,
+    )
+    .bind(contract_instance_id)
+    .execute(pool)
+    .await?;
+    let read = load_data_completeness(pool).await?;
     assert!(read.manifest_declared_targets_missing_address.is_empty());
 
     database.cleanup().await
@@ -262,7 +275,9 @@ async fn manifest_declared_targets_require_matching_live_address_rows() -> Resul
                  {"role":"deactivated","address":"0xGONE"},
                  {"role":"closed","address":"0xCLOSED"},
                  {"role":"wrong_address","address":"0xDECLARED"},
-                 {"role":"wrong_chain","address":"0xCHAIN"}
+                 {"role":"wrong_chain","address":"0xCHAIN"},
+                 {"role":"late_start","address":"0xLATE","start_block":100},
+                 {"role":"unknown_start","address":"0xUNKNOWN"}
              ]}'::jsonb)
         RETURNING manifest_id
         "#,
@@ -277,7 +292,9 @@ async fn manifest_declared_targets_require_matching_live_address_rows() -> Resul
             ('22222222-2222-2222-2222-222222222222', 'ethereum-sepolia', 'contract'),
             ('55555555-5555-5555-5555-555555555555', 'ethereum-sepolia', 'contract'),
             ('33333333-3333-3333-3333-333333333333', 'ethereum-sepolia', 'contract'),
-            ('44444444-4444-4444-4444-444444444444', 'ethereum-sepolia', 'contract')
+            ('44444444-4444-4444-4444-444444444444', 'ethereum-sepolia', 'contract'),
+            ('66666666-6666-6666-6666-666666666666', 'ethereum-sepolia', 'contract'),
+            ('77777777-7777-7777-7777-777777777777', 'ethereum-sepolia', 'contract')
         "#,
     )
     .execute(pool)
@@ -297,7 +314,11 @@ async fn manifest_declared_targets_require_matching_live_address_rows() -> Resul
             ($1, 'contract', 'wrong_address',
              '33333333-3333-3333-3333-333333333333', '0xDECLARED', 'wrong_address', 'none'),
             ($1, 'contract', 'wrong_chain',
-             '44444444-4444-4444-4444-444444444444', '0xCHAIN', 'wrong_chain', 'none')
+             '44444444-4444-4444-4444-444444444444', '0xCHAIN', 'wrong_chain', 'none'),
+            ($1, 'contract', 'late_start',
+             '66666666-6666-6666-6666-666666666666', '0xLATE', 'late_start', 'none'),
+            ($1, 'contract', 'unknown_start',
+             '77777777-7777-7777-7777-777777777777', '0xUNKNOWN', 'unknown_start', 'none')
         "#,
     )
     .bind(manifest_id)
@@ -306,13 +327,16 @@ async fn manifest_declared_targets_require_matching_live_address_rows() -> Resul
     sqlx::query(
         r#"
         INSERT INTO contract_instance_addresses
-            (contract_instance_id, chain_id, address, deactivated_at, active_to_block_number)
+            (contract_instance_id, chain_id, address, deactivated_at,
+             active_from_block_number, active_to_block_number)
         VALUES
-            ('11111111-1111-1111-1111-111111111111', 'ethereum-sepolia', '0xexact', NULL, NULL),
-            ('22222222-2222-2222-2222-222222222222', 'ethereum-sepolia', '0xgone', now(), NULL),
-            ('55555555-5555-5555-5555-555555555555', 'ethereum-sepolia', '0xclosed', NULL, 99),
-            ('33333333-3333-3333-3333-333333333333', 'ethereum-sepolia', '0xOTHER', NULL, NULL),
-            ('44444444-4444-4444-4444-444444444444', 'base-sepolia', '0xchain', NULL, NULL)
+            ('11111111-1111-1111-1111-111111111111', 'ethereum-sepolia', '0xexact', NULL, NULL, NULL),
+            ('22222222-2222-2222-2222-222222222222', 'ethereum-sepolia', '0xgone', now(), NULL, NULL),
+            ('55555555-5555-5555-5555-555555555555', 'ethereum-sepolia', '0xclosed', NULL, NULL, 99),
+            ('33333333-3333-3333-3333-333333333333', 'ethereum-sepolia', '0xOTHER', NULL, NULL, NULL),
+            ('44444444-4444-4444-4444-444444444444', 'base-sepolia', '0xchain', NULL, NULL, NULL),
+            ('66666666-6666-6666-6666-666666666666', 'ethereum-sepolia', '0xlate', NULL, 900, NULL),
+            ('77777777-7777-7777-7777-777777777777', 'ethereum-sepolia', '0xunknown', NULL, 900, NULL)
         "#,
     )
     .execute(pool)
@@ -326,11 +350,40 @@ async fn manifest_declared_targets_require_matching_live_address_rows() -> Resul
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
         missing,
-        ["0xchain", "0xclosed", "0xdeclared", "0xgone"]
-            .into_iter()
-            .collect()
+        [
+            "0xchain",
+            "0xclosed",
+            "0xdeclared",
+            "0xgone",
+            "0xlate",
+            "0xunknown"
+        ]
+        .into_iter()
+        .collect()
     );
     assert!(!missing.contains("0xexact"));
+
+    sqlx::raw_sql(
+        r#"
+        UPDATE contract_instance_addresses
+        SET active_from_block_number = 50
+        WHERE contract_instance_id = '66666666-6666-6666-6666-666666666666';
+
+        UPDATE contract_instance_addresses
+        SET active_from_block_number = NULL
+        WHERE contract_instance_id = '77777777-7777-7777-7777-777777777777'
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    let read = load_data_completeness(pool).await?;
+    let missing = read
+        .manifest_declared_targets_missing_address
+        .iter()
+        .map(|target| target.address.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(!missing.contains("0xlate"));
+    assert!(!missing.contains("0xunknown"));
 
     database.cleanup().await
 }
@@ -530,6 +583,34 @@ async fn manifest_proxy_implementation_is_a_declared_target() -> Result<()> {
     sqlx::query(
         r#"
         UPDATE discovery_edges
+        SET active_from_block_number = 99
+        WHERE source_manifest_id = $1
+          AND edge_kind = 'proxy_implementation'
+        "#,
+    )
+    .bind(manifest_id)
+    .execute(pool)
+    .await?;
+    let read = load_data_completeness(pool).await?;
+    assert_eq!(read.manifest_proxy_implementations_missing_edge.len(), 1);
+
+    sqlx::query(
+        r#"
+        UPDATE discovery_edges
+        SET active_from_block_number = 10
+        WHERE source_manifest_id = $1
+          AND edge_kind = 'proxy_implementation'
+        "#,
+    )
+    .bind(manifest_id)
+    .execute(pool)
+    .await?;
+    let read = load_data_completeness(pool).await?;
+    assert!(read.manifest_proxy_implementations_missing_edge.is_empty());
+
+    sqlx::query(
+        r#"
+        UPDATE discovery_edges
         SET active_to_block_number = 99
         WHERE source_manifest_id = $1
           AND edge_kind = 'proxy_implementation'
@@ -703,6 +784,84 @@ async fn discovery_target_without_live_address_is_surfaced() -> Result<()> {
     .execute(pool)
     .await?;
     let read = load_data_completeness(pool).await?;
+    assert!(read.discovery_targets_missing_address.is_empty());
+
+    database.cleanup().await
+}
+
+/// Resolver discovery from an active registry source requires the matching active resolver
+/// manifest used by the runtime watch view. Losing that target manifest must not erase the edge
+/// from completeness authority.
+#[tokio::test]
+async fn resolver_discovery_target_without_active_manifest_is_surfaced() -> Result<()> {
+    let database = test_database().await?;
+    let pool = database.pool();
+    let source_manifest_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO manifest_versions
+            (manifest_version, namespace, source_family, chain, deployment_epoch,
+             rollout_status, normalizer_version, file_path, manifest_payload)
+        VALUES
+            (1, 'ens', 'ens_v2_registry_l1', 'ethereum-sepolia', 'ens_v2_sepolia_dev',
+             'active', 'n', 'registry', '{}'::jsonb)
+        RETURNING manifest_id
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+    sqlx::raw_sql(
+        r#"
+        INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+        VALUES
+            ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'ethereum-sepolia', 'contract'),
+            ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'ethereum-sepolia', 'contract');
+
+        INSERT INTO contract_instance_addresses
+            (contract_instance_id, chain_id, address)
+        VALUES
+            ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'ethereum-sepolia', '0xRESOLVER')
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO discovery_edges
+            (chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id,
+             discovery_source, source_manifest_id, admission, active_from_block_number)
+        VALUES
+            ('ethereum-sepolia', 'resolver',
+             'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+             'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+             'registry_event', $1, 'reachable_from_root', 100)
+        "#,
+    )
+    .bind(source_manifest_id)
+    .execute(pool)
+    .await?;
+
+    let read = load_data_completeness(pool).await?;
+    assert_eq!(read.discovery_targets_missing_manifest.len(), 1);
+    assert_eq!(
+        read.discovery_targets_missing_manifest[0].source_family,
+        "ens_v2_resolver_l1"
+    );
+    assert!(read.discovery_targets_missing_address.is_empty());
+
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_versions
+            (manifest_version, namespace, source_family, chain, deployment_epoch,
+             rollout_status, normalizer_version, file_path, manifest_payload)
+        VALUES
+            (1, 'ens', 'ens_v2_resolver_l1', 'ethereum-sepolia', 'ens_v2_sepolia_dev',
+             'active', 'n', 'resolver', '{}'::jsonb)
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    let read = load_data_completeness(pool).await?;
+    assert!(read.discovery_targets_missing_manifest.is_empty());
     assert!(read.discovery_targets_missing_address.is_empty());
 
     database.cleanup().await
@@ -955,6 +1114,7 @@ async fn rewound_cursor_next_below_target_is_loaded() -> Result<()> {
         .iter()
         .find(|cursor| cursor.cursor_kind == "raw_fact_normalized_events")
         .expect("cursor");
+    assert_eq!(cursor.range_start_block_number, 0);
     assert_eq!(cursor.next_block_number, Some(500));
     assert_eq!(cursor.target_block_number, Some(1000));
     assert_eq!(cursor.last_completed_block_number, Some(1000));

@@ -1,12 +1,15 @@
-use super::backfill_coverage::BackfillCoverageGap;
+use super::backfill_coverage::{
+    BackfillCoverageGap, BackfillCoverageInspection, BackfillCoverageTopicDrift,
+};
 use super::evaluate::{CheckStatus, DEFAULT_MAX_HEAD_LAG_BLOCKS, evaluate_data_completeness};
 use crate::replay::{ALL_CURRENT_PROJECTION_ORDER, CURRENT_PROJECTION_REPLAY_VERSION};
 use bigname_manifests::{WatchedContract, WatchedContractSource};
 use bigname_storage::{
     ActiveManifestEventSource, BackfillLifecycleRow, ChainCompletenessRow,
     DEFERRED_NORMALIZED_EVENT_INDEXES, DataCompletenessRead, DiscoveryTargetMissingAddress,
-    ManifestChainNamespace, ManifestDeclaredTarget, NameCurrentCount, ObservedCodeAddress,
-    ProjectionApplyCursorRow, ProjectionReplayMarker, ReplayCursorRow,
+    DiscoveryTargetMissingManifest, ManifestChainNamespace, ManifestDeclaredTarget,
+    NameCurrentCount, ObservedCodeAddress, ProjectionApplyCursorRow, ProjectionReplayMarker,
+    ReplayCursorRow,
 };
 use uuid::Uuid;
 
@@ -121,6 +124,7 @@ fn replay_cursor(target: i64, failure: Option<&str>) -> ReplayCursorRow {
         deployment_profile: DEPLOYMENT_PROFILE.to_owned(),
         chain_id: CHAIN.to_owned(),
         cursor_kind: "raw_fact_normalized_events".to_owned(),
+        range_start_block_number: 0,
         next_block_number: Some(target + 1),
         target_block_number: Some(target),
         last_completed_block_number: Some(target),
@@ -134,6 +138,7 @@ fn rewound_cursor(next: i64, target: i64, last_completed: i64) -> ReplayCursorRo
         deployment_profile: DEPLOYMENT_PROFILE.to_owned(),
         chain_id: CHAIN.to_owned(),
         cursor_kind: "raw_fact_normalized_events".to_owned(),
+        range_start_block_number: 0,
         next_block_number: Some(next),
         target_block_number: Some(target),
         last_completed_block_number: Some(last_completed),
@@ -142,11 +147,12 @@ fn rewound_cursor(next: i64, target: i64, last_completed: i64) -> ReplayCursorRo
 }
 
 // A backlog cursor caught up to `target` when `next > target`.
-fn backlog_cursor(next: i64, target: i64) -> ReplayCursorRow {
+fn backlog_cursor(range_start: i64, next: i64, target: i64) -> ReplayCursorRow {
     ReplayCursorRow {
         deployment_profile: DEPLOYMENT_PROFILE.to_owned(),
         chain_id: CHAIN.to_owned(),
         cursor_kind: "post_replay_live_adapter_backlog".to_owned(),
+        range_start_block_number: range_start,
         next_block_number: Some(next),
         target_block_number: Some(target),
         last_completed_block_number: Some(next - 1),
@@ -183,6 +189,7 @@ fn healthy_read() -> DataCompletenessRead {
         manifest_declared_targets_missing_address: vec![],
         manifest_proxy_implementations_missing_edge: vec![],
         discovery_targets_missing_address: vec![],
+        discovery_targets_missing_manifest: vec![],
     }
 }
 
@@ -190,7 +197,12 @@ fn evaluate(
     read: &DataCompletenessRead,
     watched_contracts: &[WatchedContract],
 ) -> super::evaluate::DataCompletenessReport {
-    evaluate_data_completeness(read, watched_contracts, &[], DEFAULT_MAX_HEAD_LAG_BLOCKS)
+    evaluate_data_completeness(
+        read,
+        watched_contracts,
+        &BackfillCoverageInspection::default(),
+        DEFAULT_MAX_HEAD_LAG_BLOCKS,
+    )
 }
 
 fn registry_only() -> Vec<WatchedContract> {
@@ -207,18 +219,51 @@ fn healthy_database_is_data_complete() {
 #[test]
 fn uncovered_retained_backfill_span_fails() {
     let read = healthy_read();
-    let gaps = vec![BackfillCoverageGap {
-        chain: CHAIN.to_owned(),
-        source_family: "ens_v2_registry_l1".to_owned(),
-        address: REGISTRY.to_owned(),
-        required_from_block: 992,
-        required_to_block: 1_000,
-    }];
-    let report =
-        evaluate_data_completeness(&read, &registry_only(), &gaps, DEFAULT_MAX_HEAD_LAG_BLOCKS);
+    let coverage = BackfillCoverageInspection {
+        gaps: vec![BackfillCoverageGap {
+            chain: CHAIN.to_owned(),
+            source_family: "ens_v2_registry_l1".to_owned(),
+            address: REGISTRY.to_owned(),
+            required_from_block: 992,
+            required_to_block: 1_000,
+        }],
+        topic_drifts: vec![],
+    };
+    let report = evaluate_data_completeness(
+        &read,
+        &registry_only(),
+        &coverage,
+        DEFAULT_MAX_HEAD_LAG_BLOCKS,
+    );
 
     assert_eq!(report.stored_lineage_backfill_coverage(), CheckStatus::Fail);
-    assert_eq!(report.backfill_coverage_gaps, gaps);
+    assert_eq!(report.backfill_coverage_gaps, coverage.gaps);
+    assert!(!report.data_complete());
+}
+
+/// Coverage facts written under a stale topic-filtered ABI cannot prove the current watched
+/// input, even when the tuple interval itself is fully contained.
+#[test]
+fn drifted_backfill_topic_set_fails() {
+    let read = healthy_read();
+    let coverage = BackfillCoverageInspection {
+        gaps: vec![],
+        topic_drifts: vec![BackfillCoverageTopicDrift {
+            chain: CHAIN.to_owned(),
+            required_from_block: 992,
+            required_to_block: 1_000,
+            reason: "manifest ABI topic0 set changed".to_owned(),
+        }],
+    };
+    let report = evaluate_data_completeness(
+        &read,
+        &registry_only(),
+        &coverage,
+        DEFAULT_MAX_HEAD_LAG_BLOCKS,
+    );
+
+    assert_eq!(report.stored_lineage_backfill_coverage(), CheckStatus::Fail);
+    assert_eq!(report.backfill_coverage_topic_drifts, coverage.topic_drifts);
     assert!(!report.data_complete());
 }
 
@@ -360,6 +405,23 @@ fn discovery_target_missing_address_fails_named_check() {
     assert!(!report.data_complete());
 }
 
+/// An admitted resolver endpoint remains discovery authority when its active registry source
+/// survives, even if the resolver-family target manifest needed by the watch view vanished.
+#[test]
+fn discovery_target_missing_resolver_manifest_fails_named_check() {
+    let mut read = healthy_read();
+    read.discovery_targets_missing_manifest = vec![DiscoveryTargetMissingManifest {
+        chain: CHAIN.to_owned(),
+        source_family: "ens_v2_resolver_l1".to_owned(),
+        contract_instance_id: Uuid::from_u128(42),
+    }];
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.discovery_targets_present(), CheckStatus::Fail);
+    assert_eq!(report.discovery_targets_missing_manifest.len(), 1);
+    assert!(!report.data_complete());
+}
+
 /// A manifest-less restore reads zero watched contracts. The coverage check is the
 /// load-bearing one, so it must not pass vacuously when there is nothing to observe.
 #[test]
@@ -424,6 +486,7 @@ fn failed_replay_cursor_on_inactive_chain_is_ignored() {
         deployment_profile: DEPLOYMENT_PROFILE.to_owned(),
         chain_id: "retired-chain".to_owned(),
         cursor_kind: "raw_fact_normalized_events".to_owned(),
+        range_start_block_number: 0,
         next_block_number: Some(1),
         target_block_number: Some(10),
         last_completed_block_number: None,
@@ -560,6 +623,32 @@ fn projection_apply_cursor_behind_max_change_fails() {
 
     assert_eq!(report.projection_drained(), CheckStatus::Fail);
     assert_eq!(report.lagging_projection_cursors[0].behind_by, 2);
+    assert!(!report.data_complete());
+}
+
+/// The derive worker scans only change IDs above its cursor. A restored cursor above the
+/// retained high watermark would skip every retained row at or below that stale watermark.
+#[test]
+fn projection_apply_cursor_ahead_of_change_log_fails() {
+    let mut read = healthy_read();
+    read.projection_apply_cursors = vec![apply_cursor(50)];
+    read.max_projection_change_id = Some(42);
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.projection_apply_cursor_ahead_by, Some(8));
+    assert_eq!(report.projection_drained(), CheckStatus::Fail);
+    assert!(!report.data_complete());
+}
+
+#[test]
+fn nonzero_projection_apply_cursor_with_empty_change_log_fails() {
+    let mut read = healthy_read();
+    read.projection_apply_cursors = vec![apply_cursor(50)];
+    read.max_projection_change_id = None;
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.projection_apply_cursor_ahead_by, Some(50));
+    assert_eq!(report.projection_drained(), CheckStatus::Fail);
     assert!(!report.data_complete());
 }
 
@@ -894,7 +983,10 @@ fn latched_chain_read() -> DataCompletenessRead {
 #[test]
 fn latched_chain_at_targets_is_caught_up() {
     let mut read = latched_chain_read();
-    read.replay_cursors = vec![replay_cursor(1_000, None), backlog_cursor(2_001, 2_000)];
+    read.replay_cursors = vec![
+        replay_cursor(1_000, None),
+        backlog_cursor(1_001, 2_001, 2_000),
+    ];
     let report = evaluate(&read, &registry_only());
 
     assert_eq!(report.normalization_caught_up(), CheckStatus::Pass);
@@ -905,11 +997,35 @@ fn latched_chain_at_targets_is_caught_up() {
 #[test]
 fn latched_chain_with_backlog_short_of_target_fails() {
     let mut read = latched_chain_read();
-    read.replay_cursors = vec![replay_cursor(1_000, None), backlog_cursor(1_900, 2_000)];
+    read.replay_cursors = vec![
+        replay_cursor(1_000, None),
+        backlog_cursor(1_001, 1_900, 2_000),
+    ];
     let report = evaluate(&read, &registry_only());
 
     assert_eq!(report.normalization_caught_up(), CheckStatus::Fail);
     assert_eq!(report.lagging_replay_cursors[0].behind_by, 100);
+    assert!(!report.data_complete());
+}
+
+/// The backlog writer seeds its inclusive start to the completed raw-fact replay target plus
+/// one. A later restored start leaves a normalization hole even when both cursors are complete.
+#[test]
+fn latched_chain_with_backlog_start_gap_fails() {
+    let mut read = latched_chain_read();
+    read.replay_cursors = vec![
+        replay_cursor(1_000, None),
+        backlog_cursor(1_500, 2_001, 2_000),
+    ];
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.normalization_caught_up(), CheckStatus::Fail);
+    assert_eq!(report.lagging_replay_cursors[0].behind_by, 499);
+    assert!(
+        report.lagging_replay_cursors[0]
+            .label
+            .ends_with(":range_start")
+    );
     assert!(!report.data_complete());
 }
 
