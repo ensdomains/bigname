@@ -528,6 +528,11 @@ head, and treat bootstrap's near-tip slice as unpromotable until the enforced
 clamp/per-fact finality watermark tracked on #145 lands.
 - Selected-log companion rows missing: rerun the selected hash-pinned backfill so
   raw code, transaction, and receipt rows are persisted with the selected logs.
+  The demand is scoped the way backfill writes companions: a stored log demands
+  them only when its emitter is watched under a source family, its block is
+  inside that watched entry's active window, and its topic0 is in the family's
+  current manifest ABI topic0 set. Sibling-retained foreign-topic logs from
+  watched addresses never demand companions.
 - Missing event-silent current resolver state after catch-up: let ordinary live
   reconciliation process the current tip so direct-call observations are
   retained for the built-in Ethereum Mainnet event-silent reverse resolver set.
