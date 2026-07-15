@@ -832,6 +832,66 @@ async fn normalized_replay_catchup_rebuilds_deferred_indexes_when_configured_cha
     Ok(())
 }
 
+#[tokio::test]
+async fn successful_idle_iteration_clears_stale_cursor_failure() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_normalized_replay_cursor_table(database.pool()).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_replay_cursors (
+            deployment_profile,
+            chain_id,
+            cursor_kind,
+            range_start_block_number,
+            next_block_number,
+            target_block_number,
+            last_completed_block_number,
+            last_failure_reason,
+            last_failure_at
+        )
+        VALUES (
+            'mainnet', 'ethereum-mainnet', 'raw_fact_normalized_events', 1, 2, 1, 1,
+            'transient provider failure', now()
+        )
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    let config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
+        "mainnet".to_owned(),
+        vec!["ethereum-mainnet".to_owned()],
+        1_000,
+        1_000,
+        1,
+    )?
+    .with_defer_projection_indexes(false);
+    assert_eq!(
+        normalized_replay_catchup::run_normalized_replay_catchup_iteration(
+            database.pool(),
+            &config,
+            "ethereum-mainnet",
+        )
+        .await?,
+        normalized_replay_catchup::CatchupIterationStatus::Idle
+    );
+
+    let failure = sqlx::query_as::<_, (Option<String>, Option<sqlx::types::time::OffsetDateTime>)>(
+        r#"
+        SELECT last_failure_reason, last_failure_at
+        FROM normalized_replay_cursors
+        WHERE deployment_profile = 'mainnet'
+          AND chain_id = 'ethereum-mainnet'
+          AND cursor_kind = 'raw_fact_normalized_events'
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(failure, (None, None));
+
+    database.cleanup().await
+}
+
 async fn create_normalized_replay_cursor_table(pool: &PgPool) -> Result<()> {
     sqlx::query(
         r#"

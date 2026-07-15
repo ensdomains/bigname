@@ -25,7 +25,7 @@ mod indexes;
 mod sources;
 
 use cursors::{
-    advance_cursor, ensure_cursor, record_cursor_failure,
+    advance_cursor, clear_cursor_failure, ensure_cursor, record_cursor_failure,
     rewind_cursor_for_newly_observed_older_logs,
 };
 use indexes::{
@@ -276,6 +276,7 @@ pub(crate) async fn run_normalized_replay_catchup_iteration(
             )
             .await?;
         }
+        clear_cursor_failure(pool, &config.deployment_profile, chain).await?;
         return Ok(CatchupIterationStatus::Idle);
     };
     if pending_base_rederive_replay_target.is_some() {
@@ -334,6 +335,7 @@ pub(crate) async fn run_normalized_replay_catchup_iteration(
             )
             .await?;
         }
+        clear_cursor_failure(pool, &config.deployment_profile, chain).await?;
         return Ok(CatchupIterationStatus::Idle);
     }
 
