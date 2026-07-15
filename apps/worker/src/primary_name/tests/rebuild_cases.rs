@@ -476,8 +476,9 @@ async fn targeted_rebuild_serializes_claim_publish_with_verified_primary_produce
         Condvar::new(),
     ));
     let hook_state_for_hook = Arc::clone(&hook_state);
-    let _hook_guard = test_hooks::install_targeted_rebuild_after_invalidation_hook(Arc::new(
-        move |hook_address, hook_namespace, hook_coin_type| {
+    let _hook_guard = test_hooks::install_targeted_rebuild_after_invalidation_hook(
+        database.pool(),
+        Arc::new(move |hook_address, hook_namespace, hook_coin_type| {
             if hook_address != address || hook_namespace != "ens" || hook_coin_type != "60" {
                 return;
             }
@@ -492,8 +493,9 @@ async fn targeted_rebuild_serializes_claim_publish_with_verified_primary_produce
                     .wait(state)
                     .expect("targeted rebuild hook state mutex poisoned while waiting");
             }
-        },
-    ));
+        }),
+    )
+    .await?;
 
     let worker_pool = database.pool().clone();
     let worker_address = address.to_owned();

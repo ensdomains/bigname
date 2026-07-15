@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     time::Duration,
 };
 
@@ -97,6 +97,49 @@ pub(super) fn resolve_token_key(
         .cloned()
 }
 
+pub(super) fn take_state_for_unregister(
+    states: &mut BTreeMap<(String, String), RegistryNameState>,
+    aliases: &mut HashMap<(String, String), (String, String)>,
+    registry: &str,
+    token_id: &str,
+) -> Option<RegistryNameState> {
+    let canonical_key = resolve_token_key(aliases, registry, token_id)
+        .unwrap_or_else(|| (registry.to_owned(), token_id.to_owned()));
+    let state = states.remove(&canonical_key)?;
+    aliases.retain(|_, target| target != &canonical_key);
+    Some(state)
+}
+
+pub(super) fn take_states_for_name(
+    states: &mut BTreeMap<(String, String), RegistryNameState>,
+    aliases: &mut HashMap<(String, String), (String, String)>,
+    registry: &str,
+    namehash: &str,
+) -> Vec<RegistryNameState> {
+    let keys = states
+        .iter()
+        .filter(|(_, state)| state.registry_address == registry && state.name.namehash == namehash)
+        .map(|(key, _)| key.clone())
+        .collect::<BTreeSet<_>>();
+    let removed = keys
+        .iter()
+        .filter_map(|key| states.remove(key))
+        .collect::<Vec<_>>();
+    aliases.retain(|_, target| !keys.contains(target));
+    removed
+}
+
+pub(super) fn replace_token_alias(
+    aliases: &mut HashMap<(String, String), (String, String)>,
+    registry: &str,
+    token_id: &str,
+    canonical_key: &(String, String),
+) {
+    let current_alias = (registry.to_owned(), token_id.to_owned());
+    aliases.retain(|alias, target| target != canonical_key || alias == &current_alias);
+    aliases.insert(current_alias, canonical_key.clone());
+}
+
 pub(super) fn remember_linked_resource_state(
     linked_resource_states: &mut BTreeMap<Uuid, RegistryNameState>,
     state: &RegistryNameState,
@@ -106,7 +149,7 @@ pub(super) fn remember_linked_resource_state(
     }
 }
 
-pub(super) fn closed_surface_binding_for_unregister(
+pub(super) fn closed_surface_binding_for_terminal(
     state: &RegistryNameState,
     reference: &ObservationRef,
 ) -> Option<SurfaceBinding> {

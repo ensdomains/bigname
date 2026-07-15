@@ -5,19 +5,10 @@ use anyhow::Result;
 use serde_json::Value;
 
 use super::support;
+use crate::harness::responses::selector_keys;
 use crate::harness::{anvil::Anvil, ens_v1, repo_root};
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
-
-fn selector_keys(body: &Value) -> BTreeSet<String> {
-    body.pointer("/declared_state/record_inventory/selectors")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| entry.get("record_key").and_then(Value::as_str))
-        .map(str::to_owned)
-        .collect()
-}
 
 /// One DNS resource record in wire format: dns-encoded name, type, class IN,
 /// ttl, rdlength, rdata. Empty rdata deletes the RRset
@@ -173,12 +164,13 @@ async fn remaining_record_families_derive_normalized_but_stay_unenumerated() -> 
 }
 
 /// setPubkey on the admitted PublicResolver: the only composed-profile event
-/// outside the resolver ABI. The gate rejects it by design (a tested
-/// exclusion), so nothing derives; whether the raw log even persists is
-/// pinned here. Drift-vs-narrowing stays a doc-first question — no
-/// divergence entry names pubkey.
+/// outside the resolver ABI. Live intake retains the watched emitter's raw
+/// log, but the adapter's admitted resolver-event set excludes it, so nothing
+/// derives.
+/// (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L29 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/resolvers/profiles/PubkeyResolver.sol:L25 @ ens_v1@91c966f)
 #[tokio::test]
-async fn pubkey_write_on_admitted_resolver_stays_invisible() -> Result<()> {
+async fn pubkey_write_on_admitted_resolver_stays_raw_only() -> Result<()> {
     let anvil = Anvil::spawn().await?;
     let rpc = anvil.client();
 
@@ -213,18 +205,20 @@ async fn pubkey_write_on_admitted_resolver_stays_invisible() -> Result<()> {
     );
     let raw_pubkey_logs: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM raw_logs \
-         WHERE emitting_address = $1 AND topics[1] = $2",
+         WHERE emitting_address = $1 AND topics[1] = $2 \
+         AND canonicality_state = 'canonical'",
     )
     .bind(format!("{resolver:#x}"))
     .bind(&pubkey_topic)
     .fetch_one(&run.db.pool)
     .await?;
 
-    // The on-chain write succeeded, but the live scan is topic-filtered by
-    // the manifest ABI: the pubkey log never even persists as a raw fact.
+    // Live intake retains logs from watched emitters even when their topic is
+    // outside the active manifest ABI. Raw retention must not be mistaken for
+    // normalized or projected admission.
     assert_eq!(
-        raw_pubkey_logs, 0,
-        "PubkeyChanged is invisible at the raw layer by admission"
+        raw_pubkey_logs, 1,
+        "the single PubkeyChanged emission must remain available as a raw fact"
     );
 
     let derived_keys: Vec<String> = sqlx::query_scalar(

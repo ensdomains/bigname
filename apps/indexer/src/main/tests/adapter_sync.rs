@@ -1,4 +1,81 @@
 #[tokio::test]
+async fn scoped_ens_v2_registry_sync_emits_registry_permission_events() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let registry_contract_instance_id = Uuid::from_u128(0x341);
+    let registry_address = "0x0000000000000000000000000000000000000341";
+    let account = "0x00000000000000000000000000000000000000aa";
+    let block = provider_block(
+        "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        Some("0xbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc"),
+        63,
+    );
+
+    insert_active_replay_manifest_contract(
+        database.pool(),
+        1,
+        "ens",
+        "ens_v2_registry_l1",
+        chain,
+        "ens_v2",
+        registry_contract_instance_id,
+        registry_address,
+        "registry",
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE manifest_versions SET manifest_payload = $2 WHERE manifest_id = $1",
+    )
+    .bind(1_i64)
+    .bind(test_manifest_payload())
+    .execute(database.pool())
+    .await?;
+    insert_raw_resolver_log(
+        database.pool(),
+        chain,
+        &block,
+        registry_address,
+        vec![
+            ens_v2_eac_roles_changed_topic0(),
+            hex_string(&abi_word_u64(0)),
+            hex_string(&abi_word_address(account)),
+        ],
+        decode_hex_string(&encode_eac_roles_changed_log_data(
+            &hex_string(&abi_word_u64(0)),
+            &hex_string(&abi_word_u64(1)),
+        )),
+        0,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+
+    sync_adapter_state_from_scoped_persisted_raw_payloads(
+        database.pool(),
+        chain,
+        std::slice::from_ref(&block.block_hash),
+        &[(
+            "ens_v2_registry_l1".to_owned(),
+            registry_address.to_owned(),
+            block.block_number,
+            block.block_number,
+        )],
+    )
+    .await?;
+
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE derivation_kind = 'ens_v2_permissions' AND event_kind IN ('PermissionChanged', 'RootPermissionChanged')"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "a registry-scoped adapter run must not skip the permission adapter"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn sync_adapter_owned_raw_log_state_backfills_reverse_claims_from_stored_raw_logs()
 -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -247,12 +324,21 @@ async fn live_adapter_sync_continues_after_block_derived_events() -> Result<()> 
 
     let summary = sync_live_adapter_state_from_persisted_raw_payloads(
         database.pool(),
+        "test",
         "ethereum-mainnet",
         std::slice::from_ref(&stored_block.block_hash),
     )
     .await?;
 
     assert_eq!(summary.total_synced_count, 1);
+    assert_eq!(
+        summary.resolver_profile_authority_epoch_guard_count, 1,
+        "ordinary live sync must run its cheap per-chain discovery-epoch guard"
+    );
+    assert_eq!(
+        summary.resolver_profile_authority_scan_count, 0,
+        "an ordinary live block with no discovery mutation must not scan global resolver authority"
+    );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'ReverseChanged'"
@@ -261,6 +347,159 @@ async fn live_adapter_sync_continues_after_block_derived_events() -> Result<()> 
         .await?,
         1
     );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn live_adapter_retry_recovers_committed_discovery_after_post_mutation_failure() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let manifests = TestManifestDir::new()?;
+    let registry_address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+    let resolver_address = "0x0000000000000000000000000000000000000abc";
+    let registry_manifest = format!(
+        r#"
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v1_registry_l1"
+chain = "ethereum-mainnet"
+deployment_epoch = "ens_v1"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+
+[capability_flags]
+declared_children = "supported"
+
+[[roots]]
+name = "ENSRegistry"
+address = "{registry_address}"
+
+[[contracts]]
+role = "registry"
+address = "{registry_address}"
+proxy_kind = "none"
+
+[[discovery_rules]]
+edge_kind = "resolver"
+from_role = "registry"
+admission = "reachable_from_root"
+
+{}
+"#,
+        test_manifest_abi_toml()
+    );
+    manifests.write_manifest_for_source_family("ens_v1_registry_l1", &registry_manifest)?;
+    let resolver_manifest = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../manifests/mainnet/ethereum/ens/ens_v1_resolver_l1/v1.toml"),
+    )?;
+    manifests.write_manifest_for_source_family("ens_v1_resolver_l1", &resolver_manifest)?;
+    let repository = load_manifest_repository(&manifests.path)?;
+    build_manifest_runtime_state(database.pool(), &repository).await?;
+    sqlx::query(
+        r#"
+        UPDATE resolver_profile_input_changes
+        SET processed_generation = generation,
+            force_reconciliation = FALSE
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    let block = provider_block(
+        "0xabababababababababababababababababababababababababababababababab",
+        Some("0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"),
+        22_800_000,
+    );
+    upsert_raw_blocks(
+        database.pool(),
+        &[provider_block_to_raw_block(
+            "ethereum-mainnet",
+            &block,
+            CanonicalityState::Canonical,
+        )],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[RawLog {
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: block.block_hash.clone(),
+            block_number: block.block_number,
+            transaction_hash: transaction_hash_for_block(&block),
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: registry_address.to_ascii_lowercase(),
+            topics: vec![
+                registry_new_resolver_topic0(),
+                "0x0000000000000000000000000000000000000000000000000000000000000001".to_owned(),
+            ],
+            data: decode_hex_string(&encode_registry_new_resolver_log_data(resolver_address)),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+
+    let journal_before =
+        bigname_storage::load_resolver_profile_authority_journal(database.pool()).await?;
+    install_post_discovery_mutation_failure_for_test(database.pool());
+    let error = sync_live_adapter_state_from_persisted_raw_payloads(
+        database.pool(),
+        "test",
+        "ethereum-mainnet",
+        std::slice::from_ref(&block.block_hash),
+    )
+    .await
+    .expect_err("the injected post-mutation failure must escape before journaling");
+    assert!(error.to_string().contains("injected failure"));
+    assert_eq!(
+        bigname_storage::load_resolver_profile_authority_journal(database.pool())
+            .await?
+            .revision,
+        journal_before.revision,
+        "the injected crash window must leave the older durable snapshot"
+    );
+
+    let retry = sync_live_adapter_state_from_persisted_raw_payloads(
+        database.pool(),
+        "test",
+        "ethereum-mainnet",
+        std::slice::from_ref(&block.block_hash),
+    )
+    .await?;
+    assert_eq!(
+        retry.resolver_profile_authority_scan_count, 1,
+        "the no-op retry must turn prior epoch drift into one full authority diff"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (bool, bool)>(
+            r#"
+            SELECT
+                processed_generation < generation AS pending,
+                force_reconciliation
+            FROM resolver_profile_input_changes
+            WHERE chain_id = 'ethereum-mainnet'
+              AND contract_address = lower($1)
+            "#,
+        )
+        .bind(resolver_address)
+        .fetch_one(database.pool())
+        .await?,
+        (true, true),
+        "the recovered journal diff must retain the newly discovered resolver target"
+    );
+
+    let no_op = sync_live_adapter_state_from_persisted_raw_payloads(
+        database.pool(),
+        "test",
+        "ethereum-mainnet",
+        std::slice::from_ref(&block.block_hash),
+    )
+    .await?;
+    assert_eq!(no_op.resolver_profile_authority_scan_count, 0);
+    assert!(no_op.resolver_profile_authority_epoch_guard_count >= 1);
 
     database.cleanup().await?;
     Ok(())

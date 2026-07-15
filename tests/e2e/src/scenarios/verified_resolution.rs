@@ -4,13 +4,10 @@ use serde_json::{Value, json};
 use sqlx::types::Uuid;
 
 use super::support;
+use crate::harness::responses::pointer;
 use crate::harness::{anvil::Anvil, ens_v1, repo_root};
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
-
-fn pointer(body: &Value, path: &str) -> Value {
-    body.pointer(path).cloned().unwrap_or(Value::Null)
-}
 
 fn query_by_record_key<'a>(
     queries: &'a Value,

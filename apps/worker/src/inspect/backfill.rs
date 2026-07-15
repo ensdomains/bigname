@@ -49,6 +49,7 @@ fn render_backfill_job(job: &BackfillJob) -> Value {
         "backfill_job_id": job.backfill_job_id,
         "deployment_profile": job.deployment_profile.as_str(),
         "chain_id": job.chain_id.as_str(),
+        "raw_log_retention_generation": job.raw_log_retention_generation,
         "source_identity": job.source_identity.clone(),
         "scan_mode": job.scan_mode.as_str(),
         "status": job.status.as_str(),

@@ -8,9 +8,10 @@ pub(super) async fn seed_planned_manifest_entry_addresses(
     manifest_id: i64,
     loaded_manifest: &LoadedManifest,
     planned_entries: &[PersistedManifestEntry],
-) -> Result<()> {
+) -> Result<bool> {
+    let mut inserted_address = false;
     for entry in planned_entries {
-        ensure_contract_instance_address_seed(
+        inserted_address |= ensure_contract_instance_address_seed(
             executor,
             entry.contract_instance_id,
             &loaded_manifest.manifest.chain,
@@ -30,7 +31,7 @@ pub(super) async fn seed_planned_manifest_entry_addresses(
             entry.implementation_contract_instance_id,
             entry.declared_implementation_address.as_deref(),
         ) {
-            ensure_contract_instance_address_seed(
+            inserted_address |= ensure_contract_instance_address_seed(
                 executor,
                 implementation_contract_instance_id,
                 &loaded_manifest.manifest.chain,
@@ -49,7 +50,7 @@ pub(super) async fn seed_planned_manifest_entry_addresses(
         }
     }
 
-    Ok(())
+    Ok(inserted_address)
 }
 
 pub(crate) async fn ensure_contract_instance_address_seed(
@@ -59,8 +60,8 @@ pub(crate) async fn ensure_contract_instance_address_seed(
     address: &str,
     source_manifest_id: Option<i64>,
     provenance: &serde_json::Value,
-) -> Result<()> {
-    sqlx::query(
+) -> Result<bool> {
+    let result = sqlx::query(
         r#"
         INSERT INTO contract_instance_addresses (
             contract_instance_id,
@@ -91,5 +92,5 @@ pub(crate) async fn ensure_contract_instance_address_seed(
         )
     })?;
 
-    Ok(())
+    Ok(result.rows_affected() > 0)
 }

@@ -3,6 +3,8 @@ use super::*;
 #[derive(Clone, Debug, Default)]
 pub(super) struct ResolverProfileGate {
     supported_fact_families: HashSet<(String, String, String, &'static str)>,
+    observable_fact_families: HashSet<(String, String, String, &'static str)>,
+    classified_profile_addresses: HashSet<(String, String, String)>,
 }
 
 impl ResolverProfileGate {
@@ -68,8 +70,23 @@ impl ResolverProfileGate {
     }
 
     fn from_admissions(admissions: Vec<bigname_manifests::ResolverProfileAdmission>) -> Self {
+        // ENSv1 generic resolver topics are observation admission, not
+        // complete-profile admission. A pending profile may therefore emit a
+        // decoded current-resolver fact while its family coverage stays
+        // pending in the projection. Explicitly unsupported known profiles
+        // remain rejected here.
+        let classified_profile_addresses = admissions
+            .iter()
+            .map(|admission| {
+                (
+                    admission.chain.clone(),
+                    admission.source_family.clone(),
+                    admission.address.to_ascii_lowercase(),
+                )
+            })
+            .collect();
         let supported_fact_families = admissions
-            .into_iter()
+            .iter()
             .filter(|admission| {
                 resolver_profile_admitted(&admission.source_family, &admission.profile)
                     && admission.status == "supported"
@@ -77,8 +94,27 @@ impl ResolverProfileGate {
             .filter_map(|admission| {
                 resolver_fact_family_key(&admission.fact_family).map(|fact_family| {
                     (
-                        admission.chain,
-                        admission.source_family,
+                        admission.chain.clone(),
+                        admission.source_family.clone(),
+                        admission.address.to_ascii_lowercase(),
+                        fact_family,
+                    )
+                })
+            })
+            .collect();
+        let observable_fact_families = admissions
+            .iter()
+            .filter(|admission| {
+                resolver_profile_admitted(&admission.source_family, &admission.profile)
+                    && (admission.status == "supported"
+                        || (admission.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1
+                            && admission.status == "pending"))
+            })
+            .filter_map(|admission| {
+                resolver_fact_family_key(&admission.fact_family).map(|fact_family| {
+                    (
+                        admission.chain.clone(),
+                        admission.source_family.clone(),
                         admission.address.to_ascii_lowercase(),
                         fact_family,
                     )
@@ -88,7 +124,34 @@ impl ResolverProfileGate {
 
         Self {
             supported_fact_families,
+            observable_fact_families,
+            classified_profile_addresses,
         }
+    }
+
+    pub(super) fn supports_resolver_local_fact(
+        &self,
+        raw_log: &AuthorityRawLogRow,
+        event_topics: &AuthorityEventTopics,
+    ) -> Result<bool> {
+        let Some(topic0) = raw_log.topics.first() else {
+            return Ok(false);
+        };
+        let fact_families =
+            resolver_fact_families_for_topic0(&raw_log.source_family, topic0, event_topics)?;
+        let chain_id = raw_log.chain_id.clone();
+        let source_family = raw_log.source_family.clone();
+        let emitting_address = raw_log.emitting_address.to_ascii_lowercase();
+
+        let Some(&fact_family) = fact_families.first() else {
+            return Ok(false);
+        };
+        Ok(self.supported_fact_families.contains(&(
+            chain_id,
+            source_family,
+            emitting_address,
+            fact_family,
+        )))
     }
 
     pub(super) fn rejects_resolver_local_fact(
@@ -112,14 +175,33 @@ impl ResolverProfileGate {
         let chain_id = raw_log.chain_id.clone();
         let source_family = raw_log.source_family.clone();
         let emitting_address = raw_log.emitting_address.to_ascii_lowercase();
-        Ok(!fact_families.iter().any(|fact_family| {
-            self.supported_fact_families.contains(&(
+        if fact_families.iter().any(|fact_family| {
+            self.observable_fact_families.contains(&(
                 chain_id.clone(),
                 source_family.clone(),
                 emitting_address.clone(),
                 fact_family,
             ))
-        }))
+        }) {
+            return Ok(false);
+        }
+
+        // Generic ENSv1 topic intake is deliberately wider than resolver
+        // profile discovery. No admission row means the resolver is still
+        // unclassified, so a decoded fact remains observable while complete
+        // family coverage stays pending. Once the address has an explicit
+        // profile classification, unsupported facts remain rejected above.
+        if source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1
+            && !self.classified_profile_addresses.contains(&(
+                chain_id,
+                source_family,
+                emitting_address,
+            ))
+        {
+            return Ok(false);
+        }
+
+        Ok(true)
     }
 }
 
@@ -245,14 +327,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolver_profile_gate_rejects_unsupported_record_facts() -> Result<()> {
+    fn resolver_profile_gate_observes_pending_and_unclassified_ensv1_facts_but_rejects_unsupported_facts()
+    -> Result<()> {
         let event_topics = AuthorityEventTopics::for_tests();
         let supported_resolver = "0x00000000000000000000000000000000000000c1";
         let unsupported_resolver = "0x00000000000000000000000000000000000000c2";
         let eth_only_resolver = "0x00000000000000000000000000000000000000c3";
         let multicoin_resolver = "0x00000000000000000000000000000000000000c4";
+        let unclassified_resolver = "0x00000000000000000000000000000000000000c5";
+        let pending_resolver = "0x00000000000000000000000000000000000000c6";
         let gate = ResolverProfileGate {
             supported_fact_families: HashSet::from([
+                (
+                    "ethereum-mainnet".to_owned(),
+                    SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
+                    supported_resolver.to_owned(),
+                    "resolver_record",
+                ),
+                (
+                    "ethereum-mainnet".to_owned(),
+                    SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
+                    supported_resolver.to_owned(),
+                    "resolver_record:name",
+                ),
+                (
+                    "ethereum-mainnet".to_owned(),
+                    SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
+                    supported_resolver.to_owned(),
+                    "resolver_record_version",
+                ),
+                (
+                    "ethereum-mainnet".to_owned(),
+                    SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
+                    eth_only_resolver.to_owned(),
+                    "resolver_record:addr",
+                ),
+                (
+                    "ethereum-mainnet".to_owned(),
+                    SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
+                    multicoin_resolver.to_owned(),
+                    "resolver_record:multicoin_addr",
+                ),
+            ]),
+            observable_fact_families: HashSet::from([
                 (
                     "ethereum-mainnet".to_owned(),
                     SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
@@ -277,6 +394,39 @@ mod tests {
                     multicoin_resolver.to_owned(),
                     "resolver_record:multicoin_addr",
                 ),
+                (
+                    "ethereum-mainnet".to_owned(),
+                    SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
+                    pending_resolver.to_owned(),
+                    "resolver_record",
+                ),
+            ]),
+            classified_profile_addresses: HashSet::from([
+                (
+                    "ethereum-mainnet".to_owned(),
+                    SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
+                    supported_resolver.to_owned(),
+                ),
+                (
+                    "ethereum-mainnet".to_owned(),
+                    SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
+                    unsupported_resolver.to_owned(),
+                ),
+                (
+                    "ethereum-mainnet".to_owned(),
+                    SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
+                    eth_only_resolver.to_owned(),
+                ),
+                (
+                    "ethereum-mainnet".to_owned(),
+                    SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
+                    multicoin_resolver.to_owned(),
+                ),
+                (
+                    "ethereum-mainnet".to_owned(),
+                    SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
+                    pending_resolver.to_owned(),
+                ),
             ]),
         };
 
@@ -286,6 +436,30 @@ mod tests {
         )?);
         assert!(gate.rejects_resolver_local_fact(
             &resolver_log(unsupported_resolver, name_changed_topic0(),),
+            &event_topics
+        )?);
+        assert!(!gate.rejects_resolver_local_fact(
+            &resolver_log(unclassified_resolver, name_changed_topic0(),),
+            &event_topics
+        )?);
+        assert!(!gate.rejects_resolver_local_fact(
+            &resolver_log(pending_resolver, name_changed_topic0()),
+            &event_topics
+        )?);
+        assert!(gate.supports_resolver_local_fact(
+            &resolver_log(supported_resolver, name_changed_topic0()),
+            &event_topics
+        )?);
+        assert!(!gate.supports_resolver_local_fact(
+            &resolver_log(unclassified_resolver, name_changed_topic0()),
+            &event_topics
+        )?);
+        assert!(!gate.supports_resolver_local_fact(
+            &resolver_log(pending_resolver, name_changed_topic0()),
+            &event_topics
+        )?);
+        assert!(!gate.supports_resolver_local_fact(
+            &resolver_log(unsupported_resolver, name_changed_topic0()),
             &event_topics
         )?);
         assert!(!gate.rejects_resolver_local_fact(

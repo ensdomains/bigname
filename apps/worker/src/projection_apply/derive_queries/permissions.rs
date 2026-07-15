@@ -16,7 +16,18 @@ candidate_keys AS (
         change_id,
         changed_at
     FROM changed_events
-    WHERE event_kind IN ('PermissionChanged', 'RootPermissionChanged', 'PermissionScopeChanged')
+    WHERE (
+        event_kind IN (
+            'PermissionChanged',
+            'RootPermissionChanged',
+            'PermissionScopeChanged',
+            'AuthorityEpochChanged'
+        )
+        OR (
+            event_kind = 'RegistrationGranted'
+            AND source_family = 'ens_v2_registry_l1'
+        )
+    )
       AND resource_id IS NOT NULL
 )
 "#;

@@ -1654,6 +1654,14 @@ async fn children_current_declared_child_sources_include_ensv2_linked_subregistr
                 305,
                 0,
             ),
+            ensv2_subregistry_event(
+                "ensv2-subregistry-repeat",
+                parent,
+                parent_registry,
+                Some(child_registry),
+                300,
+                1,
+            ),
         ],
     )
     .await?;
@@ -1689,6 +1697,25 @@ async fn children_current_declared_child_sources_include_ensv2_linked_subregistr
     assert_eq!(current[0].chain_id, "ethereum-sepolia");
     assert_eq!(current[0].normalized_event_ids.len(), 3);
     assert_eq!(current[0].raw_fact_refs.as_array().map(Vec::len), Some(3));
+
+    upsert_normalized_events(
+        database.pool(),
+        &[ensv2_subregistry_event(
+            "ensv2-subregistry-terminal",
+            parent,
+            parent_registry,
+            None,
+            307,
+            0,
+        )],
+    )
+    .await?;
+    assert!(
+        load_canonical_declared_child_sources(database.pool(), Some(parent))
+            .await?
+            .is_empty(),
+        "a terminal null SubregistryChanged must remove the retired subtree on full rebuild"
+    );
 
     database.cleanup().await
 }

@@ -89,6 +89,10 @@ struct TestDatabase {
 
 impl TestDatabase {
     async fn new() -> Result<Self> {
+        Self::new_with_max_connections(5).await
+    }
+
+    async fn new_with_max_connections(max_connections: u32) -> Result<Self> {
         let database_url = std::env::var("BIGNAME_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| default_database_url().to_owned());
@@ -119,7 +123,7 @@ impl TestDatabase {
         let mut database_options = connect_options.database(&database_name);
         database_options = database_options.application_name("bigname-ensv1-subregistry-tests");
         let pool = PgPoolOptions::new()
-            .max_connections(5)
+            .max_connections(max_connections)
             .connect_with(database_options)
             .await
             .with_context(|| format!("failed to connect test database {database_name}"))?;
@@ -824,6 +828,138 @@ async fn checkpointed_subregistry_replay_full_reconciles_missing_staged_edges() 
 }
 
 #[tokio::test]
+async fn checkpointed_subregistry_replay_reaches_reactivated_recursive_emitters() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+
+    let registry_address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+    let eth_owner = "0x00000000000000000000000000000000000000CC";
+    let sub_owner = "0x00000000000000000000000000000000000000DD";
+    let eth_block_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let sub_block_hash = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let tombstone_block_hash = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    test_dir.write_manifest("ens", "ens_v1_registry_l1", "v1", &manifest_contents(true))?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+    insert_raw_new_owner_log(
+        database.pool(),
+        "ethereum-mainnet",
+        eth_block_hash,
+        42,
+        registry_address,
+        eth_owner,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    let initial = sync_ens_v1_subregistry_discovery(database.pool(), "ethereum-mainnet").await?;
+    assert_eq!(initial.active_edge_count, 1);
+
+    insert_raw_new_owner_log(
+        database.pool(),
+        "ethereum-mainnet",
+        tombstone_block_hash,
+        44,
+        registry_address,
+        ZERO_ADDRESS,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    let removed = sync_ens_v1_subregistry_discovery(database.pool(), "ethereum-mainnet").await?;
+    assert_eq!(removed.active_edge_count, 0);
+    insert_raw_new_owner_log(
+        database.pool(),
+        "ethereum-mainnet",
+        tombstone_block_hash,
+        44,
+        registry_address,
+        ZERO_ADDRESS,
+        CanonicalityState::Orphaned,
+    )
+    .await?;
+
+    let eth_node = child_node(ZERO_NODE, &labelhash_hex("eth"))?;
+    insert_raw_new_owner_log_with_key(
+        database.pool(),
+        RawNewOwnerLog {
+            chain_id: "ethereum-mainnet",
+            block_hash: sub_block_hash,
+            block_number: 43,
+            emitting_address: eth_owner,
+            owner: sub_owner,
+            parent_node: &eth_node,
+            label: "sub",
+            canonicality_state: CanonicalityState::Canonical,
+        },
+    )
+    .await?;
+
+    let checkpoint = ReplayAdapterCheckpointContext {
+        deployment_profile: "test".to_owned(),
+        cursor_kind: "checkpointed_subregistry_reactivated_recursive_emitters".to_owned(),
+        range_start_block_number: 1,
+        target_block_number: 43,
+    };
+    let replay = sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit(
+        database.pool(),
+        "ethereum-mainnet",
+        &checkpoint,
+        1,
+    )
+    .await?;
+    assert_eq!(replay.scanned_log_count, 2);
+    assert_eq!(replay.matched_log_count, 2);
+    assert_eq!(replay.active_observation_count, 2);
+    assert_eq!(replay.active_edge_count, 2);
+    assert_eq!(
+        replay.inserted_edge_count, 0,
+        "the public replay summary is from the final fixed-point pass"
+    );
+    assert_eq!(replay.deactivated_edge_count, 0);
+    assert_eq!(replay.total_normalized_event_count, 2);
+    assert_eq!(
+        replay.total_normalized_event_inserted_count, 1,
+        "the restored root assignment is idempotent while the retained child assignment is new"
+    );
+
+    let discovery_source = ens_v1_subregistry_discovery_source("ethereum-mainnet");
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE discovery_source = $1 AND deactivated_at IS NULL"
+        )
+        .bind(&discovery_source)
+        .fetch_one(database.pool())
+        .await?,
+        2
+    );
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE event_kind = 'SubregistryChanged' AND block_number <= 43"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        2
+    );
+    let watched_plan = load_watched_chain_plan(database.pool()).await?;
+    assert_eq!(
+        watched_plan,
+        vec![WatchedChainPlan {
+            chain: "ethereum-mainnet".to_owned(),
+            addresses: vec![
+                "0x00000000000000000000000000000000000000cc".to_owned(),
+                "0x00000000000000000000000000000000000000dd".to_owned(),
+                "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned(),
+            ],
+            manifest_root_entry_count: 1,
+            manifest_contract_entry_count: 1,
+            discovery_edge_entry_count: 2,
+        }]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn checkpointed_subregistry_replay_reaches_recursive_emitters_discovered_in_target()
 -> Result<()> {
     let _permit = crate::acquire_test_db_permit().await;
@@ -921,6 +1057,117 @@ async fn checkpointed_subregistry_replay_reaches_recursive_emitters_discovered_i
             manifest_contract_entry_count: 1,
             discovery_edge_entry_count: 2,
         }]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn checkpointed_subregistry_replay_resets_for_late_lower_position_in_consumed_block()
+-> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new_with_max_connections(2).await?;
+
+    let chain = "ethereum-mainnet";
+    let registry_address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+    let block_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    test_dir.write_manifest("ens", "ens_v1_registry_l1", "v1", &manifest_contents(true))?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+    upsert_raw_blocks(
+        database.pool(),
+        &[RawBlock {
+            chain_id: chain.to_owned(),
+            block_hash: block_hash.to_owned(),
+            parent_hash: None,
+            block_number: 42,
+            block_timestamp: OffsetDateTime::UNIX_EPOCH,
+            logs_bloom: None,
+            transactions_root: None,
+            receipts_root: None,
+            state_root: None,
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[RawLog {
+            chain_id: chain.to_owned(),
+            block_hash: block_hash.to_owned(),
+            block_number: 42,
+            transaction_hash: "0xhigh".to_owned(),
+            transaction_index: 1,
+            log_index: 1,
+            emitting_address: registry_address.to_owned(),
+            topics: vec![
+                new_owner_topic0(),
+                ZERO_NODE.to_owned(),
+                labelhash_hex("eth"),
+            ],
+            data: encode_new_owner_log_data("0x00000000000000000000000000000000000000cc"),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+
+    let checkpoint = ReplayAdapterCheckpointContext {
+        deployment_profile: "test".to_owned(),
+        cursor_kind: "checkpointed_subregistry_late_lower_position".to_owned(),
+        range_start_block_number: 1,
+        target_block_number: 42,
+    };
+    let first = sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit(
+        database.pool(),
+        chain,
+        &checkpoint,
+        1,
+    )
+    .await?;
+    assert_eq!(first.scanned_log_count, 1);
+
+    upsert_raw_logs(
+        database.pool(),
+        &[RawLog {
+            chain_id: chain.to_owned(),
+            block_hash: block_hash.to_owned(),
+            block_number: 42,
+            transaction_hash: "0xlow".to_owned(),
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: registry_address.to_owned(),
+            topics: vec![
+                new_owner_topic0(),
+                ZERO_NODE.to_owned(),
+                labelhash_hex("com"),
+            ],
+            data: encode_new_owner_log_data("0x00000000000000000000000000000000000000dd"),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+
+    let extended_checkpoint = ReplayAdapterCheckpointContext {
+        target_block_number: 43,
+        ..checkpoint
+    };
+    let extended = sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit(
+        database.pool(),
+        chain,
+        &extended_checkpoint,
+        1,
+    )
+    .await?;
+    assert_eq!(extended.scanned_log_count, 2);
+    assert_eq!(extended.matched_log_count, 2);
+    assert_eq!(extended.active_observation_count, 2);
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE event_kind = 'SubregistryChanged'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        2
     );
 
     database.cleanup().await
@@ -2608,7 +2855,9 @@ async fn source_scoped_subregistry_discovery_reconciles_touched_assignments_only
     assert_eq!(summary.scanned_log_count, 1);
     assert_eq!(summary.matched_log_count, 1);
     assert_eq!(summary.active_observation_count, 1);
-    assert_eq!(summary.active_edge_count, 1);
+    // The scoped replay mutates only the touched assignment, while the summary reports the
+    // post-reconciliation total for this discovery source.
+    assert_eq!(summary.active_edge_count, 2);
     assert_eq!(summary.admitted_edge_count, 1);
     assert_eq!(summary.inserted_edge_count, 1);
     assert_eq!(summary.deactivated_edge_count, 1);

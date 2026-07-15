@@ -190,6 +190,7 @@ async fn load_reverse_claim_sources_internal(
 pub(super) fn apply_reverse_claim_source_observation(
     history: &mut ReverseClaimSourceHistory,
     observation: AuthorityObservation,
+    resolver_fact_has_supported_profile: bool,
 ) -> Result<()> {
     match observation {
         AuthorityObservation::ResolverChanged(event) => {
@@ -228,13 +229,18 @@ pub(super) fn apply_reverse_claim_source_observation(
             if event.selector.record_key != "name" {
                 return Ok(());
             }
+            // Generic ENSv1 NameChanged intake retains one reverse-source
+            // observation across profile reclassification, but only a
+            // supported name profile may turn it into declared primary-name
+            // identity.
+            let claim_source = resolver_fact_has_supported_profile.then_some(&history.claim_source);
             history.events.push(build_normalized_event(
                 &event.reference,
                 None,
                 None,
                 EVENT_KIND_RECORD_CHANGED,
                 json!({}),
-                record_changed_after_state(&event, Some(&history.claim_source)),
+                record_changed_after_state(&event, claim_source),
                 format!(
                     "record-change:{}:{}:{}",
                     event.reference.block_hash,

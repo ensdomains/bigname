@@ -11,12 +11,42 @@ const LABEL: &str = "crosspoll";
 const LOGICAL_NAME_ID: &str = "ens:crosspoll.eth";
 const YEAR: u64 = 365 * 24 * 60 * 60;
 
+#[derive(Debug, PartialEq, sqlx::FromRow)]
+struct TerminalRoleRow {
+    event_kind: String,
+    block_number: i64,
+    terminal_reason: Option<String>,
+    resolver: Option<String>,
+    subregistry: Option<String>,
+}
+
 #[tokio::test]
 async fn ens_v2_registry_state_survives_distinct_live_polls() -> Result<()> {
     let anvil = Anvil::spawn_ethereum_sepolia().await?;
     let rpc = anvil.client();
     let root = repo_root();
     let deployment = ens_v2::deploy_ens_v2(&rpc, &root).await?;
+    let accounts = rpc.accounts().await?;
+    let alice = accounts[1];
+    let bob = accounts[2];
+    // This scenario isolates process-local lifecycle-state reuse across live
+    // polls. Admit and generation-cover the registry target during automatic
+    // startup so the later poll is not also testing the separate operational
+    // catch-up required for a first-ever live discovery target.
+    let child = ens_v2::deploy_child_registry(&rpc, &root, &deployment).await?;
+    ens_v2::register_eth_name(
+        &rpc,
+        &deployment,
+        ens_v2::RegisterEthName {
+            from: alice,
+            label: "crosspollcoverage",
+            owner: alice,
+            duration_secs: YEAR,
+            subregistry: child.address,
+            resolver: Address::ZERO,
+        },
+    )
+    .await?;
     rpc.mine(2).await?;
 
     let scratch = support::TempDir::create()?;
@@ -38,9 +68,6 @@ async fn ens_v2_registry_state_survives_distinct_live_polls() -> Result<()> {
         .wait_for_first_chain_checkpoint(&db.pool, CHAIN)
         .await?;
 
-    let accounts = rpc.accounts().await?;
-    let alice = accounts[1];
-    let bob = accounts[2];
     let registration = ens_v2::register_eth_name(
         &rpc,
         &deployment,
@@ -95,7 +122,6 @@ async fn ens_v2_registry_state_survives_distinct_live_polls() -> Result<()> {
         )
         .await?;
 
-    let child = ens_v2::deploy_child_registry(&rpc, &root, &deployment).await?;
     ens_v2::attach_subregistry(
         &rpc,
         deployment.eth_registry.address,
@@ -197,8 +223,10 @@ async fn ens_v2_registry_state_survives_distinct_live_polls() -> Result<()> {
             "SubregistryChanged",
             "TokenRegenerated",
             "RegistrationReleased",
+            "ResolverChanged",
+            "SubregistryChanged",
         ],
-        "each later poll must retain enough registry state to normalize its lifecycle event: {lifecycle:?}"
+        "each later poll must retain enough registry state to normalize its lifecycle event and terminal role boundaries: {lifecycle:?}"
     );
     assert!(
         lifecycle
@@ -211,6 +239,48 @@ async fn ens_v2_registry_state_survives_distinct_live_polls() -> Result<()> {
             .iter()
             .all(|(_, _, resource_id)| *resource_id == lifecycle[0].2),
         "resolver, subregistry, token, and unregister events must remain on one resource: {lifecycle:?}"
+    );
+
+    let release_block = lifecycle
+        .iter()
+        .find(|(event_kind, _, _)| event_kind == "RegistrationReleased")
+        .map(|(_, block_number, _)| *block_number)
+        .expect("lifecycle assertion above requires a RegistrationReleased row");
+    let terminal_roles: Vec<TerminalRoleRow> = sqlx::query_as(
+        "SELECT event_kind, \
+                block_number, \
+                after_state->>'terminal_reason' AS terminal_reason, \
+                after_state->>'resolver' AS resolver, \
+                after_state->>'subregistry' AS subregistry \
+         FROM normalized_events \
+         WHERE logical_name_id = $1 \
+           AND after_state->>'terminal_reason' = 'unregistered' \
+           AND event_kind IN ('ResolverChanged', 'SubregistryChanged') \
+           AND canonicality_state IN ('canonical', 'safe', 'finalized') \
+         ORDER BY event_kind",
+    )
+    .bind(LOGICAL_NAME_ID)
+    .fetch_all(&db.pool)
+    .await?;
+    assert_eq!(
+        terminal_roles,
+        vec![
+            TerminalRoleRow {
+                event_kind: "ResolverChanged".to_owned(),
+                block_number: release_block,
+                terminal_reason: Some("unregistered".to_owned()),
+                resolver: None,
+                subregistry: None,
+            },
+            TerminalRoleRow {
+                event_kind: "SubregistryChanged".to_owned(),
+                block_number: release_block,
+                terminal_reason: Some("unregistered".to_owned()),
+                resolver: None,
+                subregistry: None,
+            },
+        ],
+        "unregister must emit explicit null resolver and subregistry boundaries"
     );
 
     let expiry_event_blocks: Vec<i64> = sqlx::query_scalar(

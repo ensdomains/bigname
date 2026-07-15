@@ -13,7 +13,10 @@ mod profile_scope;
 pub(crate) mod scoped;
 
 use super::{
-    adapter_sync::sync_replay_normalized_events_from_persisted_raw_payloads,
+    adapter_sync::{
+        sync_manual_full_closure_normalized_events_from_persisted_raw_payloads,
+        sync_replay_normalized_events_from_persisted_raw_payloads,
+    },
     types::{
         PersistedRawPayloadAdapterSyncSummary, RawFactNormalizedEventReplayOutcome,
         RawFactNormalizedEventReplayRequest, RawFactNormalizedEventReplaySelection,
@@ -21,14 +24,18 @@ use super::{
 };
 use classification::classify_raw_fact_replay_contract;
 use profile_scope::{
-    ensure_replay_matches_deployment_profile_scope, load_replay_adapter_source_scope,
+    ensure_replay_matches_deployment_profile_scope, load_replay_adapter_source_scopes,
 };
 use scoped::load_replay_raw_log_selection_for_scoped_range;
+
+const MANUAL_FULL_CLOSURE_CHECKPOINT_CURSOR_PREFIX: &str = "manual_raw_fact_normalized_events";
 
 pub(crate) use classification::{
     NormalizedEventReplayAdapter, RawFactReplayContractPlan,
     active_closure_or_dependency_replay_adapters, chain_has_closure_or_dependency_replay_adapter,
-    source_scope_includes_adapter, unsupported_closure_replay_adapters,
+    ensure_full_closure_retention_authority_for_adapters,
+    ensure_legacy_registry_closure_retention_authority_for_adapters, source_scope_includes_adapter,
+    unsupported_closure_replay_adapters,
 };
 
 pub(crate) async fn replay_raw_fact_normalized_events(
@@ -51,7 +58,7 @@ pub(crate) async fn replay_raw_fact_normalized_events(
     let profile_scope_ms = profile_scope_started.elapsed().as_millis();
 
     let source_scope_started = Instant::now();
-    let source_scope = load_replay_adapter_source_scope(
+    let source_scopes = load_replay_adapter_source_scopes(
         pool,
         &request,
         raw_log_selection.range,
@@ -59,13 +66,19 @@ pub(crate) async fn replay_raw_fact_normalized_events(
     )
     .await?;
     let source_scope_ms = source_scope_started.elapsed().as_millis();
+    let source_scope = &source_scopes.execution;
 
-    let replay_contract_plan =
-        classify_raw_fact_replay_contract(pool, &request, &raw_log_selection, &source_scope)
-            .await?;
+    let replay_contract_plan = classify_raw_fact_replay_contract(
+        pool,
+        &request,
+        &raw_log_selection,
+        source_scope,
+        &source_scopes.closure_validation,
+    )
+    .await?;
 
     let adapter_sync_started = Instant::now();
-    let normalized_event_summary = if raw_log_selection.block_hashes.is_empty() {
+    let mut normalized_event_summary = if raw_log_selection.block_hashes.is_empty() {
         PersistedRawPayloadAdapterSyncSummary::default()
     } else if source_scope.is_empty() {
         PersistedRawPayloadAdapterSyncSummary {
@@ -73,18 +86,54 @@ pub(crate) async fn replay_raw_fact_normalized_events(
             matched_log_count: 0,
             total_synced_count: 0,
             total_inserted_count: 0,
+            resolver_profile_authority_epoch_guard_count: 0,
+            resolver_profile_authority_scan_count: 0,
         }
     } else {
         sync_replay_normalized_events_from_persisted_raw_payloads(
             pool,
             &request.chain,
             &raw_log_selection.block_hashes,
-            Some(&source_scope),
+            Some(source_scope),
             raw_log_selection.canonical_raw_log_count,
             replay_contract_plan,
         )
         .await?
     };
+    if replay_contract_plan.permits_nonstateless_adapters() {
+        let RawFactNormalizedEventReplaySelection::BlockRange {
+            from_block,
+            to_block,
+        } = request.selection
+        else {
+            unreachable!("full-closure replay classification requires a block range");
+        };
+        let closure_adapters = active_closure_or_dependency_replay_adapters(pool, &request.chain)
+            .await?
+            .into_iter()
+            .filter(|adapter| source_scope_includes_adapter(source_scope, *adapter))
+            .collect::<Vec<_>>();
+        let checkpoint_cursor_kind =
+            manual_full_closure_checkpoint_cursor_kind(from_block, to_block);
+        let closure_summary =
+            sync_manual_full_closure_normalized_events_from_persisted_raw_payloads(
+                pool,
+                &request.deployment_profile,
+                &request.chain,
+                &checkpoint_cursor_kind,
+                from_block,
+                to_block,
+                &closure_adapters,
+                100_000,
+            )
+            .await?;
+        normalized_event_summary.add_counts(
+            closure_summary.scanned_log_count,
+            closure_summary.matched_log_count,
+            closure_summary.total_synced_count,
+            closure_summary.total_inserted_count,
+        );
+    }
     let adapter_sync_ms = adapter_sync_started.elapsed().as_millis();
 
     info!(
@@ -123,6 +172,10 @@ pub(crate) async fn replay_raw_fact_normalized_events(
         normalized_event_synced_count: normalized_event_summary.total_synced_count,
         normalized_event_inserted_count: normalized_event_summary.total_inserted_count,
     })
+}
+
+fn manual_full_closure_checkpoint_cursor_kind(from_block: i64, to_block: i64) -> String {
+    format!("{MANUAL_FULL_CLOSURE_CHECKPOINT_CURSOR_PREFIX}:{from_block}:{to_block}")
 }
 
 #[derive(Debug, Eq, PartialEq)]

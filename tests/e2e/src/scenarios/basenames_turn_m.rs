@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use sqlx::types::Uuid;
 
 use super::support;
+use crate::harness::responses::{exact_name, pointer, primary_name, selector_keys};
 use crate::harness::{anvil::Anvil, basenames, ens_v1, repo_root};
 
 const DAY: u64 = 24 * 60 * 60;
@@ -14,19 +15,6 @@ const GRACE_PERIOD: u64 = 90 * DAY;
 const MULTICOIN_TYPE: u64 = 0;
 const MULTICOIN_BYTES: &[u8] = &[0xde, 0xad, 0xbe, 0xef];
 const CONTENTHASH_BYTES: &[u8] = &[0xe3, 0x01, 0x01, 0x70, 0x12, 0x20];
-
-fn pointer(body: &Value, path: &str) -> Value {
-    body.pointer(path).cloned().unwrap_or(Value::Null)
-}
-
-async fn exact_name(run: &support::PipelineRun, name: &str) -> Result<Value> {
-    let (status, body) = run
-        .api
-        .get_json(&format!("/v1/names/basenames/{name}"))
-        .await?;
-    assert_eq!(status, 200, "Basenames exact-name lookup failed: {body}");
-    Ok(body)
-}
 
 async fn children(run: &support::PipelineRun, parent: &str) -> Result<Vec<Value>> {
     let (status, body) = run
@@ -48,28 +36,6 @@ async fn compact_records(run: &support::PipelineRun, name: &str, query: &str) ->
         .await?;
     assert_eq!(status, 200, "Basenames records lookup failed: {body}");
     Ok(body)
-}
-
-async fn primary_name(run: &support::PipelineRun, address: &str) -> Result<Value> {
-    let (status, body) = run
-        .api
-        .get_json(&format!(
-            "/v1/primary-names/{address}?namespace=basenames&coin_type={}&mode=declared",
-            basenames::BASE_PRIMARY_COIN_TYPE
-        ))
-        .await?;
-    assert_eq!(status, 200, "Basenames primary-name lookup failed: {body}");
-    Ok(body)
-}
-
-fn selector_keys(body: &Value) -> BTreeSet<String> {
-    body.pointer("/declared_state/record_inventory/selectors")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| entry.get("record_key").and_then(Value::as_str))
-        .map(str::to_owned)
-        .collect()
 }
 
 fn inventory_reason(body: &Value, section: &str, family: &str, field: &str) -> Option<String> {
@@ -150,7 +116,7 @@ async fn renew_release_and_premium_reregistration_rotate_lineage() -> Result<()>
         renewal_events, 1,
         "three-field NameRenewed must decode once"
     );
-    let grace_body = exact_name(&grace, "phoenix.base.eth").await?;
+    let grace_body = exact_name(&grace.api, "basenames", "phoenix.base.eth").await?;
     assert_eq!(
         pointer(&grace_body, "/declared_state/registration/status"),
         "active"
@@ -197,7 +163,7 @@ async fn renew_release_and_premium_reregistration_rotate_lineage() -> Result<()>
          release={release_block}, activity={}",
         activity.register_block
     );
-    let released_body = exact_name(&released, "phoenix.base.eth").await?;
+    let released_body = exact_name(&released.api, "basenames", "phoenix.base.eth").await?;
     assert_eq!(
         pointer(&released_body, "/declared_state/registration/status"),
         "released"
@@ -278,7 +244,7 @@ async fn renew_release_and_premium_reregistration_rotate_lineage() -> Result<()>
     .await?;
     assert_eq!(renewal_resource, first_identity.0);
 
-    let body = exact_name(&current, "phoenix.base.eth").await?;
+    let body = exact_name(&current.api, "basenames", "phoenix.base.eth").await?;
     assert_eq!(
         pointer(&body, "/data/resource_id"),
         second_identity.0.to_string()
@@ -398,14 +364,22 @@ async fn upgradeable_controller_proxy_registers_and_renews() -> Result<()> {
         .await?;
         assert_eq!(derived, 1, "proxy-emitted {event_kind} did not decode");
     }
-    let implementation_logs: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM raw_logs WHERE lower(emitting_address) = $1")
-            .bind(format!("{:#x}", implementation.address))
-            .fetch_one(&run.db.pool)
-            .await?;
-    assert_eq!(implementation_logs, 0);
+    let implementation_call_logs: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM raw_logs \
+         WHERE transaction_hash IN ($1, $2) \
+           AND lower(emitting_address) = $3",
+    )
+    .bind(&registered.register_tx_hash)
+    .bind(&renewed.tx_hash)
+    .bind(format!("{:#x}", implementation.address))
+    .fetch_one(&run.db.pool)
+    .await?;
+    assert_eq!(
+        implementation_call_logs, 0,
+        "delegatecall registration and renewal logs must be emitted by the proxy"
+    );
 
-    let body = exact_name(&run, "proxied.base.eth").await?;
+    let body = exact_name(&run.api, "basenames", "proxied.base.eth").await?;
     assert_eq!(
         pointer(&body, "/declared_state/registration/status"),
         "active"
@@ -657,7 +631,7 @@ async fn l2_resolver_records_clear_and_contenthash_gap() -> Result<()> {
     .await?;
     assert_eq!(contenthash_events, 0);
 
-    let initial_exact = exact_name(&initial, "records.base.eth").await?;
+    let initial_exact = exact_name(&initial.api, "basenames", "records.base.eth").await?;
     assert_eq!(
         selector_keys(&initial_exact),
         BTreeSet::from(["addr:0".to_owned(), "text:description".to_owned()])
@@ -717,7 +691,7 @@ async fn l2_resolver_records_clear_and_contenthash_gap() -> Result<()> {
     .await?;
     assert_eq!(version_events, 1);
 
-    let current_exact = exact_name(&current, "records.base.eth").await?;
+    let current_exact = exact_name(&current.api, "basenames", "records.base.eth").await?;
     let current_boundary = pointer(
         &current_exact,
         "/declared_state/record_inventory/record_version_boundary",
@@ -798,7 +772,7 @@ async fn unadmitted_resolver_rotation_stays_profile_gated_then_clears() -> Resul
     .await?;
 
     // Live intake hangs on this rotation-to-discovered-instance chain (the
-    // Base sibling of the chipped compositional/reveal hang family; the
+    // Base sibling of the reproduced compositional/reveal hang family; the
     // ENSv1 twin of this scenario ingests live without issue). Both phases
     // pin derivation and projections via backfill + replay; API-layer reads
     // are impossible on this path.
@@ -1125,7 +1099,14 @@ async fn legacy_reverse_registrar_stays_registry_and_raw_record_only() -> Result
         primary_rows, 0,
         "helper path must not mint a primary candidate"
     );
-    let primary = primary_name(&run, &alice_path).await?;
+    let primary = primary_name(
+        &run.api,
+        "basenames",
+        basenames::BASE_PRIMARY_COIN_TYPE,
+        &alice_path,
+        "declared",
+    )
+    .await?;
     assert_eq!(
         pointer(&primary, "/declared_state/claimed_primary_name/status"),
         "not_found"

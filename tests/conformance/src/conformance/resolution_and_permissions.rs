@@ -5512,6 +5512,19 @@ async fn resource_permissions_contract_returns_rows_with_shared_collection_envel
     )
     .await
     .context("failed to upsert permissions_current rows for conformance")?;
+    bigname_storage::upsert_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(
+            resource_id,
+            "registrar",
+            &["permissions_current"],
+            "resource_permissions",
+            "ethereum-mainnet",
+            43,
+        ),
+    )
+    .await
+    .context("failed to upsert permissions_current resource summary for conformance")?;
 
     let response = app_router(database.app_state())
         .oneshot(
@@ -5779,6 +5792,19 @@ async fn resource_permissions_contract_reads_basenames_permission_changed_rows_o
             )
             .await?;
     rebuild_permissions_current(&database, Some(resource_id)).await?;
+    bigname_storage::upsert_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(
+            resource_id,
+            "registrar",
+            &["permissions_current"],
+            "resource_permissions",
+            "base-mainnet",
+            107,
+        ),
+    )
+    .await
+    .context("failed to upsert Basenames permissions resource summary for conformance")?;
 
     let response = app_router(database.app_state())
         .oneshot(
@@ -5904,6 +5930,19 @@ async fn resource_permissions_contract_reads_ensv2_resource_and_resolver_scopes(
     )
     .await?;
     rebuild_permissions_current(&database, Some(resource_id)).await?;
+    bigname_storage::upsert_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(
+            resource_id,
+            "ens_v2_registry",
+            &[ENSV2_RESOLVER_SOURCE_FAMILY],
+            "resource_permissions",
+            "ethereum-mainnet",
+            144,
+        ),
+    )
+    .await
+    .context("failed to upsert ENSv2 permissions resource summary for conformance")?;
 
     let response = app_router(database.app_state())
         .oneshot(

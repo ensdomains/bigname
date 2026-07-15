@@ -41,6 +41,9 @@ pub(crate) async fn run_resumable_hash_pinned_backfill_job_concurrently(
     let watched_chain = &source_plan.watched_chain_plan;
     let record =
         create_hash_pinned_backfill_job_with_ranges(pool, source_plan, &config, ranges).await?;
+    config
+        .idempotency_key
+        .clone_from(&record.job.idempotency_key);
     let mut aggregate =
         BackfillJobRunOutcome::new(record.job.backfill_job_id, source_plan, &config);
     let lease_duration_secs = backfill_lease_duration_secs(config.lease_expires_at)?;
@@ -404,6 +407,7 @@ mod tests {
         BackfillJobRunConfig {
             deployment_profile: "test".to_owned(),
             idempotency_key: "test".to_owned(),
+            scope_idempotency_to_raw_log_retention_generation: false,
             range: super::super::BackfillBlockRange {
                 from_block: 1,
                 to_block: 8_192,

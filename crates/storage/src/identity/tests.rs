@@ -1,6 +1,6 @@
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -234,6 +234,75 @@ fn binding(seed: BindingSeed<'_>) -> SurfaceBinding {
         provenance: json!({"source": seed.source}),
         canonicality_state: seed.canonicality_state,
     }
+}
+
+#[expect(clippy::too_many_arguments)]
+async fn seed_closed_declared_binding(
+    pool: &PgPool,
+    chain_id: &str,
+    block_hash: &str,
+    block_number: i64,
+    namespace: &str,
+    normalized_name: &str,
+    logical_name_id: &str,
+    resource_id: Uuid,
+    surface_binding_id: Uuid,
+    active_from: OffsetDateTime,
+    active_to: OffsetDateTime,
+) -> Result<()> {
+    upsert_resources(
+        pool,
+        &[Resource {
+            resource_id,
+            token_lineage_id: None,
+            chain_id: chain_id.to_owned(),
+            block_hash: block_hash.to_owned(),
+            block_number,
+            provenance: json!({"source": "closed_binding_regression"}),
+            canonicality_state: CanonicalityState::Finalized,
+        }],
+    )
+    .await?;
+    upsert_name_surfaces(
+        pool,
+        &[NameSurface {
+            logical_name_id: logical_name_id.to_owned(),
+            namespace: namespace.to_owned(),
+            input_name: normalized_name.to_owned(),
+            canonical_display_name: normalized_name.to_owned(),
+            normalized_name: normalized_name.to_owned(),
+            dns_encoded_name: vec![0],
+            namehash: format!("namehash:{normalized_name}"),
+            labelhashes: vec![format!("labelhash:{normalized_name}")],
+            normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
+            normalization_warnings: json!([]),
+            normalization_errors: json!([]),
+            chain_id: chain_id.to_owned(),
+            block_hash: block_hash.to_owned(),
+            block_number,
+            provenance: json!({"source": "closed_binding_regression"}),
+            canonicality_state: CanonicalityState::Finalized,
+        }],
+    )
+    .await?;
+    upsert_surface_bindings(
+        pool,
+        &[SurfaceBinding {
+            surface_binding_id,
+            logical_name_id: logical_name_id.to_owned(),
+            resource_id,
+            binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+            active_from,
+            active_to: Some(active_to),
+            chain_id: chain_id.to_owned(),
+            block_hash: block_hash.to_owned(),
+            block_number,
+            provenance: json!({"source": "closed_binding_regression"}),
+            canonicality_state: CanonicalityState::Finalized,
+        }],
+    )
+    .await?;
+    Ok(())
 }
 
 async fn identity_count(pool: &PgPool, address: &str, roles: &str) -> Result<i64> {
@@ -2298,6 +2367,419 @@ async fn orphaned_release_moves_predecessor_close_to_earliest_readable_successor
         Some(winning_successor_start),
         "orphaning the losing T1 release must move the predecessor close to the earliest readable successor at T2"
     );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn orphaned_ensv2_release_preserves_reincluded_close_and_unrelated_boundary() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain_id = "chain:reincluded_release_reorg";
+    let parent_hash = "0xparent_reincluded_release_reorg";
+    let losing_hash = "0xlosing_reincluded_release_reorg";
+    let winning_hash = "0xwinning_reincluded_release_reorg";
+    let active_from = timestamp(1_717_180_000);
+    let losing_block_timestamp = timestamp(1_717_180_100);
+    let winning_block_timestamp = timestamp(1_717_180_200);
+    let losing_close = losing_block_timestamp + Duration::from_micros(2_005);
+    let winning_close = winning_block_timestamp + Duration::from_micros(3_007);
+    let unrelated_close = timestamp(1_717_180_300);
+    let reincluded_resource_id = Uuid::from_u128(0xf200);
+    let reincluded_binding_id = Uuid::from_u128(0xf201);
+    let unrelated_resource_id = Uuid::from_u128(0xf202);
+    let unrelated_binding_id = Uuid::from_u128(0xf203);
+
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[
+            lineage_block(
+                chain_id,
+                parent_hash,
+                Some("0xgenesis_reincluded_release_reorg"),
+                10,
+                active_from,
+                CanonicalityState::Finalized,
+            ),
+            lineage_block(
+                chain_id,
+                losing_hash,
+                Some(parent_hash),
+                20,
+                losing_block_timestamp,
+                CanonicalityState::Finalized,
+            ),
+            lineage_block(
+                chain_id,
+                winning_hash,
+                Some(parent_hash),
+                21,
+                winning_block_timestamp,
+                CanonicalityState::Finalized,
+            ),
+        ],
+    )
+    .await?;
+    seed_closed_declared_binding(
+        database.pool(),
+        chain_id,
+        parent_hash,
+        10,
+        "ens",
+        "reincluded-release.eth",
+        "ens:reincluded-release.eth",
+        reincluded_resource_id,
+        reincluded_binding_id,
+        active_from,
+        losing_close,
+    )
+    .await?;
+    seed_closed_declared_binding(
+        database.pool(),
+        chain_id,
+        parent_hash,
+        10,
+        "ens",
+        "unrelated-close.eth",
+        "ens:unrelated-close.eth",
+        unrelated_resource_id,
+        unrelated_binding_id,
+        active_from,
+        unrelated_close,
+    )
+    .await?;
+
+    upsert_normalized_events_with_summary(
+        database.pool(),
+        &[
+            NormalizedEvent {
+                event_identity: "ensv2-release-losing-reincluded".to_owned(),
+                namespace: "ens".to_owned(),
+                logical_name_id: Some("ens:reincluded-release.eth".to_owned()),
+                resource_id: Some(reincluded_resource_id),
+                event_kind: "RegistrationReleased".to_owned(),
+                source_family: "ens_v2_registry_l1".to_owned(),
+                manifest_version: 1,
+                source_manifest_id: None,
+                chain_id: Some(chain_id.to_owned()),
+                block_number: Some(20),
+                block_hash: Some(losing_hash.to_owned()),
+                transaction_hash: Some("0xrelease-reincluded".to_owned()),
+                log_index: Some(5),
+                raw_fact_ref: json!({
+                    "kind": "raw_log",
+                    "block_hash": losing_hash,
+                    "transaction_index": 2,
+                }),
+                derivation_kind: "ens_v2_registry_resource_surface".to_owned(),
+                canonicality_state: CanonicalityState::Finalized,
+                before_state: json!({"status": "registered"}),
+                after_state: json!({"status": "unregistered"}),
+            },
+            NormalizedEvent {
+                event_identity: "ensv2-release-winning-reincluded".to_owned(),
+                namespace: "ens".to_owned(),
+                logical_name_id: Some("ens:reincluded-release.eth".to_owned()),
+                resource_id: Some(reincluded_resource_id),
+                event_kind: "RegistrationReleased".to_owned(),
+                source_family: "ens_v2_registry_l1".to_owned(),
+                manifest_version: 1,
+                source_manifest_id: None,
+                chain_id: Some(chain_id.to_owned()),
+                block_number: Some(21),
+                block_hash: Some(winning_hash.to_owned()),
+                transaction_hash: Some("0xrelease-reincluded".to_owned()),
+                log_index: Some(7),
+                raw_fact_ref: json!({
+                    "kind": "raw_log",
+                    "block_hash": winning_hash,
+                    "transaction_index": 3,
+                }),
+                derivation_kind: "ens_v2_registry_resource_surface".to_owned(),
+                canonicality_state: CanonicalityState::Finalized,
+                before_state: json!({"status": "registered"}),
+                after_state: json!({"status": "unregistered"}),
+            },
+            NormalizedEvent {
+                event_identity: "ensv2-release-losing-unrelated-boundary".to_owned(),
+                namespace: "ens".to_owned(),
+                logical_name_id: Some("ens:unrelated-close.eth".to_owned()),
+                resource_id: Some(unrelated_resource_id),
+                event_kind: "RegistrationReleased".to_owned(),
+                source_family: "ens_v2_registry_l1".to_owned(),
+                manifest_version: 1,
+                source_manifest_id: None,
+                chain_id: Some(chain_id.to_owned()),
+                block_number: Some(20),
+                block_hash: Some(losing_hash.to_owned()),
+                transaction_hash: Some("0xrelease-unrelated".to_owned()),
+                log_index: Some(1),
+                raw_fact_ref: json!({"kind": "raw_log", "block_hash": losing_hash}),
+                derivation_kind: "ens_v2_registry_resource_surface".to_owned(),
+                canonicality_state: CanonicalityState::Finalized,
+                before_state: json!({"status": "registered"}),
+                after_state: json!({"status": "unregistered"}),
+            },
+        ],
+    )
+    .await?;
+
+    assert_eq!(
+        mark_block_derived_normalized_events_range_orphaned(
+            database.pool(),
+            chain_id,
+            losing_hash,
+            Some(parent_hash),
+        )
+        .await?,
+        2
+    );
+    mark_identity_rows_range_orphaned(database.pool(), chain_id, losing_hash, Some(parent_hash))
+        .await?;
+
+    assert_eq!(
+        load_surface_binding(database.pool(), reincluded_binding_id)
+            .await?
+            .expect("reincluded release predecessor must remain readable")
+            .active_to,
+        Some(winning_close),
+        "a canonical reincluded release must remain the binding close boundary"
+    );
+    assert_eq!(
+        load_surface_binding(database.pool(), unrelated_binding_id)
+            .await?
+            .expect("unrelated close predecessor must remain readable")
+            .active_to,
+        Some(unrelated_close),
+        "orphan repair must not reopen a close at a different position"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn orphaned_ensv2_replacement_reservation_reopens_prior_binding() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain_id = "chain:orphaned_replacement_reservation";
+    let parent_hash = "0xparent_orphaned_replacement_reservation";
+    let losing_hash = "0xlosing_orphaned_replacement_reservation";
+    let active_from = timestamp(1_717_180_400);
+    let losing_block_timestamp = timestamp(1_717_180_500);
+    let losing_close = losing_block_timestamp + Duration::from_micros(2_005);
+    let resource_id = Uuid::from_u128(0xf210);
+    let binding_id = Uuid::from_u128(0xf211);
+
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[
+            lineage_block(
+                chain_id,
+                parent_hash,
+                Some("0xgenesis_orphaned_replacement_reservation"),
+                10,
+                active_from,
+                CanonicalityState::Finalized,
+            ),
+            lineage_block(
+                chain_id,
+                losing_hash,
+                Some(parent_hash),
+                20,
+                losing_block_timestamp,
+                CanonicalityState::Finalized,
+            ),
+        ],
+    )
+    .await?;
+    seed_closed_declared_binding(
+        database.pool(),
+        chain_id,
+        parent_hash,
+        10,
+        "ens",
+        "reserved.eth",
+        "ens:reserved.eth",
+        resource_id,
+        binding_id,
+        active_from,
+        losing_close,
+    )
+    .await?;
+    upsert_normalized_events_with_summary(
+        database.pool(),
+        &[NormalizedEvent {
+            event_identity: "ensv2-replacement-reservation-unbound".to_owned(),
+            namespace: "ens".to_owned(),
+            logical_name_id: Some("ens:reserved.eth".to_owned()),
+            resource_id: Some(resource_id),
+            event_kind: "SurfaceUnbound".to_owned(),
+            source_family: "ens_v2_registry_l1".to_owned(),
+            manifest_version: 1,
+            source_manifest_id: None,
+            chain_id: Some(chain_id.to_owned()),
+            block_number: Some(20),
+            block_hash: Some(losing_hash.to_owned()),
+            transaction_hash: Some("0xreserve-losing".to_owned()),
+            log_index: Some(5),
+            raw_fact_ref: json!({
+                "kind": "raw_log",
+                "block_hash": losing_hash,
+                "transaction_index": 2,
+            }),
+            derivation_kind: "ens_v2_registry_resource_surface".to_owned(),
+            canonicality_state: CanonicalityState::Finalized,
+            before_state: json!({"binding_kind": "declared_registry_path"}),
+            after_state: json!({
+                "source_event": "LabelReserved",
+                "terminal_reason": "replacement_reservation",
+            }),
+        }],
+    )
+    .await?;
+
+    assert_eq!(
+        mark_block_derived_normalized_events_range_orphaned(
+            database.pool(),
+            chain_id,
+            losing_hash,
+            Some(parent_hash),
+        )
+        .await?,
+        1
+    );
+    mark_identity_rows_range_orphaned(database.pool(), chain_id, losing_hash, Some(parent_hash))
+        .await?;
+
+    assert_eq!(
+        load_surface_binding(database.pool(), binding_id)
+            .await?
+            .context("prior registered binding should remain stored")?
+            .active_to,
+        None,
+        "orphaning the replacement reservation must reopen its prior binding"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn orphaned_surface_unbound_reopens_ensv1_and_basenames_bindings() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain_id = "chain:surface_unbound_reorg";
+    let parent_hash = "0xparent_surface_unbound_reorg";
+    let losing_hash = "0xlosing_surface_unbound_reorg";
+    let active_from = timestamp(1_717_181_000);
+    let losing_close = timestamp(1_717_181_100);
+    let cases = [
+        (
+            "ens",
+            "ens:surface-unbound.eth",
+            "surface-unbound.eth",
+            "ens_v1_registrar_l1",
+            Uuid::from_u128(0xf210),
+            Uuid::from_u128(0xf211),
+        ),
+        (
+            "basenames",
+            "basenames:surface-unbound.base.eth",
+            "surface-unbound.base.eth",
+            "basenames_base_registrar",
+            Uuid::from_u128(0xf212),
+            Uuid::from_u128(0xf213),
+        ),
+    ];
+
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[
+            lineage_block(
+                chain_id,
+                parent_hash,
+                Some("0xgenesis_surface_unbound_reorg"),
+                10,
+                active_from,
+                CanonicalityState::Finalized,
+            ),
+            lineage_block(
+                chain_id,
+                losing_hash,
+                Some(parent_hash),
+                20,
+                losing_close,
+                CanonicalityState::Finalized,
+            ),
+        ],
+    )
+    .await?;
+    for (namespace, logical_name_id, name, _, resource_id, binding_id) in &cases {
+        seed_closed_declared_binding(
+            database.pool(),
+            chain_id,
+            parent_hash,
+            10,
+            namespace,
+            name,
+            logical_name_id,
+            *resource_id,
+            *binding_id,
+            active_from,
+            losing_close,
+        )
+        .await?;
+    }
+
+    let events = cases
+        .iter()
+        .enumerate()
+        .map(
+            |(log_index, (namespace, logical_name_id, _, source_family, resource_id, _))| {
+                NormalizedEvent {
+                    event_identity: format!("{namespace}-surface-unbound-losing"),
+                    namespace: (*namespace).to_owned(),
+                    logical_name_id: Some((*logical_name_id).to_owned()),
+                    resource_id: Some(*resource_id),
+                    event_kind: "SurfaceUnbound".to_owned(),
+                    source_family: (*source_family).to_owned(),
+                    manifest_version: 1,
+                    source_manifest_id: None,
+                    chain_id: Some(chain_id.to_owned()),
+                    block_number: Some(20),
+                    block_hash: Some(losing_hash.to_owned()),
+                    transaction_hash: Some(format!("0xsurface-unbound-{namespace}")),
+                    log_index: Some(log_index as i64),
+                    raw_fact_ref: json!({"kind": "raw_log", "block_hash": losing_hash}),
+                    derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+                    canonicality_state: CanonicalityState::Finalized,
+                    before_state: json!({"active_to": null}),
+                    after_state: json!({"active_to": losing_close.unix_timestamp()}),
+                }
+            },
+        )
+        .collect::<Vec<_>>();
+    upsert_normalized_events_with_summary(database.pool(), &events).await?;
+
+    assert_eq!(
+        mark_block_derived_normalized_events_range_orphaned(
+            database.pool(),
+            chain_id,
+            losing_hash,
+            Some(parent_hash),
+        )
+        .await?,
+        2
+    );
+    mark_identity_rows_range_orphaned(database.pool(), chain_id, losing_hash, Some(parent_hash))
+        .await?;
+
+    for (_, logical_name_id, _, _, _, binding_id) in cases {
+        assert_eq!(
+            load_surface_binding(database.pool(), binding_id)
+                .await?
+                .expect("predecessor binding must remain readable")
+                .active_to,
+            None,
+            "orphaned SurfaceUnbound must reopen {logical_name_id}"
+        );
+    }
 
     database.cleanup().await
 }

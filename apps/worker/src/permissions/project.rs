@@ -11,8 +11,9 @@ use super::json::{
     build_coverage, build_provenance, json_object_or_default, json_optional_object,
     json_string_array, json_text, parse_scope,
 };
-use super::load::load_permission_events;
-use super::types::{PermissionKey, RelevantEvent};
+use super::load::{load_permission_events, load_resource_projection_context};
+use super::resource_summary::build_resource_summary;
+use super::types::{PermissionKey, ProjectedPermissionsResource, RelevantEvent};
 use super::{
     EVENT_KIND_PERMISSION_CHANGED, EVENT_KIND_PERMISSION_SCOPE_CHANGED,
     EVENT_KIND_ROOT_PERMISSION_CHANGED,
@@ -47,18 +48,23 @@ pub(crate) struct FuseMaskedPowers {
     pub(crate) changed: bool,
 }
 
-pub(super) async fn build_rows(
+pub(super) async fn build_resource_projection(
     pool: &PgPool,
-    resource_ids: &[Uuid],
-) -> Result<Vec<PermissionsCurrentRow>> {
-    let mut rows = Vec::new();
-
-    for resource_id in resource_ids {
-        let events = load_permission_events(pool, *resource_id).await?;
-        rows.extend(project_rows(*resource_id, &events)?);
-    }
-
-    Ok(rows)
+    resource_id: Uuid,
+) -> Result<ProjectedPermissionsResource> {
+    let Some(context) = load_resource_projection_context(pool, resource_id).await? else {
+        return Ok(ProjectedPermissionsResource {
+            rows: Vec::new(),
+            summary: None,
+        });
+    };
+    let events = load_permission_events(pool, resource_id).await?;
+    let rows = project_rows(resource_id, &events)?;
+    let summary = build_resource_summary(&context, &events);
+    Ok(ProjectedPermissionsResource {
+        rows,
+        summary: Some(summary),
+    })
 }
 
 fn project_rows(resource_id: Uuid, events: &[RelevantEvent]) -> Result<Vec<PermissionsCurrentRow>> {

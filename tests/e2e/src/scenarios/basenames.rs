@@ -2,25 +2,10 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::support;
+use crate::harness::responses::{exact_name, pointer, primary_name};
 use crate::harness::{anvil::Anvil, basenames, repo_root};
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
-
-fn pointer(body: &Value, path: &str) -> Value {
-    body.pointer(path).cloned().unwrap_or(Value::Null)
-}
-
-async fn exact_name(run: &support::PipelineRun, name: &str) -> Result<Value> {
-    let (status, body) = run
-        .api
-        .get_json(&format!("/v1/names/basenames/{name}"))
-        .await?;
-    assert_eq!(
-        status, 200,
-        "Basenames exact-name lookup for {name} failed: {body}"
-    );
-    Ok(body)
-}
 
 async fn records(run: &support::PipelineRun, name: &str) -> Result<Value> {
     let (status, body) = run
@@ -32,21 +17,6 @@ async fn records(run: &support::PipelineRun, name: &str) -> Result<Value> {
     assert_eq!(
         status, 200,
         "Basenames records lookup for {name} failed: {body}"
-    );
-    Ok(body)
-}
-
-async fn primary_name(run: &support::PipelineRun, address: &str, mode: &str) -> Result<Value> {
-    let (status, body) = run
-        .api
-        .get_json(&format!(
-            "/v1/primary-names/{address}?namespace=basenames&coin_type={}&mode={mode}",
-            basenames::BASE_PRIMARY_COIN_TYPE
-        ))
-        .await?;
-    assert_eq!(
-        status, 200,
-        "Basenames primary-name lookup for {address} mode={mode} failed: {body}"
     );
     Ok(body)
 }
@@ -197,7 +167,7 @@ async fn basenames_declared_state_matrix_end_to_end() -> Result<()> {
     .await?;
     assert_eq!(registration_events, 4);
 
-    let alice_body = exact_name(&run, "alice.base.eth").await?;
+    let alice_body = exact_name(&run.api, "basenames", "alice.base.eth").await?;
     assert_eq!(
         pointer(&alice_body, "/data/logical_name_id"),
         "basenames:alice.base.eth"
@@ -237,10 +207,10 @@ async fn basenames_declared_state_matrix_end_to_end() -> Result<()> {
         "L2Resolver addr:60 should match the changed address; body: {alice_records}"
     );
 
-    let nft_only = exact_name(&run, "nftonly.base.eth").await?;
+    let nft_only = exact_name(&run.api, "basenames", "nftonly.base.eth").await?;
     assert_exact_control(&nft_only, &bob_path, &alice_path, "AuthorityEpochChanged");
 
-    let management_only = exact_name(&run, "mgmtonly.base.eth").await?;
+    let management_only = exact_name(&run.api, "basenames", "mgmtonly.base.eth").await?;
     assert_exact_control(
         &management_only,
         &alice_path,
@@ -248,7 +218,7 @@ async fn basenames_declared_state_matrix_end_to_end() -> Result<()> {
         "AuthorityEpochChanged",
     );
 
-    let full_transfer = exact_name(&run, "fullxfer.base.eth").await?;
+    let full_transfer = exact_name(&run.api, "basenames", "fullxfer.base.eth").await?;
     assert_exact_control(
         &full_transfer,
         &bob_path,
@@ -256,14 +226,28 @@ async fn basenames_declared_state_matrix_end_to_end() -> Result<()> {
         "AuthorityEpochChanged",
     );
 
-    let declared = primary_name(&run, &alice_path, "declared").await?;
+    let declared = primary_name(
+        &run.api,
+        "basenames",
+        basenames::BASE_PRIMARY_COIN_TYPE,
+        &alice_path,
+        "declared",
+    )
+    .await?;
     assert_declared_primary(&declared, "alice.base.eth");
     assert_eq!(
         pointer(&declared, "/verified_state"),
         Value::Null,
         "declared mode should not fabricate verified Basenames primary state; body: {declared}"
     );
-    let both = primary_name(&run, &alice_path, "both").await?;
+    let both = primary_name(
+        &run.api,
+        "basenames",
+        basenames::BASE_PRIMARY_COIN_TYPE,
+        &alice_path,
+        "both",
+    )
+    .await?;
     assert_declared_primary(&both, "alice.base.eth");
     assert_eq!(
         pointer(&both, "/verified_state/verified_primary_name/status"),
@@ -285,7 +269,14 @@ async fn basenames_declared_state_matrix_end_to_end() -> Result<()> {
     );
     let cleared =
         support::ingest_basenames_and_serve(&base, &deployment, Some(&clear_ready_sql)).await?;
-    let cleared_body = primary_name(&cleared, &alice_path, "both").await?;
+    let cleared_body = primary_name(
+        &cleared.api,
+        "basenames",
+        basenames::BASE_PRIMARY_COIN_TYPE,
+        &alice_path,
+        "both",
+    )
+    .await?;
     assert_eq!(
         pointer(&cleared_body, "/declared_state/claimed_primary_name/status"),
         "not_found",

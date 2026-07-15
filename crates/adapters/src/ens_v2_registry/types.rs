@@ -175,6 +175,16 @@ pub(super) enum RegistryObservation {
         new_token_id: String,
         reference: ObservationRef,
     },
+    TokenControlTransferred {
+        token_id: String,
+        operator: String,
+        from: String,
+        to: String,
+        amount: String,
+        source_event: &'static str,
+        transfer_index: Option<usize>,
+        reference: ObservationRef,
+    },
     ParentUpdated {
         parent: String,
         label: String,

@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::Result;
-use bigname_storage::{NormalizedEvent, Resource, load_resource_including_noncanonical};
+use bigname_storage::{
+    NormalizedEvent, Resource, ens_v2_registry_resource_id, load_resource_including_noncanonical,
+};
 use serde_json::{Value, json};
 use sqlx::{PgPool, types::Uuid};
 
@@ -333,20 +335,19 @@ fn bit_is_set(bytes: &[u8; 32], bit: usize) -> bool {
     bytes[byte_index] & bit_mask != 0
 }
 
-fn permission_resource_id(
+pub(super) fn permission_resource_id(
     chain_id: &str,
     contract_instance_id: Uuid,
     upstream_resource: &str,
     registry_permission_source: bool,
 ) -> Uuid {
-    let prefix = if registry_permission_source {
-        "ens-v2-resource"
+    if registry_permission_source {
+        ens_v2_registry_resource_id(chain_id, contract_instance_id, upstream_resource)
     } else {
-        "ens-v2-resolver-resource"
-    };
-    deterministic_uuid(&format!(
-        "{prefix}:{chain_id}:{contract_instance_id}:{upstream_resource}"
-    ))
+        deterministic_uuid(&format!(
+            "ens-v2-resolver-resource:{chain_id}:{contract_instance_id}:{upstream_resource}"
+        ))
+    }
 }
 
 fn is_registry_permission_source(source_family: &str) -> bool {

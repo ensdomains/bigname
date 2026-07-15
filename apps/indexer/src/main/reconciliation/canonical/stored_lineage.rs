@@ -23,6 +23,7 @@ mod topic_drift;
 use admission_epoch_fence::StoredLineageAdmissionEpochFence;
 pub(crate) use coverage::ChainCoverageFrontiers;
 use coverage::stored_path_has_required_raw_fact_coverage;
+pub(crate) use topic_drift::ensure_required_topic_sets_undrifted_for_retention_generation;
 
 const MAX_STORED_ANCHOR_PARENT_FETCH_DEPTH: usize =
     (MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS as usize) * 4;
@@ -94,16 +95,14 @@ pub(super) async fn reconcile_large_checkpoint_gap_from_stored_lineage(
             current_canonical_number, stored_anchor.block_number
         )));
     }
-    let admission_epoch_fence = StoredLineageAdmissionEpochFence::acquire(pool, chain).await?;
-    #[cfg(test)]
-    admission_epoch_fence::pause_after_admission_epoch_fence_for_tests(chain).await;
+    let admission_epoch = StoredLineageAdmissionEpochFence::read_epoch(pool, chain).await?;
     if let Err(reason) = stored_path_has_required_raw_fact_coverage(
         pool,
         chain,
         &path,
         coverage_frontiers,
         stored_anchor.block_number,
-        admission_epoch_fence.epoch(),
+        admission_epoch,
     )
     .await
     {
@@ -111,6 +110,15 @@ pub(super) async fn reconcile_large_checkpoint_gap_from_stored_lineage(
             "canonical gap of {live_gap_blocks} blocks for chain {chain} exceeds live gap fill limit {MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS}; {reason}"
         )));
     }
+    // Coverage is verified optimistically so historical scans do not block
+    // discovery admission. A brief shared lock accepts the proof only if no
+    // watched-surface mutation committed during verification.
+    StoredLineageAdmissionEpochFence::acquire_for_epoch(pool, chain, admission_epoch)
+        .await?
+        .release()
+        .await?;
+    #[cfg(test)]
+    admission_epoch_fence::pause_after_admission_epoch_verification_for_tests(chain).await;
 
     let target = path
         .last()
@@ -164,7 +172,7 @@ pub(super) async fn reconcile_large_checkpoint_gap_from_stored_lineage(
         .map(|block| lineage_block_to_provider(&block))
         .collect::<Vec<_>>();
 
-    coverage_frontiers.hold_promotion_fence(chain, admission_epoch_fence);
+    coverage_frontiers.record_promotion_epoch(chain, admission_epoch);
     Ok(StoredLineagePromotion::Promoted(CanonicalReconciliation {
         status: CanonicalReconciliationStatus::StoredLineagePromoted,
         canonical: Some(canonical),

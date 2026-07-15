@@ -48,6 +48,25 @@ service containers can therefore mark those old indexer/worker containers
 unhealthy until they are replaced with the matching image; treat that as version
 skew, not evidence that PostgreSQL is down.
 
+### Resolver-profile replay after an upgrade or compaction
+
+The raw-log retention migration marks every pre-existing chain as generation
+one because the database cannot prove that its staged ENSv1 resolver history was
+never compacted. The resolver-profile queue migration does not schedule
+historical repair for those chains, and the first authority-journal capture is a
+baseline rather than a change. A later resolver code-hash or manifest/discovery
+authority change is still recorded as pending work, but the indexer fails that
+repair closed before publishing projection invalidations or acknowledging the
+queue generation.
+
+The current release has no in-place ENSv1 resolver-profile coverage proof and
+no versioned adapter-snapshot import. Running an ordinary ranged backfill does
+not make a generation-one or later corpus acceptable to this repair path. The
+current recovery is a full database rebootstrap from the checked-in migrations
+and configured historical bootstrap into a new generation-zero corpus. Do not
+delete the pending queue row or manually advance `processed_generation`; that
+would discard an unperformed absence-aware repair.
+
 ### Projection replay version upgrades
 
 A replay-version change that widens a projection's consumed input set is not a
@@ -59,12 +78,19 @@ current projection family has a marker for the new replay version and
 the remaining new workers. Indexers may continue ingesting while workers are
 stopped; their durable changes will be consumed after replay handoff.
 
-Replay version 7 is such an upgrade: it makes retained ENSv2 fresh registrar
-registrations part of `name_current` exact-name-profile evidence. Version-6 and
-version-7 workers must never overlap. The replay-version marker prevents a new
-worker from trusting old bootstrap completion; it does not fence an old worker
-from claiming a later invalidation. Container healthchecks report version skew
-but do not stop an old process, so they are not a substitute for this drain.
+Replay version 8 is such an upgrade: it backfills the projection-owned
+`permissions_current_resource_summary` for every current permission resource,
+including resources with zero permission rows, and atomically republishes it
+with `permissions_current`. A version-7 completion marker cannot satisfy this
+upgrade because it predates that companion projection. Version-7 and version-8
+workers must never overlap, and the API must remain drained until every
+version-8 marker is current and pending invalidations are empty. Replay version
+7 was the preceding upgrade that made retained ENSv2 fresh registrar
+registrations part of `name_current` exact-name-profile evidence; version 8
+retains that behavior. The replay-version marker prevents a new worker from
+trusting old bootstrap completion; it does not fence an old worker from claiming
+a later invalidation. Container healthchecks report version skew but do not stop
+an old process, so they are not a substitute for this drain.
 
 The indexer loads exactly one manifest profile root. Use `/app/manifests/mainnet`
 for the mainnet profile or `/app/manifests/sepolia` for the ENSv2 Sepolia
@@ -385,12 +411,21 @@ backfill catch-up, and live head following stay idle with an explicit
 must not fail solely because Base is missing. A provider entry for a chain that
 is not part of the selected manifest root is invalid.
 
-Startup bootstrap creates finite backfill jobs from each eligible target's
-manifest/discovery admitted start through the provider head observed at job
-creation time. It does not cap work to a recent window. This is still
-operational intake work: completing bootstrap alone is not consumer-replacement
-or route-coverage evidence without the relevant projection, route, conformance,
-and rollout gates.
+Startup bootstrap creates finite backfill jobs from the planning snapshot of
+eligible manifest-declared targets and already-materialized finite-known-start
+ENSv2 root, registry, and resolver discovery targets. Their ranges end at one
+provider finalized head latched for that chain's startup run. A configured
+provider that omits that finalized head, or reports it above the canonical head,
+fails automatic bootstrap for the chain. Bootstrap does not fall back to the
+canonical tip: the unfinalized tail remains live-intake work and cannot produce
+number-keyed bootstrap coverage. Automatic ENSv2 startup may repeat this plan as
+newly admitted ENSv2 targets expand the authoritative set, but every pass keeps
+the same finalized upper bound; it does not generically enumerate discovery
+targets for other families. ENSv1 generic resolver and Basenames recursive
+registry history use their separate scan mechanisms. Bootstrap does not cap
+work to a recent window. This is still operational intake work: completing
+bootstrap alone is not consumer-replacement or route-coverage evidence without
+the relevant projection, route, conformance, and rollout gates.
 
 Bootstrap backfill identity is tied to the selected deployment profile, chain,
 finite range, and source identity, not the manifest root path used by a given
@@ -496,13 +531,13 @@ topic-unfiltered facts over the same required interval replaces it.
 Address-enumerated hash-pinned fetches are topic-unfiltered and immune to
 drift.
 
-Promotion reconstructs selected-log companion obligations from the coverage
-scope that admitted the range. An address-scoped fact selects every log from
-that exact watched address during its active interval. A family-scoped fact
-selects only logs whose topic0 is in that family's current active manifest ABI.
+Promotion reconstructs family-selected companion obligations the same way the
+backfill write side does: a stored log is selected only when its emitter is
+watched under the source family, its block is inside that watched entry's active
+window, and its topic0 is in the family's current active manifest ABI.
 Same-transaction sibling logs retained for replay context do not independently
-require a code observation for the sibling emitter; the transaction and
-receipt that contain the selected log remain required.
+require a code observation for the sibling emitter; the transaction and receipt
+that contain a selected log remain required.
 
 Fact-based coverage means Reth-db backfills can promote after completion even
 though they do not write `raw_payload_cache_metadata` rows; retained payload
@@ -556,22 +591,21 @@ Threat-model boundary for number-keyed coverage: coverage facts and completed
 ranges are keyed by block number, not hash. The design is sound only while the
 blocks a job fetches are final relative to the validation provider at fetch
 time — a fact recorded from a fetch of a block that is later reorged would
-credit the replacement block's number. Operationally this holds today (jobs
-fetch far behind the provider head during catch-up, and the same-height
-non-orphan fork probe refuses promotion whenever competing lineage rows
-exist), but it is an operational premise, not an enforced invariant: sample
-validation hash-checks against the provider's current view without a finality
-watermark, and bootstrap as currently shipped violates this rule by ending
-its ranges at the latest observed head rather than the finalized head — its
-near-tip blocks are fetched pre-finality. Do not run ranged number-keyed
-backfills whose upper bound intentionally exceeds the provider finalized
-head, and treat bootstrap's near-tip slice as unpromotable until the enforced
-clamp/per-fact finality watermark tracked on #145 lands.
+credit the replacement block's number. Automatic bootstrap enforces this
+boundary: it latches the provider finalized head, clips every manifest and
+discovery target, retry pass, fetched range, and coverage fact to that inclusive
+height, and fails closed when the provider cannot supply a coherent finalized
+head. Blocks above that height through the canonical tip are not fetched by
+bootstrap and remain live-intake work. The same-height non-orphan fork probe is
+an additional refusal for already-stored ambiguity, not a substitute for the
+finalized bootstrap bound. Manual ranged number-keyed backfills still have no
+per-fact finality watermark, so operators must not give them an upper bound
+above the validation provider's finalized head.
 - Selected-log companion rows missing: rerun the selected hash-pinned backfill
   so raw code, transaction, and receipt rows are persisted with the selected
   logs. A retained same-transaction sibling log does not require a code row for
-  its emitter unless that sibling is itself selected by address or family-topic
-  coverage.
+  its emitter unless that sibling itself matches the watched family, active
+  window, and current family topic0 set.
 - Missing event-silent current resolver state after catch-up: let ordinary live
   reconciliation process the current tip so direct-call observations are
   retained for the built-in Ethereum Mainnet event-silent reverse resolver set.

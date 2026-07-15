@@ -2678,6 +2678,72 @@ fn permission_current_row(
     }
 }
 
+fn permission_current_resource_summary(
+    resource_id: Uuid,
+    authority_kind: Option<&str>,
+) -> bigname_storage::PermissionsCurrentResourceSummary {
+    let authority_kind = authority_kind.map(str::to_owned);
+    let coverage = match authority_kind.as_deref() {
+        Some("wrapper") => json!({
+            "status": "unsupported",
+            "exhaustiveness": "not_applicable",
+            "source_classes_considered": ["permissions_current", "ens_v1_wrapper_l1"],
+            "enumeration_basis": "resource_permissions",
+            "unsupported_reason": "ensv1_wrapper_holder_permissions_not_projected",
+        }),
+        Some(_) => json!({
+            "status": "full",
+            "exhaustiveness": "authoritative",
+            "source_classes_considered": ["permissions_current"],
+            "enumeration_basis": "resource_permissions",
+            "unsupported_reason": null,
+        }),
+        None => json!({
+            "status": "partial",
+            "exhaustiveness": "best_effort",
+            "source_classes_considered": ["permissions_current"],
+            "enumeration_basis": "resource_permissions",
+            "unsupported_reason": "resource_permission_authority_not_projected",
+        }),
+    };
+    bigname_storage::PermissionsCurrentResourceSummary {
+        resource_id,
+        authority_kind,
+        root_resource_id: None,
+        coverage,
+        provenance: json!({
+            "derivation_kind": "permissions_current_resource_summary_rebuild",
+        }),
+        chain_positions: json!({
+            "ethereum-mainnet": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 1,
+                "block_hash": "0xpermission-summary",
+                "timestamp": "2024-05-31T01:13:20Z",
+            }
+        }),
+        canonicality_summary: json!({
+            "status": "finalized",
+            "chains": {"ethereum-mainnet": "finalized"},
+        }),
+        manifest_version: 1,
+        last_recomputed_at: timestamp(1_717_174_000),
+    }
+}
+
+async fn seed_permission_current_resource_summary(
+    database: &TestDatabase,
+    resource_id: Uuid,
+    authority_kind: &str,
+) -> Result<()> {
+    bigname_storage::upsert_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(resource_id, Some(authority_kind)),
+    )
+    .await?;
+    Ok(())
+}
+
 fn permission_subjects(payload: &ResourcePermissionsResponse) -> Vec<&str> {
     payload
         .data

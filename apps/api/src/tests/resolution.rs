@@ -4,6 +4,118 @@ const STANDARD_PROFILE_CACHE_RECORD_KEYS: &[&str] =
     &["addr:60", "text:com.twitter", "contenthash"];
 
 #[tokio::test]
+async fn get_resolution_execution_explain_rejects_snapshot_selector_query_parameters()
+-> Result<()> {
+    let database = TestDatabase::new(false).await?;
+    let cases = [
+        ("at", "at=2026-04-17T00%3A00%3A03Z"),
+        ("chain_positions", "chain_positions=%7B%7D"),
+        ("consistency", "consistency=finalized"),
+    ];
+
+    for (label, query) in cases {
+        let response = app_router(database.app_state())
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/v1/explain/resolutions/ens/alice.eth/execution?records=addr:60&{query}"
+                    ))
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .with_context(|| format!("{label} execution explain request failed"))?;
+
+        assert_public_invalid_input_response(response, "query parameters are invalid").await?;
+    }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_execution_explain_sanitizes_snapshot_storage_failure() -> Result<()> {
+    let database = TestDatabase::new(false).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/explain/resolutions/ens/alice.eth/execution?records=addr:60")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("storage-failure execution explain request failed")?;
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "internal_error");
+    assert_eq!(
+        payload.error.message,
+        "failed to load resolution execution explain projection for name ens/alice.eth"
+    );
+    assert!(payload.error.details.is_empty());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_execution_explain_reports_stale_inventory_as_conflict() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2201);
+    let token_lineage_id = Uuid::from_u128(0x1101);
+    let surface_binding_id = Uuid::from_u128(0x3301);
+
+    database
+        .seed_name_current_binding_migrated(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+
+    let mut stale_inventory = record_inventory_current_row(logical_name_id, resource_id);
+    stale_inventory.chain_positions["ethereum-mainnet"]["block_number"] = json!(21_000_004);
+    stale_inventory.chain_positions["ethereum-mainnet"]["block_hash"] = json!("0xfuture");
+    stale_inventory.chain_positions["ethereum-mainnet"]["timestamp"] =
+        json!("2026-04-17T00:00:04Z");
+    database
+        .insert_record_inventory_current_row(stale_inventory)
+        .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(
+                    "/v1/explain/resolutions/ens/alice.eth/execution?records=text:com.twitter,addr:60",
+                )
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("stale-inventory execution explain request failed")?;
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "stale");
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_resolution_execution_explain_returns_persisted_verified_state_and_reuses_resolution_envelope_fields()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -306,7 +418,7 @@ async fn get_resolution_execution_explain_returns_persisted_verified_state_and_r
 }
 
 #[tokio::test]
-async fn get_resolution_execution_explain_reads_persisted_alias_only_avatar_answers_for_ens_alias_binding()
+async fn get_resolution_execution_explain_falls_back_to_full_selector_alias_avatar_answer()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = "ens:alice.eth";
@@ -314,7 +426,7 @@ async fn get_resolution_execution_explain_reads_persisted_alias_only_avatar_answ
     let token_lineage_id = Uuid::from_u128(0x1100);
     let surface_binding_id = Uuid::from_u128(0x3300);
     let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000025);
-    let request_key = resolution_execution_request_key(&["text:com.twitter"]);
+    let compact_request_key = resolution_execution_request_key(&["text:com.twitter"]);
     let persisted_verified_queries = json!([
         {
             "record_key": "avatar",
@@ -361,9 +473,22 @@ async fn get_resolution_execution_explain_reads_persisted_alias_only_avatar_answ
         .insert_record_inventory_current_row(inventory_row.clone())
         .await?;
 
+    let explain_records = ["avatar", "text:com.twitter"]
+        .into_iter()
+        .map(|record_key| {
+            parse_resolution_record_key(record_key).expect("explain selector must parse")
+        })
+        .collect::<Vec<_>>();
+    let full_selector_cache_key = bigname_storage::build_resolution_execution_cache_key(
+        &name_row,
+        &explain_records,
+        Some(&inventory_row),
+        name_row.chain_positions.clone(),
+    )?;
+
     let mut trace = resolution_execution_trace(
         execution_trace_id,
-        &request_key,
+        &full_selector_cache_key.request_key,
         &["avatar", "text:com.twitter"],
         persisted_verified_queries.clone(),
     );
@@ -380,20 +505,38 @@ async fn get_resolution_execution_explain_reads_persisted_alias_only_avatar_answ
     trace.chain_context = json!({
         "requested_positions": requested_chain_positions_from_name_current(&name_row.chain_positions),
     });
-    let mut outcome = resolution_execution_outcome_with_boundaries(
+    let compact_verified_queries = json!([{
+        "record_key": "text:com.twitter",
+        "status": "success",
+        "value": {
+            "value": "@alice-via-alias"
+        },
+        "provenance": {
+            "execution_trace_id": execution_trace_id.to_string()
+        }
+    }]);
+    let mut compact_outcome = resolution_execution_outcome_with_boundaries(
         execution_trace_id,
-        &request_key,
-        persisted_verified_queries.clone(),
+        &compact_request_key,
+        compact_verified_queries,
         topology_boundary.clone(),
         record_boundary.clone(),
     );
-    outcome.cache_key.requested_chain_positions =
+    compact_outcome.cache_key.requested_chain_positions =
         requested_chain_positions_from_name_current(&name_row.chain_positions);
-    outcome.cache_key.manifest_versions = name_row
+    compact_outcome.cache_key.manifest_versions = name_row
         .provenance
         .get("manifest_versions")
         .cloned()
         .unwrap_or_else(|| json!([]));
+    let mut full_selector_outcome = resolution_execution_outcome_with_boundaries(
+        execution_trace_id,
+        &full_selector_cache_key.request_key,
+        persisted_verified_queries.clone(),
+        topology_boundary.clone(),
+        record_boundary.clone(),
+    );
+    full_selector_outcome.cache_key = full_selector_cache_key;
     let profile_records = STANDARD_PROFILE_RECORD_KEYS
         .iter()
         .map(|record_key| {
@@ -450,7 +593,8 @@ async fn get_resolution_execution_explain_reads_persisted_alias_only_avatar_answ
     );
     profile_outcome.cache_key = profile_cache_key;
     upsert_execution_trace(&database.pool, &trace).await?;
-    upsert_execution_outcome(&database.pool, &outcome).await?;
+    upsert_execution_outcome(&database.pool, &compact_outcome).await?;
+    upsert_execution_outcome(&database.pool, &full_selector_outcome).await?;
     upsert_execution_outcome(&database.pool, &profile_outcome).await?;
 
     let explain_response = app_router(database.app_state())
@@ -578,6 +722,33 @@ async fn get_resolution_execution_explain_reads_persisted_alias_only_avatar_answ
                 }
             ]
         }))
+    );
+
+    let deleted_compact =
+        sqlx::query("DELETE FROM execution_cache_outcomes WHERE request_key = $1")
+            .bind(&compact_request_key)
+            .execute(&database.pool)
+            .await?
+            .rows_affected();
+    assert_eq!(deleted_compact, 1, "expected one compact cache outcome");
+
+    let full_only_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/explain/resolutions/ens/alice.eth/execution?records=avatar,text:com.twitter")
+                .body(Body::empty())
+                .expect("full-selector-only explain request must build"),
+        )
+        .await
+        .context("full-selector-only resolution execution explain request failed")?;
+    assert_eq!(full_only_response.status(), StatusCode::OK);
+    let full_only_payload: ResolutionResponse = read_json(full_only_response).await?;
+    assert_eq!(
+        full_only_payload
+            .verified_state
+            .as_ref()
+            .and_then(|state| state.get("verified_queries")),
+        Some(&persisted_verified_queries)
     );
 
     database.cleanup().await?;
@@ -5209,6 +5380,83 @@ async fn get_resolution_execution_explain_returns_not_found_when_persisted_answe
         "persisted resolution execution explain was not found for name alice.eth in namespace ens"
     );
     assert!(payload.error.details.is_empty());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_resolution_execution_explain_treats_mixed_supported_and_unsupported_selectors_as_miss()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let logical_name_id = "ens:alice.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000002c);
+    let request_key = resolution_execution_request_key(&["addr:60"]);
+    let persisted_verified_queries = json!([{
+        "record_key": "addr:60",
+        "status": "success",
+        "value": {
+            "coin_type": "60",
+            "value": "0x00000000000000000000000000000000000000aa"
+        },
+        "provenance": {
+            "execution_trace_id": execution_trace_id.to_string()
+        }
+    }]);
+
+    database
+        .seed_name_current_binding_migrated(
+            logical_name_id,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    database
+        .insert_name_current_row(exact_name_row(
+            logical_name_id,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+        ))
+        .await?;
+
+    let trace = resolution_execution_trace(
+        execution_trace_id,
+        &request_key,
+        &["addr:60"],
+        persisted_verified_queries.clone(),
+    );
+    let outcome = resolution_execution_outcome(
+        execution_trace_id,
+        &request_key,
+        persisted_verified_queries,
+        logical_name_id,
+        resource_id,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/explain/resolutions/ens/alice.eth/execution?records=addr:60,name")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("mixed-selector resolution execution explain request failed")?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "not_found");
+    assert_eq!(
+        payload.error.message,
+        "persisted resolution execution explain was not found for name alice.eth in namespace ens"
+    );
 
     database.cleanup().await?;
     Ok(())

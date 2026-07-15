@@ -1,3 +1,4 @@
+mod ids;
 mod merge;
 mod orphan;
 mod read;
@@ -7,6 +8,7 @@ mod write;
 mod write_fast;
 mod write_rows;
 
+pub use ids::ens_v2_registry_resource_id;
 pub use orphan::{mark_identity_rows_range_orphaned, mark_surface_binding_range_orphaned};
 pub use read::{
     load_name_surface, load_name_surface_including_noncanonical,

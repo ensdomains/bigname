@@ -16,7 +16,10 @@ pub use coverage_facts::{
     BackfillCoverageFactDerivation, BackfillCoverageFactScope, BackfillCoverageFactWrite,
     load_backfill_coverage_fact_counts, write_backfill_coverage_facts,
 };
-pub use create::create_backfill_job;
+pub use create::{
+    create_backfill_job, create_generation_scoped_backfill_job,
+    ensure_and_load_raw_log_retention_generation,
+};
 pub use fail::{fail_backfill_job, fail_backfill_range};
 pub use lease::{advance_backfill_range, reserve_backfill_range};
 pub use read::{

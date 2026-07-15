@@ -93,6 +93,24 @@ fragment = "event TokenResource(uint256 indexed tokenId, uint256 indexed resourc
 emitter_roles = ["registry"]
 normalized_events = ["TokenResourceLinked"]
 
+# Canonical ERC-1155 transfer events are present in the deployed ETHRegistry ABI:
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L652 @ ens_v2@48b3e2d)
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L689 @ ens_v2@48b3e2d).
+# The discovered UserRegistry implementation exposes the same events:
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/UserRegistryImpl.json:L723 @ ens_v2@48b3e2d)
+# (upstream: .refs/ens_v2/contracts/deployments/sepolia/UserRegistryImpl.json:L760 @ ens_v2@48b3e2d).
+[[abi.events]]
+name = "TransferSingle"
+fragment = "event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)"
+emitter_roles = ["registry"]
+normalized_events = ["TokenControlTransferred"]
+
+[[abi.events]]
+name = "TransferBatch"
+fragment = "event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values)"
+emitter_roles = ["registry"]
+normalized_events = ["TokenControlTransferred"]
+
 # EACRolesChanged comes from the permissioned registry's inherited EnhancedAccessControl interface:
 # (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L10 @ ens_v2@48b3e2d)
 # (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L22 @ ens_v2@48b3e2d).

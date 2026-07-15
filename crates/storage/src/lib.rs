@@ -26,9 +26,12 @@ mod raw_calls;
 mod raw_children;
 mod raw_code;
 mod raw_payload_cache;
+mod raw_staging_revision;
 mod record_inventory;
 mod resolution_support;
 mod resolver;
+mod resolver_profile_authority_journal;
+mod resolver_profile_input_changes;
 mod snapshot_selection;
 pub mod sql_row;
 mod time;
@@ -73,8 +76,9 @@ pub use backfill_jobs::{
     BackfillCoverageFactDerivation, BackfillCoverageFactScope, BackfillCoverageFactWrite,
     BackfillJob, BackfillJobCreate, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange,
     BackfillRangeSpec, advance_backfill_range, complete_backfill_job, complete_backfill_range,
-    complete_backfill_range_recording_coverage, create_backfill_job, fail_backfill_job,
-    fail_backfill_range, load_backfill_coverage_fact_counts, load_backfill_job,
+    complete_backfill_range_recording_coverage, create_backfill_job,
+    create_generation_scoped_backfill_job, ensure_and_load_raw_log_retention_generation,
+    fail_backfill_job, fail_backfill_range, load_backfill_coverage_fact_counts, load_backfill_job,
     load_backfill_ranges, load_completed_backfill_jobs_intersecting_range, reserve_backfill_range,
     write_backfill_coverage_facts,
 };
@@ -103,8 +107,8 @@ pub use base_normalized_rederive::{
 };
 pub use checkpoints::{
     ChainCheckpoint, ChainCheckpointUpdate, CheckpointBlockRef, advance_chain_checkpoints,
-    load_chain_checkpoint, load_chain_checkpoint_snapshots, rewind_chain_checkpoints_to_ancestor,
-    sync_chain_checkpoints,
+    advance_chain_checkpoints_rejecting_non_orphaned_lineage_forks, load_chain_checkpoint,
+    load_chain_checkpoint_snapshots, rewind_chain_checkpoints_to_ancestor, sync_chain_checkpoints,
 };
 pub use children::{
     ChildrenCurrentKeysetCursor, ChildrenCurrentPage, ChildrenCurrentRow, ChildrenCurrentSummary,
@@ -141,7 +145,7 @@ pub use history::{
 };
 pub use identity::{
     IdentityOrphanCounts, NameSurface, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage,
-    load_name_surface, load_name_surface_including_noncanonical,
+    ens_v2_registry_resource_id, load_name_surface, load_name_surface_including_noncanonical,
     load_name_surfaces_by_logical_name_ids, load_resource, load_resource_including_noncanonical,
     load_surface_binding, load_surface_binding_including_noncanonical,
     load_surface_bindings_by_logical_name_id,
@@ -177,6 +181,11 @@ pub use lineage::{
     upsert_chain_lineage_blocks_without_snapshots,
     upsert_chain_lineage_blocks_without_snapshots_recanonicalizing_orphaned,
 };
+pub use migration_indexes::{
+    DEFERRED_NORMALIZED_EVENT_INDEXES, NormalizedReplayIndexDdlGuard,
+    RECORD_INVENTORY_REPLAY_INDEX, TEMPORARY_NORMALIZED_REPLAY_INDEXES,
+    acquire_normalized_replay_index_ddl_guard, count_unready_normalized_event_indexes,
+};
 pub use name_current::{
     NameCurrentAddressFilter, NameCurrentAddressRelationFilter, NameCurrentListCursor,
     NameCurrentListCursorValue, NameCurrentListFilter, NameCurrentListOrder, NameCurrentListPage,
@@ -192,17 +201,19 @@ pub use normalized_events::{
     NormalizedEvent, NormalizedEventUpsertSummary, load_normalized_event_counts_by_kind,
     load_normalized_events_by_namespace, mark_block_derived_normalized_events_range_orphaned,
     serialize_jsonb_value, upsert_normalized_events, upsert_normalized_events_count_only,
-    upsert_normalized_events_with_summary,
+    upsert_normalized_events_count_only_in_transaction, upsert_normalized_events_with_summary,
 };
 pub use permissions::{
     PermissionScope, PermissionsCurrentAccountResourceCursor,
     PermissionsCurrentAccountResourcePage, PermissionsCurrentFullFilterSummary,
-    PermissionsCurrentKeysetCursor, PermissionsCurrentPage, PermissionsCurrentRow,
-    clear_permissions_current, delete_permissions_current, load_permissions_current,
-    load_permissions_current_account_resource_page,
+    PermissionsCurrentKeysetCursor, PermissionsCurrentPage, PermissionsCurrentResourceSummary,
+    PermissionsCurrentRow, clear_permissions_current, delete_permissions_current,
+    load_permissions_current, load_permissions_current_account_resource_page,
     load_permissions_current_account_resource_page_count_summary,
     load_permissions_current_by_resource_ids, load_permissions_current_for_resolver_scope,
     load_permissions_current_page, load_permissions_current_resolver_targets,
+    load_permissions_current_resource_summaries, load_permissions_current_resource_summary,
+    replace_permissions_current_resource_projection, upsert_permissions_current_resource_summary,
     upsert_permissions_current_rows,
 };
 pub use primary_name::{
@@ -246,6 +257,11 @@ pub use raw_payload_cache::{
     list_raw_payload_cache_metadata_by_block_hash, load_raw_payload_cache_metadata,
     upsert_raw_payload_cache_metadata, verify_raw_payload_cache_digest,
 };
+pub use raw_staging_revision::{
+    RawLogStagingInputVersion, RawLogStagingReadGuard, acquire_raw_log_staging_read_guard,
+    earliest_raw_log_staging_block_changed_since, load_raw_log_staging_input_version,
+    raw_log_staging_block_range_changed_since,
+};
 pub use record_inventory::{
     RecordInventoryCurrentRow, clear_record_inventory_current,
     count_record_inventory_selectors_by_lookup_keys, delete_record_inventory_current,
@@ -276,6 +292,15 @@ pub use resolution_support::{
 pub use resolver::{
     ResolverCurrentRow, clear_resolver_current, delete_resolver_current, load_resolver_current,
     upsert_resolver_current_rows,
+};
+pub use resolver_profile_authority_journal::{
+    ResolverProfileAuthorityJournal, advance_resolver_profile_authority_journal,
+    load_resolver_profile_authority_journal,
+};
+pub use resolver_profile_input_changes::{
+    ResolverProfileInputChange, ResolverProfileReconciliationTarget,
+    acknowledge_resolver_profile_input_change, enqueue_resolver_profile_reconciliations,
+    load_pending_resolver_profile_input_changes,
 };
 pub use snapshot_selection::{
     ChainPosition, ChainPositions, SelectedSnapshot, SnapshotAt, SnapshotConsistency,
@@ -374,10 +399,7 @@ async fn connect_inner(config: &DatabaseConfig, application_name: Option<&str>) 
 
 /// Apply all checked-in migrations.
 pub async fn migrate(pool: &PgPool) -> Result<()> {
-    migration_indexes::run_migrations_and_ensure_record_inventory_replay_index_ready(
-        pool, &MIGRATOR,
-    )
-    .await?;
+    migration_indexes::run_migrations_and_ensure_required_indexes_ready(pool, &MIGRATOR).await?;
     info!("checked-in migrations applied");
     let summary = backfill_label_preimages_from_existing_facts(pool, None)
         .await

@@ -1,17 +1,12 @@
-use std::collections::BTreeSet;
-
 use alloy_primitives::Address;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 use super::support;
+use crate::harness::responses::{pointer, selector_keys};
 use crate::harness::{anvil::Anvil, ens_v1, repo_root};
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
-
-fn pointer(body: &Value, path: &str) -> Value {
-    body.pointer(path).cloned().unwrap_or(Value::Null)
-}
 
 fn entries(body: &Value) -> Vec<Value> {
     body.pointer("/data")
@@ -27,16 +22,6 @@ async fn children(run: &support::PipelineRun, parent: &str) -> Result<Vec<Value>
         .await?;
     assert_eq!(status, 200, "children lookup for {parent} failed: {body}");
     Ok(entries(&body))
-}
-
-fn selector_keys(body: &Value) -> BTreeSet<String> {
-    body.pointer("/declared_state/record_inventory/selectors")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| entry.get("record_key").and_then(Value::as_str))
-        .map(str::to_owned)
-        .collect()
 }
 
 /// Registry ownership may build a non-.eth tree, while the admitted reverse
@@ -269,7 +254,7 @@ async fn label_preimage_revealed_later_upgrades_child_listing() -> Result<()> {
     first.db.cleanup().await?;
 
     ens_v1::register_eth_name(&rpc, &deployment, "later", carol, YEAR, Address::ZERO).await?;
-    // REVIEW POINT (chipped): live re-ingest of a chain whose later 2LD
+    // REVIEW POINT (reproduced defect): live re-ingest of a chain whose later 2LD
     // registration reveals an existing placeholder child's label hangs the
     // run loop before checkpoint promotion (silent async wedge; catch-up
     // replay of the same span derives fine). Phase 2 therefore pins the

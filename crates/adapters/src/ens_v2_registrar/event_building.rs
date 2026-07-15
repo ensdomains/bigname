@@ -86,12 +86,25 @@ pub(super) async fn build_registrar_event(
         }
     };
 
-    let link = load_registry_resource_link(pool, &raw_log.namespace, &token_id).await?;
-    let logical_name_id = link.logical_name_id.or_else(|| {
-        normalize_label_under_suffix(&label, &["eth"])
-            .ok()
-            .map(|name| format!("{}:{}", raw_log.namespace, name.normalized_name))
-    });
+    let registrar_logical_name_id = normalize_label_under_suffix(&label, &["eth"])
+        .ok()
+        .map(|name| format!("{}:{}", raw_log.namespace, name.normalized_name));
+    let link = if let Some(logical_name_id) = registrar_logical_name_id.as_deref() {
+        load_registry_resource_link(
+            pool,
+            &raw_log.chain_id,
+            &raw_log.namespace,
+            logical_name_id,
+            &token_id,
+            raw_log.block_number,
+            raw_log.transaction_index,
+            raw_log.log_index,
+        )
+        .await?
+    } else {
+        Default::default()
+    };
+    let logical_name_id = link.logical_name_id.or(registrar_logical_name_id);
     let mut after_state = after_state;
     if let Some(object) = after_state.as_object_mut() {
         object.insert("token_id".to_owned(), Value::String(token_id.clone()));

@@ -55,6 +55,7 @@ candidate_keys AS (
             (ne.before_state ->> 'registrant'),
             (ne.after_state ->> 'to'),
             (ne.before_state ->> 'to'),
+            (ne.before_state ->> 'from'),
             (ne.after_state ->> 'owner'),
             (ne.before_state ->> 'owner')
     ) AS address(address)

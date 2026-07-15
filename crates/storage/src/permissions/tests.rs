@@ -178,6 +178,158 @@ fn permissions_current_row(
     }
 }
 
+fn permissions_current_resource_summary(
+    resource_id: Uuid,
+    authority_kind: &str,
+) -> PermissionsCurrentResourceSummary {
+    let wrapper = authority_kind == "wrapper";
+    PermissionsCurrentResourceSummary {
+        resource_id,
+        authority_kind: Some(authority_kind.to_owned()),
+        root_resource_id: None,
+        coverage: if wrapper {
+            json!({
+                "status": "unsupported",
+                "exhaustiveness": "not_applicable",
+                "source_classes_considered": ["permissions_current", "ens_v1_wrapper_l1"],
+                "enumeration_basis": "resource_permissions",
+                "unsupported_reason": "ensv1_wrapper_holder_permissions_not_projected",
+            })
+        } else {
+            json!({
+                "status": "full",
+                "exhaustiveness": "authoritative",
+                "source_classes_considered": ["permissions_current"],
+                "enumeration_basis": "resource_permissions",
+                "unsupported_reason": null,
+            })
+        },
+        provenance: json!({
+            "derivation_kind": "permissions_current_resource_summary_rebuild",
+        }),
+        chain_positions: json!({
+            "ethereum-mainnet": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 111,
+                "block_hash": "0xpermissions-summary",
+                "timestamp": "2026-04-13T20:28:31Z",
+            }
+        }),
+        canonicality_summary: json!({
+            "status": "finalized",
+            "chains": {"ethereum-mainnet": "finalized"},
+        }),
+        manifest_version: 1,
+        last_recomputed_at: timestamp(1_776_000_111),
+    }
+}
+
+#[tokio::test]
+async fn permission_resource_summary_persists_for_zero_holder_wrapper_and_hides_when_orphaned()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x60f0);
+    seed_resources(&database, &[resource_id]).await?;
+    let summary = permissions_current_resource_summary(resource_id, "wrapper");
+
+    let (upserted, deleted) = replace_permissions_current_resource_projection(
+        database.pool(),
+        resource_id,
+        &[],
+        Some(&summary),
+    )
+    .await?;
+    assert_eq!((upserted, deleted), (0, 0));
+    assert_eq!(
+        load_permissions_current_resource_summary(database.pool(), resource_id).await?,
+        Some(summary)
+    );
+
+    orphan_resource(&database, resource_id).await?;
+    assert_eq!(
+        load_permissions_current_resource_summary(database.pool(), resource_id).await?,
+        None,
+        "orphaned projection metadata must not claim public support before replay removes it"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn keyed_permission_replacement_rolls_back_rows_when_summary_is_invalid() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x60f1);
+    seed_resources(&database, &[resource_id]).await?;
+    let old_row = permissions_current_row(
+        resource_id,
+        "0x0000000000000000000000000000000000000aaa",
+        PermissionScope::Resource,
+        1,
+    );
+    let old_summary = permissions_current_resource_summary(resource_id, "registrar");
+    replace_permissions_current_resource_projection(
+        database.pool(),
+        resource_id,
+        std::slice::from_ref(&old_row),
+        Some(&old_summary),
+    )
+    .await?;
+
+    let new_row = permissions_current_row(
+        resource_id,
+        "0x0000000000000000000000000000000000000bbb",
+        PermissionScope::Resource,
+        2,
+    );
+    let mut invalid_summary = permissions_current_resource_summary(resource_id, "wrapper");
+    invalid_summary.coverage = json!([]);
+    replace_permissions_current_resource_projection(
+        database.pool(),
+        resource_id,
+        std::slice::from_ref(&new_row),
+        Some(&invalid_summary),
+    )
+    .await
+    .expect_err("invalid companion summary must abort the whole keyed replacement");
+
+    assert_eq!(
+        load_permissions_current(database.pool(), resource_id, None, None).await?,
+        vec![old_row]
+    );
+    assert_eq!(
+        load_permissions_current_resource_summary(database.pool(), resource_id).await?,
+        Some(old_summary)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn deleting_a_resource_cascades_its_permission_support_summary() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x60f2);
+    seed_resources(&database, &[resource_id]).await?;
+    upsert_permissions_current_resource_summary(
+        database.pool(),
+        &permissions_current_resource_summary(resource_id, "registrar"),
+    )
+    .await?;
+
+    sqlx::query("DELETE FROM resources WHERE resource_id = $1")
+        .bind(resource_id)
+        .execute(database.pool())
+        .await?;
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM permissions_current_resource_summary WHERE resource_id = $1",
+    )
+    .bind(resource_id)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(count, 0);
+
+    database.cleanup().await
+}
+
 #[tokio::test]
 async fn permissions_current_upserts_and_loads_resource_and_resolver_rows() -> Result<()> {
     let database = TestDatabase::new().await?;

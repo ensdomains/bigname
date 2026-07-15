@@ -1,3 +1,56 @@
+#[test]
+fn wrapper_permission_coverage_is_explicitly_unsupported_without_rows() {
+    let summary = permission_current_resource_summary(Uuid::nil(), Some("wrapper"));
+    let coverage = build_permissions_coverage_from_resource_summary(Some(&summary));
+
+    assert_eq!(coverage.status, "unsupported");
+    assert_eq!(coverage.exhaustiveness, "not_applicable");
+    assert_eq!(
+        coverage.source_classes_considered,
+        vec!["permissions_current".to_owned(), "ens_v1_wrapper_l1".to_owned()]
+    );
+    assert_eq!(coverage.enumeration_basis, "resource_permissions");
+    assert_eq!(
+        coverage.unsupported_reason.as_deref(),
+        Some("ensv1_wrapper_holder_permissions_not_projected")
+    );
+}
+
+#[test]
+fn supported_non_wrapper_permission_coverage_stays_authoritative_without_rows() {
+    let summary = permission_current_resource_summary(Uuid::nil(), Some("registrar"));
+    let coverage = build_permissions_coverage_from_resource_summary(Some(&summary));
+
+    assert_eq!(coverage.status, "full");
+    assert_eq!(coverage.exhaustiveness, "authoritative");
+    assert_eq!(
+        coverage.source_classes_considered,
+        vec!["permissions_current".to_owned()]
+    );
+    assert_eq!(coverage.enumeration_basis, "resource_permissions");
+    assert_eq!(coverage.unsupported_reason, None);
+}
+
+#[test]
+fn unrecognized_permission_summary_coverage_fails_closed() {
+    let mut summary = permission_current_resource_summary(Uuid::nil(), Some("registrar"));
+    summary.coverage = json!({
+        "status": "complete_enough",
+        "exhaustiveness": "mostly_authoritative",
+        "source_classes_considered": ["permissions_current"],
+        "enumeration_basis": "resource_permissions",
+    });
+
+    let coverage = build_permissions_coverage_from_resource_summary(Some(&summary));
+
+    assert_eq!(coverage.status, "partial");
+    assert_eq!(coverage.exhaustiveness, "best_effort");
+    assert_eq!(
+        coverage.unsupported_reason.as_deref(),
+        Some("resource_permission_authority_not_projected")
+    );
+}
+
 #[tokio::test]
 async fn get_name_history_returns_canonical_only_rows_with_provenance_and_coverage() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -2974,6 +3027,7 @@ async fn get_resource_permissions_returns_declared_state_collection() -> Result<
         ],
     )
     .await?;
+    seed_permission_current_resource_summary(&database, resource_id, "ens_v2_registry").await?;
 
     let response = app_router(database.app_state())
         .oneshot(
@@ -3236,6 +3290,7 @@ async fn get_resource_permissions_honors_subject_and_scope_filters() -> Result<(
         ],
     )
     .await?;
+    seed_permission_current_resource_summary(&database, resource_id, "ens_v2_registry").await?;
 
     let subject_response = app_router(database.app_state())
         .oneshot(

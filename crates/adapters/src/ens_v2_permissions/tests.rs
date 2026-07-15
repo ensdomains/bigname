@@ -28,7 +28,9 @@ use crate::evm_abi::keccak_signature_hex;
 use super::constants::*;
 use super::decode::build_permissions_observation;
 use super::hints::{fallback_resource_hint, resolver_resource_hint};
-use super::normalized::{RoleVocabulary, permission_changed_event, role_bitmap_powers};
+use super::normalized::{
+    RoleVocabulary, permission_changed_event, permission_resource_id, role_bitmap_powers,
+};
 use super::types::{PermissionsObservation, PermissionsRawLogRow};
 use super::util::hex_string;
 
@@ -290,6 +292,23 @@ fn builds_permission_changed_event_payload() -> Result<()> {
             "normalized_name": "alice.eth",
             "dns_encoded_name": format!("0x{}", hex_string(&name)),
         })
+    );
+
+    Ok(())
+}
+
+#[test]
+fn ens_v2_registry_permission_resource_id_matches_legacy_golden() -> Result<()> {
+    let raw_log = raw_log_with_source_family(SOURCE_FAMILY_ENS_V2_REGISTRY_L1, vec![], vec![]);
+
+    assert_eq!(
+        permission_resource_id(
+            &raw_log.chain_id,
+            raw_log.emitting_contract_instance_id,
+            &topic_word(0),
+            true,
+        ),
+        Uuid::parse_str("9dc2aecc-e987-52e2-b6c7-823eb71231bc")?
     );
 
     Ok(())

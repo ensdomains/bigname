@@ -6,6 +6,117 @@ use sqlx::types::time::OffsetDateTime;
 use super::*;
 
 #[test]
+fn live_payload_retains_generic_resolver_topics_without_widening_other_emitters() {
+    let selected_address = "0x00000000000000000000000000000000000000a1";
+    let generic_emitter = "0x00000000000000000000000000000000000000b1";
+    let unrelated_emitter = "0x00000000000000000000000000000000000000c1";
+    let selected_addresses = selected_address_set(&[selected_address.to_owned()]);
+    let generic_topic0 = crate::ens_v1_resolver::generic_resolver_record_topic0s()
+        .into_iter()
+        .next()
+        .expect("ENSv1 generic resolver intake must declare at least one topic");
+    let generic_resolver_topic0s = BTreeSet::from([generic_topic0.clone()]);
+    let raw_block = RawBlock {
+        chain_id: "ethereum-mainnet".to_owned(),
+        block_hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+        parent_hash: Some(
+            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+        ),
+        block_number: 10,
+        block_timestamp: OffsetDateTime::UNIX_EPOCH,
+        canonicality_state: CanonicalityState::Canonical,
+        logs_bloom: None,
+        transactions_root: None,
+        receipts_root: None,
+        state_root: None,
+    };
+    let selected_transaction_hash =
+        "0x1111111111111111111111111111111111111111111111111111111111111111";
+    let generic_transaction_hash =
+        "0x2222222222222222222222222222222222222222222222222222222222222222";
+    let unrelated_transaction_hash =
+        "0x3333333333333333333333333333333333333333333333333333333333333333";
+    let unrelated_topic0 = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    let logs = vec![
+        provider_log(
+            &raw_block,
+            selected_address,
+            selected_transaction_hash,
+            0,
+            0,
+            unrelated_topic0,
+        ),
+        provider_log(
+            &raw_block,
+            unrelated_emitter,
+            selected_transaction_hash,
+            0,
+            1,
+            unrelated_topic0,
+        ),
+        provider_log(
+            &raw_block,
+            generic_emitter,
+            generic_transaction_hash,
+            1,
+            2,
+            &generic_topic0.to_ascii_uppercase(),
+        ),
+        provider_log(
+            &raw_block,
+            unrelated_emitter,
+            generic_transaction_hash,
+            1,
+            3,
+            unrelated_topic0,
+        ),
+        provider_log(
+            &raw_block,
+            unrelated_emitter,
+            unrelated_transaction_hash,
+            2,
+            4,
+            unrelated_topic0,
+        ),
+    ];
+
+    let retained = provider_logs_to_live_selected_raw_logs(
+        "ethereum-mainnet",
+        &raw_block,
+        &logs,
+        &selected_addresses,
+        &generic_resolver_topic0s,
+    )
+    .expect("live log selection must succeed");
+
+    assert_eq!(
+        retained.iter().map(|log| log.log_index).collect::<Vec<_>>(),
+        vec![0, 1, 2, 3]
+    );
+    assert_eq!(retained[2].emitting_address, generic_emitter);
+}
+
+fn provider_log(
+    raw_block: &RawBlock,
+    address: &str,
+    transaction_hash: &str,
+    transaction_index: i64,
+    log_index: i64,
+    topic0: &str,
+) -> ProviderLog {
+    ProviderLog {
+        block_hash: raw_block.block_hash.clone(),
+        block_number: raw_block.block_number,
+        transaction_hash: transaction_hash.to_owned(),
+        transaction_index,
+        log_index,
+        address: address.to_owned(),
+        topics: vec![topic0.to_owned()],
+        data: "0x".to_owned(),
+    }
+}
+
+#[test]
 fn live_payload_retains_successful_direct_calls_to_selected_addresses() {
     let selected_addresses =
         selected_address_set(&["0xa2c122be93b0074270ebee7f6b7292c7deb45047".to_owned()]);

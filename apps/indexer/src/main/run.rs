@@ -9,12 +9,14 @@ use crate::{
     provider::{ChainProviderKind, ProviderRegistry},
     reconciliation::HeaderAuditMode,
     replay::deployment_profile_from_manifest_root,
+    resolver_profile_convergence::drain_resolver_profile_input_changes,
     run_mode::IndexerRunMode,
     runtime::{
         build_manifest_runtime_state_with_watch_scope, ensure_manifest_root_ready,
         intake_runtime_state, load_manifest_repository, log_intake_chain_tasks,
         log_manifest_runtime_state, log_manifest_summary, log_provider_registry,
-        log_watched_chain_plan, manifest_normalized_event_kind_count, run_poll_loop,
+        log_watched_chain_plan, manifest_normalized_event_kind_count,
+        refresh_runtime_state_from_stored_discovery, run_poll_loop,
         sync_adapter_owned_raw_log_state, sync_intake_chain_tasks,
         validate_provider_registry_for_intake_tasks, watched_chain_plan_state,
     },
@@ -36,7 +38,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
     let header_audit_mode =
         HeaderAuditMode::from_retain_audit_fields(args.retain_header_audit_fields);
     let run_mode = IndexerRunMode::new(adapter_sync_mode, args.normalized_replay_catchup_enabled);
-    let manifest_runtime_state = build_manifest_runtime_state_with_watch_scope(
+    let mut manifest_runtime_state = build_manifest_runtime_state_with_watch_scope(
         &pool,
         &manifest_repository,
         run_mode.runtime_watch_scope,
@@ -54,12 +56,9 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
     }
     log_manifest_runtime_state(&manifest_runtime_state);
     log_watched_chain_plan("startup", &manifest_runtime_state.watched_chain_plan);
-    let watched_chain_plan_state =
-        watched_chain_plan_state(&manifest_runtime_state.watched_chain_plan);
-    let intake_chain_tasks =
+    let mut intake_chain_tasks =
         sync_intake_chain_tasks(&pool, &manifest_runtime_state.watched_chain_plan).await?;
     log_intake_chain_tasks("startup", &intake_chain_tasks);
-    let intake_runtime_state = intake_runtime_state(&intake_chain_tasks);
     let provider_registry =
         ProviderRegistry::from_sources(&args.chain_rpc_urls, &args.chain_reth_db_sources)?;
     validate_provider_registry_for_intake_tasks(&intake_chain_tasks, &provider_registry)?;
@@ -72,7 +71,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         &intake_chain_tasks,
         &provider_registry,
         args.hash_pinned_chunk_blocks,
-        run_mode.startup_backfill_adapter_sync_mode,
+        adapter_sync_mode,
         replay_completed_startup_raw_ranges,
         header_audit_mode,
         args.bootstrap_backfill_workers,
@@ -88,6 +87,29 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
             "startup bootstrap backfill drained; syncing adapter-owned raw-log state before live polling"
         );
         sync_adapter_owned_raw_log_state(&pool, &manifest_runtime_state.watched_chain_plan).await?;
+    }
+    if adapter_sync_mode != BackfillAdapterSyncMode::RawOnly
+        && let Some((next_manifest_runtime_state, next_intake_chain_tasks)) =
+            refresh_runtime_state_from_stored_discovery(&pool, &manifest_runtime_state).await?
+    {
+        validate_provider_registry_for_intake_tasks(&next_intake_chain_tasks, &provider_registry)?;
+        manifest_runtime_state = next_manifest_runtime_state;
+        intake_chain_tasks = next_intake_chain_tasks;
+        log_watched_chain_plan(
+            "post-bootstrap-discovery",
+            &manifest_runtime_state.watched_chain_plan,
+        );
+        log_intake_chain_tasks("post-bootstrap-discovery", &intake_chain_tasks);
+        log_provider_registry(
+            "post-bootstrap-discovery",
+            &intake_chain_tasks,
+            &provider_registry,
+        );
+    }
+    if adapter_sync_mode != BackfillAdapterSyncMode::RawOnly
+        && !run_mode.normalized_replay_catchup_enabled
+    {
+        drain_resolver_profile_input_changes(&pool).await?;
     }
     if run_mode.normalized_replay_catchup_enabled {
         let catchup_config = NormalizedReplayCatchupConfig::new(
@@ -112,6 +134,10 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
             }
         });
     }
+
+    let watched_chain_plan_state =
+        watched_chain_plan_state(&manifest_runtime_state.watched_chain_plan);
+    let intake_runtime_state = intake_runtime_state(&intake_chain_tasks);
 
     info!(
         service = "indexer",
@@ -178,7 +204,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         bootstrap_backfill_skipped_future_target_count = bootstrap_backfill_outcome.skipped_future_target_count,
         bootstrap_backfill_reserved_range_count = bootstrap_backfill_outcome.reserved_range_count,
         bootstrap_backfill_completed_range_count = bootstrap_backfill_outcome.completed_range_count,
-        bootstrap_backfill_range_policy = "manifest_declared_start_to_provider_head",
+        bootstrap_backfill_range_policy = "authoritative_known_start_to_provider_finalized_head",
         bootstrap_backfill_workers = bootstrap_backfill_outcome.requested_worker_count,
         effective_bootstrap_backfill_workers = bootstrap_backfill_outcome.effective_worker_count,
         bootstrap_backfill_range_blocks = bootstrap_backfill_outcome.range_partition_block_count,
@@ -220,6 +246,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         run_mode.broad_runtime_refresh_enabled,
         header_audit_mode,
         args.event_silent_reverse_resolver_addresses,
+        bootstrap_backfill_outcome.latched_finalized_heads,
         // Process-lifetime verified-coverage frontier: deep-gap promotion
         // verifies fact coverage in large chunks once, then every poll cycle
         // is an O(1) in-memory check.

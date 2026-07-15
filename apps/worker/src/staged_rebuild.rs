@@ -3,8 +3,8 @@
 
 use anyhow::{Context, Result, bail};
 use bigname_storage::{
-    ChildrenCurrentRow, PermissionsCurrentRow, PrimaryNameCurrentSnapshot,
-    RecordInventoryCurrentRow, ResolverCurrentRow,
+    ChildrenCurrentRow, PermissionsCurrentResourceSummary, PermissionsCurrentRow,
+    PrimaryNameCurrentSnapshot, RecordInventoryCurrentRow, ResolverCurrentRow,
 };
 use serde_json::Value;
 use sqlx::{Connection, PgConnection, Postgres, QueryBuilder, types::Uuid};
@@ -39,6 +39,17 @@ pub(crate) const PERMISSIONS_CURRENT_COLUMNS: &[&str] = &[
     "transfer_behavior",
     "provenance",
     "coverage",
+    "chain_positions",
+    "canonicality_summary",
+    "manifest_version",
+    "last_recomputed_at",
+];
+pub(crate) const PERMISSIONS_CURRENT_RESOURCE_SUMMARY_COLUMNS: &[&str] = &[
+    "resource_id",
+    "authority_kind",
+    "root_resource_id",
+    "coverage",
+    "provenance",
     "chain_positions",
     "canonicality_summary",
     "manifest_version",
@@ -159,6 +170,49 @@ pub(crate) async fn publish_stage_table(
     Ok((deleted, inserted))
 }
 
+/// Atomically replace permission holder rows and the per-resource support summary projection.
+pub(crate) async fn publish_permissions_current_stage_tables(
+    conn: &mut PgConnection,
+    rows_stage_table: &str,
+    summaries_stage_table: &str,
+) -> Result<(u64, u64, u64)> {
+    let row_columns = PERMISSIONS_CURRENT_COLUMNS.join(", ");
+    let summary_columns = PERMISSIONS_CURRENT_RESOURCE_SUMMARY_COLUMNS.join(", ");
+    let mut tx = conn
+        .begin()
+        .await
+        .context("failed to open permissions_current replacement transaction")?;
+    let deleted_rows = sqlx::query("DELETE FROM permissions_current")
+        .execute(&mut *tx)
+        .await
+        .context("failed to delete old permissions_current rows")?
+        .rows_affected();
+    sqlx::query("DELETE FROM permissions_current_resource_summary")
+        .execute(&mut *tx)
+        .await
+        .context("failed to delete old permissions_current resource summaries")?;
+    let inserted_summaries = sqlx::query(&format!(
+        "INSERT INTO permissions_current_resource_summary ({summary_columns}) \
+         SELECT {summary_columns} FROM {summaries_stage_table}"
+    ))
+    .execute(&mut *tx)
+    .await
+    .context("failed to publish permissions_current resource summaries")?
+    .rows_affected();
+    let inserted_rows = sqlx::query(&format!(
+        "INSERT INTO permissions_current ({row_columns}) \
+         SELECT {row_columns} FROM {rows_stage_table}"
+    ))
+    .execute(&mut *tx)
+    .await
+    .context("failed to publish permissions_current rows")?
+    .rows_affected();
+    tx.commit()
+        .await
+        .context("failed to commit permissions_current replacement")?;
+    Ok((deleted_rows, inserted_rows, inserted_summaries))
+}
+
 pub(crate) async fn stage_children_current_rows(
     conn: &mut PgConnection,
     stage_table: &str,
@@ -222,6 +276,32 @@ pub(crate) async fn stage_permissions_current_rows(
         values.push_bind(row.last_recomputed_at);
     });
     execute_stage_insert(conn, builder, "permissions_current").await
+}
+
+pub(crate) async fn stage_permissions_current_resource_summaries(
+    conn: &mut PgConnection,
+    stage_table: &str,
+    summaries: &[PermissionsCurrentResourceSummary],
+) -> Result<u64> {
+    if summaries.is_empty() {
+        return Ok(0);
+    }
+    let mut builder = QueryBuilder::<Postgres>::new(format!(
+        "INSERT INTO {stage_table} ({}) ",
+        PERMISSIONS_CURRENT_RESOURCE_SUMMARY_COLUMNS.join(", ")
+    ));
+    builder.push_values(summaries, |mut values, summary| {
+        values.push_bind(summary.resource_id);
+        values.push_bind(&summary.authority_kind);
+        values.push_bind(summary.root_resource_id);
+        values.push_bind(summary.coverage.clone());
+        values.push_bind(summary.provenance.clone());
+        values.push_bind(summary.chain_positions.clone());
+        values.push_bind(summary.canonicality_summary.clone());
+        values.push_bind(summary.manifest_version);
+        values.push_bind(summary.last_recomputed_at);
+    });
+    execute_stage_insert(conn, builder, "permissions_current_resource_summary").await
 }
 
 pub(crate) async fn stage_primary_names_current_snapshots(

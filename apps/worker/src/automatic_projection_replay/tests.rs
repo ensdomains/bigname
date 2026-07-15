@@ -158,15 +158,87 @@ async fn projection_replay_treats_invalid_required_index_as_missing() -> Result<
     Ok(())
 }
 
+#[tokio::test]
+async fn migration_preserves_intentionally_deferred_normalized_replay_index() -> Result<()> {
+    let database = test_database().await?;
+    sqlx::query(
+        r#"
+        CREATE INDEX normalized_events_replay_latest_resolver_tmp_idx
+        ON normalized_events (normalized_event_id)
+        "#,
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to create normalized replay deferral marker index")?;
+    sqlx::query("DROP INDEX normalized_events_record_inventory_resource_replay_idx")
+        .execute(database.pool())
+        .await
+        .context("failed to defer record-inventory replay index")?;
+    bigname_storage::migrate(database.pool())
+        .await
+        .context("migration must accept intentionally deferred replay indexes")?;
+    assert!(
+        !sqlx::query_scalar::<_, bool>(
+            "SELECT to_regclass('normalized_events_record_inventory_resource_replay_idx') IS NOT NULL",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "worker migrate must not rebuild an index deliberately deferred by normalized replay"
+    );
+
+    sqlx::query("DROP INDEX normalized_events_replay_latest_resolver_tmp_idx")
+        .execute(database.pool())
+        .await
+        .context("failed to clear normalized replay deferral marker index")?;
+    bigname_storage::migrate(database.pool())
+        .await
+        .context("migration must repair an accidentally missing replay index")?;
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT index.indisvalid AND index.indisready
+            FROM pg_index AS index
+            WHERE index.indexrelid =
+                    to_regclass('normalized_events_record_inventory_resource_replay_idx')
+              AND index.indrelid = 'normalized_events'::regclass
+            "#,
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "migration must repair the index once normalized replay is no longer deferring it"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[test]
 fn projection_replay_runs_when_normalized_replay_and_indexes_are_ready() {
     assert!(ready_status().is_ready());
 }
 
 #[test]
-fn apply_cursor_is_seeded_after_bootstrap_when_absent() {
-    assert!(should_seed_apply_cursor_after_bootstrap(false));
-    assert!(!should_seed_apply_cursor_after_bootstrap(true));
+fn fresh_bootstrap_seeds_apply_cursor_at_captured_watermark() {
+    let captured = projection_apply::NormalizedEventChangeCursor { change_id: 17 };
+
+    assert_eq!(
+        projection_bootstrap_apply_cursor_seed(false, 0, captured),
+        Some(captured)
+    );
+    assert_eq!(
+        projection_bootstrap_apply_cursor_seed(true, 0, captured),
+        None
+    );
+}
+
+#[test]
+fn resumed_bootstrap_without_apply_cursor_replays_change_log_from_beginning() {
+    let captured = projection_apply::NormalizedEventChangeCursor { change_id: 17 };
+
+    assert_eq!(
+        projection_bootstrap_apply_cursor_seed(false, 1, captured),
+        Some(projection_apply::NormalizedEventChangeCursor { change_id: 0 })
+    );
 }
 
 #[test]
@@ -211,6 +283,110 @@ async fn restart_bootstrap_skip_requires_apply_cursor_even_with_target_covering_
         !projection_bootstrap_already_handed_off_to_apply(database.pool()).await?,
         "replay markers must not hand off bootstrap before incremental apply has a cursor"
     );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn restart_after_markers_does_not_seed_past_post_marker_change() -> Result<()> {
+    let database = test_database().await?;
+    seed_ready_normalized_replay_cursor(database.pool(), 20).await?;
+    seed_chain_checkpoint(database.pool(), 20).await?;
+    seed_replay_markers(database.pool(), 20).await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_events (
+            event_identity,
+            namespace,
+            logical_name_id,
+            event_kind,
+            source_family,
+            manifest_version,
+            chain_id,
+            block_number,
+            block_hash,
+            derivation_kind,
+            canonicality_state,
+            after_state
+        )
+        VALUES (
+            'automatic-replay:post-marker-change',
+            'ens',
+            'ens:post-marker.eth',
+            'ResolverChanged',
+            'ens_v1_registry_l1',
+            1,
+            'ethereum-mainnet',
+            20,
+            '0xpostmarker20',
+            'ens_v1_unwrapped_authority',
+            'canonical'::canonicality_state,
+            '{"resolver":"0x0000000000000000000000000000000000000abc"}'::jsonb
+        )
+        "#,
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to insert post-marker normalized-event change")?;
+    let post_marker_change_id = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(MAX(change_id), 0) FROM projection_normalized_event_changes",
+    )
+    .fetch_one(database.pool())
+    .await
+    .context("failed to load post-marker normalized-event change id")?;
+
+    assert!(
+        replay_all_current_projections_when_ready(database.pool(), None, None).await?,
+        "ready automatic replay should complete bootstrap handoff"
+    );
+    let cursor = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT last_change_id
+        FROM projection_apply_cursors
+        WHERE cursor_name = 'normalized_events_to_projection_invalidations'
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await
+    .context("failed to load automatic projection replay cursor")?;
+    assert_eq!(
+        cursor, 0,
+        "markers without an apply cursor must replay the change log from the beginning"
+    );
+
+    let derive_summary = projection_apply::derive_once(database.pool()).await?;
+    assert_eq!(
+        derive_summary.scanned_event_count, 1,
+        "the post-marker change must be consumed after bootstrap handoff"
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM projection_invalidations
+                WHERE projection = 'name_current'
+                  AND projection_key = 'ens:post-marker.eth'
+            )
+            "#,
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "the post-marker change must enqueue its stale name projection key"
+    );
+    let derived_cursor = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT last_change_id
+        FROM projection_apply_cursors
+        WHERE cursor_name = 'normalized_events_to_projection_invalidations'
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await
+    .context("failed to load derived automatic projection replay cursor")?;
+    assert_eq!(derived_cursor, post_marker_change_id);
 
     database.cleanup().await?;
     Ok(())

@@ -23,6 +23,12 @@ mod cursors;
 mod indexes;
 #[path = "normalized_replay_catchup/sources.rs"]
 mod sources;
+#[cfg(test)]
+#[path = "normalized_replay_catchup/test_hook.rs"]
+mod test_hook;
+
+#[cfg(test)]
+pub(crate) use test_hook::install_after_rewind as install_after_rewind_test_hook;
 
 use cursors::{
     advance_cursor, ensure_cursor, record_cursor_failure,
@@ -69,6 +75,8 @@ struct NormalizedReplayCursor {
     next_block_number: i64,
     target_block_number: i64,
     last_replayed_at: Option<OffsetDateTime>,
+    raw_log_input_revision: i64,
+    raw_log_retention_generation: i64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -116,13 +124,15 @@ pub(crate) async fn rewind_cursor_for_test(
     deployment_profile: &str,
     chain: &str,
 ) -> Result<(i64, i64, i64)> {
-    let row = sqlx::query_as::<_, (i64, i64, i64, Option<OffsetDateTime>)>(
+    let row = sqlx::query_as::<_, (i64, i64, i64, Option<OffsetDateTime>, i64, i64)>(
         r#"
         SELECT
             range_start_block_number,
             next_block_number,
             target_block_number,
-            last_replayed_at
+            last_replayed_at,
+            raw_log_input_revision,
+            raw_log_retention_generation
         FROM normalized_replay_cursors
         WHERE deployment_profile = $1
           AND chain_id = $2
@@ -134,7 +144,7 @@ pub(crate) async fn rewind_cursor_for_test(
     .bind(CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS)
     .fetch_one(pool)
     .await?;
-    let cursor = rewind_cursor_for_newly_observed_older_logs(
+    let (cursor, _) = rewind_cursor_for_newly_observed_older_logs(
         pool,
         deployment_profile,
         chain,
@@ -143,6 +153,8 @@ pub(crate) async fn rewind_cursor_for_test(
             next_block_number: row.1,
             target_block_number: row.2,
             last_replayed_at: row.3,
+            raw_log_input_revision: row.4,
+            raw_log_retention_generation: row.5,
         },
     )
     .await?;
@@ -304,13 +316,15 @@ pub(crate) async fn run_normalized_replay_catchup_iteration(
         target_refresh_policy,
     )
     .await?;
-    let cursor = rewind_cursor_for_newly_observed_older_logs(
+    let (cursor, rewind_inspection_input_version) = rewind_cursor_for_newly_observed_older_logs(
         pool,
         &config.deployment_profile,
         chain,
         cursor,
     )
     .await?;
+    #[cfg(test)]
+    test_hook::pause_after_rewind(pool, &config.deployment_profile, chain).await;
     if let Some(reviewed_target) = pending_base_rederive_replay_target {
         ensure!(
             cursor.target_block_number == reviewed_target,
@@ -364,8 +378,8 @@ pub(crate) async fn run_normalized_replay_catchup_iteration(
         (from_block, to_block)
     };
     let started = Instant::now();
-    let outcome = if closure_or_dependency_replay {
-        replay_full_closure_or_dependency_normalized_events(
+    let (outcome, raw_log_input_version) = if closure_or_dependency_replay {
+        let outcome = replay_full_closure_or_dependency_normalized_events(
             pool,
             &config.deployment_profile,
             chain,
@@ -373,9 +387,10 @@ pub(crate) async fn run_normalized_replay_catchup_iteration(
             to_block,
             config.max_raw_logs_per_chunk,
         )
-        .await?
+        .await?;
+        (outcome, rewind_inspection_input_version)
     } else {
-        replay_raw_fact_normalized_events(
+        let outcome = replay_raw_fact_normalized_events(
             pool,
             RawFactNormalizedEventReplayRequest {
                 deployment_profile: config.deployment_profile.clone(),
@@ -386,7 +401,8 @@ pub(crate) async fn run_normalized_replay_catchup_iteration(
                 },
             },
         )
-        .await?
+        .await?;
+        (outcome, rewind_inspection_input_version)
     };
 
     advance_cursor(
@@ -401,6 +417,7 @@ pub(crate) async fn run_normalized_replay_catchup_iteration(
         },
         to_block,
         &outcome,
+        raw_log_input_version,
     )
     .await?;
     if closure_or_dependency_replay {
@@ -456,7 +473,6 @@ async fn replay_full_closure_or_dependency_normalized_events(
             unsupported.join(", ")
         );
     }
-
     info!(
         service = "indexer",
         replay_cursor_kind = CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS,
@@ -469,16 +485,18 @@ async fn replay_full_closure_or_dependency_normalized_events(
         "full closure normalized-event replay session started"
     );
 
-    let summary = sync_full_closure_normalized_events_from_persisted_raw_payloads(
+    let replay = sync_full_closure_normalized_events_from_persisted_raw_payloads(
         pool,
         deployment_profile,
         chain,
+        CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS,
         from_block,
         to_block,
         &adapters,
         max_raw_logs_per_page,
     )
     .await?;
+    let summary = replay.summary;
 
     Ok(RawFactNormalizedEventReplayOutcome {
         deployment_profile: deployment_profile.to_owned(),

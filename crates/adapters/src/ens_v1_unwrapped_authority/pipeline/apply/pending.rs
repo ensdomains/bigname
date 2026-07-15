@@ -189,7 +189,6 @@ pub(super) fn should_clear_stale_wrapper_before_registration_grant(
                 position.is_wrapper_name_wrapped
                     && position.block_hash == grant_position.block_hash
                     && position.transaction_hash == grant_position.transaction_hash
-                    && position.log_index > grant_position.log_index
             })
         }))
 }

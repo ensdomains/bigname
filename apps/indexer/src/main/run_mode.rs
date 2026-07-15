@@ -37,9 +37,13 @@ impl IndexerRunMode {
             runtime_watch_scope,
             startup_backfill_adapter_sync_mode: adapter_sync_mode
                 .startup_hash_pinned_backfill_mode(),
-            sync_adapter_before_startup_backfill: adapter_sync_mode
+            // A fresh chain has no retained-history proof until its
+            // generation-bound bootstrap facts and coverage are committed.
+            // Inline mode therefore performs its broad absence-based sync
+            // only after bootstrap drains.
+            sync_adapter_before_startup_backfill: false,
+            sync_adapter_after_startup_backfill: adapter_sync_mode
                 == BackfillAdapterSyncMode::Inline,
-            sync_adapter_after_startup_backfill: false,
             normalized_replay_catchup_enabled,
             live_poll_adapter_sync_enabled,
             live_poll_adapter_sync_after_normalized_replay_catchup,

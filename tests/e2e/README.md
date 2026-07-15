@@ -85,12 +85,15 @@ scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml -- --test-thr
    execution-plane row runs yet. ENSv2 scenarios mirror the shipped
    `manifests/sepolia/ethereum/ens` families into a generated
    `manifests-sepolia` root so the selected profile remains the post-audit Sepolia
-   one. Cross-protocol scenarios structurally mirror the eleven currently
-   checked-in mainnet families across both chains, including the two
+   one. Cross-protocol scenarios structurally mirror the eleven
+   non-`ens_execution` mainnet families across both chains, including the two
    ethereum-chain glue families (`basenames_l1_compat`,
    `basenames_execution`), into one generated root and run a single live
-   session over two anvils. Nothing under the checked-in `manifests/` tree
-   changes.
+   session over two anvils. The twelfth checked-in family, shadow
+   `ens_execution`, is omitted from that composed corpus and exercised
+   separately by the verified-resolution scenario; the cross-protocol run is
+   therefore not a full-mainnet-profile claim. Nothing under the checked-in
+   `manifests/` tree changes.
 4. **Pipeline** — most scenarios run an `indexer run` live-intake session
    supervised until the canonical checkpoint reaches the scenario head (the
    live loop, not `backfill`, is
@@ -177,7 +180,7 @@ route inventory or a claim that every protocol transition is covered.
   (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L340 @ ens_v1@91c966f),
   while record authorship is pinned to that controller transaction and the
   normalized record shape's explicit lack of a writer field. Pins the
-  chipped anchor-rebind review point: the burst's records derive only under
+  reproduced anchor-rebind defect: the burst's records derive only under
   the transient registry-only resource, so exact-name serves an empty
   selector inventory with explicit gaps and the mid-burst controller as
   registry_owner; a second ingest shows later plain writes restoring the
@@ -206,7 +209,7 @@ route inventory or a claim that every protocol transition is covered.
   upgrades the bracketed child display, and confirms that label proof alone
   does not mint an exact-name surface. Phase 2 pins the reveal via
   backfill + projection replay because live re-ingest of the reveal chain
-  hangs the run loop before checkpoint promotion (chipped review point);
+  hangs the run loop before checkpoint promotion (a reproduced live-intake defect);
   `BIGNAME_E2E_READY_TIMEOUT_SECS` shortens the readiness deadline when
   reproducing that wedge.
 - `unadmitted_controller::unadmitted_controller_registration_derives_registry_side_only`
@@ -215,9 +218,9 @@ route inventory or a claim that every protocol transition is covered.
   (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L110 @ ens_v1@91c966f):
   registrar-plane facts persist raw-only (no lease events derive, not even
   `TokenControlTransferred` — fresh mints have no existing lease), exactly
-  one registry-side `SubregistryChanged` derives, the child stays a
-  bracketed placeholder, and no exact-name surface or registrant-collection
-  entry appears.
+  one registry-side `SubregistryChanged` derives, and the lack of a routeable
+  `.eth` parent surface means no child projection, exact-name surface, or
+  registrant-collection entry appears.
 - `registry_migration::registry_migration_legacy_to_current_admission` —
   exercises the active registry v3 old-registry role end to end: a pure
   legacy 2LD derives subregistry state without minting an exact-name surface,
@@ -233,11 +236,22 @@ route inventory or a claim that every protocol transition is covered.
   cached values and selectors, then checks resolver replacement and
   `clearRecords` move the record-version boundary without leaking prior
   values.
-- `resolver_records::unadmitted_custom_resolver_observes_facts_but_keeps_profile_gated`
-  — binds a name to an unpatched PublicResolver copy and writes a text
-  record on it; declared reads never surface the unadmitted write (no
-  record events, no inventory selectors, `not_found` on request,
-  enumeration supported-but-empty).
+- `resolver_records::byte_identical_public_resolver_copy_converges_to_admitted_profile`
+  — binds a name to a byte-identical copy of the pinned PublicResolver
+  (upstream: .refs/ens_v1/contracts/resolvers/PublicResolver.sol:L66 @ ens_v1@91c966f),
+  waits until its runtime code hash matches the manifest seed, and writes a
+  text record. Dynamic code-hash admission publishes the observed text value
+  and selector, explicit addr/contenthash absence gaps, and supported
+  known-text enumeration. This scenario does not claim that an unsupported
+  resolver remains pending.
+- `resolver_records::live_code_hash_profile_transition_orphans_and_reactivates_records`
+  — keeps the production indexer, continuous projection worker, and API live
+  while a copied PublicResolver's retained effective code hash moves from a
+  seed match to a mismatch and back. It proves durable queue acknowledgement,
+  absence-aware orphaning and same-identity reactivation of the exact resolver
+  record, and removal/restoration of the selector, declared value, and support
+  state; neither tested profile transition invokes normalized-event or
+  projection full replay.
 - `resolver_records::shared_resolver_keeps_per_name_records_and_overview_fan_in_unsupported`
   — two names share one resolver while per-node records stay distinct; the
   resolver overview keeps binding fan-in explicitly unsupported.
@@ -257,22 +271,22 @@ route inventory or a claim that every protocol transition is covered.
   (upstream: .refs/ens_v1/contracts/resolvers/profiles/DNSResolver.sol:L186 @ ens_v1@91c966f),
   and the inventory enumerates selectors only for addr/text/contenthash —
   the keyed families stay out of selectors, gaps, and unsupported_families.
-- `record_families::pubkey_write_on_admitted_resolver_stays_invisible` —
+- `record_families::pubkey_write_on_admitted_resolver_stays_raw_only` —
   setPubkey on the admitted resolver
   (upstream: .refs/ens_v1/contracts/resolvers/profiles/PubkeyResolver.sol:L25 @ ens_v1@91c966f)
-  is invisible at every layer: the topic-filtered live scan persists no raw
-  log, nothing derives, and no pubkey family surfaces in the inventory
-  (the adapter gate rejects the family by tested design; drift-vs-narrowing
-  is a doc-first question).
+  remains in raw watched-emitter intake, but the adapter's admitted
+  resolver-event set excludes the family: nothing normalizes and no pubkey
+  family surfaces in the inventory.
 - `wrapper::wrapper_wrap_fuses_subnames_and_unwrap_restore_identity` —
   wraps registrar names through the pinned NameWrapper, asserts wrapper
   resource/token-lineage rotation, burns `CANNOT_UNWRAP`,
   `CANNOT_TRANSFER`, and `CANNOT_SET_RESOLVER`, and pins the emitted
   `PermissionScopeChanged` fuse bitmaps. It also exposes the current
   publication gap: wrapper-backed resources have no holder subject grants or
-  published masked `effective_powers`, while a wrap-of-existing-name retains
-  stale control facets. The scenario therefore does not claim effective-power
-  masking is published. It creates wrapped subnames with
+  published masked `effective_powers`. A wrap-of-existing-name retains stale
+  control inputs internally, while the public exact-name route suppresses
+  them behind an explicit unsupported control summary. The scenario therefore
+  does not claim effective-power masking is published. It creates wrapped subnames with
   `PARENT_CANNOT_CONTROL`, checks wrapper expiry vs registrar expiry, and
   unwraps a separate name before lease end to confirm the prior registrar
   resource and lineage reactivate.
@@ -292,8 +306,10 @@ route inventory or a claim that every protocol transition is covered.
 - `wrapper_turn_k_transfers::wrapped_erc1155_single_and_batch_transfers_preserve_identity`
   — performs real single and two-id batch ERC1155 transfers, pins per-id
   `TransferBatch` fan-out, holder-following registrants, stable wrapper
-  resource/lineage, zero registry/lifecycle derivation, and the existing
-  stale control facets under holder rotation
+  resource/lineage, and zero registry/lifecycle derivation. Exact-name
+  registration follows each holder, while wrapper effective control remains
+  explicitly unsupported rather than inferring holder powers or publishing
+  stale pre-wrap facets
   (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L154 @ ens_v1@91c966f).
 - `wrapper_turn_k::parent_burns_pcc_then_extends_existing_child_expiry`
   — creates a live wrapped child without PCC, burns the exact 0→65536
@@ -305,10 +321,13 @@ route inventory or a claim that every protocol transition is covered.
   wraps a plain child under a registry-only parent using DNS wire bytes and
   registry operator approval; the child's registry `Transfer` (not
   `NewOwner`) rotates it to a distinct wrapper resource and publishes the
-  `NameWrapped` label preimage while the parent stays registry-only
-  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L342 @ ens_v1@91c966f).
+  `NameWrapped` label preimage while the parent stays registry-only: `wrap()`
+  calls `setOwner`
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L372 @ ens_v1@91c966f),
+  whose registry implementation emits `Transfer`
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L68 @ ens_v1@91c966f).
   Reveal-via-wrap trips the same live-intake hang as
-  reveal-via-registration (chipped), so this scenario pins derivation and
+  reveal-via-registration (the reproduced live-intake defect), so this scenario pins derivation and
   projections via backfill + replay — no API layer.
 - `reverse_primary::reverse_claim_set_changed_then_cleared_tracks_declared_candidate`
   — drives `ReverseRegistrar.setName` through the admitted reverse family
@@ -333,9 +352,13 @@ route inventory or a claim that every protocol transition is covered.
   (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L44 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L129 @ ens_v1@91c966f).
 - `reverse_primary_turn_j::unadmitted_reverse_resolver_keeps_candidate_absent`
-  — claims through a fresh PublicResolver copy and writes its reverse-node
-  name; the admitted reverse claim remains visible, but the unadmitted
-  `NameChanged` derives nothing and the candidate stays `not_found`
+  — claims through a pinned, owner-written OwnedResolver whose runtime code
+  hash differs from the admitted PublicResolver seed
+  (upstream: .refs/ens_v1/contracts/resolvers/OwnedResolver.sol:L16 @ ens_v1@91c966f),
+  and writes its reverse-node name; the admitted reverse claim remains visible,
+  while generic topic intake retains one unanchored `NameChanged` observation without
+  `primary_claim_source`, so the persisted and public candidate stay
+  `not_found`
   (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L93 @ ens_v1@91c966f).
 - `reverse_primary_turn_j::forward_mismatch_keeps_declared_candidate_but_verified_not_found`
   — runs with chain RPC and the local Universal Resolver, writes a forward
@@ -413,11 +436,13 @@ route inventory or a claim that every protocol transition is covered.
   under `ethereum-sepolia`, role-driven token regeneration and current
   permission rows, and subregistry attach/swap behavior across two
   ingests. Fresh registration confirms the promoted exact-name profile end
-  to end (`full`, `authoritative`, and `exact_name_profile`). It retains two
-  review points recorded in the ledger: discovered child-registry logs are
-  never scanned in-session, and unregister→re-register wedges intake when
-  ingested (exercised on-chain only, post-ingest). The on-chain cycle rotates
-  both resource and token lineage: `unregister` burns the token and increments
+  to end (`full`, `authoritative`, and `exact_name_profile`). Automatic ENSv2
+  bootstrap fetches each finite-known-start discovered child registry within
+  the same startup invocation, so the active child's registration projects
+  while the replaced child's name leaves the current listing. The
+  unregister→re-register cycle also reaches the live checkpoint and serves the
+  successor owner/resource. The on-chain cycle rotates both resource and token
+  lineage: `unregister` burns the token and increments
   both `eacVersionId` and `tokenVersionId`, from which the registry
   reconstructs later resource and token IDs
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L201 @ ens_v2@48b3e2d)
@@ -436,15 +461,24 @@ route inventory or a claim that every protocol transition is covered.
 - `ens_v2_turn_l::resolver_and_subregistry_edges_follow_set_change_zero` —
   resolver set/change/zero and subregistry attach/detach derive NULL-edge
   detaches; pinned via backfill + replay because the composed live chain
-  hangs intake (chipped; every op ingests cleanly alone), which also pinned
+  hangs intake (a reproduced defect; every op ingests cleanly alone), which also pinned
   the backfill/live parity gap: backfill derives zero v2
   `PermissionChanged`.
+- `ens_v2_live_poll::ens_v2_registry_state_survives_distinct_live_polls` —
+  keeps one indexer live while registration, resolver attachment, subregistry
+  attachment, token regeneration, and unregister land in distinct polls. It
+  asserts one resource lineage, explicit null resolver/subregistry terminal
+  boundaries, no spurious expiry changes, and a closed binding. The registry
+  target is generation-covered during startup, so this does not test first-ever
+  live discovery catch-up; it stops at normalized and identity state without a
+  worker or public API assertion.
 - `ens_v2_turn_l::expiry_passes_then_reregistration_advances_lineage` —
   after expiry and the post-audit grace period pass, the event-silent availability
   flip serves last-known active state with a past
-  expiry; re-registration advances the on-chain counters while BOTH intake
-  paths refuse the cycle (live hang; backfill anchor-conflict abort,
-  asserted verbatim).
+  expiry; re-registration advances the on-chain counters without an unregister
+  event, live intake reaches both `RegistrationGranted` resource epochs, and
+  exact-name readback serves the successor owner/resource with `full` /
+  `authoritative` coverage while the two binding intervals remain adjacent.
 - `ens_v2_turn_l::root_apex_attach_and_root_scope_roles` — the root
   family's first transitions: `eth` apex registration + attach derive,
   root-scope grant/revoke read from the resulting bitmap and clear
@@ -455,14 +489,18 @@ route inventory or a claim that every protocol transition is covered.
   labelhash-keyed token-less reservations promote in place preserving
   expiry; a non-admitted root-role registrar derives registry-only facts
   with gated coverage; an ERC1155 sale migrates roles (admin-half rendered
-  as `admin_*` powers) with no token regeneration while the registrant
-  facet stays at the seller (chipped).
-- `ens_v2_turn_l::discovered_v2_resolver_records_stay_unscanned` — a
+  as `admin_*` powers) with no token regeneration while the declared
+  registrant and registrant collection move from seller to buyer.
+- `ens_v2_turn_l::discovered_v2_resolver_records_are_backfilled_in_session` — a
   VerifiableFactory-proxied writable resolver
-  (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L201 @ ens_v2@48b3e2d)
-  is discovery-admitted from the registry's `ResolverUpdated`, but zero raw
-  logs are scanned at the discovered address in-session and zero record
-  events derive — the discovered-registry scan gap extends to resolvers.
+  (upstream: .refs/ens_v2/contracts/script/setup.ts:L719 @ ens_v2@48b3e2d)
+  (upstream: .refs/ens_v2/contracts/script/setup.ts:L721 @ ens_v2@48b3e2d)
+  (upstream: .refs/ens_v2/contracts/script/setup.ts:L722 @ ens_v2@48b3e2d)
+  is discovery-admitted from the registry's `ResolverUpdated`; automatic
+  ENSv2 bootstrap fetches its three finite-known-start writes in-session,
+  derives the text/address/version observations, and keeps the public record
+  inventory explicitly `unsupported` because that summary is not yet
+  projected for ENSv2.
 - `verified_resolution::direct_path_verified_query_via_local_universal_resolver_persists_trace`
   — deploys the pinned ENSv1 UniversalResolver with local constructor
   dependencies (upstream: .refs/ens_v1/contracts/universalResolver/UniversalResolver.sol:L11 @ ens_v1@91c966f)
@@ -510,6 +548,10 @@ route inventory or a claim that every protocol transition is covered.
 - The supervised `indexer run` session writes its full log to
   `$TMPDIR/bigname-e2e-indexer-<pid>-<target block>.log`; failures include
   the tail.
+- Anvil startup writes its full log to
+  `$TMPDIR/bigname-e2e-anvil-<pid>-<chain id>-<sequence>.log`. Normal
+  teardown removes the file; an unexpected exit retains it and reports its
+  path and tail.
 - `BIGNAME_E2E_READY_TIMEOUT_SECS` shortens the 600s readiness deadline
   when reproducing intake wedges locally.
 - Full local runs are most stable with bounded parallelism

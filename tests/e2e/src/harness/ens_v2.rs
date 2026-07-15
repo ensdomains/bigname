@@ -678,6 +678,7 @@ mod erc1155_calls {
     // (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L88 @ ens_v2@48b3e2d).
     sol! {
         function safeTransferFrom(address from, address to, uint256 id, uint256 value, bytes data) external;
+        function safeBatchTransferFrom(address from, address to, uint256[] ids, uint256[] values, bytes data) external;
     }
 }
 
@@ -828,6 +829,37 @@ pub async fn transfer_registry_token(
     Ok(receipt)
 }
 
+pub async fn batch_transfer_registry_tokens(
+    rpc: &RpcClient,
+    registry: Address,
+    from: Address,
+    to: Address,
+    token_ids: &[U256],
+) -> Result<TxReceipt> {
+    let receipt = rpc
+        .send_transaction(
+            from,
+            Some(registry),
+            &erc1155_calls::safeBatchTransferFromCall {
+                from,
+                to,
+                ids: token_ids.to_vec(),
+                values: vec![U256::from(1_u8); token_ids.len()],
+                data: Bytes::new(),
+            }
+            .abi_encode(),
+            U256::ZERO,
+        )
+        .await?;
+    if !receipt.status_ok {
+        bail!(
+            "ENSv2 batch token transfer reverted (tx {})",
+            receipt.tx_hash
+        );
+    }
+    Ok(receipt)
+}
+
 pub async fn grant_root_roles(
     rpc: &RpcClient,
     registry: Address,
@@ -944,8 +976,11 @@ mod resolver_addr_calls {
 mod factory_calls {
     use alloy_sol_types::sol;
 
-    // User resolvers deploy behind VerifiableFactory proxies — the raw
-    // implementation disables its initializers
+    // User resolvers deploy behind VerifiableFactory proxies
+    // (upstream: .refs/ens_v2/contracts/script/setup.ts:L719 @ ens_v2@48b3e2d)
+    // (upstream: .refs/ens_v2/contracts/script/setup.ts:L721 @ ens_v2@48b3e2d)
+    // (upstream: .refs/ens_v2/contracts/script/setup.ts:L722 @ ens_v2@48b3e2d) — the
+    // raw implementation disables its initializers
     // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L201 @ ens_v2@48b3e2d).
     sol! {
         function deployProxy(address implementation, uint256 salt, bytes data) external returns (address);

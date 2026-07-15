@@ -2,23 +2,13 @@ use std::collections::BTreeSet;
 
 use alloy_primitives::Address;
 use anyhow::{Context, Result};
-use serde_json::Value;
 use sqlx::types::Uuid;
 
 use super::support;
+use crate::harness::responses::{exact_name, pointer};
 use crate::harness::{anvil::Anvil, ens_v1, repo_root};
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
-
-fn pointer(body: &Value, path: &str) -> Value {
-    body.pointer(path).cloned().unwrap_or(Value::Null)
-}
-
-async fn exact_name(run: &support::PipelineRun, name: &str) -> Result<Value> {
-    let (status, body) = run.api.get_json(&format!("/v1/names/ens/{name}")).await?;
-    assert_eq!(status, 200, "exact-name lookup for {name} failed: {body}");
-    Ok(body)
-}
 
 async fn resource_token_lineage(
     run: &support::PipelineRun,
@@ -159,7 +149,7 @@ async fn wrapped_renewal_tracks_registrar_expiry_without_wrapper_event() -> Resu
         "active wrapper resource must retain a token lineage through renewal"
     );
 
-    let body = exact_name(&run, name).await?;
+    let body = exact_name(&run.api, "ens", name).await?;
     assert_eq!(
         pointer(&body, "/data/resource_id").as_str(),
         Some(wrapper_resource.to_string().as_str()),
@@ -375,11 +365,9 @@ async fn wrapped_erc1155_single_and_batch_transfers_preserve_identity() -> Resul
         "plain holder transfers must not invent wrapper lifecycle transitions"
     );
 
-    assert_transferred_exact_shape(&run, names[0], alice, bob, deployment.name_wrapper.address)
-        .await?;
+    assert_transferred_exact_shape(&run, names[0], bob, deployment.name_wrapper.address).await?;
     for name in &names[1..] {
-        assert_transferred_exact_shape(&run, name, alice, carol, deployment.name_wrapper.address)
-            .await?;
+        assert_transferred_exact_shape(&run, name, carol, deployment.name_wrapper.address).await?;
     }
 
     run.db.cleanup().await?;
@@ -389,7 +377,6 @@ async fn wrapped_erc1155_single_and_batch_transfers_preserve_identity() -> Resul
 async fn assert_transferred_exact_shape(
     run: &support::PipelineRun,
     name: &str,
-    pre_wrap_owner: Address,
     holder: Address,
     wrapper: Address,
 ) -> Result<()> {
@@ -446,7 +433,7 @@ async fn assert_transferred_exact_shape(
     .await?;
     assert_eq!(latest_registry_owner, format!("{wrapper:#x}"));
 
-    let body = exact_name(run, name).await?;
+    let body = exact_name(&run.api, "ens", name).await?;
     assert_eq!(
         pointer(&body, "/data/resource_id").as_str(),
         Some(resource.to_string().as_str()),
@@ -463,21 +450,16 @@ async fn assert_transferred_exact_shape(
         "registration registrant should follow the ERC1155 holder; body: {body}"
     );
     assert_eq!(
-        pointer(&body, "/declared_state/control/registrant"),
-        format!("{holder:#x}"),
-        "control registrant should follow the ERC1155 holder; body: {body}"
+        pointer(&body, "/declared_state/control"),
+        serde_json::json!({
+            "status": "unsupported",
+            "unsupported_reason": "ENSv1 wrapper effective control is not yet projected",
+        }),
+        "wrapper control must stay explicitly unsupported instead of leaking stale or holder-derived facets; body: {body}"
     );
 
-    // REVIEW POINT (pinned observed projection): the transfer event updates
-    // the shared registrant fact, but the exact-name control view still keeps
-    // the pre-wrap registry owner and registrar authority_key even though the
-    // canonical registry event above names NameWrapper. Holder rotation does
-    // not repair the existing wrap-window projection disagreement.
-    assert_eq!(
-        pointer(&body, "/declared_state/control/registry_owner"),
-        format!("{pre_wrap_owner:#x}"),
-        "pinned stale registry_owner after wrapped holder rotation; body: {body}"
-    );
+    // The registration summary follows the ERC1155 holder, but wrapper
+    // effective control is deliberately not inferred from that shared fact.
     let authority_key = pointer(&body, "/declared_state/registration/authority_key");
     assert!(
         authority_key

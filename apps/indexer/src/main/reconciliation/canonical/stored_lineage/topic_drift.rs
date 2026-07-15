@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use bigname_manifests::load_required_watched_tuples;
+use bigname_manifests::RequiredWatchedTuple;
 use bigname_storage::{BackfillJob, load_completed_backfill_jobs_intersecting_range};
 use serde_json::Value;
 use sqlx::Row;
@@ -10,19 +10,80 @@ use sqlx::Row;
 /// with no relevant facts cannot poison the range forever. Likewise, a
 /// gap-free union of current-topic or topic-unfiltered facts that replaces
 /// the stale evidence makes the stale rows irrelevant to promotion.
-pub(super) async fn ensure_family_topic_sets_undrifted(
+pub(super) async fn ensure_required_topic_sets_undrifted(
     pool: &sqlx::PgPool,
     chain: &str,
     current_topic0s_by_family: &BTreeMap<String, BTreeSet<String>>,
-    from_block: i64,
-    to_block: i64,
+    required_tuples: &[RequiredWatchedTuple],
 ) -> std::result::Result<(), String> {
-    if current_topic0s_by_family.is_empty() {
+    ensure_required_topic_sets_undrifted_with_retention_generation(
+        pool,
+        chain,
+        current_topic0s_by_family,
+        required_tuples,
+        None,
+    )
+    .await
+}
+
+/// Retention-recovery variant: only jobs captured in the current raw-log
+/// generation may replace a stale topic-filtered fact. An older generation's
+/// otherwise-current job is audit history, not recovery authority.
+pub(crate) async fn ensure_required_topic_sets_undrifted_for_retention_generation(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    current_topic0s_by_family: &BTreeMap<String, BTreeSet<String>>,
+    required_tuples: &[RequiredWatchedTuple],
+    retention_generation: i64,
+) -> std::result::Result<(), String> {
+    ensure_required_topic_sets_undrifted_with_retention_generation(
+        pool,
+        chain,
+        current_topic0s_by_family,
+        required_tuples,
+        Some(retention_generation),
+    )
+    .await
+}
+
+async fn ensure_required_topic_sets_undrifted_with_retention_generation(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    current_topic0s_by_family: &BTreeMap<String, BTreeSet<String>>,
+    required_tuples: &[RequiredWatchedTuple],
+    retention_generation: Option<i64>,
+) -> std::result::Result<(), String> {
+    if current_topic0s_by_family.is_empty() || required_tuples.is_empty() {
         return Ok(());
     }
+    let from_block = required_tuples
+        .iter()
+        .map(|tuple| tuple.required_from_block)
+        .min()
+        .expect("non-empty requirements must have a lower bound");
+    let to_block = required_tuples
+        .iter()
+        .map(|tuple| tuple.required_to_block)
+        .max()
+        .expect("non-empty requirements must have an upper bound");
+    let required_source_families = required_tuples
+        .iter()
+        .map(|tuple| tuple.source_family.as_str())
+        .collect::<BTreeSet<_>>();
+    let relevant_topic0s_by_family = current_topic0s_by_family
+        .iter()
+        .filter(|(family, _)| required_source_families.contains(family.as_str()))
+        .map(|(family, topics)| (family.clone(), topics.clone()))
+        .collect::<BTreeMap<_, _>>();
     let jobs = load_completed_backfill_jobs_intersecting_range(pool, chain, from_block, to_block)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|job| {
+            retention_generation
+                .is_none_or(|generation| job.raw_log_retention_generation == generation)
+        })
+        .collect::<Vec<_>>();
     if jobs.is_empty() {
         return Ok(());
     }
@@ -30,7 +91,7 @@ pub(super) async fn ensure_family_topic_sets_undrifted(
     let mut current_job_ids_by_family = BTreeMap::<String, BTreeSet<i64>>::new();
     let mut stale_jobs = Vec::<StaleTopicJob>::new();
     for job in &jobs {
-        for (source_family, current_topic0s) in current_topic0s_by_family {
+        for (source_family, current_topic0s) in &relevant_topic0s_by_family {
             match topic_status(job, source_family, current_topic0s) {
                 TopicStatus::CurrentOrUnfiltered => {
                     current_job_ids_by_family
@@ -69,11 +130,6 @@ pub(super) async fn ensure_family_topic_sets_undrifted(
         &source_families,
     )
     .await?;
-    let required_tuples =
-        load_required_watched_tuples(pool, chain, from_block, to_block, &source_families)
-            .await
-            .map_err(|error| error.to_string())?;
-
     for tuple in required_tuples {
         let current_job_ids = current_job_ids_by_family
             .get(&tuple.source_family)
@@ -195,8 +251,9 @@ fn topic_status(
 }
 
 /// Topic-filtered jobs persist their manifest topic0 sets either inside the
-/// Coinbase SQL plan or at the top level for hash-pinned Basenames registry
-/// scan-all. Both shapes carry the same family-to-topic-set contract.
+/// Coinbase SQL plan or at the top level for hash-pinned generic ENSv1
+/// resolver and Basenames registry scans. Both shapes carry the same
+/// family-to-topic-set contract.
 fn persisted_topic0s_by_source_family(
     source_identity: &Value,
 ) -> Option<&serde_json::Map<String, Value>> {
@@ -222,18 +279,24 @@ async fn load_topic_coverage_facts(
     let rows = sqlx::query(
         r#"
         SELECT
-            backfill_job_id,
-            source_family,
-            scope::TEXT AS scope,
-            LOWER(address) AS address,
-            covered_from_block,
-            covered_to_block
-        FROM backfill_coverage_facts
-        WHERE chain_id = $1
-          AND backfill_job_id = ANY($2::BIGINT[])
-          AND source_family = ANY($3::TEXT[])
-          AND covered_from_block <= $5
-          AND covered_to_block >= $4
+            fact.backfill_job_id,
+            fact.source_family,
+            fact.scope::TEXT AS scope,
+            LOWER(fact.address) AS address,
+            fact.covered_from_block,
+            fact.covered_to_block
+        FROM backfill_coverage_facts fact
+        JOIN backfill_jobs fact_job
+          ON fact_job.backfill_job_id = fact.backfill_job_id
+        WHERE fact.chain_id = $1
+          AND fact.backfill_job_id = ANY($2::BIGINT[])
+          AND fact_job.status = 'completed'::backfill_lifecycle_status
+          AND fact_job.chain_id = fact.chain_id
+          AND fact.covered_from_block >= fact_job.range_start_block_number
+          AND fact.covered_to_block <= fact_job.range_end_block_number
+          AND fact.source_family = ANY($3::TEXT[])
+          AND fact.covered_from_block <= $5
+          AND fact.covered_to_block >= $4
         "#,
     )
     .bind(chain)
@@ -301,9 +364,10 @@ fn facts_cover_interval<'a>(
     false
 }
 
-/// Families a job fetched through topic-filtered generic scans whose identity
-/// does not persist the topic set in force (hash-pinned generic resolver
-/// scans; `coinbase_sql_topic_plan`-bearing identities are checked above).
+/// Families a legacy job fetched through topic-filtered generic scans whose
+/// identity does not persist the topic set in force. Current hash-pinned
+/// generic resolver producers persist their set at the top level;
+/// `coinbase_sql_topic_plan`-bearing identities are checked above.
 fn topic_filtered_families_without_persisted_sets(source_identity: &Value) -> Vec<String> {
     if persisted_topic0s_by_source_family(source_identity).is_some() {
         return Vec::new();
@@ -335,9 +399,55 @@ fn topic_filtered_families_without_persisted_sets(source_identity: &Value) -> Ve
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use std::collections::BTreeSet;
 
-    use super::persisted_topic0s_by_source_family;
+    use bigname_storage::{BackfillJob, BackfillLifecycleStatus};
+    use serde_json::json;
+    use sqlx::types::time::OffsetDateTime;
+
+    use crate::ens_v1_resolver::{
+        SOURCE_FAMILY_ENS_V1_RESOLVER_L1, generic_resolver_record_topic0s,
+    };
+
+    use super::{TopicStatus, persisted_topic0s_by_source_family, topic_status};
+
+    fn completed_job(source_identity: serde_json::Value) -> BackfillJob {
+        BackfillJob {
+            backfill_job_id: 7,
+            deployment_profile: "mainnet".to_owned(),
+            chain_id: "ethereum-mainnet".to_owned(),
+            raw_log_retention_generation: 0,
+            source_identity,
+            scan_mode: "hash_pinned_block".to_owned(),
+            range_start_block_number: 1,
+            range_end_block_number: 10,
+            idempotency_key: "generic-resolver-topic-test".to_owned(),
+            status: BackfillLifecycleStatus::Completed,
+            failure_reason: None,
+            failure_metadata: json!({}),
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+            completed_at: Some(OffsetDateTime::UNIX_EPOCH),
+        }
+    }
+
+    fn generic_resolver_identity(topic0s: &[String]) -> serde_json::Value {
+        json!({
+            "selector_kind": "source_family",
+            "source_family": SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+            "source_identity_payload_format": "generic_resolver_event_topics_v1",
+            "topic0s_by_source_family": {
+                SOURCE_FAMILY_ENS_V1_RESOLVER_L1: topic0s,
+            }
+        })
+    }
+
+    fn current_generic_resolver_topic0s() -> BTreeSet<String> {
+        generic_resolver_record_topic0s()
+            .into_iter()
+            .map(|topic0| topic0.to_ascii_lowercase())
+            .collect()
+    }
 
     #[test]
     fn topic_drift_reads_top_level_hash_pinned_scan_all_topics() {
@@ -353,5 +463,36 @@ mod tests {
             .and_then(serde_json::Value::as_array)
             .expect("hash-pinned scan-all topics must be readable at the top level");
         assert_eq!(topics, &[json!("0x1234")]);
+    }
+
+    #[test]
+    fn hash_pinned_generic_resolver_identity_accepts_its_fetched_topic_set() {
+        let topic0s = generic_resolver_record_topic0s();
+        let job = completed_job(generic_resolver_identity(&topic0s));
+
+        assert!(matches!(
+            topic_status(
+                &job,
+                SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+                &current_generic_resolver_topic0s(),
+            ),
+            TopicStatus::CurrentOrUnfiltered
+        ));
+    }
+
+    #[test]
+    fn hash_pinned_generic_resolver_identity_rejects_topic_drift() {
+        let mut fetched_topic0s = generic_resolver_record_topic0s();
+        fetched_topic0s.pop();
+        let job = completed_job(generic_resolver_identity(&fetched_topic0s));
+
+        let TopicStatus::Stale(reason) = topic_status(
+            &job,
+            SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+            &current_generic_resolver_topic0s(),
+        ) else {
+            panic!("a changed generic resolver topic set must be stale");
+        };
+        assert!(reason.contains("manifest ABI topic0 set changed"));
     }
 }

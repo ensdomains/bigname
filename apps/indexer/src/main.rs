@@ -31,6 +31,8 @@ mod reconciliation;
 mod repair;
 #[path = "main/replay.rs"]
 mod replay;
+#[path = "main/resolver_profile_convergence.rs"]
+mod resolver_profile_convergence;
 #[path = "main/rewind.rs"]
 mod rewind;
 #[path = "main/run.rs"]
@@ -52,8 +54,9 @@ use anyhow::{Context, Result};
 use backfill::{
     BackfillAdapterSyncMode, BackfillBlockRange, BackfillJobRunConfig, BackfillSourceKind,
     CoinbaseSqlBackfillConfig, CoinbaseSqlSourceRegistry, hash_pinned_backfill_range_specs,
-    run_resumable_coinbase_sql_backfill_job, run_resumable_coinbase_sql_backfill_job_concurrently,
-    run_resumable_hash_pinned_backfill_job,
+    is_base_chain, run_resumable_coinbase_sql_backfill_job,
+    run_resumable_coinbase_sql_backfill_job_concurrently, run_resumable_hash_pinned_backfill_job,
+    selected_backfill_source, standalone_backfill_profile_convergence_enabled,
 };
 #[cfg(test)]
 use bigname_manifests::{
@@ -92,6 +95,7 @@ pub(crate) use replay::{
     generated_backfill_lease_token,
 };
 use replay::{backfill_source_selector, replay_normalized_events_selection};
+use resolver_profile_convergence::drain_resolver_profile_input_changes;
 #[allow(unused_imports)]
 use runtime::*;
 use tracing::info;
@@ -222,11 +226,19 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
     };
     let lease_expires_at = backfill_lease_expires_at(args.lease_duration_secs)?;
     let adapter_sync_mode = BackfillAdapterSyncMode::parse(&args.hash_pinned_adapter_sync)?;
+    let profile_convergence_enabled = standalone_backfill_profile_convergence_enabled(
+        &pool,
+        &source_plan,
+        selected_backfill_source,
+        adapter_sync_mode,
+    )
+    .await?;
     let header_audit_mode =
         HeaderAuditMode::from_retain_audit_fields(args.retain_header_audit_fields);
     let config = BackfillJobRunConfig {
         deployment_profile,
         idempotency_key: args.idempotency_key,
+        scope_idempotency_to_raw_log_retention_generation: false,
         range,
         lease_owner,
         lease_token,
@@ -288,25 +300,10 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
         }
         BackfillSourceKind::Auto => unreachable!("auto must be resolved before execution"),
     }
-    Ok(())
-}
-
-fn selected_backfill_source(
-    requested: BackfillSourceKind,
-    chain: &str,
-    coinbase_sql_configured: bool,
-) -> BackfillSourceKind {
-    match requested {
-        BackfillSourceKind::Auto if is_base_chain(chain) && coinbase_sql_configured => {
-            BackfillSourceKind::CoinbaseSql
-        }
-        BackfillSourceKind::Auto => BackfillSourceKind::HashPinned,
-        source => source,
+    if profile_convergence_enabled {
+        drain_resolver_profile_input_changes(&pool).await?;
     }
-}
-
-fn is_base_chain(chain: &str) -> bool {
-    matches!(chain, "base-mainnet" | "base" | "base-sepolia")
+    Ok(())
 }
 
 async fn run_ops_catchup(args: OpsCatchupArgs) -> Result<()> {

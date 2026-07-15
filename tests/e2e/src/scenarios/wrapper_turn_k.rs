@@ -4,22 +4,13 @@ use serde_json::Value;
 use sqlx::types::Uuid;
 
 use super::support;
+use crate::harness::responses::{exact_name, pointer};
 use crate::harness::{anvil::Anvil, ens_v1, repo_root};
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
 const GRACE_PERIOD: u64 = 90 * 24 * 60 * 60;
 const CANNOT_UNWRAP: u16 = 1;
 const PARENT_CANNOT_CONTROL: u32 = 1 << 16;
-
-fn pointer(body: &Value, path: &str) -> Value {
-    body.pointer(path).cloned().unwrap_or(Value::Null)
-}
-
-async fn exact_name(run: &support::PipelineRun, name: &str) -> Result<Value> {
-    let (status, body) = run.api.get_json(&format!("/v1/names/ens/{name}")).await?;
-    assert_eq!(status, 200, "exact-name lookup for {name} failed: {body}");
-    Ok(body)
-}
 
 async fn active_binding(
     pool: &sqlx::PgPool,
@@ -50,7 +41,7 @@ async fn active_binding(
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L281 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289 @ ens_v1@91c966f)
 #[tokio::test]
-async fn born_wrapped_registration_exposes_trailing_grant_rebind() -> Result<()> {
+async fn born_wrapped_registration_retains_wrapper_authority() -> Result<()> {
     let anvil = Anvil::spawn().await?;
     let rpc = anvil.client();
     let deployment = ens_v1::deploy_ens_v1(&rpc, &repo_root()).await?;
@@ -137,18 +128,55 @@ async fn born_wrapped_registration_exposes_trailing_grant_rebind() -> Result<()>
         "born-wrapped NameWrapped expiry should include registrar grace"
     );
 
-    // PreimageObserved is a repair event for already-known hash-only
-    // identities; a born-wrapped registration introduces the name with its
-    // label in the same round, so none derives anywhere in the corpus.
-    let preimage_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM normalized_events \
-         WHERE event_kind = 'PreimageObserved' AND canonicality_state = 'canonical'",
+    // Both name-bearing logs retain their own observation, while the durable
+    // labelhash-to-label fact remains deduplicated.
+    let bornwrapped_labelhash = format!("{:#x}", ens_v1::labelhash("bornwrapped"));
+    let preimage_observations: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT source_family, after_state->>'source_event', \
+                after_state->>'decoded_name', after_state->'labelhashes'->>0 \
+         FROM normalized_events \
+         WHERE event_kind = 'PreimageObserved' \
+           AND transaction_hash = $1 \
+           AND after_state->>'decoded_name' = 'bornwrapped.eth' \
+           AND canonicality_state = 'canonical' \
+         ORDER BY source_family, log_index",
     )
+    .bind(tx_hash)
+    .fetch_all(&run.db.pool)
+    .await?;
+    assert_eq!(
+        preimage_observations,
+        vec![
+            (
+                "ens_v1_registrar_l1".to_owned(),
+                "NameRegistered".to_owned(),
+                "bornwrapped.eth".to_owned(),
+                bornwrapped_labelhash.clone(),
+            ),
+            (
+                "ens_v1_wrapper_l1".to_owned(),
+                "NameWrapped".to_owned(),
+                "bornwrapped.eth".to_owned(),
+                bornwrapped_labelhash.clone(),
+            ),
+        ],
+        "the registrar and wrapper name-bearing logs must both retain the same verified label preimage"
+    );
+    let retained_label: (String, String, String) = sqlx::query_as(
+        "SELECT label, normalized_label, canonical_display_label \
+         FROM label_preimages WHERE labelhash = $1",
+    )
+    .bind(&bornwrapped_labelhash)
     .fetch_one(&run.db.pool)
     .await?;
     assert_eq!(
-        preimage_count, 0,
-        "born-wrapped introduction needs no preimage repair"
+        retained_label,
+        (
+            "bornwrapped".to_owned(),
+            "bornwrapped".to_owned(),
+            "bornwrapped".to_owned(),
+        ),
+        "duplicate observations must converge on one verified label fact"
     );
 
     let registry_owner_events: i64 = sqlx::query_scalar(
@@ -231,22 +259,17 @@ async fn born_wrapped_registration_exposes_trailing_grant_rebind() -> Result<()>
         "wrapper resource must anchor the surface once"
     );
 
-    // REVIEW POINT (pinned observed implementation shape): NameWrapped is
-    // earlier than the controller's NameRegistered. The adapter's stale-wrap
-    // guard therefore clears the just-created wrapper and rebinds through
-    // registry-only to registrar. Boundary events have no log index and sort
-    // by identity after the raw grant, so exact-name's authority_kind/key end
-    // on registry_only even while /data identifies the active registrar
-    // resource. Born-wrapped registration therefore disproves the ledger's
-    // earlier hypothesis that only the post-registration wrap window was
-    // stale.
+    // NameWrapped is earlier than the controller's NameRegistered, but both
+    // observations belong to the same atomic registration. The later grant
+    // must therefore retain the wrapper binding instead of treating it as a
+    // stale wrapper from a previous registration epoch.
     let (active_resource, active_lineage, active_kind) =
         active_binding(&run.db.pool, "ens:bornwrapped.eth").await?;
-    assert_eq!(active_kind, "registrar");
+    assert_eq!(active_kind, "wrapper");
     assert!(active_lineage.is_some());
-    assert_ne!(active_resource, wrapper_resources[0]);
+    assert_eq!(active_resource, wrapper_resources[0]);
 
-    let body = exact_name(&run, "bornwrapped.eth").await?;
+    let body = exact_name(&run.api, "ens", "bornwrapped.eth").await?;
     let active_lineage_string = active_lineage.map(|lineage| lineage.to_string());
     assert_eq!(
         pointer(&body, "/data/resource_id"),
@@ -265,18 +288,22 @@ async fn born_wrapped_registration_exposes_trailing_grant_rebind() -> Result<()>
         registrar_expiry
     );
     assert_eq!(
-        pointer(&body, "/declared_state/control/registry_owner"),
-        format!("{:#x}", deployment.name_wrapper.address)
+        pointer(&body, "/declared_state/control"),
+        serde_json::json!({
+            "status": "unsupported",
+            "unsupported_reason": "ENSv1 wrapper effective control is not yet projected",
+        }),
+        "born-wrapped control must fail closed instead of publishing the registry owner as effective control"
     );
     assert_eq!(
         pointer(&body, "/declared_state/registration/authority_kind"),
-        "registry_only"
+        "wrapper"
     );
     assert!(
         pointer(&body, "/declared_state/registration/authority_key")
             .as_str()
-            .is_some_and(|key| key.starts_with("registry-only:")),
-        "pinned mixed born-wrapped authority key missing: {body}"
+            .is_some_and(|key| key.starts_with("wrapper:")),
+        "born-wrapped authority key missing: {body}"
     );
 
     run.db.cleanup().await?;
@@ -444,7 +471,7 @@ async fn parent_burns_pcc_then_extends_existing_child_expiry() -> Result<()> {
     assert_eq!(active_resource, event_resources[0]);
     assert!(active_lineage.is_some());
 
-    let body = exact_name(&run, "transition.fuseparent.eth").await?;
+    let body = exact_name(&run.api, "ens", "transition.fuseparent.eth").await?;
     let active_lineage_string = active_lineage.map(|lineage| lineage.to_string());
     assert_eq!(
         pointer(&body, "/data/resource_id"),
@@ -463,8 +490,11 @@ async fn parent_burns_pcc_then_extends_existing_child_expiry() -> Result<()> {
         format!("{carol:#x}")
     );
     assert_eq!(
-        pointer(&body, "/declared_state/control/registry_owner"),
-        format!("{:#x}", deployment.name_wrapper.address)
+        pointer(&body, "/declared_state/control"),
+        serde_json::json!({
+            "status": "unsupported",
+            "unsupported_reason": "ENSv1 wrapper effective control is not yet projected",
+        })
     );
     assert_eq!(
         pointer(&body, "/declared_state/registration/expiry"),
@@ -523,7 +553,7 @@ async fn wrap_existing_registry_subname_rotates_child_only() -> Result<()> {
 
     // Wrapping an existing placeholder child reveals its label via
     // NameWrapped — the same live-intake reveal wedge pinned on the
-    // registration path (chipped): the run loop hangs before checkpoint
+    // registration path (reproduced defect): the run loop hangs before checkpoint
     // promotion. Derivation and projections are pinned via backfill +
     // replay instead; API reads are impossible on this path.
     let run =
@@ -677,8 +707,11 @@ async fn wrap_existing_registry_subname_rotates_child_only() -> Result<()> {
         format!("{carol:#x}")
     );
     assert_eq!(
-        child_summary["control"]["registry_owner"],
-        format!("{:#x}", deployment.name_wrapper.address)
+        child_summary["control"],
+        serde_json::json!({
+            "status": "unsupported",
+            "unsupported_reason": "ENSv1 wrapper effective control is not yet projected",
+        })
     );
 
     let (parent_resource, parent_lineage, parent_kind) =

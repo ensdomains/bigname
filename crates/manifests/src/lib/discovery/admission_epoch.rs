@@ -3,6 +3,46 @@ use std::collections::BTreeSet;
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 
+/// Acquire the writer side of the admission-epoch fence before changing any
+/// rows which can alter the watched set. The lock is held by the caller's
+/// transaction until commit; a stored-lineage promotion which reaches its
+/// final shared fence must therefore wait and then observe the conditional
+/// epoch bump made by that same transaction.
+pub(crate) async fn fence_discovery_admission_epoch_writes(
+    executor: &mut sqlx::postgres::PgConnection,
+    chains: &BTreeSet<String>,
+) -> Result<()> {
+    if chains.is_empty() {
+        return Ok(());
+    }
+    let chains = chains.iter().cloned().collect::<Vec<_>>();
+    sqlx::query(
+        r#"
+        INSERT INTO discovery_admission_epochs (chain_id, epoch)
+        SELECT chain_id, 0 FROM UNNEST($1::TEXT[]) AS chains(chain_id)
+        ON CONFLICT (chain_id) DO NOTHING
+        "#,
+    )
+    .bind(&chains)
+    .execute(&mut *executor)
+    .await
+    .context("failed to ensure discovery admission-epoch writer fence rows")?;
+    sqlx::query(
+        r#"
+        SELECT chain_id
+        FROM discovery_admission_epochs
+        WHERE chain_id = ANY($1::TEXT[])
+        ORDER BY chain_id
+        FOR UPDATE
+        "#,
+    )
+    .bind(&chains)
+    .fetch_all(executor)
+    .await
+    .context("failed to acquire discovery admission-epoch writer fences")?;
+    Ok(())
+}
+
 /// Invariant: any transaction that mutates `discovery_edges` (insert,
 /// reactivation, window update, or deactivation) OR the manifest-declared
 /// watched surface (manifest entries, seeded addresses, declared start

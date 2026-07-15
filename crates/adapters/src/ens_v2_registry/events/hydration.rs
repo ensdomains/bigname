@@ -110,12 +110,25 @@ pub(in crate::ens_v2_registry) async fn hydrate_subregistry_event_target_ids(
             discovery_edges.to_contract_instance_id
         FROM requested
         JOIN discovery_edges
-          ON discovery_edges.chain_id = requested.chain_id
+         ON discovery_edges.chain_id = requested.chain_id
          AND discovery_edges.edge_kind = 'subregistry'
          AND discovery_edges.from_contract_instance_id = requested.from_contract_instance_id
-         AND discovery_edges.active_from_block_number = requested.block_number
-         AND discovery_edges.active_from_block_hash = requested.block_hash
          AND lower(discovery_edges.provenance ->> 'to_address') = requested.target_address
+         AND (
+             discovery_edges.active_from_block_number < requested.block_number
+             OR (
+                 discovery_edges.active_from_block_number = requested.block_number
+                 AND discovery_edges.active_from_block_hash = requested.block_hash
+             )
+         )
+         AND (
+             discovery_edges.active_to_block_number IS NULL
+             OR discovery_edges.active_to_block_number > requested.block_number
+             OR (
+                 discovery_edges.active_to_block_number = requested.block_number
+                 AND discovery_edges.active_to_block_hash = requested.block_hash
+             )
+         )
         ORDER BY requested.event_index, discovery_edges.discovery_edge_id
         "#,
     );

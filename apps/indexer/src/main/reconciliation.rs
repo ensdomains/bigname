@@ -15,6 +15,11 @@ mod replay;
 #[path = "reconciliation/types.rs"]
 mod types;
 
+#[cfg(test)]
+pub(crate) use adapter_sync::{
+    install_ownership_release_test_hook, install_post_discovery_mutation_failure_for_test,
+    sync_manual_full_closure_normalized_events_from_persisted_raw_payloads,
+};
 #[allow(unused_imports)]
 pub(crate) use adapter_sync::{
     sync_adapter_state_from_persisted_raw_payloads,
@@ -28,6 +33,10 @@ pub(crate) use canonical::{
     ChainCoverageFrontiers, orphan_canonical_branch, poll_provider_heads,
     poll_provider_heads_with_adapter_sync, reconcile_canonical_head, reconcile_fetched_heads,
     reconcile_fetched_heads_with_adapter_sync, reconcile_intake_chain_task,
+};
+#[cfg(test)]
+pub(crate) use canonical::{
+    EnsV2LiveCoverageRecoveryStatus, recover_ens_v2_live_coverage_requirement,
 };
 #[allow(unused_imports)]
 pub(crate) use lineage::{
@@ -59,8 +68,10 @@ pub(crate) use persistence::{
 #[allow(unused_imports)]
 pub(crate) use replay::{
     NormalizedEventReplayAdapter, active_closure_or_dependency_replay_adapters,
-    chain_has_closure_or_dependency_replay_adapter, replay_raw_fact_normalized_events,
-    unsupported_closure_replay_adapters,
+    chain_has_closure_or_dependency_replay_adapter,
+    ensure_full_closure_retention_authority_for_adapters,
+    ensure_legacy_registry_closure_retention_authority_for_adapters,
+    replay_raw_fact_normalized_events, unsupported_closure_replay_adapters,
 };
 #[allow(unused_imports)]
 pub(crate) use types::{

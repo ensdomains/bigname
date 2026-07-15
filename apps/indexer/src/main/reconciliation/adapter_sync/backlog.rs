@@ -76,8 +76,13 @@ pub(crate) async fn sync_live_adapter_backlog_after_normalized_replay(
                 block_hash_count = hashes.len(),
                 "post-replay live raw payload adapter backlog page selected"
             );
-            let summary = sync_live_adapter_state_from_persisted_raw_payloads(pool, chain, &hashes)
-                .await
+            let summary = sync_live_adapter_state_from_persisted_raw_payloads(
+                pool,
+                deployment_profile,
+                chain,
+                &hashes,
+            )
+            .await
                 .with_context(|| {
                     format!(
                         "failed to sync post-replay live adapter backlog for {deployment_profile}/{chain} through block {completed_to_block}"

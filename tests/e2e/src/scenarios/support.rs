@@ -1,3 +1,4 @@
+use alloy_primitives::Address;
 use anyhow::Result;
 
 use crate::harness::{
@@ -14,6 +15,43 @@ pub struct PipelineRun {
 pub struct BackfillRun {
     pub db: HarnessDb,
     _scratch: TempDir,
+}
+
+/// SQL scalar expression that compares the latest non-orphaned code-hash
+/// observations used by resolver-profile admission for two addresses.
+pub fn resolver_code_hash_comparison_sql(
+    candidate: Address,
+    profile_seed: Address,
+    expect_match: bool,
+) -> String {
+    let comparison = if expect_match { "=" } else { "<>" };
+    format!(
+        "COALESCE((SELECT candidate.code_hash {comparison} seed.code_hash \
+         FROM LATERAL ( \
+             SELECT code_hash FROM raw_code_hashes \
+             WHERE chain_id = 'ethereum-mainnet' \
+               AND lower(contract_address) = '{candidate:#x}' \
+               AND canonicality_state <> 'orphaned' \
+             ORDER BY block_number DESC, \
+               CASE canonicality_state \
+                 WHEN 'finalized' THEN 4 WHEN 'safe' THEN 3 \
+                 WHEN 'canonical' THEN 2 WHEN 'observed' THEN 1 ELSE 0 \
+               END DESC, raw_code_hash_id DESC \
+             LIMIT 1 \
+         ) candidate \
+         CROSS JOIN LATERAL ( \
+             SELECT code_hash FROM raw_code_hashes \
+             WHERE chain_id = 'ethereum-mainnet' \
+               AND lower(contract_address) = '{profile_seed:#x}' \
+               AND canonicality_state <> 'orphaned' \
+             ORDER BY block_number DESC, \
+               CASE canonicality_state \
+                 WHEN 'finalized' THEN 4 WHEN 'safe' THEN 3 \
+                 WHEN 'canonical' THEN 2 WHEN 'observed' THEN 1 ELSE 0 \
+               END DESC, raw_code_hash_id DESC \
+             LIMIT 1 \
+         ) seed), FALSE)"
+    )
 }
 
 /// Ingest the chain as it stands (live intake to the current head, then a

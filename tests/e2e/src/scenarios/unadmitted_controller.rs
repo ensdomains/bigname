@@ -10,8 +10,9 @@ const YEAR: u64 = 365 * 24 * 60 * 60;
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L79 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L110 @ ens_v1@91c966f).
 /// The registrar-level uint256 events are outside every active manifest ABI,
-/// so the pipeline sees only the registry side: a labelhash placeholder child
-/// of eth with no lease facts and no exact-name surface.
+/// so the pipeline sees only the registry-side normalized event. With no
+/// routeable `.eth` parent surface, no child projection, lease facts, or
+/// exact-name surface materializes.
 #[tokio::test]
 async fn unadmitted_controller_registration_derives_registry_side_only() -> Result<()> {
     let anvil = Anvil::spawn().await?;
@@ -63,19 +64,20 @@ async fn unadmitted_controller_registration_derives_registry_side_only() -> Resu
     // Nothing lease-bearing derives: the only normalized event from the
     // transaction is the registry-side child edge.
     let derived_kinds: Vec<(String, String)> = sqlx::query_as(
-        "SELECT DISTINCT event_kind, source_family FROM normalized_events \
+        "SELECT event_kind, source_family FROM normalized_events \
          WHERE transaction_hash = $1 AND canonicality_state = 'canonical'",
     )
     .bind(&register_tx)
     .fetch_all(&run.db.pool)
     .await?;
-    assert!(
-        derived_kinds
-            .iter()
-            .all(|(kind, family)| kind == "SubregistryChanged" && family == "ens_v1_registry_l1"),
-        "unadmitted-controller registration must derive registry facts only: {derived_kinds:?}"
+    assert_eq!(
+        derived_kinds,
+        vec![(
+            "SubregistryChanged".to_owned(),
+            "ens_v1_registry_l1".to_owned(),
+        )],
+        "unadmitted-controller registration must derive exactly one registry-side event"
     );
-    assert!(!derived_kinds.is_empty(), "registry child edge must derive");
     let lease_events: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events \
          WHERE event_kind IN ('RegistrationGranted', 'TokenControlTransferred', \
@@ -91,20 +93,18 @@ async fn unadmitted_controller_registration_derives_registry_side_only() -> Resu
     .await?;
     assert_eq!(lease_events, 0, "no lease facts may derive for shadow.eth");
 
-    // The child projects as a labelhash placeholder under eth with the
-    // registrant as registry owner; no exact-name surface is minted.
-    let child: Option<(String, String)> =
-        sqlx::query_as("SELECT normalized_name, owner FROM children_current WHERE namehash = $1")
+    // `children_current` is keyed by a routeable parent surface. The harness
+    // has no `.eth` parent surface, so the registry fact remains normalized
+    // evidence rather than becoming a child row.
+    let child_rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM children_current WHERE namehash = $1")
             .bind(&shadow_node)
-            .fetch_optional(&run.db.pool)
+            .fetch_one(&run.db.pool)
             .await?;
-    if let Some((child_name, child_owner)) = &child {
-        assert!(
-            child_name.starts_with('[') && child_name.ends_with(".eth"),
-            "shadow child must stay a bracketed placeholder: {child_name}"
-        );
-        assert_eq!(child_owner, &format!("{registrant:#x}"));
-    }
+    assert_eq!(
+        child_rows, 0,
+        "unadmitted registration must not invent a child without a parent surface"
+    );
     let surfaces: i64 =
         sqlx::query_scalar("SELECT count(*) FROM name_surfaces WHERE logical_name_id = $1")
             .bind("ens:shadow.eth")

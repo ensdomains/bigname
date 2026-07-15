@@ -3,7 +3,9 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use anyhow::{Context, Result, ensure};
+#[cfg(feature = "reth-db")]
+use anyhow::ensure;
+use anyhow::{Context, Result};
 use serde_json::Value;
 #[cfg(feature = "reth-db")]
 use sqlx::Row;

@@ -353,6 +353,22 @@ pub(super) async fn resource_permissions(
         .await?;
     }
 
+    let resource_summary = bigname_storage::load_permissions_current_resource_summary(
+        &state.pool,
+        resource_id,
+    )
+        .await
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                resource_id = %resource_id,
+                error = ?load_error,
+                "failed to load projection-owned permissions support metadata"
+            );
+            ApiError::internal_error(format!(
+                "failed to load permissions for resource {resource_id}"
+            ))
+        })?;
     let storage_page = bigname_storage::load_permissions_current_page(
         &state.pool,
         resource_id,
@@ -387,6 +403,7 @@ pub(super) async fn resource_permissions(
     Ok(Json(build_resource_permissions_response_from_summary(
         &storage_page.summary,
         &storage_page.rows,
+        resource_summary.as_ref(),
         page,
     )))
 }
@@ -438,6 +455,20 @@ async fn build_address_names_response_with_role_summary(
         );
         ApiError::internal_error("failed to load permissions for address role summary expansion")
     })?;
+    let permission_summaries =
+        bigname_storage::load_permissions_current_resource_summaries(pool, &resource_ids)
+            .await
+            .map_err(|load_error| {
+                error!(
+                    service = "api",
+                    resource_ids = ?resource_ids,
+                    error = ?load_error,
+                    "failed to batch load projection-owned permission support metadata for address role summary expansion"
+                );
+                ApiError::internal_error(
+                    "failed to load permission support for address role summary expansion",
+                )
+            })?;
     let children_summaries = bigname_storage::load_children_current_summaries(
         pool,
         &logical_name_ids,
@@ -469,6 +500,7 @@ async fn build_address_names_response_with_role_summary(
             .map(Vec::as_slice)
             .unwrap_or_default();
         let children_summary = children_summaries.get(&entry.logical_name_id);
+        let permission_summary = permission_summaries.get(&entry.resource_id);
         let child_count = children_summary
             .map(|summary| u64::try_from(summary.child_count).unwrap_or_default())
             .unwrap_or_default();
@@ -477,6 +509,9 @@ async fn build_address_names_response_with_role_summary(
             supplement.push_name_current(row);
         }
         supplement.push_permissions(permissions);
+        if let Some(summary) = permission_summary {
+            supplement.push_permissions_resource_summary(summary);
+        }
         if let Some(summary) = children_summary {
             supplement.push_children_summary(summary);
         }
@@ -484,6 +519,7 @@ async fn build_address_names_response_with_role_summary(
             entry,
             name_row,
             permissions,
+            permission_summary,
             child_count,
         ));
     }

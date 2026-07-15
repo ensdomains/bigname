@@ -46,6 +46,37 @@ pub(in crate::ens_v1_unwrapped_authority) async fn load_canonical_blocks(
         .collect()
 }
 
+pub(in crate::ens_v1_unwrapped_authority) async fn load_canonical_block_at_number(
+    pool: &PgPool,
+    chain: &str,
+    block_number: i64,
+) -> Result<RawBlockSnapshot> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            chain_id,
+            block_hash,
+            block_number,
+            block_timestamp,
+            canonicality_state::TEXT AS canonicality_state
+        FROM chain_lineage
+        WHERE chain_id = $1
+          AND block_number = $2
+          AND canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+        "#,
+    )
+    .bind(chain)
+    .bind(block_number)
+    .fetch_one(pool)
+    .await
+    .with_context(|| format!("failed to load canonical block {block_number} for chain {chain}"))?;
+    raw_block_snapshot_from_row(row)
+}
+
 pub(in crate::ens_v1_unwrapped_authority) async fn load_canonical_blocks_for_restricted_authority_sync(
     pool: &PgPool,
     chain: &str,
@@ -55,15 +86,32 @@ pub(in crate::ens_v1_unwrapped_authority) async fn load_canonical_blocks_for_res
     let Some(replay_head) = restricted_replay_head_block(raw_logs) else {
         return Ok(Vec::new());
     };
-    let mut blocks = load_release_boundary_blocks_for_authority_logs(
+    load_canonical_blocks_for_authority_logs_through_head(
         pool,
         chain,
         raw_logs,
         &replay_head,
         event_topics,
     )
+    .await
+}
+
+pub(in crate::ens_v1_unwrapped_authority) async fn load_canonical_blocks_for_authority_logs_through_head(
+    pool: &PgPool,
+    chain: &str,
+    raw_logs: &[AuthorityRawLogRow],
+    replay_head: &RawBlockSnapshot,
+    event_topics: &AuthorityEventTopics,
+) -> Result<Vec<RawBlockSnapshot>> {
+    let mut blocks = load_release_boundary_blocks_for_authority_logs(
+        pool,
+        chain,
+        raw_logs,
+        replay_head,
+        event_topics,
+    )
     .await?;
-    blocks.push(replay_head);
+    blocks.push(replay_head.clone());
 
     blocks.sort_by(|left, right| {
         left.block_number

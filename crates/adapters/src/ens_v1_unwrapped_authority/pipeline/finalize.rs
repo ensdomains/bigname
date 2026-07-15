@@ -74,7 +74,7 @@ pub(super) async fn finalize_authority_sync(
         resource_count,
         surface_count,
         mut bindings,
-        events,
+        mut events,
         token_lineages_upsert_ms,
         resources_upsert_ms,
         surfaces_upsert_ms,
@@ -110,7 +110,9 @@ pub(super) async fn finalize_authority_sync(
     drop(bindings);
     let normalized_events_started = Instant::now();
     let normalized_event_count = events.len();
-    let event_inserted_count = upsert_normalized_events_count_only(input.pool, &events).await?;
+    let event_inserted_count =
+        event_persistence::upsert_events_preserving_manifest_provenance(input.pool, &mut events)
+            .await?;
     let normalized_events_upsert_ms = normalized_events_started.elapsed().as_millis();
     drop(events);
 

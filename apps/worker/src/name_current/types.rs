@@ -29,6 +29,7 @@ pub(super) struct CurrentBindingContext {
     pub(super) block_timestamp: Option<OffsetDateTime>,
     pub(super) surface_binding_state: CanonicalityState,
     pub(super) resource_state: CanonicalityState,
+    pub(super) resource_authority_kind: Option<String>,
     pub(super) token_lineage_state: Option<CanonicalityState>,
 }
 

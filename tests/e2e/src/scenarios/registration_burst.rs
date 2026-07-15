@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 use super::support;
+use crate::harness::responses::{pointer, selector_keys};
 use crate::harness::{anvil::Anvil, ens_v1, repo_root};
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
@@ -22,20 +23,6 @@ sol! {
         uint256 expires,
         bytes32 referrer
     );
-}
-
-fn pointer(body: &Value, path: &str) -> Value {
-    body.pointer(path).cloned().unwrap_or(Value::Null)
-}
-
-fn selector_keys(body: &Value) -> BTreeSet<String> {
-    body.pointer("/declared_state/record_inventory/selectors")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| entry.get("record_key").and_then(Value::as_str))
-        .map(str::to_owned)
-        .collect()
 }
 
 /// Controller registration writes node-checked resolver data and the Ethereum
@@ -236,7 +223,7 @@ async fn registration_with_records_reverse_and_referrer_derives_single_burst() -
         "ens_v1_reverse_l1"
     );
 
-    // REVIEW POINT (chipped): the burst's record writes derive only under
+    // REVIEW POINT (reproduced defect): the burst's record writes derive only under
     // the transient registry-only anchor; the same-tx RegistrationGranted
     // rebinds the surface to the registrar resource and carries the
     // resolver across, but neither the records nor the registry-owner

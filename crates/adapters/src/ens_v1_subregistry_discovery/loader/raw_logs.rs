@@ -159,6 +159,39 @@ pub(in crate::ens_v1_subregistry_discovery) async fn stream_registry_raw_logs(
     Ok(scanned_log_count)
 }
 
+pub(in crate::ens_v1_subregistry_discovery) async fn stream_registry_raw_logs_through_block(
+    pool: &PgPool,
+    chain: &str,
+    emitters: &[ActiveEmitter],
+    through_block_number: i64,
+    page_limit: i64,
+    mut handle_raw_log: impl FnMut(RegistryRawLogRow) -> Result<()>,
+) -> Result<usize> {
+    let mut start_after = None;
+    let mut scanned_log_count = 0usize;
+    loop {
+        let page = load_registry_raw_log_checkpoint_page(
+            pool,
+            chain,
+            emitters,
+            0,
+            through_block_number,
+            start_after.as_ref(),
+            page_limit,
+        )
+        .await?;
+        let Some(last_position) = page.last_position else {
+            break;
+        };
+        for raw_log in page.raw_logs {
+            handle_raw_log(raw_log)?;
+            scanned_log_count += 1;
+        }
+        start_after = Some(last_position);
+    }
+    Ok(scanned_log_count)
+}
+
 pub(in crate::ens_v1_subregistry_discovery) async fn load_registry_raw_log_checkpoint_page(
     pool: &PgPool,
     chain: &str,

@@ -3,6 +3,7 @@ use serde_json::Value;
 use sqlx::types::Uuid;
 
 use super::support;
+use crate::harness::responses::{data_array, exact_name, pointer};
 use crate::harness::{anvil::Anvil, ens_v1, repo_root};
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
@@ -18,24 +19,50 @@ const LOCKED_PARENT_FUSES: u32 = IS_DOT_ETH
     | CANNOT_TRANSFER as u32
     | CANNOT_SET_RESOLVER as u32;
 
-fn pointer(body: &Value, path: &str) -> Value {
-    body.pointer(path).cloned().unwrap_or(Value::Null)
+fn assert_wrapper_permission_coverage(body: &Value) {
+    assert_eq!(pointer(body, "/coverage/status"), "unsupported");
+    assert_eq!(pointer(body, "/coverage/exhaustiveness"), "not_applicable");
+    assert_eq!(
+        pointer(body, "/coverage/source_classes_considered"),
+        serde_json::json!(["permissions_current", "ens_v1_wrapper_l1"])
+    );
+    assert_eq!(
+        pointer(body, "/coverage/enumeration_basis"),
+        "resource_permissions"
+    );
+    assert_eq!(
+        pointer(body, "/coverage/unsupported_reason"),
+        "ensv1_wrapper_holder_permissions_not_projected"
+    );
 }
 
-async fn exact_name(run: &support::PipelineRun, name: &str) -> Result<Value> {
-    let (status, body) = run.api.get_json(&format!("/v1/names/ens/{name}")).await?;
-    assert_eq!(status, 200, "exact-name lookup for {name} failed: {body}");
-    Ok(body)
+fn assert_wrapper_role_meta(body: &Value) {
+    assert_eq!(pointer(body, "/meta/support_status"), "unsupported");
+    assert_eq!(pointer(body, "/meta/total_count"), Value::Null);
+    assert_eq!(pointer(body, "/meta/exhaustiveness"), "not_applicable");
+    assert_eq!(
+        pointer(body, "/meta/source_classes_considered"),
+        serde_json::json!(["permissions_current", "ens_v1_wrapper_l1"])
+    );
+    assert_eq!(pointer(body, "/meta/enumeration_basis"), "resource_roles");
+    assert_eq!(
+        pointer(body, "/meta/unsupported_reason"),
+        "ensv1_wrapper_holder_permissions_not_projected"
+    );
 }
 
-fn data_array(body: &Value) -> Vec<Value> {
-    body.pointer("/data")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
+fn assert_account_roles_are_partial_for_wrapper_holder_gap(body: &Value) {
+    assert_eq!(pointer(body, "/meta/support_status"), "partial");
+    assert_eq!(pointer(body, "/meta/total_count"), Value::Null);
+    assert_eq!(pointer(body, "/meta/exhaustiveness"), "best_effort");
+    assert_eq!(pointer(body, "/meta/enumeration_basis"), "account_roles");
+    assert_eq!(
+        pointer(body, "/meta/unsupported_reason"),
+        "ensv1_wrapper_holder_permissions_not_projected"
+    );
 }
 
-async fn permissions(run: &support::PipelineRun, resource_id: Uuid) -> Result<Vec<Value>> {
+async fn permissions(run: &support::PipelineRun, resource_id: Uuid) -> Result<Value> {
     let (status, body) = run
         .api
         .get_json(&format!("/v1/resources/{resource_id}/permissions"))
@@ -44,7 +71,7 @@ async fn permissions(run: &support::PipelineRun, resource_id: Uuid) -> Result<Ve
         status, 200,
         "permissions lookup for {resource_id} failed: {body}"
     );
-    Ok(data_array(&body))
+    Ok(body)
 }
 
 async fn resource_token_lineage(
@@ -176,7 +203,7 @@ async fn wrapper_wrap_fuses_subnames_and_unwrap_restore_identity() -> Result<()>
         "wrap must rotate token lineage rather than reusing the registrar lineage"
     );
 
-    let locked_body = exact_name(&wrapped, "locked.eth").await?;
+    let locked_body = exact_name(&wrapped.api, "ens", "locked.eth").await?;
     let locked_wrapper_resource_string = locked_wrapper_resource.to_string();
     let locked_wrapper_lineage_string = locked_wrapper_lineage.map(|lineage| lineage.to_string());
     assert_eq!(
@@ -194,19 +221,16 @@ async fn wrapper_wrap_fuses_subnames_and_unwrap_restore_identity() -> Result<()>
         format!("{bob:#x}"),
         "current token-control subject should be the wrapped holder; body: {locked_body}"
     );
-    // REVIEW POINT (pinned observed behavior, not a settled contract): the
-    // adapter layer rotates the anchor to the wrapper (the surface binding
-    // above follows the wrapper resource, and a canonical
-    // AuthorityTransferred carries the NameWrapper as the new registry
-    // owner), but the exact-name projection's control section retains the
-    // pre-wrap registry owner and a registrar-anchored authority_key. The
-    // projection and adapter disagree about a wrapped name's control view;
-    // whether the projection should absorb the wrap-window authority events
-    // is an open product decision recorded in the ledger.
+    // Wrapper-holder effective control is not yet a supported exact-name
+    // summary. The route must not expose the stale pre-wrap owner as current
+    // control while the wrapper resource is active.
     assert_eq!(
-        pointer(&locked_body, "/declared_state/control/registry_owner"),
-        format!("{alice:#x}"),
-        "pinned: control.registry_owner currently retains the pre-wrap owner; body: {locked_body}"
+        pointer(&locked_body, "/declared_state/control"),
+        serde_json::json!({
+            "status": "unsupported",
+            "unsupported_reason": "ENSv1 wrapper effective control is not yet projected",
+        }),
+        "wrapped exact-name control must be explicit unsupported; body: {locked_body}"
     );
     let authority_key = pointer(&locked_body, "/declared_state/registration/authority_key");
     assert!(
@@ -302,11 +326,13 @@ async fn wrapper_wrap_fuses_subnames_and_unwrap_restore_identity() -> Result<()>
         wrapper_subject_grants >= 1,
         "the NameWrapper contract should hold the registrar-anchor resource_control grant"
     );
-    let locked_permissions = permissions(&wrapped, locked_wrapper_resource).await?;
+    let locked_permissions_body = permissions(&wrapped, locked_wrapper_resource).await?;
+    let locked_permissions = data_array(&locked_permissions_body);
     assert!(
         locked_permissions.is_empty(),
         "wrapper resources should publish no subject grants while fuse masking remains unprojected: {locked_permissions:?}"
     );
+    assert_wrapper_permission_coverage(&locked_permissions_body);
     let (status, locked_roles) = wrapped
         .api
         .get_json("/v1/names/ens/locked.eth/roles")
@@ -319,18 +345,67 @@ async fn wrapper_wrap_fuses_subnames_and_unwrap_restore_identity() -> Result<()>
         data_array(&locked_roles).is_empty(),
         "name roles should expose no wrapper-holder grants while that projection is unsupported: {locked_roles}"
     );
-
-    let kid_body = exact_name(&wrapped, "kid.locked.eth").await?;
-    // Contrast with the parent above: a child BORN wrapped projects fully
-    // wrapper-anchored (authority_kind, wrapper authority_key, and
-    // registry_owner = the NameWrapper contract). The parent's stale mixed
-    // control view is therefore specific to the wrap-of-an-existing-name
-    // window, pointing at wrap-window event ordering rather than wrapper
-    // support generally.
+    assert_wrapper_role_meta(&locked_roles);
+    for route in [
+        "/v1/roles?namespace=ens&name=locked.eth".to_owned(),
+        format!("/v1/roles?resource_id={locked_wrapper_resource}"),
+        format!("/v1/roles?namespace=ens&name=locked.eth&resource_id={locked_wrapper_resource}"),
+    ] {
+        let (status, body) = wrapped.api.get_json(&route).await?;
+        assert_eq!(
+            status, 200,
+            "wrapper roles lookup failed at {route}: {body}"
+        );
+        assert!(
+            data_array(&body).is_empty(),
+            "wrapper roles must not invent holder grants at {route}: {body}"
+        );
+        assert_wrapper_role_meta(&body);
+    }
+    let (status, bob_roles) = wrapped
+        .api
+        .get_json(&format!("/v1/roles?account={bob:#x}"))
+        .await?;
     assert_eq!(
-        pointer(&kid_body, "/declared_state/control/registry_owner"),
-        format!("{:#x}", deployment.name_wrapper.address),
-        "wrapper-born child should show the NameWrapper as registry owner; body: {kid_body}"
+        status, 200,
+        "wrapper holder roles lookup failed: {bob_roles}"
+    );
+    assert_account_roles_are_partial_for_wrapper_holder_gap(&bob_roles);
+
+    let (status, bob_names) = wrapped
+        .api
+        .get_json(&format!(
+            "/v1/addresses/{bob:#x}/names?namespace=ens&include=role_summary"
+        ))
+        .await?;
+    assert_eq!(
+        status, 200,
+        "wrapper address-name lookup failed: {bob_names}"
+    );
+    let locked_address_row = data_array(&bob_names)
+        .into_iter()
+        .find(|row| row["normalized_name"] == "locked.eth")
+        .context("locked.eth missing from current wrapper holder's address-name collection")?;
+    assert_eq!(
+        pointer(&locked_address_row, "/role_summary/status"),
+        "unsupported"
+    );
+    assert_eq!(
+        pointer(&locked_address_row, "/role_summary/unsupported_reason"),
+        "ensv1_wrapper_holder_permissions_not_projected"
+    );
+
+    let kid_body = exact_name(&wrapped.api, "ens", "kid.locked.eth").await?;
+    // Wrapper-born and wrap-existing names share one conservative public
+    // boundary: exact-name effective control stays unsupported until the
+    // wrapper-holder permission projection is graduated.
+    assert_eq!(
+        pointer(&kid_body, "/declared_state/control"),
+        serde_json::json!({
+            "status": "unsupported",
+            "unsupported_reason": "ENSv1 wrapper effective control is not yet projected",
+        }),
+        "wrapper-born child control must be explicit unsupported; body: {kid_body}"
     );
     assert_eq!(
         pointer(&kid_body, "/declared_state/registration/authority_kind"),
@@ -354,7 +429,8 @@ async fn wrapper_wrap_fuses_subnames_and_unwrap_restore_identity() -> Result<()>
     // Same pinned wrapper-permission contract as the parent: wrapper-anchored
     // resources publish no subject grants at all — neither the child holder's
     // nor (correctly, per PARENT_CANNOT_CONTROL) the parent owner's.
-    let kid_permissions = permissions(&wrapped, kid_resource).await?;
+    let kid_permissions_body = permissions(&wrapped, kid_resource).await?;
+    let kid_permissions = data_array(&kid_permissions_body);
     let bob_string = format!("{bob:#x}");
     assert!(
         kid_permissions
@@ -366,8 +442,9 @@ async fn wrapper_wrap_fuses_subnames_and_unwrap_restore_identity() -> Result<()>
         kid_permissions.is_empty(),
         "pinned: wrapper-anchored child resources publish no subject grants: {kid_permissions:?}"
     );
+    assert_wrapper_permission_coverage(&kid_permissions_body);
 
-    let record_body = exact_name(&wrapped, "record.locked.eth").await?;
+    let record_body = exact_name(&wrapped.api, "ens", "record.locked.eth").await?;
     assert_eq!(
         pointer(&record_body, "/declared_state/resolver/address"),
         format!("{resolver:#x}"),
@@ -413,7 +490,7 @@ async fn wrapper_wrap_fuses_subnames_and_unwrap_restore_identity() -> Result<()>
         "wrapper token lineage should remain distinct from the registrar lineage"
     );
 
-    let restore_body = exact_name(&unwrapped, "restore.eth").await?;
+    let restore_body = exact_name(&unwrapped.api, "ens", "restore.eth").await?;
     let restore_registrar_resource_string = restore_registrar_resource.to_string();
     let restore_registrar_lineage_string =
         restore_registrar_lineage.map(|lineage| lineage.to_string());

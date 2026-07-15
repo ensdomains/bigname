@@ -67,7 +67,7 @@ async fn register_eth_name_end_to_end() -> Result<()> {
     .await?;
     // NewResolver(bytes32,address) — the register call carried a resolver, so
     // the registry must have observed the binding on-chain
-    // (upstream: .refs/ens_v1/contracts/registry/ENS.sol @ ens_v1@91c966f).
+    // (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L12 @ ens_v1@91c966f).
     let new_resolver_topic0 = format!(
         "{:#x}",
         alloy_primitives::keccak256("NewResolver(bytes32,address)")

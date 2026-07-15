@@ -22,6 +22,26 @@ const EXACT_NAME_PROFILE_CAPABILITY: &str = "exact_name_profile";
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
+#[test]
+fn wrapper_current_resource_marks_exact_name_control_unsupported() {
+    let facts = types::ProjectedFacts {
+        registrant: Some("0x0000000000000000000000000000000000000aaa".to_owned()),
+        registry_owner: Some("0x0000000000000000000000000000000000000bbb".to_owned()),
+        latest_control_event_kind: Some("AuthorityEpochChanged".to_owned()),
+        ..types::ProjectedFacts::default()
+    };
+
+    let summary = build_declared_summary(facts, None, true);
+
+    assert_eq!(
+        summary["control"],
+        json!({
+            "status": "unsupported",
+            "unsupported_reason": "ENSv1 wrapper effective control is not yet projected",
+        })
+    );
+}
+
 struct TestDatabase {
     admin_pool: PgPool,
     pool: PgPool,

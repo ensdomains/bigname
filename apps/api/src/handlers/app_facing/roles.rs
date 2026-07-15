@@ -48,6 +48,13 @@ pub(super) async fn roles(
         .is_some_and(|(requested, resolved)| {
             requested != resolved && Some(requested) != ensv2_root_resource_id
         });
+    let support_resource_id = if name_resource_mismatch {
+        resolved_resource_id
+    } else {
+        effective_resource_id
+    };
+    let support =
+        compact_roles_support_for_resource(&state.pool, support_resource_id, "/v1/roles").await?;
 
     let pagination = parse_pagination(query.cursor.as_deref(), query.page_size)?;
     let cursor_spec = roles_cursor_spec(
@@ -65,7 +72,9 @@ pub(super) async fn roles(
             return Err(invalid_cursor_error());
         }
         let page = page_response_from_storage_cursor(&pagination, &cursor_spec, None);
-        return Ok(Json(build_empty_compact_roles_response(page, meta_mode)));
+        return Ok(Json(build_empty_compact_roles_response(
+            page, meta_mode, support,
+        )));
     }
     let root_composition_resource_id = if requested_resource_id.is_none() {
         ensv2_root_resource_id
@@ -112,6 +121,7 @@ pub(super) async fn roles(
         &storage_page.summary,
         page,
         meta_mode,
+        support,
     )))
 }
 
@@ -131,6 +141,12 @@ pub(super) async fn name_roles(
     let account = parse_roles_account(query.account.as_deref());
     let name_row = load_resource_lookup_row(&state.pool, &namespace, &name).await?;
     let resource_id = resource_id_from_name_current(&name_row)?;
+    let support = compact_roles_support_for_resource(
+        &state.pool,
+        Some(resource_id),
+        "/v1/names/{namespace}/{name}/roles",
+    )
+    .await?;
     let pagination = parse_pagination(query.cursor.as_deref(), query.page_size)?;
     let logical_name_id = format!("{namespace}:{name}");
     let cursor_spec = roles_cursor_spec(
@@ -190,6 +206,7 @@ pub(super) async fn name_roles(
         &storage_page.summary,
         page,
         meta_mode,
+        support,
     )))
 }
 

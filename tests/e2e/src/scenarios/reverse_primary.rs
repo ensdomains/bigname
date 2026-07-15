@@ -2,25 +2,8 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::support;
+use crate::harness::responses::{pointer, primary_name};
 use crate::harness::{anvil::Anvil, ens_v1, repo_root};
-
-fn pointer(body: &Value, path: &str) -> Value {
-    body.pointer(path).cloned().unwrap_or(Value::Null)
-}
-
-async fn primary_name(run: &support::PipelineRun, address: &str, mode: &str) -> Result<Value> {
-    let (status, body) = run
-        .api
-        .get_json(&format!(
-            "/v1/primary-names/{address}?namespace=ens&coin_type=60&mode={mode}"
-        ))
-        .await?;
-    assert_eq!(
-        status, 200,
-        "primary-name lookup for {address} mode={mode} failed: {body}"
-    );
-    Ok(body)
-}
 
 fn assert_declared_success(body: &Value, expected_name: &str) {
     assert_eq!(
@@ -70,14 +53,14 @@ async fn reverse_claim_set_changed_then_cleared_tracks_declared_candidate() -> R
         ),
     )
     .await?;
-    let declared = primary_name(&first, &alice_path, "declared").await?;
+    let declared = primary_name(&first.api, "ens", 60, &alice_path, "declared").await?;
     assert_declared_success(&declared, "alice.eth");
     assert_eq!(
         pointer(&declared, "/verified_state"),
         Value::Null,
         "declared mode should not fabricate verified primary state; body: {declared}"
     );
-    let both = primary_name(&first, &alice_path, "both").await?;
+    let both = primary_name(&first.api, "ens", 60, &alice_path, "both").await?;
     assert_declared_success(&both, "alice.eth");
     assert_eq!(
         pointer(&both, "/verified_state/verified_primary_name/status"),
@@ -101,7 +84,7 @@ async fn reverse_claim_set_changed_then_cleared_tracks_declared_candidate() -> R
         ),
     )
     .await?;
-    let changed_body = primary_name(&changed, &alice_path, "both").await?;
+    let changed_body = primary_name(&changed.api, "ens", 60, &alice_path, "both").await?;
     assert_declared_success(&changed_body, "bob.eth");
     assert_eq!(
         pointer(
@@ -128,7 +111,7 @@ async fn reverse_claim_set_changed_then_cleared_tracks_declared_candidate() -> R
         ),
     )
     .await?;
-    let cleared_body = primary_name(&cleared, &alice_path, "both").await?;
+    let cleared_body = primary_name(&cleared.api, "ens", 60, &alice_path, "both").await?;
     assert_eq!(
         pointer(&cleared_body, "/declared_state/claimed_primary_name/status"),
         "not_found",
@@ -180,7 +163,7 @@ async fn reverse_claim_invalid_name_surfaces_raw_claim() -> Result<()> {
     )
     .await?;
 
-    let body = primary_name(&run, &alice_path, "both").await?;
+    let body = primary_name(&run.api, "ens", 60, &alice_path, "both").await?;
     assert_eq!(
         pointer(&body, "/declared_state/claimed_primary_name/status"),
         "invalid_name",

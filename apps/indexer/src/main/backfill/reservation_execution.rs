@@ -2,26 +2,25 @@
 mod coinbase_sql_execution;
 #[path = "reservation_execution/digest.rs"]
 mod digest;
+#[path = "reservation_execution/generic_topic_identity.rs"]
+mod generic_topic_identity;
 #[path = "reservation_execution/lease_heartbeat.rs"]
 mod lease_heartbeat;
 #[path = "reservation_execution/scan_all.rs"]
 mod scan_all;
 
 use anyhow::{Context, Result, bail};
-use bigname_manifests::{
-    WatchedBackfillTarget, WatchedSourceSelectorKind, WatchedSourceSelectorPlan,
-};
+use bigname_manifests::{WatchedSourceSelectorKind, WatchedSourceSelectorPlan};
 use bigname_storage::{
     BackfillJobCreate, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange,
-    BackfillRangeSpec, advance_backfill_range, create_backfill_job, load_backfill_job,
-    reserve_backfill_range,
+    BackfillRangeSpec, advance_backfill_range, create_backfill_job,
+    create_generation_scoped_backfill_job, load_backfill_job, reserve_backfill_range,
 };
 use serde_json::{Value, json};
 use sqlx::types::time::OffsetDateTime;
 use tracing::info;
 
 use crate::{
-    ens_v1_resolver::SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
     provider::ChainProviderOps,
     source_scope::{
         watched_source_plan_uses_basenames_registry_scan_all,
@@ -38,6 +37,7 @@ use super::{
     selection::{SelectedTargetIntervalIndex, SelectedTargetRangeCursor},
 };
 use digest::keccak256_json_digest;
+use generic_topic_identity::{generic_topic_scan_source_identity_payload, selected_targets_sample};
 
 pub(crate) use coinbase_sql_execution::{
     effective_coinbase_sql_adapter_sync_mode,
@@ -77,20 +77,21 @@ pub(crate) async fn create_hash_pinned_backfill_job_with_ranges(
     config: &BackfillJobRunConfig,
     ranges: Vec<BackfillRangeSpec>,
 ) -> Result<BackfillJobRecord> {
-    create_backfill_job(
-        pool,
-        &BackfillJobCreate {
-            deployment_profile: config.deployment_profile.clone(),
-            chain_id: source_plan.watched_chain_plan.chain.clone(),
-            source_identity: backfill_job_source_identity_payload(source_plan)?,
-            scan_mode: HASH_PINNED_BACKFILL_SCAN_MODE.to_owned(),
-            range_start_block_number: config.range.from_block,
-            range_end_block_number: config.range.to_block,
-            idempotency_key: config.idempotency_key.clone(),
-            ranges,
-        },
-    )
-    .await
+    let request = BackfillJobCreate {
+        deployment_profile: config.deployment_profile.clone(),
+        chain_id: source_plan.watched_chain_plan.chain.clone(),
+        source_identity: backfill_job_source_identity_payload(source_plan)?,
+        scan_mode: HASH_PINNED_BACKFILL_SCAN_MODE.to_owned(),
+        range_start_block_number: config.range.from_block,
+        range_end_block_number: config.range.to_block,
+        idempotency_key: config.idempotency_key.clone(),
+        ranges,
+    };
+    if config.scope_idempotency_to_raw_log_retention_generation {
+        create_generation_scoped_backfill_job(pool, &request).await
+    } else {
+        create_backfill_job(pool, &request).await
+    }
 }
 
 pub(crate) async fn create_coinbase_sql_backfill_job(
@@ -278,75 +279,6 @@ pub(crate) fn coinbase_sql_backfill_job_source_identity_payload(
     Ok(payload)
 }
 
-fn generic_topic_scan_source_identity_payload(
-    source_plan: &WatchedSourceSelectorPlan,
-) -> Result<Value> {
-    let selected_targets = source_plan
-        .selected_targets
-        .iter()
-        .filter(|target| target.source_family != SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
-        .cloned()
-        .collect::<Vec<_>>();
-    let requested_watched_targets = source_plan.requested_watched_targets.clone();
-    let generic_topic_scans = json!([
-        {
-            "source_family": SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
-            "source_identity_payload_format": "generic_resolver_event_topics_v1"
-        }
-    ]);
-
-    let mut payload = if source_plan.selector_kind == WatchedSourceSelectorKind::SourceFamily
-        && source_plan.source_family.as_deref() == Some(SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
-    {
-        json!({
-            "selector_kind": source_plan.selector_kind.as_str(),
-            "source_family": &source_plan.source_family,
-            "requested_watched_targets": requested_watched_targets,
-            "source_identity_payload_format": "generic_resolver_event_topics_v1",
-        })
-    } else if selected_targets.len() <= COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD {
-        json!({
-            "selector_kind": source_plan.selector_kind.as_str(),
-            "source_family": &source_plan.source_family,
-            "requested_watched_targets": requested_watched_targets,
-            "selected_targets": selected_targets,
-            "generic_topic_scans": generic_topic_scans,
-            "source_identity_payload_format": "selected_targets_with_generic_topic_scans_v1",
-        })
-    } else {
-        let selected_targets_digest = keccak256_json_digest(&selected_targets)
-            .context("failed to digest compact generic-topic-scan source selected targets")?;
-        json!({
-            "selector_kind": source_plan.selector_kind.as_str(),
-            "source_family": &source_plan.source_family,
-            "requested_watched_targets": requested_watched_targets,
-            "selected_target_count": selected_targets.len(),
-            "selected_targets_digest_algorithm": "keccak256",
-            "selected_targets_digest": selected_targets_digest,
-            "selected_targets_sample": selected_targets_sample(&selected_targets),
-            "generic_topic_scans": generic_topic_scans,
-            "source_identity_payload_format": "selected_targets_digest_with_generic_topic_scans_v1",
-        })
-    };
-    let source_identity_hash = keccak256_json_digest(&payload)
-        .context("failed to digest generic-topic-scan backfill source identity")?;
-    payload
-        .as_object_mut()
-        .expect("generic-topic-scan source identity payload must be an object")
-        .insert(
-            "source_identity_hash".to_owned(),
-            Value::String(source_identity_hash),
-        );
-    Ok(payload)
-}
-
-fn selected_targets_sample(selected_targets: &[WatchedBackfillTarget]) -> Value {
-    json!({
-        "first": selected_targets.first(),
-        "last": selected_targets.last(),
-    })
-}
-
 pub(crate) async fn run_resumable_hash_pinned_backfill_job(
     pool: &sqlx::PgPool,
     source_plan: &WatchedSourceSelectorPlan,
@@ -356,8 +288,34 @@ pub(crate) async fn run_resumable_hash_pinned_backfill_job(
     config.adapter_sync_mode =
         effective_hash_pinned_adapter_sync_mode(source_plan, config.adapter_sync_mode);
     validate_hash_pinned_chunk_blocks(config.hash_pinned_chunk_blocks)?;
-    let watched_chain = &source_plan.watched_chain_plan;
     let record = create_hash_pinned_backfill_job(pool, source_plan, &config).await?;
+    run_precreated_hash_pinned_backfill_job_inner(pool, source_plan, provider, config, record).await
+}
+
+pub(crate) async fn run_precreated_hash_pinned_backfill_job(
+    pool: &sqlx::PgPool,
+    source_plan: &WatchedSourceSelectorPlan,
+    provider: &(impl ChainProviderOps + ?Sized),
+    mut config: BackfillJobRunConfig,
+    record: BackfillJobRecord,
+) -> Result<BackfillJobRunOutcome> {
+    config.adapter_sync_mode =
+        effective_hash_pinned_adapter_sync_mode(source_plan, config.adapter_sync_mode);
+    validate_hash_pinned_chunk_blocks(config.hash_pinned_chunk_blocks)?;
+    run_precreated_hash_pinned_backfill_job_inner(pool, source_plan, provider, config, record).await
+}
+
+async fn run_precreated_hash_pinned_backfill_job_inner(
+    pool: &sqlx::PgPool,
+    source_plan: &WatchedSourceSelectorPlan,
+    provider: &(impl ChainProviderOps + ?Sized),
+    mut config: BackfillJobRunConfig,
+    record: BackfillJobRecord,
+) -> Result<BackfillJobRunOutcome> {
+    let watched_chain = &source_plan.watched_chain_plan;
+    config
+        .idempotency_key
+        .clone_from(&record.job.idempotency_key);
     let mut outcome = BackfillJobRunOutcome::new(record.job.backfill_job_id, source_plan, &config);
     let lease_duration_secs = backfill_lease_duration_secs(config.lease_expires_at)?;
 

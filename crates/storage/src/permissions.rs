@@ -1,6 +1,7 @@
 mod decode;
 mod paging;
 mod reads;
+mod resource_summary;
 mod types;
 mod validation;
 mod writes;
@@ -13,10 +14,15 @@ pub use reads::{
     load_permissions_current, load_permissions_current_by_resource_ids,
     load_permissions_current_for_resolver_scope, load_permissions_current_resolver_targets,
 };
+pub use resource_summary::{
+    load_permissions_current_resource_summaries, load_permissions_current_resource_summary,
+    replace_permissions_current_resource_projection, upsert_permissions_current_resource_summary,
+};
 pub use types::{
     PermissionScope, PermissionsCurrentAccountResourceCursor,
     PermissionsCurrentAccountResourcePage, PermissionsCurrentFullFilterSummary,
-    PermissionsCurrentKeysetCursor, PermissionsCurrentPage, PermissionsCurrentRow,
+    PermissionsCurrentKeysetCursor, PermissionsCurrentPage, PermissionsCurrentResourceSummary,
+    PermissionsCurrentRow,
 };
 pub use writes::{
     clear_permissions_current, delete_permissions_current, upsert_permissions_current_rows,

@@ -3,10 +3,11 @@ use futures_util::{Stream, StreamExt};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use super::types::RelevantEvent;
+use super::types::{RelevantEvent, ResourceProjectionContext};
 use super::{
-    CANONICAL_STATE_FILTER, EVENT_KIND_PERMISSION_CHANGED, EVENT_KIND_PERMISSION_SCOPE_CHANGED,
-    EVENT_KIND_ROOT_PERMISSION_CHANGED,
+    CANONICAL_STATE_FILTER, EVENT_KIND_AUTHORITY_EPOCH_CHANGED, EVENT_KIND_PERMISSION_CHANGED,
+    EVENT_KIND_PERMISSION_SCOPE_CHANGED, EVENT_KIND_REGISTRATION_GRANTED,
+    EVENT_KIND_ROOT_PERMISSION_CHANGED, SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
 };
 
 pub(super) fn stream_target_resource_ids<'a>(
@@ -23,7 +24,13 @@ pub(super) fn stream_target_resource_ids<'a>(
               'safe'::canonicality_state,
               'finalized'::canonicality_state
           )
-        WHERE ne.event_kind IN ($1, $2, $3)
+        WHERE (
+              ne.event_kind IN ($1, $2, $3, $4)
+              OR (
+                  ne.event_kind = $5
+                  AND ne.source_family = $6
+              )
+          )
           AND ne.resource_id IS NOT NULL
           AND ne.canonicality_state IN (
               'canonical'::canonicality_state,
@@ -36,10 +43,47 @@ pub(super) fn stream_target_resource_ids<'a>(
     .bind(EVENT_KIND_PERMISSION_CHANGED)
     .bind(EVENT_KIND_ROOT_PERMISSION_CHANGED)
     .bind(EVENT_KIND_PERMISSION_SCOPE_CHANGED)
+    .bind(EVENT_KIND_AUTHORITY_EPOCH_CHANGED)
+    .bind(EVENT_KIND_REGISTRATION_GRANTED)
+    .bind(SOURCE_FAMILY_ENS_V2_REGISTRY_L1)
     .fetch(pool)
     .map(|row| {
         row.context("failed to stream resource_ids for permissions_current rebuild")
             .and_then(|row| row.try_get("resource_id").context("missing resource_id"))
+    })
+}
+
+pub(super) async fn load_resource_projection_context(
+    pool: &PgPool,
+    resource_id: Uuid,
+) -> Result<Option<ResourceProjectionContext>> {
+    sqlx::query_as::<_, ResourceProjectionContext>(
+        r#"
+        SELECT
+            resource.resource_id,
+            resource.chain_id,
+            resource.block_number,
+            resource.block_hash,
+            resource.provenance,
+            resource.canonicality_state::TEXT AS canonicality_state,
+            lineage.block_timestamp
+        FROM resources resource
+        LEFT JOIN chain_lineage lineage
+          ON lineage.chain_id = resource.chain_id
+         AND lineage.block_hash = resource.block_hash
+        WHERE resource.resource_id = $1
+          AND resource.canonicality_state IN (
+              'canonical'::canonicality_state,
+              'safe'::canonicality_state,
+              'finalized'::canonicality_state
+          )
+        "#,
+    )
+    .bind(resource_id)
+    .fetch_optional(pool)
+    .await
+    .with_context(|| {
+        format!("failed to load permissions resource projection context for {resource_id}")
     })
 }
 
@@ -75,8 +119,8 @@ pub(super) async fn load_permission_events(
         LEFT JOIN chain_lineage rb
           ON rb.chain_id = ne.chain_id
          AND rb.block_hash = ne.block_hash
-        WHERE ne.event_kind IN ($1, $2, $3)
-          AND ne.resource_id = $4
+        WHERE ne.event_kind IN ($1, $2, $3, $4)
+          AND ne.resource_id = $5
           AND ne.canonicality_state {CANONICAL_STATE_FILTER}
         ORDER BY
             ne.block_number ASC NULLS FIRST,
@@ -87,6 +131,7 @@ pub(super) async fn load_permission_events(
     .bind(EVENT_KIND_PERMISSION_CHANGED)
     .bind(EVENT_KIND_ROOT_PERMISSION_CHANGED)
     .bind(EVENT_KIND_PERMISSION_SCOPE_CHANGED)
+    .bind(EVENT_KIND_AUTHORITY_EPOCH_CHANGED)
     .bind(resource_id)
     .fetch_all(pool)
     .await

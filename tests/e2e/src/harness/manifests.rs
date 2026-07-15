@@ -107,12 +107,14 @@ pub fn generate_local_basenames_profile(
 
 const MAINNET_GLUE_FAMILIES: &[&str] = &["basenames_l1_compat", "basenames_execution"];
 
-/// Mirror the FULL shipped mainnet profile into one generated root: the
-/// ENSv1 ethereum families, the Basenames base-mainnet families, and the
-/// two ethereum-chain glue families (`basenames_l1_compat`,
-/// `basenames_execution`) that no single-protocol scenario mirrors. Glue
-/// roles a scenario does not deploy get placeholder addresses like any
-/// other undeployed role.
+/// Mirror the eleven non-`ens_execution` mainnet families into one generated
+/// root: five ENSv1 intake families, four Basenames base-mainnet families, and
+/// the two ethereum-chain glue families (`basenames_l1_compat`,
+/// `basenames_execution`) that no single-protocol scenario mirrors. The
+/// checked-in shadow `ens_execution` family is intentionally omitted here and
+/// exercised by the separate verified-resolution scenario. Glue roles a
+/// scenario does not deploy get placeholder addresses like any other
+/// undeployed role.
 pub fn generate_local_mainnet_composed_profile(
     scratch_dir: &Path,
     repo_root: &Path,

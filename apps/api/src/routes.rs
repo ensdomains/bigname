@@ -270,7 +270,7 @@ pub(crate) const API_ROUTE_DEFINITIONS: &[ApiRouteDefinition] = &[
             "Explain",
             EXPLAIN_RESOLUTION_EXECUTION_PARAMETERS,
             "ResolutionResponse",
-            ApiRouteErrorResponses::new(true, true),
+            ApiRouteErrorResponses::conflict(true),
         ),
     ),
     ApiRouteDefinition::public_get(

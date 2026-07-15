@@ -1,7 +1,8 @@
 use anyhow::{Context, Result, bail};
 use bigname_manifests::{
-    WatchedSourceSelector, load_manifest_declared_watched_source_selector_plan,
-    load_watched_chain_plan, load_watched_contracts_by_addresses,
+    WatchedSourceSelector, load_historical_watched_contracts_by_chain,
+    load_manifest_declared_watched_source_selector_plan, load_watched_chain_plan,
+    load_watched_contracts_by_addresses,
 };
 
 use super::scoped::replay_source_scope_from_requested_scope;
@@ -13,6 +14,12 @@ use crate::{
     },
     source_scope::SourceScope,
 };
+
+#[derive(Debug, Default, Eq, PartialEq)]
+pub(super) struct ReplayAdapterSourceScopes {
+    pub(super) execution: Vec<(String, String, i64, i64)>,
+    pub(super) closure_validation: Vec<(String, String, i64, i64)>,
+}
 
 pub(super) async fn ensure_replay_matches_deployment_profile_scope(
     pool: &sqlx::PgPool,
@@ -54,30 +61,53 @@ pub(super) async fn ensure_replay_matches_deployment_profile_scope(
     Ok(())
 }
 
-pub(super) async fn load_replay_adapter_source_scope(
+pub(super) async fn load_replay_adapter_source_scopes(
     pool: &sqlx::PgPool,
     request: &RawFactNormalizedEventReplayRequest,
     range: Option<(i64, i64)>,
     address_targets: &[(String, String)],
-) -> Result<Vec<(String, String, i64, i64)>> {
+) -> Result<ReplayAdapterSourceScopes> {
     let Some((from_block, to_block)) = range else {
-        return Ok(Vec::new());
+        return Ok(ReplayAdapterSourceScopes::default());
     };
     if let Some(source_scope) = replay_selection_source_scope(&request.selection) {
-        return replay_source_scope_from_requested_scope(source_scope, from_block, to_block);
+        let execution =
+            replay_source_scope_from_requested_scope(source_scope, from_block, to_block)?;
+        return Ok(ReplayAdapterSourceScopes {
+            closure_validation: execution.clone(),
+            execution,
+        });
     }
-    if address_targets.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let watched_contracts = load_watched_contracts_by_addresses(pool, &address_targets)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to load replay source scope targets for chain {} range {}..={}",
-                request.chain, from_block, to_block
-            )
-        })?;
+    let watched_contracts = match &request.selection {
+        // An unscoped range is the only selector which may authorize a
+        // stateful/contextual full-closure session. Build that session from
+        // the complete historically watched corpus, including emitters whose
+        // discovery interval closed before the current manifest view.
+        RawFactNormalizedEventReplaySelection::BlockRange { .. } => {
+            load_historical_watched_contracts_by_chain(pool, &request.chain)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to load historical replay source scope for chain {} range {}..={}",
+                        request.chain, from_block, to_block
+                    )
+                })?
+        }
+        RawFactNormalizedEventReplaySelection::BlockHashes(_)
+        | RawFactNormalizedEventReplaySelection::ScopedBlockRange { .. } => {
+            if address_targets.is_empty() {
+                return Ok(ReplayAdapterSourceScopes::default());
+            }
+            load_watched_contracts_by_addresses(pool, address_targets)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to load replay source scope targets for chain {} range {}..={}",
+                        request.chain, from_block, to_block
+                    )
+                })?
+        }
+    };
     let include_generic_resolver_scope =
         active_ens_v1_resolver_manifest_exists(pool, &request.chain).await?
             && selected_replay_includes_generic_resolver_logs(
@@ -86,15 +116,30 @@ pub(super) async fn load_replay_adapter_source_scope(
                 &request.selection,
             )
             .await?;
-    let source_scope = SourceScope::from_watched_contracts(
+    let execution = SourceScope::from_watched_contracts(
         &watched_contracts,
         &request.chain,
         from_block,
         to_block,
         include_generic_resolver_scope,
     );
+    let closure_validation = match &request.selection {
+        RawFactNormalizedEventReplaySelection::BlockRange { .. } => {
+            SourceScope::from_historical_watched_contracts_through(
+                &watched_contracts,
+                &request.chain,
+                to_block,
+                include_generic_resolver_scope,
+            )
+        }
+        RawFactNormalizedEventReplaySelection::BlockHashes(_)
+        | RawFactNormalizedEventReplaySelection::ScopedBlockRange { .. } => execution.clone(),
+    };
 
-    Ok(source_scope.adapter_sync_scope())
+    Ok(ReplayAdapterSourceScopes {
+        execution: execution.adapter_sync_scope(),
+        closure_validation: closure_validation.adapter_sync_scope(),
+    })
 }
 
 async fn selected_replay_includes_generic_resolver_logs(

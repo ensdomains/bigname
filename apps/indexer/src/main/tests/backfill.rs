@@ -646,6 +646,15 @@ fn ensv1_resolver_backfill_source_identity_uses_generic_event_topics() -> Result
             .and_then(Value::as_str),
         Some("generic_resolver_event_topics_v1")
     );
+    assert_eq!(
+        payload
+            .get("topic0s_by_source_family")
+            .and_then(|families| families.get("ens_v1_resolver_l1")),
+        Some(&json!(
+            crate::ens_v1_resolver::generic_resolver_record_topic0s()
+        )),
+        "generic resolver identity must persist the exact topic0 set used by the hash-pinned fetch"
+    );
     assert!(payload.get("selected_targets").is_none());
 
     let mut drifted_source_plan = source_plan.clone();
@@ -6179,6 +6188,7 @@ fn backfill_job_config(
     Ok(BackfillJobRunConfig {
         deployment_profile: "mainnet".to_owned(),
         idempotency_key: idempotency_key.to_owned(),
+        scope_idempotency_to_raw_log_retention_generation: false,
         range,
         lease_owner: "indexer-backfill-test".to_owned(),
         lease_token: lease_token.to_owned(),
@@ -6216,6 +6226,7 @@ async fn create_backfill_job_tables(pool: &PgPool) -> Result<()> {
             backfill_job_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             deployment_profile TEXT NOT NULL,
             chain_id TEXT NOT NULL,
+            raw_log_retention_generation BIGINT NOT NULL DEFAULT 0,
             source_identity JSONB NOT NULL,
             scan_mode TEXT NOT NULL,
             range_start_block_number BIGINT NOT NULL CHECK (range_start_block_number >= 0),

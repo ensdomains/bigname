@@ -559,6 +559,75 @@ async fn ensv2_parent_changed_invalidates_linked_children_parent() -> Result<()>
 }
 
 #[tokio::test]
+async fn ensv2_terminal_role_events_invalidate_children_and_prior_resolver() -> Result<()> {
+    let database = test_database().await?;
+    let resolver = "0x0000000000000000000000000000000000000abc";
+    let observed_at = timestamp(1_800_000_019);
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:ensv2-terminal-subregistry",
+            namespace: "ens",
+            logical_name_id: Some("ens:alice.eth"),
+            resource_id: None,
+            event_kind: "SubregistryChanged",
+            source_family: "ens_v2_registry_l1",
+            derivation_kind: "ens_v2_registry_resource_surface",
+            chain_id: Some("ethereum-sepolia"),
+            block_number: Some(60),
+            block_hash: Some("0xensv2terminal60"),
+            before_state: json!({
+                "subregistry": "0x00000000000000000000000000000000000000bb"
+            }),
+            after_state: json!({
+                "source_event": "LabelUnregistered",
+                "terminal_reason": "unregistered",
+                "subregistry": null,
+                "from_contract_instance_id": Uuid::from_u128(0x3811).to_string(),
+                "to_contract_instance_id": null,
+            }),
+            observed_at,
+        },
+    )
+    .await?;
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:ensv2-terminal-resolver",
+            namespace: "ens",
+            logical_name_id: Some("ens:alice.eth"),
+            resource_id: None,
+            event_kind: "ResolverChanged",
+            source_family: "ens_v2_registry_l1",
+            derivation_kind: "ens_v2_registry_resource_surface",
+            chain_id: Some("ethereum-sepolia"),
+            block_number: Some(60),
+            block_hash: Some("0xensv2terminal60"),
+            before_state: json!({"resolver": resolver}),
+            after_state: json!({
+                "source_event": "LabelUnregistered",
+                "terminal_reason": "unregistered",
+                "resolver": null,
+            }),
+            observed_at,
+        },
+    )
+    .await?;
+
+    let summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
+    assert_eq!(summary.scanned_event_count, 2);
+    let invalidations = load_invalidations(&database).await?;
+    assert!(has_key(&invalidations, "children_current", "ens:alice.eth"));
+    assert!(has_key(
+        &invalidations,
+        "resolver_current",
+        &format!("ethereum-sepolia:{resolver}")
+    ));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn ensv2_parent_changed_derives_moved_name_key_without_existing_children_rows() -> Result<()>
 {
     let database = test_database().await?;
@@ -716,6 +785,52 @@ async fn address_names_permission_changes_invalidate_existing_authority_owner() 
         &invalidations,
         "address_names_current",
         "0x0000000000000000000000000000000000000b00:ens:controller.eth"
+    ));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn token_control_transfer_invalidates_seller_and_buyer_address_names() -> Result<()> {
+    let database = test_database().await?;
+    let resource_id = Uuid::new_v4();
+    let observed_at = timestamp(1_800_000_000);
+    let seller = "0x0000000000000000000000000000000000000a00";
+    let buyer = "0x0000000000000000000000000000000000000b00";
+
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:ensv2-sale-transfer",
+            namespace: "ens",
+            logical_name_id: Some("ens:sale.eth"),
+            resource_id: Some(resource_id),
+            event_kind: "TokenControlTransferred",
+            source_family: "ens_v2_registry_l1",
+            derivation_kind: "ens_v2_registry_resource_surface",
+            chain_id: Some("ethereum-sepolia"),
+            block_number: Some(21),
+            block_hash: Some("0xensv2sale21"),
+            before_state: json!({"from": seller}),
+            after_state: json!({"to": buyer, "source_event": "TransferSingle"}),
+            observed_at,
+        },
+    )
+    .await?;
+
+    let summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
+    assert_eq!(summary.scanned_event_count, 1);
+    let invalidations = load_invalidations(&database).await?;
+    assert!(has_key(&invalidations, "name_current", "ens:sale.eth"));
+    assert!(has_key(
+        &invalidations,
+        "address_names_current",
+        &format!("{seller}:ens:sale.eth")
+    ));
+    assert!(has_key(
+        &invalidations,
+        "address_names_current",
+        &format!("{buyer}:ens:sale.eth")
     ));
 
     database.cleanup().await
@@ -1124,6 +1239,91 @@ async fn root_permission_changes_invalidate_permissions_current() -> Result<()> 
                 "effective_powers": ["registrar", "register_reserved"]
             }),
             observed_at: timestamp(1_800_000_210),
+        },
+    )
+    .await?;
+
+    let summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
+    assert_eq!(summary.scanned_event_count, 1);
+    let invalidations = load_invalidations(&database).await?;
+    assert!(has_key(
+        &invalidations,
+        "permissions_current",
+        &resource_id.to_string()
+    ));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn ensv2_registration_without_role_events_invalidates_permissions_summary() -> Result<()> {
+    let database = test_database().await?;
+    let resource_id = Uuid::new_v4();
+    insert_resource(&database, resource_id).await?;
+
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:ensv2-registration-without-role-events",
+            namespace: "ens",
+            logical_name_id: Some("ens:zero-role.eth"),
+            resource_id: Some(resource_id),
+            event_kind: "RegistrationGranted",
+            source_family: "ens_v2_registry_l1",
+            derivation_kind: "ens_v2_registry_resource_surface",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(24),
+            block_hash: Some("0xensv2registration24"),
+            before_state: json!({}),
+            after_state: json!({
+                "registrant": "0x0000000000000000000000000000000000000abc",
+                "registry_contract_instance_id": Uuid::from_u128(0xe201),
+                "upstream_resource": "0x00000000000000000000000000000000000000000000000000000000000073d0",
+            }),
+            observed_at: timestamp(1_800_000_220),
+        },
+    )
+    .await?;
+
+    let summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
+    assert_eq!(summary.scanned_event_count, 1);
+    let invalidations = load_invalidations(&database).await?;
+    assert!(
+        has_key(
+            &invalidations,
+            "permissions_current",
+            &resource_id.to_string()
+        ),
+        "ENSv2 RegistrationGranted must invalidate the zero-row permission summary for its resource"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn authority_epoch_changes_invalidate_zero_holder_permission_summaries() -> Result<()> {
+    let database = test_database().await?;
+    let resource_id = Uuid::new_v4();
+
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:wrapper-authority-epoch",
+            namespace: "ens",
+            logical_name_id: Some("ens:wrapped.eth"),
+            resource_id: Some(resource_id),
+            event_kind: "AuthorityEpochChanged",
+            source_family: "ens_v1_wrapper_l1",
+            derivation_kind: "ens_v1_unwrapped_authority",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(24),
+            block_hash: Some("0xwrapper24"),
+            before_state: json!({"authority_kind": "registrar"}),
+            after_state: json!({
+                "authority_kind": "wrapper",
+                "authority_key": "ens-v1-wrapper:wrapped.eth"
+            }),
+            observed_at: timestamp(1_800_000_220),
         },
     )
     .await?;

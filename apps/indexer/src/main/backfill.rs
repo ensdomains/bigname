@@ -16,6 +16,8 @@ mod reservation_execution;
 mod selection;
 #[path = "backfill/source.rs"]
 mod source;
+#[path = "backfill/source_selection.rs"]
+mod source_selection;
 
 use anyhow::{Result, bail};
 use bigname_manifests::WatchedSourceSelectorPlan;
@@ -24,6 +26,7 @@ use sqlx::types::time::OffsetDateTime;
 
 use crate::reconciliation::HeaderAuditMode;
 
+pub(crate) use coinbase_sql::load_backfill_topic_plan;
 pub(crate) use coinbase_sql::{
     CoinbaseSqlSourceRegistry, DEFAULT_COINBASE_SQL_API_KEY_ID_ENV,
     DEFAULT_COINBASE_SQL_API_KEY_SECRET_ENV,
@@ -41,11 +44,11 @@ pub(crate) use fetching::{materialize_historical_payload_range, run_hash_pinned_
 pub(crate) use reservation_execution::COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD;
 #[cfg(test)]
 pub(crate) use reservation_execution::coinbase_sql_backfill_job_source_identity_payload;
-#[cfg(test)]
 pub(crate) use reservation_execution::effective_hash_pinned_adapter_sync_mode;
 pub(crate) use reservation_execution::{
     DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS, backfill_job_source_identity_payload,
-    create_hash_pinned_backfill_job, hash_pinned_backfill_range_specs,
+    create_hash_pinned_backfill_job, effective_coinbase_sql_adapter_sync_mode,
+    hash_pinned_backfill_range_specs, run_precreated_hash_pinned_backfill_job,
     run_resumable_coinbase_sql_backfill_job, run_resumable_hash_pinned_backfill_job,
 };
 #[cfg(test)]
@@ -53,6 +56,9 @@ pub(crate) use selection::SelectedTargetIntervalIndex;
 pub(crate) use source::{
     BackfillTopicPlan, CoinbaseSqlFetchStats, HistoricalBackfillSourceOps, HistoricalLogPayload,
     HistoricalLogPayloadRequest, HistoricalLogValidationFilter,
+};
+pub(crate) use source_selection::{
+    is_base_chain, selected_backfill_source, standalone_backfill_profile_convergence_enabled,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -222,6 +228,9 @@ impl BackfillAdapterSyncMode {
 pub(crate) struct BackfillJobRunConfig {
     pub(crate) deployment_profile: String,
     pub(crate) idempotency_key: String,
+    /// Automatic raw-log recovery appends the generation while holding the
+    /// retention-state lock; explicit operator keys remain unchanged.
+    pub(crate) scope_idempotency_to_raw_log_retention_generation: bool,
     pub(crate) range: BackfillBlockRange,
     pub(crate) lease_owner: String,
     pub(crate) lease_token: String,

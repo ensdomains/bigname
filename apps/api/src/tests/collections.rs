@@ -1,3 +1,28 @@
+#[test]
+fn wrapper_role_summary_is_explicitly_unsupported_when_no_holder_rows_exist() {
+    let resource_summary = permission_current_resource_summary(Uuid::nil(), Some("wrapper"));
+    let summary = build_address_name_role_summary(&[], Some(&resource_summary));
+
+    assert_eq!(summary["subjects"], json!([]));
+    assert_eq!(summary["status"], "unsupported");
+    assert_eq!(
+        summary["unsupported_reason"],
+        "ensv1_wrapper_holder_permissions_not_projected"
+    );
+}
+
+#[test]
+fn role_summary_fails_closed_when_resource_authority_summary_is_missing() {
+    let summary = build_address_name_role_summary(&[], None);
+
+    assert_eq!(summary["subjects"], json!([]));
+    assert_eq!(summary["status"], "partial");
+    assert_eq!(
+        summary["unsupported_reason"],
+        "resource_permission_authority_not_projected"
+    );
+}
+
 #[tokio::test]
 async fn get_name_children_compact_default_returns_rows_with_summary_meta() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -2620,6 +2645,7 @@ async fn get_address_names_include_role_summary_adds_projection_backed_expansion
         ],
     )
     .await?;
+    seed_permission_current_resource_summary(&database, resource_id, "registrar").await?;
 
     let base_response = app_router(database.app_state())
         .oneshot(
@@ -2942,6 +2968,8 @@ async fn get_address_names_include_role_summary_paginates_with_batched_expansion
         ],
     )
     .await?;
+    seed_permission_current_resource_summary(&database, alpha_resource_id, "registrar").await?;
+    seed_permission_current_resource_summary(&database, beta_resource_id, "registrar").await?;
 
     let base_response = app_router(database.app_state())
         .oneshot(
@@ -3247,6 +3275,7 @@ async fn get_address_names_include_role_summary_reads_ensv2_projection_outputs_w
         ],
     )
     .await?;
+    seed_permission_current_resource_summary(&database, resource_id, "ens_v2_registry").await?;
     bigname_storage::upsert_resolver_current_rows(
         &database.pool,
         &[bigname_storage::ResolverCurrentRow {
@@ -3697,6 +3726,7 @@ async fn get_resource_permissions_keyset_pagination_preserves_full_filter_summar
         ],
     )
     .await?;
+    seed_permission_current_resource_summary(&database, resource_id, "ens_v2_registry").await?;
 
     let base_response = app_router(database.app_state())
         .oneshot(
@@ -3807,6 +3837,7 @@ async fn get_resource_permissions_rejects_malformed_wrong_route_filter_and_stale
         ],
     )
     .await?;
+    seed_permission_current_resource_summary(&database, resource_id, "ens_v2_registry").await?;
 
     let first_page_response = app_router(database.app_state())
         .oneshot(

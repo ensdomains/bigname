@@ -15,7 +15,7 @@ fn reject_role_bitmap_filter(role_bitmap: Option<&str>) -> ApiResult<()> {
 }
 
 // Keep in sync with apps/worker replay::CURRENT_PROJECTION_REPLAY_VERSION.
-const CURRENT_PROJECTION_REPLAY_VERSION: i32 = 7;
+const CURRENT_PROJECTION_REPLAY_VERSION: i32 = 8;
 
 fn parse_roles_account(account: Option<&str>) -> Option<String> {
     parse_permissions_subject(account).map(|account| account.to_ascii_lowercase())
@@ -161,6 +161,8 @@ fn resource_id_from_name_current(row: &NameCurrentRow) -> ApiResult<Uuid> {
         ),
     })
 }
+
+include!("roles_support_authority.rs");
 
 fn roles_cursor_spec(
     route: &'static str,
@@ -466,8 +468,6 @@ fn merge_role_summaries(
     resource_summary
 }
 
-include!("roles_ensv2_root.rs");
-
 async fn load_associated_role_names(
     pool: &PgPool,
     rows: &[PermissionsCurrentRow],
@@ -574,3 +574,5 @@ async fn load_associated_role_names(
 
     Ok(associated_names)
 }
+
+include!("roles_ensv2_root.rs");

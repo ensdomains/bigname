@@ -543,6 +543,26 @@ pub async fn deploy_extra_public_resolver(
     .await
 }
 
+/// Deploy the pinned OwnedResolver artifact without adding it to
+/// `manifest_targets`. Its owner-only authorization makes the deployer the
+/// writer for every supported node.
+///
+/// (upstream: .refs/ens_v1/contracts/resolvers/OwnedResolver.sol:L16 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/resolvers/OwnedResolver.sol:L28 @ ens_v1@91c966f)
+pub async fn deploy_owned_resolver(
+    rpc: &RpcClient,
+    repo_root: &Path,
+    d: &EnsV1Deployment,
+) -> Result<Deployed> {
+    deploy(
+        rpc,
+        d.deployer,
+        &load_ens_v1_artifact(repo_root, "sepolia", "OwnedResolver")?,
+        &[],
+    )
+    .await
+}
+
 /// Deploy the pinned UniversalResolver with local constructor dependencies,
 /// then install its runtime bytecode at the address currently used by the
 /// execution crate for ENS verified resolution.

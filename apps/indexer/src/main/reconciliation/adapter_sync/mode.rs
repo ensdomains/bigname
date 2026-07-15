@@ -14,6 +14,23 @@ pub(super) enum PersistedRawPayloadAdapterSyncMode {
     },
 }
 
+impl PersistedRawPayloadAdapterSyncMode {
+    pub(super) fn selects_adapter(
+        self,
+        source_scope: Option<&[(String, String, i64, i64)]>,
+        adapter: NormalizedEventReplayAdapter,
+    ) -> bool {
+        source_scope.map_or(true, |scope| source_scope_includes_adapter(scope, adapter))
+            && match self {
+                Self::RawFactReplay {
+                    replay_contract_plan,
+                    ..
+                } => replay_contract_plan.uses_restricted_sync_for(adapter),
+                Self::LivePoll | Self::LiveOrBackfill => true,
+            }
+    }
+}
+
 pub(super) fn ensure_raw_fact_adapter_allowed(
     mode: PersistedRawPayloadAdapterSyncMode,
     adapter: NormalizedEventReplayAdapter,
@@ -26,13 +43,4 @@ pub(super) fn ensure_raw_fact_adapter_allowed(
         replay_contract_plan.ensure_adapter_allowed(adapter)?;
     }
     Ok(())
-}
-
-pub(super) fn adapter_selected_by_scope(
-    source_scope: Option<&[(String, String, i64, i64)]>,
-    adapter: NormalizedEventReplayAdapter,
-) -> bool {
-    source_scope.map_or(true, |source_scope| {
-        source_scope_includes_adapter(source_scope, adapter)
-    })
 }

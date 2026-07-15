@@ -34,12 +34,15 @@ pub use ens_v1_reverse_claim::{
 };
 pub use ens_v1_subregistry_discovery::{
     EnsV1SubregistryDiscoverySyncSummary, ReplayAdapterCheckpointContext,
-    sync_ens_v1_subregistry_discovery, sync_ens_v1_subregistry_discovery_with_replay_checkpoint,
+    sync_ens_v1_subregistry_discovery, sync_ens_v1_subregistry_discovery_through_block,
+    sync_ens_v1_subregistry_discovery_through_block_with_expected_admission_epoch,
+    sync_ens_v1_subregistry_discovery_with_replay_checkpoint,
     sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit,
 };
 pub use ens_v1_unwrapped_authority::{
-    EnsV1TextRecordChange, EnsV1UnwrappedAuthoritySyncSummary, decode_ens_v1_text_record_change,
-    sync_ens_v1_unwrapped_authority,
+    EnsV1TextRecordChange, EnsV1UnwrappedAuthoritySyncSummary,
+    ResolverProfileEventReconciliationSummary, decode_ens_v1_text_record_change,
+    reconcile_resolver_profile_events, sync_ens_v1_unwrapped_authority,
     sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limit,
 };
 pub use ens_v2_permissions::{
@@ -51,7 +54,9 @@ pub use ens_v2_registrar::{
     sync_ens_v2_registrar_through_block,
 };
 pub use ens_v2_registry::{
-    EnsV2RegistryResourceSurfaceSyncSummary, sync_ens_v2_registry_resource_surface,
+    EnsV2NewlyRequiredCoverage, EnsV2RegistryResourceSurfaceSyncSummary,
+    is_ens_v2_newly_required_coverage, record_ens_v2_live_selected_raw_log_coverage,
+    sync_ens_v2_registry_resource_surface, sync_ens_v2_registry_resource_surface_live_poll,
     sync_ens_v2_registry_resource_surface_through_block,
 };
 pub use ens_v2_resolver::{

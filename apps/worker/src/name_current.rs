@@ -305,6 +305,11 @@ async fn build_name_current_row(pool: &PgPool, name: &NameSurfaceSeed) -> Result
         declared_summary: build_declared_summary(
             facts,
             supported_resolution_projection.map(|projection| projection.topology),
+            name.namespace == ENS_NAMESPACE
+                && current_binding
+                    .as_ref()
+                    .and_then(|binding| binding.resource_authority_kind.as_deref())
+                    == Some("wrapper"),
         ),
         provenance,
         coverage: build_exact_name_coverage(&name.namespace, &events),

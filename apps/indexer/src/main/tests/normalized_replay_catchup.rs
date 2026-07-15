@@ -464,6 +464,649 @@ async fn normalized_replay_catchup_does_not_use_log_bound_as_stateful_boundary()
 }
 
 #[tokio::test]
+async fn normalized_replay_catchup_fails_closed_on_retained_ensv1_suffix_after_generation_rotation()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_normalized_replay_cursor_table(database.pool()).await?;
+    create_raw_log_staging_input_revisions_table(database.pool()).await?;
+    let chain = "ethereum-mainnet";
+    let wrapper_address = "0x0000000000000000000000000000000000000132";
+    let suffix_block = provider_block(
+        "0x3232323232323232323232323232323232323232323232323232323232323232",
+        Some("0x3131313131313131313131313131313131313131313131313131313131313131"),
+        32,
+    );
+
+    insert_active_replay_watched_contract(
+        database.pool(),
+        395,
+        chain,
+        Uuid::from_u128(0x395),
+        wrapper_address,
+    )
+    .await?;
+    insert_raw_name_wrapped_log(
+        database.pool(),
+        chain,
+        &suffix_block,
+        wrapper_address,
+        0,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO raw_log_staging_input_revisions (
+            chain_id,
+            revision,
+            retention_generation,
+            retained_history_complete,
+            incomplete_since
+        )
+        VALUES ($1, 1, 1, false, clock_timestamp())
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+
+    let config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
+        "mainnet".to_owned(),
+        vec![chain.to_owned()],
+        1_000,
+        1_000,
+        1,
+    )?;
+    let error = normalized_replay_catchup::run_normalized_replay_catchup_iteration(
+        database.pool(),
+        &config,
+        chain,
+    )
+    .await
+    .expect_err("automatic full closure must reject a suffix from a rotated generation");
+    assert!(
+        format!("{error:#}").contains("incomplete raw-log retention generation 1"),
+        "unexpected automatic closure refusal: {error:#}"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, Option<i64>)>(
+            r#"
+            SELECT next_block_number, last_completed_block_number
+            FROM normalized_replay_cursors
+            WHERE deployment_profile = 'mainnet'
+              AND chain_id = $1
+              AND cursor_kind = 'raw_fact_normalized_events'
+            "#,
+        )
+        .bind(chain)
+        .fetch_one(database.pool())
+        .await?,
+        (suffix_block.block_number, None),
+        "a refused closure must not advance the automatic replay cursor"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM normalized_events")
+            .fetch_one(database.pool())
+            .await?,
+        0,
+        "a refused closure must not publish normalized output"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_replay_catchup_rejects_input_committed_before_cursor_publication() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    create_normalized_replay_cursor_table(database.pool()).await?;
+    let deployment_profile = "mainnet";
+    let chain = "ethereum-mainnet";
+    let wrapper_address = "0x0000000000000000000000000000000000000133";
+    let initial_block = provider_block(
+        "0x3333333333333333333333333333333333333333333333333333333333333333",
+        Some("0x3232323232323232323232323232323232323232323232323232323232323232"),
+        33,
+    );
+    let late_block = provider_block(
+        "0x3232323232323232323232323232323232323232323232323232323232323234",
+        Some("0x3131313131313131313131313131313131313131313131313131313131313131"),
+        32,
+    );
+
+    insert_active_replay_watched_contract(
+        database.pool(),
+        396,
+        chain,
+        Uuid::from_u128(0x396),
+        wrapper_address,
+    )
+    .await?;
+    insert_raw_name_wrapped_log(
+        database.pool(),
+        chain,
+        &initial_block,
+        wrapper_address,
+        0,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO raw_log_staging_input_revisions (
+            chain_id,
+            revision,
+            retention_generation,
+            retained_history_complete,
+            incomplete_since
+        )
+        VALUES ($1, 1, 0, false, clock_timestamp())
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO raw_log_staging_block_revisions (
+            chain_id,
+            block_hash,
+            block_number,
+            revision
+        )
+        VALUES ($1, $2, $3, 1)
+        "#,
+    )
+    .bind(chain)
+    .bind(&initial_block.block_hash)
+    .bind(initial_block.block_number)
+    .execute(database.pool())
+    .await?;
+
+    let release_hook =
+        install_ownership_release_test_hook(database.pool(), deployment_profile, chain).await;
+    let pool = database.pool().clone();
+    let config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
+        deployment_profile.to_owned(),
+        vec![chain.to_owned()],
+        1_000,
+        1_000,
+        1,
+    )?;
+    let task_config = config.clone();
+    let replay = tokio::spawn(async move {
+        normalized_replay_catchup::run_normalized_replay_catchup_iteration(
+            &pool,
+            &task_config,
+            chain,
+        )
+        .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        release_hook.wait_until_before_release(),
+    )
+    .await
+    .context("automatic closure did not reach its ownership-release barrier")?;
+
+    insert_raw_name_wrapped_log(
+        database.pool(),
+        chain,
+        &late_block,
+        wrapper_address,
+        0,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE raw_log_staging_input_revisions
+        SET revision = 2
+        WHERE chain_id = $1
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO raw_log_staging_block_revisions (
+            chain_id,
+            block_hash,
+            block_number,
+            revision
+        )
+        VALUES ($1, $2, $3, 2)
+        "#,
+    )
+    .bind(chain)
+    .bind(&late_block.block_hash)
+    .bind(late_block.block_number)
+    .execute(database.pool())
+    .await?;
+
+    release_hook.resume();
+    let error = tokio::time::timeout(std::time::Duration::from_secs(10), replay)
+        .await
+        .context("automatic closure did not resume after the ownership barrier")?
+        .context("automatic closure task panicked")?
+        .expect_err("a newer raw input revision must prevent cursor publication");
+    assert!(
+        format!("{error:#}").contains("changed before normalized replay cursor publication"),
+        "unexpected publication-fence error: {error:#}"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, Option<i64>)>(
+            r#"
+            SELECT next_block_number, last_completed_block_number
+            FROM normalized_replay_cursors
+            WHERE deployment_profile = $1
+              AND chain_id = $2
+              AND cursor_kind = 'raw_fact_normalized_events'
+            "#,
+        )
+        .bind(deployment_profile)
+        .bind(chain)
+        .fetch_one(database.pool())
+        .await?,
+        (initial_block.block_number, None),
+        "cursor publication must remain pending after an input-version race"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_replay_catchup_rejects_late_older_commit_after_rewind_inspection() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    create_normalized_replay_cursor_table(database.pool()).await?;
+    let deployment_profile = "mainnet";
+    let chain = "ethereum-mainnet";
+    let reverse_address = "0x0000000000000000000000000000000000000144";
+    let replay_block = provider_block(
+        "0x9696969696969696969696969696969696969696969696969696969696969696",
+        Some("0x9595959595959595959595959595959595959595959595959595959595959595"),
+        150,
+    );
+    let late_block = provider_block(
+        "0x7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d",
+        Some("0x7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c"),
+        125,
+    );
+    let last_replayed_at = OffsetDateTime::now_utc();
+
+    insert_active_replay_watched_contract_with_source_family(
+        database.pool(),
+        397,
+        chain,
+        "ens_v1_reverse_l1",
+        Uuid::from_u128(0x397),
+        reverse_address,
+        "reverse_registrar",
+    )
+    .await?;
+    insert_chain_lineage_for_block(
+        database.pool(),
+        chain,
+        &replay_block,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_reverse_claimed_log(
+        database.pool(),
+        chain,
+        &replay_block,
+        reverse_address,
+        "0x0000000000000000000000000000000000000150",
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO raw_log_staging_input_revisions (
+            chain_id,
+            revision,
+            retention_generation,
+            retained_history_complete,
+            incomplete_since
+        )
+        VALUES ($1, 1, 0, false, clock_timestamp())
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO raw_log_staging_block_revisions (
+            chain_id,
+            block_hash,
+            block_number,
+            revision
+        )
+        VALUES ($1, $2, $3, 1)
+        "#,
+    )
+    .bind(chain)
+    .bind(&replay_block.block_hash)
+    .bind(replay_block.block_number)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_replay_cursors (
+            deployment_profile,
+            chain_id,
+            cursor_kind,
+            range_start_block_number,
+            next_block_number,
+            target_block_number,
+            last_completed_block_number,
+            last_replayed_at,
+            raw_log_input_revision,
+            raw_log_retention_generation
+        )
+        VALUES ($1, $2, 'raw_fact_normalized_events', 100, 150, 150, 149, $3, 1, 0)
+        "#,
+    )
+    .bind(deployment_profile)
+    .bind(chain)
+    .bind(last_replayed_at)
+    .execute(database.pool())
+    .await?;
+
+    let after_rewind_hook = normalized_replay_catchup::install_after_rewind_test_hook(
+        database.pool(),
+        deployment_profile,
+        chain,
+    )
+    .await;
+    let pool = database.pool().clone();
+    let config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
+        deployment_profile.to_owned(),
+        vec![chain.to_owned()],
+        1_000,
+        1_000,
+        1,
+    )?;
+    let task_config = config.clone();
+    let replay = tokio::spawn(async move {
+        normalized_replay_catchup::run_normalized_replay_catchup_iteration(
+            &pool,
+            &task_config,
+            chain,
+        )
+        .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        after_rewind_hook.wait_until_after_rewind(),
+    )
+    .await
+    .context("stateless catch-up did not reach its after-rewind barrier")?;
+
+    insert_chain_lineage_for_block(
+        database.pool(),
+        chain,
+        &late_block,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_reverse_claimed_log(
+        database.pool(),
+        chain,
+        &late_block,
+        reverse_address,
+        "0x0000000000000000000000000000000000000125",
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE raw_logs SET observed_at = $1 - INTERVAL '1 second' WHERE chain_id = $2 AND block_hash = $3",
+    )
+    .bind(last_replayed_at)
+    .bind(chain)
+    .bind(&late_block.block_hash)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE raw_log_staging_input_revisions SET revision = 2 WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO raw_log_staging_block_revisions (
+            chain_id,
+            block_hash,
+            block_number,
+            revision
+        )
+        VALUES ($1, $2, $3, 2)
+        "#,
+    )
+    .bind(chain)
+    .bind(&late_block.block_hash)
+    .bind(late_block.block_number)
+    .execute(database.pool())
+    .await?;
+
+    after_rewind_hook.resume();
+    let error = tokio::time::timeout(std::time::Duration::from_secs(10), replay)
+        .await
+        .context("stateless catch-up did not resume after the rewind barrier")?
+        .context("stateless catch-up task panicked")?
+        .expect_err("a late older commit must not be acknowledged after rewind inspection");
+    assert!(
+        format!("{error:#}").contains("changed before normalized replay cursor publication"),
+        "unexpected publication-fence error: {error:#}"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64)>(
+            r#"
+            SELECT next_block_number, raw_log_input_revision
+            FROM normalized_replay_cursors
+            WHERE deployment_profile = $1
+              AND chain_id = $2
+              AND cursor_kind = 'raw_fact_normalized_events'
+            "#,
+        )
+        .bind(deployment_profile)
+        .bind(chain)
+        .fetch_one(database.pool())
+        .await?,
+        (replay_block.block_number, 1),
+        "the cursor must not acknowledge a revision whose older block was not replayed"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE raw_fact_ref->>'block_hash' = $1",
+        )
+        .bind(&late_block.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "the late older raw fact should remain pending after publication refusal"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_replay_catchup_accepts_commit_strictly_after_latched_closure_target()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_normalized_replay_cursor_table(database.pool()).await?;
+    let deployment_profile = "mainnet";
+    let chain = "ethereum-mainnet";
+    let wrapper_address = "0x0000000000000000000000000000000000000145";
+    let replay_block = provider_block(
+        "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+        Some("0x9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f"),
+        160,
+    );
+    let post_target_block = provider_block(
+        "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        Some(&replay_block.block_hash),
+        161,
+    );
+
+    insert_active_replay_watched_contract(
+        database.pool(),
+        398,
+        chain,
+        Uuid::from_u128(0x398),
+        wrapper_address,
+    )
+    .await?;
+    insert_raw_name_wrapped_log(
+        database.pool(),
+        chain,
+        &replay_block,
+        wrapper_address,
+        0,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO raw_log_staging_input_revisions (
+            chain_id,
+            revision,
+            retention_generation,
+            retained_history_complete,
+            incomplete_since
+        )
+        VALUES ($1, 1, 0, false, clock_timestamp())
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO raw_log_staging_block_revisions (
+            chain_id,
+            block_hash,
+            block_number,
+            revision
+        )
+        VALUES ($1, $2, $3, 1)
+        "#,
+    )
+    .bind(chain)
+    .bind(&replay_block.block_hash)
+    .bind(replay_block.block_number)
+    .execute(database.pool())
+    .await?;
+
+    let after_rewind_hook = normalized_replay_catchup::install_after_rewind_test_hook(
+        database.pool(),
+        deployment_profile,
+        chain,
+    )
+    .await;
+    let pool = database.pool().clone();
+    let config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
+        deployment_profile.to_owned(),
+        vec![chain.to_owned()],
+        1_000,
+        1_000,
+        1,
+    )?;
+    let replay = tokio::spawn(async move {
+        normalized_replay_catchup::run_normalized_replay_catchup_iteration(
+            &pool,
+            &config,
+            chain,
+        )
+        .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        after_rewind_hook.wait_until_after_rewind(),
+    )
+    .await
+    .context("automatic closure did not reach its after-rewind barrier")?;
+
+    insert_raw_name_wrapped_log(
+        database.pool(),
+        chain,
+        &post_target_block,
+        wrapper_address,
+        0,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE raw_log_staging_input_revisions SET revision = 2 WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO raw_log_staging_block_revisions (
+            chain_id,
+            block_hash,
+            block_number,
+            revision
+        )
+        VALUES ($1, $2, $3, 2)
+        "#,
+    )
+    .bind(chain)
+    .bind(&post_target_block.block_hash)
+    .bind(post_target_block.block_number)
+    .execute(database.pool())
+    .await?;
+
+    after_rewind_hook.resume();
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(10), replay)
+            .await
+            .context("automatic closure did not resume after the rewind barrier")?
+            .context("automatic closure task panicked")??,
+        normalized_replay_catchup::CatchupIterationStatus::Progressed
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64, Option<i64>, i64)>(
+            r#"
+            SELECT
+                next_block_number,
+                target_block_number,
+                last_completed_block_number,
+                raw_log_input_revision
+            FROM normalized_replay_cursors
+            WHERE deployment_profile = $1
+              AND chain_id = $2
+              AND cursor_kind = 'raw_fact_normalized_events'
+            "#,
+        )
+        .bind(deployment_profile)
+        .bind(chain)
+        .fetch_one(database.pool())
+        .await?,
+        (161, 160, Some(160), 2),
+        "the closure cursor must complete its latched target and remember the accepted newer revision"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE block_number = $1",
+        )
+        .bind(post_target_block.block_number)
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "a post-target commit is backlog work, not part of the latched closure pass"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn normalized_replay_catchup_preserves_latched_closure_target() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_normalized_replay_cursor_table(database.pool()).await?;
@@ -582,6 +1225,113 @@ async fn normalized_replay_catchup_rewinds_newly_observed_logs_after_range_start
 
     database.cleanup().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn normalized_replay_cursor_rewinds_for_newer_commit_revision_even_when_observed_at_is_old()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_normalized_replay_cursor_table(database.pool()).await?;
+    create_raw_log_staging_input_revisions_table(database.pool()).await?;
+    let chain = "base-mainnet";
+    let range_start = 100_i64;
+    let late_block_number = 125_i64;
+    let next_block = 150_i64;
+    let target = 200_i64;
+    let last_replayed_at = OffsetDateTime::now_utc();
+    let late_block = provider_block(
+        "0x4141414141414141414141414141414141414141414141414141414141414141",
+        Some("0x4040404040404040404040404040404040404040404040404040404040404040"),
+        late_block_number,
+    );
+
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_replay_cursors (
+            deployment_profile,
+            chain_id,
+            cursor_kind,
+            range_start_block_number,
+            next_block_number,
+            target_block_number,
+            last_replayed_at,
+            raw_log_input_revision,
+            raw_log_retention_generation
+        )
+        VALUES ('mainnet', $1, 'raw_fact_normalized_events', $2, $3, $4, $5, 5, 0)
+        "#,
+    )
+    .bind(chain)
+    .bind(range_start)
+    .bind(next_block)
+    .bind(target)
+    .bind(last_replayed_at)
+    .execute(database.pool())
+    .await?;
+    insert_chain_lineage_for_block(
+        database.pool(),
+        chain,
+        &late_block,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_reverse_claimed_log(
+        database.pool(),
+        chain,
+        &late_block,
+        "0x0000000000000000000000000000000000000142",
+        "0x0000000000000000000000000000000000000052",
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE raw_logs SET observed_at = $1 - INTERVAL '1 second' WHERE chain_id = $2 AND block_hash = $3",
+    )
+    .bind(last_replayed_at)
+    .bind(chain)
+    .bind(&late_block.block_hash)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO raw_log_staging_input_revisions (
+            chain_id,
+            revision,
+            retention_generation,
+            retained_history_complete,
+            incomplete_since
+        )
+        VALUES ($1, 6, 0, false, clock_timestamp())
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO raw_log_staging_block_revisions (
+            chain_id,
+            block_hash,
+            block_number,
+            revision
+        )
+        VALUES ($1, $2, $3, 6)
+        "#,
+    )
+    .bind(chain)
+    .bind(&late_block.block_hash)
+    .bind(late_block_number)
+    .execute(database.pool())
+    .await?;
+
+    assert_eq!(
+        normalized_replay_catchup::rewind_cursor_for_test(database.pool(), "mainnet", chain)
+            .await?,
+        (range_start, late_block_number, target),
+        "commit-ordered raw input revision must rewind even when observed_at predates replay"
+    );
+
+    database.cleanup().await
 }
 
 #[tokio::test]
@@ -834,6 +1584,15 @@ async fn normalized_replay_catchup_rebuilds_deferred_indexes_when_configured_cha
         1_000,
         1,
     )?;
+    // TestDatabase is capped at two connections. Retain one exactly as the
+    // process-lifetime Base rederive writer guard does in production; index
+    // restoration must run all fenced catalog work on the DDL guard's own
+    // second connection instead of waiting forever for a third.
+    let outer_runtime_guard = database
+        .pool()
+        .acquire()
+        .await
+        .context("failed to retain simulated runtime writer-guard connection")?;
     assert_eq!(
         normalized_replay_catchup::run_normalized_replay_catchup_iteration(
             database.pool(),
@@ -873,6 +1632,7 @@ async fn normalized_replay_catchup_rebuilds_deferred_indexes_when_configured_cha
         "restored record inventory replay index must cover ENSv2 registry resources: {record_inventory_predicate}"
     );
 
+    drop(outer_runtime_guard);
     database.cleanup().await?;
     Ok(())
 }
@@ -895,6 +1655,8 @@ async fn create_normalized_replay_cursor_table(pool: &PgPool) -> Result<()> {
             last_normalized_event_synced_count BIGINT NOT NULL DEFAULT 0 CHECK (last_normalized_event_synced_count >= 0),
             last_normalized_event_inserted_count BIGINT NOT NULL DEFAULT 0 CHECK (last_normalized_event_inserted_count >= 0),
             last_replayed_at TIMESTAMPTZ,
+            raw_log_input_revision BIGINT NOT NULL DEFAULT 0 CHECK (raw_log_input_revision >= 0),
+            raw_log_retention_generation BIGINT NOT NULL DEFAULT 0 CHECK (raw_log_retention_generation >= 0),
             last_failure_reason TEXT,
             last_failure_at TIMESTAMPTZ,
             created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -907,13 +1669,7 @@ async fn create_normalized_replay_cursor_table(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await
     .context("failed to create normalized_replay_cursors table for indexer tests")?;
-    sqlx::raw_sql(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../migrations/20260509120000_normalized_replay_adapter_checkpoints.sql"
-    )))
-    .execute(pool)
-    .await
-    .context("failed to create normalized replay adapter checkpoint tables for indexer tests")?;
+    create_normalized_replay_adapter_checkpoint_tables(pool).await?;
 
     Ok(())
 }

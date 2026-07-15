@@ -22,6 +22,25 @@ pub struct PermissionsCurrentRow {
     pub last_recomputed_at: OffsetDateTime,
 }
 
+/// Projection-owned support and authority metadata for one permission resource.
+///
+/// This row exists independently of holder rows so an empty `permissions_current` collection can
+/// still report whether it is authoritative. `root_resource_id` is the optional ENSv2 registry
+/// root whose permission rows are composed by app-facing role reads. Chain-position and
+/// canonicality fields preserve the authority input evidence even when no holder row exists.
+#[derive(Clone, Debug, Eq, PartialEq, sqlx::FromRow)]
+pub struct PermissionsCurrentResourceSummary {
+    pub resource_id: Uuid,
+    pub authority_kind: Option<String>,
+    pub root_resource_id: Option<Uuid>,
+    pub coverage: Value,
+    pub provenance: Value,
+    pub chain_positions: Value,
+    pub canonicality_summary: Value,
+    pub manifest_version: i64,
+    pub last_recomputed_at: OffsetDateTime,
+}
+
 /// Keyset cursor fields for the frozen subject/scope permissions order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PermissionsCurrentKeysetCursor {

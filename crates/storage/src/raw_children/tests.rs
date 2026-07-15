@@ -256,6 +256,63 @@ async fn upserts_raw_transactions_receipts_and_logs() -> Result<()> {
 }
 
 #[tokio::test]
+async fn raw_log_block_number_updates_keep_the_new_number_in_block_revision() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let log = raw_log(CanonicalityState::Canonical);
+    upsert_raw_logs(database.pool(), std::slice::from_ref(&log)).await?;
+
+    let initial = sqlx::query_as::<_, (i64, i64)>(
+        r#"
+        SELECT block_number, revision
+        FROM raw_log_staging_block_revisions
+        WHERE chain_id = $1 AND block_hash = $2
+        "#,
+    )
+    .bind(&log.chain_id)
+    .bind(&log.block_hash)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(initial, (101, 1));
+
+    for (block_number, expected_revision) in [(100_i64, 2_i64), (102, 3)] {
+        sqlx::query(
+            "UPDATE raw_logs SET block_number = $1 WHERE chain_id = $2 AND block_hash = $3",
+        )
+        .bind(block_number)
+        .bind(&log.chain_id)
+        .bind(&log.block_hash)
+        .execute(database.pool())
+        .await
+        .with_context(|| format!("failed to correct raw-log block number to {block_number}"))?;
+
+        let revised = sqlx::query_as::<_, (i64, i64)>(
+            r#"
+            SELECT block_number, revision
+            FROM raw_log_staging_block_revisions
+            WHERE chain_id = $1 AND block_hash = $2
+            "#,
+        )
+        .bind(&log.chain_id)
+        .bind(&log.block_hash)
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(revised, (block_number, expected_revision));
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM raw_log_staging_block_revisions WHERE chain_id = $1 AND block_hash = $2",
+        )
+        .bind(&log.chain_id)
+        .bind(&log.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn bulk_upserts_raw_logs_and_promotes_existing_rows() -> Result<()> {
     let database = TestDatabase::new().await?;
     let logs = (0..150)

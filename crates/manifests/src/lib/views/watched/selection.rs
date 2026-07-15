@@ -10,8 +10,8 @@ use crate::{
 };
 
 use super::{
-    load_manifest_declared_watched_contracts, load_watched_contracts,
-    load_watched_contracts_by_source_family,
+    load_historical_watched_contracts_by_chain, load_manifest_declared_watched_contracts,
+    load_watched_contracts, load_watched_contracts_by_source_family,
 };
 
 pub fn summarize_watched_contracts(
@@ -396,6 +396,28 @@ pub async fn load_manifest_declared_watched_source_selector_plan(
     range_end_block_number: i64,
 ) -> Result<WatchedSourceSelectorPlan> {
     let watched_contracts = load_manifest_declared_watched_contracts(pool).await?;
+    resolve_watched_source_selector(
+        &watched_contracts,
+        chain,
+        selector,
+        range_start_block_number,
+        range_end_block_number,
+    )
+}
+
+/// Resolve a selector against current manifest declarations plus bounded
+/// historical discovery intervals retained under the active manifest corpus.
+/// Callers must still narrow the resulting target set to the authoritative
+/// recovery requirements they intend to fetch; this loader supplies identity
+/// and exact historical active-range intersection, not new admission.
+pub async fn load_historical_watched_source_selector_plan(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    selector: WatchedSourceSelector,
+    range_start_block_number: i64,
+    range_end_block_number: i64,
+) -> Result<WatchedSourceSelectorPlan> {
+    let watched_contracts = load_historical_watched_contracts_by_chain(pool, chain).await?;
     resolve_watched_source_selector(
         &watched_contracts,
         chain,

@@ -11,6 +11,21 @@ use crate::{
 pub(super) struct ExistingManifestVersion {
     pub(super) manifest_id: i64,
     pub(super) storage_key: ManifestStorageKey,
+    rollout_status: String,
+    normalizer_version: String,
+    manifest_payload: serde_json::Value,
+}
+
+impl ExistingManifestVersion {
+    pub(super) fn authority_matches(&self, loaded_manifest: &LoadedManifest) -> Result<bool> {
+        let manifest_payload = serde_json::to_value(&loaded_manifest.manifest)
+            .context("failed to serialize manifest payload for mutation detection")?;
+        Ok(
+            self.rollout_status == loaded_manifest.manifest.rollout_status.as_db_value()
+                && self.normalizer_version == loaded_manifest.manifest.normalizer_version
+                && self.manifest_payload == manifest_payload,
+        )
+    }
 }
 
 pub(super) async fn load_existing_manifest_versions(
@@ -18,7 +33,16 @@ pub(super) async fn load_existing_manifest_versions(
 ) -> Result<Vec<ExistingManifestVersion>> {
     let rows = sqlx::query(
         r#"
-        SELECT manifest_id, namespace, source_family, chain, deployment_epoch, manifest_version
+        SELECT
+            manifest_id,
+            namespace,
+            source_family,
+            chain,
+            deployment_epoch,
+            manifest_version,
+            rollout_status::TEXT AS rollout_status,
+            normalizer_version,
+            manifest_payload
         FROM manifest_versions
         "#,
     )
@@ -50,6 +74,15 @@ pub(super) async fn load_existing_manifest_versions(
                         .context("failed to read existing deployment_epoch")?,
                     manifest_version,
                 },
+                rollout_status: row
+                    .try_get("rollout_status")
+                    .context("failed to read existing rollout_status")?,
+                normalizer_version: row
+                    .try_get("normalizer_version")
+                    .context("failed to read existing normalizer_version")?,
+                manifest_payload: row
+                    .try_get("manifest_payload")
+                    .context("failed to read existing manifest_payload")?,
             })
         })
         .collect()
@@ -97,6 +130,10 @@ pub(super) async fn upsert_manifest_version(
             file_path = EXCLUDED.file_path,
             manifest_payload = EXCLUDED.manifest_payload,
             loaded_at = now()
+        WHERE manifest_versions.rollout_status IS DISTINCT FROM EXCLUDED.rollout_status
+           OR manifest_versions.normalizer_version IS DISTINCT FROM EXCLUDED.normalizer_version
+           OR manifest_versions.file_path IS DISTINCT FROM EXCLUDED.file_path
+           OR manifest_versions.manifest_payload IS DISTINCT FROM EXCLUDED.manifest_payload
         RETURNING manifest_id
         "#,
     )
@@ -109,7 +146,7 @@ pub(super) async fn upsert_manifest_version(
     .bind(&loaded_manifest.manifest.normalizer_version)
     .bind(loaded_manifest.relative_path.to_string_lossy().into_owned())
     .bind(manifest_payload)
-    .fetch_one(executor)
+    .fetch_optional(&mut *executor)
     .await
     .with_context(|| {
         format!(
@@ -118,8 +155,31 @@ pub(super) async fn upsert_manifest_version(
         )
     })?;
 
-    row.try_get("manifest_id")
-        .context("failed to read manifest_id from manifest upsert")
+    if let Some(row) = row {
+        return row
+            .try_get("manifest_id")
+            .context("failed to read manifest_id from manifest upsert");
+    }
+
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT manifest_id
+        FROM manifest_versions
+        WHERE namespace = $1
+          AND source_family = $2
+          AND chain = $3
+          AND deployment_epoch = $4
+          AND manifest_version = $5
+        "#,
+    )
+    .bind(&manifest_key.namespace)
+    .bind(&manifest_key.source_family)
+    .bind(&manifest_key.chain)
+    .bind(&manifest_key.deployment_epoch)
+    .bind(manifest_key.manifest_version)
+    .fetch_one(executor)
+    .await
+    .context("failed to reload manifest_id after a byte-identical manifest upsert")
 }
 
 pub(super) async fn load_existing_manifest_entries(

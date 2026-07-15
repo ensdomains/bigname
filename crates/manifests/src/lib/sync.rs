@@ -7,7 +7,7 @@ mod persistence;
 #[path = "sync/planning.rs"]
 mod planning;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
 use sqlx::PgPool;
@@ -25,7 +25,7 @@ use self::{
     },
     planning::{declared_start_block_for_entry, plan_manifest_entries},
 };
-use crate::discovery::bump_discovery_admission_epochs;
+use crate::discovery::{bump_discovery_admission_epochs, fence_discovery_admission_epoch_writes};
 use crate::{
     ManifestLoadStatus, ManifestRepository, ManifestSyncStatus, ManifestSyncSummary,
     managed_edges::{reconcile_manifest_source_graph, replace_manifest_children},
@@ -55,10 +55,21 @@ pub async fn sync_repository(
         .await
         .context("failed to start manifest sync transaction")?;
     let existing_manifests = load_existing_manifest_versions(transaction.as_mut()).await?;
+    let admission_fence_chains = repository
+        .manifests()
+        .iter()
+        .map(|loaded_manifest| loaded_manifest.manifest.chain.clone())
+        .chain(
+            existing_manifests
+                .iter()
+                .map(|manifest| manifest.storage_key.chain.clone()),
+        )
+        .collect::<BTreeSet<_>>();
+    fence_discovery_admission_epoch_writes(transaction.as_mut(), &admission_fence_chains).await?;
 
     let mut retained_keys = HashSet::new();
     let mut in_place_transitions = Vec::new();
-    let mut mutated_chains = std::collections::BTreeSet::new();
+    let mut mutated_chains = BTreeSet::new();
     let mut active_declared_start_blocks = HashMap::<(String, Uuid), (i64, String, String)>::new();
     let mut sync_summary = ManifestSyncSummary {
         status: ManifestSyncStatus::Synced,
@@ -78,8 +89,14 @@ pub async fn sync_repository(
 
     for loaded_manifest in repository.manifests() {
         let storage_key = ManifestStorageKey::from_loaded_manifest(loaded_manifest)?;
+        let manifest_authority_changed = match existing_manifests
+            .iter()
+            .find(|existing_manifest| existing_manifest.storage_key == storage_key)
+        {
+            Some(existing_manifest) => !existing_manifest.authority_matches(loaded_manifest)?,
+            None => true,
+        };
         retained_keys.insert(storage_key);
-        mutated_chains.insert(loaded_manifest.manifest.chain.clone());
 
         let manifest_id = upsert_manifest_version(transaction.as_mut(), loaded_manifest).await?;
         let existing_entries =
@@ -149,20 +166,24 @@ pub async fn sync_repository(
             }
         }
 
-        replace_manifest_children(
+        let children_changed = replace_manifest_children(
             transaction.as_mut(),
             manifest_id,
             &loaded_manifest.manifest,
+            &existing_entries,
             &planned_entries,
         )
         .await?;
-        seed_planned_manifest_entry_addresses(
+        let address_seeded = seed_planned_manifest_entry_addresses(
             transaction.as_mut(),
             manifest_id,
             loaded_manifest,
             &planned_entries,
         )
         .await?;
+        if manifest_authority_changed || children_changed || address_seeded {
+            mutated_chains.insert(loaded_manifest.manifest.chain.clone());
+        }
 
         sync_summary.root_count += loaded_manifest.manifest.roots.len();
         sync_summary.contract_count += loaded_manifest.manifest.contracts.len();
@@ -180,15 +201,16 @@ pub async fn sync_repository(
         sync_summary.removed_manifest_count += 1;
     }
 
-    sync_summary.cleared_discovery_edge_count =
+    let (cleared_discovery_edge_count, mutated_address_chains) =
         reconcile_manifest_source_graph(transaction.as_mut(), &in_place_transitions).await?;
+    sync_summary.cleared_discovery_edge_count = cleared_discovery_edge_count;
+    mutated_chains.extend(mutated_address_chains);
 
-    // The manifest-declared arm of the watched surface (entries, seeded
-    // addresses, declared start blocks, rollout status) can grow without any
-    // discovery-edge mutation; promotion's verified coverage frontier is
-    // versioned by the admission epoch, so every chain this sync touched must
-    // bump. Sync only runs when the repository actually changed, and a
-    // spurious re-verification costs a few anti-join chunks.
+    // The manifest-declared arm of the watched surface can change without a
+    // discovery-edge mutation. Invalidate retained coverage only for chains
+    // whose stored manifest authority, child rows, address seeds, active
+    // ranges, or removals actually changed; a byte-identical startup refresh
+    // must preserve the retained-history proof tuple.
     bump_discovery_admission_epochs(transaction.as_mut(), &mutated_chains).await?;
 
     transaction

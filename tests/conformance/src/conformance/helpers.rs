@@ -1798,6 +1798,52 @@ fn permission_current_row(
     }
 }
 
+fn permission_current_resource_summary(
+    resource_id: Uuid,
+    authority_kind: &str,
+    source_classes_considered: &[&str],
+    enumeration_basis: &str,
+    chain_id: &str,
+    block_number: i64,
+) -> bigname_storage::PermissionsCurrentResourceSummary {
+    let chain_slot = if chain_id.starts_with("base") {
+        "base"
+    } else {
+        "ethereum"
+    };
+    bigname_storage::PermissionsCurrentResourceSummary {
+        resource_id,
+        authority_kind: Some(authority_kind.to_owned()),
+        root_resource_id: None,
+        coverage: json!({
+            "status": "full",
+            "exhaustiveness": "authoritative",
+            "source_classes_considered": source_classes_considered,
+            "enumeration_basis": enumeration_basis,
+            "unsupported_reason": null,
+        }),
+        provenance: json!({
+            "derivation_kind": "permissions_current_resource_summary_rebuild",
+        }),
+        chain_positions: json!({
+            (chain_slot): {
+                "chain_id": chain_id,
+                "block_number": block_number,
+                "block_hash": format!("0xpermission-summary-{block_number:02x}"),
+                "timestamp": format!("2026-04-17T00:00:{:02}Z", block_number % 60),
+            }
+        }),
+        canonicality_summary: json!({
+            "status": "finalized",
+            "chains": {
+                (chain_id): "finalized",
+            }
+        }),
+        manifest_version: 1,
+        last_recomputed_at: timestamp(1_717_174_000 + block_number),
+    }
+}
+
 fn permission_subjects(payload: &ResourcePermissionsResponse) -> Vec<&str> {
     payload
         .data

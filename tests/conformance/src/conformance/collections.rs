@@ -1587,6 +1587,21 @@
             )
             .await
             .context("failed to upsert permissions_current rows for role-summary conformance")?;
+            bigname_storage::upsert_permissions_current_resource_summary(
+                &database.pool,
+                &permission_current_resource_summary(
+                    resource_id,
+                    "registrar",
+                    &["permissions_current"],
+                    "resource_permissions",
+                    "ethereum-mainnet",
+                    73,
+                ),
+            )
+            .await
+            .context(
+                "failed to upsert permissions_current resource summary for role-summary conformance",
+            )?;
 
             let base_response = app_router(database.app_state())
                 .oneshot(
@@ -1907,6 +1922,21 @@
             )
             .await?;
             rebuild_permissions_current(&database, Some(resource_id)).await?;
+            bigname_storage::upsert_permissions_current_resource_summary(
+                &database.pool,
+                &permission_current_resource_summary(
+                    resource_id,
+                    "ens_v2_registry",
+                    &["permissions_current"],
+                    "resource_permissions",
+                    "ethereum-sepolia",
+                    210,
+                ),
+            )
+            .await
+            .context(
+                "failed to upsert ENSv2 permissions resource summary for address role-summary conformance",
+            )?;
 
             let base_response = app_router(database.app_state())
                 .oneshot(

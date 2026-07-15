@@ -1,4 +1,5 @@
 use super::*;
+use crate::ens_v1_unwrapped_authority::event_persistence::upsert_events_preserving_manifest_provenance;
 use crate::normalized_event_support::count_events_by_kind;
 
 const REPLAY_EVENT_FLUSH_BATCH_SIZE: usize = 20_000;
@@ -61,7 +62,7 @@ pub(super) async fn flush_replay_event_buffer_now(
 
     let event_count = buffer.len();
     merge_event_kind_counts(&mut flushed_events.by_kind, count_events_by_kind(buffer));
-    let inserted_count = upsert_normalized_events_count_only(pool, buffer).await?;
+    let inserted_count = upsert_events_preserving_manifest_provenance(pool, buffer).await?;
     flushed_events.total_count += event_count;
     flushed_events.inserted_count += inserted_count;
     buffer.clear();

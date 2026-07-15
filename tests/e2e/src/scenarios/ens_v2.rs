@@ -7,29 +7,10 @@ use super::support;
 use crate::harness::{
     anvil::{self, Anvil},
     ens_v2, repo_root,
+    responses::{data_array, exact_name, pointer},
 };
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
-
-fn pointer(body: &Value, path: &str) -> Value {
-    body.pointer(path).cloned().unwrap_or(Value::Null)
-}
-
-fn data_array(body: &Value) -> Vec<Value> {
-    body.pointer("/data")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
-}
-
-async fn exact_name(run: &support::PipelineRun, name: &str) -> Result<Value> {
-    let (status, body) = run.api.get_json(&format!("/v1/names/ens/{name}")).await?;
-    assert_eq!(
-        status, 200,
-        "ENSv2 exact-name lookup for {name} failed: {body}"
-    );
-    Ok(body)
-}
 
 async fn children(run: &support::PipelineRun, name: &str) -> Result<Value> {
     let (status, body) = run
@@ -72,6 +53,15 @@ fn assert_child_absent(body: &Value, logical_name_id: &str) {
         data.iter()
             .all(|row| pointer(row, "/logical_name_id") != logical_name_id),
         "did not expect child {logical_name_id} in children response after subregistry swap; body: {body}"
+    );
+}
+
+fn assert_child_present(body: &Value, logical_name_id: &str) {
+    let data = data_array(body);
+    assert!(
+        data.iter()
+            .any(|row| pointer(row, "/logical_name_id") == logical_name_id),
+        "expected child {logical_name_id} in children response; body: {body}"
     );
 }
 
@@ -201,41 +191,44 @@ async fn ens_v2_sepolia_post_audit_declared_matrix_end_to_end() -> Result<()> {
     .await?;
 
     // children_current is a worker projection and cannot gate intake
-    // readiness; gate on the derivable registry events instead.
+    // readiness; gate on the parent discovery event and the child
+    // registration that automatic ENSv2 bootstrap must fetch in the same
+    // startup invocation.
     let first_ready_sql = "SELECT EXISTS (
        SELECT 1 FROM normalized_events
        WHERE logical_name_id = 'ens:tree.eth'
          AND event_kind = 'SubregistryChanged'
          AND canonicality_state IN ('canonical', 'safe', 'finalized')
+    ) AND EXISTS (
+       SELECT 1 FROM normalized_events
+       WHERE logical_name_id = 'ens:leaf.tree.eth'
+         AND event_kind = 'RegistrationGranted'
+         AND canonicality_state IN ('canonical', 'safe', 'finalized')
     )";
     let first_run =
         support::ingest_ens_v2_sepolia_and_serve(&sepolia, &deployment, Some(first_ready_sql))
             .await?;
-    let child_a_logs: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM raw_logs WHERE emitting_address = $1")
-            .bind(format!("{:#x}", child_a.address))
-            .fetch_one(&first_run.db.pool)
-            .await?;
-    let leaf_events: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM normalized_events WHERE logical_name_id = 'ens:leaf.tree.eth'",
+    let leaf_registration_events: (i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+             count(*) FILTER (WHERE resource_id IS NULL \
+                               AND after_state->>'resource_pending' = 'true')::BIGINT, \
+             count(*) FILTER (WHERE resource_id IS NOT NULL \
+                               AND after_state->>'authority_kind' = 'ens_v2_registry')::BIGINT, \
+             count(*)::BIGINT \
+         FROM normalized_events \
+         WHERE logical_name_id = 'ens:leaf.tree.eth' \
+           AND event_kind = 'RegistrationGranted' \
+           AND canonicality_state IN ('canonical', 'safe', 'finalized')",
     )
     .fetch_one(&first_run.db.pool)
     .await?;
     let first_children = children(&first_run, "tree.eth").await?;
-    // REVIEW POINT (pinned observed behavior): discovery admits the
-    // subregistry edge, but the discovered child registry's own logs are
-    // never fetched within the discovering session — registrations inside
-    // discovered subregistries derive nothing live and need a later
-    // backfill/ops-catchup. Recorded in the ledger.
     assert_eq!(
-        child_a_logs, 0,
-        "pinned: discovered child-registry logs are not scanned in-session"
+        leaf_registration_events,
+        (1, 1, 2),
+        "automatic ENSv2 bootstrap must derive exactly the provisional and resource-linked child registration facts"
     );
-    assert_eq!(
-        leaf_events, 0,
-        "pinned: registrations inside discovered subregistries derive nothing live"
-    );
-    assert_child_absent(&first_children, "ens:leaf.tree.eth");
+    assert_child_present(&first_children, "ens:leaf.tree.eth");
     first_run.db.cleanup().await?;
 
     let child_b = ens_v2::deploy_child_registry(&rpc, &repo_root, &deployment).await?;
@@ -344,6 +337,12 @@ async fn ens_v2_sepolia_post_audit_declared_matrix_end_to_end() -> Result<()> {
                AND event_kind = 'SubregistryChanged'
                AND canonicality_state IN ('canonical', 'safe', 'finalized')
            )
+           AND EXISTS (
+             SELECT 1 FROM normalized_events
+             WHERE logical_name_id = 'ens:newleaf.tree.eth'
+               AND event_kind = 'RegistrationGranted'
+               AND canonicality_state IN ('canonical', 'safe', 'finalized')
+           )
            AND (
              SELECT count(DISTINCT resource_id) = 2 FROM normalized_events
              WHERE logical_name_id = 'ens:cycle.eth'
@@ -359,7 +358,7 @@ async fn ens_v2_sepolia_post_audit_declared_matrix_end_to_end() -> Result<()> {
         support::ingest_ens_v2_sepolia_and_serve(&sepolia, &deployment, Some(&final_ready_sql))
             .await?;
 
-    let alice_body = exact_name(&run, "alice.eth").await?;
+    let alice_body = exact_name(&run.api, "ens", "alice.eth").await?;
     assert_eq!(
         pointer(&alice_body, "/data/logical_name_id"),
         "ens:alice.eth",
@@ -407,7 +406,7 @@ async fn ens_v2_sepolia_post_audit_declared_matrix_end_to_end() -> Result<()> {
         "alice.eth chain position should be under ethereum-sepolia; body: {alice_body}"
     );
 
-    let roles_body = exact_name(&run, "roles.eth").await?;
+    let roles_body = exact_name(&run.api, "ens", "roles.eth").await?;
     let roles_resource_id = resource_id_from_exact_name(&roles_body)?;
     let distinct_role_resources: i64 = sqlx::query_scalar(
         "SELECT count(DISTINCT resource_id)
@@ -439,15 +438,15 @@ async fn ens_v2_sepolia_post_audit_declared_matrix_end_to_end() -> Result<()> {
         "Bob's revoked roles.eth permission should not remain current; rows: {role_permission_rows:?}"
     );
 
-    let tree_body = exact_name(&run, "tree.eth").await?;
+    let tree_body = exact_name(&run.api, "ens", "tree.eth").await?;
     assert_eq!(
         pointer(&tree_body, "/data/logical_name_id"),
         "ens:tree.eth",
         "tree.eth exact-name route should remain available after subregistry swap; body: {tree_body}"
     );
     let final_children = children(&run, "tree.eth").await?;
-    eprintln!("PROBE final tree children: {final_children:?}");
     assert_child_absent(&final_children, "ens:leaf.tree.eth");
+    assert_child_present(&final_children, "ens:newleaf.tree.eth");
 
     let tree_resource_after_swap =
         ens_v2::resource_id(&rpc, deployment.eth_registry.address, tree_label).await?;
@@ -456,7 +455,7 @@ async fn ens_v2_sepolia_post_audit_declared_matrix_end_to_end() -> Result<()> {
         "setSubregistry swap should not change the parent resource id"
     );
 
-    let cycle_body = exact_name(&run, "cycle.eth").await?;
+    let cycle_body = exact_name(&run.api, "ens", "cycle.eth").await?;
     assert_eq!(
         pointer(&cycle_body, "/declared_state/registration/registrant"),
         bob_path,

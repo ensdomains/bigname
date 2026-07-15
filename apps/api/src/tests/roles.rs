@@ -1,3 +1,28 @@
+#[test]
+fn roles_and_permissions_handlers_do_not_read_adapter_resource_identity_for_public_metadata() {
+    let handler_sources = [
+        (
+            "resource permissions",
+            include_str!("../handlers/collections.rs"),
+        ),
+        (
+            "roles support",
+            include_str!("../handlers/app_facing/roles_support_authority.rs"),
+        ),
+        (
+            "ENSv2 root role composition",
+            include_str!("../handlers/app_facing/roles_ensv2_root.rs"),
+        ),
+    ];
+
+    for (label, source) in handler_sources {
+        assert!(
+            !source.contains("load_resource("),
+            "{label} must read projection-owned permission support metadata, not adapter-owned resources"
+        );
+    }
+}
+
 #[tokio::test]
 async fn resource_lookup_resolves_name_current_resource_identity() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -68,6 +93,264 @@ async fn resource_lookup_resolves_name_current_resource_identity() -> Result<()>
 }
 
 #[tokio::test]
+async fn wrapper_role_route_shapes_report_unsupported_non_authoritative_metadata() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let resource_id = Uuid::from_u128(0xd011);
+    let unrelated_resource_id = Uuid::from_u128(0xd014);
+    let token_lineage_id = Uuid::from_u128(0xd012);
+    let surface_binding_id = Uuid::from_u128(0xd013);
+
+    database
+        .seed_name_current_binding_migrated(
+            "ens:wrapped.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    let mut row = exact_name_row(
+        "ens:wrapped.eth",
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    row.canonical_display_name = "wrapped.eth".to_owned();
+    row.normalized_name = "wrapped.eth".to_owned();
+    row.namehash = "namehash:wrapped.eth".to_owned();
+    row.declared_summary["registration"]["authority_kind"] = json!("wrapper");
+    database.insert_name_current_row(row).await?;
+    sqlx::query(
+        "UPDATE resources \
+         SET provenance = provenance || '{\"authority_kind\":\"registrar\"}'::jsonb \
+         WHERE resource_id = $1",
+    )
+    .bind(resource_id)
+    .execute(&database.pool)
+    .await?;
+    bigname_storage::upsert_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(resource_id, Some("wrapper")),
+    )
+    .await?;
+    mark_permissions_current_projection_ready(&database).await?;
+
+    let route_shapes = [
+        "/v1/names/ens/wrapped.eth/roles".to_owned(),
+        "/v1/roles?namespace=ens&name=wrapped.eth".to_owned(),
+        format!("/v1/roles?resource_id={resource_id}"),
+        format!(
+            "/v1/roles?namespace=ens&name=wrapped.eth&resource_id={resource_id}"
+        ),
+        format!(
+            "/v1/roles?namespace=ens&name=wrapped.eth&resource_id={unrelated_resource_id}"
+        ),
+    ];
+    for uri in route_shapes {
+        let response = app_router(database.app_state())
+            .oneshot(
+                Request::builder()
+                    .uri(&uri)
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .with_context(|| format!("wrapper roles request failed for {uri}"))?;
+        assert_eq!(response.status(), StatusCode::OK, "route: {uri}");
+        let payload: Value = read_json(response).await?;
+        assert_eq!(payload["data"], json!([]), "route: {uri}");
+        assert_eq!(
+            payload["meta"]["support_status"], "unsupported",
+            "route: {uri}"
+        );
+        assert_eq!(payload["meta"]["total_count"], JsonValue::Null, "route: {uri}");
+        assert_eq!(
+            payload["meta"]["exhaustiveness"], "not_applicable",
+            "route: {uri}"
+        );
+        assert_eq!(
+            payload["meta"]["source_classes_considered"],
+            json!(["permissions_current", "ens_v1_wrapper_l1"]),
+            "route: {uri}"
+        );
+        assert_eq!(
+            payload["meta"]["enumeration_basis"], "resource_roles",
+            "route: {uri}"
+        );
+        assert_eq!(
+            payload["meta"]["unsupported_reason"],
+            "ensv1_wrapper_holder_permissions_not_projected",
+            "route: {uri}"
+        );
+        assert!(
+            payload["meta"]["unsupported_fields"]
+                .as_array()
+                .is_some_and(|fields| fields.contains(&json!("effective_powers"))),
+            "route: {uri}"
+        );
+    }
+
+    let account_only_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/roles?account=0x0000000000000000000000000000000000000b0b")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("account-wide wrapper-gap roles request failed")?;
+    assert_eq!(account_only_response.status(), StatusCode::OK);
+    let account_only_payload: Value = read_json(account_only_response).await?;
+    assert_eq!(account_only_payload["meta"]["support_status"], "partial");
+    assert_eq!(
+        account_only_payload["meta"]["exhaustiveness"],
+        "best_effort"
+    );
+    assert_eq!(account_only_payload["meta"]["total_count"], JsonValue::Null);
+    assert_eq!(
+        account_only_payload["meta"]["enumeration_basis"],
+        "account_roles"
+    );
+    assert_eq!(
+        account_only_payload["meta"]["unsupported_reason"],
+        "ensv1_wrapper_holder_permissions_not_projected"
+    );
+
+    let permissions_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/resources/{resource_id}/permissions"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("zero-holder wrapper permission request failed")?;
+    assert_eq!(permissions_response.status(), StatusCode::OK);
+    let permissions_payload: ResourcePermissionsResponse = read_json(permissions_response).await?;
+    assert!(permissions_payload.data.is_empty());
+    assert_eq!(permissions_payload.coverage.status, "unsupported");
+    assert_eq!(permissions_payload.coverage.exhaustiveness, "not_applicable");
+    assert_eq!(
+        permissions_payload.coverage.unsupported_reason.as_deref(),
+        Some("ensv1_wrapper_holder_permissions_not_projected")
+    );
+    assert_eq!(
+        permissions_payload.chain_positions["ethereum-mainnet"]["block_hash"],
+        "0xpermission-summary"
+    );
+    assert_eq!(permissions_payload.consistency, "finalized");
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn missing_permission_resource_summary_fails_closed_for_roles_and_permissions() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let resource_id = Uuid::from_u128(0xd019);
+    let subject = "0x0000000000000000000000000000000000000aaa";
+    bigname_storage::upsert_resources(&database.pool, &[resource(resource_id)]).await?;
+    bigname_storage::upsert_permissions_current_rows(
+        &database.pool,
+        &[permission_current_row(
+            resource_id,
+            subject,
+            PermissionScope::Resource,
+            12,
+            41,
+        )],
+    )
+    .await?;
+    mark_permissions_current_projection_ready(&database).await?;
+
+    let roles_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/roles?resource_id={resource_id}"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("roles request without resource summary failed")?;
+    assert_eq!(roles_response.status(), StatusCode::OK);
+    let roles_payload: Value = read_json(roles_response).await?;
+    assert_eq!(roles_payload["data"].as_array().map(Vec::len), Some(1));
+    assert_eq!(roles_payload["meta"]["support_status"], "partial");
+    assert_eq!(roles_payload["meta"]["exhaustiveness"], "best_effort");
+    assert_eq!(roles_payload["meta"]["total_count"], JsonValue::Null);
+    assert_eq!(
+        roles_payload["meta"]["unsupported_reason"],
+        "resource_permission_authority_not_projected"
+    );
+
+    let permissions_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/resources/{resource_id}/permissions"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("permissions request without resource summary failed")?;
+    assert_eq!(permissions_response.status(), StatusCode::OK);
+    let permissions_payload: ResourcePermissionsResponse = read_json(permissions_response).await?;
+    assert_eq!(permissions_payload.data.len(), 1);
+    assert_eq!(permissions_payload.coverage.status, "partial");
+    assert_eq!(permissions_payload.coverage.exhaustiveness, "best_effort");
+    assert_eq!(
+        permissions_payload.coverage.unsupported_reason.as_deref(),
+        Some("resource_permission_authority_not_projected")
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn non_authoritative_permission_summary_fails_closed_for_roles() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let resource_id = Uuid::from_u128(0xd01a);
+    let subject = "0x0000000000000000000000000000000000000aaa";
+    bigname_storage::upsert_resources(&database.pool, &[resource(resource_id)]).await?;
+    bigname_storage::upsert_permissions_current_rows(
+        &database.pool,
+        &[permission_current_row(
+            resource_id,
+            subject,
+            PermissionScope::Resource,
+            12,
+            41,
+        )],
+    )
+    .await?;
+    let mut summary = permission_current_resource_summary(resource_id, Some("registrar"));
+    summary.coverage["exhaustiveness"] = json!("best_effort");
+    bigname_storage::upsert_permissions_current_resource_summary(&database.pool, &summary).await?;
+    mark_permissions_current_projection_ready(&database).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/roles?resource_id={resource_id}"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("roles request with non-authoritative resource summary failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["data"].as_array().map(Vec::len), Some(1));
+    assert_eq!(payload["meta"]["support_status"], "partial");
+    assert_eq!(payload["meta"]["exhaustiveness"], "best_effort");
+    assert_eq!(payload["meta"]["total_count"], JsonValue::Null);
+    assert_eq!(
+        payload["meta"]["unsupported_reason"],
+        "resource_permission_authority_not_projected"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn roles_filter_by_account_resource_and_name_from_permissions_current() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let account = "0x0000000000000000000000000000000000000aaa";
@@ -109,6 +392,11 @@ async fn roles_filter_by_account_resource_and_name_from_permissions_current() ->
         ],
     )
     .await?;
+    bigname_storage::upsert_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(alice_resource_id, Some("registrar")),
+    )
+    .await?;
     mark_permissions_current_projection_ready(&database).await?;
 
     let account_response = app_router(database.app_state())
@@ -124,7 +412,9 @@ async fn roles_filter_by_account_resource_and_name_from_permissions_current() ->
     let account_payload: Value = read_json(account_response).await?;
     assert_eq!(account_payload["data"].as_array().unwrap().len(), 2);
     assert_eq!(account_payload["page"]["sort"], json!("account_resource_scope_asc"));
-    assert_eq!(account_payload["meta"]["total_count"], json!(2));
+    assert_eq!(account_payload["meta"]["support_status"], "partial");
+    assert_eq!(account_payload["meta"]["exhaustiveness"], "best_effort");
+    assert_eq!(account_payload["meta"]["total_count"], JsonValue::Null);
     assert_eq!(
         account_payload["data"][0]["resource_id"],
         json!(alice_resource_id.to_string())
@@ -229,6 +519,11 @@ async fn roles_omit_associated_name_for_closed_surface_binding() -> Result<()> {
         )],
     )
     .await?;
+    bigname_storage::upsert_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(resource_id, Some("registrar")),
+    )
+    .await?;
     mark_permissions_current_projection_ready(&database).await?;
 
     let response = app_router(database.app_state())
@@ -282,6 +577,11 @@ async fn name_roles_resolves_current_resource_and_paginates() -> Result<()> {
             permission_current_row(resource_id, second_account, PermissionScope::Registry, 21, 52),
             permission_current_row(resource_id, first_account, PermissionScope::Resource, 22, 51),
         ],
+    )
+    .await?;
+    bigname_storage::upsert_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(resource_id, Some("registrar")),
     )
     .await?;
     mark_permissions_current_projection_ready(&database).await?;
@@ -409,6 +709,19 @@ async fn name_roles_precompose_ensv2_root_fallback_permissions() -> Result<()> {
             permission_current_row(resource_id, local_account, PermissionScope::Resource, 22, 53),
             root_grant,
         ],
+    )
+    .await?;
+    let mut resource_summary =
+        permission_current_resource_summary(resource_id, Some("ens_v2_registry"));
+    resource_summary.root_resource_id = Some(root_resource_id);
+    bigname_storage::upsert_permissions_current_resource_summary(
+        &database.pool,
+        &resource_summary,
+    )
+    .await?;
+    bigname_storage::upsert_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(root_resource_id, Some("ens_v2_registry")),
     )
     .await?;
     mark_permissions_current_projection_ready(&database).await?;
@@ -669,7 +982,7 @@ async fn roles_treat_stale_permissions_replay_marker_as_unavailable() -> Result<
             upserted_row_count,
             deleted_row_count
         )
-        VALUES ('permissions_current', 1, 0, 0, 0, 0)
+        VALUES ('permissions_current', 7, 0, 0, 0, 0)
         "#,
     )
     .execute(&database.pool)
@@ -776,7 +1089,7 @@ async fn mark_permissions_current_projection_ready(database: &TestDatabase) -> R
             upserted_row_count,
             deleted_row_count
         )
-        VALUES ('permissions_current', 7, 0, 0, 0, 0)
+        VALUES ('permissions_current', 8, 0, 0, 0, 0)
         ON CONFLICT (projection) DO UPDATE SET
             replay_version = EXCLUDED.replay_version,
             completed_normalized_target_block = EXCLUDED.completed_normalized_target_block,

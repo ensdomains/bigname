@@ -62,6 +62,7 @@ pub struct BackfillJob {
     pub backfill_job_id: i64,
     pub deployment_profile: String,
     pub chain_id: String,
+    pub raw_log_retention_generation: i64,
     pub source_identity: Value,
     pub scan_mode: String,
     pub range_start_block_number: i64,

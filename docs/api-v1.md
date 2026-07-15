@@ -144,7 +144,7 @@ Rules:
 - `chain_positions` may carry multiple chains for cross-chain answers.
 - Route-level `coverage` and per-section support are independent: a read may be authoritative while one declared section returns `UnsupportedSummary`.
 - Top-level `provenance` is optional and reserved for explicit diagnostic/full metadata paths. Product routes omit it by default; mixed declared+verified routes may add section-local `provenance` where derivations differ.
-- `meta=none` omits `meta` (collection `page` stays). `meta=summary` includes route-level support, unsupported filters/fields, count metadata, and snapshot summary. `meta=full` adds the full-envelope `coverage`, `chain_positions`, `consistency`, `last_updated`, and route-level `provenance` summaries where a compact route documents those diagnostics; compact names and role collections currently keep the same compact `meta` object as `meta=summary`.
+- `meta=none` omits `meta` (collection `page` stays). `meta=summary` includes route-level support, unsupported filters/fields, count metadata, and snapshot summary. Wrapper-scoped and account-wide compact role pages also carry `exhaustiveness`, `source_classes_considered`, `enumeration_basis`, and `unsupported_reason` so an empty page cannot be mistaken for complete wrapper-holder permission coverage; account-wide role searches are `partial`/`best_effort`, while a wrapper-scoped page is `unsupported`/`not_applicable`. `meta=full` adds the full-envelope `coverage`, `chain_positions`, `consistency`, `last_updated`, and route-level `provenance` summaries where a compact route documents those diagnostics; compact names and role collections currently keep the same compact `meta` object as `meta=summary`.
 - `GET /v1/profiles/names/{name}` is the app full-profile exception to the ordinary full-envelope default: `meta=summary` and `meta=none` return compact profile `data` without internal IDs or routine `normalized_name`, omit top-level coverage/chain/provenance fields, and strip per-query execution provenance. `meta=full` is required for diagnostic exact-name data and envelope metadata.
 - `view=full` returns the full envelope only when the route documents a full view. Compact-only routes keep `view=full` as a reserved input that returns `400 invalid_input`; OpenAPI advertises only `view=compact` for those routes.
 - Compact responses never expose raw facts, full provenance, or projection internals as a substitute for `meta`. Explain detail belongs on explain/audit routes.
@@ -229,7 +229,7 @@ Used when a documented declared subdocument exists but isn't projected. The fiel
 
 ### `ExactNameControlSummary`
 
-`registrant`, `registry_owner`, `latest_event_kind`. The narrow `declared_state.control` for one resource. Not a `ControlVector` dump or a permissions ledger. Keys stay present when supported; values may be `null` when the authority epoch doesn't expose that subject or no retained pointer exists.
+`registrant`, `registry_owner`, `latest_event_kind`. The narrow `declared_state.control` for one resource. Not a `ControlVector` dump or a permissions ledger. Keys stay present when supported; values may be `null` when the authority epoch doesn't expose that subject or no retained pointer exists. A current ENSv1 wrapper resource returns `UnsupportedSummary` instead of publishing wrapper-born or stale pre-wrap owner facets as effective control.
 
 ### `ExactNameResolverSummary`
 
@@ -241,7 +241,7 @@ For Basenames, complete family coverage requires a discovered Base resolver to b
 
 ### `RoleSummary`
 
-`subjects[*]` with `subject`, `scopes[*].scope`, `scopes[*].effective_powers`. Per-resource summary view of current effective permission rows. Row-granular lineage stays on `GET /v1/resources/{resource_id}/permissions`.
+`subjects[*]` with `subject`, `scopes[*].scope`, `scopes[*].effective_powers`. Per-resource summary view of current effective permission rows, with support classification from the projection-owned per-resource permission summary. For a current ENSv1 wrapper resource, the object additionally carries `status="unsupported"` and `unsupported_reason="ensv1_wrapper_holder_permissions_not_projected"`; `subjects` contains only rows that were actually projected and is not an exhaustive holder-power answer. If the resource summary is absent or its authority classification is unrecognized, the object carries `status="partial"` and `unsupported_reason="resource_permission_authority_not_projected"`. Row-granular lineage stays on `GET /v1/resources/{resource_id}/permissions`.
 
 ### `HistoryPointer`
 

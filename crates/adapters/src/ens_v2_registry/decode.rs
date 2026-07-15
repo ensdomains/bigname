@@ -1,5 +1,5 @@
 use alloy_sol_types::sol;
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 use crate::adapter_manifest::ActiveManifestEventTopic0sBySignature;
 use crate::evm_abi::{
@@ -59,9 +59,97 @@ sol! {
 
     #[derive(Debug)]
     event ParentUpdated(address indexed parent, string label, address indexed sender);
+
+    event TransferSingle(
+        address indexed operator,
+        address indexed from,
+        address indexed to,
+        uint256 id,
+        uint256 value
+    );
+
+    event TransferBatch(
+        address indexed operator,
+        address indexed from,
+        address indexed to,
+        uint256[] ids,
+        uint256[] values
+    );
 }
 
-pub(super) fn build_registry_observation(
+pub(super) fn build_registry_observations(
+    raw_log: &RegistryRawLogRow,
+    event_topics: &ActiveManifestEventTopic0sBySignature,
+) -> Result<Vec<RegistryObservation>> {
+    let Some(topic0) = raw_log.topics.first() else {
+        return Ok(Vec::new());
+    };
+
+    if event_topics.matches(ABI_EVENT_TRANSFER_SINGLE_SIGNATURE, topic0)? {
+        let event = decode_event_log::<TransferSingle>(
+            &raw_log.topics,
+            &raw_log.data,
+            "TransferSingle log is malformed",
+        )?;
+        let from = address_hex(event.from);
+        let to = address_hex(event.to);
+        if from == ZERO_ADDRESS || to == ZERO_ADDRESS || event.value.is_zero() {
+            return Ok(Vec::new());
+        }
+        return Ok(vec![RegistryObservation::TokenControlTransferred {
+            token_id: u256_word_hex(event.id),
+            operator: address_hex(event.operator),
+            from,
+            to,
+            amount: u256_word_hex(event.value),
+            source_event: "TransferSingle",
+            transfer_index: None,
+            reference: raw_log.reference(),
+        }]);
+    }
+
+    if event_topics.matches(ABI_EVENT_TRANSFER_BATCH_SIGNATURE, topic0)? {
+        let event = decode_event_log::<TransferBatch>(
+            &raw_log.topics,
+            &raw_log.data,
+            "TransferBatch log is malformed",
+        )?;
+        if event.ids.len() != event.values.len() {
+            bail!("TransferBatch ids and values length mismatch");
+        }
+        let from = address_hex(event.from);
+        let to = address_hex(event.to);
+        if from == ZERO_ADDRESS || to == ZERO_ADDRESS {
+            return Ok(Vec::new());
+        }
+        let operator = address_hex(event.operator);
+        let reference = raw_log.reference();
+        return Ok(event
+            .ids
+            .into_iter()
+            .zip(event.values)
+            .enumerate()
+            .filter_map(|(transfer_index, (id, value))| {
+                (!value.is_zero()).then(|| RegistryObservation::TokenControlTransferred {
+                    token_id: u256_word_hex(id),
+                    operator: operator.clone(),
+                    from: from.clone(),
+                    to: to.clone(),
+                    amount: u256_word_hex(value),
+                    source_event: "TransferBatch",
+                    transfer_index: Some(transfer_index),
+                    reference: reference.clone(),
+                })
+            })
+            .collect());
+    }
+
+    Ok(build_registry_observation(raw_log, event_topics)?
+        .into_iter()
+        .collect())
+}
+
+fn build_registry_observation(
     raw_log: &RegistryRawLogRow,
     event_topics: &ActiveManifestEventTopic0sBySignature,
 ) -> Result<Option<RegistryObservation>> {

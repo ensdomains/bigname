@@ -22,6 +22,17 @@ impl AddressNamesResponseSupplement {
             .extend(rows.iter().map(|row| row.last_recomputed_at));
     }
 
+    fn push_permissions_resource_summary(
+        &mut self,
+        summary: &bigname_storage::PermissionsCurrentResourceSummary,
+    ) {
+        self.provenances.push(summary.provenance.clone());
+        self.chain_positions.push(summary.chain_positions.clone());
+        self.canonicality_summaries
+            .push(summary.canonicality_summary.clone());
+        self.last_recomputed_at.push(summary.last_recomputed_at);
+    }
+
     fn push_children_summary(&mut self, summary: &bigname_storage::ChildrenCurrentSummary) {
         self.provenances
             .extend(summary.provenance_inputs.iter().cloned());
@@ -94,10 +105,18 @@ fn build_history_response(
 fn build_resource_permissions_response_from_summary(
     summary: &bigname_storage::PermissionsCurrentFullFilterSummary,
     page_rows: &[PermissionsCurrentRow],
+    resource_summary: Option<&bigname_storage::PermissionsCurrentResourceSummary>,
     page: HistoryPageResponse,
 ) -> ResourcePermissionsResponse {
+    let mut provenance_inputs = summary.provenance.clone();
+    if let Some(resource_summary) = resource_summary {
+        provenance_inputs.push(resource_summary.provenance.clone());
+    }
     let last_updated = summary
         .last_recomputed_at
+        .into_iter()
+        .chain(resource_summary.map(|summary| summary.last_recomputed_at))
+        .max()
         .map(format_timestamp)
         .unwrap_or_else(|| format_timestamp(OffsetDateTime::now_utc()));
 
@@ -106,13 +125,24 @@ fn build_resource_permissions_response_from_summary(
         declared_state: empty_object(),
         verified_state: None,
         provenance: build_collection_provenance_from_inputs(
-            &summary.provenance,
+            &provenance_inputs,
             "permissions_current_rebuild",
         ),
-        coverage: build_permissions_coverage_from_sample(summary.coverage.as_ref()),
-        chain_positions: build_chain_positions_from_values(summary.chain_positions.iter()),
+        coverage: build_permissions_coverage_from_resource_summary(resource_summary),
+        chain_positions: build_chain_positions_from_values(
+            summary
+                .chain_positions
+                .iter()
+                .chain(resource_summary.map(|summary| &summary.chain_positions)),
+        ),
         page,
-        consistency: collection_consistency(summary.canonicality_summaries.iter()).to_owned(),
+        consistency: collection_consistency(
+            summary
+                .canonicality_summaries
+                .iter()
+                .chain(resource_summary.map(|summary| &summary.canonicality_summary)),
+        )
+        .to_owned(),
         last_updated,
     }
 }
@@ -231,6 +261,7 @@ fn build_address_name_item_with_role_summary(
     entry: &AddressNameCurrentEntry,
     name_row: Option<&NameCurrentRow>,
     permissions: &[PermissionsCurrentRow],
+    permission_summary: Option<&bigname_storage::PermissionsCurrentResourceSummary>,
     child_count: u64,
 ) -> JsonValue {
     let mut value = build_address_name_item(entry);
@@ -241,7 +272,7 @@ fn build_address_name_item_with_role_summary(
     insert_value_field(
         &mut value,
         "role_summary",
-        build_address_name_role_summary(permissions),
+        build_address_name_role_summary(permissions, permission_summary),
     );
     insert_value_field(
         &mut value,
@@ -392,26 +423,57 @@ fn build_chain_positions_from_values<'a>(values: impl Iterator<Item = &'a JsonVa
     serde_json::to_value(chain_positions).expect("address names chain positions must serialize")
 }
 
-fn build_permissions_coverage_from_sample(sample: Option<&JsonValue>) -> CoverageResponse {
+fn build_permissions_coverage_from_resource_summary(
+    summary: Option<&bigname_storage::PermissionsCurrentResourceSummary>,
+) -> CoverageResponse {
+    let Some(coverage) = summary.map(|summary| &summary.coverage) else {
+        return unknown_permission_authority_coverage();
+    };
+    let Some(status) = coverage.get("status").and_then(JsonValue::as_str) else {
+        return unknown_permission_authority_coverage();
+    };
+    let Some(exhaustiveness) = coverage
+        .get("exhaustiveness")
+        .and_then(JsonValue::as_str)
+    else {
+        return unknown_permission_authority_coverage();
+    };
+    if !matches!(
+        (status, exhaustiveness),
+        ("full", "authoritative")
+            | ("partial", "best_effort")
+            | ("unsupported", "not_applicable")
+    ) {
+        return unknown_permission_authority_coverage();
+    }
+
     CoverageResponse {
-        status: string_field(sample.and_then(|value| provenance_field(value, "status")))
-            .unwrap_or_else(|| "full".to_owned()),
-        exhaustiveness: string_field(
-            sample.and_then(|value| provenance_field(value, "exhaustiveness")),
-        )
-        .unwrap_or_else(|| "authoritative".to_owned()),
-        source_classes_considered: match sample
-            .and_then(|value| provenance_field(value, "source_classes_considered"))
-        {
+        status: status.to_owned(),
+        exhaustiveness: exhaustiveness.to_owned(),
+        source_classes_considered: match coverage.get("source_classes_considered") {
             Some(JsonValue::Array(values)) => values.iter().filter_map(value_to_string).collect(),
             _ => vec!["permissions_current".to_owned()],
         },
-        enumeration_basis: string_field(
-            sample.and_then(|value| provenance_field(value, "enumeration_basis")),
-        )
-        .unwrap_or_else(|| "resource_permissions".to_owned()),
-        unsupported_reason: string_field(
-            sample.and_then(|value| provenance_field(value, "unsupported_reason")),
+        enumeration_basis: coverage
+            .get("enumeration_basis")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("resource_permissions")
+            .to_owned(),
+        unsupported_reason: coverage
+            .get("unsupported_reason")
+            .and_then(JsonValue::as_str)
+            .map(str::to_owned),
+    }
+}
+
+fn unknown_permission_authority_coverage() -> CoverageResponse {
+    CoverageResponse {
+        status: "partial".to_owned(),
+        exhaustiveness: "best_effort".to_owned(),
+        source_classes_considered: vec!["permissions_current".to_owned()],
+        enumeration_basis: "resource_permissions".to_owned(),
+        unsupported_reason: Some(
+            RESOURCE_PERMISSION_AUTHORITY_NOT_PROJECTED_REASON.to_owned(),
         ),
     }
 }
@@ -461,14 +523,17 @@ fn build_permission_scope_value(scope: &PermissionScope) -> JsonValue {
     value
 }
 
-fn build_address_name_role_summary(rows: &[PermissionsCurrentRow]) -> JsonValue {
+fn build_address_name_role_summary(
+    rows: &[PermissionsCurrentRow],
+    resource_summary: Option<&bigname_storage::PermissionsCurrentResourceSummary>,
+) -> JsonValue {
     let mut subjects = BTreeMap::<String, Vec<&PermissionsCurrentRow>>::new();
 
     for row in rows {
         subjects.entry(row.subject.clone()).or_default().push(row);
     }
 
-    json!({
+    let mut summary = json!({
         "subjects": subjects
             .into_iter()
             .map(|(subject, mut rows)| {
@@ -487,5 +552,17 @@ fn build_address_name_role_summary(rows: &[PermissionsCurrentRow]) -> JsonValue 
                 })
             })
             .collect::<Vec<_>>(),
-    })
+    });
+    let coverage = build_permissions_coverage_from_resource_summary(resource_summary);
+    if coverage.status != "full" {
+        insert_string_field(&mut summary, "status", coverage.status);
+        insert_string_field(
+            &mut summary,
+            "unsupported_reason",
+            coverage
+                .unsupported_reason
+                .unwrap_or_else(|| RESOURCE_PERMISSION_AUTHORITY_NOT_PROJECTED_REASON.to_owned()),
+        );
+    }
+    summary
 }

@@ -7,6 +7,10 @@ use sqlx::types::Uuid;
 
 use crate::backfill::BackfillBlockRange;
 
+#[path = "planning/recovery.rs"]
+mod recovery;
+pub(super) use recovery::merge_retained_history_recovery_targets;
+
 #[rustfmt::skip]
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct CatchupTarget { source_family: String, pub(super) contract_instance_id: Uuid, address: String, from_block: i64, to_block: Option<i64> }

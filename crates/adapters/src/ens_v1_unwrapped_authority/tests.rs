@@ -27,8 +27,332 @@ struct TestDatabase {
     database_name: String,
 }
 
+async fn seed_intervening_resolver_context_fixture(
+    pool: &PgPool,
+    include_intervening_context: bool,
+) -> Result<()> {
+    const REGISTRAR: &str = "0x00000000000000000000000000000000000010aa";
+    const REGISTRY: &str = "0x00000000000000000000000000000000000010bb";
+    const TARGET_RESOLVER: &str = "0x00000000000000000000000000000000000010cc";
+    const OTHER_RESOLVER: &str = "0x00000000000000000000000000000000000010dd";
+    const OWNER: &str = "0x0000000000000000000000000000000000001011";
+    const FIRST_ADDRESS: &str = "0x0000000000000000000000000000000000001022";
+    const STALE_ADDRESS: &str = "0x0000000000000000000000000000000000001033";
+    const BLOCK_10: &str = "0xa100000000000000000000000000000000000000000000000000000000000010";
+    const BLOCK_20: &str = "0xa100000000000000000000000000000000000000000000000000000000000020";
+    const BLOCK_30: &str = "0xa100000000000000000000000000000000000000000000000000000000000030";
+
+    insert_active_contract_fixture(
+        pool,
+        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+        "registrar",
+        REGISTRAR,
+        Some("registrar"),
+        "manifests/ens/ens_v1_registrar_l1/v1.toml",
+    )
+    .await?;
+    insert_active_contract_fixture(
+        pool,
+        SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+        "registry",
+        REGISTRY,
+        Some("registry"),
+        "manifests/ens/ens_v1_registry_l1/v3.toml",
+    )
+    .await?;
+    insert_active_contract_fixture(
+        pool,
+        SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+        "resolver",
+        TARGET_RESOLVER,
+        Some("public_resolver"),
+        "manifests/ens/ens_v1_resolver_l1/v1.toml",
+    )
+    .await?;
+    let alice = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
+    upsert_raw_blocks(
+        pool,
+        &[
+            raw_block(BLOCK_10, None, 10, 1_700_000_010),
+            raw_block(BLOCK_20, Some(BLOCK_10), 20, 1_700_000_020),
+            raw_block(BLOCK_30, Some(BLOCK_20), 30, 1_700_000_030),
+        ],
+    )
+    .await?;
+    let mut logs = vec![
+        RawLog {
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: BLOCK_10.to_owned(),
+            block_number: 10,
+            transaction_hash: "0xtxa1000000000000000000000000000000000000000000000000000000000010"
+                .to_owned(),
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: REGISTRAR.to_owned(),
+            topics: vec![
+                name_registered_topic0(),
+                alice.labelhashes[0].clone(),
+                hex_string(&abi_word_address(OWNER)),
+            ],
+            data: encode_registrar_name_registered_log_data("alice", 1_800_000_000),
+            canonicality_state: CanonicalityState::Canonical,
+        },
+        RawLog {
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: BLOCK_10.to_owned(),
+            block_number: 10,
+            transaction_hash: "0xtxa1000000000000000000000000000000000000000000000000000000000010"
+                .to_owned(),
+            transaction_index: 0,
+            log_index: 1,
+            emitting_address: REGISTRY.to_owned(),
+            topics: vec![new_resolver_topic0(), alice.namehash.clone()],
+            data: encode_registry_new_resolver_log_data(TARGET_RESOLVER),
+            canonicality_state: CanonicalityState::Canonical,
+        },
+        RawLog {
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: BLOCK_10.to_owned(),
+            block_number: 10,
+            transaction_hash: "0xtxa1000000000000000000000000000000000000000000000000000000000010"
+                .to_owned(),
+            transaction_index: 0,
+            log_index: 2,
+            emitting_address: TARGET_RESOLVER.to_owned(),
+            topics: vec![addr_changed_topic0(), alice.namehash.clone()],
+            data: encode_resolver_addr_changed_log_data(FIRST_ADDRESS),
+            canonicality_state: CanonicalityState::Canonical,
+        },
+        RawLog {
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: BLOCK_30.to_owned(),
+            block_number: 30,
+            transaction_hash: "0xtxa1000000000000000000000000000000000000000000000000000000000030"
+                .to_owned(),
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: TARGET_RESOLVER.to_owned(),
+            topics: vec![addr_changed_topic0(), alice.namehash.clone()],
+            data: encode_resolver_addr_changed_log_data(STALE_ADDRESS),
+            canonicality_state: CanonicalityState::Canonical,
+        },
+    ];
+    if include_intervening_context {
+        logs.push(RawLog {
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: BLOCK_20.to_owned(),
+            block_number: 20,
+            transaction_hash: "0xtxa1000000000000000000000000000000000000000000000000000000000020"
+                .to_owned(),
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: REGISTRY.to_owned(),
+            topics: vec![new_resolver_topic0(), alice.namehash],
+            data: encode_registry_new_resolver_log_data(OTHER_RESOLVER),
+            canonicality_state: CanonicalityState::Canonical,
+        });
+    }
+    upsert_raw_logs(pool, &logs).await?;
+    Ok(())
+}
+
+async fn canonical_resolver_rows(pool: &PgPool) -> Result<Value> {
+    sqlx::query_scalar(
+        "SELECT COALESCE(jsonb_agg( \
+             to_jsonb(event) - 'normalized_event_id' - 'observed_at' \
+             ORDER BY event.event_identity \
+         ), '[]'::jsonb) \
+         FROM normalized_events event \
+         WHERE event.derivation_kind = 'ens_v1_unwrapped_authority' \
+           AND event.source_family = 'ens_v1_resolver_l1' \
+           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')",
+    )
+    .fetch_one(pool)
+    .await
+    .context("failed to load canonical resolver fixture rows")
+}
+
+#[tokio::test]
+async fn resolver_profile_reconciliation_streams_intervening_context_with_bounded_live_state()
+-> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    const TARGET_RESOLVER: &str = "0x00000000000000000000000000000000000010cc";
+    const BLOCK_20: &str = "0xa100000000000000000000000000000000000000000000000000000000000020";
+    const BLOCK_30: &str = "0xa100000000000000000000000000000000000000000000000000000000000030";
+    const REGISTRY: &str = "0x00000000000000000000000000000000000010bb";
+    const OTHER_RESOLVER: &str = "0x00000000000000000000000000000000000010dd";
+
+    let transitioned = TestDatabase::new().await?;
+    seed_intervening_resolver_context_fixture(transitioned.pool(), false).await?;
+    sync_ens_v1_unwrapped_authority(transitioned.pool(), "ethereum-mainnet").await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events \
+             WHERE source_family = 'ens_v1_resolver_l1' \
+               AND block_number = 30 \
+               AND canonicality_state IN ('canonical', 'safe', 'finalized')",
+        )
+        .fetch_one(transitioned.pool())
+        .await?,
+        1
+    );
+    let alice = observe_registrar_eth_name_with_version("alice", ENS_NORMALIZER_VERSION)?;
+    upsert_raw_logs(
+        transitioned.pool(),
+        &[RawLog {
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: BLOCK_20.to_owned(),
+            block_number: 20,
+            transaction_hash: "0xtxa1000000000000000000000000000000000000000000000000000000000020"
+                .to_owned(),
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: REGISTRY.to_owned(),
+            topics: vec![new_resolver_topic0(), alice.namehash],
+            data: encode_registry_new_resolver_log_data(OTHER_RESOLVER),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+
+    let summary =
+        resolver_profile_reconciliation::reconcile_resolver_profile_events_with_log_limit(
+            transitioned.pool(),
+            "ethereum-mainnet",
+            &[TARGET_RESOLVER.to_owned()],
+            1,
+        )
+        .await?;
+    assert_eq!(summary.replay_page_count, 3);
+    assert_eq!(summary.max_replay_page_log_count, 3);
+    assert!(summary.max_live_state_item_count > 0);
+    assert!(summary.max_live_state_item_count <= 10_000);
+    assert!(summary.max_live_state_payload_bytes > 0);
+    assert!(summary.max_live_state_payload_bytes <= 64 * 1024 * 1024);
+    assert_eq!(summary.orphaned_normalized_event_count, 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT canonicality_state::TEXT FROM normalized_events \
+             WHERE source_family = 'ens_v1_resolver_l1' AND block_hash = $1",
+        )
+        .bind(BLOCK_30)
+        .fetch_one(transitioned.pool())
+        .await?,
+        "orphaned"
+    );
+
+    let clean = TestDatabase::new().await?;
+    seed_intervening_resolver_context_fixture(clean.pool(), true).await?;
+    sync_ens_v1_unwrapped_authority(clean.pool(), "ethereum-mainnet").await?;
+    assert_eq!(
+        canonical_resolver_rows(transitioned.pool()).await?,
+        canonical_resolver_rows(clean.pool()).await?
+    );
+
+    clean.cleanup().await?;
+    transitioned.cleanup().await
+}
+
+#[tokio::test]
+async fn broad_sync_and_profile_reconciliation_preserve_manifest_provenance_across_rollover()
+-> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    const TARGET_RESOLVER: &str = "0x00000000000000000000000000000000000010cc";
+
+    let database = TestDatabase::new().await?;
+    seed_intervening_resolver_context_fixture(database.pool(), true).await?;
+    sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
+    let original_rows = sqlx::query_as::<_, (String, i64, Option<i64>)>(
+        r#"
+        SELECT event_identity, manifest_version, source_manifest_id
+        FROM normalized_events
+        WHERE derivation_kind = 'ens_v1_unwrapped_authority'
+          AND source_family = 'ens_v1_resolver_l1'
+        ORDER BY event_identity
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert!(!original_rows.is_empty());
+
+    let (original_manifest_id, contract_instance_id) = sqlx::query_as::<_, (i64, Uuid)>(
+        r#"
+            SELECT manifest.manifest_id, declaration.contract_instance_id
+            FROM manifest_versions manifest
+            JOIN manifest_contract_instances declaration
+              ON declaration.manifest_id = manifest.manifest_id
+            WHERE manifest.chain = 'ethereum-mainnet'
+              AND manifest.source_family = 'ens_v1_resolver_l1'
+              AND manifest.rollout_status = 'active'
+              AND lower(declaration.declared_address) = lower($1)
+            "#,
+    )
+    .bind(TARGET_RESOLVER)
+    .fetch_one(database.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE manifest_versions SET rollout_status = 'deprecated' WHERE manifest_id = $1",
+    )
+    .bind(original_manifest_id)
+    .execute(database.pool())
+    .await?;
+    let replacement_manifest_id = insert_manifest_version(
+        database.pool(),
+        ManifestVersionSeed {
+            manifest_version: 2,
+            namespace: "ens",
+            source_family: SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+            chain: "ethereum-mainnet",
+            deployment_epoch: "ens_v1",
+            rollout_status: "active",
+            normalizer_version: ENS_NORMALIZER_VERSION,
+            file_path: "manifests/ens/ens_v1_resolver_l1/v2.toml",
+        },
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        ManifestContractInstanceSeed {
+            manifest_id: replacement_manifest_id,
+            declaration_kind: "contract",
+            declaration_name: "resolver",
+            contract_instance_id,
+            declared_address: TARGET_RESOLVER,
+            role: Some("public_resolver"),
+            proxy_kind: Some("none"),
+        },
+    )
+    .await?;
+
+    sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
+    reconcile_resolver_profile_events(
+        database.pool(),
+        "ethereum-mainnet",
+        &[TARGET_RESOLVER.to_owned()],
+    )
+    .await?;
+    let replayed_rows = sqlx::query_as::<_, (String, i64, Option<i64>)>(
+        r#"
+        SELECT event_identity, manifest_version, source_manifest_id
+        FROM normalized_events
+        WHERE derivation_kind = 'ens_v1_unwrapped_authority'
+          AND source_family = 'ens_v1_resolver_l1'
+        ORDER BY event_identity
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(replayed_rows, original_rows);
+
+    database.cleanup().await
+}
+
 impl TestDatabase {
     async fn new() -> Result<Self> {
+        Self::new_with_max_connections(5).await
+    }
+
+    async fn new_with_max_connections(max_connections: u32) -> Result<Self> {
         let database_url = std::env::var("BIGNAME_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| default_database_url().to_owned());
@@ -53,7 +377,7 @@ impl TestDatabase {
             .with_context(|| format!("failed to create test database {database_name}"))?;
 
         let pool = PgPoolOptions::new()
-            .max_connections(5)
+            .max_connections(max_connections)
             .connect_with(base_options.database(&database_name))
             .await
             .context("failed to connect test pool for ENSv1 unwrapped authority tests")?;
@@ -716,6 +1040,36 @@ fn raw_code_hash_for_address(address: &str, code_hash: &str) -> RawCodeHash {
     raw_code_hash_for_address_on_chain("ethereum-mainnet", address, code_hash)
 }
 
+fn raw_code_hash_for_address_at_block(
+    address: &str,
+    code_hash: &str,
+    block_number: i64,
+) -> RawCodeHash {
+    raw_code_hash_for_address_on_chain_at_block(
+        "ethereum-mainnet",
+        address,
+        code_hash,
+        block_number,
+    )
+}
+
+fn raw_code_hash_for_address_on_chain_at_block(
+    chain_id: &str,
+    address: &str,
+    code_hash: &str,
+    block_number: i64,
+) -> RawCodeHash {
+    RawCodeHash {
+        chain_id: chain_id.to_owned(),
+        block_hash: format!("0x{block_number:064x}"),
+        block_number,
+        contract_address: address.to_owned(),
+        code_hash: code_hash.to_owned(),
+        code_byte_length: 5,
+        canonicality_state: CanonicalityState::Canonical,
+    }
+}
+
 fn raw_code_hash_for_address_on_chain(
     chain_id: &str,
     address: &str,
@@ -999,6 +1353,190 @@ fn reverse_claim_event(
             },
         }),
     }
+}
+
+struct ReverseNameProfileTransitionFixture {
+    resolver_address: &'static str,
+    supported_code_hash: &'static str,
+    unsupported_code_hash: &'static str,
+    claimed_address: &'static str,
+}
+
+async fn seed_reverse_name_profile_transition_fixture(
+    pool: &PgPool,
+) -> Result<ReverseNameProfileTransitionFixture> {
+    const REGISTRY_ADDRESS: &str = "0x00000000000000000000000000000000000000bb";
+    const SEED_RESOLVER_ADDRESS: &str = "0x00000000000000000000000000000000000000bc";
+    const TARGET_RESOLVER_ADDRESS: &str = "0x00000000000000000000000000000000000000cc";
+    const SUPPORTED_CODE_HASH: &str =
+        "0x1111111111111111111111111111111111111111111111111111111111111111";
+    const UNSUPPORTED_CODE_HASH: &str =
+        "0x2222222222222222222222222222222222222222222222222222222222222222";
+    const CLAIMED_ADDRESS: &str = "0x0000000000000000000000000000000000001234";
+
+    let reverse_manifest_id = insert_active_contract_fixture(
+        pool,
+        "ens_v1_reverse_l1",
+        "reverse_registrar",
+        "0x00000000000000000000000000000000000000ad",
+        Some(CONTRACT_ROLE_REVERSE_REGISTRAR),
+        "manifests/ens/ens_v1_reverse_l1/v1.toml",
+    )
+    .await?;
+    let registry_manifest_id = insert_active_contract_fixture(
+        pool,
+        SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+        "registry",
+        REGISTRY_ADDRESS,
+        Some("registry"),
+        "manifests/ens/ens_v1_registry_l1/v1.toml",
+    )
+    .await?;
+    let resolver_manifest_id = insert_active_contract_fixture(
+        pool,
+        SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+        "public_resolver_seed",
+        SEED_RESOLVER_ADDRESS,
+        Some("public_resolver"),
+        "manifests/ens/ens_v1_resolver_l1/v1.toml",
+    )
+    .await?;
+
+    let registry_contract_instance_id: Uuid = sqlx::query_scalar(
+        "SELECT contract_instance_id FROM contract_instance_addresses \
+         WHERE chain_id = 'ethereum-mainnet' AND address = $1",
+    )
+    .bind(REGISTRY_ADDRESS)
+    .fetch_one(pool)
+    .await?;
+    let resolver_contract_instance_id = Uuid::from_u128(0xfeed_cafe);
+    insert_contract_instance(
+        pool,
+        resolver_contract_instance_id,
+        "ethereum-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_contract_instance_address(
+        pool,
+        resolver_contract_instance_id,
+        "ethereum-mainnet",
+        TARGET_RESOLVER_ADDRESS,
+        resolver_manifest_id,
+    )
+    .await?;
+    insert_active_discovery_edge_with_range(
+        pool,
+        ActiveDiscoveryEdgeSeed {
+            chain_id: "ethereum-mainnet",
+            edge_kind: "resolver",
+            from_contract_instance_id: registry_contract_instance_id,
+            to_contract_instance_id: resolver_contract_instance_id,
+            source_manifest_id: registry_manifest_id,
+            active_from_block_number: Some(42),
+            active_to_block_number: None,
+        },
+    )
+    .await?;
+
+    upsert_raw_code_hashes(
+        pool,
+        &[raw_code_hash_for_address_at_block(
+            SEED_RESOLVER_ADDRESS,
+            SUPPORTED_CODE_HASH,
+            40,
+        )],
+    )
+    .await?;
+
+    let block_hash = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    let transaction_hash = "0xtxdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    let version_block_hash = "0xdededededededededededededededededededededededededededededededede";
+    let version_transaction_hash =
+        "0xtxdedededededededededededededededededededededededededededededede";
+    let reverse_node = reverse_node_for_address(CLAIMED_ADDRESS);
+    let reverse_name = format!(
+        "{}.addr.reverse",
+        reverse_label_for_address(CLAIMED_ADDRESS)
+    );
+    upsert_raw_blocks(
+        pool,
+        &[
+            raw_block(
+                block_hash,
+                Some("0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"),
+                42,
+                1_700_000_042,
+            ),
+            raw_block(version_block_hash, Some(block_hash), 43, 1_700_000_043),
+        ],
+    )
+    .await?;
+    upsert_normalized_events(
+        pool,
+        &[reverse_claim_event(
+            reverse_manifest_id,
+            block_hash,
+            transaction_hash,
+            0,
+            CLAIMED_ADDRESS,
+            &reverse_node,
+            &reverse_name,
+        )],
+    )
+    .await?;
+    upsert_raw_logs(
+        pool,
+        &[
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 1,
+                emitting_address: REGISTRY_ADDRESS.to_owned(),
+                topics: vec![new_resolver_topic0(), reverse_node.clone()],
+                data: encode_registry_new_resolver_log_data(TARGET_RESOLVER_ADDRESS),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: block_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 2,
+                emitting_address: TARGET_RESOLVER_ADDRESS.to_owned(),
+                topics: vec![name_changed_topic0(), reverse_node],
+                data: encode_dynamic_string_log_data("alice.eth"),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: version_block_hash.to_owned(),
+                block_number: 43,
+                transaction_hash: version_transaction_hash.to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: TARGET_RESOLVER_ADDRESS.to_owned(),
+                topics: vec![
+                    version_changed_topic0(),
+                    reverse_node_for_address(CLAIMED_ADDRESS),
+                ],
+                data: encode_resolver_version_changed_log_data(7),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        ],
+    )
+    .await?;
+
+    Ok(ReverseNameProfileTransitionFixture {
+        resolver_address: TARGET_RESOLVER_ADDRESS,
+        supported_code_hash: SUPPORTED_CODE_HASH,
+        unsupported_code_hash: UNSUPPORTED_CODE_HASH,
+        claimed_address: CLAIMED_ADDRESS,
+    })
 }
 
 fn basenames_reverse_claim_event(
@@ -4143,6 +4681,144 @@ async fn sync_ens_v1_unwrapped_authority_replay_checkpoint_honors_latched_target
         .fetch_one(database.pool())
         .await?,
         42
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn unwrapped_checkpoint_replay_resets_for_late_log_in_consumed_block() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new_with_max_connections(2).await?;
+
+    let chain = "ethereum-mainnet";
+    let registrar_address = "0x00000000000000000000000000000000000000aa";
+    let block_42_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let block_43_hash = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    insert_active_contract_fixture(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+        "registrar",
+        registrar_address,
+        Some("registrar"),
+        "manifests/ens/ens_v1_registrar_l1/v1.toml",
+    )
+    .await?;
+    upsert_raw_blocks(
+        database.pool(),
+        &[
+            raw_block(
+                block_42_hash,
+                Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
+                42,
+                1_700_000_042,
+            ),
+            raw_block(block_43_hash, Some(block_42_hash), 43, 1_700_000_043),
+        ],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[RawLog {
+            chain_id: chain.to_owned(),
+            block_hash: block_42_hash.to_owned(),
+            block_number: 42,
+            transaction_hash: "0xhigh".to_owned(),
+            transaction_index: 1,
+            log_index: 1,
+            emitting_address: registrar_address.to_owned(),
+            topics: vec![
+                name_registered_topic0(),
+                keccak256_hex(b"alice"),
+                hex_string(&abi_word_address(
+                    "0x0000000000000000000000000000000000000001",
+                )),
+            ],
+            data: encode_registrar_name_registered_log_data("alice", 1_700_010_000),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+
+    let checkpoint = crate::ens_v1_subregistry_discovery::ReplayAdapterCheckpointContext {
+        deployment_profile: "test".to_owned(),
+        cursor_kind: "unwrapped_late_consumed_block".to_owned(),
+        range_start_block_number: 42,
+        target_block_number: 42,
+    };
+    let first = sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limit(
+        database.pool(),
+        chain,
+        &checkpoint,
+        1,
+    )
+    .await?;
+    assert_eq!(first.scanned_log_count, 1);
+
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            RawLog {
+                chain_id: chain.to_owned(),
+                block_hash: block_42_hash.to_owned(),
+                block_number: 42,
+                transaction_hash: "0xlow".to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: registrar_address.to_owned(),
+                topics: vec![
+                    name_registered_topic0(),
+                    keccak256_hex(b"carol"),
+                    hex_string(&abi_word_address(
+                        "0x0000000000000000000000000000000000000003",
+                    )),
+                ],
+                data: encode_registrar_name_registered_log_data("carol", 1_700_010_000),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: chain.to_owned(),
+                block_hash: block_43_hash.to_owned(),
+                block_number: 43,
+                transaction_hash: "0xnext".to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: registrar_address.to_owned(),
+                topics: vec![
+                    name_registered_topic0(),
+                    keccak256_hex(b"bob"),
+                    hex_string(&abi_word_address(
+                        "0x0000000000000000000000000000000000000002",
+                    )),
+                ],
+                data: encode_registrar_name_registered_log_data("bob", 1_700_010_000),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        ],
+    )
+    .await?;
+
+    let extended_checkpoint = crate::ens_v1_subregistry_discovery::ReplayAdapterCheckpointContext {
+        target_block_number: 43,
+        ..checkpoint
+    };
+    let extended = sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limit(
+        database.pool(),
+        chain,
+        &extended_checkpoint,
+        1,
+    )
+    .await?;
+    assert_eq!(extended.scanned_log_count, 3);
+    assert!(
+        load_name_surface(database.pool(), "ens:carol.eth")
+            .await?
+            .is_some()
+    );
+    assert!(
+        load_name_surface(database.pool(), "ens:bob.eth")
+            .await?
+            .is_some()
     );
 
     database.cleanup().await
@@ -10108,6 +10784,255 @@ async fn sync_ens_v1_unwrapped_authority_emits_reverse_claim_source_observations
 }
 
 #[tokio::test]
+async fn sync_ens_v1_reverse_name_observation_converges_across_profile_reclassification()
+-> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+    let fixture = seed_reverse_name_profile_transition_fixture(database.pool()).await?;
+
+    let pending = sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
+    assert_eq!(pending.by_kind.get(EVENT_KIND_RECORD_CHANGED), Some(&1));
+    assert_eq!(
+        pending.by_kind.get(EVENT_KIND_RECORD_VERSION_CHANGED),
+        Some(&1)
+    );
+    let pending_after_state: Value = sqlx::query_scalar(
+        "SELECT after_state FROM normalized_events \
+         WHERE event_kind = 'RecordChanged' \
+           AND logical_name_id IS NULL \
+           AND after_state->>'record_key' = 'name'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(pending_after_state["raw_name"], "alice.eth");
+    assert!(
+        pending_after_state.get("primary_claim_source").is_none(),
+        "a pending resolver profile must retain the observation without declaring a primary-name claim: {pending_after_state}"
+    );
+
+    upsert_raw_code_hashes(
+        database.pool(),
+        &[raw_code_hash_for_address_at_block(
+            fixture.resolver_address,
+            fixture.supported_code_hash,
+            43,
+        )],
+    )
+    .await?;
+    let supported = reconcile_resolver_profile_events(
+        database.pool(),
+        "ethereum-mainnet",
+        &[fixture.resolver_address.to_owned()],
+    )
+    .await?;
+    assert_eq!(supported.block_hash_count, 2);
+    assert_eq!(supported.orphaned_normalized_event_count, 0);
+    let supported_after_state: Value = sqlx::query_scalar(
+        "SELECT after_state FROM normalized_events \
+         WHERE event_kind = 'RecordChanged' \
+           AND logical_name_id IS NULL \
+           AND after_state->>'record_key' = 'name'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        supported_after_state["primary_claim_source"]["address"],
+        fixture.claimed_address
+    );
+
+    upsert_raw_code_hashes(
+        database.pool(),
+        &[raw_code_hash_for_address_at_block(
+            fixture.resolver_address,
+            fixture.unsupported_code_hash,
+            44,
+        )],
+    )
+    .await?;
+    let unsupported = reconcile_resolver_profile_events(
+        database.pool(),
+        "ethereum-mainnet",
+        &[fixture.resolver_address.to_owned()],
+    )
+    .await?;
+    assert_eq!(unsupported.orphaned_normalized_event_count, 1);
+    let transitioned_row: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(event) - 'normalized_event_id' - 'observed_at' \
+         FROM normalized_events event \
+         WHERE event_kind = 'RecordChanged' \
+           AND logical_name_id IS NULL \
+           AND after_state->>'record_key' = 'name'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert!(
+        transitioned_row["after_state"]
+            .get("primary_claim_source")
+            .is_none(),
+        "an unsupported resolver profile must keep the observation but remove declared primary-name identity: {transitioned_row}"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT canonicality_state::TEXT FROM normalized_events \
+             WHERE event_kind = 'RecordVersionChanged' \
+               AND source_family = 'ens_v1_resolver_l1'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "orphaned"
+    );
+
+    let repaired_change_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT \
+         FROM projection_normalized_event_changes change \
+         JOIN normalized_events event \
+           ON event.normalized_event_id = change.normalized_event_id \
+         WHERE event.event_kind = 'RecordChanged' \
+           AND event.logical_name_id IS NULL \
+           AND event.after_state->>'record_key' = 'name' \
+           AND change.change_kind = 'canonicality_update'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(repaired_change_count, 2);
+    let (generation, key_payload): (i64, Value) = sqlx::query_as(
+        "SELECT generation, key_payload \
+         FROM projection_invalidations \
+         WHERE projection = 'primary_names_current' \
+           AND projection_key = $1",
+    )
+    .bind(format!("{}:ens:60", fixture.claimed_address))
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(generation, 1);
+    assert_eq!(
+        key_payload,
+        json!({
+            "address": fixture.claimed_address,
+            "namespace": "ens",
+            "coin_type": "60",
+        })
+    );
+
+    let clean_database = TestDatabase::new().await?;
+    let clean_fixture = seed_reverse_name_profile_transition_fixture(clean_database.pool()).await?;
+    upsert_raw_code_hashes(
+        clean_database.pool(),
+        &[raw_code_hash_for_address_at_block(
+            clean_fixture.resolver_address,
+            clean_fixture.unsupported_code_hash,
+            44,
+        )],
+    )
+    .await?;
+    sync_ens_v1_unwrapped_authority(clean_database.pool(), "ethereum-mainnet").await?;
+    let transitioned_unsupported_rows: Value = sqlx::query_scalar(
+        "SELECT COALESCE(jsonb_agg( \
+             to_jsonb(event) - 'normalized_event_id' - 'observed_at' \
+             ORDER BY event.event_identity \
+         ), '[]'::jsonb) \
+         FROM normalized_events event \
+         WHERE event.derivation_kind = 'ens_v1_unwrapped_authority' \
+           AND event.source_family = 'ens_v1_resolver_l1' \
+           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    let clean_unsupported_rows: Value = sqlx::query_scalar(
+        "SELECT COALESCE(jsonb_agg( \
+             to_jsonb(event) - 'normalized_event_id' - 'observed_at' \
+             ORDER BY event.event_identity \
+         ), '[]'::jsonb) \
+         FROM normalized_events event \
+         WHERE event.derivation_kind = 'ens_v1_unwrapped_authority' \
+           AND event.source_family = 'ens_v1_resolver_l1' \
+           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')",
+    )
+    .fetch_one(clean_database.pool())
+    .await?;
+    assert_eq!(transitioned_unsupported_rows, clean_unsupported_rows);
+
+    upsert_raw_code_hashes(
+        database.pool(),
+        &[raw_code_hash_for_address_at_block(
+            fixture.resolver_address,
+            fixture.supported_code_hash,
+            45,
+        )],
+    )
+    .await?;
+    let reactivated = reconcile_resolver_profile_events(
+        database.pool(),
+        "ethereum-mainnet",
+        &[fixture.resolver_address.to_owned()],
+    )
+    .await?;
+    assert_eq!(reactivated.orphaned_normalized_event_count, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT canonicality_state::TEXT FROM normalized_events \
+             WHERE event_kind = 'RecordVersionChanged' \
+               AND source_family = 'ens_v1_resolver_l1'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "canonical"
+    );
+    let reactivated_after_state: Value = sqlx::query_scalar(
+        "SELECT after_state FROM normalized_events \
+         WHERE event_kind = 'RecordChanged' \
+           AND logical_name_id IS NULL \
+           AND after_state->>'record_key' = 'name'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        reactivated_after_state["primary_claim_source"]["address"],
+        fixture.claimed_address
+    );
+
+    upsert_raw_code_hashes(
+        clean_database.pool(),
+        &[raw_code_hash_for_address_at_block(
+            clean_fixture.resolver_address,
+            clean_fixture.supported_code_hash,
+            45,
+        )],
+    )
+    .await?;
+    let clean = sync_ens_v1_unwrapped_authority(clean_database.pool(), "ethereum-mainnet").await?;
+    assert_eq!(clean.by_kind.get(EVENT_KIND_RECORD_CHANGED), Some(&1));
+    let transitioned_canonical_rows: Value = sqlx::query_scalar(
+        "SELECT COALESCE(jsonb_agg( \
+             to_jsonb(event) - 'normalized_event_id' - 'observed_at' \
+             ORDER BY event.event_identity \
+         ), '[]'::jsonb) \
+         FROM normalized_events event \
+         WHERE event.derivation_kind = 'ens_v1_unwrapped_authority' \
+           AND event.source_family = 'ens_v1_resolver_l1' \
+           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    let clean_canonical_rows: Value = sqlx::query_scalar(
+        "SELECT COALESCE(jsonb_agg( \
+             to_jsonb(event) - 'normalized_event_id' - 'observed_at' \
+             ORDER BY event.event_identity \
+         ), '[]'::jsonb) \
+         FROM normalized_events event \
+         WHERE event.derivation_kind = 'ens_v1_unwrapped_authority' \
+           AND event.source_family = 'ens_v1_resolver_l1' \
+           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')",
+    )
+    .fetch_one(clean_database.pool())
+    .await?;
+    assert_eq!(transitioned_canonical_rows, clean_canonical_rows);
+
+    clean_database.cleanup().await?;
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn reverse_name_record_preimage_releases_pending_forward_observations() -> Result<()> {
     let _permit = crate::acquire_test_db_permit().await;
     let database = TestDatabase::new().await?;
@@ -10581,8 +11506,11 @@ async fn sync_ens_v1_unwrapped_authority_generic_resolver_events_do_not_require_
     .await?;
 
     let summary = sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
+    // Topic-first intake matches the unclassified emitter without a discovery
+    // range, but authority normalization still rejects it because it is not
+    // the node's selected current resolver.
     assert_eq!(summary.scanned_log_count, 6);
-    assert_eq!(summary.matched_log_count, 5);
+    assert_eq!(summary.matched_log_count, 6);
     assert_eq!(summary.total_normalized_event_count, 5);
     assert_eq!(
         summary.by_kind.get(EVENT_KIND_RESOLVER_CHANGED),
@@ -10964,8 +11892,12 @@ async fn sync_ens_v1_unwrapped_authority_gates_discovered_ensv1_resolver_event_f
                 transaction_index: 0,
                 log_index: 11,
                 emitting_address: unlisted_resolver_address.to_owned(),
-                topics: vec![name_changed_topic0(), alice.namehash.clone()],
-                data: encode_dynamic_string_log_data("unlisted.eth"),
+                topics: vec![
+                    text_changed_with_value_topic0(),
+                    alice.namehash.clone(),
+                    keccak256_hex(b"description"),
+                ],
+                data: encode_two_dynamic_string_log_data("description", "unlisted resolver text"),
                 canonicality_state: CanonicalityState::Canonical,
             },
         ],
@@ -10974,18 +11906,18 @@ async fn sync_ens_v1_unwrapped_authority_gates_discovered_ensv1_resolver_event_f
 
     let summary = sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
     assert_eq!(summary.scanned_log_count, 12);
-    assert_eq!(summary.matched_log_count, 7);
+    assert_eq!(summary.matched_log_count, 10);
     assert_eq!(
         summary.by_kind.get(EVENT_KIND_RESOLVER_CHANGED),
         Some(&4_usize)
     );
     assert_eq!(
         summary.by_kind.get(EVENT_KIND_RECORD_CHANGED),
-        Some(&1_usize)
+        Some(&3_usize)
     );
     assert_eq!(
         summary.by_kind.get(EVENT_KIND_RECORD_VERSION_CHANGED),
-        Some(&1_usize)
+        Some(&2_usize)
     );
     assert_eq!(
         sqlx::query_scalar::<_, Vec<String>>(
@@ -11002,28 +11934,43 @@ async fn sync_ens_v1_unwrapped_authority_gates_discovered_ensv1_resolver_event_f
     );
     assert_eq!(
         sqlx::query_scalar::<_, Vec<String>>(
-            "SELECT ARRAY_AGG(after_state->>'raw_name' ORDER BY log_index) FROM normalized_events WHERE event_kind = 'RecordChanged'"
+            "SELECT ARRAY_AGG(after_state->>'raw_name' ORDER BY log_index) FROM normalized_events WHERE event_kind = 'RecordChanged' AND after_state ? 'raw_name'"
         )
         .fetch_one(database.pool())
         .await?,
-        vec!["supported.eth".to_owned()]
+        vec![
+            "supported.eth".to_owned(),
+            "pending.eth".to_owned()
+        ]
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE event_kind IN ('RecordChanged', 'RecordVersionChanged') AND log_index = ANY($1::BIGINT[])"
         )
-        .bind(vec![5_i64, 6, 8, 9])
+        .bind(vec![5_i64, 6])
+        .fetch_one(database.pool())
+        .await?,
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE event_kind IN ('RecordChanged', 'RecordVersionChanged') AND log_index = ANY($1::BIGINT[])"
+        )
+        .bind(vec![8_i64, 9])
         .fetch_one(database.pool())
         .await?,
         0
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE log_index = 11 AND event_kind = 'RecordChanged'"
+        sqlx::query_as::<_, (String, String)>(
+            "SELECT after_state->>'record_key', after_state->>'value' FROM normalized_events WHERE log_index = 11 AND event_kind = 'RecordChanged'"
         )
         .fetch_one(database.pool())
         .await?,
-        0
+        (
+            "text:description".to_owned(),
+            "unlisted resolver text".to_owned()
+        )
     );
 
     database.cleanup().await
@@ -11532,7 +12479,7 @@ async fn sync_ens_v1_unwrapped_authority_emits_basenames_base_authority_events_i
 }
 
 #[tokio::test]
-async fn sync_ens_v1_unwrapped_authority_gates_basenames_dynamic_resolver_facts_by_l2_profile()
+async fn reconcile_resolver_profile_events_orphans_and_reactivates_only_selected_basenames_emitter()
 -> Result<()> {
     let _permit = crate::acquire_test_db_permit().await;
     let database = TestDatabase::new().await?;
@@ -11899,6 +12846,124 @@ async fn sync_ens_v1_unwrapped_authority_gates_basenames_dynamic_resolver_facts_
         .fetch_one(database.pool())
         .await?,
         0
+    );
+
+    upsert_raw_code_hashes(
+        database.pool(),
+        &[raw_code_hash_for_address_on_chain_at_block(
+            "base-mainnet",
+            pending_resolver_address,
+            l2_resolver_code_hash,
+            43,
+        )],
+    )
+    .await?;
+    let pending_supported = reconcile_resolver_profile_events(
+        database.pool(),
+        "base-mainnet",
+        &[pending_resolver_address.to_owned()],
+    )
+    .await?;
+    assert_eq!(pending_supported.block_hash_count, 1);
+    assert_eq!(pending_supported.orphaned_normalized_event_count, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events \
+             WHERE source_family = 'basenames_base_resolver' \
+               AND log_index = ANY($1::BIGINT[]) \
+               AND canonicality_state IN ('canonical', 'safe', 'finalized')",
+        )
+        .bind(vec![5_i64, 6])
+        .fetch_one(database.pool())
+        .await?,
+        2
+    );
+
+    upsert_raw_code_hashes(
+        database.pool(),
+        &[raw_code_hash_for_address_on_chain_at_block(
+            "base-mainnet",
+            supported_resolver_address,
+            "0x3333333333333333333333333333333333333333333333333333333333333333",
+            44,
+        )],
+    )
+    .await?;
+    let selected_unsupported = reconcile_resolver_profile_events(
+        database.pool(),
+        "base-mainnet",
+        &[supported_resolver_address.to_owned()],
+    )
+    .await?;
+    assert_eq!(selected_unsupported.orphaned_normalized_event_count, 2);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events \
+             WHERE source_family = 'basenames_base_resolver' \
+               AND log_index = ANY($1::BIGINT[]) \
+               AND canonicality_state = 'orphaned'",
+        )
+        .bind(vec![2_i64, 3])
+        .fetch_one(database.pool())
+        .await?,
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events \
+             WHERE source_family = 'basenames_base_resolver' \
+               AND log_index = ANY($1::BIGINT[]) \
+               AND canonicality_state IN ('canonical', 'safe', 'finalized')",
+        )
+        .bind(vec![5_i64, 6])
+        .fetch_one(database.pool())
+        .await?,
+        2,
+        "another resolver in the same block must remain canonical"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events \
+             WHERE source_family IN ( \
+                 'basenames_base_registrar', \
+                 'basenames_base_registry' \
+             ) \
+               AND canonicality_state = 'orphaned'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "resolver profile reconciliation must not orphan registrar or registry events"
+    );
+
+    upsert_raw_code_hashes(
+        database.pool(),
+        &[raw_code_hash_for_address_on_chain_at_block(
+            "base-mainnet",
+            supported_resolver_address,
+            l2_resolver_code_hash,
+            45,
+        )],
+    )
+    .await?;
+    let selected_reactivated = reconcile_resolver_profile_events(
+        database.pool(),
+        "base-mainnet",
+        &[supported_resolver_address.to_owned()],
+    )
+    .await?;
+    assert_eq!(selected_reactivated.orphaned_normalized_event_count, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_events \
+             WHERE source_family = 'basenames_base_resolver' \
+               AND log_index = ANY($1::BIGINT[]) \
+               AND canonicality_state IN ('canonical', 'safe', 'finalized')",
+        )
+        .bind(vec![2_i64, 3, 5, 6])
+        .fetch_one(database.pool())
+        .await?,
+        4
     );
 
     database.cleanup().await

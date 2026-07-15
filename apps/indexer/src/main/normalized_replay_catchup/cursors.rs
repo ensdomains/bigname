@@ -1,4 +1,8 @@
 use anyhow::{Context, Result};
+use bigname_storage::{
+    RawLogStagingInputVersion, acquire_raw_log_staging_read_guard,
+    earliest_raw_log_staging_block_changed_since, load_raw_log_staging_input_version,
+};
 use sqlx::PgPool;
 use sqlx::types::time::OffsetDateTime;
 
@@ -17,7 +21,7 @@ pub(super) async fn ensure_cursor(
     bounds: RawLogBounds,
     target_refresh_policy: TargetRefreshPolicy,
 ) -> Result<NormalizedReplayCursor> {
-    let row = sqlx::query_as::<_, (i64, i64, i64, Option<OffsetDateTime>)>(
+    let row = sqlx::query_as::<_, (i64, i64, i64, Option<OffsetDateTime>, i64, i64)>(
         r#"
         INSERT INTO normalized_replay_cursors (
             deployment_profile,
@@ -54,7 +58,9 @@ pub(super) async fn ensure_cursor(
             range_start_block_number,
             next_block_number,
             target_block_number,
-            last_replayed_at
+            last_replayed_at,
+            raw_log_input_revision,
+            raw_log_retention_generation
         "#,
     )
     .bind(deployment_profile)
@@ -79,6 +85,8 @@ pub(super) async fn ensure_cursor(
         next_block_number: row.1,
         target_block_number: row.2,
         last_replayed_at: row.3,
+        raw_log_input_revision: row.4,
+        raw_log_retention_generation: row.5,
     })
 }
 
@@ -87,49 +95,70 @@ pub(super) async fn rewind_cursor_for_newly_observed_older_logs(
     deployment_profile: &str,
     chain: &str,
     cursor: NormalizedReplayCursor,
-) -> Result<NormalizedReplayCursor> {
+) -> Result<(NormalizedReplayCursor, RawLogStagingInputVersion)> {
+    let current_version = load_raw_log_staging_input_version(pool, chain).await?;
     let Some(last_replayed_at) = cursor.last_replayed_at else {
-        return Ok(cursor);
+        return Ok((cursor, current_version));
     };
 
-    let rewind_block = sqlx::query_scalar::<_, Option<i64>>(
-        r#"
-        SELECT MIN(raw_logs.block_number)
-        FROM raw_logs
-        JOIN chain_lineage AS lineage
-          ON lineage.chain_id = raw_logs.chain_id
-         AND lineage.block_hash = raw_logs.block_hash
-        WHERE raw_logs.chain_id = $1
-          AND raw_logs.block_number < $2
-          AND raw_logs.observed_at > $3
-          AND lineage.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-          AND raw_logs.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-        "#,
-    )
-    .bind(chain)
-    .bind(cursor.next_block_number)
-    .bind(last_replayed_at)
-    .fetch_one(pool)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to inspect newly observed older normalized replay work for {deployment_profile}/{chain}/{CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS}"
+    let revision_rewind =
+        if current_version.retention_generation != cursor.raw_log_retention_generation {
+            Some(cursor.range_start_block_number)
+        } else if current_version.revision > cursor.raw_log_input_revision
+            && cursor.next_block_number > 0
+        {
+            earliest_raw_log_staging_block_changed_since(
+                pool,
+                chain,
+                cursor.raw_log_input_revision,
+                cursor.next_block_number - 1,
+            )
+            .await?
+        } else {
+            None
+        };
+    let rewind_block = if revision_rewind.is_some() {
+        revision_rewind
+    } else {
+        sqlx::query_scalar::<_, Option<i64>>(
+            r#"
+            SELECT MIN(raw_logs.block_number)
+            FROM raw_logs
+            JOIN chain_lineage AS lineage
+              ON lineage.chain_id = raw_logs.chain_id
+             AND lineage.block_hash = raw_logs.block_hash
+            WHERE raw_logs.chain_id = $1
+              AND raw_logs.block_number < $2
+              AND raw_logs.observed_at > $3
+              AND lineage.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+              AND raw_logs.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+            "#,
         )
-    })?;
+        .bind(chain)
+        .bind(cursor.next_block_number)
+        .bind(last_replayed_at)
+        .fetch_one(pool)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to inspect newly observed older normalized replay work for {deployment_profile}/{chain}/{CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS}"
+            )
+        })?
+    };
 
     let Some(rewind_block) = rewind_block else {
-        return Ok(cursor);
+        return Ok((cursor, current_version));
     };
 
-    let row = sqlx::query_as::<_, (i64, i64, i64, Option<OffsetDateTime>)>(
+    let row = sqlx::query_as::<_, (i64, i64, i64, Option<OffsetDateTime>, i64, i64)>(
         r#"
         UPDATE normalized_replay_cursors
         SET
@@ -143,7 +172,9 @@ pub(super) async fn rewind_cursor_for_newly_observed_older_logs(
             range_start_block_number,
             next_block_number,
             target_block_number,
-            last_replayed_at
+            last_replayed_at,
+            raw_log_input_revision,
+            raw_log_retention_generation
         "#,
     )
     .bind(deployment_profile)
@@ -158,12 +189,17 @@ pub(super) async fn rewind_cursor_for_newly_observed_older_logs(
         )
     })?;
 
-    Ok(NormalizedReplayCursor {
-        range_start_block_number: row.0,
-        next_block_number: row.1,
-        target_block_number: row.2,
-        last_replayed_at: row.3,
-    })
+    Ok((
+        NormalizedReplayCursor {
+            range_start_block_number: row.0,
+            next_block_number: row.1,
+            target_block_number: row.2,
+            last_replayed_at: row.3,
+            raw_log_input_revision: row.4,
+            raw_log_retention_generation: row.5,
+        },
+        current_version,
+    ))
 }
 
 pub(super) async fn advance_cursor(
@@ -174,6 +210,7 @@ pub(super) async fn advance_cursor(
     latest_target_block: i64,
     completed_to_block: i64,
     outcome: &RawFactNormalizedEventReplayOutcome,
+    raw_log_input_version: RawLogStagingInputVersion,
 ) -> Result<()> {
     let next_block = completed_to_block
         .checked_add(1)
@@ -191,6 +228,19 @@ pub(super) async fn advance_cursor(
     let normalized_event_inserted_count = i64::try_from(outcome.normalized_event_inserted_count)
         .context("normalized event inserted count does not fit in i64")?;
 
+    let mut raw_log_guard = acquire_raw_log_staging_read_guard(pool, chain).await?;
+    let accepted_raw_log_input_version = raw_log_guard
+        .accept_newer_revisions_after(raw_log_input_version, completed_to_block)
+        .await
+        .with_context(|| {
+            format!(
+                "raw-log staging input changed before normalized replay cursor publication for {chain}: expected generation {} revision {}, observed generation {} revision {}",
+                raw_log_input_version.retention_generation,
+                raw_log_input_version.revision,
+                raw_log_guard.version().retention_generation,
+                raw_log_guard.version().revision
+            )
+        })?;
     sqlx::query(
         r#"
         UPDATE normalized_replay_cursors
@@ -207,6 +257,8 @@ pub(super) async fn advance_cursor(
             last_matched_raw_log_count = $10,
             last_normalized_event_synced_count = $11,
             last_normalized_event_inserted_count = $12,
+            raw_log_input_revision = $13,
+            raw_log_retention_generation = $14,
             last_replayed_at = now(),
             last_failure_reason = NULL,
             last_failure_at = NULL,
@@ -228,7 +280,9 @@ pub(super) async fn advance_cursor(
     .bind(matched_raw_log_count)
     .bind(normalized_event_synced_count)
     .bind(normalized_event_inserted_count)
-    .execute(pool)
+    .bind(accepted_raw_log_input_version.revision)
+    .bind(accepted_raw_log_input_version.retention_generation)
+    .execute(raw_log_guard.connection_mut())
     .await
     .with_context(|| {
         format!(
@@ -236,7 +290,7 @@ pub(super) async fn advance_cursor(
         )
     })?;
 
-    Ok(())
+    raw_log_guard.release().await
 }
 
 pub(super) async fn record_cursor_failure(

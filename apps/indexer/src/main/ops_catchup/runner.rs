@@ -2,7 +2,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use bigname_manifests::{
-    WatchedSourceSelector, WatchedTargetIdentity, load_watched_contracts,
+    WatchedSourceSelector, WatchedTargetIdentity, load_ens_v2_retained_history_recovery_targets,
+    load_historical_watched_source_selector_plan, load_watched_contracts,
     load_watched_source_selector_plan,
 };
 use bigname_storage::{BackfillLifecycleStatus, fail_backfill_job};
@@ -12,9 +13,14 @@ use tracing::{error, info, warn};
 use crate::{
     backfill::{
         BackfillBlockRange, BackfillJobRunConfig, create_hash_pinned_backfill_job,
-        run_resumable_hash_pinned_backfill_job,
+        run_precreated_hash_pinned_backfill_job,
     },
-    backfill_lease_expires_at, default_backfill_lease_owner, generated_backfill_lease_token,
+    backfill_lease_expires_at,
+    bootstrap_backfill::{
+        automatic_backfill_retention_snapshot_is_stable,
+        converge_ens_v2_retained_history_through_block, load_bootstrap_retention_snapshot,
+    },
+    default_backfill_lease_owner, generated_backfill_lease_token,
     provider::{ChainProvider, ChainProviderOps, ProviderRegistry},
     runtime::{IntakeChainTask, validate_provider_registry_for_intake_tasks},
 };
@@ -22,8 +28,13 @@ use crate::{
 use super::{
     capacity::{CAPACITY_FAILURE_REASON, capacity_metadata, check_capacity},
     config::{OpsCatchupConfig, OpsCatchupOutcome},
-    planning::{CatchupChunk, catchup_targets_for_chain, plan_catchup_chunks},
+    planning::{
+        CatchupChunk, catchup_targets_for_chain, merge_retained_history_recovery_targets,
+        plan_catchup_chunks,
+    },
 };
+
+const MAX_OPS_CATCHUP_RETENTION_GENERATION_RETRIES: usize = 4;
 
 pub(crate) async fn run_ops_finalized_catchup(
     pool: &sqlx::PgPool,
@@ -75,7 +86,7 @@ async fn run_ops_finalized_catchup_iteration(
     let watched_contracts = load_watched_contracts(pool).await?;
 
     for task in intake_chain_tasks {
-        let (targets, skipped_unknown_start_targets) =
+        let (_, skipped_unknown_start_targets) =
             catchup_targets_for_chain(&watched_contracts, &task.chain);
         let skipped_unknown_start_target_count = skipped_unknown_start_targets.len();
         outcome.skipped_unknown_start_target_count += skipped_unknown_start_target_count;
@@ -122,25 +133,93 @@ async fn run_ops_finalized_catchup_iteration(
             continue;
         };
 
-        let (chunks, skipped_future_target_count) =
-            plan_catchup_chunks(&targets, finalized_head.block_number, config.chunk_blocks)?;
-        outcome.skipped_future_target_count += skipped_future_target_count;
-        outcome.planned_chunk_count += chunks.len();
-        for chunk in chunks {
-            run_ops_finalized_catchup_chunk(
-                pool,
-                &task.chain,
-                provider,
-                config,
-                &chunk,
+        let mut retention_generation_attempt = 0_usize;
+        loop {
+            retention_generation_attempt += 1;
+            let retention_snapshot =
+                load_bootstrap_retention_snapshot(pool, &task.chain, finalized_head.block_number)
+                    .await?;
+            // Load the watched set after capturing the authority snapshot on
+            // every pass. If adapter sync admits a target while a pass is
+            // running, the epoch check below forces a retry whose plan now
+            // includes that target through the same finalized head.
+            let watched_contracts = load_watched_contracts(pool).await?;
+            let (targets, _) = catchup_targets_for_chain(&watched_contracts, &task.chain);
+            let mut planned_targets = targets.clone();
+            if retention_snapshot.requires_ens_v2_history_recovery {
+                let recovery_targets = load_ens_v2_retained_history_recovery_targets(
+                    pool,
+                    &task.chain,
+                    finalized_head.block_number,
+                )
+                .await?;
+                merge_retained_history_recovery_targets(&mut planned_targets, &recovery_targets);
+            }
+            let (chunks, skipped_future_target_count) = plan_catchup_chunks(
+                &planned_targets,
                 finalized_head.block_number,
-                &finalized_head.block_hash,
-                outcome,
-            )
-            .await?;
+                config.chunk_blocks,
+            )?;
+            let planned_chunk_count = chunks.len();
+            for chunk in chunks {
+                run_ops_finalized_catchup_chunk(
+                    pool,
+                    &task.chain,
+                    provider,
+                    config,
+                    &chunk,
+                    finalized_head.block_number,
+                    &finalized_head.block_hash,
+                    retention_snapshot.requires_ens_v2_history_recovery,
+                    outcome,
+                )
+                .await?;
+            }
+            let newly_required_coverage = if retention_snapshot.requires_ens_v2_history_recovery {
+                converge_ens_v2_retained_history_through_block(
+                    pool,
+                    &task.chain,
+                    finalized_head.block_number,
+                    retention_snapshot.has_ens_v2_history_requirements,
+                )
+                .await?
+            } else {
+                false
+            };
+            if !newly_required_coverage
+                && automatic_backfill_retention_snapshot_is_stable(
+                    pool,
+                    &task.chain,
+                    finalized_head.block_number,
+                    retention_snapshot,
+                )
+                .await?
+            {
+                outcome.skipped_future_target_count += skipped_future_target_count;
+                outcome.planned_chunk_count += planned_chunk_count;
+                break;
+            }
+            if retention_generation_attempt >= MAX_OPS_CATCHUP_RETENTION_GENERATION_RETRIES {
+                bail!(
+                    "raw-log retention generation for chain {} changed during {} consecutive ops catch-up planning passes",
+                    task.chain,
+                    retention_generation_attempt
+                );
+            }
+            warn!(
+                service = "indexer",
+                command = "ops-catchup",
+                catchup_status = "retry_retention_authority_changed",
+                chain = %task.chain,
+                planned_raw_log_retention_generation = retention_snapshot.generation,
+                planned_discovery_admission_epoch = retention_snapshot.discovery_admission_epoch,
+                retention_generation_attempt,
+                "raw-log retention or ENSv2 discovery authority changed during ops catch-up; retrying the complete chain planning pass"
+            );
         }
     }
 
+    crate::resolver_profile_convergence::drain_resolver_profile_input_changes(pool).await?;
     Ok(())
 }
 
@@ -152,24 +231,40 @@ async fn run_ops_finalized_catchup_chunk(
     chunk: &CatchupChunk,
     finalized_head_block_number: i64,
     finalized_head_block_hash: &str,
+    include_historical_recovery_targets: bool,
     outcome: &mut OpsCatchupOutcome,
 ) -> Result<()> {
-    let source_plan = load_watched_source_selector_plan(
-        pool,
-        chain,
-        WatchedSourceSelector::WatchedTargetSet(
-            chunk
-                .target_contract_instance_ids()
-                .into_iter()
-                .map(|contract_instance_id| WatchedTargetIdentity {
-                    contract_instance_id,
-                })
-                .collect(),
-        ),
-        chunk.range.from_block,
-        chunk.range.to_block,
-    )
-    .await?;
+    let selector = WatchedSourceSelector::WatchedTargetSet(
+        chunk
+            .target_contract_instance_ids()
+            .into_iter()
+            .map(|contract_instance_id| WatchedTargetIdentity {
+                contract_instance_id,
+            })
+            .collect(),
+    );
+    let mut source_plan = if include_historical_recovery_targets {
+        load_historical_watched_source_selector_plan(
+            pool,
+            chain,
+            selector,
+            chunk.range.from_block,
+            chunk.range.to_block,
+        )
+        .await?
+    } else {
+        load_watched_source_selector_plan(
+            pool,
+            chain,
+            selector,
+            chunk.range.from_block,
+            chunk.range.to_block,
+        )
+        .await?
+    };
+    if include_historical_recovery_targets {
+        chunk.narrow_historical_source_plan(&mut source_plan)?;
+    }
     let idempotency_key = ops_catchup_idempotency_key(
         &config.deployment_profile,
         chain,
@@ -179,6 +274,7 @@ async fn run_ops_finalized_catchup_chunk(
     let run_config = BackfillJobRunConfig {
         deployment_profile: config.deployment_profile.clone(),
         idempotency_key,
+        scope_idempotency_to_raw_log_retention_generation: true,
         range: chunk.range,
         lease_owner: format!("{}:ops-finalized-catchup", default_backfill_lease_owner()),
         lease_token: generated_backfill_lease_token()?,
@@ -262,7 +358,8 @@ async fn run_ops_finalized_catchup_chunk(
     }
 
     let job_outcome =
-        run_resumable_hash_pinned_backfill_job(pool, &source_plan, provider, run_config).await?;
+        run_precreated_hash_pinned_backfill_job(pool, &source_plan, provider, run_config, record)
+            .await?;
     outcome.add_job(&job_outcome);
     Ok(())
 }

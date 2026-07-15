@@ -389,7 +389,19 @@
       },
       "CompactMeta": {
         "properties": {
+          "enumeration_basis": {
+            "type": "string"
+          },
+          "exhaustiveness": {
+            "type": "string"
+          },
           "inventory_source": {},
+          "source_classes_considered": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "support_status": {
             "type": "string"
           },
@@ -411,6 +423,12 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "unsupported_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "value_source": {}
         },
@@ -2737,6 +2755,16 @@
               }
             },
             "description": "Requested resource was not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Snapshot conflict or stale projection"
           },
           "500": {
             "content": {

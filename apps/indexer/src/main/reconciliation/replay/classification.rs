@@ -3,13 +3,19 @@ use std::collections::BTreeSet;
 use anyhow::{Context, Result, bail};
 use sqlx::Row;
 
-use crate::ens_v1_resolver::{
-    GENERIC_SOURCE_SCOPE_ADDRESS, SOURCE_FAMILY_ENS_V1_RESOLVER_L1, generic_resolver_record_topic0s,
-};
+use crate::ens_v1_resolver::SOURCE_FAMILY_ENS_V1_RESOLVER_L1;
 
 use super::ReplayRawLogSelection;
 use crate::reconciliation::types::{
     RawFactNormalizedEventReplayRequest, RawFactNormalizedEventReplaySelection,
+};
+
+#[path = "classification/closure_boundary.rs"]
+mod closure_boundary;
+
+use closure_boundary::{
+    earliest_required_raw_fact_block, ensure_full_closure_retention_authority,
+    ensure_legacy_registry_closure_retention_authority,
 };
 
 pub(crate) const SOURCE_FAMILY_ENS_V2_ROOT_L1: &str = "ens_v2_root_l1";
@@ -37,7 +43,8 @@ const ENS_V1_UNWRAPPED_AUTHORITY_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_
 const ENS_V2_REGISTRY_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V2_ROOT_L1, SOURCE_FAMILY_ENS_V2_REGISTRY_L1];
 const ENS_V2_REGISTRAR_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V2_REGISTRAR_L1];
 const ENS_V2_RESOLVER_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V2_RESOLVER_L1];
-const ENS_V2_PERMISSIONS_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V2_RESOLVER_L1];
+#[rustfmt::skip]
+const ENS_V2_PERMISSIONS_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V2_ROOT_L1, SOURCE_FAMILY_ENS_V2_REGISTRY_L1, SOURCE_FAMILY_ENS_V2_RESOLVER_L1];
 
 #[rustfmt::skip]
 const ENS_V2_REGISTRAR_DEPENDENCY_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V2_ROOT_L1, SOURCE_FAMILY_ENS_V2_REGISTRY_L1, SOURCE_FAMILY_ENS_V2_REGISTRAR_L1];
@@ -215,7 +222,7 @@ pub(crate) const NORMALIZED_EVENT_REPLAY_CONTRACTS: &[AdapterReplayContract] = &
         producer_paths: &["crates/adapters/src/ens_v2_permissions"],
         restricted_replay_proof_tests: &[],
         closure_replay_supported: true,
-        replay_note: "permission resources and role events depend on prior resolver resource hint observations in canonical order",
+        replay_note: "permission resources and role events are stateful within root, registry, and resolver emitter histories",
     },
     AdapterReplayContract {
         adapter: NormalizedEventReplayAdapter::ManifestNormalizedEvents,
@@ -250,10 +257,11 @@ impl RawFactReplayContractPlan {
     }
 
     pub(crate) fn permits_nonstateless_adapters(self) -> bool {
-        match self.0 {
-            RawFactReplayContractMode::StatelessRestricted => false,
-            RawFactReplayContractMode::FullClosure => true,
-        }
+        matches!(self.0, RawFactReplayContractMode::FullClosure)
+    }
+
+    pub(crate) fn uses_restricted_sync_for(self, adapter: NormalizedEventReplayAdapter) -> bool {
+        !self.permits_nonstateless_adapters() || !full_closure_reemits_adapter(adapter)
     }
 
     pub(crate) fn ensure_adapter_allowed(
@@ -286,6 +294,7 @@ pub(crate) async fn classify_raw_fact_replay_contract(
     request: &RawFactNormalizedEventReplayRequest,
     raw_log_selection: &ReplayRawLogSelection,
     source_scope: &[(String, String, i64, i64)],
+    closure_validation_source_scope: &[(String, String, i64, i64)],
 ) -> Result<RawFactReplayContractPlan> {
     let selected_contracts = selected_raw_fact_contracts(source_scope);
     let nonstateless_contracts = selected_contracts
@@ -299,7 +308,10 @@ pub(crate) async fn classify_raw_fact_replay_contract(
     }
 
     let adapter_list = adapter_list(&nonstateless_contracts);
-    let RawFactNormalizedEventReplaySelection::BlockRange { from_block, .. } = &request.selection
+    let RawFactNormalizedEventReplaySelection::BlockRange {
+        from_block,
+        to_block,
+    } = &request.selection
     else {
         bail!(
             "normalized-event replay selected closure/context-dependent adapter(s) {adapter_list}; block-hash and source-scoped replay are disabled for these adapters"
@@ -318,17 +330,26 @@ pub(crate) async fn classify_raw_fact_replay_contract(
     }
 
     let closure_source_families = closure_source_families_for_contracts(&nonstateless_contracts);
-    if from_block > 0
-        && let Some(closure_start_block) = earliest_required_raw_fact_block(
-            pool,
-            &request.chain,
-            source_scope,
-            &closure_source_families,
-            from_block,
-        )
-        .await?
-        && from_block > closure_start_block
-    {
+    ensure_full_closure_retention_authority(
+        pool,
+        &request.chain,
+        &closure_source_families,
+        *to_block,
+    )
+    .await?;
+    let Some(closure_start_block) = earliest_required_raw_fact_block(
+        pool,
+        &request.chain,
+        closure_validation_source_scope,
+        &closure_source_families,
+    )
+    .await?
+    else {
+        bail!(
+            "normalized-event replay for closure/context-dependent adapter(s) {adapter_list} has no retained canonical raw fact boundary; explicit historical backfill/refetch or log-audit retention is required"
+        );
+    };
+    if from_block > closure_start_block {
         bail!(
             "normalized-event replay for closure/context-dependent adapter(s) {adapter_list} must start at closure boundary block {closure_start_block}; requested block {from_block}"
         );
@@ -424,6 +445,45 @@ pub(crate) fn unsupported_closure_replay_adapters(
         .collect()
 }
 
+pub(crate) async fn ensure_full_closure_retention_authority_for_adapters(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    adapters: &[NormalizedEventReplayAdapter],
+    through_block: i64,
+) -> Result<()> {
+    let contracts = adapters
+        .iter()
+        .copied()
+        .map(replay_contract)
+        .filter(|contract| !contract.model.restricted_replay_supported())
+        .collect::<Vec<_>>();
+    let closure_source_families = closure_source_families_for_contracts(&contracts);
+    ensure_full_closure_retention_authority(pool, chain, &closure_source_families, through_block)
+        .await
+}
+
+pub(crate) async fn ensure_legacy_registry_closure_retention_authority_for_adapters(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    adapters: &[NormalizedEventReplayAdapter],
+    through_block: i64,
+) -> Result<i64> {
+    let contracts = adapters
+        .iter()
+        .copied()
+        .map(replay_contract)
+        .filter(|contract| !contract.model.restricted_replay_supported())
+        .collect::<Vec<_>>();
+    let closure_source_families = closure_source_families_for_contracts(&contracts);
+    ensure_legacy_registry_closure_retention_authority(
+        pool,
+        chain,
+        &closure_source_families,
+        through_block,
+    )
+    .await
+}
+
 pub(crate) fn replay_contract(
     adapter: NormalizedEventReplayAdapter,
 ) -> &'static AdapterReplayContract {
@@ -504,87 +564,6 @@ fn adapter_list(contracts: &[&'static AdapterReplayContract]) -> String {
         .map(|contract| contract.adapter.as_str())
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-async fn earliest_required_raw_fact_block(
-    pool: &sqlx::PgPool,
-    chain: &str,
-    source_scope: &[(String, String, i64, i64)],
-    closure_source_families: &[&str],
-    before_block: i64,
-) -> Result<Option<i64>> {
-    let required_scope = source_scope
-        .iter()
-        .filter(|(source_family, _, _, _)| source_family_in(source_family, closure_source_families))
-        .map(|(source_family, address, _, _)| (source_family.clone(), address.to_ascii_lowercase()))
-        .collect::<Vec<_>>();
-    if required_scope.is_empty() {
-        return Ok(None);
-    }
-
-    let mut source_families = Vec::with_capacity(required_scope.len());
-    let mut addresses = Vec::with_capacity(required_scope.len());
-    for (source_family, address) in required_scope {
-        source_families.push(source_family);
-        addresses.push(address);
-    }
-    let generic_resolver_topic0s = generic_resolver_record_topic0s()
-        .into_iter()
-        .map(|topic0| topic0.to_ascii_lowercase())
-        .collect::<Vec<_>>();
-
-    let row = sqlx::query(
-        r#"
-        WITH required_scope AS (
-            SELECT DISTINCT source_family, address
-            FROM unnest($2::TEXT[], $3::TEXT[]) AS scope(source_family, address)
-        )
-        SELECT MIN(logs.block_number) AS closure_start_block
-        FROM raw_logs AS logs
-        JOIN chain_lineage AS lineage
-          ON lineage.chain_id = logs.chain_id
-         AND lineage.block_hash = logs.block_hash
-        WHERE logs.chain_id = $1
-          AND lineage.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-          AND logs.block_number < $7
-          AND logs.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-          AND EXISTS (
-              SELECT 1
-              FROM required_scope
-              WHERE (
-                    required_scope.address <> $4
-                    AND LOWER(logs.emitting_address) = required_scope.address
-                )
-                OR (
-                    required_scope.source_family = $5
-                    AND required_scope.address = $4
-                    AND LOWER(logs.topics[1]) = ANY($6::TEXT[])
-                )
-          )
-        "#,
-    )
-    .bind(chain)
-    .bind(&source_families)
-    .bind(&addresses)
-    .bind(GENERIC_SOURCE_SCOPE_ADDRESS)
-    .bind(SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
-    .bind(&generic_resolver_topic0s)
-    .bind(before_block)
-    .fetch_one(pool)
-    .await
-    .with_context(|| {
-        format!("failed to load normalized replay closure boundary for chain {chain}")
-    })?;
-
-    Ok(row.get::<Option<i64>, _>("closure_start_block"))
 }
 
 fn source_family_in(source_family: &str, candidates: &[&str]) -> bool {

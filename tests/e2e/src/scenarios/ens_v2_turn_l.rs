@@ -1,17 +1,16 @@
+use std::collections::BTreeSet;
+
 use alloy_primitives::{Address, U256, keccak256};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::types::{Uuid, time::OffsetDateTime};
 
 use super::support;
+use crate::harness::responses::pointer;
 use crate::harness::{anvil::Anvil, ens_v2, repo_root};
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
 const MONTH: u64 = 30 * 24 * 60 * 60;
-
-fn pointer(body: &Value, path: &str) -> Value {
-    body.pointer(path).cloned().unwrap_or(Value::Null)
-}
 
 async fn name_resource(pool: &sqlx::PgPool, logical_name_id: &str) -> Result<Uuid> {
     sqlx::query_scalar("SELECT resource_id FROM name_current WHERE logical_name_id = $1")
@@ -185,7 +184,7 @@ async fn renewal_promotes_coverage_and_registry_edges_follow() -> Result<()> {
 /// render distinctly. A chain composing renewal + three resolver changes +
 /// attach/detach on one name hangs live intake even though every op ingests
 /// cleanly in isolation (probed one by one; compositional trigger recorded
-/// with the wedge chip) — these edges are pinned via backfill + replay.
+/// with the reproduced wedge) — these edges are pinned via backfill + replay.
 #[tokio::test]
 async fn resolver_and_subregistry_edges_follow_set_change_zero() -> Result<()> {
     let anvil = Anvil::spawn_ethereum_sepolia().await?;
@@ -568,14 +567,10 @@ async fn root_apex_attach_and_root_scope_roles() -> Result<()> {
     .fetch_all(&run.db.pool)
     .await?;
     let bitmaps: Vec<String> = root_bitmaps.into_iter().flatten().collect();
-    assert_eq!(bitmaps.len(), 2, "grant then revoke must both derive");
-    assert!(
-        bitmaps[0].trim_start_matches("0x").contains('1'),
-        "grant bitmap must set the registrar bit: {bitmaps:?}"
-    );
-    assert!(
-        !bitmaps[1].trim_start_matches("0x").contains('1'),
-        "revoke bitmap must clear to zero: {bitmaps:?}"
+    assert_eq!(
+        bitmaps,
+        vec![format!("0x{:064x}", 1), format!("0x{:064x}", 0)],
+        "grant must set exactly the registrar bit and revoke must clear the bitmap"
     );
     let current_root_rows: i64 =
         sqlx::query_scalar("SELECT count(*) FROM permissions_current WHERE lower(subject) = $1")
@@ -601,8 +596,8 @@ async fn root_apex_attach_and_root_scope_roles() -> Result<()> {
 
 /// Rows 7, 8, and 2: reserved labels promote in place preserving expiry, a
 /// non-admitted root-role holder registers with registry-only provenance and
-/// gated coverage, and an ERC1155 sale migrates roles without regenerating
-/// the token.
+/// gated coverage, and ERC1155 single and batch sales transfer token control
+/// without regenerating the token.
 #[tokio::test]
 async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
     let anvil = Anvil::spawn_ethereum_sepolia().await?;
@@ -690,6 +685,36 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
     )
     .await?;
 
+    let mut batch_sales = Vec::new();
+    for label in ["batchsaleone", "batchsaletwo"] {
+        batch_sales.push(
+            ens_v2::register_eth_name(
+                &rpc,
+                &deployment,
+                ens_v2::RegisterEthName {
+                    from: alice,
+                    label,
+                    owner: alice,
+                    duration_secs: YEAR,
+                    subregistry: Address::ZERO,
+                    resolver: Address::ZERO,
+                },
+            )
+            .await?,
+        );
+    }
+    let batch_receipt = ens_v2::batch_transfer_registry_tokens(
+        &rpc,
+        deployment.eth_registry.address,
+        alice,
+        carol,
+        &batch_sales
+            .iter()
+            .map(|registration| registration.token_id)
+            .collect::<Vec<_>>(),
+    )
+    .await?;
+
     let ready_sql = format!(
         "SELECT EXISTS (SELECT 1 FROM normalized_events \
            WHERE event_kind = 'RegistrationReserved' \
@@ -698,11 +723,20 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
            WHERE after_state->>'label' = 'foreign' \
              AND event_kind = 'RegistrationGranted' \
              AND canonicality_state = 'canonical') \
-         AND EXISTS (SELECT 1 FROM normalized_events \
+         AND (SELECT count(*) FROM normalized_events \
+           WHERE event_kind = 'TokenControlTransferred' \
+             AND transaction_hash = '{sale_tx}' \
+             AND canonicality_state = 'canonical') = 1 \
+         AND (SELECT count(*) FROM normalized_events \
+           WHERE event_kind = 'TokenControlTransferred' \
+             AND transaction_hash = '{batch_tx}' \
+             AND canonicality_state = 'canonical') = 2 \
+         AND (SELECT count(*) FROM normalized_events \
            WHERE event_kind = 'PermissionChanged' \
              AND transaction_hash = '{sale_tx}' \
-             AND canonicality_state = 'canonical')",
+             AND canonicality_state = 'canonical') = 2",
         sale_tx = sale_receipt.tx_hash,
+        batch_tx = batch_receipt.tx_hash,
     );
     let run =
         support::ingest_ens_v2_sepolia_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
@@ -766,8 +800,8 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
         "foreign registration stays coverage-gated: {foreign_body}"
     );
 
-    // Row 2 pins: paired role migration, no regeneration, and the observed
-    // registrant facet after the sale.
+    // Row 2 pins the canonical token-control event. The accompanying role
+    // migration remains orthogonal permission evidence.
     let sale_kind_counts: Vec<(String, i64)> = sqlx::query_as(
         "SELECT event_kind, count(*) FROM normalized_events \
          WHERE transaction_hash = $1 AND canonicality_state = 'canonical' \
@@ -785,12 +819,188 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
         permission_changes, 2,
         "sale must migrate roles as a revoke/grant pair: {sale_kind_counts:?}"
     );
+    assert_eq!(
+        sale_kind_counts
+            .iter()
+            .find(|(kind, _)| kind == "TokenControlTransferred")
+            .map(|(_, count)| *count),
+        Some(1),
+        "sale must emit one canonical token-control transfer: {sale_kind_counts:?}"
+    );
     assert!(
         !sale_kind_counts
             .iter()
             .any(|(kind, _)| kind == "TokenRegenerated"),
         "sale must not regenerate the token: {sale_kind_counts:?}"
     );
+    let single_transfer: (String, Uuid, i64, String, String, String) = sqlx::query_as(
+        "SELECT logical_name_id, resource_id, log_index, event_identity, \
+                before_state->>'from', after_state->>'to' \
+         FROM normalized_events \
+         WHERE transaction_hash = $1 \
+           AND event_kind = 'TokenControlTransferred' \
+           AND source_family = 'ens_v2_registry_l1' \
+           AND canonicality_state = 'canonical'",
+    )
+    .bind(&sale_receipt.tx_hash)
+    .fetch_one(&run.db.pool)
+    .await?;
+    assert_eq!(single_transfer.0, "ens:sale.eth");
+    assert_eq!(single_transfer.4, format!("{alice:#x}"));
+    assert_eq!(single_transfer.5, format!("{bob:#x}"));
+
+    let batch_transfers: Vec<(String, Uuid, i64, String, String, String, Value)> = sqlx::query_as(
+        "SELECT logical_name_id, resource_id, log_index, event_identity, \
+                before_state->>'from', after_state->>'to', raw_fact_ref \
+         FROM normalized_events \
+         WHERE transaction_hash = $1 \
+           AND event_kind = 'TokenControlTransferred' \
+           AND source_family = 'ens_v2_registry_l1' \
+           AND canonicality_state = 'canonical' \
+         ORDER BY logical_name_id",
+    )
+    .bind(&batch_receipt.tx_hash)
+    .fetch_all(&run.db.pool)
+    .await?;
+    assert_eq!(batch_transfers.len(), 2);
+    assert_eq!(
+        batch_transfers
+            .iter()
+            .map(|row| row.0.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["ens:batchsaleone.eth", "ens:batchsaletwo.eth"])
+    );
+    assert_eq!(
+        batch_transfers
+            .iter()
+            .map(|row| row.1)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        2,
+        "each batch token must retain its own resource"
+    );
+    assert_eq!(
+        batch_transfers
+            .iter()
+            .map(|row| row.2)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        1,
+        "both rows must point to one TransferBatch raw log"
+    );
+    assert_ne!(
+        batch_transfers[0].3, batch_transfers[1].3,
+        "batch fan-out identities must be distinct"
+    );
+    assert_eq!(batch_transfers[0].6, batch_transfers[1].6);
+    assert!(
+        batch_transfers
+            .iter()
+            .all(|row| { row.4 == format!("{alice:#x}") && row.5 == format!("{carol:#x}") })
+    );
+    let (status, buyer_names) = run
+        .api
+        .get_json(&format!(
+            "/v1/addresses/{bob:#x}/names?namespace=ens&relation=registrant"
+        ))
+        .await?;
+    assert_eq!(status, 200, "buyer registrant lookup failed: {buyer_names}");
+    assert!(
+        buyer_names["data"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["normalized_name"] == "sale.eth")),
+        "the buyer registrant collection must contain sale.eth: {buyer_names}"
+    );
+    let (status, buyer_holder_names) = run
+        .api
+        .get_json(&format!(
+            "/v1/addresses/{bob:#x}/names?namespace=ens&relation=token_holder"
+        ))
+        .await?;
+    assert_eq!(
+        status, 200,
+        "buyer token-holder lookup failed: {buyer_holder_names}"
+    );
+    assert!(
+        buyer_holder_names["data"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["normalized_name"] == "sale.eth")),
+        "the buyer token-holder collection must contain sale.eth: {buyer_holder_names}"
+    );
+    let (status, seller_names) = run
+        .api
+        .get_json(&format!(
+            "/v1/addresses/{alice:#x}/names?namespace=ens&relation=registrant"
+        ))
+        .await?;
+    assert_eq!(
+        status, 200,
+        "seller registrant lookup failed: {seller_names}"
+    );
+    assert!(
+        seller_names["data"]
+            .as_array()
+            .is_none_or(|rows| rows.iter().all(|row| row["normalized_name"] != "sale.eth")),
+        "the seller registrant collection must not retain sale.eth: {seller_names}"
+    );
+    let (status, seller_holder_names) = run
+        .api
+        .get_json(&format!(
+            "/v1/addresses/{alice:#x}/names?namespace=ens&relation=token_holder"
+        ))
+        .await?;
+    assert_eq!(
+        status, 200,
+        "seller token-holder lookup failed: {seller_holder_names}"
+    );
+    assert!(
+        seller_holder_names["data"]
+            .as_array()
+            .is_none_or(|rows| rows.iter().all(|row| row["normalized_name"] != "sale.eth")),
+        "the seller token-holder collection must not retain sale.eth: {seller_holder_names}"
+    );
+
+    for relation in ["registrant", "token_holder"] {
+        let (status, recipient_names) = run
+            .api
+            .get_json(&format!(
+                "/v1/addresses/{carol:#x}/names?namespace=ens&relation={relation}"
+            ))
+            .await?;
+        assert_eq!(
+            status, 200,
+            "batch recipient lookup failed: {recipient_names}"
+        );
+        let rows = recipient_names["data"]
+            .as_array()
+            .context("batch recipient collection data must be an array")?;
+        for name in ["batchsaleone.eth", "batchsaletwo.eth"] {
+            assert!(
+                rows.iter().any(|row| row["normalized_name"] == name),
+                "batch recipient {relation} collection must contain {name}: {recipient_names}"
+            );
+        }
+
+        let (status, prior_holder_names) = run
+            .api
+            .get_json(&format!(
+                "/v1/addresses/{alice:#x}/names?namespace=ens&relation={relation}"
+            ))
+            .await?;
+        assert_eq!(
+            status, 200,
+            "batch seller lookup failed: {prior_holder_names}"
+        );
+        let prior_rows = prior_holder_names["data"]
+            .as_array()
+            .context("batch seller collection data must be an array")?;
+        for name in ["batchsaleone.eth", "batchsaletwo.eth"] {
+            assert!(
+                prior_rows.iter().all(|row| row["normalized_name"] != name),
+                "batch seller {relation} collection must not retain {name}: {prior_holder_names}"
+            );
+        }
+    }
     let sale_summary: Value = sqlx::query_scalar(
         "SELECT declared_summary FROM name_current WHERE logical_name_id = 'ens:sale.eth'",
     )
@@ -798,10 +1008,22 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
     .await?;
     assert_eq!(
         sale_summary["registration"]["registrant"],
-        format!("{alice:#x}"),
-        "pinned: the registrant facet stays at the seller after an ERC1155 \
-         sale (no registration event fires): {sale_summary}"
+        format!("{bob:#x}"),
+        "the registrant facet must follow the ERC1155 buyer: {sale_summary}"
     );
+    for logical_name_id in ["ens:batchsaleone.eth", "ens:batchsaletwo.eth"] {
+        let batch_summary: Value = sqlx::query_scalar(
+            "SELECT declared_summary FROM name_current WHERE logical_name_id = $1",
+        )
+        .bind(logical_name_id)
+        .fetch_one(&run.db.pool)
+        .await?;
+        assert_eq!(
+            batch_summary["registration"]["registrant"],
+            format!("{carol:#x}"),
+            "the batch registrant facet must follow the ERC1155 recipient for {logical_name_id}: {batch_summary}"
+        );
+    }
 
     // Row 9's admin-half pin rides this live corpus (backfill derives no
     // PermissionChanged): the registrar bitmap's admin bits must render as
@@ -845,13 +1067,12 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
     Ok(())
 }
 
-/// Row 4: record writes on a discovered v2 resolver. Discovery admits the
-/// resolver edge from the watched registry's ResolverUpdated, but — exactly
-/// as pinned for discovered child registries — the discovered address is
-/// never scanned in-session: zero raw logs, zero record derivations. The
-/// scan gap extends to resolvers.
+/// Row 4: record writes on a discovered v2 resolver. Automatic ENSv2
+/// bootstrap admits the resolver edge, fetches its finite-known-start history
+/// in the same startup invocation, and derives the configured record events.
+/// Resolver-profile admission still gates public selector publication.
 #[tokio::test]
-async fn discovered_v2_resolver_records_stay_unscanned() -> Result<()> {
+async fn discovered_v2_resolver_records_are_backfilled_in_session() -> Result<()> {
     let anvil = Anvil::spawn_ethereum_sepolia().await?;
     let rpc = anvil.client();
     let deployment = ens_v2::deploy_ens_v2(&rpc, &repo_root()).await?;
@@ -887,7 +1108,11 @@ async fn discovered_v2_resolver_records_stay_unscanned() -> Result<()> {
     ens_v2::clear_resolver_records(&rpc, resolver.address, alice, node).await?;
 
     let ready_sql = "SELECT EXISTS (SELECT 1 FROM normalized_events \
-         WHERE event_kind = 'ResolverChanged' AND canonicality_state = 'canonical')";
+         WHERE event_kind = 'ResolverChanged' AND canonicality_state = 'canonical') \
+         AND (SELECT count(*) = 3 FROM normalized_events \
+              WHERE logical_name_id = 'ens:records.eth' \
+                AND event_kind IN ('RecordChanged', 'RecordVersionChanged') \
+                AND canonicality_state = 'canonical')";
     let run =
         support::ingest_ens_v2_sepolia_and_serve(&anvil, &deployment, Some(ready_sql)).await?;
 
@@ -908,20 +1133,57 @@ async fn discovered_v2_resolver_records_stay_unscanned() -> Result<()> {
             .bind(&resolver_hex)
             .fetch_one(&run.db.pool)
             .await?;
+    // The address write emits both AddressChanged and the legacy AddrChanged
+    // compatibility event. (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L679 @ ens_v2@48b3e2d)
+    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L681 @ ens_v2@48b3e2d)
     assert_eq!(
-        resolver_raw_logs, 0,
-        "discovered resolver logs are never scanned in-session"
+        resolver_raw_logs, 4,
+        "automatic ENSv2 bootstrap must fetch all four discovered-resolver logs"
     );
-    let record_events: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM normalized_events \
+    let record_events: Vec<(String, String)> = sqlx::query_as(
+        "SELECT event_kind, after_state->>'source_event' FROM normalized_events \
          WHERE event_kind IN ('RecordChanged', 'RecordVersionChanged') \
-           AND canonicality_state = 'canonical'",
+           AND logical_name_id = 'ens:records.eth' \
+           AND canonicality_state = 'canonical' \
+         ORDER BY block_number, log_index, event_kind",
     )
-    .fetch_one(&run.db.pool)
+    .fetch_all(&run.db.pool)
     .await?;
     assert_eq!(
-        record_events, 0,
-        "no record derivations without scanned resolver logs"
+        record_events,
+        vec![
+            ("RecordChanged".to_owned(), "TextChanged".to_owned()),
+            ("RecordChanged".to_owned(), "AddressChanged".to_owned()),
+            (
+                "RecordVersionChanged".to_owned(),
+                "VersionChanged".to_owned(),
+            ),
+        ],
+        "discovered resolver history must derive text, address, and version observations"
+    );
+
+    let (status, exact) = run
+        .api
+        .get_json("/v1/names/ens/records.eth?chain=ethereum-sepolia")
+        .await?;
+    assert_eq!(status, 200, "records.eth exact-name lookup failed: {exact}");
+    assert_eq!(
+        pointer(&exact, "/declared_state/resolver/address"),
+        resolver_hex,
+        "the discovered resolver must remain the declared registry binding: {exact}"
+    );
+    assert_eq!(
+        pointer(&exact, "/declared_state/record_inventory/status"),
+        "unsupported",
+        "unadmitted ENSv2 resolver observations must not publish an inventory: {exact}"
+    );
+    assert_eq!(
+        pointer(
+            &exact,
+            "/declared_state/record_inventory/unsupported_reason"
+        ),
+        "declared record inventory summary is not yet projected",
+        "the exact-name route must expose its current record-inventory boundary: {exact}"
     );
 
     run.db.cleanup().await?;
