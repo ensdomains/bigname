@@ -8,21 +8,24 @@ use crate::{
     replay::{ALL_CURRENT_PROJECTION_ORDER, CURRENT_PROJECTION_REPLAY_VERSION},
 };
 use bigname_manifests::WatchedContract;
-use bigname_storage::{DEFERRED_NORMALIZED_EVENT_INDEXES, DataCompletenessRead};
+use bigname_storage::{
+    DEFERRED_NORMALIZED_EVENT_INDEXES, DataCompletenessRead, MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS,
+};
 use helpers::{chain_frontier, cursor_label, missing_chain_frontier, replay_complete_lag};
 use report::{
     ChainWithoutFiniteStart, HistoryTruncation, MissingManifestContent, MissingManifestLineage,
-    UnobservedTarget,
+    MissingManifestRawLogs, PendingActivationTarget, UnobservedTarget,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::backfill_coverage::BackfillCoverageInspection;
+use super::{
+    backfill_coverage::BackfillCoverageInspection, manifest_corpus::ManifestCorpusInspection,
+    projection_content::ProjectionContentInspection,
+};
+use crate::inspect::RetentionMode;
 
-/// Blocks the reconciliation frontier may lead or trail the stored canonical checkpoint before
-/// the frontier check fails. Reconcile commits canonical lineage and then advances the
-/// checkpoint, so on a live database the lineage head routinely leads the checkpoint by a
-/// small margin (a negative lag); the tolerance is symmetric and only a larger gap in either
-/// direction fails.
+/// Blocks the stored canonical checkpoint may lead the reconciliation lineage head before the
+/// frontier check fails. The opposite direction uses the writer's live contiguous gap limit.
 pub(super) const DEFAULT_MAX_HEAD_LAG_BLOCKS: i64 = 8;
 
 pub(super) const RAW_FACT_NORMALIZED_EVENTS_CURSOR: &str = "raw_fact_normalized_events";
@@ -55,7 +58,10 @@ pub(super) fn evaluate_data_completeness(
     read: &DataCompletenessRead,
     watched_contracts: &[WatchedContract],
     backfill_coverage: &BackfillCoverageInspection,
+    manifest_corpus: &ManifestCorpusInspection,
+    projection_content: &ProjectionContentInspection,
     max_head_lag_blocks: i64,
+    retention_mode: RetentionMode,
 ) -> DataCompletenessReport {
     let observed = read
         .observed_code_addresses
@@ -65,6 +71,15 @@ pub(super) fn evaluate_data_completeness(
                 (entry.chain_id.clone(), entry.address.to_ascii_lowercase()),
                 entry.max_observed_block_number,
             )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let canonical_heads = read
+        .chains
+        .iter()
+        .filter_map(|chain| {
+            chain
+                .canonical_block_number
+                .map(|head| (chain.chain_id.as_str(), head))
         })
         .collect::<BTreeMap<_, _>>();
 
@@ -92,11 +107,55 @@ pub(super) fn evaluate_data_completeness(
         ));
     }
 
-    // Coverage is address-scoped. If multiple active source entries share an address, the
-    // latest finite start is the strictest lower bound and proves every active entry was
-    // observed after its admission.
+    let pending_activation_targets = active_target_entries
+        .iter()
+        .filter_map(
+            |(chain, address, source_family, active_from_block_number)| {
+                let start = active_from_block_number.as_ref().copied()?;
+                let canonical_head = canonical_heads.get(chain.as_str()).copied()?;
+                (start > canonical_head).then(|| PendingActivationTarget {
+                    chain: chain.clone(),
+                    address: address.clone(),
+                    source_family: source_family.clone(),
+                    active_from_block_number: start,
+                    canonical_head_block_number: canonical_head,
+                })
+            },
+        )
+        .collect::<Vec<_>>();
+    let pending_activation_entries = pending_activation_targets
+        .iter()
+        .map(|target| {
+            (
+                target.chain.as_str(),
+                target.address.as_str(),
+                target.source_family.as_str(),
+                target.active_from_block_number,
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let active_watched_target_count = active_target_entries
+        .iter()
+        .map(|(chain, address, _, _)| (chain, address))
+        .collect::<BTreeSet<_>>()
+        .len();
+
+    // Coverage is address-scoped. Pre-activation declarations remain active authority but do
+    // not require an impossible code observation above the stored canonical head. If multiple
+    // current source entries share an address, the latest finite start is the strictest lower
+    // bound and proves every current entry was observed after its admission.
     let mut active_targets = BTreeMap::<(String, String), ActiveTargetInfo>::new();
     for (chain, address, source_family, active_from_block_number) in &active_target_entries {
+        if active_from_block_number.is_some_and(|start| {
+            pending_activation_entries.contains(&(
+                chain.as_str(),
+                address.as_str(),
+                source_family.as_str(),
+                start,
+            ))
+        }) {
+            continue;
+        }
         let target = active_targets
             .entry((chain.clone(), address.clone()))
             .or_insert_with(|| ActiveTargetInfo {
@@ -254,12 +313,13 @@ pub(super) fn evaluate_data_completeness(
         })
         .collect::<BTreeMap<_, _>>();
 
-    let latched_keys = read
-        .replay_cursors
+    let closure_replay_chains = read
+        .manifest_chain_source_families
         .iter()
-        .filter(|cursor| cursor_is_active(cursor))
-        .filter(|cursor| cursor.cursor_kind == POST_REPLAY_LIVE_ADAPTER_BACKLOG_CURSOR)
-        .map(|cursor| (cursor.deployment_profile.as_str(), cursor.chain_id.as_str()))
+        .filter(|entry| {
+            bigname_adapters::source_family_preserves_normalized_replay_target(&entry.source_family)
+        })
+        .map(|entry| entry.chain.as_str())
         .collect::<BTreeSet<_>>();
 
     let raw_fact_targets = read
@@ -289,8 +349,7 @@ pub(super) fn evaluate_data_completeness(
         .filter(|cursor| cursor_is_active(cursor))
         .filter_map(|cursor| match cursor.cursor_kind.as_str() {
             RAW_FACT_NORMALIZED_EVENTS_CURSOR => {
-                let key = (cursor.deployment_profile.as_str(), cursor.chain_id.as_str());
-                if latched_keys.contains(&key) {
+                if closure_replay_chains.contains(cursor.chain_id.as_str()) {
                     replay_complete_lag(cursor)
                 } else {
                     // Non-latched: replay must have completed its target and the target must
@@ -435,6 +494,20 @@ pub(super) fn evaluate_data_completeness(
                 .normalized_events_missing_canonical_lineage_count,
         })
         .collect::<Vec<_>>();
+    let active_manifest_sources_with_missing_raw_logs = read
+        .active_manifest_event_sources
+        .iter()
+        .filter(|source| source.normalized_events_missing_canonical_raw_log_count > 0)
+        .map(|source| MissingManifestRawLogs {
+            manifest_id: source.manifest_id,
+            manifest_version: source.manifest_version,
+            chain: source.chain.clone(),
+            namespace: source.namespace.clone(),
+            source_family: source.source_family.clone(),
+            missing_canonical_raw_log_count: source
+                .normalized_events_missing_canonical_raw_log_count,
+        })
+        .collect::<Vec<_>>();
     let names_by_namespace = read
         .name_current_counts
         .iter()
@@ -470,12 +543,17 @@ pub(super) fn evaluate_data_completeness(
 
     DataCompletenessReport {
         max_head_lag_blocks,
+        max_lineage_ahead_blocks: MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS,
+        retention_mode,
+        manifest_corpus: manifest_corpus.clone(),
+        projection_content: projection_content.clone(),
         active_deployment_profile: read.active_deployment_profile.clone(),
         frontiers,
         foreign_chains,
         ignored_replay_cursors,
-        active_watched_target_count: active_targets.len(),
+        active_watched_target_count,
         unobserved_targets,
+        pending_activation_targets,
         manifest_targets_missing_address,
         manifest_proxy_implementations_missing_edge,
         discovery_targets_missing_address: read.discovery_targets_missing_address.clone(),
@@ -499,6 +577,7 @@ pub(super) fn evaluate_data_completeness(
         missing_projection_replay_markers,
         active_manifest_sources_without_events,
         active_manifest_sources_with_missing_lineage,
+        active_manifest_sources_with_missing_raw_logs,
         active_namespaces_without_names,
         normalized_events_null_chain_id_count: read.normalized_events_null_chain_id_count,
         missing_deferred_projection_indexes,

@@ -16,7 +16,10 @@ bigname-worker inspect data-completeness --json
 Gate a promotion or cutover on it:
 
 ```sh
-bigname-worker inspect data-completeness --json --fail-on-incomplete
+bigname-worker inspect data-completeness \
+  --manifests-root manifests/mainnet \
+  --retention-mode minimal \
+  --json --fail-on-incomplete
 ```
 
 Exit `0` means every check passed and `data_complete` is `true`. With
@@ -26,6 +29,18 @@ command always exits `0` and is a report.
 Point it at any database with `--database-url`, or `BIGNAME_DATABASE_URL` /
 `DATABASE_URL`. Comparing a warmed candidate database against the serving one is the
 intended use.
+
+`--manifests-root` is optional so the command remains usable against a database without a
+local checkout, but promotion automation should always supply the same profile root as the
+indexer. With a root, the on-disk active manifests are an external expectation and must match
+the database bidirectionally, including version and complete serialized payload. Without one,
+the report keeps database-derived behavior and sets `advisories.manifest_corpus_unverified` to
+`true`.
+
+`--retention-mode` selects the storage contract to verify. It defaults to `minimal`, where
+compacted raw-log staging is valid. `log-audit` additionally requires the exact retained
+serving-canonical raw log and lineage anchor for every active normalized event whose
+`raw_fact_ref.kind` is `raw_log`.
 
 ## Why `/v1/status` cannot do this
 
@@ -52,20 +67,23 @@ retired chain and is reported as an advisory, not gated for the per-chain checks
 
 | Check | Passes when |
 | --- | --- |
-| `reconciliation_frontier_at_head` | every active chain has a head lag within `±--max-head-lag-blocks` (default 8) between the stored canonical checkpoint and the canonical lineage head, the checkpoint's exact hash and number resolve to a canonical/safe/finalized lineage row, and every active chain has a frontier row at all |
+| `manifest_corpus_matches_repository` | when `--manifests-root` is supplied, every active on-disk manifest has an active database row with the same identity, version, and payload, and every active database row has an on-disk counterpart; without the argument the check is non-gating and explicitly unverified |
+| `reconciliation_frontier_at_head` | every active chain has a stored frontier, the checkpoint's exact hash and number resolve to a canonical/safe/finalized lineage row, checkpoint-ahead lag is at most `--max-head-lag-blocks` (default 8), and lineage-ahead lag is at most the live reconciler's shared contiguous gap-fill limit (currently 1,024 blocks) |
 | `reconciliation_lineage_contiguous` | distinct canonical/safe/finalized block numbers equal `head - floor + 1`, no retained canonical height has an additional non-orphaned hash, and every row above the retained floor points by `parent_hash` to the canonical/safe/finalized row at the preceding height |
 | `reconciliation_history_from_declared_start` | for every active watched chain, the retained lineage floor is at or below the earliest finite start block its active targets declare; a chain whose targets are all open-ended fails, since no floor can be established |
 | `stored_lineage_backfill_coverage` | every active log-producing watched tuple intersecting a persisted bounded-backfill range inside retained lineage is contained in a durable address- or family-scoped `backfill_coverage_facts` row over each shared promotion-verification chunk, and each topic-filtered completed job in that range recorded the exact topic set the active manifest ABI still declares |
-| `watch_set_code_observation_coverage` | there is at least one active target, and every **active** target — direct active-manifest declarations unioned with the materialized watch view and active discovery edges — has a non-orphaned `raw_code_hashes` observation with an exact retained non-orphaned lineage anchor at or after its inclusive active start (when finite) |
+| `watch_set_code_observation_coverage` | there is at least one active target, and every target whose inclusive start is at or below its chain's stored canonical head — direct active-manifest declarations unioned with the materialized watch view and active discovery edges — has a non-orphaned `raw_code_hashes` observation with an exact retained non-orphaned lineage anchor at or after that start; future-start targets are reported as `pending_activation` |
 | `manifest_declared_targets_present` | every active manifest-payload root, contract, and proxy implementation has its matching materialized instance and open address whose start does not narrow the payload start; every proxy implementation also has the exact open managed `proxy_implementation` edge, with a range-preserving start, consumed by the watch view |
 | `discovery_targets_present` | every target endpoint of an open non-migration discovery edge has an open `contract_instance_addresses` row on the edge's chain whose start does not narrow the edge's admitted start, and every open resolver edge from an active registry source retains its matching active resolver target manifest; bounded edges are historical and impose no current target requirement |
 | `active_event_lineage_retained` | every matching canonical/safe/finalized normalized event for an active event-producing manifest source still resolves by exact chain, block hash, and block number to a canonical/safe/finalized `chain_lineage` anchor |
+| `active_raw_logs_retained` | in `minimal` mode, always; in `log-audit` mode, every active serving-canonical normalized event sourced from a raw log retains the exact canonical/safe/finalized `raw_logs` row and exact serving-canonical lineage anchor |
 | `normalization_no_failure` | no replay cursor for an active chain under the deployment profile inferred from the active manifest corpus carries a `last_failure_reason` |
 | `normalization_caught_up_to_raw_head` | the active manifest corpus resolves to one supported deployment profile; every active chain with retained canonical raw logs has that profile's `raw_fact_normalized_events` cursor, each applicable cursor has reached its target, and a post-replay backlog starts no later than the raw-fact target plus one (see below) |
 | `projection_apply_drained` | the `normalized_events_to_projection_invalidations` cursor, when present, exactly equals the retained change-log high-water mark (`max(change_id)`, or zero for an empty log); a non-empty log also requires the cursor, and unrelated cursor rows do not count |
 | `projection_invalidations_drained` | `projection_invalidations` is empty — every enqueued invalidation has been applied and deleted |
 | `projection_no_dead_letters` | `projection_invalidation_dead_letters` is empty — no invalidation exhausted its retries |
 | `projection_replay_complete` | every current projection has a `current_projection_replay_status` marker at this worker's `CURRENT_PROJECTION_REPLAY_VERSION`; before a durable projection-apply cursor exists, each marker must also cover the target bootstrap would request now |
+| `current_projection_content_present` | all seven projections in the worker's `ALL_CURRENT_PROJECTION_ORDER` were counted, and every namespace, chain, or global table whose active manifest event declarations can feed that projection has at least one row |
 | `active_dataset_non_empty` | every active manifest source whose ABI declares non-empty `normalized_events` output has a canonical/safe/finalized matching event under that exact `source_manifest_id`, manifest version, chain, namespace, source family, and declared event kind; every such namespace also has `name_current` rows |
 | `normalized_events_chain_id_present` | no non-orphaned `normalized_events` row has a NULL `chain_id` |
 | `deferred_projection_indexes_present` | the eight deferred `normalized_events` projection indexes all exist on `public.normalized_events` and have `pg_index.indisvalid = true` and `indisready = true` (a fresh replay drops them and rebuilds them after catch-up) |
@@ -74,9 +92,10 @@ retired chain and is reported as an advisory, not gated for the per-chain checks
 exists. Most others are *relative* invariants: each compares a stage to the stage before
 it, so they stay green while the pipeline faithfully processes an incomplete input.
 `reconciliation_history_from_declared_start`, `stored_lineage_backfill_coverage`,
-`active_event_lineage_retained`, `active_dataset_non_empty`, and
-`projection_replay_complete` also compare against retained truth, the declared world, or the
-pipeline's own handoff authority rather than the previous stage.
+`manifest_corpus_matches_repository`, `active_event_lineage_retained`,
+`active_dataset_non_empty`, `current_projection_content_present`, and
+`projection_replay_complete` also compare against external or retained truth, the declared
+world, or the pipeline's own handoff authority rather than the previous stage.
 
 `projection_apply_drained` only proves the derive scan finished — that the apply cursor
 exactly matches the change-log frontier. A cursor behind the frontier has not derived all
@@ -101,16 +120,21 @@ A cursor left by another profile cannot satisfy an active chain, and failures or
 inactive chain or a non-active profile are reported in `advisories.ignored_replay_cursors`
 instead of gating the serving corpus.
 
-A chain that ran closure or dependency replay is an exception. Its raw-fact cursor target
-is latched permanently below the live head; newer logs are carried by a one-shot
-`post_replay_live_adapter_backlog` sweep and then live adapter sync. The gate detects the
-latch by the presence of a `post_replay_live_adapter_backlog` cursor row and, for such a
-chain, requires both the raw-fact cursor and the backlog cursor to have reached their own
-targets rather than the raw-log head. It also requires the backlog's inclusive range start to
-be no later than the raw-fact target plus one. An earlier start is a safe overlap; a later one
-leaves an unnormalized gap that completed cursors cannot reveal. **Limitation:** the live tail beyond the backlog
-target has no cursor, so the gate cannot verify it. This is one of the reasons a passing
-gate is necessary but not sufficient (see Scope).
+A chain with an active closure- or dependency-replay source family is an exception. The writer
+uses the shared source-family policy to preserve that chain's first raw-fact cursor target below
+the live head; newer logs are carried by a one-shot `post_replay_live_adapter_backlog` sweep and
+then live adapter sync. The gate uses the same policy, so a quiet chain whose sweep found no work
+and wrote no backlog cursor still completes against its latched raw-fact target. When a backlog
+cursor exists, both cursors must reach their own targets and the backlog's inclusive range start
+must be no later than the raw-fact target plus one. An earlier start is a safe overlap; a later
+one leaves an unnormalized gap that completed cursors cannot reveal. **Limitation:** the live
+tail beyond the backlog target has no cursor, so the gate cannot verify it. This is one reason a
+passing gate is necessary but not sufficient (see Scope).
+
+The catch-up writer clears `last_failure_reason` and `last_failure_at` after either a successful
+advance or a successful idle iteration. A transient failure therefore remains gating until the
+same chain completes a healthy poll, but it cannot remain stuck forever on an already-complete
+latched cursor.
 
 Completion is read from the cursor's `next_block_number > target_block_number` pair, the
 same authority the catch-up loop uses, not from `last_completed_block_number`. A reorg
@@ -135,6 +159,14 @@ manifest payload targets, including proxy implementation addresses, are read ind
 declaration or address row makes the target unobserved instead of removing it from the expected
 set. When several active entries share an address, coverage uses the latest finite start, the
 strictest lower bound across those entries.
+
+A finite start above the chain checkpoint's canonical block is a pre-activation declaration.
+It remains part of the active target and history authority, but coverage cannot require an
+observation from a block the chain has not reached. The entry is excluded from only the code
+observation comparison and appears in `advisories.pending_activation` with its declared start
+and current canonical head. Once the head reaches the start, the same target becomes gating.
+If the chain has no stored canonical checkpoint, the gate cannot prove pre-activation and does
+not skip the target.
 
 `manifest_declared_targets_present` diagnoses the materialization edge separately. Every payload
 root or contract must have the matching `manifest_contract_instances` declaration; a proxy
@@ -169,11 +201,12 @@ See [`chain-intake.md`](../chain-intake.md).
 Three checks measure the chain and its content against what the watch set declares, not
 only against the previous pipeline stage:
 
-- **Frontier.** `reconciliation_frontier_at_head` tolerates a head lag within `±max` blocks.
-  Reconcile commits canonical lineage and then advances the checkpoint, so on a live database
-  the lineage head routinely leads the checkpoint by a small margin — a negative lag is a
-  normal committed state, not a fault, and only a gap beyond `max` in either direction fails
-  (a checkpoint far behind the lineage is a stale checkpoint writer). A zero numeric lag still
+- **Frontier.** `reconciliation_frontier_at_head` applies asymmetric writer bounds. A positive
+  lag, where the checkpoint is ahead of retained lineage, may not exceed
+  `--max-head-lag-blocks` (default 8). Reconcile commits an entire canonical lineage path before
+  advancing the checkpoint, so a negative lag may reach the live reconciler's shared contiguous
+  gap-fill limit (currently 1,024 blocks). Beyond that limit the writer itself refuses live gap
+  fill and requires bounded catch-up or hash-pinned backfill. A zero numeric lag still
   fails when the checkpoint's `canonical_block_hash` does not join the canonical/safe/finalized
   lineage row at that exact height; later reconciliation uses that hash as its branch anchor. The
   check also
@@ -229,10 +262,31 @@ only against the previous pipeline stage:
   because projection readers consume only serving-canonical states. This is the durable
   reorg-repair authority. In the documented minimal retention
   mode, `raw_logs` are replay staging and may be compacted after normalized replay and downstream
-  durability; that valid compaction does not fail this check. Log-audit mode may retain those
-  rows, but choosing it does not change the completeness contract.
+  durability; that valid compaction does not fail this check. With `--retention-mode log-audit`,
+  `active_raw_logs_retained` additionally joins every active normalized raw-log event to its
+  exact `(chain, block hash, block number, transaction hash, log index)` raw-log row and requires
+  both that row and its exact lineage anchor to be canonical, safe, or finalized.
 
 ### Projections rebuilt, and structural integrity
+
+`current_projection_content_present` enumerates the same seven-family
+`ALL_CURRENT_PROJECTION_ORDER` that replay publishes. It reports total and scoped row counts for
+every family. Expectations come from active manifests' declared normalized event kinds, never
+from the projection rows being checked:
+
+| Projection | Required scope | A scope is expected when an active source declares |
+| --- | --- | --- |
+| `name_current` | namespace | any normalized event output |
+| `children_current` | namespace | `SubregistryChanged`, `ParentChanged`, `RegistrationGranted`, `RegistrationRenewed`, or `RegistrationReleased` |
+| `permissions_current` | global | `PermissionChanged`, `RootPermissionChanged`, or `PermissionScopeChanged` |
+| `record_inventory_current` | global | `RecordChanged`, `RecordVersionChanged`, or `ResolverChanged` |
+| `resolver_current` | chain | `ResolverChanged`, `AliasChanged`, `PermissionChanged`, or `PermissionScopeChanged` (resolver-scoped permission rows are resolver rebuild targets) |
+| `address_names_current` | namespace | `RegistrationGranted`, `TokenControlTransferred`, `AuthorityTransferred`, `AuthorityEpochChanged`, `PermissionChanged`, `PermissionScopeChanged`, or `TokenRegenerated` |
+| `primary_names_current` | namespace | `ReverseChanged` |
+
+An unlisted input does not create an expectation for that projection. This lets a small healthy
+corpus with no declared permission events keep an empty `permissions_current`, while truncating
+`resolver_current` for a chain whose active manifests declare `ResolverChanged` fails by chain.
 
 `projection_replay_complete` requires every current projection to have a marker in
 `current_projection_replay_status` at the inspecting worker's
@@ -271,6 +325,11 @@ otherwise abort the read), so they are surfaced here as a data-integrity fault.
 
 ## Interpreting failures
 
+- **`manifest_corpus_matches_repository` fails.** The supplied profile root is missing or
+  invalid, an active on-disk manifest is absent or payload-mismatched in the database, or the
+  database retains an active manifest the root does not contain. Run manifest sync from the
+  intended root and investigate unexpected active rows; do not accept a smaller surviving
+  database corpus as its own expectation.
 - **`watch_set_code_observation_coverage` fails, everything else passes.** The runtime
   watch scope is narrower than the manifests and discovery edges declare. The reported
   `unobserved_targets` were never watched, so their logs were never indexed and their
@@ -299,6 +358,10 @@ otherwise abort the read), so they are surfaced here as a data-integrity fault.
 - **`active_event_lineage_retained` fails.** Active normalized content has lost one or more exact
   canonical lineage anchors. Restore `chain_lineage` and run reorg/projection repair as needed;
   raw-log compaction by itself is not this failure.
+- **`active_raw_logs_retained` fails.** The operator selected `log-audit`, but an active
+  normalized raw-log event has lost its exact serving-canonical raw-log row or exact canonical
+  lineage anchor. Restore or refetch and verify the retained audit fact. Select `minimal` only
+  when compaction is the deployment's actual retention policy, not merely to silence the check.
 - **Coverage fails on a database warmed by backfill alone.** Backfill only observes a
   block's selected log emitters. A watched target that never emits acquires its single
   baseline observation from the live tailer, on canonical head reconciliation. Let the
@@ -312,10 +375,11 @@ otherwise abort the read), so they are surfaced here as a data-integrity fault.
   `mainnet` or `sepolia` profile. Correct manifest rollout state before interpreting cursor
   progress.
 - **`reconciliation_frontier_at_head` fails.** Head reconciliation has stalled, or the
-  checkpoint and lineage have diverged by more than `±max` blocks. A large positive
-  `head_lag_blocks` means the lineage trails the checkpoint; a large negative value means the
-  checkpoint writer is stale and far behind the lineage (a small negative lag is normal — see
-  above). A `missing_from_storage: true` chain is declared by the watch set but has no
+  checkpoint and lineage exceed the applicable asymmetric bound. A positive
+  `head_lag_blocks` beyond `--max-head-lag-blocks` means lineage trails the checkpoint. A
+  negative value is allowed through the reconciler's live gap-fill limit because lineage is
+  committed before checkpoint advancement; beyond that limit the checkpoint writer is stale
+  or the restore is mixed. A `missing_from_storage: true` chain is declared by the watch set but has no
   frontier row. `checkpoint_canonical_lineage_match: false` with zero numeric lag means the
   checkpoint hash is missing, orphaned, or points at a different branch at that height.
 - **`reconciliation_lineage_contiguous` fails with a non-zero `duplicate_canonical_height_count`.**
@@ -343,6 +407,11 @@ otherwise abort the read), so they are surfaced here as a data-integrity fault.
   active. `name_current` is published first, so a candidate with only it is early in the rebuild;
   old-version markers always require replay, while stale-target markers require replay only
   before the durable apply cursor takes over.
+- **`current_projection_content_present` fails.** At least one expected namespace, chain, or
+  global current-projection table is empty even though active manifest event declarations can
+  feed it. Use the reported table and `missing_scopes`; replay markers and drained cursors are
+  not substitutes for the missing serving rows. Rebuild the named projection from canonical
+  inputs before promotion.
 - **`deferred_projection_indexes_present` fails.** A fresh replay dropped the listed indexes,
   the rebuild pass has not run, or a concurrent build left a named but invalid catalog entry.
   Data may be complete, but the database is not serve-ready; rebuild valid indexes before
@@ -374,6 +443,12 @@ otherwise abort the read), so they are surfaced here as a data-integrity fault.
 
 The `advisories` block reports state that is worth an operator's attention but does not gate:
 
+- **`manifest_corpus_unverified`** — no `--manifests-root` was supplied, so all manifest-derived
+  expectations still come from surviving database rows. This is acceptable for diagnosis, not
+  for a promotion gate that must detect a partially restored manifest corpus.
+- **`pending_activation`** — active targets whose finite start is above their chain's stored
+  canonical head. They do not yet require code-observation coverage; they become gating when
+  the checkpoint reaches the declared start.
 - **`foreign_chains`** — chains with residual checkpoint or lineage rows that the active watch
   set does not cover (a retired chain, or one whose manifest was removed while its chain state
   remained). Their per-chain checks are not gated; the listing is for cleanup.

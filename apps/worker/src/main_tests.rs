@@ -188,6 +188,33 @@ fn inspect_backfill_job_cli_is_available() {
 }
 
 #[test]
+fn inspect_data_completeness_accepts_manifest_and_retention_authority() {
+    let cli = Cli::parse_from([
+        "bigname-worker",
+        "inspect",
+        "data-completeness",
+        "--manifests-root",
+        "manifests/sepolia",
+        "--retention-mode",
+        "log-audit",
+    ]);
+
+    match cli.command {
+        Command::Inspect(args) => match args.command {
+            inspect::InspectCommand::DataCompleteness(args) => {
+                assert_eq!(
+                    args.manifests_root.as_deref(),
+                    Some(std::path::Path::new("manifests/sepolia"))
+                );
+                assert_eq!(args.retention_mode, inspect::RetentionMode::LogAudit);
+            }
+            other => panic!("expected data-completeness inspect command, got {other:?}"),
+        },
+        other => panic!("expected inspect command, got {other:?}"),
+    }
+}
+
+#[test]
 fn inspect_execution_trace_cli_is_available() {
     let trace_id = "0e7ec7ac-e000-0000-0000-000000000abc";
     let cli = Cli::parse_from([

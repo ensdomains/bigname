@@ -56,7 +56,8 @@ use scan_all::{
 
 const HASH_PINNED_BACKFILL_SCAN_MODE: &str = "hash_pinned_block";
 pub(crate) const COINBASE_SQL_BACKFILL_SCAN_MODE: &str = "coinbase_sql_hash_pinned_logs_v1";
-pub(crate) const DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS: i64 = 1_024;
+pub(crate) const DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS: i64 =
+    bigname_storage::MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS;
 pub(crate) const COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD: usize = 10_000;
 
 pub(crate) async fn create_hash_pinned_backfill_job(

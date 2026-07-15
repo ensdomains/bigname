@@ -48,6 +48,21 @@ fn closure_or_dependency_contracts_do_not_claim_restricted_replay_proofs() {
 }
 
 #[test]
+fn shared_latched_target_families_match_replay_contracts() {
+    let contract_families = NORMALIZED_EVENT_REPLAY_CONTRACTS
+        .iter()
+        .filter(|contract| contract.raw_fact_replay_participant)
+        .filter(|contract| contract.model != ReplayDependencyModel::StatelessRawFact)
+        .flat_map(|contract| contract.source_families.iter().copied())
+        .collect::<BTreeSet<_>>();
+    let shared_families = bigname_adapters::CLOSURE_OR_DEPENDENCY_REPLAY_SOURCE_FAMILIES
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(shared_families, contract_families);
+}
+
+#[test]
 fn implemented_full_closure_contracts_are_enumerated() {
     let actual = NORMALIZED_EVENT_REPLAY_CONTRACTS
         .iter()

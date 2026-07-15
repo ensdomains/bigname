@@ -952,6 +952,7 @@ async fn active_event_sources_are_counted_by_exact_manifest_identity() -> Result
     assert_eq!(read.active_manifest_event_sources.len(), 1);
     let source = &read.active_manifest_event_sources[0];
     assert_eq!(source.manifest_id, active_event_manifest_id);
+    assert_eq!(source.normalized_event_kinds, vec!["ResolverChanged"]);
     assert_eq!(source.normalized_event_count, 0);
 
     database.cleanup().await
@@ -1036,6 +1037,97 @@ async fn active_event_sources_report_missing_canonical_lineage() -> Result<()> {
     assert_eq!(
         read.active_manifest_event_sources[0].normalized_events_missing_canonical_lineage_count,
         0
+    );
+
+    database.cleanup().await
+}
+
+/// Log-audit verification requires both the exact serving-canonical raw-log row and its exact
+/// serving-canonical lineage anchor. An observed raw-log row or an orphaned anchor cannot prove
+/// retained audit input.
+#[tokio::test]
+async fn active_raw_log_events_report_missing_canonical_raw_log_with_anchor_transitivity()
+-> Result<()> {
+    let database = test_database().await?;
+    let pool = database.pool();
+    let manifest_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO manifest_versions
+            (manifest_version, namespace, source_family, chain, deployment_epoch,
+             rollout_status, normalizer_version, file_path, manifest_payload)
+        VALUES
+            (1, 'ens', 'registry', 'ethereum-sepolia', 'ens_v2_sepolia_dev',
+             'active', 'n', 'active',
+             '{"abi":{"events":[{"normalized_events":["ResolverChanged"]}]}}'::jsonb)
+        RETURNING manifest_id
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO chain_lineage
+            (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+        VALUES ('ethereum-sepolia', '0xBLOCK', 42, now(), 'canonical')
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_events
+            (event_identity, namespace, event_kind, source_family, manifest_version,
+             source_manifest_id, chain_id, block_number, block_hash, transaction_hash,
+             log_index, raw_fact_ref, derivation_kind, canonicality_state)
+        VALUES
+            ('active-event', 'ens', 'ResolverChanged', 'registry', 1, $1,
+             'ethereum-sepolia', 42, '0xBLOCK', '0xTX', 3,
+             '{"kind":"raw_log"}'::jsonb, 'raw_log', 'canonical')
+        "#,
+    )
+    .bind(manifest_id)
+    .execute(pool)
+    .await?;
+
+    let read = load_data_completeness(pool).await?;
+    assert_eq!(
+        read.active_manifest_event_sources[0].normalized_events_missing_canonical_raw_log_count,
+        1
+    );
+
+    sqlx::query(
+        r#"
+        INSERT INTO raw_logs
+            (chain_id, block_hash, block_number, transaction_hash, transaction_index,
+             log_index, emitting_address, canonicality_state)
+        VALUES
+            ('ethereum-sepolia', '0xBLOCK', 42, '0xTX', 0, 3, '0xresolver', 'observed')
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    let read = load_data_completeness(pool).await?;
+    assert_eq!(
+        read.active_manifest_event_sources[0].normalized_events_missing_canonical_raw_log_count,
+        1
+    );
+
+    sqlx::query("UPDATE raw_logs SET canonicality_state = 'canonical'")
+        .execute(pool)
+        .await?;
+    let read = load_data_completeness(pool).await?;
+    assert_eq!(
+        read.active_manifest_event_sources[0].normalized_events_missing_canonical_raw_log_count,
+        0
+    );
+
+    sqlx::query("UPDATE chain_lineage SET canonicality_state = 'orphaned'")
+        .execute(pool)
+        .await?;
+    let read = load_data_completeness(pool).await?;
+    assert_eq!(
+        read.active_manifest_event_sources[0].normalized_events_missing_canonical_raw_log_count,
+        1
     );
 
     database.cleanup().await
@@ -1209,6 +1301,8 @@ async fn active_manifest_chain_namespaces_are_loaded() -> Result<()> {
     assert_eq!(read.manifest_chain_namespaces.len(), 1);
     assert_eq!(read.manifest_chain_namespaces[0].chain, "ethereum-sepolia");
     assert_eq!(read.manifest_chain_namespaces[0].namespace, "ens");
+    assert_eq!(read.manifest_chain_source_families.len(), 1);
+    assert_eq!(read.manifest_chain_source_families[0].source_family, "sf");
     // The declared chain has no checkpoint/lineage row, so it is absent from the storage chains.
     assert!(
         read.chains

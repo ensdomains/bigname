@@ -3,6 +3,9 @@ use bigname_storage::{
 };
 
 use super::super::backfill_coverage::{BackfillCoverageGap, BackfillCoverageTopicDrift};
+use super::super::manifest_corpus::ManifestCorpusInspection;
+use super::super::projection_content::ProjectionContentInspection;
+use crate::inspect::RetentionMode;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::inspect::data_completeness) enum CheckStatus {
@@ -47,6 +50,15 @@ pub(in crate::inspect::data_completeness) struct UnobservedTarget {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(in crate::inspect::data_completeness) struct PendingActivationTarget {
+    pub(in crate::inspect::data_completeness) chain: String,
+    pub(in crate::inspect::data_completeness) address: String,
+    pub(in crate::inspect::data_completeness) source_family: String,
+    pub(in crate::inspect::data_completeness) active_from_block_number: i64,
+    pub(in crate::inspect::data_completeness) canonical_head_block_number: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::inspect::data_completeness) struct HistoryTruncation {
     pub(in crate::inspect::data_completeness) chain: String,
     pub(in crate::inspect::data_completeness) declared_start_block: i64,
@@ -80,6 +92,16 @@ pub(in crate::inspect::data_completeness) struct MissingManifestLineage {
     pub(in crate::inspect::data_completeness) missing_canonical_lineage_count: i64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(in crate::inspect::data_completeness) struct MissingManifestRawLogs {
+    pub(in crate::inspect::data_completeness) manifest_id: i64,
+    pub(in crate::inspect::data_completeness) manifest_version: i64,
+    pub(in crate::inspect::data_completeness) chain: String,
+    pub(in crate::inspect::data_completeness) namespace: String,
+    pub(in crate::inspect::data_completeness) source_family: String,
+    pub(in crate::inspect::data_completeness) missing_canonical_raw_log_count: i64,
+}
+
 /// `behind_by` is the block or change-id distance to the applicable target, best-effort:
 /// a missing bound is treated with a `-1` sentinel.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -91,12 +113,18 @@ pub(in crate::inspect::data_completeness) struct CursorLag {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::inspect::data_completeness) struct DataCompletenessReport {
     pub(in crate::inspect::data_completeness) max_head_lag_blocks: i64,
+    pub(in crate::inspect::data_completeness) max_lineage_ahead_blocks: i64,
+    pub(in crate::inspect::data_completeness) retention_mode: RetentionMode,
+    pub(in crate::inspect::data_completeness) manifest_corpus: ManifestCorpusInspection,
+    pub(in crate::inspect::data_completeness) projection_content: ProjectionContentInspection,
     pub(in crate::inspect::data_completeness) active_deployment_profile: Option<String>,
     pub(in crate::inspect::data_completeness) frontiers: Vec<ChainFrontier>,
     pub(in crate::inspect::data_completeness) foreign_chains: Vec<String>,
     pub(in crate::inspect::data_completeness) ignored_replay_cursors: Vec<String>,
     pub(in crate::inspect::data_completeness) active_watched_target_count: usize,
     pub(in crate::inspect::data_completeness) unobserved_targets: Vec<UnobservedTarget>,
+    pub(in crate::inspect::data_completeness) pending_activation_targets:
+        Vec<PendingActivationTarget>,
     pub(in crate::inspect::data_completeness) manifest_targets_missing_address:
         Vec<UnobservedTarget>,
     pub(in crate::inspect::data_completeness) manifest_proxy_implementations_missing_edge:
@@ -128,6 +156,8 @@ pub(in crate::inspect::data_completeness) struct DataCompletenessReport {
         Vec<MissingManifestContent>,
     pub(in crate::inspect::data_completeness) active_manifest_sources_with_missing_lineage:
         Vec<MissingManifestLineage>,
+    pub(in crate::inspect::data_completeness) active_manifest_sources_with_missing_raw_logs:
+        Vec<MissingManifestRawLogs>,
     pub(in crate::inspect::data_completeness) active_namespaces_without_names: Vec<String>,
     pub(in crate::inspect::data_completeness) normalized_events_null_chain_id_count: i64,
     pub(in crate::inspect::data_completeness) missing_deferred_projection_indexes: Vec<String>,
@@ -141,9 +171,15 @@ impl DataCompletenessReport {
         CheckStatus::from_pass(self.frontiers.iter().all(|frontier| {
             frontier.checkpoint_canonical_lineage_match
                 && frontier.head_lag_blocks.is_some_and(|lag| {
-                    (-self.max_head_lag_blocks..=self.max_head_lag_blocks).contains(&lag)
+                    (-self.max_lineage_ahead_blocks..=self.max_head_lag_blocks).contains(&lag)
                 })
         }))
+    }
+
+    pub(in crate::inspect::data_completeness) fn manifest_corpus_matches_repository(
+        &self,
+    ) -> CheckStatus {
+        CheckStatus::from_pass(self.manifest_corpus.complete())
     }
 
     pub(in crate::inspect::data_completeness) fn lineage_contiguous(&self) -> CheckStatus {
@@ -193,6 +229,15 @@ impl DataCompletenessReport {
         CheckStatus::from_pass(self.active_manifest_sources_with_missing_lineage.is_empty())
     }
 
+    pub(in crate::inspect::data_completeness) fn active_raw_logs_retained(&self) -> CheckStatus {
+        CheckStatus::from_pass(
+            self.retention_mode == RetentionMode::Minimal
+                || self
+                    .active_manifest_sources_with_missing_raw_logs
+                    .is_empty(),
+        )
+    }
+
     pub(in crate::inspect::data_completeness) fn normalization_healthy(&self) -> CheckStatus {
         CheckStatus::from_pass(self.failed_replay_cursors.is_empty())
     }
@@ -227,6 +272,10 @@ impl DataCompletenessReport {
         CheckStatus::from_pass(self.missing_projection_replay_markers.is_empty())
     }
 
+    pub(in crate::inspect::data_completeness) fn projection_content_present(&self) -> CheckStatus {
+        CheckStatus::from_pass(self.projection_content.complete())
+    }
+
     pub(in crate::inspect::data_completeness) fn active_dataset_non_empty(&self) -> CheckStatus {
         CheckStatus::from_pass(
             self.active_manifest_sources_without_events.is_empty()
@@ -249,6 +298,7 @@ impl DataCompletenessReport {
     pub(in crate::inspect::data_completeness) fn data_complete(&self) -> bool {
         [
             self.frontier_at_head(),
+            self.manifest_corpus_matches_repository(),
             self.lineage_contiguous(),
             self.history_from_declared_start(),
             self.stored_lineage_backfill_coverage(),
@@ -256,12 +306,14 @@ impl DataCompletenessReport {
             self.manifest_declared_targets_present(),
             self.discovery_targets_present(),
             self.active_event_lineage_retained(),
+            self.active_raw_logs_retained(),
             self.normalization_healthy(),
             self.normalization_caught_up(),
             self.projection_drained(),
             self.projection_invalidations_drained(),
             self.projection_no_dead_letters(),
             self.projection_replay_complete(),
+            self.projection_content_present(),
             self.active_dataset_non_empty(),
             self.normalized_events_chain_id_present(),
             self.deferred_projection_indexes_present(),

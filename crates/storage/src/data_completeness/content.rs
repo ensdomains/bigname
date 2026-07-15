@@ -2,7 +2,8 @@ use anyhow::{Context, Result};
 
 use super::{
     ActiveManifestEventSource, BackfillLifecycleRow, DEFERRED_NORMALIZED_EVENT_INDEXES,
-    ManifestChainNamespace, NameCurrentCount, ObservedCodeAddress, ProjectionReplayMarker,
+    ManifestChainNamespace, ManifestChainSourceFamily, NameCurrentCount, ObservedCodeAddress,
+    ProjectionReplayMarker,
 };
 
 pub(super) async fn load_observed_code_addresses(
@@ -52,7 +53,8 @@ pub(super) async fn load_active_manifest_event_sources(
                 manifest.chain,
                 manifest.namespace,
                 manifest.source_family,
-                ARRAY_AGG(DISTINCT normalized_kind.event_kind) AS normalized_event_kinds
+                ARRAY_AGG(DISTINCT normalized_kind.event_kind ORDER BY normalized_kind.event_kind)
+                    AS normalized_event_kinds
             FROM manifest_versions manifest
             CROSS JOIN LATERAL jsonb_array_elements(
                 COALESCE(manifest.manifest_payload #> '{abi,events}', '[]'::JSONB)
@@ -74,11 +76,17 @@ pub(super) async fn load_active_manifest_event_sources(
             source.chain,
             source.namespace,
             source.source_family,
+            source.normalized_event_kinds,
             COUNT(event.normalized_event_id)::BIGINT AS normalized_event_count,
             COUNT(event.normalized_event_id) FILTER (
                 WHERE event.normalized_event_id IS NOT NULL
                   AND lineage.block_hash IS NULL
-            )::BIGINT AS normalized_events_missing_canonical_lineage_count
+            )::BIGINT AS normalized_events_missing_canonical_lineage_count,
+            COUNT(event.normalized_event_id) FILTER (
+                WHERE event.normalized_event_id IS NOT NULL
+                  AND event.raw_fact_ref ->> 'kind' = 'raw_log'
+                  AND (raw_log.raw_log_id IS NULL OR lineage.block_hash IS NULL)
+            )::BIGINT AS normalized_events_missing_canonical_raw_log_count
         FROM active_event_sources source
         LEFT JOIN normalized_events event
           ON event.source_manifest_id = source.manifest_id
@@ -101,12 +109,25 @@ pub(super) async fn load_active_manifest_event_sources(
              'safe'::canonicality_state,
              'finalized'::canonicality_state
          )
+        LEFT JOIN raw_logs raw_log
+          ON event.raw_fact_ref ->> 'kind' = 'raw_log'
+         AND raw_log.chain_id = event.chain_id
+         AND raw_log.block_hash = event.block_hash
+         AND raw_log.block_number = event.block_number
+         AND raw_log.transaction_hash = event.transaction_hash
+         AND raw_log.log_index = event.log_index
+         AND raw_log.canonicality_state IN (
+             'canonical'::canonicality_state,
+             'safe'::canonicality_state,
+             'finalized'::canonicality_state
+         )
         GROUP BY
             source.manifest_id,
             source.manifest_version,
             source.chain,
             source.namespace,
-            source.source_family
+            source.source_family,
+            source.normalized_event_kinds
         ORDER BY
             source.chain,
             source.namespace,
@@ -127,10 +148,15 @@ pub(super) async fn load_active_manifest_event_sources(
                 chain: crate::sql_row::get(&row, "chain")?,
                 namespace: crate::sql_row::get(&row, "namespace")?,
                 source_family: crate::sql_row::get(&row, "source_family")?,
+                normalized_event_kinds: crate::sql_row::get(&row, "normalized_event_kinds")?,
                 normalized_event_count: crate::sql_row::get(&row, "normalized_event_count")?,
                 normalized_events_missing_canonical_lineage_count: crate::sql_row::get(
                     &row,
                     "normalized_events_missing_canonical_lineage_count",
+                )?,
+                normalized_events_missing_canonical_raw_log_count: crate::sql_row::get(
+                    &row,
+                    "normalized_events_missing_canonical_raw_log_count",
                 )?,
             })
         })
@@ -347,6 +373,31 @@ pub(super) async fn load_manifest_chain_namespaces(
             Ok(ManifestChainNamespace {
                 chain: crate::sql_row::get(&row, "chain")?,
                 namespace: crate::sql_row::get(&row, "namespace")?,
+            })
+        })
+        .collect()
+}
+
+pub(super) async fn load_manifest_chain_source_families(
+    pool: &sqlx::PgPool,
+) -> Result<Vec<ManifestChainSourceFamily>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT DISTINCT chain, source_family
+        FROM manifest_versions
+        WHERE rollout_status = 'active'
+        ORDER BY chain, source_family
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to load active manifest chain source families")?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(ManifestChainSourceFamily {
+                chain: crate::sql_row::get(&row, "chain")?,
+                source_family: crate::sql_row::get(&row, "source_family")?,
             })
         })
         .collect()

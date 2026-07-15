@@ -1,5 +1,7 @@
 mod backfill_coverage;
 mod evaluate;
+mod manifest_corpus;
+mod projection_content;
 
 #[cfg(test)]
 mod tests;
@@ -13,6 +15,8 @@ use backfill_coverage::load_backfill_coverage;
 use evaluate::{
     CheckStatus, DEFAULT_MAX_HEAD_LAG_BLOCKS, DataCompletenessReport, evaluate_data_completeness,
 };
+use manifest_corpus::inspect_manifest_corpus;
+use projection_content::load_projection_content;
 
 pub(in crate::inspect) async fn inspect_data_completeness(
     args: InspectDataCompletenessArgs,
@@ -21,6 +25,9 @@ pub(in crate::inspect) async fn inspect_data_completeness(
     let read = bigname_storage::load_data_completeness(&pool).await?;
     let watched_contracts = load_watched_contracts(&pool).await?;
     let backfill_coverage = load_backfill_coverage(&pool, &read).await?;
+    let manifest_corpus = inspect_manifest_corpus(&pool, args.manifests_root.as_deref()).await?;
+    let projection_content =
+        load_projection_content(&pool, &read.active_manifest_event_sources).await?;
     let max_head_lag_blocks = args
         .max_head_lag_blocks
         .unwrap_or(DEFAULT_MAX_HEAD_LAG_BLOCKS);
@@ -28,7 +35,10 @@ pub(in crate::inspect) async fn inspect_data_completeness(
         &read,
         &watched_contracts,
         &backfill_coverage,
+        &manifest_corpus,
+        &projection_content,
         max_head_lag_blocks,
+        args.retention_mode,
     );
 
     println!("{}", render_data_completeness(&report));
@@ -45,7 +55,21 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
         "read_only": true,
         "data_complete": report.data_complete(),
         "max_head_lag_blocks": report.max_head_lag_blocks,
+        "max_lineage_ahead_blocks": report.max_lineage_ahead_blocks,
+        "retention_mode": report.retention_mode.as_str(),
         "checks": [
+            check("manifest_corpus_matches_repository", report.manifest_corpus_matches_repository(), json!({
+                "repository_supplied": report.manifest_corpus.repository_supplied,
+                "verified": report.manifest_corpus.verified,
+                "repository_root": report.manifest_corpus.repository_root,
+                "repository_status": report.manifest_corpus.repository_status,
+                "repository_error": report.manifest_corpus.repository_error,
+                "expected_active_manifest_count": report.manifest_corpus.expected_active_manifest_count,
+                "database_active_manifest_count": report.manifest_corpus.database_active_manifest_count,
+                "missing_active_manifests": report.manifest_corpus.missing_active_manifests,
+                "unexpected_active_manifests": report.manifest_corpus.unexpected_active_manifests,
+                "mismatched_manifest_payloads": report.manifest_corpus.mismatched_manifest_payloads,
+            })),
             check("reconciliation_frontier_at_head", report.frontier_at_head(), json!({
                 "chains": report.frontiers.iter().map(|frontier| json!({
                     "chain": frontier.chain_id.as_str(),
@@ -146,6 +170,17 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
                     "missing_canonical_lineage_count": entry.missing_canonical_lineage_count,
                 })).collect::<Vec<_>>(),
             })),
+            check("active_raw_logs_retained", report.active_raw_logs_retained(), json!({
+                "retention_mode": report.retention_mode.as_str(),
+                "manifest_sources_with_missing_raw_logs": report.active_manifest_sources_with_missing_raw_logs.iter().map(|entry| json!({
+                    "manifest_id": entry.manifest_id,
+                    "manifest_version": entry.manifest_version,
+                    "chain": entry.chain.as_str(),
+                    "namespace": entry.namespace.as_str(),
+                    "source_family": entry.source_family.as_str(),
+                    "missing_canonical_raw_log_count": entry.missing_canonical_raw_log_count,
+                })).collect::<Vec<_>>(),
+            })),
             check("normalization_no_failure", report.normalization_healthy(), json!({
                 "active_deployment_profile": report.active_deployment_profile.as_deref(),
                 "failed_cursors": report.failed_replay_cursors.clone(),
@@ -174,6 +209,19 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
                 "required_target_block": report.projection_replay_required_target_block,
                 "missing_projections": report.missing_projection_replay_markers.clone(),
             })),
+            check("current_projection_content_present", report.projection_content_present(), json!({
+                "tables": report.projection_content.tables.iter().map(|table| json!({
+                    "projection": table.projection.as_str(),
+                    "scope_kind": table.scope_kind,
+                    "total_count": table.total_count,
+                    "scoped_counts": table.scoped_counts.iter().map(|entry| json!({
+                        "scope": entry.scope.as_str(),
+                        "count": entry.count,
+                    })).collect::<Vec<_>>(),
+                    "expected_scopes": table.expected_scopes.clone(),
+                    "missing_scopes": table.missing_scopes.clone(),
+                })).collect::<Vec<_>>(),
+            })),
             check("active_dataset_non_empty", report.active_dataset_non_empty(), json!({
                 "normalized_event_total": report.normalized_event_total,
                 "name_current_total": report.name_current_total,
@@ -194,8 +242,16 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
             })),
         ],
         "advisories": {
+            "manifest_corpus_unverified": !report.manifest_corpus.repository_supplied,
             "foreign_chains": report.foreign_chains.clone(),
             "ignored_replay_cursors": report.ignored_replay_cursors.clone(),
+            "pending_activation": report.pending_activation_targets.iter().map(|target| json!({
+                "chain": target.chain.as_str(),
+                "address": target.address.as_str(),
+                "source_family": target.source_family.as_str(),
+                "active_from_block_number": target.active_from_block_number,
+                "canonical_head_block_number": target.canonical_head_block_number,
+            })).collect::<Vec<_>>(),
             "backfill_lifecycle": report.backfill_advisory.iter().map(|row| json!({
                 "deployment_profile": row.deployment_profile.as_str(),
                 "failed_job_count": row.failed_job_count,

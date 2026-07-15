@@ -237,6 +237,15 @@ Live manifest drift and proxy-upgrade alerting is a worker-owned operational loo
 
 `bigname-worker manifest-drift audit --json` computes candidates, persists alert observations, and renders the persisted view alongside live counts. `--fail-on-alert --json` returns nonzero when actionable persisted alerts remain. `bigname-worker inspect manifest-drift --json` is read-only over already persisted observations.
 
+Cutover inspection can anchor the active database corpus back to this filesystem authority with
+`bigname-worker inspect data-completeness --manifests-root <profile-root>`. The comparison is
+bidirectional over active manifests: disk requires a database row with the same namespace,
+source family, chain, deployment epoch, manifest version, and complete serialized payload, and
+every active database row requires the corresponding disk manifest. A missing, empty, or invalid
+supplied root fails. Omitting the argument preserves database-only diagnosis but reports
+`manifest_corpus_unverified: true`; promotion automation must supply the selected profile root so
+a partial restore cannot shrink its own manifest-derived expectations.
+
 ## Watch-plan expansion
 
 Watch-plan expansion starts from active manifest roots by `contract_instance_id` and traverses active discovery edges by ID.

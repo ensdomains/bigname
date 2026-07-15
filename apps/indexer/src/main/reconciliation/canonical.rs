@@ -1,7 +1,8 @@
 use anyhow::{Result, bail};
 use bigname_storage::{
-    CanonicalityState, ChainCheckpoint, ChainCheckpointUpdate, advance_chain_checkpoints,
-    chain_lineage_contains_ancestor, load_chain_lineage_block, mark_chain_lineage_range_orphaned,
+    CanonicalityState, ChainCheckpoint, ChainCheckpointUpdate, MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS,
+    advance_chain_checkpoints, chain_lineage_contains_ancestor, load_chain_lineage_block,
+    mark_chain_lineage_range_orphaned,
     upsert_chain_lineage_blocks_recanonicalizing_orphaned as upsert_recanonicalized_lineage_blocks,
     upsert_chain_lineage_blocks_without_snapshots,
     upsert_chain_lineage_blocks_without_snapshots_recanonicalizing_orphaned as upsert_recanonicalized_lineage_blocks_without_snapshots,
@@ -9,7 +10,6 @@ use bigname_storage::{
 use tracing::{info, warn};
 
 use crate::{
-    backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
     provider::{ChainProviderOps, ProviderBlock, ProviderHeadSnapshot, ProviderRegistry},
     runtime::{IntakeChainTask, checkpoint_mode},
 };
@@ -48,8 +48,6 @@ use stored_lineage::{
 const MAX_PARENT_FETCH_DEPTH: usize = 131_072;
 // Live polling fails closed before it tries to ingest a large catch-up range.
 // Hash-pinned backfill owns larger bounded gaps.
-const MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS: i64 = DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS;
-
 #[allow(dead_code)]
 pub(crate) async fn poll_provider_heads(
     pool: &sqlx::PgPool,

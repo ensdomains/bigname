@@ -16,6 +16,7 @@ mod ens_v2_resolver;
 mod evm_abi;
 mod manifest_normalized_events;
 mod normalized_event_support;
+mod normalized_replay_policy;
 mod registry_migration_cache;
 
 /// Current adapter bootstrap status.
@@ -61,6 +62,9 @@ pub use ens_v2_resolver::{
 pub use manifest_normalized_events::{
     ManifestNormalizedEventKindSyncSummary, ManifestNormalizedEventSyncSummary,
     sync_manifest_normalized_events,
+};
+pub use normalized_replay_policy::{
+    CLOSURE_OR_DEPENDENCY_REPLAY_SOURCE_FAMILIES, source_family_preserves_normalized_replay_target,
 };
 
 pub async fn clear_replay_adapter_checkpoints(

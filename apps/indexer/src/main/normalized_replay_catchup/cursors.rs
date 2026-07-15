@@ -273,6 +273,39 @@ pub(super) async fn record_cursor_failure(
     Ok(())
 }
 
+/// A successful idle iteration is a successful health signal even though there is no cursor
+/// advancement to clear a previous transient failure. The predicate avoids rewriting a healthy
+/// cursor on every poll.
+pub(super) async fn clear_cursor_failure(
+    pool: &PgPool,
+    deployment_profile: &str,
+    chain: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE normalized_replay_cursors
+        SET
+            last_failure_reason = NULL,
+            last_failure_at = NULL,
+            updated_at = now()
+        WHERE deployment_profile = $1
+          AND chain_id = $2
+          AND cursor_kind = $3
+          AND (last_failure_reason IS NOT NULL OR last_failure_at IS NOT NULL)
+        "#,
+    )
+    .bind(deployment_profile)
+    .bind(chain)
+    .bind(CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS)
+    .execute(pool)
+    .await
+    .with_context(|| {
+        format!("failed to clear normalized replay cursor failure for {deployment_profile}/{chain}")
+    })?;
+
+    Ok(())
+}
+
 fn postgres_text_safe(text: &str) -> String {
     text.replace('\0', "\\u0000")
 }

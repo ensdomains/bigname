@@ -12,9 +12,9 @@ mod tests;
 
 use anyhow::{Context, Result};
 use bigname_storage::DatabaseConfig;
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use std::str::FromStr;
+use std::{path::PathBuf, str::FromStr};
 use uuid::Uuid;
 
 pub(crate) use manifest_drift::render_manifest_drift_alert_observations;
@@ -75,6 +75,27 @@ pub(crate) struct InspectDataCompletenessArgs {
     pub(crate) fail_on_incomplete: bool,
     #[arg(long)]
     pub(crate) max_head_lag_blocks: Option<i64>,
+    /// Optional on-disk manifest profile root used as the external active-corpus authority.
+    #[arg(long)]
+    pub(crate) manifests_root: Option<PathBuf>,
+    /// Raw-log retention contract to verify.
+    #[arg(long, value_enum, default_value_t = RetentionMode::Minimal)]
+    pub(crate) retention_mode: RetentionMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum RetentionMode {
+    Minimal,
+    LogAudit,
+}
+
+impl RetentionMode {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::LogAudit => "log-audit",
+        }
+    }
 }
 
 #[derive(Args, Debug)]

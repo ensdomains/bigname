@@ -89,6 +89,14 @@ pub struct ManifestChainNamespace {
     pub namespace: String,
 }
 
+/// A `(chain, source_family)` declared by an active manifest. Replay inspection uses this
+/// external manifest authority to apply the same target-refresh policy as the writer.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ManifestChainSourceFamily {
+    pub chain: String,
+    pub source_family: String,
+}
+
 /// A root, contract, or proxy-implementation address declared by an active manifest payload.
 /// This remains authoritative even when a partial restore has lost its materialized
 /// `manifest_contract_instances` or `contract_instance_addresses` row.
@@ -129,10 +137,16 @@ pub struct ActiveManifestEventSource {
     pub chain: String,
     pub namespace: String,
     pub source_family: String,
+    /// Distinct normalized event kinds declared by the active manifest ABI. Projection-content
+    /// inspection maps these declarations to the current projection writers they can feed.
+    pub normalized_event_kinds: Vec<String>,
     pub normalized_event_count: i64,
     /// Matching normalized events whose exact lineage anchor is absent or is no longer
     /// canonical/safe/finalized.
     pub normalized_events_missing_canonical_lineage_count: i64,
+    /// Matching serving-canonical events sourced from a raw log whose exact canonical raw-log
+    /// row, including its canonical lineage anchor, is absent.
+    pub normalized_events_missing_canonical_raw_log_count: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -201,6 +215,9 @@ pub struct DataCompletenessRead {
     pub present_deferred_projection_indexes: Vec<String>,
     /// `(chain, namespace)` declared by active manifest versions — active-chain authority.
     pub manifest_chain_namespaces: Vec<ManifestChainNamespace>,
+    /// `(chain, source_family)` declared by active manifests. This lets the gate interpret
+    /// latched replay cursors using the writer's shared adapter replay policy.
+    pub manifest_chain_source_families: Vec<ManifestChainSourceFamily>,
     /// Active manifest payload targets whose declaration/implementation instance or live
     /// address row does not match the payload's chain and address. A non-empty list is a
     /// watch-authority gap.
@@ -255,6 +272,7 @@ pub async fn load_data_completeness(pool: &sqlx::PgPool) -> Result<DataCompleten
         backfill_lifecycle: load_backfill_lifecycle(pool).await?,
         present_deferred_projection_indexes: load_present_deferred_projection_indexes(pool).await?,
         manifest_chain_namespaces: load_manifest_chain_namespaces(pool).await?,
+        manifest_chain_source_families: load_manifest_chain_source_families(pool).await?,
         manifest_declared_targets_missing_address: load_manifest_declared_targets_missing_address(
             pool,
         )

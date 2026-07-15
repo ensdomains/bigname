@@ -2,14 +2,17 @@ use super::backfill_coverage::{
     BackfillCoverageGap, BackfillCoverageInspection, BackfillCoverageTopicDrift,
 };
 use super::evaluate::{CheckStatus, DEFAULT_MAX_HEAD_LAG_BLOCKS, evaluate_data_completeness};
+use super::manifest_corpus::ManifestCorpusInspection;
+use super::projection_content::{ProjectionContentInspection, ProjectionTableContent};
+use crate::inspect::RetentionMode;
 use crate::replay::{ALL_CURRENT_PROJECTION_ORDER, CURRENT_PROJECTION_REPLAY_VERSION};
 use bigname_manifests::{WatchedContract, WatchedContractSource};
 use bigname_storage::{
     ActiveManifestEventSource, BackfillLifecycleRow, ChainCompletenessRow,
     DEFERRED_NORMALIZED_EVENT_INDEXES, DataCompletenessRead, DiscoveryTargetMissingAddress,
-    DiscoveryTargetMissingManifest, ManifestChainNamespace, ManifestDeclaredTarget,
-    NameCurrentCount, ObservedCodeAddress, ProjectionApplyCursorRow, ProjectionReplayMarker,
-    ReplayCursorRow,
+    DiscoveryTargetMissingManifest, ManifestChainNamespace, ManifestChainSourceFamily,
+    ManifestDeclaredTarget, NameCurrentCount, ObservedCodeAddress, ProjectionApplyCursorRow,
+    ProjectionReplayMarker, ReplayCursorRow,
 };
 use uuid::Uuid;
 
@@ -43,6 +46,22 @@ fn all_deferred_indexes() -> Vec<String> {
         .iter()
         .map(|name| (*name).to_owned())
         .collect()
+}
+
+fn complete_projection_content() -> ProjectionContentInspection {
+    ProjectionContentInspection {
+        tables: ALL_CURRENT_PROJECTION_ORDER
+            .iter()
+            .map(|projection| ProjectionTableContent {
+                projection: (*projection).to_owned(),
+                scope_kind: "global",
+                total_count: 1,
+                scoped_counts: vec![],
+                expected_scopes: vec![],
+                missing_scopes: vec![],
+            })
+            .collect(),
+    }
 }
 
 fn watched(address: &str, source: WatchedContractSource) -> WatchedContract {
@@ -86,8 +105,10 @@ fn active_event_source(
         chain: CHAIN.to_owned(),
         namespace: NAMESPACE.to_owned(),
         source_family: source_family.to_owned(),
+        normalized_event_kinds: vec!["ResolverChanged".to_owned()],
         normalized_event_count,
         normalized_events_missing_canonical_lineage_count: 0,
+        normalized_events_missing_canonical_raw_log_count: 0,
     }
 }
 
@@ -186,6 +207,10 @@ fn healthy_read() -> DataCompletenessRead {
         backfill_lifecycle: vec![],
         present_deferred_projection_indexes: all_deferred_indexes(),
         manifest_chain_namespaces: vec![manifest_ns(CHAIN, NAMESPACE)],
+        manifest_chain_source_families: vec![ManifestChainSourceFamily {
+            chain: CHAIN.to_owned(),
+            source_family: "ens_v2_registry_l1".to_owned(),
+        }],
         manifest_declared_targets_missing_address: vec![],
         manifest_proxy_implementations_missing_edge: vec![],
         discovery_targets_missing_address: vec![],
@@ -197,11 +222,22 @@ fn evaluate(
     read: &DataCompletenessRead,
     watched_contracts: &[WatchedContract],
 ) -> super::evaluate::DataCompletenessReport {
+    evaluate_with_retention(read, watched_contracts, RetentionMode::Minimal)
+}
+
+fn evaluate_with_retention(
+    read: &DataCompletenessRead,
+    watched_contracts: &[WatchedContract],
+    retention_mode: RetentionMode,
+) -> super::evaluate::DataCompletenessReport {
     evaluate_data_completeness(
         read,
         watched_contracts,
         &BackfillCoverageInspection::default(),
+        &ManifestCorpusInspection::default(),
+        &complete_projection_content(),
         DEFAULT_MAX_HEAD_LAG_BLOCKS,
+        retention_mode,
     )
 }
 
@@ -233,7 +269,10 @@ fn uncovered_retained_backfill_span_fails() {
         &read,
         &registry_only(),
         &coverage,
+        &ManifestCorpusInspection::default(),
+        &complete_projection_content(),
         DEFAULT_MAX_HEAD_LAG_BLOCKS,
+        RetentionMode::Minimal,
     );
 
     assert_eq!(report.stored_lineage_backfill_coverage(), CheckStatus::Fail);
@@ -259,7 +298,10 @@ fn drifted_backfill_topic_set_fails() {
         &read,
         &registry_only(),
         &coverage,
+        &ManifestCorpusInspection::default(),
+        &complete_projection_content(),
         DEFAULT_MAX_HEAD_LAG_BLOCKS,
+        RetentionMode::Minimal,
     );
 
     assert_eq!(report.stored_lineage_backfill_coverage(), CheckStatus::Fail);
@@ -323,6 +365,54 @@ fn pre_admission_code_observation_does_not_cover_active_target() {
     assert_eq!(report.watch_set_observed(), CheckStatus::Fail);
     assert_eq!(report.unobserved_targets.len(), 1);
     assert!(!report.data_complete());
+}
+
+#[test]
+fn preactivation_target_passes_coverage_with_pending_advisory() {
+    let mut read = healthy_read();
+    read.observed_code_addresses.clear();
+    read.manifest_declared_targets[0].active_from_block_number = Some(1_500);
+    let mut registry = watched(REGISTRY, WatchedContractSource::ManifestContract);
+    registry.active_from_block_number = Some(1_500);
+    let report = evaluate(&read, &[registry]);
+
+    assert_eq!(report.watch_set_observed(), CheckStatus::Pass);
+    assert!(report.unobserved_targets.is_empty());
+    assert_eq!(report.pending_activation_targets.len(), 1);
+    assert_eq!(
+        report.pending_activation_targets[0].canonical_head_block_number,
+        1_000
+    );
+    assert!(report.data_complete());
+}
+
+#[test]
+fn activated_target_without_observation_still_fails_coverage() {
+    let mut read = healthy_read();
+    read.observed_code_addresses.clear();
+    read.manifest_declared_targets[0].active_from_block_number = Some(500);
+    let mut registry = watched(REGISTRY, WatchedContractSource::ManifestContract);
+    registry.active_from_block_number = Some(500);
+    let report = evaluate(&read, &[registry]);
+
+    assert_eq!(report.watch_set_observed(), CheckStatus::Fail);
+    assert!(report.pending_activation_targets.is_empty());
+    assert_eq!(report.unobserved_targets.len(), 1);
+}
+
+#[test]
+fn future_start_without_canonical_head_is_not_exempted() {
+    let mut read = healthy_read();
+    read.observed_code_addresses.clear();
+    read.chains[0].canonical_block_number = None;
+    read.manifest_declared_targets[0].active_from_block_number = Some(1_500);
+    let mut registry = watched(REGISTRY, WatchedContractSource::ManifestContract);
+    registry.active_from_block_number = Some(1_500);
+    let report = evaluate(&read, &[registry]);
+
+    assert_eq!(report.watch_set_observed(), CheckStatus::Fail);
+    assert!(report.pending_activation_targets.is_empty());
+    assert_eq!(report.unobserved_targets.len(), 1);
 }
 
 /// Direct manifest declarations remain coverage authority if a partial restore loses the
@@ -528,15 +618,18 @@ fn unresolved_active_deployment_profile_fails_normalization() {
     assert!(!report.data_complete());
 }
 
+/// Backlog cursor residue cannot latch a stateless chain; current source-family policy is the
+/// writer's target-refresh authority.
 #[test]
-fn replay_cursor_behind_canonical_raw_log_head_fails() {
+fn stateless_replay_cursor_behind_head_fails_despite_backlog_residue() {
     let mut read = healthy_read();
+    read.manifest_chain_source_families[0].source_family = "ens_v1_reverse_l1".to_owned();
     read.chains = vec![ChainCompletenessRow {
         canonical_raw_log_head_block_number: Some(900),
         raw_log_head_block_number: Some(900),
         ..chain_row(1_000, 1_000, 1, 1_000)
     }];
-    read.replay_cursors = vec![replay_cursor(800, None)];
+    read.replay_cursors = vec![replay_cursor(800, None), backlog_cursor(801, 901, 900)];
     let report = evaluate(&read, &registry_only());
 
     assert_eq!(report.normalization_caught_up(), CheckStatus::Fail);
@@ -612,6 +705,24 @@ fn active_normalized_events_missing_lineage_fail() {
         3
     );
     assert!(!report.data_complete());
+}
+
+#[test]
+fn missing_raw_log_is_mode_dependent() {
+    let mut read = healthy_read();
+    read.active_manifest_event_sources[0].normalized_events_missing_canonical_raw_log_count = 1;
+
+    let minimal = evaluate_with_retention(&read, &registry_only(), RetentionMode::Minimal);
+    assert_eq!(minimal.active_raw_logs_retained(), CheckStatus::Pass);
+    assert!(minimal.data_complete());
+
+    let log_audit = evaluate_with_retention(&read, &registry_only(), RetentionMode::LogAudit);
+    assert_eq!(log_audit.active_raw_logs_retained(), CheckStatus::Fail);
+    assert_eq!(
+        log_audit.active_manifest_sources_with_missing_raw_logs[0].missing_canonical_raw_log_count,
+        1
+    );
+    assert!(!log_audit.data_complete());
 }
 
 #[test]
@@ -753,17 +864,30 @@ fn checkpoint_hash_without_canonical_lineage_anchor_fails_frontier() {
     assert!(!report.data_complete());
 }
 
-/// A stale checkpoint writer or mixed restore leaves the checkpoint far behind the lineage
-/// head, giving a negative lag beyond tolerance.
+/// Reconcile may commit a full live contiguous gap before advancing the checkpoint, so the
+/// writer's admitted gap-fill range is a healthy negative lag.
 #[test]
-fn large_negative_head_lag_fails_frontier() {
+fn lineage_ahead_within_writer_gap_limit_passes_frontier() {
     let mut read = healthy_read();
     read.chains = vec![chain_row(900, 1_000, 1, 1_000)];
     let report = evaluate(&read, &registry_only());
 
     assert_eq!(report.frontiers[0].head_lag_blocks, Some(-100));
+    assert_eq!(report.frontier_at_head(), CheckStatus::Pass);
+}
+
+#[test]
+fn lineage_ahead_beyond_writer_gap_limit_fails_frontier() {
+    let mut read = healthy_read();
+    let lineage_head = bigname_storage::MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS + 2;
+    read.chains = vec![chain_row(1, lineage_head, 1, lineage_head)];
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(
+        report.frontiers[0].head_lag_blocks,
+        Some(-(bigname_storage::MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS + 1))
+    );
     assert_eq!(report.frontier_at_head(), CheckStatus::Fail);
-    assert!(!report.data_complete());
 }
 
 /// A chain the active watch set declares but that is absent from checkpoints and lineage
@@ -918,8 +1042,10 @@ fn foreign_chain_content_does_not_satisfy_an_empty_active_chain() {
             chain: "base-mainnet".to_owned(),
             namespace: NAMESPACE.to_owned(),
             source_family: "foreign_registry".to_owned(),
+            normalized_event_kinds: vec!["ResolverChanged".to_owned()],
             normalized_event_count: 500,
             normalized_events_missing_canonical_lineage_count: 0,
+            normalized_events_missing_canonical_raw_log_count: 0,
         });
     read.name_current_counts = vec![names(NAMESPACE, 20)];
     let report = evaluate(&read, &registry_only());
@@ -987,6 +1113,20 @@ fn latched_chain_at_targets_is_caught_up() {
         replay_cursor(1_000, None),
         backlog_cursor(1_001, 2_001, 2_000),
     ];
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.normalization_caught_up(), CheckStatus::Pass);
+    assert!(report.lagging_replay_cursors.is_empty());
+    assert!(report.data_complete());
+}
+
+/// The backlog sweep writes no cursor row when a quiet closure-replay chain has no work above
+/// the latched raw-fact target. Active adapter policy, not backlog-row existence, identifies
+/// the latched completion authority.
+#[test]
+fn quiet_latched_chain_without_backlog_cursor_is_caught_up() {
+    let mut read = latched_chain_read();
+    read.replay_cursors = vec![replay_cursor(1_000, None)];
     let report = evaluate(&read, &registry_only());
 
     assert_eq!(report.normalization_caught_up(), CheckStatus::Pass);

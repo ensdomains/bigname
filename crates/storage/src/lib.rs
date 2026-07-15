@@ -118,9 +118,10 @@ pub use children::{
 pub use data_completeness::{
     ActiveManifestEventSource, BackfillLifecycleRow, ChainCompletenessRow,
     DEFERRED_NORMALIZED_EVENT_INDEXES, DataCompletenessRead, DiscoveryTargetMissingAddress,
-    DiscoveryTargetMissingManifest, ManifestChainNamespace, ManifestDeclaredTarget,
-    NameCurrentCount, ObservedCodeAddress, ProjectionApplyCursorRow, ProjectionReplayMarker,
-    ReplayCursorRow, load_active_manifest_deployment_profile, load_data_completeness,
+    DiscoveryTargetMissingManifest, ManifestChainNamespace, ManifestChainSourceFamily,
+    ManifestDeclaredTarget, NameCurrentCount, ObservedCodeAddress, ProjectionApplyCursorRow,
+    ProjectionReplayMarker, ReplayCursorRow, load_active_manifest_deployment_profile,
+    load_data_completeness,
 };
 pub use evm_primitives::{normalize_evm_address, normalize_evm_b256};
 pub use execution::{
@@ -177,11 +178,11 @@ pub use label_preimages::{
     upsert_label_preimages_from_normalized_events, upsert_label_preimages_in_transaction,
 };
 pub use lineage::{
-    CanonicalityState, ChainLineageBlock, chain_lineage_contains_ancestor,
-    chain_lineage_contains_canonical_ancestor_position, load_chain_lineage_block,
-    load_chain_lineage_canonical_child_path, load_highest_canonical_chain_lineage_block,
-    mark_chain_lineage_range_orphaned, upsert_chain_lineage_blocks,
-    upsert_chain_lineage_blocks_recanonicalizing_orphaned,
+    CanonicalityState, ChainLineageBlock, MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS,
+    chain_lineage_contains_ancestor, chain_lineage_contains_canonical_ancestor_position,
+    load_chain_lineage_block, load_chain_lineage_canonical_child_path,
+    load_highest_canonical_chain_lineage_block, mark_chain_lineage_range_orphaned,
+    upsert_chain_lineage_blocks, upsert_chain_lineage_blocks_recanonicalizing_orphaned,
     upsert_chain_lineage_blocks_without_snapshots,
     upsert_chain_lineage_blocks_without_snapshots_recanonicalizing_orphaned,
 };
