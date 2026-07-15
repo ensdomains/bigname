@@ -601,11 +601,13 @@ an additional refusal for already-stored ambiguity, not a substitute for the
 finalized bootstrap bound. Manual ranged number-keyed backfills still have no
 per-fact finality watermark, so operators must not give them an upper bound
 above the validation provider's finalized head.
-- Selected-log companion rows missing: rerun the selected hash-pinned backfill
-  so raw code, transaction, and receipt rows are persisted with the selected
-  logs. A retained same-transaction sibling log does not require a code row for
-  its emitter unless that sibling itself matches the watched family, active
-  window, and current family topic0 set.
+- Selected-log companion rows missing: rerun the selected hash-pinned backfill so
+  raw code, transaction, and receipt rows are persisted with the selected logs.
+  The demand is scoped the way backfill writes companions: a stored log demands
+  them only when its emitter is watched under a source family, its block is
+  inside that watched entry's active window, and its topic0 is in the family's
+  current manifest ABI topic0 set. Sibling-retained foreign-topic logs from
+  watched addresses never demand companions.
 - Missing event-silent current resolver state after catch-up: let ordinary live
   reconciliation process the current tip so direct-call observations are
   retained for the built-in Ethereum Mainnet event-silent reverse resolver set.
