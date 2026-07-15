@@ -1698,6 +1698,253 @@ async fn reconcile_fetched_heads_refuses_watched_tuple_without_coverage_facts() 
     Ok(())
 }
 
+/// Scaffolds a large-gap stored-lineage promotion over base-mainnet with one
+/// watched contract and a single seeded raw log (block 11, inside the first
+/// promoted batch), then runs one reconciliation cycle. Transactions and
+/// receipts are always seeded for the log; `seed_code_rows` controls its code
+/// companion, `log_topic0` its selectedness, and
+/// `watched_active_from_block_number` narrows the watched entry's active
+/// window. Returns the reconciliation result, the checkpoint block number,
+/// and the handles the caller must clean up.
+async fn companion_scope_promotion_scenario(
+    manifest_id: i64,
+    log_topic0: &str,
+    seed_code_rows: bool,
+    watched_active_from_block_number: Option<i64>,
+) -> Result<(
+    Result<Option<(IntakeChainTask, ChainReconciliationOutcome)>>,
+    i64,
+    TestDatabase,
+    JoinHandle<()>,
+)> {
+    let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let chain = "base-mainnet";
+    let stored_safe_block_number =
+        crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS * 2 + 7;
+    let live_latest_block_number = stored_safe_block_number + 25;
+    let mut blocks = Vec::new();
+    let mut parent_hash = None::<String>;
+    for block_number in 1..=live_latest_block_number {
+        let block_hash = format!("0x{block_number:064x}");
+        let block = provider_block(&block_hash, parent_hash.as_deref(), block_number);
+        parent_hash = Some(block_hash);
+        blocks.push(block);
+    }
+    let current = blocks
+        .first()
+        .expect("test chain must include a current block")
+        .clone();
+    let latest = blocks
+        .last()
+        .expect("test chain must include a latest block")
+        .clone();
+    let stored_safe = blocks
+        .iter()
+        .find(|block| block.block_number == stored_safe_block_number)
+        .expect("test chain must include the stored safe block")
+        .clone();
+    for block in &blocks {
+        if block.block_number > stored_safe_block_number {
+            continue;
+        }
+        let state = if block.block_number == stored_safe_block_number {
+            CanonicalityState::Safe
+        } else {
+            CanonicalityState::Canonical
+        };
+        insert_chain_lineage_for_block(database.pool(), chain, block, state).await?;
+    }
+    let selected_address = "0x0000000000000000000000000000000000000001";
+    insert_reconcile_watched_manifest_contract(
+        database.pool(),
+        manifest_id,
+        "test",
+        chain,
+        "test_source_family",
+        Uuid::from_u128(u128::try_from(manifest_id).expect("non-negative test manifest id")),
+        selected_address,
+    )
+    .await?;
+    if let Some(active_from_block_number) = watched_active_from_block_number {
+        sqlx::query(
+            r#"
+            UPDATE contract_instance_addresses
+            SET active_from_block_number = $1
+            WHERE chain_id = $2
+              AND LOWER(address) = LOWER($3)
+            "#,
+        )
+        .bind(active_from_block_number)
+        .bind(chain)
+        .bind(selected_address)
+        .execute(database.pool())
+        .await
+        .context("failed to narrow the watched active window")?;
+    }
+    insert_raw_log_inputs_with_topic0(
+        database.pool(),
+        chain,
+        &[blocks[10].clone()],
+        selected_address,
+        log_topic0,
+        seed_code_rows,
+        false,
+    )
+    .await?;
+    insert_completed_backfill_range_coverage(
+        database.pool(),
+        chain,
+        current.block_number + 1,
+        stored_safe_block_number,
+        &[selected_address],
+    )
+    .await?;
+    insert_chain_checkpoint(
+        database.pool(),
+        &ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    )
+    .await?;
+    let (provider, server) = bundle_provider(vec![latest.clone(), stored_safe.clone()]).await?;
+    let task = IntakeChainTask {
+        chain: chain.to_owned(),
+        addresses: vec![selected_address.to_owned()],
+        manifest_root_entry_count: 0,
+        manifest_contract_entry_count: 1,
+        discovery_edge_entry_count: 0,
+        checkpoint: ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    };
+
+    let outcome = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: latest,
+            safe: Some(stored_safe),
+            finalized: None,
+        },
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+        &ChainCoverageFrontiers::default(),
+    )
+    .await;
+
+    Ok((outcome, current.block_number, database, server))
+}
+
+/// A sibling-retained log from a watched address whose topic0 is not in the
+/// watched family's manifest ABI topic0 set never receives a write-side code
+/// observation (backfill scopes code observations to family-selected log
+/// emitters), so promotion must not demand one.
+#[tokio::test]
+async fn reconcile_fetched_heads_promotes_despite_foreign_topic_sibling_log_without_code_row()
+-> Result<()> {
+    let (outcome, current_block_number, database, server) = companion_scope_promotion_scenario(
+        10_060,
+        &keccak256_hex(b"BaseReverseClaimed(address,bytes32)"),
+        false,
+        None,
+    )
+    .await?;
+
+    let (task, outcome) = outcome
+        .expect("foreign-topic sibling log must not block stored lineage promotion")
+        .expect("stored lineage promotion must advance the checkpoint");
+    assert_eq!(
+        outcome.canonical_status,
+        CanonicalReconciliationStatus::StoredLineagePromoted
+    );
+    assert_eq!(
+        task.checkpoint.canonical_block_number,
+        Some(current_block_number + crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS)
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// A family-selected log (watched emitter, in-window, family topic0) missing
+/// its raw code companion must still refuse promotion with the actionable
+/// per-kind counts.
+#[tokio::test]
+async fn reconcile_fetched_heads_refuses_family_selected_log_missing_code_companion() -> Result<()>
+{
+    let (outcome, current_block_number, database, server) =
+        companion_scope_promotion_scenario(10_061, &family_selected_test_topic0(), false, None)
+            .await?;
+
+    let error = outcome
+        .expect_err("a family-selected log without its code companion must refuse promotion");
+    let refusal = format!("{error:#}");
+    assert!(
+        refusal.contains(&format!(
+            "stored lineage selected logs over {}..={} are missing raw code/transaction/receipt companion rows (missing code: 1, transactions: 0, receipts: 0)",
+            current_block_number + 1,
+            current_block_number + crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS
+        )),
+        "companion refusal must report the range and per-kind counts: {refusal}"
+    );
+    assert!(
+        refusal.contains("rerun hash-pinned backfill for the selected range before retrying"),
+        "companion refusal must include an actionable remedy: {refusal}"
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// A family-topic0 log emitted before the address's watched active window
+/// opened was never fetch-selected (backfill selection is window-scoped), so
+/// its missing code companion must not block promotion.
+#[tokio::test]
+async fn reconcile_fetched_heads_promotes_when_selected_topic_log_predates_watched_window()
+-> Result<()> {
+    let log_block_number = 11;
+    let (outcome, current_block_number, database, server) = companion_scope_promotion_scenario(
+        10_062,
+        &family_selected_test_topic0(),
+        false,
+        Some(log_block_number + 1),
+    )
+    .await?;
+
+    let (task, outcome) = outcome
+        .expect("an out-of-window log must not block stored lineage promotion")
+        .expect("stored lineage promotion must advance the checkpoint");
+    assert_eq!(
+        outcome.canonical_status,
+        CanonicalReconciliationStatus::StoredLineagePromoted
+    );
+    assert_eq!(
+        task.checkpoint.canonical_block_number,
+        Some(current_block_number + crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS)
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn reconcile_fetched_heads_promotes_completed_coverage_with_orphaned_same_height_repair_row()
 -> Result<()> {
@@ -5357,11 +5604,39 @@ async fn insert_retained_full_block_payloads<'a>(
     Ok(())
 }
 
+/// Topic0 of a `test_source_family` manifest ABI event (the default test
+/// manifest payload declares `NewOwner(bytes32,bytes32,address)`), so seeded
+/// logs are family-selected and demand raw companions during promotion.
+fn family_selected_test_topic0() -> String {
+    keccak256_hex(b"NewOwner(bytes32,bytes32,address)")
+}
+
 async fn insert_selected_raw_log_inputs(
     pool: &sqlx::PgPool,
     chain: &str,
     blocks: &[crate::provider::ProviderBlock],
     selected_address: &str,
+    retain_full_payloads: bool,
+) -> Result<()> {
+    insert_raw_log_inputs_with_topic0(
+        pool,
+        chain,
+        blocks,
+        selected_address,
+        &family_selected_test_topic0(),
+        true,
+        retain_full_payloads,
+    )
+    .await
+}
+
+async fn insert_raw_log_inputs_with_topic0(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    blocks: &[crate::provider::ProviderBlock],
+    selected_address: &str,
+    topic0: &str,
+    seed_code_rows: bool,
     retain_full_payloads: bool,
 ) -> Result<()> {
     let selected_address = selected_address.to_ascii_lowercase();
@@ -5402,19 +5677,21 @@ async fn insert_selected_raw_log_inputs(
             transaction_index: 0,
             log_index: 0,
             emitting_address: selected_address.clone(),
-            topics: vec![format!("0x{:064x}", 1)],
+            topics: vec![topic0.to_owned()],
             data: vec![1],
             canonicality_state: CanonicalityState::Canonical,
         });
-        code_hashes.push(bigname_storage::RawCodeHash {
-            chain_id: chain.to_owned(),
-            block_hash: block.block_hash.clone(),
-            block_number: block.block_number,
-            contract_address: selected_address.clone(),
-            code_hash: format!("0x{:064x}", block.block_number + 20_000),
-            code_byte_length: 1,
-            canonicality_state: CanonicalityState::Canonical,
-        });
+        if seed_code_rows {
+            code_hashes.push(bigname_storage::RawCodeHash {
+                chain_id: chain.to_owned(),
+                block_hash: block.block_hash.clone(),
+                block_number: block.block_number,
+                contract_address: selected_address.clone(),
+                code_hash: format!("0x{:064x}", block.block_number + 20_000),
+                code_byte_length: 1,
+                canonicality_state: CanonicalityState::Canonical,
+            });
+        }
     }
 
     bigname_storage::upsert_raw_transactions(pool, &transactions).await?;
