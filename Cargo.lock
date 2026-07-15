@@ -1808,6 +1808,7 @@ name = "bigname-worker"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bigname-adapters",
  "bigname-domain",
  "bigname-execution",
  "bigname-manifests",
@@ -1815,6 +1816,7 @@ dependencies = [
  "bigname-test-support",
  "clap",
  "futures-util",
+ "serde",
  "serde_json",
  "sqlx",
  "tokio",

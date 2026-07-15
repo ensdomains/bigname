@@ -1,21 +1,17 @@
-//! Topic-set drift guard: coverage facts assert topics-complete fetches, so
-//! promotion must refuse when a family's manifest ABI topic0 set no longer
-//! matches the set a completed topic-filtered job persisted.
+//! Topic-set drift guard for durable coverage facts.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use bigname_storage::load_completed_backfill_jobs_intersecting_range;
 use serde_json::Value;
 
-/// Fail closed on topic-set drift: coverage facts assert fetches that were
-/// topics-complete relative to the family's manifest ABI event set at fetch
-/// time. If a family's current topic0 set differs from the set persisted in
-/// any completed topic-filtered job intersecting the evaluated range — or a
-/// topic-filtered job did not persist its set at all — the facts may
-/// overclaim relative to the current ABI, so promotion refuses naming the
-/// family. Address-enumerated hash-pinned fetches are topic-unfiltered and
-/// immune.
-pub(super) async fn ensure_family_topic_sets_undrifted(
+use super::load_completed_backfill_jobs_intersecting_range;
+
+/// Fail closed on topic-set drift: coverage facts assert fetches that were topics-complete
+/// relative to the family's manifest ABI event set at fetch time. If a family's current topic0
+/// set differs from the set persisted in any completed topic-filtered job intersecting the
+/// evaluated range—or a topic-filtered job did not persist its set—the facts may overclaim.
+/// Address-enumerated hash-pinned fetches are topic-unfiltered and immune.
+pub async fn ensure_backfill_family_topic_sets_undrifted(
     pool: &sqlx::PgPool,
     chain: &str,
     current_topic0s_by_family: &BTreeMap<String, BTreeSet<String>>,
@@ -82,8 +78,8 @@ pub(super) async fn ensure_family_topic_sets_undrifted(
 }
 
 /// The persisted topic0 sets a topic-filtered job fetched under: nested in
-/// `coinbase_sql_topic_plan` for Coinbase SQL jobs, or top-level for the
-/// hash-pinned Basenames registry scan-all shape.
+/// `coinbase_sql_topic_plan` for Coinbase SQL jobs, or top-level for the hash-pinned Basenames
+/// registry scan-all shape.
 fn persisted_topic0s_by_source_family(
     source_identity: &Value,
 ) -> Option<&serde_json::Map<String, Value>> {
@@ -98,9 +94,8 @@ fn persisted_topic0s_by_source_family(
         })
 }
 
-/// Families a job fetched through topic-filtered generic scans whose identity
-/// does not persist the topic set in force (hash-pinned generic resolver
-/// scans; identities with persisted topic sets are checked above).
+/// Families a job fetched through topic-filtered generic scans whose identity does not persist
+/// the topic set in force. Identities with persisted topic sets are checked above.
 fn topic_filtered_families_without_persisted_sets(source_identity: &Value) -> Vec<String> {
     if persisted_topic0s_by_source_family(source_identity).is_some() {
         return Vec::new();

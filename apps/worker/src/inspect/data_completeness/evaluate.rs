@@ -1,0 +1,590 @@
+mod helpers;
+mod report;
+
+pub(super) use report::{CheckStatus, CursorLag, DataCompletenessReport};
+
+use crate::{
+    projection_apply::NORMALIZED_EVENT_CURSOR,
+    replay::{ALL_CURRENT_PROJECTION_ORDER, CURRENT_PROJECTION_REPLAY_VERSION},
+};
+use bigname_manifests::WatchedContract;
+use bigname_storage::{
+    DEFERRED_NORMALIZED_EVENT_INDEXES, DataCompletenessRead, MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS,
+};
+use helpers::{
+    ActiveTargetInfo, ChainStartInfo, chain_frontier, cursor_label, latched_replay_lag,
+    missing_chain_frontier, replay_complete_lag,
+};
+use report::{
+    ChainWithoutFiniteStart, HistoryTruncation, MissingManifestContent, MissingManifestLineage,
+    MissingManifestRawLogs, PendingActivationTarget, UnobservedTarget,
+};
+use std::collections::{BTreeMap, BTreeSet};
+
+use super::{
+    backfill_coverage::BackfillCoverageInspection, manifest_corpus::ManifestCorpusInspection,
+    projection_content::ProjectionContentInspection,
+};
+use crate::inspect::RetentionMode;
+
+/// Blocks the stored canonical checkpoint may lead the reconciliation lineage head before the
+/// frontier check fails. The opposite direction uses the writer's live contiguous gap limit.
+pub(super) const DEFAULT_MAX_HEAD_LAG_BLOCKS: i64 = 8;
+
+pub(super) const RAW_FACT_NORMALIZED_EVENTS_CURSOR: &str = "raw_fact_normalized_events";
+
+/// A chain that has this cursor ran closure/dependency replay, which latches the
+/// `raw_fact_normalized_events` cursor's target permanently below the live head; newer logs
+/// are swept by the backlog cursor and then live adapter sync. On such a chain the raw-fact
+/// cursor is caught up when it reaches its own latched target, not the raw-log head.
+pub(super) const POST_REPLAY_LIVE_ADAPTER_BACKLOG_CURSOR: &str = "post_replay_live_adapter_backlog";
+
+pub(super) fn evaluate_data_completeness(
+    read: &DataCompletenessRead,
+    watched_contracts: &[WatchedContract],
+    backfill_coverage: &BackfillCoverageInspection,
+    manifest_corpus: &ManifestCorpusInspection,
+    projection_content: &ProjectionContentInspection,
+    max_head_lag_blocks: i64,
+    retention_mode: RetentionMode,
+) -> DataCompletenessReport {
+    let observed = read
+        .observed_code_addresses
+        .iter()
+        .map(|entry| {
+            (
+                (entry.chain_id.clone(), entry.address.to_ascii_lowercase()),
+                entry.max_observed_block_number,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let canonical_heads = read
+        .chains
+        .iter()
+        .filter_map(|chain| {
+            chain
+                .canonical_block_number
+                .map(|head| (chain.chain_id.as_str(), head))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    // Direct manifest declarations remain authority even if a partial restore lost the
+    // contract_instance_addresses row that normally materializes them into the watch view.
+    // Entries are deduplicated before deriving per-address coverage and per-chain history.
+    let mut active_target_entries = BTreeSet::<(String, String, String, Option<i64>)>::new();
+    for contract in watched_contracts
+        .iter()
+        .filter(|contract| contract.active_to_block_number.is_none())
+    {
+        active_target_entries.insert((
+            contract.chain.clone(),
+            contract.address.to_ascii_lowercase(),
+            contract.source_family.clone(),
+            contract.active_from_block_number,
+        ));
+    }
+    for target in &read.manifest_declared_targets {
+        active_target_entries.insert((
+            target.chain.clone(),
+            target.address.to_ascii_lowercase(),
+            target.source_family.clone(),
+            target.active_from_block_number,
+        ));
+    }
+
+    let pending_activation_targets = active_target_entries
+        .iter()
+        .filter_map(
+            |(chain, address, source_family, active_from_block_number)| {
+                let start = active_from_block_number.as_ref().copied()?;
+                let canonical_head = canonical_heads.get(chain.as_str()).copied()?;
+                (start > canonical_head).then(|| PendingActivationTarget {
+                    chain: chain.clone(),
+                    address: address.clone(),
+                    source_family: source_family.clone(),
+                    active_from_block_number: start,
+                    canonical_head_block_number: canonical_head,
+                })
+            },
+        )
+        .collect::<Vec<_>>();
+    let pending_activation_entries = pending_activation_targets
+        .iter()
+        .map(|target| {
+            (
+                target.chain.as_str(),
+                target.address.as_str(),
+                target.source_family.as_str(),
+                target.active_from_block_number,
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let active_watched_target_count = active_target_entries
+        .iter()
+        .map(|(chain, address, _, _)| (chain, address))
+        .collect::<BTreeSet<_>>()
+        .len();
+
+    // Coverage is address-scoped. Pre-activation declarations remain active authority but do
+    // not require an impossible code observation above the stored canonical head. If multiple
+    // current source entries share an address, the latest finite start is the strictest lower
+    // bound and proves every current entry was observed after its admission.
+    let mut active_targets = BTreeMap::<(String, String), ActiveTargetInfo>::new();
+    for (chain, address, source_family, active_from_block_number) in &active_target_entries {
+        if active_from_block_number.is_some_and(|start| {
+            pending_activation_entries.contains(&(
+                chain.as_str(),
+                address.as_str(),
+                source_family.as_str(),
+                start,
+            ))
+        }) {
+            continue;
+        }
+        let target = active_targets
+            .entry((chain.clone(), address.clone()))
+            .or_insert_with(|| ActiveTargetInfo {
+                source_family: source_family.clone(),
+                active_from_block_number: *active_from_block_number,
+            });
+        if active_from_block_number > &target.active_from_block_number {
+            target.source_family = source_family.clone();
+            target.active_from_block_number = *active_from_block_number;
+        }
+    }
+
+    let unobserved_targets = active_targets
+        .iter()
+        .filter_map(|((chain, address), target)| {
+            let max_observed_block_number =
+                observed.get(&(chain.clone(), address.clone())).copied();
+            let covered = match target.active_from_block_number {
+                Some(start) => max_observed_block_number.is_some_and(|block| block >= start),
+                None => max_observed_block_number.is_some(),
+            };
+            (!covered).then(|| UnobservedTarget {
+                chain: chain.clone(),
+                address: address.clone(),
+                source_family: target.source_family.clone(),
+                active_from_block_number: target.active_from_block_number,
+                max_observed_block_number,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    // Keep the structural address-materialization check separate from code observation. The
+    // direct manifest union above prevents a missing address row from shrinking coverage, while
+    // this diagnostic identifies the broken authority edge itself.
+    let manifest_targets_missing_address = read
+        .manifest_declared_targets_missing_address
+        .iter()
+        .map(|target| UnobservedTarget {
+            chain: target.chain.clone(),
+            address: target.address.clone(),
+            source_family: target.source_family.clone(),
+            active_from_block_number: target.active_from_block_number,
+            max_observed_block_number: observed
+                .get(&(target.chain.clone(), target.address.to_ascii_lowercase()))
+                .copied(),
+        })
+        .collect::<Vec<_>>();
+    let manifest_proxy_implementations_missing_edge = read
+        .manifest_proxy_implementations_missing_edge
+        .iter()
+        .map(|target| UnobservedTarget {
+            chain: target.chain.clone(),
+            address: target.address.clone(),
+            source_family: target.source_family.clone(),
+            active_from_block_number: target.active_from_block_number,
+            max_observed_block_number: observed
+                .get(&(target.chain.clone(), target.address.to_ascii_lowercase()))
+                .copied(),
+        })
+        .collect::<Vec<_>>();
+
+    // Per-chain declared start information across the deduplicated active source entries.
+    let mut chain_starts = BTreeMap::<String, ChainStartInfo>::new();
+    for (chain, _, _, active_from_block_number) in &active_target_entries {
+        let info = chain_starts.entry(chain.clone()).or_default();
+        info.target_count += 1;
+        match active_from_block_number {
+            Some(start) => {
+                info.finite_min_start = Some(
+                    info.finite_min_start
+                        .map_or(*start, |current| current.min(*start)),
+                );
+            }
+            None => info.open_ended_target_count += 1,
+        }
+    }
+
+    let manifest_chains = read
+        .manifest_chain_namespaces
+        .iter()
+        .map(|entry| entry.chain.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut active_chains = chain_starts.keys().cloned().collect::<BTreeSet<_>>();
+    active_chains.extend(manifest_chains.iter().map(|chain| (*chain).to_owned()));
+
+    let storage_chains = read
+        .chains
+        .iter()
+        .map(|chain| (chain.chain_id.as_str(), chain))
+        .collect::<BTreeMap<_, _>>();
+
+    // Gating frontiers cover active chains only; a foreign or retired chain with residual
+    // storage rows is an advisory, not a permanent gate failure.
+    let mut frontiers = Vec::new();
+    for chain_id in &active_chains {
+        match storage_chains.get(chain_id.as_str()) {
+            Some(row) => frontiers.push(chain_frontier(row)),
+            None => frontiers.push(missing_chain_frontier(chain_id)),
+        }
+    }
+    let foreign_chains = read
+        .chains
+        .iter()
+        .filter(|chain| !active_chains.contains(&chain.chain_id))
+        .map(|chain| chain.chain_id.clone())
+        .collect::<Vec<_>>();
+    let active_deployment_profile = read.active_deployment_profile.as_deref();
+    let cursor_is_active = |cursor: &bigname_storage::ReplayCursorRow| {
+        active_deployment_profile == Some(cursor.deployment_profile.as_str())
+            && active_chains.contains(&cursor.chain_id)
+    };
+    let ignored_replay_cursors = read
+        .replay_cursors
+        .iter()
+        .filter(|cursor| !cursor_is_active(cursor))
+        .map(cursor_label)
+        .collect::<Vec<_>>();
+
+    // History: a finite declared start requires the lineage floor to reach it; a chain whose
+    // targets are all open-ended has no floor to check and fails closed.
+    let mut chains_history_truncated = Vec::new();
+    let mut chains_without_finite_start = Vec::new();
+    for (chain, info) in &chain_starts {
+        if info.target_count == 0 {
+            continue;
+        }
+        match info.finite_min_start {
+            Some(declared_start) => {
+                let floor = storage_chains
+                    .get(chain.as_str())
+                    .and_then(|row| row.lineage_floor_block_number);
+                if !matches!(floor, Some(f) if f <= declared_start) {
+                    chains_history_truncated.push(HistoryTruncation {
+                        chain: chain.clone(),
+                        declared_start_block: declared_start,
+                        lineage_floor_block: floor,
+                    });
+                }
+            }
+            None => chains_without_finite_start.push(ChainWithoutFiniteStart {
+                chain: chain.clone(),
+                open_ended_target_count: info.open_ended_target_count,
+            }),
+        }
+    }
+
+    let canonical_raw_log_head = read
+        .chains
+        .iter()
+        .map(|chain| {
+            (
+                chain.chain_id.as_str(),
+                chain.canonical_raw_log_head_block_number,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let closure_replay_chains = read
+        .manifest_chain_source_families
+        .iter()
+        .filter(|entry| {
+            bigname_adapters::source_family_preserves_normalized_replay_target(&entry.source_family)
+        })
+        .map(|entry| entry.chain.as_str())
+        .collect::<BTreeSet<_>>();
+
+    let raw_fact_targets = read
+        .replay_cursors
+        .iter()
+        .filter(|cursor| cursor_is_active(cursor))
+        .filter(|cursor| cursor.cursor_kind == RAW_FACT_NORMALIZED_EVENTS_CURSOR)
+        .map(|cursor| {
+            (
+                (cursor.deployment_profile.as_str(), cursor.chain_id.as_str()),
+                cursor.target_block_number,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let failed_replay_cursors = read
+        .replay_cursors
+        .iter()
+        .filter(|cursor| cursor_is_active(cursor))
+        .filter(|cursor| cursor.last_failure_reason.is_some())
+        .map(cursor_label)
+        .collect::<Vec<_>>();
+
+    let post_replay_backlog_cursor_keys = read
+        .replay_cursors
+        .iter()
+        .filter(|cursor| cursor_is_active(cursor))
+        .filter(|cursor| cursor.cursor_kind == POST_REPLAY_LIVE_ADAPTER_BACKLOG_CURSOR)
+        .map(|cursor| (cursor.deployment_profile.as_str(), cursor.chain_id.as_str()))
+        .collect::<BTreeSet<_>>();
+
+    let lagging_replay_cursors = read
+        .replay_cursors
+        .iter()
+        .filter(|cursor| cursor_is_active(cursor))
+        .filter_map(|cursor| match cursor.cursor_kind.as_str() {
+            RAW_FACT_NORMALIZED_EVENTS_CURSOR => {
+                if closure_replay_chains.contains(cursor.chain_id.as_str()) {
+                    let head = canonical_raw_log_head
+                        .get(cursor.chain_id.as_str())
+                        .copied()
+                        .flatten();
+                    let key = (cursor.deployment_profile.as_str(), cursor.chain_id.as_str());
+                    latched_replay_lag(cursor, head, post_replay_backlog_cursor_keys.contains(&key))
+                } else {
+                    // Non-latched: replay must have completed its target and the target must
+                    // have reached the canonical raw-log head.
+                    let head = canonical_raw_log_head
+                        .get(cursor.chain_id.as_str())
+                        .copied()
+                        .flatten()?;
+                    if let Some(lag) = replay_complete_lag(cursor) {
+                        return Some(lag);
+                    }
+                    let target = cursor.target_block_number.unwrap_or(-1);
+                    (target < head).then(|| CursorLag {
+                        label: cursor_label(cursor),
+                        behind_by: head - target,
+                    })
+                }
+            }
+            POST_REPLAY_LIVE_ADAPTER_BACKLOG_CURSOR => {
+                let key = (cursor.deployment_profile.as_str(), cursor.chain_id.as_str());
+                let expected_start = raw_fact_targets
+                    .get(&key)
+                    .copied()
+                    .flatten()
+                    .and_then(|target| target.checked_add(1));
+                match expected_start {
+                    Some(expected) if cursor.range_start_block_number > expected => {
+                        Some(CursorLag {
+                            label: format!("{}:range_start", cursor_label(cursor)),
+                            behind_by: cursor.range_start_block_number - expected,
+                        })
+                    }
+                    Some(_) => replay_complete_lag(cursor),
+                    None => Some(CursorLag {
+                        label: format!("{}:range_start", cursor_label(cursor)),
+                        behind_by: -1,
+                    }),
+                }
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    let chains_with_raw_fact_cursor = read
+        .replay_cursors
+        .iter()
+        .filter(|cursor| cursor_is_active(cursor))
+        .filter(|cursor| cursor.cursor_kind == RAW_FACT_NORMALIZED_EVENTS_CURSOR)
+        .map(|cursor| cursor.chain_id.as_str())
+        .collect::<BTreeSet<_>>();
+
+    let chains_missing_raw_fact_cursor = read
+        .chains
+        .iter()
+        .filter(|chain| active_chains.contains(&chain.chain_id))
+        .filter(|chain| chain.canonical_raw_log_head_block_number.is_some())
+        .filter(|chain| !chains_with_raw_fact_cursor.contains(chain.chain_id.as_str()))
+        .map(|chain| chain.chain_id.clone())
+        .collect::<Vec<_>>();
+
+    let expected_projection_cursor = read
+        .projection_apply_cursors
+        .iter()
+        .find(|cursor| cursor.cursor_name == NORMALIZED_EVENT_CURSOR);
+    let lagging_projection_cursors = expected_projection_cursor
+        .into_iter()
+        .filter_map(|cursor| {
+            let max_change_id = read.max_projection_change_id?;
+            (cursor.last_change_id < max_change_id).then(|| CursorLag {
+                label: cursor.cursor_name.clone(),
+                behind_by: max_change_id - cursor.last_change_id,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let projection_apply_cursor_missing =
+        read.max_projection_change_id.is_some() && expected_projection_cursor.is_none();
+    let projection_apply_cursor_ahead_by = expected_projection_cursor.and_then(|cursor| {
+        let retained_change_high_watermark = read.max_projection_change_id.unwrap_or(0);
+        (cursor.last_change_id > retained_change_high_watermark)
+            .then_some(cursor.last_change_id - retained_change_high_watermark)
+    });
+    let projection_replay_target_coverage_required = !matches!(
+        (expected_projection_cursor, read.max_projection_change_id),
+        (Some(cursor), Some(high_watermark)) if cursor.last_change_id == high_watermark
+    );
+
+    // Projection replay markers: report the newest stored version for diagnosis, but require
+    // all current projections at this worker's replay version, exactly as automatic bootstrap
+    // does. Until a non-empty change log exactly corroborates the durable apply cursor, each
+    // marker must also cover the target automatic bootstrap would request now; after that
+    // handoff, apply/change/invalidation drain is the advancing authority and replay markers
+    // intentionally remain fixed.
+    let projection_replay_version = read
+        .projection_replay_markers
+        .iter()
+        .map(|marker| marker.replay_version)
+        .max();
+    let present_projection_replay_markers = read
+        .projection_replay_markers
+        .iter()
+        .filter(|marker| {
+            marker.replay_version == CURRENT_PROJECTION_REPLAY_VERSION
+                && (!projection_replay_target_coverage_required
+                    || match read.projection_replay_required_target_block {
+                        Some(required) => marker
+                            .completed_normalized_target_block
+                            .is_some_and(|completed| completed >= required),
+                        None => true,
+                    })
+        })
+        .map(|marker| marker.projection.as_str())
+        .collect::<BTreeSet<_>>();
+    let missing_projection_replay_markers = ALL_CURRENT_PROJECTION_ORDER
+        .iter()
+        .filter(|projection| !present_projection_replay_markers.contains(*projection))
+        .map(|projection| (*projection).to_owned())
+        .collect();
+
+    // Content expectations come only from active manifest sources that declare normalized
+    // adapter output. Counts are joined to the exact source_manifest_id by storage, so rows
+    // from deprecated manifests cannot satisfy a newly active source.
+    let active_manifest_sources_without_events = read
+        .active_manifest_event_sources
+        .iter()
+        .filter(|source| source.normalized_event_count == 0)
+        .map(|source| MissingManifestContent {
+            manifest_id: source.manifest_id,
+            manifest_version: source.manifest_version,
+            chain: source.chain.clone(),
+            namespace: source.namespace.clone(),
+            source_family: source.source_family.clone(),
+        })
+        .collect::<Vec<_>>();
+    let active_manifest_sources_with_missing_lineage = read
+        .active_manifest_event_sources
+        .iter()
+        .filter(|source| source.normalized_events_missing_canonical_lineage_count > 0)
+        .map(|source| MissingManifestLineage {
+            manifest_id: source.manifest_id,
+            manifest_version: source.manifest_version,
+            chain: source.chain.clone(),
+            namespace: source.namespace.clone(),
+            source_family: source.source_family.clone(),
+            missing_canonical_lineage_count: source
+                .normalized_events_missing_canonical_lineage_count,
+        })
+        .collect::<Vec<_>>();
+    let active_manifest_sources_with_missing_raw_logs = read
+        .active_manifest_event_sources
+        .iter()
+        .filter(|source| source.normalized_events_missing_canonical_raw_log_count > 0)
+        .map(|source| MissingManifestRawLogs {
+            manifest_id: source.manifest_id,
+            manifest_version: source.manifest_version,
+            chain: source.chain.clone(),
+            namespace: source.namespace.clone(),
+            source_family: source.source_family.clone(),
+            missing_canonical_raw_log_count: source
+                .normalized_events_missing_canonical_raw_log_count,
+        })
+        .collect::<Vec<_>>();
+    let names_by_namespace = read
+        .name_current_counts
+        .iter()
+        .map(|entry| (entry.namespace.as_str(), entry.count))
+        .collect::<BTreeMap<_, _>>();
+    let active_namespaces_without_names = read
+        .active_manifest_event_sources
+        .iter()
+        .map(|source| source.namespace.as_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|namespace| names_by_namespace.get(namespace).copied().unwrap_or(0) == 0)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+
+    let present_indexes = read
+        .present_deferred_projection_indexes
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let missing_deferred_projection_indexes = DEFERRED_NORMALIZED_EVENT_INDEXES
+        .iter()
+        .filter(|index| !present_indexes.contains(*index))
+        .map(|index| (*index).to_owned())
+        .collect::<Vec<_>>();
+
+    let normalized_event_total = read
+        .active_manifest_event_sources
+        .iter()
+        .map(|source| source.normalized_event_count)
+        .sum();
+    let name_current_total = read.name_current_counts.iter().map(|e| e.count).sum();
+
+    DataCompletenessReport {
+        max_head_lag_blocks,
+        max_lineage_ahead_blocks: MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS,
+        retention_mode,
+        manifest_corpus: manifest_corpus.clone(),
+        projection_content: projection_content.clone(),
+        active_deployment_profile: read.active_deployment_profile.clone(),
+        frontiers,
+        foreign_chains,
+        ignored_replay_cursors,
+        active_watched_target_count,
+        unobserved_targets,
+        pending_activation_targets,
+        manifest_targets_missing_address,
+        manifest_proxy_implementations_missing_edge,
+        discovery_targets_missing_address: read.discovery_targets_missing_address.clone(),
+        discovery_targets_missing_manifest: read.discovery_targets_missing_manifest.clone(),
+        chains_history_truncated,
+        chains_without_finite_start,
+        backfill_coverage_gaps: backfill_coverage.gaps.clone(),
+        backfill_coverage_topic_drifts: backfill_coverage.topic_drifts.clone(),
+        failed_replay_cursors,
+        lagging_replay_cursors,
+        chains_missing_raw_fact_cursor,
+        lagging_projection_cursors,
+        projection_apply_cursor_missing,
+        projection_apply_cursor_ahead_by,
+        pending_projection_invalidation_count: read.pending_projection_invalidation_count,
+        projection_invalidation_dead_letter_count: read.projection_invalidation_dead_letter_count,
+        projection_replay_version,
+        projection_replay_required_version: CURRENT_PROJECTION_REPLAY_VERSION,
+        projection_replay_target_coverage_required,
+        projection_replay_required_target_block: read.projection_replay_required_target_block,
+        missing_projection_replay_markers,
+        active_manifest_sources_without_events,
+        active_manifest_sources_with_missing_lineage,
+        active_manifest_sources_with_missing_raw_logs,
+        active_namespaces_without_names,
+        normalized_events_null_chain_id_count: read.normalized_events_null_chain_id_count,
+        missing_deferred_projection_indexes,
+        backfill_advisory: read.backfill_lifecycle.clone(),
+        normalized_event_total,
+        name_current_total,
+    }
+}

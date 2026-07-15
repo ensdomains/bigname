@@ -470,14 +470,9 @@ fn closure_source_families_for_contracts(
 }
 
 fn closure_or_dependency_source_families() -> Vec<String> {
-    NORMALIZED_EVENT_REPLAY_CONTRACTS
+    bigname_adapters::CLOSURE_OR_DEPENDENCY_REPLAY_SOURCE_FAMILIES
         .iter()
-        .filter(|contract| contract.raw_fact_replay_participant)
-        .filter(|contract| !contract.model.restricted_replay_supported())
-        .flat_map(|contract| contract.source_families.iter().copied())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .map(str::to_owned)
+        .map(|source_family| (*source_family).to_owned())
         .collect()
 }
 

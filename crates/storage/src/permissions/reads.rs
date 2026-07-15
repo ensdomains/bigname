@@ -9,7 +9,7 @@ use super::{
     types::{PermissionScope, PermissionsCurrentRow},
 };
 
-pub(super) const DEFAULT_PERMISSIONS_CURRENT_READ_FILTER: &str = r#"
+pub(crate) const DEFAULT_PERMISSIONS_CURRENT_READ_FILTER: &str = r#"
   AND resource.canonicality_state IN (
       'canonical'::canonicality_state,
       'safe'::canonicality_state,

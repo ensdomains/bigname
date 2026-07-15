@@ -49,6 +49,13 @@ For `[[discovery_rules]]`, the only authorable `admission` value is `reachable_f
 
 `[abi]` is optional. When present, it declares the Solidity ABI fragments that this manifest version authorizes for adapter, execution, or watch-plan use. ABI entries are source-family metadata; they do not by themselves graduate public capability support.
 
+Manifest `normalized_events` declarations are combined with adapter-owned emitted-kind declarations
+when operational tooling enumerates the active normalized-event universe. The manifest remains the
+authority that admits the source family, chain, namespace, and version; the adapter declaration only
+adds normalized kinds that the admitted adapter can synthesize even when no one ABI event carries
+that kind, such as reverse-claim or block-derived output. Adapter declarations do not admit a source,
+change capability status, or expand the watch plan.
+
 ### `capability_flags`
 
 Each flag carries a name, a status (`unsupported` | `shadow` | `supported`), and optional notes.
@@ -236,6 +243,15 @@ Manifest changes produce normalized events: `SourceManifestUpdated`, `ProxyImple
 Live manifest drift and proxy-upgrade alerting is a worker-owned operational loop. The worker computes drift candidates from admitted manifests, code-hash facts, proxy/implementation edges, and watch-plan state, and persists them to the worker-owned alert observation family. The worker does not write `normalized_events`, mutate manifests, mutate discovery admission, change capability flags, write projections, or expose a public route. Remediation is an explicit manifest or discovery change that produces the normal events above.
 
 `bigname-worker manifest-drift audit --json` computes candidates, persists alert observations, and renders the persisted view alongside live counts. `--fail-on-alert --json` returns nonzero when actionable persisted alerts remain. `bigname-worker inspect manifest-drift --json` is read-only over already persisted observations.
+
+Cutover inspection can anchor the active database corpus back to this filesystem authority with
+`bigname-worker inspect data-completeness --manifests-root <profile-root>`. The comparison is
+bidirectional over active manifests: disk requires a database row with the same namespace,
+source family, chain, deployment epoch, manifest version, and complete serialized payload, and
+every active database row requires the corresponding disk manifest. A missing, empty, or invalid
+supplied root fails. Omitting the argument preserves database-only diagnosis but reports
+`manifest_corpus_unverified: true`; promotion automation must supply the selected profile root so
+a partial restore cannot shrink its own manifest-derived expectations.
 
 ## Watch-plan expansion
 

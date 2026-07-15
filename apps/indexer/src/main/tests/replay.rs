@@ -1053,6 +1053,73 @@ async fn replay_normalized_events_rejects_deployment_profile_outside_active_mani
 }
 
 #[tokio::test]
+async fn replay_normalized_events_accepts_sepolia_manifest_profile() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-sepolia";
+    let reverse_address = "0x00000000000000000000000000000000000000d5";
+    let claimed_address = "0x5555555555555555555555555555555555555555";
+    let block = provider_block(
+        "0xd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5",
+        Some("0x1111111111111111111111111111111111111111111111111111111111111111"),
+        105,
+    );
+
+    insert_active_replay_watched_contract_with_source_family(
+        database.pool(),
+        40,
+        chain,
+        "ens_v1_reverse_l1",
+        Uuid::from_u128(0x940),
+        reverse_address,
+        "reverse_registrar",
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE manifest_versions SET deployment_epoch = 'ens_v1_sepolia_dev' WHERE manifest_id = 40",
+    )
+    .execute(database.pool())
+    .await?;
+    insert_active_replay_manifest(
+        database.pool(),
+        41,
+        "ens",
+        "ens_v1_resolver_l1",
+        chain,
+        "ens_v1_sepolia_dev",
+    )
+    .await?;
+    insert_chain_lineage_for_block(database.pool(), chain, &block, CanonicalityState::Canonical)
+        .await?;
+    insert_raw_reverse_claimed_log(
+        database.pool(),
+        chain,
+        &block,
+        reverse_address,
+        claimed_address,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+
+    let outcome = replay_raw_fact_normalized_events(
+        database.pool(),
+        RawFactNormalizedEventReplayRequest {
+            deployment_profile: "sepolia".to_owned(),
+            chain: chain.to_owned(),
+            selection: RawFactNormalizedEventReplaySelection::BlockRange {
+                from_block: block.block_number,
+                to_block: block.block_number,
+            },
+        },
+    )
+    .await?;
+
+    assert_eq!(outcome.selected_block_count, 1);
+    assert_eq!(outcome.normalized_event_inserted_count, 1);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn replay_normalized_events_skips_noncanonical_raw_logs_in_selected_block_hashes()
 -> Result<()> {
     let database = TestDatabase::new().await?;

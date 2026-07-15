@@ -5,6 +5,8 @@ mod types;
 mod validation;
 mod writes;
 
+pub(crate) use reads::DEFAULT_PERMISSIONS_CURRENT_READ_FILTER;
+
 pub use paging::{
     load_permissions_current_account_resource_page,
     load_permissions_current_account_resource_page_count_summary, load_permissions_current_page,

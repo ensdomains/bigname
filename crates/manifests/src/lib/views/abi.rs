@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use sqlx::{PgPool, Row};
@@ -130,6 +132,30 @@ pub async fn load_active_manifest_abi_events_by_chain_and_source_families(
     active_manifest_abi_events_from_rows(rows).await
 }
 
+/// Current topic0 set for every requested active source family on one chain. Stored-lineage
+/// promotion and completeness inspection share this exact view before trusting topic-filtered
+/// backfill coverage facts.
+pub async fn load_active_manifest_topic0s_by_chain_and_source_families(
+    pool: &PgPool,
+    chain: &str,
+    source_families: &[String],
+) -> Result<BTreeMap<String, BTreeSet<String>>> {
+    let events =
+        load_active_manifest_abi_events_by_chain_and_source_families(pool, chain, source_families)
+            .await?;
+    let mut topic0s_by_family = BTreeMap::<String, BTreeSet<String>>::new();
+    for event in events {
+        let Some(topic0) = event.topic0 else {
+            continue;
+        };
+        topic0s_by_family
+            .entry(event.source_family)
+            .or_default()
+            .insert(topic0.to_ascii_lowercase());
+    }
+    Ok(topic0s_by_family)
+}
+
 async fn active_manifest_abi_events_from_rows(
     rows: Vec<sqlx::postgres::PgRow>,
 ) -> Result<Vec<ActiveManifestAbiEvent>> {
@@ -208,14 +234,10 @@ pub async fn load_log_producing_source_families(pool: &PgPool, chain: &str) -> R
         return Ok(Vec::new());
     }
 
-    let events =
-        load_active_manifest_abi_events_by_chain_and_source_families(pool, chain, &source_families)
-            .await?;
-    Ok(events
-        .into_iter()
-        .filter(|event| event.topic0.is_some())
-        .map(|event| event.source_family)
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect())
+    Ok(
+        load_active_manifest_topic0s_by_chain_and_source_families(pool, chain, &source_families)
+            .await?
+            .into_keys()
+            .collect(),
+    )
 }

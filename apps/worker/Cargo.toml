@@ -9,12 +9,14 @@ license.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 futures-util.workspace = true
+serde.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 
+bigname-adapters.workspace = true
 bigname-domain.workspace = true
 bigname-execution.workspace = true
 bigname-manifests.workspace = true

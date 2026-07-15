@@ -8,6 +8,7 @@ mod backfill_jobs;
 mod base_normalized_rederive;
 mod checkpoints;
 mod children;
+mod data_completeness;
 mod evm_primitives;
 mod execution;
 mod history;
@@ -72,8 +73,9 @@ pub use backfill_jobs::{
     BackfillCoverageFactDerivation, BackfillCoverageFactScope, BackfillCoverageFactWrite,
     BackfillJob, BackfillJobCreate, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange,
     BackfillRangeSpec, advance_backfill_range, complete_backfill_job, complete_backfill_range,
-    complete_backfill_range_recording_coverage, create_backfill_job, fail_backfill_job,
-    fail_backfill_range, load_backfill_coverage_fact_counts, load_backfill_job,
+    complete_backfill_range_recording_coverage, create_backfill_job,
+    ensure_backfill_family_topic_sets_undrifted, fail_backfill_job, fail_backfill_range,
+    load_backfill_coverage_fact_counts, load_backfill_job, load_backfill_jobs_intersecting_range,
     load_backfill_ranges, load_completed_backfill_jobs_intersecting_range, reserve_backfill_range,
     write_backfill_coverage_facts,
 };
@@ -112,6 +114,15 @@ pub use children::{
     load_children_current, load_children_current_including_noncanonical,
     load_children_current_page, load_children_current_summaries,
     stream_canonical_declared_child_sources, upsert_children_current_rows,
+};
+pub use data_completeness::{
+    ActiveManifestEventSource, BackfillLifecycleRow, ChainCompletenessRow,
+    DEFERRED_NORMALIZED_EVENT_INDEXES, DataCompletenessRead, DiscoveryTargetMissingAddress,
+    DiscoveryTargetMissingManifest, ManifestChainNamespace, ManifestChainSourceFamily,
+    ManifestDeclaredTarget, NameCurrentCount, ObservedCodeAddress, ProjectionApplyCursorRow,
+    ProjectionContentCounts, ProjectionContentScopeCount, ProjectionReplayMarker, ReplayCursorRow,
+    load_active_manifest_deployment_profile, load_data_completeness,
+    load_data_completeness_with_adapter_event_kinds, load_projection_content_counts,
 };
 pub use evm_primitives::{normalize_evm_address, normalize_evm_b256};
 pub use execution::{
@@ -168,11 +179,11 @@ pub use label_preimages::{
     upsert_label_preimages_from_normalized_events, upsert_label_preimages_in_transaction,
 };
 pub use lineage::{
-    CanonicalityState, ChainLineageBlock, chain_lineage_contains_ancestor,
-    chain_lineage_contains_canonical_ancestor_position, load_chain_lineage_block,
-    load_chain_lineage_canonical_child_path, load_highest_canonical_chain_lineage_block,
-    mark_chain_lineage_range_orphaned, upsert_chain_lineage_blocks,
-    upsert_chain_lineage_blocks_recanonicalizing_orphaned,
+    CanonicalityState, ChainLineageBlock, MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS,
+    chain_lineage_contains_ancestor, chain_lineage_contains_canonical_ancestor_position,
+    load_chain_lineage_block, load_chain_lineage_canonical_child_path,
+    load_highest_canonical_chain_lineage_block, mark_chain_lineage_range_orphaned,
+    upsert_chain_lineage_blocks, upsert_chain_lineage_blocks_recanonicalizing_orphaned,
     upsert_chain_lineage_blocks_without_snapshots,
     upsert_chain_lineage_blocks_without_snapshots_recanonicalizing_orphaned,
 };

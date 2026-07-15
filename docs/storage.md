@@ -380,6 +380,12 @@ There is no deployed object-storage layer in the current schema or compose stack
 - **log-audit** — the same rows remain durable audit facts and may keep heavier indexes for historical raw-fact replay.
 
 Switching modes is operational policy. It does not change route coverage, projection truth, canonicality semantics, manifest rollout, or consumer-replacement meaning.
+The database does not persist the selected mode. Promotion tooling therefore supplies it
+explicitly to `bigname-worker inspect data-completeness --retention-mode <minimal|log-audit>`.
+In `log-audit` mode the inspector requires every active serving-canonical normalized event whose
+`raw_fact_ref.kind` is `raw_log` to retain the exact serving-canonical `raw_logs` row and exact
+serving-canonical `chain_lineage` anchor. In `minimal` mode the same missing raw-log staging row
+is allowed, while the normalized event's lineage anchor remains mandatory.
 
 Live polling may retain selected `raw_transactions` and `raw_receipts` for successful direct transactions to configured event-silent resolver addresses even when those transactions do not emit selected logs. Intake copies the chain id, resolver address, block number/hash, transaction hash/index, and canonicality into `event_silent_resolver_call_observations` before those staging rows become compactable. The durable observation row is the projection-invalidation trigger for explicitly documented hydration repairs, such as legacy ENSv1 reverse-resolver primary-name hydration. It does not authorize adapters to synthesize normalized events from calldata or receipts, does not make raw facts an API fallback, and does not change minimal/log-audit compaction boundaries once downstream normalized replay and projection inputs are durable.
 
@@ -893,6 +899,7 @@ Worker-owned, read-only operational tooling reads storage audit helpers and rend
 - `bigname-worker inspect stored-lineage-range --chain-id <id> --from <block> --to <block>` — lists only lineage rows already stored for the requested chain and finite block range, ordered by `(block_number, block_hash)`. Renders chain id, block number, block hash, parent hash, canonicality state, timestamp, and stored promotion markers per observed block. Nullable fields render as `null`. Does not infer missing heights, gaps, span-wide canonicality, or completeness.
 - `bigname-worker inspect backfill-job --backfill-job-id <id>` — resolves one persisted job and its child ranges. Renders job lifecycle, declared range, selector kind, resolved source identity, idempotency key, timestamps, failure metadata, and a `ranges` array sorted by range bounds and id.
 - `bigname-worker inspect execution-trace --execution-trace-id <id>` — reads `execution_traces`, `execution_steps`, and trace-attachment metadata for one stored trace.
+- `bigname-worker inspect data-completeness [--manifests-root <profile-root>] [--retention-mode <minimal|log-audit>]` — checks active manifest authority, chain intake, replay completion, every current projection family, and the selected retention contract without writing. Supplying a manifest root anchors active database manifests bidirectionally to disk; omitting it is reported as unverified. Active event kinds are the union of manifest ABI declarations and adapter-owned emitted-kind declarations for admitted active source families. Projection content is counted through the same identity and canonicality filters as its serving storage reads, while raw row counts remain diagnostic.
 - Manifest-drift and proxy-alert inspection — joins stored alert observations to manifest/discovery identifiers, code-hash facts, proxy/implementation edges, and derived watch-target metadata. Does not fetch fresh chain state, create alerts, mutate alert lifecycle, mutate manifest truth, or change capability flags.
 
 ## Migration rules

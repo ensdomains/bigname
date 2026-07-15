@@ -6,6 +6,10 @@ mod types;
 mod upserts;
 mod validation;
 
+/// Largest canonical-lineage gap the live reconciler may persist before advancing the stored
+/// checkpoint. Larger gaps are handed to bounded catch-up or hash-pinned backfill.
+pub const MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS: i64 = 1_024;
+
 pub use orphaning::mark_chain_lineage_range_orphaned;
 pub use reads::{
     chain_lineage_contains_ancestor, chain_lineage_contains_canonical_ancestor_position,

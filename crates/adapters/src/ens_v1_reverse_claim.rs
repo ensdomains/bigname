@@ -35,6 +35,17 @@ const ENS_NATIVE_COIN_TYPE: &str = "60";
 const BASE_NATIVE_COIN_TYPE: &str = "2147492101";
 const CONTRACT_ROLE_REVERSE_REGISTRAR: &str = "reverse_registrar";
 
+pub(crate) const NORMALIZED_EVENT_KIND_DECLARATIONS: &[(&str, &[&str])] = &[
+    (
+        SOURCE_FAMILY_ENS_V1_REVERSE_L1,
+        &[EVENT_KIND_REVERSE_CHANGED],
+    ),
+    (
+        SOURCE_FAMILY_BASENAMES_BASE_PRIMARY,
+        &[EVENT_KIND_REVERSE_CHANGED, EVENT_KIND_RECORD_CHANGED],
+    ),
+];
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnsV1ReverseClaimSyncSummary {
     pub scanned_log_count: usize,

@@ -9,6 +9,8 @@ mod read;
 mod types;
 mod write;
 
+pub(crate) use query::DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER;
+
 pub use address_replacement::{
     AddressNamesCurrentAddressReplacement, begin_address_names_current_address_replacement,
     drop_address_names_current_address_replacement,

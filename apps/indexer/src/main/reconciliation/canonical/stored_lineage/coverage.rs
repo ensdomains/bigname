@@ -3,22 +3,14 @@ use std::sync::Mutex;
 
 use anyhow::Result;
 use bigname_manifests::{
-    UncoveredWatchedTuple, find_uncovered_watched_tuples,
-    load_active_manifest_abi_events_by_chain_and_source_families, load_discovery_admission_epoch,
-    load_log_producing_source_families, load_watched_contracts_by_addresses,
+    UncoveredWatchedTuple, WATCHED_COVERAGE_VERIFICATION_CHUNK_BLOCKS,
+    find_uncovered_watched_tuples, load_active_manifest_topic0s_by_chain_and_source_families,
+    load_discovery_admission_epoch, load_log_producing_source_families,
+    load_watched_contracts_by_addresses,
 };
-use bigname_storage::ChainLineageBlock;
+use bigname_storage::{ChainLineageBlock, ensure_backfill_family_topic_sets_undrifted};
 use sqlx::Row;
 
-#[path = "coverage/topic_drift.rs"]
-mod topic_drift;
-
-use topic_drift::ensure_family_topic_sets_undrifted;
-
-/// Frontier extensions verify coverage in chunks of this many blocks, so a
-/// deep gap costs a handful of anti-join queries once and every promotion
-/// cycle afterwards is an O(1) in-memory comparison.
-pub(crate) const COVERAGE_FRONTIER_VERIFICATION_CHUNK_BLOCKS: i64 = 131_072;
 const MAX_REPORTED_UNCOVERED_TUPLES: i64 = 20;
 
 /// Process-lifetime, per-chain memo of the block interval whose watched-tuple
@@ -143,7 +135,7 @@ pub(super) async fn stored_path_has_required_raw_fact_coverage(
 
 /// Extend the chain's verified coverage frontier until it contains
 /// `[required_from, required_through]`, verifying in
-/// [`COVERAGE_FRONTIER_VERIFICATION_CHUNK_BLOCKS`] chunks that opportunistically
+/// [`WATCHED_COVERAGE_VERIFICATION_CHUNK_BLOCKS`] chunks that opportunistically
 /// look ahead as far as `verify_ahead_through_block` (the stored promotion
 /// anchor) so subsequent cycles are O(1). A violation in the look-ahead beyond
 /// the required target falls back to verifying exactly up to the target, so an
@@ -159,8 +151,13 @@ async fn ensure_verified_coverage_frontier(
     let log_producing_source_families = load_log_producing_source_families(pool, chain)
         .await
         .map_err(|error| error.to_string())?;
-    let current_topic0s_by_family =
-        load_current_topic0s_by_family(pool, chain, &log_producing_source_families).await?;
+    let current_topic0s_by_family = load_active_manifest_topic0s_by_chain_and_source_families(
+        pool,
+        chain,
+        &log_producing_source_families,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     let topic_set_fingerprint = topic_set_fingerprint(&current_topic0s_by_family);
     let discovery_admission_epoch = load_discovery_admission_epoch(pool, chain)
         .await
@@ -189,7 +186,7 @@ async fn ensure_verified_coverage_frontier(
     let extension_from = interval
         .as_ref()
         .map_or(required_from, |existing| existing.through_block + 1);
-    if let Err(_look_ahead_drift) = ensure_family_topic_sets_undrifted(
+    if let Err(_look_ahead_drift) = ensure_backfill_family_topic_sets_undrifted(
         pool,
         chain,
         &current_topic0s_by_family,
@@ -202,7 +199,7 @@ async fn ensure_verified_coverage_frontier(
         // must not block promoting the covered prefix: recheck scoped to the
         // target, and if that passes, cap the look-ahead so the memo never
         // covers a span the drift guard did not clear.
-        ensure_family_topic_sets_undrifted(
+        ensure_backfill_family_topic_sets_undrifted(
             pool,
             chain,
             &current_topic0s_by_family,
@@ -222,7 +219,7 @@ async fn ensure_verified_coverage_frontier(
     while through_block < required_through {
         let chunk_from = through_block + 1;
         let chunk_through = chunk_from
-            .saturating_add(COVERAGE_FRONTIER_VERIFICATION_CHUNK_BLOCKS - 1)
+            .saturating_add(WATCHED_COVERAGE_VERIFICATION_CHUNK_BLOCKS - 1)
             .min(verify_ahead_through_block);
         let violations = find_uncovered_watched_tuples(
             pool,
@@ -314,36 +311,6 @@ fn uncovered_tuples_refusal(
     format!(
         "watched tuples over blocks {from_block}..={through_block} have no single backfill_coverage_facts row containing their required interval: {listed}{suffix}; run hash-pinned or Coinbase SQL backfill for those tuples (or repair derive-backfill-coverage-facts for legacy full-payload jobs) and retry"
     )
-}
-
-/// Current manifest topic0 sets per log-producing family; also the input to
-/// the frontier memo's ABI fingerprint.
-async fn load_current_topic0s_by_family(
-    pool: &sqlx::PgPool,
-    chain: &str,
-    log_producing_source_families: &[String],
-) -> std::result::Result<BTreeMap<String, BTreeSet<String>>, String> {
-    if log_producing_source_families.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    let events = load_active_manifest_abi_events_by_chain_and_source_families(
-        pool,
-        chain,
-        log_producing_source_families,
-    )
-    .await
-    .map_err(|error| error.to_string())?;
-    let mut current_topic0s_by_family = BTreeMap::<String, BTreeSet<String>>::new();
-    for event in events {
-        let Some(topic0) = event.topic0 else {
-            continue;
-        };
-        current_topic0s_by_family
-            .entry(event.source_family)
-            .or_default()
-            .insert(topic0.to_ascii_lowercase());
-    }
-    Ok(current_topic0s_by_family)
 }
 
 fn topic_set_fingerprint(current_topic0s_by_family: &BTreeMap<String, BTreeSet<String>>) -> String {

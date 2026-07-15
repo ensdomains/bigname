@@ -1,5 +1,6 @@
 mod backfill;
 mod canonicality;
+mod data_completeness;
 mod execution_trace;
 mod formatting;
 mod manifest_drift;
@@ -11,9 +12,9 @@ mod tests;
 
 use anyhow::{Context, Result};
 use bigname_storage::DatabaseConfig;
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use std::str::FromStr;
+use std::{path::PathBuf, str::FromStr};
 use uuid::Uuid;
 
 pub(crate) use manifest_drift::render_manifest_drift_alert_observations;
@@ -32,6 +33,10 @@ pub(crate) enum InspectCommand {
         about = "Inspect canonicality, durable raw fact counts, and retained payload-cache metadata for one block hash"
     )]
     Canonicality(InspectCanonicalityArgs),
+    #[command(
+        about = "Check whether this database is data-complete enough to serve: reconciliation frontier, watch-set code-observation coverage, replay and projection cursors, and projection content"
+    )]
+    DataCompleteness(InspectDataCompletenessArgs),
     #[command(about = "Inspect one persisted execution trace and its ordered steps")]
     ExecutionTrace(InspectExecutionTraceArgs),
     #[command(about = "Inspect stored manifest drift and proxy implementation alert observations")]
@@ -58,6 +63,39 @@ pub(crate) struct InspectCanonicalityArgs {
     pub(crate) chain_id: String,
     #[arg(long)]
     pub(crate) block_hash: String,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct InspectDataCompletenessArgs {
+    #[command(flatten)]
+    pub(crate) database: DatabaseConfig,
+    #[arg(long)]
+    pub(crate) json: bool,
+    #[arg(long)]
+    pub(crate) fail_on_incomplete: bool,
+    #[arg(long)]
+    pub(crate) max_head_lag_blocks: Option<i64>,
+    /// Optional on-disk manifest profile root used as the external active-corpus authority.
+    #[arg(long)]
+    pub(crate) manifests_root: Option<PathBuf>,
+    /// Raw-log retention contract to verify.
+    #[arg(long, value_enum, default_value_t = RetentionMode::Minimal)]
+    pub(crate) retention_mode: RetentionMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum RetentionMode {
+    Minimal,
+    LogAudit,
+}
+
+impl RetentionMode {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::LogAudit => "log-audit",
+        }
+    }
 }
 
 #[derive(Args, Debug)]
@@ -102,6 +140,9 @@ pub(crate) async fn inspect_command(args: InspectArgs) -> Result<()> {
     match args.command {
         InspectCommand::BackfillJob(args) => backfill::inspect_backfill_job(args).await,
         InspectCommand::Canonicality(args) => canonicality::inspect_canonicality(args).await,
+        InspectCommand::DataCompleteness(args) => {
+            data_completeness::inspect_data_completeness(args).await
+        }
         InspectCommand::ExecutionTrace(args) => {
             execution_trace::inspect_execution_trace(args).await
         }
