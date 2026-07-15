@@ -11,7 +11,10 @@ use bigname_manifests::WatchedContract;
 use bigname_storage::{
     DEFERRED_NORMALIZED_EVENT_INDEXES, DataCompletenessRead, MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS,
 };
-use helpers::{chain_frontier, cursor_label, missing_chain_frontier, replay_complete_lag};
+use helpers::{
+    ActiveTargetInfo, ChainStartInfo, chain_frontier, cursor_label, latched_replay_lag,
+    missing_chain_frontier, replay_complete_lag,
+};
 use report::{
     ChainWithoutFiniteStart, HistoryTruncation, MissingManifestContent, MissingManifestLineage,
     MissingManifestRawLogs, PendingActivationTarget, UnobservedTarget,
@@ -35,24 +38,6 @@ pub(super) const RAW_FACT_NORMALIZED_EVENTS_CURSOR: &str = "raw_fact_normalized_
 /// are swept by the backlog cursor and then live adapter sync. On such a chain the raw-fact
 /// cursor is caught up when it reaches its own latched target, not the raw-log head.
 pub(super) const POST_REPLAY_LIVE_ADAPTER_BACKLOG_CURSOR: &str = "post_replay_live_adapter_backlog";
-
-/// A watched contract is in scope while it has no `active_to_block_number`.
-fn is_active(contract: &WatchedContract) -> bool {
-    contract.active_to_block_number.is_none()
-}
-
-#[derive(Default)]
-struct ChainStartInfo {
-    finite_min_start: Option<i64>,
-    open_ended_target_count: usize,
-    target_count: usize,
-}
-
-#[derive(Clone)]
-struct ActiveTargetInfo {
-    source_family: String,
-    active_from_block_number: Option<i64>,
-}
 
 pub(super) fn evaluate_data_completeness(
     read: &DataCompletenessRead,
@@ -89,7 +74,7 @@ pub(super) fn evaluate_data_completeness(
     let mut active_target_entries = BTreeSet::<(String, String, String, Option<i64>)>::new();
     for contract in watched_contracts
         .iter()
-        .filter(|contract| is_active(contract))
+        .filter(|contract| contract.active_to_block_number.is_none())
     {
         active_target_entries.insert((
             contract.chain.clone(),
@@ -343,6 +328,14 @@ pub(super) fn evaluate_data_completeness(
         .map(cursor_label)
         .collect::<Vec<_>>();
 
+    let post_replay_backlog_cursor_keys = read
+        .replay_cursors
+        .iter()
+        .filter(|cursor| cursor_is_active(cursor))
+        .filter(|cursor| cursor.cursor_kind == POST_REPLAY_LIVE_ADAPTER_BACKLOG_CURSOR)
+        .map(|cursor| (cursor.deployment_profile.as_str(), cursor.chain_id.as_str()))
+        .collect::<BTreeSet<_>>();
+
     let lagging_replay_cursors = read
         .replay_cursors
         .iter()
@@ -350,7 +343,12 @@ pub(super) fn evaluate_data_completeness(
         .filter_map(|cursor| match cursor.cursor_kind.as_str() {
             RAW_FACT_NORMALIZED_EVENTS_CURSOR => {
                 if closure_replay_chains.contains(cursor.chain_id.as_str()) {
-                    replay_complete_lag(cursor)
+                    let head = canonical_raw_log_head
+                        .get(cursor.chain_id.as_str())
+                        .copied()
+                        .flatten();
+                    let key = (cursor.deployment_profile.as_str(), cursor.chain_id.as_str());
+                    latched_replay_lag(cursor, head, post_replay_backlog_cursor_keys.contains(&key))
                 } else {
                     // Non-latched: replay must have completed its target and the target must
                     // have reached the canonical raw-log head.
@@ -432,13 +430,17 @@ pub(super) fn evaluate_data_completeness(
         (cursor.last_change_id > retained_change_high_watermark)
             .then_some(cursor.last_change_id - retained_change_high_watermark)
     });
-    let projection_replay_target_coverage_required = expected_projection_cursor.is_none();
+    let projection_replay_target_coverage_required = !matches!(
+        (expected_projection_cursor, read.max_projection_change_id),
+        (Some(cursor), Some(high_watermark)) if cursor.last_change_id == high_watermark
+    );
 
     // Projection replay markers: report the newest stored version for diagnosis, but require
     // all current projections at this worker's replay version, exactly as automatic bootstrap
-    // does. Before the durable apply cursor exists, each marker must also cover the target
-    // automatic bootstrap would request now; after handoff, apply/change/invalidation drain is
-    // the advancing authority and replay markers intentionally remain fixed.
+    // does. Until a non-empty change log exactly corroborates the durable apply cursor, each
+    // marker must also cover the target automatic bootstrap would request now; after that
+    // handoff, apply/change/invalidation drain is the advancing authority and replay markers
+    // intentionally remain fixed.
     let projection_replay_version = read
         .projection_replay_markers
         .iter()

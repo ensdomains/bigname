@@ -6,7 +6,7 @@ use super::types::{
     AddressNamesCurrentSort, AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedCursorValue,
 };
 
-pub(super) const DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER: &str = r#"
+pub(crate) const DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER: &str = r#"
   AND surface.canonicality_state IN (
       'canonical'::canonicality_state,
       'safe'::canonicality_state,

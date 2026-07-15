@@ -55,8 +55,10 @@ fn complete_projection_content() -> ProjectionContentInspection {
             .map(|projection| ProjectionTableContent {
                 projection: (*projection).to_owned(),
                 scope_kind: "global",
-                total_count: 1,
-                scoped_counts: vec![],
+                raw_total_count: 1,
+                raw_scoped_counts: vec![],
+                servable_total_count: 1,
+                servable_scoped_counts: vec![],
                 expected_scopes: vec![],
                 missing_scopes: vec![],
             })
@@ -1120,12 +1122,30 @@ fn latched_chain_at_targets_is_caught_up() {
     assert!(report.data_complete());
 }
 
-/// The backlog sweep writes no cursor row when a quiet closure-replay chain has no work above
-/// the latched raw-fact target. Active adapter policy, not backlog-row existence, identifies
-/// the latched completion authority.
+/// A lost backlog cursor cannot be treated as a quiet latch while retained canonical logs prove
+/// that the writer had tail work above the raw-fact target.
 #[test]
-fn quiet_latched_chain_without_backlog_cursor_is_caught_up() {
+fn latched_chain_with_tail_logs_and_no_backlog_cursor_fails() {
     let mut read = latched_chain_read();
+    read.replay_cursors = vec![replay_cursor(1_000, None)];
+    let report = evaluate(&read, &registry_only());
+
+    assert_eq!(report.normalization_caught_up(), CheckStatus::Fail);
+    assert_eq!(report.lagging_replay_cursors[0].behind_by, 1_000);
+    assert!(
+        report.lagging_replay_cursors[0]
+            .label
+            .ends_with(":missing_backlog")
+    );
+    assert!(!report.data_complete());
+}
+
+/// The backlog writer writes no cursor when no canonical raw logs exist above the completed
+/// latch. The raw-log head independently corroborates that quiet shape.
+#[test]
+fn quiet_latched_chain_at_raw_log_head_needs_no_backlog_cursor() {
+    let mut read = latched_chain_read();
+    read.chains[0].canonical_raw_log_head_block_number = Some(1_000);
     read.replay_cursors = vec![replay_cursor(1_000, None)];
     let report = evaluate(&read, &registry_only());
 
@@ -1228,8 +1248,29 @@ fn projection_replay_markers_below_required_target_fail() {
     assert!(!report.data_complete());
 }
 
-/// Once the durable apply cursor exists, current-version markers prove bootstrap handoff and
-/// the drained apply/change-log checks own later normalized blocks. Marker targets do not move.
+/// A restored apply cursor over an empty change log is not evidence that continuous apply took
+/// over, so it cannot waive current replay-marker target coverage.
+#[test]
+fn empty_projection_change_log_does_not_waive_marker_target_coverage() {
+    let mut read = healthy_read();
+    read.projection_apply_cursors = vec![apply_cursor(0)];
+    read.max_projection_change_id = None;
+    read.projection_replay_required_target_block = Some(1_001);
+    let report = evaluate(&read, &registry_only());
+
+    assert!(report.projection_replay_target_coverage_required);
+    assert_eq!(report.projection_replay_complete(), CheckStatus::Fail);
+    assert_eq!(report.projection_drained(), CheckStatus::Pass);
+    assert_eq!(
+        report.missing_projection_replay_markers.len(),
+        ALL_CURRENT_PROJECTION_ORDER.len()
+    );
+    assert!(!report.data_complete());
+}
+
+/// Once a non-empty change log exactly corroborates the durable apply cursor, current-version
+/// markers prove bootstrap handoff and the drained apply/change-log checks own later normalized
+/// blocks. Marker targets do not move.
 #[test]
 fn drained_projection_apply_allows_target_to_advance_past_replay_markers() {
     let mut read = healthy_read();

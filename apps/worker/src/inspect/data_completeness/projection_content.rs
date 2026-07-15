@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use bigname_storage::ActiveManifestEventSource;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 
 use crate::replay::ALL_CURRENT_PROJECTION_ORDER;
 
@@ -50,8 +50,10 @@ pub(super) struct ProjectionScopeCount {
 pub(super) struct ProjectionTableContent {
     pub(super) projection: String,
     pub(super) scope_kind: &'static str,
-    pub(super) total_count: i64,
-    pub(super) scoped_counts: Vec<ProjectionScopeCount>,
+    pub(super) raw_total_count: i64,
+    pub(super) raw_scoped_counts: Vec<ProjectionScopeCount>,
+    pub(super) servable_total_count: i64,
+    pub(super) servable_scoped_counts: Vec<ProjectionScopeCount>,
     pub(super) expected_scopes: Vec<String>,
     pub(super) missing_scopes: Vec<String>,
 }
@@ -90,35 +92,26 @@ async fn load_projection_table(
     projection: &str,
     sources: &[ActiveManifestEventSource],
 ) -> Result<ProjectionTableContent> {
-    let (scope_kind, scoped_counts) = match projection {
-        "name_current" | "children_current" | "address_names_current" | "primary_names_current" => {
-            (
-                "namespace",
-                load_grouped_counts(pool, projection, "namespace").await?,
-            )
-        }
-        "resolver_current" => (
-            "chain",
-            load_grouped_counts(pool, projection, "chain_id").await?,
-        ),
-        "permissions_current" | "record_inventory_current" => {
-            let count = load_global_count(pool, projection).await?;
-            (
-                "global",
-                (count > 0)
-                    .then_some(ProjectionScopeCount {
-                        scope: "global".to_owned(),
-                        count,
-                    })
-                    .into_iter()
-                    .collect(),
-            )
-        }
-        _ => bail!("current projection {projection} has no content-inspection rule"),
-    };
+    let counts = bigname_storage::load_projection_content_counts(pool, projection).await?;
+    let raw_scoped_counts = counts
+        .raw_scoped_counts
+        .into_iter()
+        .map(|entry| ProjectionScopeCount {
+            scope: entry.scope,
+            count: entry.count,
+        })
+        .collect::<Vec<_>>();
+    let servable_scoped_counts = counts
+        .servable_scoped_counts
+        .into_iter()
+        .map(|entry| ProjectionScopeCount {
+            scope: entry.scope,
+            count: entry.count,
+        })
+        .collect::<Vec<_>>();
 
     let expected_scopes = expected_scopes(projection, sources);
-    let counts_by_scope = scoped_counts
+    let counts_by_scope = servable_scoped_counts
         .iter()
         .map(|entry| (entry.scope.as_str(), entry.count))
         .collect::<BTreeMap<_, _>>();
@@ -127,46 +120,17 @@ async fn load_projection_table(
         .filter(|scope| counts_by_scope.get(scope.as_str()).copied().unwrap_or(0) == 0)
         .cloned()
         .collect();
-    let total_count = scoped_counts.iter().map(|entry| entry.count).sum();
 
     Ok(ProjectionTableContent {
         projection: projection.to_owned(),
-        scope_kind,
-        total_count,
-        scoped_counts,
+        scope_kind: counts.scope_kind,
+        raw_total_count: counts.raw_total_count,
+        raw_scoped_counts,
+        servable_total_count: counts.servable_total_count,
+        servable_scoped_counts,
         expected_scopes,
         missing_scopes,
     })
-}
-
-async fn load_grouped_counts(
-    pool: &PgPool,
-    projection: &str,
-    scope_column: &str,
-) -> Result<Vec<ProjectionScopeCount>> {
-    let query = format!(
-        "SELECT {scope_column} AS scope, COUNT(*)::BIGINT AS count \
-         FROM {projection} GROUP BY {scope_column} ORDER BY {scope_column}"
-    );
-    let rows = sqlx::query(&query)
-        .fetch_all(pool)
-        .await
-        .with_context(|| format!("failed to count {projection} by {scope_column}"))?;
-    rows.into_iter()
-        .map(|row| {
-            Ok(ProjectionScopeCount {
-                scope: row.try_get("scope")?,
-                count: row.try_get("count")?,
-            })
-        })
-        .collect()
-}
-
-async fn load_global_count(pool: &PgPool, projection: &str) -> Result<i64> {
-    sqlx::query_scalar(&format!("SELECT COUNT(*)::BIGINT FROM {projection}"))
-        .fetch_one(pool)
-        .await
-        .with_context(|| format!("failed to count {projection}"))
 }
 
 fn expected_scopes(projection: &str, sources: &[ActiveManifestEventSource]) -> Vec<String> {
@@ -190,17 +154,10 @@ fn expected_scopes(projection: &str, sources: &[ActiveManifestEventSource]) -> V
                 .map(|source| source.namespace.clone())
                 .collect::<BTreeSet<_>>()
         }
-        "resolver_current" => matching
+        "permissions_current" | "record_inventory_current" | "resolver_current" => matching
             .into_iter()
             .map(|source| source.chain.clone())
             .collect::<BTreeSet<_>>(),
-        "permissions_current" | "record_inventory_current" => {
-            if matching.is_empty() {
-                BTreeSet::new()
-            } else {
-                BTreeSet::from(["global".to_owned()])
-            }
-        }
         _ => BTreeSet::new(),
     };
     scopes.into_iter().collect()

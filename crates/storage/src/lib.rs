@@ -120,8 +120,9 @@ pub use data_completeness::{
     DEFERRED_NORMALIZED_EVENT_INDEXES, DataCompletenessRead, DiscoveryTargetMissingAddress,
     DiscoveryTargetMissingManifest, ManifestChainNamespace, ManifestChainSourceFamily,
     ManifestDeclaredTarget, NameCurrentCount, ObservedCodeAddress, ProjectionApplyCursorRow,
-    ProjectionReplayMarker, ReplayCursorRow, load_active_manifest_deployment_profile,
-    load_data_completeness,
+    ProjectionContentCounts, ProjectionContentScopeCount, ProjectionReplayMarker, ReplayCursorRow,
+    load_active_manifest_deployment_profile, load_data_completeness,
+    load_data_completeness_with_adapter_event_kinds, load_projection_content_counts,
 };
 pub use evm_primitives::{normalize_evm_address, normalize_evm_b256};
 pub use execution::{

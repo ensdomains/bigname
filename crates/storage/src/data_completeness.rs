@@ -2,10 +2,14 @@ use anyhow::{Context, Result};
 
 mod content;
 mod manifest_targets;
+mod projection_content;
 
 use content::*;
 pub use manifest_targets::load_active_manifest_deployment_profile;
 use manifest_targets::*;
+pub use projection_content::{
+    ProjectionContentCounts, ProjectionContentScopeCount, load_projection_content_counts,
+};
 
 #[cfg(test)]
 mod tests;
@@ -128,8 +132,9 @@ pub struct DiscoveryTargetMissingManifest {
     pub contract_instance_id: uuid::Uuid,
 }
 
-/// One active manifest source that declares normalized adapter output, together with the
-/// count of matching serving-canonical normalized events written under that exact manifest ID.
+/// One active manifest source that declares normalized adapter output through its ABI or the
+/// admitted adapter's emitted-kind declaration, together with the count of matching
+/// serving-canonical normalized events written under that exact manifest ID.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActiveManifestEventSource {
     pub manifest_id: i64,
@@ -137,8 +142,9 @@ pub struct ActiveManifestEventSource {
     pub chain: String,
     pub namespace: String,
     pub source_family: String,
-    /// Distinct normalized event kinds declared by the active manifest ABI. Projection-content
-    /// inspection maps these declarations to the current projection writers they can feed.
+    /// Distinct normalized event kinds declared by the active manifest ABI and admitted adapter.
+    /// Projection-content inspection maps these declarations to the current projection writers
+    /// they can feed.
     pub normalized_event_kinds: Vec<String>,
     pub normalized_event_count: i64,
     /// Matching normalized events whose exact lineage anchor is absent or is no longer
@@ -247,6 +253,13 @@ pub const DEFERRED_NORMALIZED_EVENT_INDEXES: &[&str] = &[
 ];
 
 pub async fn load_data_completeness(pool: &sqlx::PgPool) -> Result<DataCompletenessRead> {
+    load_data_completeness_with_adapter_event_kinds(pool, &[]).await
+}
+
+pub async fn load_data_completeness_with_adapter_event_kinds(
+    pool: &sqlx::PgPool,
+    adapter_event_kind_declarations: &[(&str, &str)],
+) -> Result<DataCompletenessRead> {
     Ok(DataCompletenessRead {
         chains: load_chain_completeness(pool).await?,
         active_deployment_profile: load_active_manifest_deployment_profile(pool).await?,
@@ -262,7 +275,11 @@ pub async fn load_data_completeness(pool: &sqlx::PgPool) -> Result<DataCompleten
         .await?,
         observed_code_addresses: load_observed_code_addresses(pool).await?,
         manifest_declared_targets: load_manifest_declared_targets(pool).await?,
-        active_manifest_event_sources: load_active_manifest_event_sources(pool).await?,
+        active_manifest_event_sources: load_active_manifest_event_sources(
+            pool,
+            adapter_event_kind_declarations,
+        )
+        .await?,
         name_current_counts: load_name_current_counts(pool).await?,
         normalized_events_null_chain_id_count: load_normalized_events_null_chain_id_count(pool)
             .await?,

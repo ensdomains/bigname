@@ -75,16 +75,16 @@ retired chain and is reported as an advisory, not gated for the per-chain checks
 | `watch_set_code_observation_coverage` | there is at least one active target, and every target whose inclusive start is at or below its chain's stored canonical head — direct active-manifest declarations unioned with the materialized watch view and active discovery edges — has a non-orphaned `raw_code_hashes` observation with an exact retained non-orphaned lineage anchor at or after that start; future-start targets are reported as `pending_activation` |
 | `manifest_declared_targets_present` | every active manifest-payload root, contract, and proxy implementation has its matching materialized instance and open address whose start does not narrow the payload start; every proxy implementation also has the exact open managed `proxy_implementation` edge, with a range-preserving start, consumed by the watch view |
 | `discovery_targets_present` | every target endpoint of an open non-migration discovery edge has an open `contract_instance_addresses` row on the edge's chain whose start does not narrow the edge's admitted start, and every open resolver edge from an active registry source retains its matching active resolver target manifest; bounded edges are historical and impose no current target requirement |
-| `active_event_lineage_retained` | every matching canonical/safe/finalized normalized event for an active event-producing manifest source still resolves by exact chain, block hash, and block number to a canonical/safe/finalized `chain_lineage` anchor |
+| `active_event_lineage_retained` | every matching canonical/safe/finalized normalized event for an active event-producing source still resolves by exact chain, block hash, and block number to a canonical/safe/finalized `chain_lineage` anchor; event kinds are the union of manifest ABI and adapter-owned declarations |
 | `active_raw_logs_retained` | in `minimal` mode, always; in `log-audit` mode, every active serving-canonical normalized event sourced from a raw log retains the exact canonical/safe/finalized `raw_logs` row and exact serving-canonical lineage anchor |
 | `normalization_no_failure` | no replay cursor for an active chain under the deployment profile inferred from the active manifest corpus carries a `last_failure_reason` |
-| `normalization_caught_up_to_raw_head` | the active manifest corpus resolves to one supported deployment profile; every active chain with retained canonical raw logs has that profile's `raw_fact_normalized_events` cursor, each applicable cursor has reached its target, and a post-replay backlog starts no later than the raw-fact target plus one (see below) |
+| `normalization_caught_up_to_raw_head` | the active manifest corpus resolves to one supported deployment profile; every active chain with retained canonical raw logs has that profile's `raw_fact_normalized_events` cursor, each applicable cursor has reached its target, and canonical tail logs above a closure-replay latch require a complete post-replay backlog that starts no later than the raw-fact target plus one (see below) |
 | `projection_apply_drained` | the `normalized_events_to_projection_invalidations` cursor, when present, exactly equals the retained change-log high-water mark (`max(change_id)`, or zero for an empty log); a non-empty log also requires the cursor, and unrelated cursor rows do not count |
 | `projection_invalidations_drained` | `projection_invalidations` is empty — every enqueued invalidation has been applied and deleted |
 | `projection_no_dead_letters` | `projection_invalidation_dead_letters` is empty — no invalidation exhausted its retries |
-| `projection_replay_complete` | every current projection has a `current_projection_replay_status` marker at this worker's `CURRENT_PROJECTION_REPLAY_VERSION`; before a durable projection-apply cursor exists, each marker must also cover the target bootstrap would request now |
-| `current_projection_content_present` | all seven projections in the worker's `ALL_CURRENT_PROJECTION_ORDER` were counted, and every namespace, chain, or global table whose active manifest event declarations can feed that projection has at least one row |
-| `active_dataset_non_empty` | every active manifest source whose ABI declares non-empty `normalized_events` output has a canonical/safe/finalized matching event under that exact `source_manifest_id`, manifest version, chain, namespace, source family, and declared event kind; every such namespace also has `name_current` rows |
+| `projection_replay_complete` | every current projection has a `current_projection_replay_status` marker at this worker's `CURRENT_PROJECTION_REPLAY_VERSION`; until a non-empty retained projection change log exactly corroborates the durable apply cursor, each marker must also cover the target bootstrap would request now |
+| `current_projection_content_present` | all seven projections in the worker's `ALL_CURRENT_PROJECTION_ORDER` were counted through their serving validity rules, and every namespace or chain whose active manifest-plus-adapter event declarations can feed that projection has at least one servable row; raw counts remain diagnostic |
+| `active_dataset_non_empty` | every active manifest source with non-empty manifest- or adapter-declared normalized output has a canonical/safe/finalized matching event under that exact `source_manifest_id`, manifest version, chain, namespace, source family, and declared event kind; every such namespace also has `name_current` rows |
 | `normalized_events_chain_id_present` | no non-orphaned `normalized_events` row has a NULL `chain_id` |
 | `deferred_projection_indexes_present` | the eight deferred `normalized_events` projection indexes all exist on `public.normalized_events` and have `pg_index.indisvalid = true` and `indisready = true` (a fresh replay drops them and rebuilds them after catch-up) |
 
@@ -123,13 +123,15 @@ instead of gating the serving corpus.
 A chain with an active closure- or dependency-replay source family is an exception. The writer
 uses the shared source-family policy to preserve that chain's first raw-fact cursor target below
 the live head; newer logs are carried by a one-shot `post_replay_live_adapter_backlog` sweep and
-then live adapter sync. The gate uses the same policy, so a quiet chain whose sweep found no work
-and wrote no backlog cursor still completes against its latched raw-fact target. When a backlog
-cursor exists, both cursors must reach their own targets and the backlog's inclusive range start
-must be no later than the raw-fact target plus one. An earlier start is a safe overlap; a later
-one leaves an unnormalized gap that completed cursors cannot reveal. **Limitation:** the live
-tail beyond the backlog target has no cursor, so the gate cannot verify it. This is one reason a
-passing gate is necessary but not sufficient (see Scope).
+then live adapter sync. The gate uses the same policy. A quiet chain whose canonical raw-log head
+is at or below the latched target may complete without a backlog row, matching a sweep that found
+no tail logs and therefore wrote no cursor. If the canonical raw-log head is above the latch, a
+backlog cursor must exist, both cursors must reach their own targets, and the backlog's inclusive
+range start must be no later than the raw-fact target plus one. An earlier start is a safe overlap;
+a later one leaves an unnormalized gap that completed cursors cannot reveal. The backlog row is
+therefore optional only when retained canonical logs independently corroborate the quiet latch.
+**Limitation:** the live tail beyond the backlog target has no cursor, so the gate cannot verify
+it. This is one reason a passing gate is necessary but not sufficient (see Scope).
 
 The catch-up writer clears `last_failure_reason` and `last_failure_at` after either a successful
 advance or a successful idle iteration. A transient failure therefore remains gating until the
@@ -241,10 +243,13 @@ only against the previous pipeline stage:
   Facts from a later successful retry can satisfy the interval, so failed job/range lifecycle rows
   remain advisory. A chain with no bounded-backfill range inside retained lineage has no bounded
   fetch span requiring facts and passes this check vacuously.
-- **Content.** `active_dataset_non_empty` derives expected event-producing sources from active
-  manifest ABI entries whose `normalized_events` list is non-empty. Execution- or
-  transport-only manifests with no declared normalized output do not create event-content
-  expectations. Each expected source must have a canonical, safe, or finalized event matching its exact
+- **Content.** `active_dataset_non_empty` derives expected event-producing sources from the union
+  of active manifest ABI `normalized_events` entries and adapter-owned emitted-kind declarations
+  for those admitted source families. The adapter declaration covers normalized output synthesized
+  outside a one-to-one manifest ABI event, including reverse-claim and block-derived events; it
+  does not admit a source or widen its watch scope. Execution- or transport-only manifests with no
+  declaration from either authority do not create event-content expectations. Each expected source
+  must have a canonical, safe, or finalized event matching its exact
   `source_manifest_id`, manifest version, chain, namespace, source family, and one of its
   declared event kinds. Rows from a deprecated manifest version therefore cannot make a newly
   active source pass. Each expected namespace must also have `name_current` rows.
@@ -270,23 +275,28 @@ only against the previous pipeline stage:
 ### Projections rebuilt, and structural integrity
 
 `current_projection_content_present` enumerates the same seven-family
-`ALL_CURRENT_PROJECTION_ORDER` that replay publishes. It reports total and scoped row counts for
-every family. Expectations come from active manifests' declared normalized event kinds, never
+`ALL_CURRENT_PROJECTION_ORDER` that replay publishes. It reports raw and servable total/scoped
+row counts for every family and evaluates missing scopes only from servable counts. Expectations
+come from the union of active manifest and adapter-owned normalized event-kind declarations, never
 from the projection rows being checked:
 
-| Projection | Required scope | A scope is expected when an active source declares |
-| --- | --- | --- |
-| `name_current` | namespace | any normalized event output |
-| `children_current` | namespace | `SubregistryChanged`, `ParentChanged`, `RegistrationGranted`, `RegistrationRenewed`, or `RegistrationReleased` |
-| `permissions_current` | global | `PermissionChanged`, `RootPermissionChanged`, or `PermissionScopeChanged` |
-| `record_inventory_current` | global | `RecordChanged`, `RecordVersionChanged`, or `ResolverChanged` |
-| `resolver_current` | chain | `ResolverChanged`, `AliasChanged`, `PermissionChanged`, or `PermissionScopeChanged` (resolver-scoped permission rows are resolver rebuild targets) |
-| `address_names_current` | namespace | `RegistrationGranted`, `TokenControlTransferred`, `AuthorityTransferred`, `AuthorityEpochChanged`, `PermissionChanged`, `PermissionScopeChanged`, or `TokenRegenerated` |
-| `primary_names_current` | namespace | `ReverseChanged` |
+| Projection | Required scope | Serving validity mirrored by the count | A scope is expected when an active source declares |
+| --- | --- | --- | --- |
+| `name_current` | namespace | canonical/safe/finalized surface; when bound, canonical/safe/finalized resource and binding, open binding, and canonical/safe/finalized token lineage when present (`DEFAULT_NAME_CURRENT_READ_FILTER`) | any normalized event output |
+| `children_current` | namespace | declared rows with a canonical/safe/finalized parent and a missing, label-preimage-backed, or canonical/safe/finalized child surface (`DEFAULT_CHILDREN_CURRENT_READ_FILTER`) | `SubregistryChanged`, `ParentChanged`, `RegistrationGranted`, `RegistrationRenewed`, or `RegistrationReleased` |
+| `permissions_current` | resource chain | joined resource is canonical/safe/finalized (`DEFAULT_PERMISSIONS_CURRENT_READ_FILTER`) | `PermissionChanged`, `RootPermissionChanged`, or `PermissionScopeChanged` |
+| `record_inventory_current` | resource chain | joined resource is canonical/safe/finalized (`DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER`) | `RecordChanged`, `RecordVersionChanged`, or `ResolverChanged` |
+| `resolver_current` | chain | no additional consumer-side identity/canonicality filter | `ResolverChanged`, `AliasChanged`, `PermissionChanged`, or `PermissionScopeChanged` (resolver-scoped permission rows are resolver rebuild targets) |
+| `address_names_current` | namespace | canonical/safe/finalized surface, resource, and binding; open binding; canonical/safe/finalized token lineage when present (`DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER`) | `RegistrationGranted`, `TokenControlTransferred`, `AuthorityTransferred`, `AuthorityEpochChanged`, `PermissionChanged`, `PermissionScopeChanged`, or `TokenRegenerated` |
+| `primary_names_current` | namespace | no additional consumer-side identity/canonicality filter | `ReverseChanged` |
 
 An unlisted input does not create an expectation for that projection. This lets a small healthy
 corpus with no declared permission events keep an empty `permissions_current`, while truncating
-`resolver_current` for a chain whose active manifests declare `ResolverChanged` fails by chain.
+`resolver_current` for a chain whose active sources declare `ResolverChanged` fails by chain.
+Permissions and record inventory are resource-keyed, so residue attached only to a foreign chain's
+resources cannot satisfy an active chain. Likewise, a raw projection row whose supporting identity
+row is orphaned or whose binding is closed remains visible in diagnostics but cannot satisfy a
+servable scope.
 
 `projection_replay_complete` requires every current projection to have a marker in
 `current_projection_replay_status` at the inspecting worker's
@@ -294,15 +304,17 @@ corpus with no declared permission events keep an empty `permissions_current`, w
 `replay_version` for diagnosis, while `required_replay_version` reports the version the gate
 requires. Each current-version marker's `completed_normalized_target_block` must also reach the
 target automatic bootstrap would use now —
-`max(global raw_fact_normalized_events target, furthest persisted chain checkpoint)` — only
-before a durable `normalized_events_to_projection_invalidations` apply cursor exists. Bootstrap
+`max(global raw_fact_normalized_events target, furthest persisted chain checkpoint)` — until a
+durable `normalized_events_to_projection_invalidations` apply cursor is exactly corroborated by a
+non-empty retained `projection_normalized_event_changes` high-water mark. Bootstrap
 publishes projections in order and `name_current` is first, so a candidate mid-bootstrap has
 `name_current` but not the rest. After handoff, the worker deliberately stops advancing replay
 markers: the apply cursor/change log and invalidation queue own later normalized blocks. At that
 point current-version marker presence plus the separately drained apply/change/invalidation
 checks is the writer's authority; comparing the old bootstrap marker target with a newer chain
 frontier would false-fail a healthy live database. Complete markers from an older worker image
-are never accepted.
+are never accepted. A cursor over an empty change log is treated as restore residue and does not
+waive marker target coverage, even when its stored position is zero.
 
 When target coverage is required before apply handoff, the replay target is intentionally global
 even though foreign or retired chains are advisory for the per-chain frontier, history,

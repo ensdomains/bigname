@@ -67,6 +67,22 @@ pub use normalized_replay_policy::{
     CLOSURE_OR_DEPENDENCY_REPLAY_SOURCE_FAMILIES, source_family_preserves_normalized_replay_target,
 };
 
+/// Normalized event kinds emitted by adapters outside a one-to-one manifest ABI declaration.
+///
+/// The declaration augments event-kind inspection for an already admitted active source family;
+/// it does not admit sources or alter manifest capability and watch-plan authority.
+pub fn adapter_normalized_event_kind_declarations() -> Vec<(&'static str, &'static str)> {
+    block_derived_normalized_events::NORMALIZED_EVENT_KIND_DECLARATIONS
+        .iter()
+        .chain(ens_v1_reverse_claim::NORMALIZED_EVENT_KIND_DECLARATIONS)
+        .flat_map(|(source_family, event_kinds)| {
+            event_kinds
+                .iter()
+                .map(move |event_kind| (*source_family, *event_kind))
+        })
+        .collect()
+}
+
 pub async fn clear_replay_adapter_checkpoints(
     pool: &sqlx::PgPool,
     deployment_profile: &str,

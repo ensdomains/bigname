@@ -1,7 +1,7 @@
 use anyhow::Result;
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 
-use super::load_data_completeness;
+use super::{load_data_completeness, load_data_completeness_with_adapter_event_kinds};
 
 async fn test_database() -> Result<TestDatabase> {
     TestDatabase::create_migrated(
@@ -958,6 +958,86 @@ async fn active_event_sources_are_counted_by_exact_manifest_identity() -> Result
     database.cleanup().await
 }
 
+/// Adapter-owned kinds extend only an already-active manifest source and participate in the
+/// same exact manifest identity, content, and lineage checks as ABI-declared kinds.
+#[tokio::test]
+async fn adapter_declared_kinds_extend_active_event_source_universe() -> Result<()> {
+    let database = test_database().await?;
+    let pool = database.pool();
+    let manifest_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO manifest_versions
+            (manifest_version, namespace, source_family, chain, deployment_epoch,
+             rollout_status, normalizer_version, file_path, manifest_payload)
+        VALUES
+            (1, 'ens', 'ens_v1_reverse_l1', 'ethereum-mainnet', 'ens_v1',
+             'active', 'n', 'reverse', '{}'::jsonb)
+        RETURNING manifest_id
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    assert!(
+        load_data_completeness(pool)
+            .await?
+            .active_manifest_event_sources
+            .is_empty()
+    );
+
+    let declarations = [
+        ("ens_v1_reverse_l1", "ReverseChanged"),
+        ("ens_v1_reverse_l1", "RecordChanged"),
+    ];
+    let declared = load_data_completeness_with_adapter_event_kinds(pool, &declarations).await?;
+    assert_eq!(declared.active_manifest_event_sources.len(), 1);
+    assert_eq!(
+        declared.active_manifest_event_sources[0].normalized_event_kinds,
+        vec!["RecordChanged", "ReverseChanged"]
+    );
+    assert_eq!(
+        declared.active_manifest_event_sources[0].normalized_event_count,
+        0
+    );
+
+    sqlx::raw_sql(
+        r#"
+        INSERT INTO chain_lineage
+            (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+        VALUES ('ethereum-mainnet', '0xREVERSE', 42, now(), 'canonical');
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_events
+            (event_identity, namespace, event_kind, source_family, manifest_version,
+             source_manifest_id, chain_id, block_number, block_hash, derivation_kind,
+             canonicality_state)
+        VALUES
+            ('reverse', 'ens', 'ReverseChanged', 'ens_v1_reverse_l1', 1, $1,
+             'ethereum-mainnet', 42, '0xREVERSE', 'ens_v1_reverse_claim', 'canonical')
+        "#,
+    )
+    .bind(manifest_id)
+    .execute(pool)
+    .await?;
+
+    let populated = load_data_completeness_with_adapter_event_kinds(pool, &declarations).await?;
+    assert_eq!(
+        populated.active_manifest_event_sources[0].normalized_event_count,
+        1
+    );
+    assert_eq!(
+        populated.active_manifest_event_sources[0]
+            .normalized_events_missing_canonical_lineage_count,
+        0
+    );
+
+    database.cleanup().await
+}
+
 /// Active normalized content must retain its exact canonical lineage anchors so reorg repair
 /// remains possible after restore, including when minimal retention compacted raw-log staging.
 #[tokio::test]
@@ -1094,6 +1174,7 @@ async fn active_raw_log_events_report_missing_canonical_raw_log_with_anchor_tran
         read.active_manifest_event_sources[0].normalized_events_missing_canonical_raw_log_count,
         1
     );
+    assert_eq!(read.chains[0].canonical_raw_log_head_block_number, None);
 
     sqlx::query(
         r#"
@@ -1120,6 +1201,7 @@ async fn active_raw_log_events_report_missing_canonical_raw_log_with_anchor_tran
         read.active_manifest_event_sources[0].normalized_events_missing_canonical_raw_log_count,
         0
     );
+    assert_eq!(read.chains[0].canonical_raw_log_head_block_number, Some(42));
 
     sqlx::query("UPDATE chain_lineage SET canonicality_state = 'orphaned'")
         .execute(pool)
@@ -1129,6 +1211,7 @@ async fn active_raw_log_events_report_missing_canonical_raw_log_with_anchor_tran
         read.active_manifest_event_sources[0].normalized_events_missing_canonical_raw_log_count,
         1
     );
+    assert_eq!(read.chains[0].canonical_raw_log_head_block_number, None);
 
     database.cleanup().await
 }

@@ -6,6 +6,7 @@ mod snapshot_reads;
 mod validation;
 
 pub(crate) use boundary_key::record_version_boundary_storage_key;
+pub(crate) use snapshot_reads::DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER;
 
 pub use batch_upsert::upsert_record_inventory_current_rows;
 pub use counts::count_record_inventory_selectors_by_lookup_keys;

@@ -49,6 +49,13 @@ For `[[discovery_rules]]`, the only authorable `admission` value is `reachable_f
 
 `[abi]` is optional. When present, it declares the Solidity ABI fragments that this manifest version authorizes for adapter, execution, or watch-plan use. ABI entries are source-family metadata; they do not by themselves graduate public capability support.
 
+Manifest `normalized_events` declarations are combined with adapter-owned emitted-kind declarations
+when operational tooling enumerates the active normalized-event universe. The manifest remains the
+authority that admits the source family, chain, namespace, and version; the adapter declaration only
+adds normalized kinds that the admitted adapter can synthesize even when no one ABI event carries
+that kind, such as reverse-claim or block-derived output. Adapter declarations do not admit a source,
+change capability status, or expand the watch plan.
+
 ### `capability_flags`
 
 Each flag carries a name, a status (`unsupported` | `shadow` | `supported`), and optional notes.

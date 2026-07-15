@@ -22,7 +22,12 @@ pub(in crate::inspect) async fn inspect_data_completeness(
     args: InspectDataCompletenessArgs,
 ) -> Result<()> {
     let pool = connect_read_only(&args.database).await?;
-    let read = bigname_storage::load_data_completeness(&pool).await?;
+    let adapter_event_kinds = bigname_adapters::adapter_normalized_event_kind_declarations();
+    let read = bigname_storage::load_data_completeness_with_adapter_event_kinds(
+        &pool,
+        &adapter_event_kinds,
+    )
+    .await?;
     let watched_contracts = load_watched_contracts(&pool).await?;
     let backfill_coverage = load_backfill_coverage(&pool, &read).await?;
     let manifest_corpus = inspect_manifest_corpus(&pool, args.manifests_root.as_deref()).await?;
@@ -213,8 +218,13 @@ fn render_data_completeness(report: &DataCompletenessReport) -> Value {
                 "tables": report.projection_content.tables.iter().map(|table| json!({
                     "projection": table.projection.as_str(),
                     "scope_kind": table.scope_kind,
-                    "total_count": table.total_count,
-                    "scoped_counts": table.scoped_counts.iter().map(|entry| json!({
+                    "raw_total_count": table.raw_total_count,
+                    "raw_scoped_counts": table.raw_scoped_counts.iter().map(|entry| json!({
+                        "scope": entry.scope.as_str(),
+                        "count": entry.count,
+                    })).collect::<Vec<_>>(),
+                    "servable_total_count": table.servable_total_count,
+                    "servable_scoped_counts": table.servable_scoped_counts.iter().map(|entry| json!({
                         "scope": entry.scope.as_str(),
                         "count": entry.count,
                     })).collect::<Vec<_>>(),

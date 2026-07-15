@@ -43,18 +43,31 @@ pub(super) async fn load_observed_code_addresses(
 
 pub(super) async fn load_active_manifest_event_sources(
     pool: &sqlx::PgPool,
+    adapter_event_kind_declarations: &[(&str, &str)],
 ) -> Result<Vec<ActiveManifestEventSource>> {
+    let adapter_source_families = adapter_event_kind_declarations
+        .iter()
+        .map(|(source_family, _)| *source_family)
+        .collect::<Vec<_>>();
+    let adapter_event_kinds = adapter_event_kind_declarations
+        .iter()
+        .map(|(_, event_kind)| *event_kind)
+        .collect::<Vec<_>>();
     let rows = sqlx::query(
         r#"
-        WITH active_event_sources AS (
+        WITH adapter_declared_kinds AS (
+            SELECT declaration.source_family, declaration.event_kind
+            FROM UNNEST($1::TEXT[], $2::TEXT[])
+                AS declaration(source_family, event_kind)
+        ),
+        active_event_kinds AS (
             SELECT
                 manifest.manifest_id,
                 manifest.manifest_version,
                 manifest.chain,
                 manifest.namespace,
                 manifest.source_family,
-                ARRAY_AGG(DISTINCT normalized_kind.event_kind ORDER BY normalized_kind.event_kind)
-                    AS normalized_event_kinds
+                normalized_kind.event_kind
             FROM manifest_versions manifest
             CROSS JOIN LATERAL jsonb_array_elements(
                 COALESCE(manifest.manifest_payload #> '{abi,events}', '[]'::JSONB)
@@ -63,12 +76,36 @@ pub(super) async fn load_active_manifest_event_sources(
                 COALESCE(abi_event -> 'normalized_events', '[]'::JSONB)
             ) normalized_kind(event_kind)
             WHERE manifest.rollout_status = 'active'
-            GROUP BY
+
+            UNION
+
+            SELECT
                 manifest.manifest_id,
                 manifest.manifest_version,
                 manifest.chain,
                 manifest.namespace,
-                manifest.source_family
+                manifest.source_family,
+                adapter.event_kind
+            FROM manifest_versions manifest
+            JOIN adapter_declared_kinds adapter
+              ON adapter.source_family = manifest.source_family
+            WHERE manifest.rollout_status = 'active'
+        ),
+        active_event_sources AS (
+            SELECT
+                manifest_id,
+                manifest_version,
+                chain,
+                namespace,
+                source_family,
+                ARRAY_AGG(DISTINCT event_kind ORDER BY event_kind) AS normalized_event_kinds
+            FROM active_event_kinds
+            GROUP BY
+                manifest_id,
+                manifest_version,
+                chain,
+                namespace,
+                source_family
         )
         SELECT
             source.manifest_id,
@@ -136,6 +173,8 @@ pub(super) async fn load_active_manifest_event_sources(
             source.manifest_id
         "#,
     )
+    .bind(&adapter_source_families)
+    .bind(&adapter_event_kinds)
     .fetch_all(pool)
     .await
     .context("failed to load active manifest event-source counts")?;

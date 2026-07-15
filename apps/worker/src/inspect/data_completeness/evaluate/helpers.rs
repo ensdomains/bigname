@@ -1,6 +1,19 @@
 use super::report::{ChainFrontier, CursorLag};
 use bigname_storage::{ChainCompletenessRow, ReplayCursorRow};
 
+#[derive(Default)]
+pub(super) struct ChainStartInfo {
+    pub(super) finite_min_start: Option<i64>,
+    pub(super) open_ended_target_count: usize,
+    pub(super) target_count: usize,
+}
+
+#[derive(Clone)]
+pub(super) struct ActiveTargetInfo {
+    pub(super) source_family: String,
+    pub(super) active_from_block_number: Option<i64>,
+}
+
 /// Replay is complete for a cursor's target when `next_block_number > target_block_number`.
 /// A reorg rewind lowers `next_block_number` below the target, so a stale high
 /// `last_completed_block_number` no longer reads as caught up. A missing bound fails closed.
@@ -15,6 +28,24 @@ pub(super) fn replay_complete_lag(cursor: &ReplayCursorRow) -> Option<CursorLag>
             label: cursor_label(cursor),
             behind_by: -1,
         }),
+    }
+}
+
+pub(super) fn latched_replay_lag(
+    cursor: &ReplayCursorRow,
+    canonical_raw_log_head: Option<i64>,
+    backlog_cursor_present: bool,
+) -> Option<CursorLag> {
+    if let Some(lag) = replay_complete_lag(cursor) {
+        return Some(lag);
+    }
+    let target = cursor.target_block_number?;
+    match canonical_raw_log_head {
+        Some(head) if head > target && !backlog_cursor_present => Some(CursorLag {
+            label: format!("{}:missing_backlog", cursor_label(cursor)),
+            behind_by: head - target,
+        }),
+        _ => None,
     }
 }
 

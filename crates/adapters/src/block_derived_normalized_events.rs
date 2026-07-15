@@ -22,12 +22,49 @@ mod types;
 use crate::normalized_event_support::{
     NormalizedEventSyncCounts, count_events_by_kind, upsert_normalized_events_with_counts,
 };
+use constants::{
+    EVENT_KIND_PREIMAGE_OBSERVED, SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR,
+    SOURCE_FAMILY_ENS_V1_REGISTRAR_L1, SOURCE_FAMILY_ENS_V1_WRAPPER_L1,
+    SOURCE_FAMILY_ENS_V2_REGISTRAR_L1, SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
+    SOURCE_FAMILY_ENS_V2_RESOLVER_L1, SOURCE_FAMILY_ENS_V2_ROOT_L1,
+};
 use event_builders::build_preimage_observed_events;
 use loading::{RawLogCanonicalityFilter, load_scanned_log_count, load_watched_raw_logs};
 
 pub use types::{
     BlockDerivedNormalizedEventKindSyncSummary, BlockDerivedNormalizedEventSyncSummary,
 };
+
+pub(crate) const NORMALIZED_EVENT_KIND_DECLARATIONS: &[(&str, &[&str])] = &[
+    (
+        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+        &[EVENT_KIND_PREIMAGE_OBSERVED],
+    ),
+    (
+        SOURCE_FAMILY_ENS_V1_WRAPPER_L1,
+        &[EVENT_KIND_PREIMAGE_OBSERVED],
+    ),
+    (
+        SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR,
+        &[EVENT_KIND_PREIMAGE_OBSERVED],
+    ),
+    (
+        SOURCE_FAMILY_ENS_V2_ROOT_L1,
+        &[EVENT_KIND_PREIMAGE_OBSERVED],
+    ),
+    (
+        SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
+        &[EVENT_KIND_PREIMAGE_OBSERVED],
+    ),
+    (
+        SOURCE_FAMILY_ENS_V2_REGISTRAR_L1,
+        &[EVENT_KIND_PREIMAGE_OBSERVED],
+    ),
+    (
+        SOURCE_FAMILY_ENS_V2_RESOLVER_L1,
+        &[EVENT_KIND_PREIMAGE_OBSERVED],
+    ),
+];
 
 #[cfg(test)]
 use crate::evm_abi::keccak_signature_hex;
