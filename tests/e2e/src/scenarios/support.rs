@@ -1,5 +1,6 @@
 use alloy_primitives::Address;
 use anyhow::Result;
+use sqlx::types::Uuid;
 
 use crate::harness::{
     anvil::Anvil, basenames::BasenamesDeployment, db::HarnessDb, ens_v1::EnsV1Deployment,
@@ -15,6 +16,100 @@ pub struct PipelineRun {
 pub struct BackfillRun {
     pub db: HarnessDb,
     _scratch: TempDir,
+}
+
+#[derive(Clone, Copy)]
+struct LocalChain<'a> {
+    anvil: &'a Anvil,
+    id: &'static str,
+}
+
+async fn ingest_local_chains<F>(
+    chains: &[LocalChain<'_>],
+    mine_margin: bool,
+    ready_sql: Option<&str>,
+    serve_with_chain_rpc_urls: bool,
+    generate_profile: F,
+) -> Result<PipelineRun>
+where
+    F: FnOnce(&std::path::Path, &std::path::Path) -> Result<manifests::LocalProfile>,
+{
+    if mine_margin {
+        for chain in chains {
+            chain.anvil.client().mine(2).await?;
+        }
+    }
+
+    let mut checkpoints = Vec::with_capacity(chains.len());
+    for chain in chains {
+        checkpoints.push((chain.id, chain.anvil.client().block_number().await?));
+    }
+
+    let repo_root = repo_root();
+    let scratch = TempDir::create()?;
+    let profile = generate_profile(scratch.path(), &repo_root)?;
+    let db = HarnessDb::create().await?;
+    let chain_rpc_urls = chains
+        .iter()
+        .map(|chain| (chain.id, chain.anvil.url.as_str()))
+        .collect::<Vec<_>>();
+    pipeline::indexer_run_until_chain_checkpoints(
+        &repo_root,
+        &db.url,
+        &db.pool,
+        &profile.root,
+        &chain_rpc_urls,
+        &checkpoints,
+        ready_sql,
+    )
+    .await?;
+    pipeline::worker_replay_all_current_projections(&repo_root, &db.url).await?;
+    let api = if serve_with_chain_rpc_urls {
+        pipeline::ApiServer::start_with_chain_rpc_urls(&repo_root, &db.url, &chain_rpc_urls).await?
+    } else {
+        pipeline::ApiServer::start(&repo_root, &db.url).await?
+    };
+    Ok(PipelineRun {
+        db,
+        api,
+        _scratch: scratch,
+    })
+}
+
+async fn backfill_local_chain<F>(
+    chain: LocalChain<'_>,
+    idempotency_key: &str,
+    replay_projections: bool,
+    generate_profile: F,
+) -> Result<BackfillRun>
+where
+    F: FnOnce(&std::path::Path, &std::path::Path) -> Result<manifests::LocalProfile>,
+{
+    let repo_root = repo_root();
+    let head = chain.anvil.client().block_number().await?;
+    let scratch = TempDir::create()?;
+    let profile = generate_profile(scratch.path(), &repo_root)?;
+    let db = HarnessDb::create().await?;
+    let chain_rpc_urls = [(chain.id, chain.anvil.url.as_str())];
+    pipeline::indexer_backfill_with_chain_rpc_urls(
+        &repo_root,
+        &db.url,
+        &profile.root,
+        pipeline::ChainBackfillTarget {
+            chain_rpc_urls: &chain_rpc_urls,
+            chain: chain.id,
+            block_range: 0..=head,
+            idempotency_key,
+        },
+    )
+    .await?;
+    if replay_projections {
+        pipeline::worker_replay_all_current_projections(&repo_root, &db.url).await?;
+    }
+    Ok(BackfillRun {
+        db,
+        _scratch: scratch,
+    })
 }
 
 /// SQL scalar expression that compares the latest non-orphaned code-hash
@@ -63,8 +158,14 @@ pub async fn ingest_and_serve(
     deployment: &EnsV1Deployment,
     ready_sql: Option<&str>,
 ) -> Result<PipelineRun> {
-    anvil.client().mine(2).await?;
-    ingest_at_current_head(anvil, deployment, ready_sql).await
+    let chains = [LocalChain {
+        anvil,
+        id: "ethereum-mainnet",
+    }];
+    ingest_local_chains(&chains, true, ready_sql, false, |scratch, repo_root| {
+        manifests::generate_local_profile(scratch, repo_root, &deployment.manifest_targets())
+    })
+    .await
 }
 
 /// Ingest without advancing the chain first. Control runs that must observe
@@ -76,35 +177,14 @@ pub async fn ingest_at_current_head(
     deployment: &EnsV1Deployment,
     ready_sql: Option<&str>,
 ) -> Result<PipelineRun> {
-    let repo_root = repo_root();
-    let rpc = anvil.client();
-    let head = rpc.block_number().await?;
-
-    let scratch = TempDir::create()?;
-    let profile = manifests::generate_local_profile(
-        scratch.path(),
-        &repo_root,
-        &deployment.manifest_targets(),
-    )?;
-
-    let db = HarnessDb::create().await?;
-    pipeline::indexer_run_until_checkpoint(
-        &repo_root,
-        &db.url,
-        &db.pool,
-        &profile.root,
-        &anvil.url,
-        head,
-        ready_sql,
-    )
-    .await?;
-    pipeline::worker_replay_all_current_projections(&repo_root, &db.url).await?;
-    let api = pipeline::ApiServer::start(&repo_root, &db.url).await?;
-    Ok(PipelineRun {
-        db,
-        api,
-        _scratch: scratch,
+    let chains = [LocalChain {
+        anvil,
+        id: "ethereum-mainnet",
+    }];
+    ingest_local_chains(&chains, false, ready_sql, false, |scratch, repo_root| {
+        manifests::generate_local_profile(scratch, repo_root, &deployment.manifest_targets())
     })
+    .await
 }
 
 pub async fn ingest_and_serve_with_ens_execution(
@@ -116,39 +196,19 @@ pub async fn ingest_and_serve_with_ens_execution(
     // Keep the normal post-event margin so the selected head is deliberately
     // newer than name_current's last-event block. Verified execution and
     // explain readback must still share the selected-snapshot cache identity.
-    anvil.client().mine(2).await?;
-    let repo_root = repo_root();
-    let rpc = anvil.client();
-    let head = rpc.block_number().await?;
-
-    let scratch = TempDir::create()?;
-    let mut targets = deployment.manifest_targets();
-    targets.insert(
-        "universal_resolver",
-        (universal_resolver.address, universal_resolver.block_number),
-    );
-    let profile = manifests::generate_local_profile(scratch.path(), &repo_root, &targets)?;
-
-    let db = HarnessDb::create().await?;
-    pipeline::indexer_run_until_checkpoint(
-        &repo_root,
-        &db.url,
-        &db.pool,
-        &profile.root,
-        &anvil.url,
-        head,
-        ready_sql,
-    )
-    .await?;
-    pipeline::worker_replay_all_current_projections(&repo_root, &db.url).await?;
-    let chain_rpc_urls = [("ethereum-mainnet", anvil.url.as_str())];
-    let api = pipeline::ApiServer::start_with_chain_rpc_urls(&repo_root, &db.url, &chain_rpc_urls)
-        .await?;
-    Ok(PipelineRun {
-        db,
-        api,
-        _scratch: scratch,
+    let chains = [LocalChain {
+        anvil,
+        id: "ethereum-mainnet",
+    }];
+    ingest_local_chains(&chains, true, ready_sql, true, |scratch, repo_root| {
+        let mut targets = deployment.manifest_targets();
+        targets.insert(
+            "universal_resolver",
+            (universal_resolver.address, universal_resolver.block_number),
+        );
+        manifests::generate_local_profile(scratch, repo_root, &targets)
     })
+    .await
 }
 
 pub async fn ingest_basenames_and_serve(
@@ -156,8 +216,18 @@ pub async fn ingest_basenames_and_serve(
     deployment: &BasenamesDeployment,
     ready_sql: Option<&str>,
 ) -> Result<PipelineRun> {
-    base_anvil.client().mine(2).await?;
-    ingest_basenames_at_current_head(base_anvil, deployment, ready_sql).await
+    let chains = [LocalChain {
+        anvil: base_anvil,
+        id: "base-mainnet",
+    }];
+    ingest_local_chains(&chains, true, ready_sql, false, |scratch, repo_root| {
+        manifests::generate_local_basenames_profile(
+            scratch,
+            repo_root,
+            &deployment.manifest_targets(),
+        )
+    })
+    .await
 }
 
 pub async fn ingest_basenames_at_current_head(
@@ -165,39 +235,18 @@ pub async fn ingest_basenames_at_current_head(
     deployment: &BasenamesDeployment,
     ready_sql: Option<&str>,
 ) -> Result<PipelineRun> {
-    let repo_root = repo_root();
-    let rpc = base_anvil.client();
-    let head = rpc.block_number().await?;
-
-    let scratch = TempDir::create()?;
-    let profile = manifests::generate_local_basenames_profile(
-        scratch.path(),
-        &repo_root,
-        &deployment.manifest_targets(),
-    )?;
-
-    let db = HarnessDb::create().await?;
-    let chain_rpc_urls = [("base-mainnet", base_anvil.url.as_str())];
-    pipeline::indexer_run_until_chain_checkpoint(
-        &repo_root,
-        &db.url,
-        &db.pool,
-        &profile.root,
-        pipeline::ChainCheckpointTarget {
-            chain_rpc_urls: &chain_rpc_urls,
-            chain: "base-mainnet",
-            target_block: head,
-            extra_ready_sql: ready_sql,
-        },
-    )
-    .await?;
-    pipeline::worker_replay_all_current_projections(&repo_root, &db.url).await?;
-    let api = pipeline::ApiServer::start(&repo_root, &db.url).await?;
-    Ok(PipelineRun {
-        db,
-        api,
-        _scratch: scratch,
+    let chains = [LocalChain {
+        anvil: base_anvil,
+        id: "base-mainnet",
+    }];
+    ingest_local_chains(&chains, false, ready_sql, false, |scratch, repo_root| {
+        manifests::generate_local_basenames_profile(
+            scratch,
+            repo_root,
+            &deployment.manifest_targets(),
+        )
     })
+    .await
 }
 
 pub async fn ingest_ens_v2_sepolia_and_serve(
@@ -205,48 +254,18 @@ pub async fn ingest_ens_v2_sepolia_and_serve(
     deployment: &EnsV2Deployment,
     ready_sql: Option<&str>,
 ) -> Result<PipelineRun> {
-    sepolia_anvil.client().mine(2).await?;
-    ingest_ens_v2_sepolia_at_current_head(sepolia_anvil, deployment, ready_sql).await
-}
-
-pub async fn ingest_ens_v2_sepolia_at_current_head(
-    sepolia_anvil: &Anvil,
-    deployment: &EnsV2Deployment,
-    ready_sql: Option<&str>,
-) -> Result<PipelineRun> {
-    let repo_root = repo_root();
-    let rpc = sepolia_anvil.client();
-    let head = rpc.block_number().await?;
-
-    let scratch = TempDir::create()?;
-    let profile = manifests::generate_local_sepolia_profile(
-        scratch.path(),
-        &repo_root,
-        &deployment.manifest_targets(),
-    )?;
-
-    let db = HarnessDb::create().await?;
-    let chain_rpc_urls = [("ethereum-sepolia", sepolia_anvil.url.as_str())];
-    pipeline::indexer_run_until_chain_checkpoint(
-        &repo_root,
-        &db.url,
-        &db.pool,
-        &profile.root,
-        pipeline::ChainCheckpointTarget {
-            chain_rpc_urls: &chain_rpc_urls,
-            chain: "ethereum-sepolia",
-            target_block: head,
-            extra_ready_sql: ready_sql,
-        },
-    )
-    .await?;
-    pipeline::worker_replay_all_current_projections(&repo_root, &db.url).await?;
-    let api = pipeline::ApiServer::start(&repo_root, &db.url).await?;
-    Ok(PipelineRun {
-        db,
-        api,
-        _scratch: scratch,
+    let chains = [LocalChain {
+        anvil: sepolia_anvil,
+        id: "ethereum-sepolia",
+    }];
+    ingest_local_chains(&chains, true, ready_sql, false, |scratch, repo_root| {
+        manifests::generate_local_sepolia_profile(
+            scratch,
+            repo_root,
+            &deployment.manifest_targets(),
+        )
     })
+    .await
 }
 
 /// Sepolia twin of `backfill_and_replay_projections`: derive the ENSv2 chain
@@ -257,35 +276,22 @@ pub async fn backfill_ens_v2_sepolia_and_replay_projections(
     deployment: &EnsV2Deployment,
     idempotency_key: &str,
 ) -> Result<BackfillRun> {
-    let repo_root = repo_root();
-    let head = sepolia_anvil.client().block_number().await?;
-
-    let scratch = TempDir::create()?;
-    let profile = manifests::generate_local_sepolia_profile(
-        scratch.path(),
-        &repo_root,
-        &deployment.manifest_targets(),
-    )?;
-
-    let db = HarnessDb::create().await?;
-    let chain_rpc_urls = [("ethereum-sepolia", sepolia_anvil.url.as_str())];
-    pipeline::indexer_backfill_with_chain_rpc_urls(
-        &repo_root,
-        &db.url,
-        &profile.root,
-        pipeline::ChainBackfillTarget {
-            chain_rpc_urls: &chain_rpc_urls,
-            chain: "ethereum-sepolia",
-            block_range: 0..=head,
-            idempotency_key,
+    backfill_local_chain(
+        LocalChain {
+            anvil: sepolia_anvil,
+            id: "ethereum-sepolia",
+        },
+        idempotency_key,
+        true,
+        |scratch, repo_root| {
+            manifests::generate_local_sepolia_profile(
+                scratch,
+                repo_root,
+                &deployment.manifest_targets(),
+            )
         },
     )
-    .await?;
-    pipeline::worker_replay_all_current_projections(&repo_root, &db.url).await?;
-    Ok(BackfillRun {
-        db,
-        _scratch: scratch,
-    })
+    .await
 }
 
 /// Ingest BOTH mainnet-profile chains into one corpus: the ENSv1 ethereum
@@ -299,42 +305,25 @@ pub async fn ingest_mainnet_composed_and_serve(
     basenames_deployment: &BasenamesDeployment,
     ready_sql: Option<&str>,
 ) -> Result<PipelineRun> {
-    let repo_root = repo_root();
-    eth_anvil.client().mine(2).await?;
-    base_anvil.client().mine(2).await?;
-    let eth_head = eth_anvil.client().block_number().await?;
-    let base_head = base_anvil.client().block_number().await?;
-
-    let scratch = TempDir::create()?;
-    let profile = manifests::generate_local_mainnet_composed_profile(
-        scratch.path(),
-        &repo_root,
-        &ens_deployment.manifest_targets(),
-        &basenames_deployment.manifest_targets(),
-    )?;
-
-    let db = HarnessDb::create().await?;
-    let chain_rpc_urls = [
-        ("ethereum-mainnet", eth_anvil.url.as_str()),
-        ("base-mainnet", base_anvil.url.as_str()),
+    let chains = [
+        LocalChain {
+            anvil: eth_anvil,
+            id: "ethereum-mainnet",
+        },
+        LocalChain {
+            anvil: base_anvil,
+            id: "base-mainnet",
+        },
     ];
-    pipeline::indexer_run_until_chain_checkpoints(
-        &repo_root,
-        &db.url,
-        &db.pool,
-        &profile.root,
-        &chain_rpc_urls,
-        &[("ethereum-mainnet", eth_head), ("base-mainnet", base_head)],
-        ready_sql,
-    )
-    .await?;
-    pipeline::worker_replay_all_current_projections(&repo_root, &db.url).await?;
-    let api = pipeline::ApiServer::start(&repo_root, &db.url).await?;
-    Ok(PipelineRun {
-        db,
-        api,
-        _scratch: scratch,
+    ingest_local_chains(&chains, true, ready_sql, false, |scratch, repo_root| {
+        manifests::generate_local_mainnet_composed_profile(
+            scratch,
+            repo_root,
+            &ens_deployment.manifest_targets(),
+            &basenames_deployment.manifest_targets(),
+        )
     })
+    .await
 }
 
 /// Base twin of the backfill helpers: derive the Basenames chain via
@@ -345,35 +334,52 @@ pub async fn backfill_basenames_and_replay_projections(
     deployment: &BasenamesDeployment,
     idempotency_key: &str,
 ) -> Result<BackfillRun> {
+    backfill_local_chain(
+        LocalChain {
+            anvil: base_anvil,
+            id: "base-mainnet",
+        },
+        idempotency_key,
+        true,
+        |scratch, repo_root| {
+            manifests::generate_local_basenames_profile(
+                scratch,
+                repo_root,
+                &deployment.manifest_targets(),
+            )
+        },
+    )
+    .await
+}
+
+/// Backfill one discovery-admitted Basenames target into an existing corpus.
+/// This is the second phase for scenarios that must distinguish an adapter
+/// admission rejection from an address-filter transport exclusion.
+pub async fn backfill_basenames_watched_target_and_replay_projections(
+    run: &BackfillRun,
+    base_anvil: &Anvil,
+    contract_instance_id: Uuid,
+    block_range: std::ops::RangeInclusive<u64>,
+    idempotency_key: &str,
+) -> Result<()> {
     let repo_root = repo_root();
-    let head = base_anvil.client().block_number().await?;
-
-    let scratch = TempDir::create()?;
-    let profile = manifests::generate_local_basenames_profile(
-        scratch.path(),
-        &repo_root,
-        &deployment.manifest_targets(),
-    )?;
-
-    let db = HarnessDb::create().await?;
     let chain_rpc_urls = [("base-mainnet", base_anvil.url.as_str())];
-    pipeline::indexer_backfill_with_chain_rpc_urls(
+    let profile_root = run._scratch.path().join("manifests-e2e");
+    pipeline::indexer_backfill_watched_target_with_chain_rpc_urls(
         &repo_root,
-        &db.url,
-        &profile.root,
+        &run.db.url,
+        &profile_root,
         pipeline::ChainBackfillTarget {
             chain_rpc_urls: &chain_rpc_urls,
             chain: "base-mainnet",
-            block_range: 0..=head,
+            block_range,
             idempotency_key,
         },
+        contract_instance_id,
     )
     .await?;
-    pipeline::worker_replay_all_current_projections(&repo_root, &db.url).await?;
-    Ok(BackfillRun {
-        db,
-        _scratch: scratch,
-    })
+    pipeline::worker_replay_all_current_projections(&repo_root, &run.db.url).await?;
+    Ok(())
 }
 
 pub async fn ingest_with_restart_and_serve<F, Fut>(
@@ -420,31 +426,18 @@ pub async fn backfill_normalized_events(
     deployment: &EnsV1Deployment,
     idempotency_key: &str,
 ) -> Result<BackfillRun> {
-    let repo_root = repo_root();
-    let head = anvil.client().block_number().await?;
-
-    let scratch = TempDir::create()?;
-    let profile = manifests::generate_local_profile(
-        scratch.path(),
-        &repo_root,
-        &deployment.manifest_targets(),
-    )?;
-
-    let db = HarnessDb::create().await?;
-    pipeline::indexer_backfill(
-        &repo_root,
-        &db.url,
-        &profile.root,
-        &anvil.url,
-        0,
-        head,
+    backfill_local_chain(
+        LocalChain {
+            anvil,
+            id: "ethereum-mainnet",
+        },
         idempotency_key,
+        false,
+        |scratch, repo_root| {
+            manifests::generate_local_profile(scratch, repo_root, &deployment.manifest_targets())
+        },
     )
-    .await?;
-    Ok(BackfillRun {
-        db,
-        _scratch: scratch,
-    })
+    .await
 }
 
 pub async fn serve_existing_db(db: HarnessDb, scratch: TempDir) -> Result<PipelineRun> {
@@ -465,9 +458,18 @@ pub async fn backfill_and_replay_projections(
     deployment: &EnsV1Deployment,
     idempotency_key: &str,
 ) -> Result<BackfillRun> {
-    let run = backfill_normalized_events(anvil, deployment, idempotency_key).await?;
-    pipeline::worker_replay_all_current_projections(&repo_root(), &run.db.url).await?;
-    Ok(run)
+    backfill_local_chain(
+        LocalChain {
+            anvil,
+            id: "ethereum-mainnet",
+        },
+        idempotency_key,
+        true,
+        |scratch, repo_root| {
+            manifests::generate_local_profile(scratch, repo_root, &deployment.manifest_targets())
+        },
+    )
+    .await
 }
 
 pub async fn route_snapshots(

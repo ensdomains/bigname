@@ -3,6 +3,7 @@ async fn load_ensv2_root_resource_id_for_name_resource(
     resource_id: Uuid,
     route: &'static str,
 ) -> ApiResult<Option<Uuid>> {
+    ensure_permissions_current_projection_available(pool, route).await?;
     let summary = bigname_storage::load_permissions_current_resource_summary(pool, resource_id)
         .await
         .map_err(|load_error| {

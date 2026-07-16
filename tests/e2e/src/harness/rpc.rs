@@ -140,6 +140,25 @@ impl RpcClient {
         })
     }
 
+    /// Send a contract call and require a successful receipt. The caller
+    /// supplies the operation description so failures identify both the
+    /// scenario action and the target contract while retaining the receipt's
+    /// transaction hash.
+    pub async fn send_checked(
+        &self,
+        from: Address,
+        to: Address,
+        data: &[u8],
+        value: U256,
+        description: &str,
+    ) -> Result<TxReceipt> {
+        let receipt = self.send_transaction(from, Some(to), data, value).await?;
+        if !receipt.status_ok {
+            bail!("{description} reverted at {to:#x} (tx {})", receipt.tx_hash);
+        }
+        Ok(receipt)
+    }
+
     pub async fn eth_call(&self, to: Address, data: &[u8]) -> Result<Vec<u8>> {
         let raw = self
             .call(

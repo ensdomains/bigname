@@ -3,7 +3,7 @@ use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use uuid::Uuid;
 
 use super::{
-    ResolverProfileAuthoritySnapshot,
+    ResolverProfileAuthoritySnapshot, ResolverProfileConvergenceSummary,
     authority::{ResolverProfileAdmissionSemantics, ResolverProfileAuthorityEntry},
     drain_resolver_profile_input_changes, expanded_reconciliation_targets,
     invalidations::{
@@ -11,6 +11,26 @@ use super::{
         load_resolver_profile_projection_invalidation_plan,
     },
 };
+
+#[test]
+fn completion_guard_refuses_only_the_deferred_chain() {
+    let summary = ResolverProfileConvergenceSummary {
+        deferred_chain_count: 1,
+        deferred_chains: std::collections::BTreeSet::from(["ethereum-mainnet".to_owned()]),
+        ..ResolverProfileConvergenceSummary::default()
+    };
+    let error = summary
+        .ensure_chain_completion_allowed("ethereum-mainnet", "chain checkpoint advancement")
+        .expect_err("deferred chain must not publish its checkpoint");
+    assert!(
+        error
+            .to_string()
+            .contains("refusing chain checkpoint advancement")
+    );
+    summary
+        .ensure_chain_completion_allowed("base-mainnet", "chain checkpoint advancement")
+        .expect("an eligible chain must not inherit another chain's deferral");
+}
 
 fn input(chain: &str, address: &str) -> ResolverProfileInputChange {
     ResolverProfileInputChange {
@@ -352,9 +372,10 @@ async fn fully_compacted_history_keeps_profile_generation_pending() -> anyhow::R
         .execute(database.pool())
         .await?;
 
-    drain_resolver_profile_input_changes(database.pool())
-        .await
-        .expect_err("fully compacted resolver history must fail closed");
+    let summary = drain_resolver_profile_input_changes(database.pool()).await?;
+    assert_eq!(summary.deferred_input_count, 1);
+    assert_eq!(summary.deferred_chain_count, 1);
+    assert_eq!(summary.acknowledged_input_count, 0);
     assert_resolver_profile_generation_pending(database.pool(), chain, resolver).await?;
 
     database.cleanup().await
@@ -393,10 +414,99 @@ async fn partially_compacted_history_keeps_profile_generation_pending() -> anyho
         .execute(database.pool())
         .await?;
 
-    drain_resolver_profile_input_changes(database.pool())
-        .await
-        .expect_err("partially compacted resolver history must fail closed");
+    let summary = drain_resolver_profile_input_changes(database.pool()).await?;
+    assert_eq!(summary.deferred_input_count, 1);
+    assert_eq!(summary.deferred_chain_count, 1);
+    assert_eq!(summary.acknowledged_input_count, 0);
     assert_resolver_profile_generation_pending(database.pool(), chain, resolver).await?;
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn unavailable_chain_does_not_block_eligible_chain_convergence() -> anyhow::Result<()> {
+    let database = TestDatabase::create_migrated(
+        TestDatabaseConfig::new("indexer_resolver_profile_chain_deferral"),
+        &bigname_storage::MIGRATOR,
+        "failed to apply migrations for resolver-profile chain-deferral test",
+    )
+    .await?;
+    let deferred_chain = "ethereum-mainnet";
+    let eligible_chain = "base-mainnet";
+    let deferred_resolver = "0x0000000000000000000000000000000000000088";
+    let eligible_resolver = "0x0000000000000000000000000000000000000099";
+    seed_resolver_raw_logs(
+        database.pool(),
+        deferred_chain,
+        deferred_resolver,
+        &[(1, "0xresolver-profile-deferred-chain-block")],
+    )
+    .await?;
+    sqlx::query("DELETE FROM raw_logs WHERE chain_id = $1")
+        .bind(deferred_chain)
+        .execute(database.pool())
+        .await?;
+    bigname_storage::enqueue_resolver_profile_reconciliations(
+        database.pool(),
+        &[
+            bigname_storage::ResolverProfileReconciliationTarget {
+                chain_id: deferred_chain.to_owned(),
+                contract_address: deferred_resolver.to_owned(),
+            },
+            bigname_storage::ResolverProfileReconciliationTarget {
+                chain_id: eligible_chain.to_owned(),
+                contract_address: eligible_resolver.to_owned(),
+            },
+        ],
+    )
+    .await?;
+
+    let summary = drain_resolver_profile_input_changes(database.pool()).await?;
+    assert_eq!(summary.deferred_input_count, 1);
+    assert_eq!(summary.deferred_chain_count, 1);
+    assert_eq!(summary.acknowledged_input_count, 1);
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64)>(
+            r#"
+            SELECT generation, processed_generation
+            FROM resolver_profile_input_changes
+            WHERE chain_id = $1 AND contract_address = $2
+            "#,
+        )
+        .bind(deferred_chain)
+        .bind(deferred_resolver)
+        .fetch_one(database.pool())
+        .await?,
+        (1, 0)
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64)>(
+            r#"
+            SELECT generation, processed_generation
+            FROM resolver_profile_input_changes
+            WHERE chain_id = $1 AND contract_address = $2
+            "#,
+        )
+        .bind(eligible_chain)
+        .bind(eligible_resolver)
+        .fetch_one(database.pool())
+        .await?,
+        (1, 1)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM projection_invalidations
+            WHERE projection = 'resolver_current'
+              AND projection_key = $1
+            "#,
+        )
+        .bind(format!("{eligible_chain}:{eligible_resolver}"))
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
 
     database.cleanup().await
 }

@@ -504,6 +504,14 @@ async fn normalized_replay_catchup_fails_closed_on_retained_ensv1_suffix_after_g
             incomplete_since
         )
         VALUES ($1, 1, 1, false, clock_timestamp())
+        ON CONFLICT (chain_id) DO UPDATE
+        SET revision = EXCLUDED.revision,
+            retention_generation = EXCLUDED.retention_generation,
+            retained_history_complete = EXCLUDED.retained_history_complete,
+            incomplete_since = EXCLUDED.incomplete_since,
+            proven_retention_generation = NULL,
+            proven_discovery_admission_epoch = NULL,
+            proven_through_block = NULL
         "#,
     )
     .bind(chain)
@@ -601,6 +609,14 @@ async fn normalized_replay_catchup_rejects_input_committed_before_cursor_publica
             incomplete_since
         )
         VALUES ($1, 1, 0, false, clock_timestamp())
+        ON CONFLICT (chain_id) DO UPDATE
+        SET revision = EXCLUDED.revision,
+            retention_generation = EXCLUDED.retention_generation,
+            retained_history_complete = EXCLUDED.retained_history_complete,
+            incomplete_since = EXCLUDED.incomplete_since,
+            proven_retention_generation = NULL,
+            proven_discovery_admission_epoch = NULL,
+            proven_through_block = NULL
         "#,
     )
     .bind(chain)
@@ -772,6 +788,14 @@ async fn normalized_replay_catchup_rejects_late_older_commit_after_rewind_inspec
             incomplete_since
         )
         VALUES ($1, 1, 0, false, clock_timestamp())
+        ON CONFLICT (chain_id) DO UPDATE
+        SET revision = EXCLUDED.revision,
+            retention_generation = EXCLUDED.retention_generation,
+            retained_history_complete = EXCLUDED.retained_history_complete,
+            incomplete_since = EXCLUDED.incomplete_since,
+            proven_retention_generation = NULL,
+            proven_discovery_admission_epoch = NULL,
+            proven_through_block = NULL
         "#,
     )
     .bind(chain)
@@ -980,6 +1004,14 @@ async fn normalized_replay_catchup_accepts_commit_strictly_after_latched_closure
             incomplete_since
         )
         VALUES ($1, 1, 0, false, clock_timestamp())
+        ON CONFLICT (chain_id) DO UPDATE
+        SET revision = EXCLUDED.revision,
+            retention_generation = EXCLUDED.retention_generation,
+            retained_history_complete = EXCLUDED.retained_history_complete,
+            incomplete_since = EXCLUDED.incomplete_since,
+            proven_retention_generation = NULL,
+            proven_discovery_admission_epoch = NULL,
+            proven_through_block = NULL
         "#,
     )
     .bind(chain)
@@ -1302,6 +1334,14 @@ async fn normalized_replay_cursor_rewinds_for_newer_commit_revision_even_when_ob
             incomplete_since
         )
         VALUES ($1, 6, 0, false, clock_timestamp())
+        ON CONFLICT (chain_id) DO UPDATE
+        SET revision = EXCLUDED.revision,
+            retention_generation = EXCLUDED.retention_generation,
+            retained_history_complete = EXCLUDED.retained_history_complete,
+            incomplete_since = EXCLUDED.incomplete_since,
+            proven_retention_generation = NULL,
+            proven_discovery_admission_epoch = NULL,
+            proven_through_block = NULL
         "#,
     )
     .bind(chain)

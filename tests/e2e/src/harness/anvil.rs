@@ -4,8 +4,9 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
+use super::pipeline::{await_with_readiness_deadline, deadline_after, ready_timeout_secs};
 use super::rpc::RpcClient;
 
 static ANVIL_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -37,30 +38,59 @@ impl Anvil {
     }
 
     async fn spawn_with_chain_id(chain_id: u64) -> Result<Self> {
-        // `free_port` must release its listener before Anvil can bind. Hold the
-        // harness-wide startup lock through readiness so another local server
-        // cannot take the selected port in that window.
-        let _startup_guard = super::lock_local_server_start().await;
+        let ready_timeout_secs = ready_timeout_secs()?;
+        let deadline = deadline_after(ready_timeout_secs, "anvil readiness")?;
         let mut last_error = None;
         for attempt in 1..=SPAWN_ATTEMPTS {
-            match Self::try_spawn_with_chain_id(chain_id).await {
-                Ok(instance) => return Ok(instance),
+            match Self::try_spawn_until_bound(chain_id, deadline, ready_timeout_secs).await {
+                Ok(mut instance) => match instance
+                    .wait_ready(chain_id, deadline, ready_timeout_secs)
+                    .await
+                {
+                    Ok(()) => return Ok(instance),
+                    Err(error) => {
+                        last_error = Some(error.context(format!(
+                            "anvil chain {chain_id} startup attempt {attempt}/{SPAWN_ATTEMPTS} failed after binding"
+                        )));
+                    }
+                },
                 Err(error) => {
                     last_error = Some(error.context(format!(
                         "anvil chain {chain_id} startup attempt {attempt}/{SPAWN_ATTEMPTS} failed"
                     )));
                 }
             }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
         }
-        Err(last_error.expect("at least one anvil startup attempt ran"))
+        let error = last_error.expect("at least one anvil startup attempt ran");
+        if tokio::time::Instant::now() >= deadline {
+            return Err(error.context(format!(
+                "anvil chain {chain_id} did not become ready within the configured {ready_timeout_secs}s readiness deadline"
+            )));
+        }
+        Err(error)
     }
 
-    async fn try_spawn_with_chain_id(chain_id: u64) -> Result<Self> {
+    async fn try_spawn_until_bound(
+        chain_id: u64,
+        deadline: tokio::time::Instant,
+        ready_timeout_secs: u64,
+    ) -> Result<Self> {
+        // Serialize only the probe-to-bind window. Once this child's listener
+        // is observable, RPC readiness and any retry can proceed without
+        // blocking unrelated Anvil or API starts.
+        let _startup_guard = await_with_readiness_deadline(
+            deadline,
+            ready_timeout_secs,
+            format!("anvil chain {chain_id} local-server startup lock wait"),
+            super::lock_local_server_start(),
+        )
+        .await?;
         let port = free_port()?;
         let url = format!("http://127.0.0.1:{port}");
-        let log_path = anvil_log_path(chain_id);
-        let log_file = std::fs::File::create(&log_path)
-            .with_context(|| format!("create anvil log file at {log_path:?}"))?;
+        let (log_path, log_file) = create_anvil_log_file(chain_id)?;
         let child = Command::new("anvil")
             .args([
                 "--port",
@@ -80,7 +110,9 @@ impl Anvil {
             url,
             log_path,
         };
-        instance.wait_ready(chain_id).await?;
+        instance
+            .wait_until_listener_bound(port, deadline, ready_timeout_secs)
+            .await?;
         Ok(instance)
     }
 
@@ -88,12 +120,66 @@ impl Anvil {
         RpcClient::new(self.url.clone())
     }
 
-    async fn wait_ready(&mut self, expected_chain_id: u64) -> Result<()> {
+    async fn wait_until_listener_bound(
+        &mut self,
+        port: u16,
+        deadline: tokio::time::Instant,
+        ready_timeout_secs: u64,
+    ) -> Result<()> {
+        let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        loop {
+            self.bail_if_exited()?;
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Err(self.readiness_deadline_error(
+                    ready_timeout_secs,
+                    "waiting for its listener to bind",
+                ));
+            }
+            let connect_timeout = deadline
+                .saturating_duration_since(now)
+                .min(Duration::from_millis(20));
+            if std::net::TcpStream::connect_timeout(&address, connect_timeout).is_ok() {
+                self.bail_if_exited()?;
+                return Ok(());
+            }
+            tokio::time::sleep_until(
+                deadline.min(tokio::time::Instant::now() + Duration::from_millis(10)),
+            )
+            .await;
+        }
+    }
+
+    async fn wait_ready(
+        &mut self,
+        expected_chain_id: u64,
+        deadline: tokio::time::Instant,
+        ready_timeout_secs: u64,
+    ) -> Result<()> {
         let client = self.client();
         let mut consecutive_matches = 0_u8;
-        for _ in 0..100 {
+        loop {
             self.bail_if_exited()?;
-            match client.chain_id().await {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(
+                    self.readiness_deadline_error(ready_timeout_secs, "waiting for RPC readiness")
+                );
+            }
+            let chain_id = await_with_readiness_deadline(
+                deadline,
+                ready_timeout_secs,
+                format!("anvil chain-id RPC at {}", self.url),
+                client.chain_id(),
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "anvil log tail from {:?}:\n{}",
+                    self.log_path,
+                    self.log_tail()
+                )
+            })?;
+            match chain_id {
                 Ok(actual_chain_id) if actual_chain_id == expected_chain_id => {
                     // Harness starts are serialized, but an external process
                     // can still take the selected port after free_port releases
@@ -114,10 +200,16 @@ impl Anvil {
                 }
                 Err(_) => consecutive_matches = 0,
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep_until(
+                deadline.min(tokio::time::Instant::now() + Duration::from_millis(100)),
+            )
+            .await;
         }
-        bail!(
-            "anvil did not become ready within 10s at {}; log tail from {:?}:\n{}",
+    }
+
+    fn readiness_deadline_error(&self, ready_timeout_secs: u64, phase: &str) -> anyhow::Error {
+        anyhow!(
+            "anvil did not become ready at {} within the configured {ready_timeout_secs}s readiness deadline while {phase}; log tail from {:?}:\n{}",
             self.url,
             self.log_path,
             self.log_tail()
@@ -175,10 +267,24 @@ fn free_port() -> Result<u16> {
     Ok(listener.local_addr()?.port())
 }
 
-fn anvil_log_path(chain_id: u64) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "bigname-e2e-anvil-{}-{chain_id}-{}.log",
-        std::process::id(),
-        ANVIL_SEQ.fetch_add(1, Ordering::Relaxed)
-    ))
+fn create_anvil_log_file(chain_id: u64) -> Result<(PathBuf, std::fs::File)> {
+    for _ in 0..1000 {
+        let sequence = ANVIL_SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "bigname-e2e-anvil-{}-{chain_id}-{sequence}.log",
+            std::process::id()
+        ));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("create anvil log file at {path:?}"));
+            }
+        }
+    }
+    anyhow::bail!("could not allocate a unique anvil log path")
 }

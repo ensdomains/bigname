@@ -63,7 +63,8 @@ async fn ens_v2_registry_state_survives_distinct_live_polls() -> Result<()> {
         &profile.root,
         &chain_rpc_urls,
         "ens-v2-cross-poll",
-    )?;
+    )
+    .await?;
     indexer
         .wait_for_first_chain_checkpoint(&db.pool, CHAIN)
         .await?;

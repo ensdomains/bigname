@@ -10,7 +10,7 @@ use crate::ens_v2_registry::{
     },
     discovery::{ens_v2_resolver_discovery_source, ens_v2_subregistry_discovery_source},
     names::{
-        closed_surface_binding_for_terminal, deactivate_registry_suffix,
+        closed_surface_binding_for_terminal, deactivate_registry_suffix, discovery_observation_key,
         remember_linked_resource_state, replace_token_alias, resolve_token_key,
         take_state_for_unregister,
     },
@@ -28,6 +28,8 @@ pub(super) fn apply_label_unregistered(
     let Some(mut state) = take_state_for_unregister(
         context.states_by_registry_token,
         context.token_aliases,
+        context.state_keys_by_registry_namehash,
+        context.current_token_alias_by_canonical_key,
         &reference.emitting_address,
         &token_id,
     ) else {
@@ -54,6 +56,7 @@ pub(super) fn apply_label_unregistered(
             .closed_bindings
             .insert(binding.surface_binding_id, binding);
     }
+    let before_status = state.status;
     state.status = "unregistered";
     state.current_ref = reference.clone();
     deactivate_registry_suffix(
@@ -66,7 +69,7 @@ pub(super) fn apply_label_unregistered(
         Some(state.name.logical_name_id.clone()),
         state.resource.as_ref().map(|link| link.resource_id),
         EVENT_KIND_REGISTRATION_RELEASED,
-        json!({"status": "registered"}),
+        json!({"status": before_status}),
         json!({
             "source_event": "LabelUnregistered",
             "status": "unregistered",
@@ -181,15 +184,15 @@ pub(super) fn append_terminal_discovery_observations(
             state.subregistry.as_deref(),
             SUBREGISTRY_EDGE_KIND,
             ens_v2_subregistry_discovery_source(&reference.chain_id),
-            format!("{}:{}", reference.emitting_address, state.name.namehash),
+            discovery_observation_key(&reference.emitting_address, observed_token_id),
         ),
         (
             state.resolver.as_deref(),
             RESOLVER_EDGE_KIND,
             ens_v2_resolver_discovery_source(&reference.chain_id),
             format!(
-                "resolver:{}:{}",
-                reference.emitting_address, state.name.namehash
+                "resolver:{}",
+                discovery_observation_key(&reference.emitting_address, observed_token_id)
             ),
         ),
     ] {
@@ -254,6 +257,7 @@ pub(super) fn apply_token_regenerated(
     remember_linked_resource_state(context.linked_resource_states, state);
     replace_token_alias(
         context.token_aliases,
+        context.current_token_alias_by_canonical_key,
         &reference.emitting_address,
         &new_token_id,
         &canonical_key,

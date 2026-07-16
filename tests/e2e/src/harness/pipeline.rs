@@ -1,7 +1,7 @@
 use std::net::TcpListener;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -21,49 +21,129 @@ struct PipelineBinaries {
     worker: PathBuf,
 }
 
-static PIPELINE_BINARIES: OnceLock<std::result::Result<PipelineBinaries, String>> = OnceLock::new();
+static PIPELINE_BINARIES: tokio::sync::OnceCell<std::result::Result<PipelineBinaries, String>> =
+    tokio::sync::OnceCell::const_new();
+static PROCESS_LOG_SEQ: AtomicU64 = AtomicU64::new(0);
+
+const DEFAULT_READY_TIMEOUT_SECS: u64 = 600;
+const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 600;
+
+#[cfg(unix)]
+mod unix_process {
+    use std::io;
+
+    const SIGKILL: i32 = 9;
+    #[cfg(test)]
+    const ESRCH: i32 = 3;
+
+    unsafe extern "C" {
+        #[link_name = "kill"]
+        fn c_kill(pid: i32, signal: i32) -> i32;
+        fn getpgrp() -> i32;
+    }
+
+    pub fn kill_process_group(process_group: u32) -> io::Result<()> {
+        let process_group = positive_pid(process_group)?;
+        // SAFETY: getpgrp takes no arguments and has no memory-safety
+        // preconditions.
+        let harness_process_group = unsafe { getpgrp() };
+        if process_group == harness_process_group {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "refusing to signal the harness process group",
+            ));
+        }
+        // SAFETY: a negative, nonzero pid addresses one Unix process group.
+        // The equality guard above prevents signaling the harness group.
+        if unsafe { c_kill(-process_group, SIGKILL) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(test)]
+    pub fn process_exists(pid: u32) -> io::Result<bool> {
+        let pid = positive_pid(pid)?;
+        // SAFETY: signal 0 performs existence/permission checking only.
+        if unsafe { c_kill(pid, 0) } == 0 {
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(ESRCH) {
+            Ok(false)
+        } else {
+            Err(error)
+        }
+    }
+
+    #[cfg(test)]
+    pub fn kill_process(pid: u32) -> io::Result<()> {
+        let pid = positive_pid(pid)?;
+        // SAFETY: pid is a validated positive process id and SIGKILL has no
+        // userspace memory-safety preconditions.
+        if unsafe { c_kill(pid, SIGKILL) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    fn positive_pid(pid: u32) -> io::Result<i32> {
+        let pid = i32::try_from(pid)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "process id exceeds i32"))?;
+        if pid == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "process id must be positive",
+            ));
+        }
+        Ok(pid)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TimeoutTerminationTarget {
+    DirectChild,
+    #[cfg(unix)]
+    ProcessGroup(u32),
+}
 
 /// Build the three pipeline binaries once, then launch the exact artifacts
 /// Cargo reports. Direct launches keep later scenario startup independent of
 /// the workspace target lock while still honoring its effective target dir.
-fn pipeline_binaries(repo_root: &Path) -> Result<&'static PipelineBinaries> {
+async fn pipeline_binaries(repo_root: &Path) -> Result<&'static PipelineBinaries> {
     match PIPELINE_BINARIES
-        .get_or_init(|| build_pipeline_binaries(repo_root).map_err(|error| format!("{error:#}")))
+        .get_or_init(|| async {
+            build_pipeline_binaries(repo_root)
+                .await
+                .map_err(|error| format!("{error:#}"))
+        })
+        .await
     {
         Ok(binaries) => Ok(binaries),
         Err(error) => bail!("{error}"),
     }
 }
 
-fn build_pipeline_binaries(repo_root: &Path) -> Result<PipelineBinaries> {
+async fn build_pipeline_binaries(repo_root: &Path) -> Result<PipelineBinaries> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let output = std::process::Command::new(cargo)
-        .current_dir(repo_root)
-        .args([
-            "build",
-            "--locked",
-            "--message-format=json-render-diagnostics",
-            "--package",
-            "bigname-api",
-            "--package",
-            "bigname-indexer",
-            "--package",
-            "bigname-worker",
-            "--bins",
-        ])
-        .output()
-        .context("spawn one-time pipeline binary build")?;
+    let mut command = Command::new(cargo);
+    command.current_dir(repo_root).args([
+        "build",
+        "--locked",
+        "--message-format=json-render-diagnostics",
+        "--package",
+        "bigname-api",
+        "--package",
+        "bigname-indexer",
+        "--package",
+        "bigname-worker",
+        "--bins",
+    ]);
+    let stdout = run_to_completion(command, "one-time pipeline binary build").await?;
 
-    if !output.status.success() {
-        bail!(
-            "pipeline binary build failed ({}):\nstdout:\n{}\nstderr:\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    parse_pipeline_binaries(repo_root, &output.stdout)
+    parse_pipeline_binaries(repo_root, stdout.as_bytes())
 }
 
 fn normalize_cargo_path(repo_root: &Path, path: &str) -> PathBuf {
@@ -171,39 +251,252 @@ fn pipeline_command(repo_root: &Path, executable: &Path) -> Command {
     command
 }
 
-async fn run_to_completion(mut command: Command, what: &str) -> Result<String> {
-    let output = command
+async fn run_to_completion(command: Command, what: &str) -> Result<String> {
+    let timeout_secs = timeout_secs_from_env(
+        "BIGNAME_E2E_COMMAND_TIMEOUT_SECS",
+        DEFAULT_COMMAND_TIMEOUT_SECS,
+    )?;
+    run_to_completion_with_timeout(command, what, timeout_secs).await
+}
+
+async fn run_to_completion_with_timeout(
+    mut command: Command,
+    what: &str,
+    timeout_secs: u64,
+) -> Result<String> {
+    let (stdout_path, stdout_file) = create_process_log_file("command-stdout", what)?;
+    let (stderr_path, stderr_file) = match create_process_log_file("command-stderr", what) {
+        Ok(log) => log,
+        Err(error) => {
+            std::fs::remove_file(&stdout_path).ok();
+            return Err(error);
+        }
+    };
+    isolate_bounded_command(&mut command);
+    command
         .kill_on_drop(true)
-        .output()
-        .await
-        .with_context(|| format!("spawn {what}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        .stdout(std::process::Stdio::from(stdout_file))
+        .stderr(std::process::Stdio::from(stderr_file));
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            std::fs::remove_file(&stdout_path).ok();
+            std::fs::remove_file(&stderr_path).ok();
+            return Err(error).with_context(|| format!("spawn {what}"));
+        }
+    };
+    let termination_target = timeout_termination_target(&child);
+    let status = match tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait()).await {
+        Ok(status) => status.with_context(|| format!("wait for {what}"))?,
+        Err(_) => {
+            let stop_note = stop_and_reap_timed_out_child(&mut child, termination_target).await;
+            bail!(
+                "{what} exceeded the configured BIGNAME_E2E_COMMAND_TIMEOUT_SECS deadline of {timeout_secs}s ({stop_note}); stdout log {stdout_path:?}, stderr log {stderr_path:?}; stdout tail (reversed):\n{}\nstderr tail (reversed):\n{}",
+                process_log_tail(&stdout_path),
+                process_log_tail(&stderr_path)
+            );
+        }
+    };
+    let stdout = read_process_log(&stdout_path);
+    if !status.success() {
         bail!(
-            "{what} failed ({}):\nstdout:\n{stdout}\nstderr:\n{stderr}",
-            output.status
+            "{what} failed ({status}); stdout log {stdout_path:?}, stderr log {stderr_path:?}; stdout tail (reversed):\n{}\nstderr tail (reversed):\n{}",
+            process_log_tail(&stdout_path),
+            process_log_tail(&stderr_path)
         );
     }
+    std::fs::remove_file(stdout_path).ok();
+    std::fs::remove_file(stderr_path).ok();
     Ok(stdout)
 }
 
-fn indexer_log_path(label: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "bigname-e2e-indexer-{}-{label}.log",
-        std::process::id()
-    ))
+#[cfg(unix)]
+fn isolate_bounded_command(command: &mut Command) {
+    // PGID 0 asks the child to become leader of a new process group. Its
+    // descendants inherit that group unless they explicitly leave it.
+    command.process_group(0);
 }
 
-fn worker_log_path(label: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "bigname-e2e-worker-{}-{label}.log",
-        std::process::id()
-    ))
+#[cfg(not(unix))]
+fn isolate_bounded_command(_command: &mut Command) {}
+
+fn timeout_termination_target(child: &Child) -> TimeoutTerminationTarget {
+    #[cfg(unix)]
+    if let Some(process_group) = child.id() {
+        return TimeoutTerminationTarget::ProcessGroup(process_group);
+    }
+    TimeoutTerminationTarget::DirectChild
+}
+
+async fn stop_and_reap_timed_out_child(
+    child: &mut Child,
+    target: TimeoutTerminationTarget,
+) -> String {
+    let stop_note = request_timeout_stop(child, target);
+    let reap = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+    match reap {
+        Ok(Ok(status)) => format!("{stop_note}; process stopped and reaped with {status}"),
+        Ok(Err(wait_error)) => {
+            format!("{stop_note}; process reap failed: {wait_error}")
+        }
+        Err(_) => format!("{stop_note}; process was not reaped within 5s"),
+    }
+}
+
+fn request_timeout_stop(child: &mut Child, target: TimeoutTerminationTarget) -> String {
+    match target {
+        TimeoutTerminationTarget::DirectChild => match child.start_kill() {
+            Ok(()) => "direct child termination requested".to_string(),
+            Err(error) => format!("direct child termination failed: {error}"),
+        },
+        #[cfg(unix)]
+        TimeoutTerminationTarget::ProcessGroup(process_group) => {
+            match unix_process::kill_process_group(process_group) {
+                Ok(()) => format!("process group {process_group} termination requested"),
+                Err(group_error) => match child.start_kill() {
+                    Ok(()) => format!(
+                        "process group {process_group} termination failed ({group_error}); direct child termination requested"
+                    ),
+                    Err(child_error) => format!(
+                        "process group {process_group} termination failed ({group_error}); direct child termination failed ({child_error})"
+                    ),
+                },
+            }
+        }
+    }
+}
+
+fn timeout_secs_from_env(variable: &str, default: u64) -> Result<u64> {
+    match std::env::var(variable) {
+        Ok(value) => parse_timeout_secs(variable, &value),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(error).with_context(|| format!("read {variable}")),
+    }
+}
+
+fn parse_timeout_secs(variable: &str, value: &str) -> Result<u64> {
+    let seconds = value
+        .parse::<u64>()
+        .with_context(|| format!("{variable} must be a positive integer number of seconds"))?;
+    if seconds == 0 {
+        bail!("{variable} must be greater than zero");
+    }
+    Ok(seconds)
+}
+
+pub(super) fn ready_timeout_secs() -> Result<u64> {
+    timeout_secs_from_env("BIGNAME_E2E_READY_TIMEOUT_SECS", DEFAULT_READY_TIMEOUT_SECS)
+}
+
+pub(super) fn deadline_after(seconds: u64, what: &str) -> Result<tokio::time::Instant> {
+    tokio::time::Instant::now()
+        .checked_add(Duration::from_secs(seconds))
+        .with_context(|| format!("{what} timeout is too large"))
+}
+
+pub(super) async fn await_with_readiness_deadline<F>(
+    deadline: tokio::time::Instant,
+    ready_timeout_secs: u64,
+    what: impl Into<String>,
+    future: F,
+) -> Result<F::Output>
+where
+    F: std::future::Future,
+{
+    let what = what.into();
+    match tokio::time::timeout_at(deadline, future).await {
+        Ok(output) => Ok(output),
+        Err(_) => bail!("{what} exceeded the configured {ready_timeout_secs}s readiness deadline"),
+    }
+}
+
+async fn await_supervised_readiness<T, F>(
+    child: &mut Child,
+    log_path: &Path,
+    process_name: &str,
+    deadline: tokio::time::Instant,
+    ready_timeout_secs: u64,
+    what: impl Into<String>,
+    future: F,
+) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    match await_with_readiness_deadline(deadline, ready_timeout_secs, what, future).await {
+        Ok(result) => result,
+        Err(error) => {
+            let stop_note =
+                stop_and_reap_timed_out_child(child, TimeoutTerminationTarget::DirectChild).await;
+            Err(error.context(format!(
+                "{process_name} stopped after readiness timeout ({stop_note}); log tail (reversed) from {log_path:?}:\n{}",
+                process_log_tail(log_path)
+            )))
+        }
+    }
+}
+
+async fn stop_after_readiness_deadline(
+    child: &mut Child,
+    log_path: &Path,
+    timeout_secs: u64,
+    message: &str,
+) -> Result<()> {
+    let stop_note =
+        stop_and_reap_timed_out_child(child, TimeoutTerminationTarget::DirectChild).await;
+    bail!(
+        "{message} within the configured {timeout_secs}s readiness deadline ({stop_note}); log tail (reversed) from {log_path:?}:\n{}",
+        process_log_tail(log_path)
+    )
+}
+
+fn sanitize_log_label(label: &str) -> String {
+    let label = label
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let label = label.trim_matches('-');
+    if label.is_empty() {
+        "process".to_string()
+    } else {
+        label.to_string()
+    }
+}
+
+fn create_process_log_file(process_kind: &str, label: &str) -> Result<(PathBuf, std::fs::File)> {
+    let label = sanitize_log_label(label);
+    for _ in 0..1000 {
+        let sequence = PROCESS_LOG_SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "bigname-e2e-{process_kind}-{}-{label}-{sequence}.log",
+            std::process::id()
+        ));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("create process log at {path:?}"));
+            }
+        }
+    }
+    bail!("could not allocate a unique {process_kind} log path")
+}
+
+fn read_process_log(log_path: &Path) -> String {
+    String::from_utf8_lossy(&std::fs::read(log_path).unwrap_or_default()).into_owned()
 }
 
 fn process_log_tail(log_path: &Path) -> String {
-    let log = std::fs::read_to_string(log_path).unwrap_or_default();
+    let log = read_process_log(log_path);
     log.lines().rev().take(60).collect::<Vec<_>>().join("\n")
 }
 
@@ -308,10 +601,9 @@ pub struct WorkerRunSession {
 }
 
 impl WorkerRunSession {
-    pub fn start(repo_root: &Path, database_url: &str, log_label: &str) -> Result<Self> {
-        let worker = &pipeline_binaries(repo_root)?.worker;
-        let log_path = worker_log_path(log_label);
-        let log_file = std::fs::File::create(&log_path).context("create worker log file")?;
+    pub async fn start(repo_root: &Path, database_url: &str, log_label: &str) -> Result<Self> {
+        let worker = &pipeline_binaries(repo_root).await?.worker;
+        let (log_path, log_file) = create_process_log_file("worker", log_label)?;
         let child = pipeline_command(repo_root, worker)
             .args([
                 "run",
@@ -329,25 +621,36 @@ impl WorkerRunSession {
     }
 
     pub async fn wait_for_sql(&mut self, pool: &sqlx::PgPool, sql: &str) -> Result<()> {
-        let ready_timeout_secs = std::env::var("BIGNAME_E2E_READY_TIMEOUT_SECS")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(600);
-        let deadline = std::time::Instant::now() + Duration::from_secs(ready_timeout_secs);
+        let ready_timeout_secs = ready_timeout_secs()?;
+        let deadline = deadline_after(ready_timeout_secs, "worker readiness")?;
         loop {
             self.bail_if_exited()?;
-            if sqlx::query_scalar::<_, bool>(sql).fetch_one(pool).await? {
+            let ready = await_supervised_readiness(
+                &mut self.child,
+                &self.log_path,
+                "worker run",
+                deadline,
+                ready_timeout_secs,
+                "worker readiness SQL query",
+                async { Ok(sqlx::query_scalar::<_, bool>(sql).fetch_one(pool).await?) },
+            )
+            .await?;
+            if ready {
                 return Ok(());
             }
-            if std::time::Instant::now() > deadline {
-                self.child.kill().await.ok();
-                bail!(
-                    "worker run did not satisfy readiness SQL within {ready_timeout_secs}s; log tail (reversed) from {:?}:\n{}",
-                    self.log_path,
-                    self.log_tail()
-                );
+            if tokio::time::Instant::now() >= deadline {
+                return stop_after_readiness_deadline(
+                    &mut self.child,
+                    &self.log_path,
+                    ready_timeout_secs,
+                    "worker run did not satisfy readiness SQL",
+                )
+                .await;
             }
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            tokio::time::sleep_until(
+                deadline.min(tokio::time::Instant::now() + Duration::from_millis(250)),
+            )
+            .await;
         }
     }
 
@@ -372,7 +675,7 @@ impl WorkerRunSession {
 }
 
 impl IndexerRunSession {
-    pub fn start(
+    pub async fn start(
         repo_root: &Path,
         database_url: &str,
         manifests_root: &Path,
@@ -386,9 +689,10 @@ impl IndexerRunSession {
             &[("ethereum-mainnet", chain_rpc_url)],
             log_label,
         )
+        .await
     }
 
-    pub fn start_with_chain_rpc_urls(
+    pub async fn start_with_chain_rpc_urls(
         repo_root: &Path,
         database_url: &str,
         manifests_root: &Path,
@@ -403,12 +707,13 @@ impl IndexerRunSession {
             log_label,
             None,
         )
+        .await
     }
 
     /// Start the production loop with live poll adapter sync enabled from the
     /// first poll. This keeps automatic normalized replay catch-up out of the
     /// assertion path so a test cannot pass after a later repair cycle.
-    pub fn start_with_live_poll_adapter_sync(
+    pub async fn start_with_live_poll_adapter_sync(
         repo_root: &Path,
         database_url: &str,
         manifests_root: &Path,
@@ -423,9 +728,10 @@ impl IndexerRunSession {
             log_label,
             Some("auto"),
         )
+        .await
     }
 
-    fn start_with_chain_rpc_urls_and_adapter_sync_mode(
+    async fn start_with_chain_rpc_urls_and_adapter_sync_mode(
         repo_root: &Path,
         database_url: &str,
         manifests_root: &Path,
@@ -433,11 +739,10 @@ impl IndexerRunSession {
         log_label: &str,
         adapter_sync_mode: Option<&str>,
     ) -> Result<Self> {
-        let indexer = &pipeline_binaries(repo_root)?.indexer;
+        let indexer = &pipeline_binaries(repo_root).await?.indexer;
         // Output goes to a log file, not a pipe: the run loop can out-write an
         // undrained pipe buffer and block, deadlocking the session.
-        let log_path = indexer_log_path(log_label);
-        let log_file = std::fs::File::create(&log_path).context("create indexer log file")?;
+        let (log_path, log_file) = create_process_log_file("indexer", log_label)?;
         let chain_rpc_urls = format_chain_rpc_urls(chain_rpc_urls);
         let mut command = pipeline_command(repo_root, indexer);
         command
@@ -477,16 +782,33 @@ impl IndexerRunSession {
         pool: &sqlx::PgPool,
         chain: &str,
     ) -> Result<i64> {
-        let deadline = std::time::Instant::now() + Duration::from_secs(600);
+        let ready_timeout_secs = ready_timeout_secs()?;
+        let deadline = deadline_after(ready_timeout_secs, "indexer readiness")?;
         loop {
             self.bail_if_exited()?;
-            let checkpoint = canonical_checkpoint(pool, chain).await?;
+            let checkpoint = await_supervised_readiness(
+                &mut self.child,
+                &self.log_path,
+                "indexer run",
+                deadline,
+                ready_timeout_secs,
+                format!("indexer canonical checkpoint query for {chain}"),
+                canonical_checkpoint(pool, chain),
+            )
+            .await?;
             if let Some(block) = checkpoint {
                 return Ok(block);
             }
-            self.bail_if_timed_out(deadline, "indexer run did not write a canonical checkpoint")
-                .await?;
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            self.bail_if_timed_out(
+                deadline,
+                ready_timeout_secs,
+                "indexer run did not write a canonical checkpoint",
+            )
+            .await?;
+            tokio::time::sleep_until(
+                deadline.min(tokio::time::Instant::now() + Duration::from_millis(500)),
+            )
+            .await;
         }
     }
 
@@ -509,17 +831,34 @@ impl IndexerRunSession {
     ) -> Result<()> {
         // The binary is built before the session starts, so this deadline
         // measures intake readiness rather than workspace build-lock waits.
-        let ready_timeout_secs = std::env::var("BIGNAME_E2E_READY_TIMEOUT_SECS")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(600);
-        let deadline = std::time::Instant::now() + Duration::from_secs(ready_timeout_secs);
+        let ready_timeout_secs = ready_timeout_secs()?;
+        let deadline = deadline_after(ready_timeout_secs, "indexer readiness")?;
         loop {
             self.bail_if_exited()?;
-            let checkpoint = canonical_checkpoint(pool, chain).await?;
+            let checkpoint = await_supervised_readiness(
+                &mut self.child,
+                &self.log_path,
+                "indexer run",
+                deadline,
+                ready_timeout_secs,
+                format!("indexer canonical checkpoint query for {chain}"),
+                canonical_checkpoint(pool, chain),
+            )
+            .await?;
             if checkpoint.is_some_and(|block| block >= target_block as i64) {
                 let extra_ready = match extra_ready_sql {
-                    Some(sql) => sqlx::query_scalar::<_, bool>(sql).fetch_one(pool).await?,
+                    Some(sql) => {
+                        await_supervised_readiness(
+                            &mut self.child,
+                            &self.log_path,
+                            "indexer run",
+                            deadline,
+                            ready_timeout_secs,
+                            format!("indexer extra readiness SQL query for {chain}"),
+                            async { Ok(sqlx::query_scalar::<_, bool>(sql).fetch_one(pool).await?) },
+                        )
+                        .await?
+                    }
                     None => true,
                 };
                 if extra_ready {
@@ -528,10 +867,14 @@ impl IndexerRunSession {
             }
             self.bail_if_timed_out(
                 deadline,
+                ready_timeout_secs,
                 &format!("indexer run did not reach canonical checkpoint {target_block}"),
             )
             .await?;
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            tokio::time::sleep_until(
+                deadline.min(tokio::time::Instant::now() + Duration::from_millis(500)),
+            )
+            .await;
         }
     }
 
@@ -552,16 +895,18 @@ impl IndexerRunSession {
 
     async fn bail_if_timed_out(
         &mut self,
-        deadline: std::time::Instant,
+        deadline: tokio::time::Instant,
+        timeout_secs: u64,
         message: &str,
     ) -> Result<()> {
-        if std::time::Instant::now() > deadline {
-            self.child.kill().await.ok();
-            bail!(
-                "{message} within 600s; log tail (reversed) from {:?}:\n{}",
-                self.log_path,
-                self.log_tail()
-            );
+        if tokio::time::Instant::now() >= deadline {
+            return stop_after_readiness_deadline(
+                &mut self.child,
+                &self.log_path,
+                timeout_secs,
+                message,
+            )
+            .await;
         }
         Ok(())
     }
@@ -572,13 +917,9 @@ impl IndexerRunSession {
 }
 
 async fn canonical_checkpoint(pool: &sqlx::PgPool, chain: &str) -> Result<Option<i64>> {
-    Ok(sqlx::query_scalar(
-        "SELECT canonical_block_number FROM chain_checkpoints WHERE chain_id = $1",
-    )
-    .bind(chain)
-    .fetch_optional(pool)
-    .await?
-    .flatten())
+    Ok(bigname_storage::load_chain_checkpoint(pool, chain)
+        .await?
+        .and_then(|checkpoint| checkpoint.canonical_block_number))
 }
 
 pub async fn indexer_backfill(
@@ -611,7 +952,41 @@ pub async fn indexer_backfill_with_chain_rpc_urls(
     manifests_root: &Path,
     target: ChainBackfillTarget<'_>,
 ) -> Result<String> {
-    let indexer = &pipeline_binaries(repo_root)?.indexer;
+    indexer_backfill_with_chain_rpc_urls_and_watch_targets(
+        repo_root,
+        database_url,
+        manifests_root,
+        target,
+        &[],
+    )
+    .await
+}
+
+pub async fn indexer_backfill_watched_target_with_chain_rpc_urls(
+    repo_root: &Path,
+    database_url: &str,
+    manifests_root: &Path,
+    target: ChainBackfillTarget<'_>,
+    watch_target: sqlx::types::Uuid,
+) -> Result<String> {
+    indexer_backfill_with_chain_rpc_urls_and_watch_targets(
+        repo_root,
+        database_url,
+        manifests_root,
+        target,
+        &[watch_target],
+    )
+    .await
+}
+
+async fn indexer_backfill_with_chain_rpc_urls_and_watch_targets(
+    repo_root: &Path,
+    database_url: &str,
+    manifests_root: &Path,
+    target: ChainBackfillTarget<'_>,
+    watch_targets: &[sqlx::types::Uuid],
+) -> Result<String> {
+    let indexer = &pipeline_binaries(repo_root).await?.indexer;
     let chain_rpc_urls = format_chain_rpc_urls(target.chain_rpc_urls);
     let from_block = target.block_range.start().to_string();
     let to_block = target.block_range.end().to_string();
@@ -636,6 +1011,9 @@ pub async fn indexer_backfill_with_chain_rpc_urls(
             "--idempotency-key",
             target.idempotency_key,
         ]);
+    for watch_target in watch_targets {
+        command.arg("--watch-target").arg(watch_target.to_string());
+    }
     run_to_completion(command, "indexer backfill").await
 }
 
@@ -684,7 +1062,8 @@ pub async fn indexer_run_until_chain_checkpoint(
         manifests_root,
         target.chain_rpc_urls,
         &target.target_block.to_string(),
-    )?;
+    )
+    .await?;
     session
         .wait_for_chain_checkpoint(
             pool,
@@ -719,7 +1098,8 @@ pub async fn indexer_run_until_chain_checkpoints(
         manifests_root,
         chain_rpc_urls,
         &label,
-    )?;
+    )
+    .await?;
     for (index, (chain, target_block)) in targets.iter().enumerate() {
         let extra = if index + 1 == targets.len() {
             extra_ready_sql
@@ -756,7 +1136,8 @@ where
         manifests_root,
         chain_rpc_url,
         "restart-first",
-    )?;
+    )
+    .await?;
     first_session.wait_for_first_checkpoint(pool).await?;
     first_session.stop().await?;
 
@@ -783,7 +1164,7 @@ pub async fn indexer_replay_normalized_events(
     database_url: &str,
     to_block: u64,
 ) -> Result<String> {
-    let indexer = &pipeline_binaries(repo_root)?.indexer;
+    let indexer = &pipeline_binaries(repo_root).await?.indexer;
     let mut command = pipeline_command(repo_root, indexer);
     command.args([
         "replay",
@@ -806,7 +1187,7 @@ pub async fn worker_replay_all_current_projections(
     repo_root: &Path,
     database_url: &str,
 ) -> Result<String> {
-    let worker = &pipeline_binaries(repo_root)?.worker;
+    let worker = &pipeline_binaries(repo_root).await?.worker;
     let mut command = pipeline_command(repo_root, worker);
     command.args([
         "replay",
@@ -834,20 +1215,42 @@ impl ApiServer {
         database_url: &str,
         chain_rpc_urls: &[ChainRpcUrl<'_>],
     ) -> Result<Self> {
-        let api = &pipeline_binaries(repo_root)?.api;
-        let _startup_guard = super::lock_local_server_start().await;
+        let api = &pipeline_binaries(repo_root).await?.api;
+        let ready_timeout_secs = ready_timeout_secs()?;
+        let deadline = deadline_after(ready_timeout_secs, "API readiness")?;
         // The free port is released before the API binds it, so a parallel
         // external process can still steal it in the window. Harness-managed
-        // Anvil/API starts share the startup lock; retry if an external bind
-        // wins and the child dies instead of becoming healthy.
+        // Anvil/API starts share the startup lock only until the child listener
+        // is observed; health waits and retries do not block unrelated starts.
         let mut last_error = None;
-        for _ in 0..3 {
-            match Self::try_start(repo_root, api, database_url, chain_rpc_urls).await {
+        for attempt in 1..=3 {
+            match Self::try_start(
+                repo_root,
+                api,
+                database_url,
+                chain_rpc_urls,
+                deadline,
+                ready_timeout_secs,
+            )
+            .await
+            {
                 Ok(server) => return Ok(server),
-                Err(error) => last_error = Some(error),
+                Err(error) => {
+                    last_error =
+                        Some(error.context(format!("API startup attempt {attempt}/3 failed")));
+                    if tokio::time::Instant::now() >= deadline {
+                        break;
+                    }
+                }
             }
         }
-        Err(last_error.expect("at least one API start attempt ran"))
+        let error = last_error.expect("at least one API start attempt ran");
+        if tokio::time::Instant::now() >= deadline {
+            return Err(error.context(format!(
+                "API did not become ready within the configured {ready_timeout_secs}s readiness deadline"
+            )));
+        }
+        Err(error)
     }
 
     async fn try_start(
@@ -855,7 +1258,16 @@ impl ApiServer {
         api: &Path,
         database_url: &str,
         chain_rpc_urls: &[ChainRpcUrl<'_>],
+        deadline: tokio::time::Instant,
+        ready_timeout_secs: u64,
     ) -> Result<Self> {
+        let _startup_guard = await_with_readiness_deadline(
+            deadline,
+            ready_timeout_secs,
+            "API local-server startup lock wait",
+            super::lock_local_server_start(),
+        )
+        .await?;
         let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
         let bind_addr = format!("127.0.0.1:{port}");
         let mut command = pipeline_command(repo_root, api);
@@ -879,32 +1291,95 @@ impl ApiServer {
             base_url: format!("http://{bind_addr}"),
             http: reqwest::Client::new(),
         };
-        server.wait_healthy().await?;
+        server
+            .wait_until_listener_bound(port, deadline, ready_timeout_secs)
+            .await?;
+        drop(_startup_guard);
+        server.wait_healthy(deadline, ready_timeout_secs).await?;
         Ok(server)
     }
 
-    async fn wait_healthy(&mut self) -> Result<()> {
+    async fn wait_until_listener_bound(
+        &mut self,
+        port: u16,
+        deadline: tokio::time::Instant,
+        ready_timeout_secs: u64,
+    ) -> Result<()> {
+        let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        loop {
+            if let Some(status) = self._child.try_wait()? {
+                bail!(
+                    "API exited before binding its listener at {} ({status})",
+                    self.base_url
+                );
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                bail!(
+                    "API did not bind its listener at {} within the configured {ready_timeout_secs}s readiness deadline",
+                    self.base_url
+                );
+            }
+            let connect_timeout = deadline
+                .saturating_duration_since(now)
+                .min(Duration::from_millis(20));
+            if std::net::TcpStream::connect_timeout(&address, connect_timeout).is_ok() {
+                if let Some(status) = self._child.try_wait()? {
+                    bail!(
+                        "API exited while binding its listener at {} ({status})",
+                        self.base_url
+                    );
+                }
+                return Ok(());
+            }
+            tokio::time::sleep_until(
+                deadline.min(tokio::time::Instant::now() + Duration::from_millis(10)),
+            )
+            .await;
+        }
+    }
+
+    async fn wait_healthy(
+        &mut self,
+        deadline: tokio::time::Instant,
+        ready_timeout_secs: u64,
+    ) -> Result<()> {
         // The binary is built before startup, so this loop measures process
         // health rather than workspace build-lock waits.
-        for _ in 0..1200 {
+        loop {
             if let Some(status) = self._child.try_wait()? {
                 bail!(
                     "API exited before becoming healthy at {} ({status})",
                     self.base_url
                 );
             }
-            if let Ok(response) = self
-                .http
-                .get(format!("{}/healthz", self.base_url))
-                .send()
-                .await
-                && response.status().is_success()
-            {
+            if tokio::time::Instant::now() >= deadline {
+                bail!(
+                    "API did not become healthy at {} within the configured {ready_timeout_secs}s readiness deadline",
+                    self.base_url
+                );
+            }
+            let response = await_with_readiness_deadline(
+                deadline,
+                ready_timeout_secs,
+                format!("API health request at {}/healthz", self.base_url),
+                self.http.get(format!("{}/healthz", self.base_url)).send(),
+            )
+            .await?;
+            if response.is_ok_and(|response| response.status().is_success()) {
+                if let Some(status) = self._child.try_wait()? {
+                    bail!(
+                        "API exited while its health endpoint responded at {} ({status})",
+                        self.base_url
+                    );
+                }
                 return Ok(());
             }
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            tokio::time::sleep_until(
+                deadline.min(tokio::time::Instant::now() + Duration::from_millis(250)),
+            )
+            .await;
         }
-        bail!("API did not become healthy at {}", self.base_url)
     }
 
     pub async fn get_json(&self, path: &str) -> Result<(reqwest::StatusCode, serde_json::Value)> {
@@ -1092,6 +1567,190 @@ mod tests {
                 .and_then(|(_, value)| value),
             Some(OsStr::new("4"))
         );
+    }
+
+    #[test]
+    fn timeout_configuration_requires_positive_integer_seconds() {
+        for variable in [
+            "BIGNAME_E2E_READY_TIMEOUT_SECS",
+            "BIGNAME_E2E_COMMAND_TIMEOUT_SECS",
+        ] {
+            assert_eq!(parse_timeout_secs(variable, "17").unwrap(), 17);
+            for invalid in ["0", "-1", "1.5", "not-a-number"] {
+                let error = parse_timeout_secs(variable, invalid)
+                    .expect_err("invalid timeout must fail explicitly");
+                assert!(format!("{error:#}").contains(variable), "{error:#}");
+            }
+        }
+    }
+
+    #[test]
+    fn process_log_files_are_unique_for_repeated_labels() -> Result<()> {
+        let (first_path, first_file) = create_process_log_file("indexer", "same/label")?;
+        let (second_path, second_file) = create_process_log_file("indexer", "same/label")?;
+        drop(first_file);
+        drop(second_file);
+
+        assert_ne!(first_path, second_path);
+        assert!(
+            first_path
+                .file_name()
+                .and_then(OsStr::to_str)
+                .is_some_and(|name| name.contains("same-label"))
+        );
+        std::fs::remove_file(first_path).ok();
+        std::fs::remove_file(second_path).ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn one_shot_command_deadline_stops_and_reaps_the_child() -> Result<()> {
+        let label = "unit-one-shot-timeout";
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "printf 'deliberate-timeout-stdout\\n'; printf 'deliberate-timeout-stderr\\n' >&2; exec sleep 30",
+        ]);
+
+        let error = run_to_completion_with_timeout(command, label, 1)
+            .await
+            .expect_err("a long-running one-shot command must time out");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(
+                "exceeded the configured BIGNAME_E2E_COMMAND_TIMEOUT_SECS deadline of 1s"
+            ),
+            "{message}"
+        );
+        assert!(message.contains("stopped and reaped"), "{message}");
+        assert!(message.contains("deliberate-timeout-stdout"), "{message}");
+        assert!(message.contains("deliberate-timeout-stderr"), "{message}");
+
+        let pid = std::process::id().to_string();
+        for entry in std::fs::read_dir(std::env::temp_dir())? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("bigname-e2e-command-")
+                && name.contains(&pid)
+                && name.contains(label)
+            {
+                std::fs::remove_file(entry.path()).ok();
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn one_shot_command_deadline_terminates_descendants() -> Result<()> {
+        let label = "unit-one-shot-descendant-timeout";
+        let (pid_path, pid_file) = create_process_log_file("descendant-pid", label)?;
+        drop(pid_file);
+
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("sleep 30 & child=$!; printf '%s\\n' \"$child\" > \"$1\"; wait")
+            .arg("timeout-tree")
+            .arg(&pid_path);
+
+        let error = run_to_completion_with_timeout(command, label, 1)
+            .await
+            .expect_err("a command with a live descendant must time out");
+        let message = format!("{error:#}");
+        assert!(message.contains("process group"), "{message}");
+
+        let descendant_pid = std::fs::read_to_string(&pid_path)?
+            .trim()
+            .parse::<u32>()
+            .context("parse descendant pid")?;
+        let mut descendant_exists = unix_process::process_exists(descendant_pid)?;
+        for _ in 0..100 {
+            if !descendant_exists {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            descendant_exists = unix_process::process_exists(descendant_pid)?;
+        }
+        if descendant_exists {
+            unix_process::kill_process(descendant_pid).ok();
+        }
+        assert!(
+            !descendant_exists,
+            "descendant process {descendant_pid} survived the command timeout"
+        );
+
+        std::fs::remove_file(pid_path).ok();
+        let harness_pid = std::process::id().to_string();
+        for entry in std::fs::read_dir(std::env::temp_dir())? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("bigname-e2e-command-")
+                && name.contains(&harness_pid)
+                && name.contains(label)
+            {
+                std::fs::remove_file(entry.path()).ok();
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn expired_readiness_deadline_bounds_a_pending_probe() {
+        let expired = tokio::time::Instant::now() - Duration::from_millis(1);
+        let error = await_with_readiness_deadline(
+            expired,
+            17,
+            "deliberately pending readiness probe",
+            std::future::pending::<()>(),
+        )
+        .await
+        .expect_err("a readiness probe must not outlive its deadline");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(
+                "deliberately pending readiness probe exceeded the configured 17s readiness deadline"
+            ),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn supervised_readiness_timeout_stops_and_reaps_child() -> Result<()> {
+        let (log_path, log_file) =
+            create_process_log_file("readiness-child", "unit-readiness-timeout")?;
+        let mut child = Command::new("sh")
+            .args(["-c", "exec sleep 30"])
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::from(log_file.try_clone()?))
+            .stderr(std::process::Stdio::from(log_file))
+            .spawn()?;
+        let expired = tokio::time::Instant::now() - Duration::from_millis(1);
+
+        let error = await_supervised_readiness(
+            &mut child,
+            &log_path,
+            "test readiness child",
+            expired,
+            23,
+            "deliberately pending SQL readiness probe",
+            std::future::pending::<Result<()>>(),
+        )
+        .await
+        .expect_err("a timed-out readiness probe must fail");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(
+                "deliberately pending SQL readiness probe exceeded the configured 23s readiness deadline"
+            ),
+            "{message}"
+        );
+        assert!(message.contains("stopped and reaped"), "{message}");
+        assert!(child.id().is_none(), "the readiness child was not reaped");
+        std::fs::remove_file(log_path).ok();
+        Ok(())
     }
 
     #[tokio::test]

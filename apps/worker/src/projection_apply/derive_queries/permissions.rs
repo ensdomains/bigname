@@ -24,8 +24,8 @@ candidate_keys AS (
             'AuthorityEpochChanged'
         )
         OR (
-            event_kind = 'RegistrationGranted'
-            AND source_family = 'ens_v2_registry_l1'
+            event_kind IN ('RegistrationGranted', 'TokenResourceLinked')
+            AND source_family IN ('ens_v2_registry_l1', 'ens_v2_root_l1')
         )
     )
       AND resource_id IS NOT NULL

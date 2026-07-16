@@ -219,14 +219,80 @@ fn compare_edge_starts(
     left.spec
         .active_from_block_number
         .cmp(&right.spec.active_from_block_number)
+        // A missing event position is historical/legacy chronology and sorts
+        // before a known position in the same block. Comparing the Options
+        // directly is important: treating mixed Some/None pairs as equal while
+        // comparing Some/Some pairs by position can create a comparison cycle.
         .then_with(|| {
-            match (
-                left.spec.active_from_event_position,
-                right.spec.active_from_event_position,
-            ) {
-                (Some(left), Some(right)) => left.cmp(&right),
-                _ => Ordering::Equal,
-            }
+            left.spec
+                .active_from_event_position
+                .cmp(&right.spec.active_from_event_position)
         })
         .then_with(|| left.discovery_edge_id.cmp(&right.discovery_edge_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::types::Uuid;
+
+    use super::*;
+    use crate::discovery::types::EvmEventPosition;
+
+    fn existing_edge(
+        discovery_edge_id: i64,
+        active_from_event_position: Option<EvmEventPosition>,
+    ) -> ExistingReconciledDiscoveryEdge {
+        ExistingReconciledDiscoveryEdge {
+            discovery_edge_id,
+            to_address: format!("0x{discovery_edge_id:040x}"),
+            active_from_block_is_orphaned: false,
+            spec: ReconciledDiscoveryEdgeSpec {
+                observation_key: "same-key".to_owned(),
+                chain: "ethereum-sepolia".to_owned(),
+                edge_kind: "subregistry".to_owned(),
+                from_contract_instance_id: Uuid::nil(),
+                to_contract_instance_id: Uuid::from_u128(discovery_edge_id as u128),
+                discovery_source: "test".to_owned(),
+                source_manifest_id: 1,
+                admission: "reachable_from_root".to_owned(),
+                active_from_block_number: Some(10),
+                active_from_block_hash: Some(format!("0x{:064x}", 10)),
+                active_from_event_position,
+                provenance_json: "{}".to_owned(),
+            },
+        }
+    }
+
+    #[test]
+    fn edge_start_comparison_totally_orders_mixed_event_positions() {
+        let first_known = existing_edge(
+            3,
+            Some(EvmEventPosition {
+                transaction_index: 0,
+                log_index: 1,
+            }),
+        );
+        let legacy_unknown = existing_edge(2, None);
+        let second_known = existing_edge(
+            1,
+            Some(EvmEventPosition {
+                transaction_index: 0,
+                log_index: 2,
+            }),
+        );
+
+        assert_eq!(
+            compare_edge_starts(&&legacy_unknown, &&first_known),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_edge_starts(&&first_known, &&second_known),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_edge_starts(&&legacy_unknown, &&second_known),
+            Ordering::Less,
+            "mixed event-position comparisons must remain transitive instead of falling back to row ids",
+        );
+    }
 }

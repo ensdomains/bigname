@@ -597,6 +597,149 @@ async fn full_rebuild_publishes_summary_for_ensv2_registration_without_role_even
         (1, true),
         "full rebuild must select an ENSv2 registration resource and publish its zero-row permission summary"
     );
+    let resource_summary = resource_summary.context("missing ENSv2 zero-role resource summary")?;
+    assert_eq!(resource_summary.manifest_version, 2);
+    assert_eq!(
+        resource_summary.provenance["source_families"],
+        json!(["ens_v2_registry_l1"]),
+        "summary provenance must retain the registration event's admitted source family"
+    );
+    assert_eq!(
+        resource_summary.last_recomputed_at,
+        timestamp(1_776_100_146)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn full_rebuild_covers_ensv2_root_registration_and_reserved_token_resource() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let root_registration_resource_id = Uuid::from_u128(0x73d1);
+    let reserved_resource_id = Uuid::from_u128(0x73d2);
+    let registry_contract_instance_id = Uuid::from_u128(0xe202);
+    let root_upstream_resource =
+        "0x00000000000000000000000000000000000000000000000000000000000073d1";
+    let reserved_upstream_resource =
+        "0x00000000000000000000000000000000000000000000000000000000000073d2";
+
+    upsert_resources(
+        database.pool(),
+        &[
+            Resource {
+                resource_id: root_registration_resource_id,
+                token_lineage_id: None,
+                chain_id: "ethereum-sepolia".to_owned(),
+                block_hash: "0xensv2rootregistration0093".to_owned(),
+                block_number: 147,
+                provenance: json!({
+                    "source_family": "ens_v2_root_l1",
+                    "manifest_version": 2,
+                    "chain_id": "ethereum-sepolia",
+                    "upstream_resource": root_upstream_resource,
+                    "registry_contract_instance_id": registry_contract_instance_id,
+                }),
+                canonicality_state: CanonicalityState::Finalized,
+            },
+            Resource {
+                resource_id: reserved_resource_id,
+                token_lineage_id: None,
+                chain_id: "ethereum-sepolia".to_owned(),
+                block_hash: "0xensv2reserved0094".to_owned(),
+                block_number: 148,
+                provenance: json!({
+                    "source_family": "ens_v2_registry_l1",
+                    "manifest_version": 3,
+                    "chain_id": "ethereum-sepolia",
+                    "upstream_resource": reserved_upstream_resource,
+                    "registry_contract_instance_id": registry_contract_instance_id,
+                }),
+                canonicality_state: CanonicalityState::Finalized,
+            },
+        ],
+    )
+    .await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block(
+                "ethereum-sepolia",
+                "0xensv2rootregistration0093",
+                147,
+                1_776_100_147,
+            ),
+            raw_block(
+                "ethereum-sepolia",
+                "0xensv2reserved0094",
+                148,
+                1_776_100_148,
+            ),
+        ],
+    )
+    .await?;
+    seed_permission_events(
+        database.pool(),
+        &[
+            ensv2_summary_evidence_event(
+                "ensv2-root-registration-without-role-events",
+                "RegistrationGranted",
+                "ens_v2_root_l1",
+                2,
+                root_registration_resource_id,
+                "ens:eth",
+                "0xensv2rootregistration0093",
+                147,
+                json!({
+                    "authority_kind": "ens_v2_registry",
+                    "registry_contract_instance_id": registry_contract_instance_id,
+                    "upstream_resource": root_upstream_resource,
+                }),
+            ),
+            ensv2_summary_evidence_event(
+                "ensv2-reserved-token-resource",
+                "TokenResourceLinked",
+                "ens_v2_registry_l1",
+                3,
+                reserved_resource_id,
+                "ens:reserved.eth",
+                "0xensv2reserved0094",
+                148,
+                json!({
+                    "registry_contract_instance_id": registry_contract_instance_id,
+                    "upstream_resource": reserved_upstream_resource,
+                }),
+            ),
+        ],
+    )
+    .await?;
+
+    let rebuild = rebuild_permissions_current(database.pool(), None).await?;
+    assert_eq!(rebuild.requested_resource_count, 2);
+
+    let root_registration_summary =
+        load_permissions_current_resource_summary(database.pool(), root_registration_resource_id)
+            .await?
+            .context("missing root-family registration permission summary")?;
+    assert_eq!(
+        root_registration_summary.provenance["source_families"],
+        json!(["ens_v2_root_l1"])
+    );
+    assert!(root_registration_summary.root_resource_id.is_some());
+
+    let reserved_summary =
+        load_permissions_current_resource_summary(database.pool(), reserved_resource_id)
+            .await?
+            .context("missing reserved token-resource permission summary")?;
+    assert_eq!(
+        reserved_summary.authority_kind.as_deref(),
+        Some("ens_v2_registry")
+    );
+    assert_eq!(reserved_summary.manifest_version, 3);
+    assert_eq!(
+        reserved_summary.provenance["source_families"],
+        json!(["ens_v2_registry_l1"])
+    );
+    assert!(reserved_summary.root_resource_id.is_some());
 
     database.cleanup().await
 }
@@ -1300,6 +1443,40 @@ fn raw_block(chain_id: &str, block_hash: &str, block_number: i64, unix_timestamp
         receipts_root: None,
         state_root: None,
         canonicality_state: CanonicalityState::Finalized,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ensv2_summary_evidence_event(
+    event_identity: &str,
+    event_kind: &str,
+    source_family: &str,
+    manifest_version: i64,
+    resource_id: Uuid,
+    logical_name_id: &str,
+    block_hash: &str,
+    block_number: i64,
+    after_state: Value,
+) -> NormalizedEvent {
+    NormalizedEvent {
+        event_identity: event_identity.to_owned(),
+        namespace: "ens".to_owned(),
+        logical_name_id: Some(logical_name_id.to_owned()),
+        resource_id: Some(resource_id),
+        event_kind: event_kind.to_owned(),
+        source_family: source_family.to_owned(),
+        manifest_version,
+        source_manifest_id: None,
+        chain_id: Some("ethereum-sepolia".to_owned()),
+        block_number: Some(block_number),
+        block_hash: Some(block_hash.to_owned()),
+        transaction_hash: Some(format!("0xsummaryevidence{block_number}")),
+        log_index: Some(0),
+        raw_fact_ref: json!({"kind": "raw_log"}),
+        derivation_kind: "ens_v2_registry_resource_surface".to_owned(),
+        canonicality_state: CanonicalityState::Finalized,
+        before_state: json!({}),
+        after_state,
     }
 }
 

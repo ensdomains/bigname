@@ -60,7 +60,7 @@ pub(super) async fn build_resource_projection(
     };
     let events = load_permission_events(pool, resource_id).await?;
     let rows = project_rows(resource_id, &events)?;
-    let summary = build_resource_summary(&context, &events);
+    let summary = build_resource_summary(&context, &events)?;
     Ok(ProjectedPermissionsResource {
         rows,
         summary: Some(summary),

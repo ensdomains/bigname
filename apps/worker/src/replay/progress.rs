@@ -7,6 +7,9 @@ use super::CurrentProjectionReplayStepSummary;
 /// Version 5 covers RootPermissionChanged and registry-scope permission consumption added in PR #24.
 /// Version 6 covers ENSv2 max/oversized expiry values projecting to null instead of stale finite timestamps.
 /// Version 7 covers ENSv2 fresh registrar registrations becoming exact-name-profile evidence.
+/// Version 8 covers `permissions_current_resource_summary` backfill and atomic publication with
+/// `permissions_current`, including resources with zero permission rows, while retaining version 7
+/// exact-name-profile evidence.
 pub const CURRENT_PROJECTION_REPLAY_VERSION: i32 = 8;
 
 pub(super) async fn projection_replay_completed(

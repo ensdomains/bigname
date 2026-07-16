@@ -154,10 +154,11 @@ async fn live_worker_applies_registration_and_renewal_while_api_serves() -> Resu
         &profile.root,
         &anvil.url,
         "live-worker",
-    )?;
+    )
+    .await?;
     indexer.wait_for_first_checkpoint(&db.pool).await?;
 
-    let mut worker = pipeline::WorkerRunSession::start(&root, &db.url, "live-worker")?;
+    let mut worker = pipeline::WorkerRunSession::start(&root, &db.url, "live-worker").await?;
     worker
         .wait_for_sql(
             &db.pool,

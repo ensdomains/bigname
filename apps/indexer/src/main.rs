@@ -301,7 +301,9 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
         BackfillSourceKind::Auto => unreachable!("auto must be resolved before execution"),
     }
     if profile_convergence_enabled {
-        drain_resolver_profile_input_changes(&pool).await?;
+        let profile_convergence = drain_resolver_profile_input_changes(&pool).await?;
+        profile_convergence
+            .ensure_chain_completion_allowed(&args.chain, "standalone backfill completion")?;
     }
     Ok(())
 }

@@ -116,6 +116,7 @@ fn build_resource_permissions_response_from_summary(
         .last_recomputed_at
         .into_iter()
         .chain(resource_summary.map(|summary| summary.last_recomputed_at))
+        .filter(|timestamp| *timestamp > OffsetDateTime::UNIX_EPOCH)
         .max()
         .map(format_timestamp)
         .unwrap_or_else(|| format_timestamp(OffsetDateTime::now_utc()));
@@ -432,17 +433,12 @@ fn build_permissions_coverage_from_resource_summary(
     let Some(status) = coverage.get("status").and_then(JsonValue::as_str) else {
         return unknown_permission_authority_coverage();
     };
-    let Some(exhaustiveness) = coverage
-        .get("exhaustiveness")
-        .and_then(JsonValue::as_str)
-    else {
+    let Some(exhaustiveness) = coverage.get("exhaustiveness").and_then(JsonValue::as_str) else {
         return unknown_permission_authority_coverage();
     };
     if !matches!(
         (status, exhaustiveness),
-        ("full", "authoritative")
-            | ("partial", "best_effort")
-            | ("unsupported", "not_applicable")
+        ("full", "authoritative") | ("partial", "best_effort") | ("unsupported", "not_applicable")
     ) {
         return unknown_permission_authority_coverage();
     }
@@ -472,18 +468,14 @@ fn unknown_permission_authority_coverage() -> CoverageResponse {
         exhaustiveness: "best_effort".to_owned(),
         source_classes_considered: vec!["permissions_current".to_owned()],
         enumeration_basis: "resource_permissions".to_owned(),
-        unsupported_reason: Some(
-            RESOURCE_PERMISSION_AUTHORITY_NOT_PROJECTED_REASON.to_owned(),
-        ),
+        unsupported_reason: Some(RESOURCE_PERMISSION_AUTHORITY_NOT_PROJECTED_REASON.to_owned()),
     }
 }
 
 fn build_address_names_coverage_from_samples(samples: &[JsonValue]) -> CoverageResponse {
     let sample = samples
         .iter()
-        .find(|value| {
-            string_field(provenance_field(value, "status")).as_deref() != Some("full")
-        })
+        .find(|value| string_field(provenance_field(value, "status")).as_deref() != Some("full"))
         .or_else(|| samples.first());
 
     CoverageResponse {

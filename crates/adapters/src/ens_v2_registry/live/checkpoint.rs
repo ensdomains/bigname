@@ -17,3 +17,7 @@ pub(in crate::ens_v2_registry) const LIVE_REGISTRY_REPLAY_CHECKPOINT_CURSOR_KIND
     "live_poll";
 pub(in crate::ens_v2_registry) const LIVE_REGISTRY_REPLAY_CHECKPOINT_SCOPE: &str =
     "selected_path_state_v1";
+/// An unpublished candidate. The prior completed checkpoint remains readable
+/// until retained-history validation and checkpoint publication commit together.
+pub(in crate::ens_v2_registry) const LIVE_REGISTRY_REPLAY_CHECKPOINT_STAGING_SCOPE: &str =
+    "selected_path_state_v1_staging";

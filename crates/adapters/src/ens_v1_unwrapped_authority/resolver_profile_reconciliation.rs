@@ -390,7 +390,7 @@ async fn publish_resolver_profile_events(
               AND item_kind = 'normalized_event'
               AND ($2::TEXT IS NULL OR item_key > $2)
             ORDER BY item_key
-            LIMIT 1_000
+            LIMIT 1000
             "#,
         )
         .bind(run_id)

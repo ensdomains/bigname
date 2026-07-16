@@ -34,7 +34,57 @@ use super::{
     },
 };
 
-const MAX_OPS_CATCHUP_RETENTION_GENERATION_RETRIES: usize = 4;
+const MAX_OPS_CATCHUP_RETENTION_AUTHORITY_RETRIES: usize = 4;
+const MAX_OPS_CATCHUP_DISCOVERY_EXPANSION_PASSES: usize = 1_024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OpsCatchupRetryReason {
+    DiscoveryExpanded,
+    RetentionAuthorityChanged,
+}
+
+impl OpsCatchupRetryReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::DiscoveryExpanded => "discovery_expanded",
+            Self::RetentionAuthorityChanged => "retention_authority_changed",
+        }
+    }
+}
+
+#[derive(Default)]
+struct OpsCatchupConvergenceTracker {
+    consecutive_retention_authority_retries: usize,
+    discovery_expansion_passes: usize,
+}
+
+impl OpsCatchupConvergenceTracker {
+    fn record_retry(&mut self, chain: &str, reason: OpsCatchupRetryReason) -> Result<()> {
+        match reason {
+            OpsCatchupRetryReason::DiscoveryExpanded => {
+                self.consecutive_retention_authority_retries = 0;
+                self.discovery_expansion_passes += 1;
+                if self.discovery_expansion_passes > MAX_OPS_CATCHUP_DISCOVERY_EXPANSION_PASSES {
+                    bail!(
+                        "ENSv2 discovery on chain {chain} did not reach a fixed point within {MAX_OPS_CATCHUP_DISCOVERY_EXPANSION_PASSES} ops catch-up passes"
+                    );
+                }
+            }
+            OpsCatchupRetryReason::RetentionAuthorityChanged => {
+                self.consecutive_retention_authority_retries += 1;
+                if self.consecutive_retention_authority_retries
+                    >= MAX_OPS_CATCHUP_RETENTION_AUTHORITY_RETRIES
+                {
+                    bail!(
+                        "raw-log retention authority for chain {chain} changed during {} consecutive ops catch-up planning passes",
+                        self.consecutive_retention_authority_retries
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 pub(crate) async fn run_ops_finalized_catchup(
     pool: &sqlx::PgPool,
@@ -133,9 +183,8 @@ async fn run_ops_finalized_catchup_iteration(
             continue;
         };
 
-        let mut retention_generation_attempt = 0_usize;
+        let mut convergence_tracker = OpsCatchupConvergenceTracker::default();
         loop {
-            retention_generation_attempt += 1;
             let retention_snapshot =
                 load_bootstrap_retention_snapshot(pool, &task.chain, finalized_head.block_number)
                     .await?;
@@ -199,27 +248,33 @@ async fn run_ops_finalized_catchup_iteration(
                 outcome.planned_chunk_count += planned_chunk_count;
                 break;
             }
-            if retention_generation_attempt >= MAX_OPS_CATCHUP_RETENTION_GENERATION_RETRIES {
-                bail!(
-                    "raw-log retention generation for chain {} changed during {} consecutive ops catch-up planning passes",
-                    task.chain,
-                    retention_generation_attempt
-                );
-            }
+            let retry_reason = if newly_required_coverage {
+                OpsCatchupRetryReason::DiscoveryExpanded
+            } else {
+                OpsCatchupRetryReason::RetentionAuthorityChanged
+            };
+            convergence_tracker.record_retry(&task.chain, retry_reason)?;
             warn!(
                 service = "indexer",
                 command = "ops-catchup",
-                catchup_status = "retry_retention_authority_changed",
+                catchup_status = retry_reason.as_str(),
                 chain = %task.chain,
                 planned_raw_log_retention_generation = retention_snapshot.generation,
                 planned_discovery_admission_epoch = retention_snapshot.discovery_admission_epoch,
-                retention_generation_attempt,
+                consecutive_retention_authority_retries =
+                    convergence_tracker.consecutive_retention_authority_retries,
+                discovery_expansion_passes = convergence_tracker.discovery_expansion_passes,
                 "raw-log retention or ENSv2 discovery authority changed during ops catch-up; retrying the complete chain planning pass"
             );
         }
     }
 
-    crate::resolver_profile_convergence::drain_resolver_profile_input_changes(pool).await?;
+    let profile_convergence =
+        crate::resolver_profile_convergence::drain_resolver_profile_input_changes(pool).await?;
+    for task in intake_chain_tasks {
+        profile_convergence
+            .ensure_chain_completion_allowed(&task.chain, "ops catch-up completion")?;
+    }
     Ok(())
 }
 
@@ -374,4 +429,61 @@ pub(crate) fn ops_catchup_idempotency_key(
         "indexer-ops-finalized-catchup:v2:deployment_profile={deployment_profile}:chain={chain}:source_identity_hash={source_identity_hash}:from={}:to={}",
         range.from_block, range.to_block
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discovery_progress_does_not_consume_retention_authority_retries() -> Result<()> {
+        let mut tracker = OpsCatchupConvergenceTracker::default();
+
+        for _ in 0..(MAX_OPS_CATCHUP_RETENTION_AUTHORITY_RETRIES + 1) {
+            tracker.record_retry("ethereum-sepolia", OpsCatchupRetryReason::DiscoveryExpanded)?;
+        }
+
+        assert_eq!(tracker.consecutive_retention_authority_retries, 0);
+        assert_eq!(
+            tracker.discovery_expansion_passes,
+            MAX_OPS_CATCHUP_RETENTION_AUTHORITY_RETRIES + 1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn discovery_progress_resets_consecutive_retention_authority_retries() -> Result<()> {
+        let mut tracker = OpsCatchupConvergenceTracker::default();
+        tracker.record_retry(
+            "ethereum-sepolia",
+            OpsCatchupRetryReason::RetentionAuthorityChanged,
+        )?;
+        tracker.record_retry("ethereum-sepolia", OpsCatchupRetryReason::DiscoveryExpanded)?;
+
+        assert_eq!(tracker.consecutive_retention_authority_retries, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn consecutive_retention_authority_changes_keep_the_small_retry_cap() -> Result<()> {
+        let mut tracker = OpsCatchupConvergenceTracker::default();
+        for _ in 1..MAX_OPS_CATCHUP_RETENTION_AUTHORITY_RETRIES {
+            tracker.record_retry(
+                "ethereum-sepolia",
+                OpsCatchupRetryReason::RetentionAuthorityChanged,
+            )?;
+        }
+
+        let error = tracker
+            .record_retry(
+                "ethereum-sepolia",
+                OpsCatchupRetryReason::RetentionAuthorityChanged,
+            )
+            .expect_err("the fourth consecutive retention change must fail");
+        assert!(
+            error.to_string().contains("retention authority")
+                && error.to_string().contains("4 consecutive")
+        );
+        Ok(())
+    }
 }

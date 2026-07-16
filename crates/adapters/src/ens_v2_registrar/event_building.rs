@@ -66,8 +66,13 @@ pub(super) async fn build_registrar_event(
                 .expect("static renewal after_state is an object");
             match payment {
                 RenewalPayment::LegacyBase(base) => {
-                    // Preserve the exact pre-audit payload shape whenever a
-                    // historical two-topic log is explicitly decoded.
+                    // Preserve the exact `base`-only payload shape whenever a
+                    // two-topic log from the deprecated pre-audit manifest is
+                    // explicitly decoded.
+                    // (upstream: .refs/ens_v2_sepolia_dev/contracts/src/registrar/interfaces/IETHRegistrar.sol:L53 @ ens_v2_sepolia_dev@554c309)
+                    // (upstream: .refs/ens_v2_sepolia_dev/contracts/src/registrar/interfaces/IETHRegistrar.sol:L54 @ ens_v2_sepolia_dev@554c309)
+                    // (upstream: .refs/ens_v2_sepolia_dev/contracts/src/registrar/interfaces/IETHRegistrar.sol:L59 @ ens_v2_sepolia_dev@554c309)
+                    // (upstream: .refs/ens_v2_sepolia_dev/contracts/src/registrar/interfaces/IETHRegistrar.sol:L60 @ ens_v2_sepolia_dev@554c309)
                     object.insert("base".to_owned(), Value::String(base));
                 }
                 RenewalPayment::PostAuditAmount(amount) => {

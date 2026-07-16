@@ -135,7 +135,10 @@ async fn rewind_to_exact_ancestor(
     // Raw-code canonicality changes may enqueue resolver-profile repair. Do
     // not publish the rewound checkpoint until every observed generation has
     // completed its adapter and projection-invalidation handoff.
-    crate::resolver_profile_convergence::drain_resolver_profile_input_changes(pool).await?;
+    let profile_convergence =
+        crate::resolver_profile_convergence::drain_resolver_profile_input_changes(pool).await?;
+    profile_convergence
+        .ensure_chain_completion_allowed(&chain, "rewound checkpoint publication")?;
     rewind_chain_checkpoints_to_ancestor(pool, &chain, &ancestor).await?;
 
     Ok(RewindOutcome {

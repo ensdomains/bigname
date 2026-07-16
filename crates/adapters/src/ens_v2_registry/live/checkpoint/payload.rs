@@ -4,6 +4,7 @@ use serde_json::Value;
 use sqlx::types::Uuid;
 
 use super::super::{CachedLiveRegistryReplayState, RegistryReplayState};
+use crate::ens_v2_registry::names::rebuild_registry_state_indexes;
 
 mod codecs;
 mod encoding;
@@ -335,6 +336,7 @@ pub(super) fn decode_replay_state(
             "ENSv2 live checkpoint token alias target is absent"
         );
     }
+    rebuild_registry_state_indexes(&mut state)?;
     Ok(state)
 }
 

@@ -21,7 +21,7 @@ pub use coverage::{
     load_required_watched_tuples_in_transaction,
 };
 pub use historical::{
-    load_ens_v2_authoritative_discovery_bootstrap_targets,
+    ENS_V2_RETAINED_HISTORY_SOURCE_FAMILIES, load_ens_v2_authoritative_discovery_bootstrap_targets,
     load_ens_v2_retained_history_recovery_targets, load_historical_watched_contracts_by_chain,
 };
 pub use scoped::{

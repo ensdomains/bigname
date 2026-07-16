@@ -20,13 +20,13 @@ async fn name_resource(pool: &sqlx::PgPool, logical_name_id: &str) -> Result<Uui
         .with_context(|| format!("name_current row missing for {logical_name_id}"))
 }
 
-/// Rows 1, 3, and 9: registrar renewal promotes exact-name coverage (the
-/// sole promotion path in the shipped profile), direct registry renew moves
-/// expiry only and rejects reduction, the declared resolver edge follows
+/// Rows 1, 3, and 9: registrar renewal preserves the promoted exact-name
+/// coverage, direct registry renew moves expiry only and rejects reduction,
+/// the declared resolver edge follows
 /// set/change/zero, subregistry detach removes the edge, and admin-half
 /// role bits render alongside regular powers.
 #[tokio::test]
-async fn renewal_promotes_coverage_and_registry_edges_follow() -> Result<()> {
+async fn renewal_preserves_promoted_coverage_and_registry_edges_follow() -> Result<()> {
     let anvil = Anvil::spawn_ethereum_sepolia().await?;
     let rpc = anvil.client();
     let deployment = ens_v2::deploy_ens_v2(&rpc, &repo_root()).await?;
@@ -106,16 +106,27 @@ async fn renewal_promotes_coverage_and_registry_edges_follow() -> Result<()> {
     let run =
         support::ingest_ens_v2_sepolia_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
 
-    // Row 1 core claim: renewal promotes coverage out of the pinned shadow.
+    // Row 1 core claim: renewal preserves the exact-name profile's promoted
+    // coverage while moving the registration lifecycle forward.
     let (status, body) = run
         .api
         .get_json("/v1/names/ens/promoted.eth?chain=ethereum-sepolia")
         .await?;
     assert_eq!(status, 200, "promoted.eth lookup failed: {body}");
-    assert_ne!(
+    assert_eq!(
         pointer(&body, "/coverage/status"),
-        "unsupported",
-        "renewed name must leave the profile shadow: {body}"
+        "full",
+        "renewed name must retain full exact-name coverage: {body}"
+    );
+    assert_eq!(
+        pointer(&body, "/coverage/exhaustiveness"),
+        "authoritative",
+        "renewed name coverage must remain authoritative: {body}"
+    );
+    assert_eq!(
+        pointer(&body, "/coverage/enumeration_basis"),
+        "exact_name_profile",
+        "renewed name coverage must retain the exact-name basis: {body}"
     );
     assert_eq!(
         pointer(&body, "/coverage/unsupported_reason"),
@@ -124,8 +135,8 @@ async fn renewal_promotes_coverage_and_registry_edges_follow() -> Result<()> {
     );
 
     // Registrar renewal derives both fragments from one action.
-    let renewal_kinds: Vec<(String, String)> = sqlx::query_as(
-        "SELECT DISTINCT event_kind, source_family FROM normalized_events \
+    let renewal_kinds: Vec<(String, String, i64)> = sqlx::query_as(
+        "SELECT DISTINCT event_kind, source_family, block_number FROM normalized_events \
          WHERE transaction_hash = $1 AND canonicality_state = 'canonical' \
          AND event_kind IN ('RegistrationRenewed', 'ExpiryChanged')",
     )
@@ -135,13 +146,17 @@ async fn renewal_promotes_coverage_and_registry_edges_follow() -> Result<()> {
     assert!(
         renewal_kinds
             .iter()
-            .any(|(kind, family)| kind == "RegistrationRenewed" && family == "ens_v2_registrar_l1"),
+            .any(|(kind, family, block_number)| kind == "RegistrationRenewed"
+                && family == "ens_v2_registrar_l1"
+                && *block_number == renew_receipt.block_number as i64),
         "registrar renewal fragment missing: {renewal_kinds:?}"
     );
     assert!(
         renewal_kinds
             .iter()
-            .any(|(kind, family)| kind == "ExpiryChanged" && family == "ens_v2_registry_l1"),
+            .any(|(kind, family, block_number)| kind == "ExpiryChanged"
+                && family == "ens_v2_registry_l1"
+                && *block_number == renew_receipt.block_number as i64),
         "registry expiry fragment missing: {renewal_kinds:?}"
     );
 

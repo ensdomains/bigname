@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use anyhow::Result;
 use tracing::info;
 
@@ -14,20 +16,30 @@ use super::{
     sync_adapter_state_from_persisted_raw_payloads_with_mode,
 };
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct ReorgDiscoveryFullSources {
-    legacy_registry: bool,
-    ens_v2_registry: bool,
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct FullSourceReconciliationScope {
+    adapters: BTreeSet<NormalizedEventReplayAdapter>,
 }
 
-fn reorg_discovery_full_sources(
-    active_adapters: &[NormalizedEventReplayAdapter],
-) -> ReorgDiscoveryFullSources {
-    ReorgDiscoveryFullSources {
-        legacy_registry: active_adapters
-            .contains(&NormalizedEventReplayAdapter::EnsV1SubregistryDiscovery),
-        ens_v2_registry: active_adapters
-            .contains(&NormalizedEventReplayAdapter::EnsV2RegistryResourceSurface),
+impl FullSourceReconciliationScope {
+    fn from_active_adapters(
+        adapters: impl IntoIterator<Item = NormalizedEventReplayAdapter>,
+    ) -> Self {
+        Self {
+            adapters: adapters.into_iter().collect(),
+        }
+    }
+
+    fn includes(&self, adapter: NormalizedEventReplayAdapter) -> bool {
+        self.adapters.contains(&adapter)
+    }
+
+    pub(super) fn reconciles_legacy_registry(&self) -> bool {
+        self.includes(NormalizedEventReplayAdapter::EnsV1SubregistryDiscovery)
+    }
+
+    pub(super) fn reconciles_ens_v2_registry(&self) -> bool {
+        self.includes(NormalizedEventReplayAdapter::EnsV2RegistryResourceSurface)
     }
 }
 
@@ -62,8 +74,7 @@ pub(crate) async fn sync_adapter_state_from_persisted_raw_payloads(
         Some(&source_scope),
         PersistedRawPayloadAdapterSyncMode::LiveOrBackfill,
         true,
-        false,
-        false,
+        FullSourceReconciliationScope::default(),
     )
     .await
 }
@@ -116,12 +127,13 @@ async fn sync_live_adapter_state_from_persisted_raw_payloads_with_reorg_repair(
         "loading live adapter source scope"
     );
     let source_scope = load_live_adapter_source_scope(pool, chain, block_hashes).await?;
-    let active_reorg_adapters = if reconcile_discovery_full_sources {
-        active_closure_or_dependency_replay_adapters(pool, chain).await?
+    let full_source_reconciliation = if reconcile_discovery_full_sources {
+        FullSourceReconciliationScope::from_active_adapters(
+            active_closure_or_dependency_replay_adapters(pool, chain).await?,
+        )
     } else {
-        Vec::new()
+        FullSourceReconciliationScope::default()
     };
-    let reorg_full_sources = reorg_discovery_full_sources(&active_reorg_adapters);
     info!(
         service = "indexer",
         command = "adapter-sync",
@@ -139,8 +151,7 @@ async fn sync_live_adapter_state_from_persisted_raw_payloads_with_reorg_repair(
         Some(&source_scope),
         PersistedRawPayloadAdapterSyncMode::LivePoll,
         true,
-        reorg_full_sources.legacy_registry,
-        reorg_full_sources.ens_v2_registry,
+        full_source_reconciliation,
     )
     .await
 }
@@ -164,8 +175,7 @@ pub(crate) async fn sync_replay_normalized_events_from_persisted_raw_payloads(
             replay_contract_plan,
         },
         false,
-        false,
-        false,
+        FullSourceReconciliationScope::default(),
     )
     .await
 }
@@ -184,8 +194,7 @@ pub(crate) async fn sync_adapter_state_from_scoped_persisted_raw_payloads(
         Some(source_scope),
         PersistedRawPayloadAdapterSyncMode::LiveOrBackfill,
         false,
-        false,
-        false,
+        FullSourceReconciliationScope::default(),
     )
     .await
     .map(|_| ())?;
@@ -197,25 +206,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn live_reorg_force_selects_every_active_registry_discovery_family() {
+    fn live_reorg_full_source_scope_preserves_every_active_adapter() {
+        let scope = FullSourceReconciliationScope::from_active_adapters([
+            NormalizedEventReplayAdapter::EnsV1SubregistryDiscovery,
+            NormalizedEventReplayAdapter::EnsV2RegistryResourceSurface,
+            NormalizedEventReplayAdapter::EnsV2Registrar,
+        ]);
+
         assert_eq!(
-            reorg_discovery_full_sources(&[
+            scope.adapters,
+            BTreeSet::from([
                 NormalizedEventReplayAdapter::EnsV1SubregistryDiscovery,
                 NormalizedEventReplayAdapter::EnsV2RegistryResourceSurface,
-            ]),
-            ReorgDiscoveryFullSources {
-                legacy_registry: true,
-                ens_v2_registry: true,
-            }
-        );
-        assert_eq!(
-            reorg_discovery_full_sources(&[
-                NormalizedEventReplayAdapter::EnsV1SubregistryDiscovery,
-            ]),
-            ReorgDiscoveryFullSources {
-                legacy_registry: true,
-                ens_v2_registry: false,
-            }
+                NormalizedEventReplayAdapter::EnsV2Registrar,
+            ])
         );
     }
 }

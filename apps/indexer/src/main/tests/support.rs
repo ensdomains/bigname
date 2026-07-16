@@ -1163,6 +1163,44 @@ async fn create_raw_log_staging_input_revisions_table(pool: &PgPool) -> Result<(
     .await
     .context("failed to create raw-log block revision state for indexer tests")?;
 
+    // Production installs commit-ordered revision triggers. The hand-built
+    // fixture only needs their foundational invariant here: once a chain has
+    // a retained raw log, it also has a durable per-chain authority row.
+    sqlx::raw_sql(
+        r#"
+        CREATE OR REPLACE FUNCTION ensure_raw_log_staging_authority_for_indexer_test()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            INSERT INTO raw_log_staging_input_revisions (
+                chain_id,
+                revision,
+                retention_generation,
+                retained_history_complete,
+                incomplete_since,
+                proven_retention_generation,
+                proven_discovery_admission_epoch,
+                proven_through_block
+            )
+            VALUES (NEW.chain_id, 0, 0, false, clock_timestamp(), NULL, NULL, NULL)
+            ON CONFLICT (chain_id) DO NOTHING;
+            RETURN NEW;
+        END;
+        $$;
+
+        DROP TRIGGER IF EXISTS ensure_raw_log_staging_authority_for_indexer_test
+            ON raw_logs;
+        CREATE TRIGGER ensure_raw_log_staging_authority_for_indexer_test
+            BEFORE INSERT ON raw_logs
+            FOR EACH ROW
+            EXECUTE FUNCTION ensure_raw_log_staging_authority_for_indexer_test();
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to create raw-log retention authority trigger for indexer tests")?;
+
     Ok(())
 }
 

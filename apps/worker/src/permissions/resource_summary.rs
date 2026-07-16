@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use anyhow::{Context, Result, ensure};
 use bigname_storage::{PermissionsCurrentResourceSummary, ens_v2_registry_resource_id};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -18,7 +19,7 @@ const UNKNOWN_AUTHORITY_REASON: &str = "resource_permission_authority_not_projec
 pub(super) fn build_resource_summary(
     context: &ResourceProjectionContext,
     events: &[RelevantEvent],
-) -> PermissionsCurrentResourceSummary {
+) -> Result<PermissionsCurrentResourceSummary> {
     let authority_kind = projected_authority_kind(context, events);
     let root_resource_id = ensv2_root_resource_id(context);
     let event_refs = events.iter().collect::<Vec<_>>();
@@ -82,11 +83,52 @@ pub(super) fn build_resource_summary(
     let source_families = events
         .iter()
         .map(|event| event.source_family.clone())
+        .chain(
+            context
+                .provenance
+                .get("source_family")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        )
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
+    ensure!(
+        !source_families.is_empty(),
+        "permissions_current resource summary {} lacks authoritative source-family evidence",
+        context.resource_id
+    );
+    let manifest_version = events
+        .iter()
+        .map(|event| event.manifest_version)
+        .chain(
+            context
+                .provenance
+                .get("manifest_version")
+                .and_then(Value::as_i64),
+        )
+        .max()
+        .filter(|manifest_version| *manifest_version > 0)
+        .with_context(|| {
+            format!(
+                "permissions_current resource summary {} lacks authoritative manifest-version evidence",
+                context.resource_id
+            )
+        })?;
+    let last_recomputed_at = events
+        .iter()
+        .filter_map(|event| event.block_timestamp)
+        .chain(context.block_timestamp)
+        .max()
+        .filter(|timestamp| *timestamp > sqlx::types::time::OffsetDateTime::UNIX_EPOCH)
+        .with_context(|| {
+            format!(
+                "permissions_current resource summary {} lacks a source block timestamp",
+                context.resource_id
+            )
+        })?;
 
-    PermissionsCurrentResourceSummary {
+    Ok(PermissionsCurrentResourceSummary {
         resource_id: context.resource_id,
         authority_kind,
         root_resource_id,
@@ -97,18 +139,9 @@ pub(super) fn build_resource_summary(
         }),
         chain_positions,
         canonicality_summary,
-        manifest_version: events
-            .iter()
-            .map(|event| event.manifest_version)
-            .max()
-            .unwrap_or(1),
-        last_recomputed_at: events
-            .iter()
-            .filter_map(|event| event.block_timestamp)
-            .max()
-            .or(context.block_timestamp)
-            .unwrap_or(sqlx::types::time::OffsetDateTime::UNIX_EPOCH),
-    }
+        manifest_version,
+        last_recomputed_at,
+    })
 }
 
 fn projected_authority_kind(
@@ -211,15 +244,19 @@ mod tests {
             chain_id: "ethereum-mainnet".to_owned(),
             block_number: 1,
             block_hash: "0xcontext".to_owned(),
-            provenance: json!({"authority_kind": authority_kind}),
+            provenance: json!({
+                "authority_kind": authority_kind,
+                "source_family": "test_permission_authority",
+                "manifest_version": 1,
+            }),
             canonicality_state: bigname_storage::CanonicalityState::Finalized,
-            block_timestamp: Some(OffsetDateTime::UNIX_EPOCH),
+            block_timestamp: Some(OffsetDateTime::from_unix_timestamp(1).unwrap()),
         }
     }
 
     #[test]
     fn unknown_nonempty_authority_kind_stays_partial() {
-        let summary = build_resource_summary(&context("future_authority"), &[]);
+        let summary = build_resource_summary(&context("future_authority"), &[]).unwrap();
 
         assert_eq!(summary.authority_kind.as_deref(), Some("future_authority"));
         assert_eq!(summary.coverage["status"], "partial");
@@ -232,15 +269,32 @@ mod tests {
 
     #[test]
     fn known_and_wrapper_authorities_publish_explicit_support() {
-        let supported = build_resource_summary(&context("registrar"), &[]);
+        let supported = build_resource_summary(&context("registrar"), &[]).unwrap();
         assert_eq!(supported.coverage["status"], "full");
         assert_eq!(supported.coverage["exhaustiveness"], "authoritative");
 
-        let wrapper = build_resource_summary(&context("wrapper"), &[]);
+        let wrapper = build_resource_summary(&context("wrapper"), &[]).unwrap();
         assert_eq!(wrapper.coverage["status"], "unsupported");
         assert_eq!(
             wrapper.coverage["unsupported_reason"],
             WRAPPER_UNSUPPORTED_REASON
+        );
+    }
+
+    #[test]
+    fn summary_without_authoritative_manifest_evidence_fails_closed() {
+        let mut context = context("registrar");
+        context
+            .provenance
+            .as_object_mut()
+            .unwrap()
+            .remove("manifest_version");
+
+        let error = build_resource_summary(&context, &[]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("lacks authoritative manifest-version evidence")
         );
     }
 
@@ -278,7 +332,7 @@ mod tests {
             ),
         ];
 
-        let summary = build_resource_summary(&context(""), &events);
+        let summary = build_resource_summary(&context(""), &events).unwrap();
 
         assert_eq!(summary.authority_kind.as_deref(), Some("registrant"));
         assert_eq!(summary.coverage["status"], "full");
@@ -298,11 +352,12 @@ mod tests {
             block_hash: "0xcontext".to_owned(),
             provenance: json!({
                 "source_family": ENSV2_REGISTRY_SOURCE_FAMILY,
+                "manifest_version": 1,
                 "upstream_resource": upstream_resource,
                 "registry_contract_instance_id": registry_contract_instance_id,
             }),
             canonicality_state: bigname_storage::CanonicalityState::Finalized,
-            block_timestamp: Some(OffsetDateTime::UNIX_EPOCH),
+            block_timestamp: Some(OffsetDateTime::from_unix_timestamp(1).unwrap()),
         };
 
         let resource_summary = build_resource_summary(
@@ -311,7 +366,8 @@ mod tests {
                 "0x00000000000000000000000000000000000000000000000000000000000073c0",
             ),
             &[],
-        );
+        )
+        .unwrap();
         assert_eq!(
             resource_summary.root_resource_id,
             Some(expected_root_resource_id)
@@ -320,7 +376,8 @@ mod tests {
         let root_summary = build_resource_summary(
             &context_for(expected_root_resource_id, ENSV2_ROOT_UPSTREAM_RESOURCE),
             &[],
-        );
+        )
+        .unwrap();
         assert_eq!(root_summary.resource_id, expected_root_resource_id);
         assert_eq!(
             root_summary.root_resource_id,

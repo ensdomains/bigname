@@ -138,12 +138,8 @@ async fn wrapper_role_route_shapes_report_unsupported_non_authoritative_metadata
         "/v1/names/ens/wrapped.eth/roles".to_owned(),
         "/v1/roles?namespace=ens&name=wrapped.eth".to_owned(),
         format!("/v1/roles?resource_id={resource_id}"),
-        format!(
-            "/v1/roles?namespace=ens&name=wrapped.eth&resource_id={resource_id}"
-        ),
-        format!(
-            "/v1/roles?namespace=ens&name=wrapped.eth&resource_id={unrelated_resource_id}"
-        ),
+        format!("/v1/roles?namespace=ens&name=wrapped.eth&resource_id={resource_id}"),
+        format!("/v1/roles?namespace=ens&name=wrapped.eth&resource_id={unrelated_resource_id}"),
     ];
     for uri in route_shapes {
         let response = app_router(database.app_state())
@@ -162,7 +158,11 @@ async fn wrapper_role_route_shapes_report_unsupported_non_authoritative_metadata
             payload["meta"]["support_status"], "unsupported",
             "route: {uri}"
         );
-        assert_eq!(payload["meta"]["total_count"], JsonValue::Null, "route: {uri}");
+        assert_eq!(
+            payload["meta"]["total_count"],
+            JsonValue::Null,
+            "route: {uri}"
+        );
         assert_eq!(
             payload["meta"]["exhaustiveness"], "not_applicable",
             "route: {uri}"
@@ -177,8 +177,7 @@ async fn wrapper_role_route_shapes_report_unsupported_non_authoritative_metadata
             "route: {uri}"
         );
         assert_eq!(
-            payload["meta"]["unsupported_reason"],
-            "ensv1_wrapper_holder_permissions_not_projected",
+            payload["meta"]["unsupported_reason"], "ensv1_wrapper_holder_permissions_not_projected",
             "route: {uri}"
         );
         assert!(
@@ -228,7 +227,10 @@ async fn wrapper_role_route_shapes_report_unsupported_non_authoritative_metadata
     let permissions_payload: ResourcePermissionsResponse = read_json(permissions_response).await?;
     assert!(permissions_payload.data.is_empty());
     assert_eq!(permissions_payload.coverage.status, "unsupported");
-    assert_eq!(permissions_payload.coverage.exhaustiveness, "not_applicable");
+    assert_eq!(
+        permissions_payload.coverage.exhaustiveness,
+        "not_applicable"
+    );
     assert_eq!(
         permissions_payload.coverage.unsupported_reason.as_deref(),
         Some("ensv1_wrapper_holder_permissions_not_projected")
@@ -244,7 +246,8 @@ async fn wrapper_role_route_shapes_report_unsupported_non_authoritative_metadata
 }
 
 #[tokio::test]
-async fn missing_permission_resource_summary_fails_closed_for_roles_and_permissions() -> Result<()> {
+async fn missing_permission_resource_summary_fails_closed_for_roles_and_permissions() -> Result<()>
+{
     let database = TestDatabase::new_migrated().await?;
     let resource_id = Uuid::from_u128(0xd019);
     let subject = "0x0000000000000000000000000000000000000aaa";
@@ -380,7 +383,13 @@ async fn roles_filter_by_account_resource_and_name_from_permissions_current() ->
     bigname_storage::upsert_permissions_current_rows(
         &database.pool,
         &[
-            permission_current_row(alice_resource_id, account, PermissionScope::Resource, 12, 41),
+            permission_current_row(
+                alice_resource_id,
+                account,
+                PermissionScope::Resource,
+                12,
+                41,
+            ),
             permission_current_row(beta_resource_id, account, PermissionScope::Registry, 13, 42),
             permission_current_row(
                 alice_resource_id,
@@ -411,7 +420,10 @@ async fn roles_filter_by_account_resource_and_name_from_permissions_current() ->
     assert_eq!(account_response.status(), StatusCode::OK);
     let account_payload: Value = read_json(account_response).await?;
     assert_eq!(account_payload["data"].as_array().unwrap().len(), 2);
-    assert_eq!(account_payload["page"]["sort"], json!("account_resource_scope_asc"));
+    assert_eq!(
+        account_payload["page"]["sort"],
+        json!("account_resource_scope_asc")
+    );
     assert_eq!(account_payload["meta"]["support_status"], "partial");
     assert_eq!(account_payload["meta"]["exhaustiveness"], "best_effort");
     assert_eq!(account_payload["meta"]["total_count"], JsonValue::Null);
@@ -539,7 +551,10 @@ async fn roles_omit_associated_name_for_closed_surface_binding() -> Result<()> {
     assert_eq!(response.status(), StatusCode::OK);
     let payload: Value = read_json(response).await?;
     assert_eq!(payload["data"].as_array().unwrap().len(), 1);
-    assert_eq!(payload["data"][0]["resource_id"], json!(resource_id.to_string()));
+    assert_eq!(
+        payload["data"][0]["resource_id"],
+        json!(resource_id.to_string())
+    );
     assert_eq!(payload["data"][0]["name"], JsonValue::Null);
 
     database.cleanup().await?;
@@ -574,8 +589,20 @@ async fn name_roles_resolves_current_resource_and_paginates() -> Result<()> {
     bigname_storage::upsert_permissions_current_rows(
         &database.pool,
         &[
-            permission_current_row(resource_id, second_account, PermissionScope::Registry, 21, 52),
-            permission_current_row(resource_id, first_account, PermissionScope::Resource, 22, 51),
+            permission_current_row(
+                resource_id,
+                second_account,
+                PermissionScope::Registry,
+                21,
+                52,
+            ),
+            permission_current_row(
+                resource_id,
+                first_account,
+                PermissionScope::Resource,
+                22,
+                51,
+            ),
         ],
     )
     .await?;
@@ -603,7 +630,10 @@ async fn name_roles_resolves_current_resource_and_paginates() -> Result<()> {
     );
     assert_eq!(first_page_payload["meta"]["total_count"], json!(2));
     assert_eq!(first_page_payload["data"].as_array().unwrap().len(), 1);
-    assert_eq!(first_page_payload["data"][0]["account"], json!(first_account));
+    assert_eq!(
+        first_page_payload["data"][0]["account"],
+        json!(first_account)
+    );
     let cursor = first_page_payload["page"]["next_cursor"]
         .as_str()
         .expect("first page must include next_cursor");
@@ -622,7 +652,10 @@ async fn name_roles_resolves_current_resource_and_paginates() -> Result<()> {
     assert_eq!(second_page_response.status(), StatusCode::OK);
     let second_page_payload: Value = read_json(second_page_response).await?;
     assert_eq!(second_page_payload["data"].as_array().unwrap().len(), 1);
-    assert_eq!(second_page_payload["data"][0]["account"], json!(second_account));
+    assert_eq!(
+        second_page_payload["data"][0]["account"],
+        json!(second_account)
+    );
     assert_eq!(second_page_payload["page"]["next_cursor"], JsonValue::Null);
     assert_eq!(second_page_payload["meta"]["total_count"], json!(2));
 
@@ -645,8 +678,7 @@ async fn name_roles_precompose_ensv2_root_fallback_permissions() -> Result<()> {
     let local_account = "0x0000000000000000000000000000000000000a01";
     let root_account = "0x0000000000000000000000000000000000000902";
     let registry_address = "0x0000000000000000000000000000000000000eac";
-    let upstream_resource =
-        "0x00000000000000000000000000000000000000000000000000000000000073c0";
+    let upstream_resource = "0x00000000000000000000000000000000000000000000000000000000000073c0";
 
     database
         .seed_name_current_binding_migrated(
@@ -683,8 +715,13 @@ async fn name_roles_precompose_ensv2_root_fallback_permissions() -> Result<()> {
     )
     .await?;
 
-    let mut root_grant =
-        permission_current_row(root_resource_id, root_account, PermissionScope::Root, 24, 54);
+    let mut root_grant = permission_current_row(
+        root_resource_id,
+        root_account,
+        PermissionScope::Root,
+        24,
+        54,
+    );
     root_grant.grant_source = json!({
         "kind": "raw_log",
         "source_event": "EACRolesChanged",
@@ -706,7 +743,13 @@ async fn name_roles_precompose_ensv2_root_fallback_permissions() -> Result<()> {
     bigname_storage::upsert_permissions_current_rows(
         &database.pool,
         &[
-            permission_current_row(resource_id, local_account, PermissionScope::Resource, 22, 53),
+            permission_current_row(
+                resource_id,
+                local_account,
+                PermissionScope::Resource,
+                22,
+                53,
+            ),
             root_grant,
         ],
     )
@@ -714,11 +757,8 @@ async fn name_roles_precompose_ensv2_root_fallback_permissions() -> Result<()> {
     let mut resource_summary =
         permission_current_resource_summary(resource_id, Some("ens_v2_registry"));
     resource_summary.root_resource_id = Some(root_resource_id);
-    bigname_storage::upsert_permissions_current_resource_summary(
-        &database.pool,
-        &resource_summary,
-    )
-    .await?;
+    bigname_storage::upsert_permissions_current_resource_summary(&database.pool, &resource_summary)
+        .await?;
     bigname_storage::upsert_permissions_current_resource_summary(
         &database.pool,
         &permission_current_resource_summary(root_resource_id, Some("ens_v2_registry")),
@@ -817,8 +857,12 @@ async fn name_roles_precompose_ensv2_root_fallback_permissions() -> Result<()> {
         .await
         .context("roles query unrelated resource filter request failed")?;
     assert_eq!(unrelated_filtered_query_response.status(), StatusCode::OK);
-    let unrelated_filtered_query_payload: Value = read_json(unrelated_filtered_query_response).await?;
-    assert_eq!(unrelated_filtered_query_payload["meta"]["total_count"], json!(0));
+    let unrelated_filtered_query_payload: Value =
+        read_json(unrelated_filtered_query_response).await?;
+    assert_eq!(
+        unrelated_filtered_query_payload["meta"]["total_count"],
+        json!(0)
+    );
     assert_eq!(
         unrelated_filtered_query_payload["data"]
             .as_array()
@@ -839,13 +883,20 @@ async fn name_roles_precompose_ensv2_root_fallback_permissions() -> Result<()> {
         .await
         .context("roles query resource filter request failed")?;
     assert_eq!(resource_filtered_query_response.status(), StatusCode::OK);
-    let resource_filtered_query_payload: Value = read_json(resource_filtered_query_response).await?;
+    let resource_filtered_query_payload: Value =
+        read_json(resource_filtered_query_response).await?;
     let resource_filtered_query_rows = resource_filtered_query_payload["data"]
         .as_array()
         .expect("query data must be an array");
-    assert_eq!(resource_filtered_query_payload["meta"]["total_count"], json!(1));
+    assert_eq!(
+        resource_filtered_query_payload["meta"]["total_count"],
+        json!(1)
+    );
     assert_eq!(resource_filtered_query_rows.len(), 1);
-    assert_eq!(resource_filtered_query_rows[0]["account"], json!(local_account));
+    assert_eq!(
+        resource_filtered_query_rows[0]["account"],
+        json!(local_account)
+    );
     assert_eq!(
         resource_filtered_query_rows[0]["resource_id"],
         json!(resource_id.to_string())
@@ -889,7 +940,10 @@ async fn name_roles_precompose_ensv2_root_fallback_permissions() -> Result<()> {
     assert_eq!(first_page_response.status(), StatusCode::OK);
     let first_page_payload: Value = read_json(first_page_response).await?;
     assert_eq!(first_page_payload["data"].as_array().unwrap().len(), 1);
-    assert_eq!(first_page_payload["data"][0]["account"], json!(root_account));
+    assert_eq!(
+        first_page_payload["data"][0]["account"],
+        json!(root_account)
+    );
     assert_eq!(
         first_page_payload["data"][0]["resource_id"],
         json!(root_resource_id.to_string())
@@ -927,7 +981,10 @@ async fn name_roles_precompose_ensv2_root_fallback_permissions() -> Result<()> {
     assert_eq!(second_page_response.status(), StatusCode::OK);
     let second_page_payload: Value = read_json(second_page_response).await?;
     assert_eq!(second_page_payload["data"].as_array().unwrap().len(), 1);
-    assert_eq!(second_page_payload["data"][0]["account"], json!(local_account));
+    assert_eq!(
+        second_page_payload["data"][0]["account"],
+        json!(local_account)
+    );
     assert_eq!(
         second_page_payload["data"][0]["resource_id"],
         json!(resource_id.to_string())
@@ -962,6 +1019,52 @@ async fn roles_return_stale_until_permissions_projection_is_available() -> Resul
             .message
             .contains("permissions_current projection is not yet available")
     );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn name_resource_mismatch_cannot_bypass_permissions_projection_readiness() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let resource_id = Uuid::from_u128(0xd901);
+    let requested_resource_id = Uuid::from_u128(0xd902);
+    let token_lineage_id = Uuid::from_u128(0xd903);
+    let surface_binding_id = Uuid::from_u128(0xd904);
+
+    database
+        .seed_name_current_binding_migrated(
+            "ens:readiness.eth",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    let mut name_row = exact_name_row(
+        "ens:readiness.eth",
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    name_row.canonical_display_name = "readiness.eth".to_owned();
+    name_row.normalized_name = "readiness.eth".to_owned();
+    database.insert_name_current_row(name_row).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/roles?namespace=ens&name=readiness.eth&resource_id={requested_resource_id}"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("name/resource mismatch roles request failed")?;
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "stale");
 
     database.cleanup().await?;
     Ok(())
@@ -1114,9 +1217,8 @@ fn ensv2_registry_resource_id(
     registry_contract_instance_id: Uuid,
     upstream_resource: &str,
 ) -> Uuid {
-    let seed = format!(
-        "ens-v2-resource:{chain_id}:{registry_contract_instance_id}:{upstream_resource}"
-    );
+    let seed =
+        format!("ens-v2-resource:{chain_id}:{registry_contract_instance_id}:{upstream_resource}");
     let digest = alloy_primitives::keccak256(seed.as_bytes());
     let mut bytes = [0u8; 16];
     bytes.copy_from_slice(&digest[..16]);

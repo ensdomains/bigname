@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::{Context, Result, ensure};
 use sqlx::{PgPool, types::Uuid};
@@ -40,7 +40,10 @@ pub(super) struct RegistryReplayState {
     pub(super) registry_suffix_by_address: HashMap<String, String>,
     pub(super) registry_contract_by_address: HashMap<String, Uuid>,
     pub(super) states_by_registry_token: BTreeMap<(String, String), RegistryNameState>,
+    pub(super) state_keys_by_registry_namehash:
+        HashMap<(String, String), BTreeSet<(String, String)>>,
     pub(super) token_aliases: HashMap<(String, String), (String, String)>,
+    pub(super) current_token_alias_by_canonical_key: HashMap<(String, String), (String, String)>,
 }
 
 pub(super) use cache::invalidate_live_registry_replay_state;
@@ -48,7 +51,7 @@ pub(in crate::ens_v2_registry) use checkpoint::clear_live_registry_replay_checkp
 #[cfg(test)]
 pub(in crate::ens_v2_registry) use checkpoint::{
     LIVE_REGISTRY_REPLAY_CHECKPOINT_ADAPTER, LIVE_REGISTRY_REPLAY_CHECKPOINT_CURSOR_KIND,
-    LIVE_REGISTRY_REPLAY_CHECKPOINT_SCOPE,
+    LIVE_REGISTRY_REPLAY_CHECKPOINT_SCOPE, LIVE_REGISTRY_REPLAY_CHECKPOINT_STAGING_SCOPE,
 };
 pub(in crate::ens_v2_registry) use path::load_selected_registry_path_to_floor;
 
@@ -116,7 +119,6 @@ pub async fn sync_ens_v2_registry_resource_surface_live_poll(
     chain: &str,
     target_block_number: i64,
     block_hashes: &[String],
-    _source_scope: Option<&[(String, String, i64, i64)]>,
 ) -> Result<EnsV2RegistryResourceSurfaceSyncSummary> {
     sync_ens_v2_registry_resource_surface_live_poll_with_cache_budget(
         pool,
@@ -124,7 +126,6 @@ pub async fn sync_ens_v2_registry_resource_surface_live_poll(
         chain,
         target_block_number,
         block_hashes,
-        _source_scope,
         MAX_LIVE_REGISTRY_REPLAY_STATE_WEIGHT,
     )
     .await
@@ -137,7 +138,6 @@ pub(in crate::ens_v2_registry) async fn sync_ens_v2_registry_resource_surface_li
     chain: &str,
     target_block_number: i64,
     block_hashes: &[String],
-    source_scope: Option<&[(String, String, i64, i64)]>,
 ) -> Result<EnsV2RegistryResourceSurfaceSyncSummary> {
     sync_ens_v2_registry_resource_surface_live_poll_with_cache_budget(
         pool,
@@ -145,7 +145,6 @@ pub(in crate::ens_v2_registry) async fn sync_ens_v2_registry_resource_surface_li
         chain,
         target_block_number,
         block_hashes,
-        source_scope,
         1,
     )
     .await
@@ -157,7 +156,6 @@ async fn sync_ens_v2_registry_resource_surface_live_poll_with_cache_budget(
     chain: &str,
     target_block_number: i64,
     block_hashes: &[String],
-    source_scope: Option<&[(String, String, i64, i64)]>,
     max_process_cache_weight: usize,
 ) -> Result<EnsV2RegistryResourceSurfaceSyncSummary> {
     ensure!(
@@ -178,7 +176,6 @@ async fn sync_ens_v2_registry_resource_surface_live_poll_with_cache_budget(
         chain,
         target_block_number,
         block_hashes,
-        source_scope,
         raw_log_guard,
         max_process_cache_weight,
     )
@@ -191,7 +188,6 @@ async fn sync_ens_v2_registry_resource_surface_live_poll_locked(
     chain: &str,
     target_block_number: i64,
     block_hashes: &[String],
-    _source_scope: Option<&[(String, String, i64, i64)]>,
     raw_log_guard: FullSourceRawLogHistoryGuard,
     max_process_cache_weight: usize,
 ) -> Result<EnsV2RegistryResourceSurfaceSyncSummary> {

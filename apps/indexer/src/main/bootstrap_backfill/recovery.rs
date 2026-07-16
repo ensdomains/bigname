@@ -178,8 +178,6 @@ impl BootstrapConvergenceTracker {
     }
 }
 
-const ENS_V2_RETAINED_HISTORY_SOURCE_FAMILIES: [&str; 2] = ["ens_v2_root_l1", "ens_v2_registry_l1"];
-
 /// Capture the retention generation once for one chain planning pass. An
 /// absent row is the ordinary fresh-bootstrap state: generation zero with no
 /// historical recovery corpus yet.
@@ -188,7 +186,7 @@ pub(crate) async fn load_bootstrap_retention_snapshot(
     chain: &str,
     through_block: i64,
 ) -> Result<BootstrapRetentionSnapshot> {
-    let source_families = ENS_V2_RETAINED_HISTORY_SOURCE_FAMILIES
+    let source_families = bigname_manifests::ENS_V2_RETAINED_HISTORY_SOURCE_FAMILIES
         .iter()
         .map(|source_family| (*source_family).to_owned())
         .collect::<Vec<_>>();

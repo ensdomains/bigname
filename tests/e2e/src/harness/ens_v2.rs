@@ -3,7 +3,7 @@ use std::path::Path;
 
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_sol_types::{SolCall, SolValue};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 use super::artifacts::{Deployed, deploy, load_ens_v2_artifact};
 use super::rpc::{RpcClient, TxReceipt};
@@ -404,9 +404,9 @@ pub async fn register_eth_name(
     .await?;
 
     let receipt = rpc
-        .send_transaction(
+        .send_checked(
             from,
-            Some(d.eth_registrar.address),
+            d.eth_registrar.address,
             &registrar_calls::registerCall {
                 label: label.to_owned(),
                 owner,
@@ -419,14 +419,9 @@ pub async fn register_eth_name(
             }
             .abi_encode(),
             U256::ZERO,
+            &format!("ENSv2 register {label}.eth"),
         )
         .await?;
-    if !receipt.status_ok {
-        bail!(
-            "ENSv2 register {label}.eth reverted (tx {})",
-            receipt.tx_hash
-        );
-    }
     let token_id = token_id(rpc, d.eth_registry.address, label_id(label)).await?;
     let resource_id = resource_id(rpc, d.eth_registry.address, label_id(label)).await?;
     Ok(RegisteredEnsV2Name {
@@ -504,30 +499,24 @@ pub async fn register_in_registry(
     owner: Address,
     expiry: u64,
 ) -> Result<U256> {
-    let receipt = rpc
-        .send_transaction(
-            from,
-            Some(registry),
-            &registry_calls::registerCall {
-                label: label.to_owned(),
-                owner,
-                registry: Address::ZERO,
-                resolver: Address::ZERO,
-                roleBitmap: role_bit(ROLE_SET_SUBREGISTRY)
-                    | role_bit(ROLE_SET_RESOLVER)
-                    | role_bit(ROLE_UNREGISTER),
-                expiry,
-            }
-            .abi_encode(),
-            U256::ZERO,
-        )
-        .await?;
-    if !receipt.status_ok {
-        bail!(
-            "ENSv2 registry register {label} reverted (tx {})",
-            receipt.tx_hash
-        );
-    }
+    rpc.send_checked(
+        from,
+        registry,
+        &registry_calls::registerCall {
+            label: label.to_owned(),
+            owner,
+            registry: Address::ZERO,
+            resolver: Address::ZERO,
+            roleBitmap: role_bit(ROLE_SET_SUBREGISTRY)
+                | role_bit(ROLE_SET_RESOLVER)
+                | role_bit(ROLE_UNREGISTER),
+            expiry,
+        }
+        .abi_encode(),
+        U256::ZERO,
+        &format!("ENSv2 registry register {label}"),
+    )
+    .await?;
     token_id(rpc, registry, label_id(label)).await
 }
 
@@ -736,9 +725,9 @@ pub async fn renew_eth_name(
     )
     .await?;
     let receipt = rpc
-        .send_transaction(
+        .send_checked(
             from,
-            Some(d.eth_registrar.address),
+            d.eth_registrar.address,
             &renew_calls::renewCall {
                 label: label.to_owned(),
                 duration: duration_secs,
@@ -747,14 +736,9 @@ pub async fn renew_eth_name(
             }
             .abi_encode(),
             U256::ZERO,
+            &format!("ENSv2 registrar renew {label}"),
         )
         .await?;
-    if !receipt.status_ok {
-        bail!(
-            "ENSv2 registrar renew {label} reverted (tx {})",
-            receipt.tx_hash
-        );
-    }
     Ok(receipt)
 }
 
@@ -808,25 +792,21 @@ pub async fn transfer_registry_token(
     to: Address,
     token_id: U256,
 ) -> Result<TxReceipt> {
-    let receipt = rpc
-        .send_transaction(
+    rpc.send_checked(
+        from,
+        registry,
+        &erc1155_calls::safeTransferFromCall {
             from,
-            Some(registry),
-            &erc1155_calls::safeTransferFromCall {
-                from,
-                to,
-                id: token_id,
-                value: U256::from(1_u8),
-                data: Bytes::new(),
-            }
-            .abi_encode(),
-            U256::ZERO,
-        )
-        .await?;
-    if !receipt.status_ok {
-        bail!("ENSv2 token transfer reverted (tx {})", receipt.tx_hash);
-    }
-    Ok(receipt)
+            to,
+            id: token_id,
+            value: U256::from(1_u8),
+            data: Bytes::new(),
+        }
+        .abi_encode(),
+        U256::ZERO,
+        "ENSv2 token transfer",
+    )
+    .await
 }
 
 pub async fn batch_transfer_registry_tokens(
@@ -836,28 +816,21 @@ pub async fn batch_transfer_registry_tokens(
     to: Address,
     token_ids: &[U256],
 ) -> Result<TxReceipt> {
-    let receipt = rpc
-        .send_transaction(
+    rpc.send_checked(
+        from,
+        registry,
+        &erc1155_calls::safeBatchTransferFromCall {
             from,
-            Some(registry),
-            &erc1155_calls::safeBatchTransferFromCall {
-                from,
-                to,
-                ids: token_ids.to_vec(),
-                values: vec![U256::from(1_u8); token_ids.len()],
-                data: Bytes::new(),
-            }
-            .abi_encode(),
-            U256::ZERO,
-        )
-        .await?;
-    if !receipt.status_ok {
-        bail!(
-            "ENSv2 batch token transfer reverted (tx {})",
-            receipt.tx_hash
-        );
-    }
-    Ok(receipt)
+            to,
+            ids: token_ids.to_vec(),
+            values: vec![U256::from(1_u8); token_ids.len()],
+            data: Bytes::new(),
+        }
+        .abi_encode(),
+        U256::ZERO,
+        "ENSv2 batch token transfer",
+    )
+    .await
 }
 
 pub async fn grant_root_roles(
@@ -942,13 +915,9 @@ async fn send_checked(
     data: &[u8],
     description: &str,
 ) -> Result<()> {
-    let receipt = rpc
-        .send_transaction(from, Some(to), data, U256::ZERO)
-        .await?;
-    if !receipt.status_ok {
-        bail!("{description} reverted at {to:#x} (tx {})", receipt.tx_hash);
-    }
-    Ok(())
+    rpc.send_checked(from, to, data, U256::ZERO, description)
+        .await
+        .map(|_| ())
 }
 
 mod resolver_calls {
@@ -1016,9 +985,9 @@ pub async fn deploy_permissioned_resolver(
     }
     .abi_encode();
     let receipt = rpc
-        .send_transaction(
+        .send_checked(
             admin,
-            Some(factory.address),
+            factory.address,
             &factory_calls::deployProxyCall {
                 implementation: implementation.address,
                 salt: U256::from(1_u8),
@@ -1026,14 +995,9 @@ pub async fn deploy_permissioned_resolver(
             }
             .abi_encode(),
             U256::ZERO,
+            "VerifiableFactory deployProxy",
         )
         .await?;
-    if !receipt.status_ok {
-        bail!(
-            "VerifiableFactory deployProxy reverted (tx {})",
-            receipt.tx_hash
-        );
-    }
     let raw_receipt = rpc
         .call(
             "eth_getTransactionReceipt",

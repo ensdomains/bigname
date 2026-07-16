@@ -392,7 +392,9 @@ async fn sync_ens_v2_registry_resource_surface_with_scope_and_state(
         mut registry_suffix_by_address,
         mut registry_contract_by_address,
         mut states_by_registry_token,
+        mut state_keys_by_registry_namehash,
         mut token_aliases,
+        mut current_token_alias_by_canonical_key,
     } = replay_state;
     let mut linked_resource_states = BTreeMap::<Uuid, RegistryNameState>::new();
     let mut closed_bindings = BTreeMap::<Uuid, SurfaceBinding>::new();
@@ -409,9 +411,11 @@ async fn sync_ens_v2_registry_resource_surface_with_scope_and_state(
             registry_suffix_by_address: &mut registry_suffix_by_address,
             registry_contract_by_address: &mut registry_contract_by_address,
             states_by_registry_token: &mut states_by_registry_token,
+            state_keys_by_registry_namehash: &mut state_keys_by_registry_namehash,
             linked_resource_states: &mut linked_resource_states,
             closed_bindings: &mut closed_bindings,
             token_aliases: &mut token_aliases,
+            current_token_alias_by_canonical_key: &mut current_token_alias_by_canonical_key,
             observations: &mut observations,
             graph_events: &mut graph_events,
         };
@@ -498,7 +502,9 @@ async fn sync_ens_v2_registry_resource_surface_with_scope_and_state(
             registry_suffix_by_address,
             registry_contract_by_address,
             states_by_registry_token,
+            state_keys_by_registry_namehash,
             token_aliases,
+            current_token_alias_by_canonical_key,
         },
     ))
 }

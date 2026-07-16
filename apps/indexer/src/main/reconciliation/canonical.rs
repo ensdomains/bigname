@@ -273,7 +273,9 @@ async fn reconcile_fetched_heads_with_gap_policy(
     )
     .await?;
     if adapter_sync_enabled {
-        drain_resolver_profile_input_changes(pool).await?;
+        let profile_convergence = drain_resolver_profile_input_changes(pool).await?;
+        profile_convergence
+            .ensure_chain_completion_allowed(&task.chain, "chain checkpoint advancement")?;
     }
     let next_checkpoint = ChainCoverageFrontiers::advance_checkpoint_with_promotion_epoch(
         pool,

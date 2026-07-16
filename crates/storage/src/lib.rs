@@ -118,7 +118,7 @@ pub use children::{
     load_children_current_page, load_children_current_summaries,
     stream_canonical_declared_child_sources, upsert_children_current_rows,
 };
-pub use evm_primitives::{normalize_evm_address, normalize_evm_b256};
+pub use evm_primitives::{ens_namehash_label_bytes, normalize_evm_address, normalize_evm_b256};
 pub use execution::{
     ExecutionBoundaryInvalidation, ExecutionCacheKey, ExecutionManifestInvalidation,
     ExecutionOutcome, ExecutionOutcomeInvalidationSummary, ExecutionTrace,
@@ -299,8 +299,9 @@ pub use resolver_profile_authority_journal::{
 };
 pub use resolver_profile_input_changes::{
     ResolverProfileInputChange, ResolverProfileReconciliationTarget,
-    acknowledge_resolver_profile_input_change, enqueue_resolver_profile_reconciliations,
-    load_pending_resolver_profile_input_changes,
+    acknowledge_resolver_profile_input_change, acknowledge_resolver_profile_input_changes,
+    enqueue_resolver_profile_reconciliations, load_pending_resolver_profile_input_changes,
+    load_pending_resolver_profile_input_changes_excluding,
 };
 pub use snapshot_selection::{
     ChainPosition, ChainPositions, SelectedSnapshot, SnapshotAt, SnapshotConsistency,

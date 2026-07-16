@@ -35,7 +35,6 @@ pub(super) async fn sync_ens_v2_registry_for_mode(
                 chain,
                 target_block_number,
                 block_hashes,
-                source_scope,
             )
             .await
         }

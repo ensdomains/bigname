@@ -1,7 +1,7 @@
 use std::future::Future;
 
 use anyhow::{Context, Result};
-use sqlx::{Connection, PgConnection, PgPool, postgres::PgAdvisoryLock};
+use sqlx::{Connection, Either, PgConnection, PgPool, postgres::PgAdvisoryLock};
 
 pub(super) async fn with_full_closure_replay_lock<T, Operation, OperationFuture>(
     pool: &PgPool,
@@ -17,14 +17,32 @@ where
     // processes already retain one pool connection for the Base correction
     // writer guard, and full-closure adapters need the pool while this
     // cross-process ownership fence is held.
-    let connection = PgConnection::connect_with(pool.connect_options().as_ref())
+    let mut connection = PgConnection::connect_with(pool.connect_options().as_ref())
         .await
         .context("failed to connect the full-closure replay ownership fence")?;
     let lock_identity = format!("bigname:indexer:full-closure-replay:{deployment_profile}:{chain}");
     let lock = PgAdvisoryLock::new(lock_identity);
-    let guard = lock.acquire(connection).await.with_context(|| {
-        format!("failed to acquire full-closure replay ownership for {deployment_profile}/{chain}")
-    })?;
+    let guard = loop {
+        // A backend waiting inside pg_advisory_lock can retain a snapshot for
+        // the entire competing replay. Polling leaves no long-lived statement
+        // behind to hold back CREATE INDEX CONCURRENTLY or vacuum horizons.
+        match lock.try_acquire(connection).await.with_context(|| {
+            format!("failed to try full-closure replay ownership for {deployment_profile}/{chain}")
+        })? {
+            Either::Left(guard) => break guard,
+            Either::Right(mut unlocked) => {
+                sqlx::query("SELECT pg_sleep(0.05)")
+                    .execute(&mut unlocked)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed while polling full-closure replay ownership for {deployment_profile}/{chain}"
+                        )
+                    })?;
+                connection = unlocked;
+            }
+        }
+    };
 
     let operation_result = operation().await;
     #[cfg(test)]

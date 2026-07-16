@@ -245,16 +245,6 @@ pub(super) fn narrow_manifest_bootstrap_source_plan(
 
     narrowed_targets.sort();
     narrowed_targets.dedup();
-    if narrowed_targets.len() != targets.len() {
-        bail!(
-            "bootstrap source plan for range {}..={} produced {} unique manifest targets from {} requested targets",
-            range.from_block,
-            range.to_block,
-            narrowed_targets.len(),
-            targets.len()
-        );
-    }
-
     source_plan.selected_targets = narrowed_targets;
 
     Ok(())
@@ -311,6 +301,29 @@ mod tests {
                 .contains("did not select authoritative contract_instance_id"),
             "unexpected error: {error:#}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn bootstrap_source_plan_coalesces_overlapping_targets_for_one_contract_instance() -> Result<()>
+    {
+        let mut first = manifest_target(
+            "ens_v2_registry_l1",
+            1,
+            "0x0000000000000000000000000000000000000001",
+        );
+        first.effective_from_block = 10;
+        first.effective_to_block = Some(30);
+        let mut second = first.clone();
+        second.effective_from_block = 20;
+        second.effective_to_block = Some(40);
+        let range = BackfillBlockRange::new(20, 30)?;
+        let expected = watched_target(&first, range);
+        let mut source_plan = source_plan(vec![expected.clone()]);
+
+        narrow_manifest_bootstrap_source_plan(&mut source_plan, &[first, second], range)?;
+
+        assert_eq!(source_plan.selected_targets, vec![expected]);
         Ok(())
     }
 

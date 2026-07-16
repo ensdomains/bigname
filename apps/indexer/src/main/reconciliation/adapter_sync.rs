@@ -65,8 +65,7 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
     source_scope: Option<&[(String, String, i64, i64)]>,
     mode: PersistedRawPayloadAdapterSyncMode,
     reload_live_source_scope: bool,
-    reconcile_legacy_registry_full_source: bool,
-    reconcile_ens_v2_full_source: bool,
+    full_source_reconciliation: entrypoints::FullSourceReconciliationScope,
 ) -> Result<PersistedRawPayloadAdapterSyncSummary> {
     if matches!(mode, PersistedRawPayloadAdapterSyncMode::LivePoll) {
         ensure!(
@@ -79,6 +78,8 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
             "only live-poll adapter sync may carry a deployment profile"
         );
     }
+    let legacy_full_source = full_source_reconciliation.reconciles_legacy_registry();
+    let ens_v2_full_source = full_source_reconciliation.reconciles_ens_v2_registry();
     let mut aggregate = PersistedRawPayloadAdapterSyncSummary::default();
     let epoch_guard = journal_resolver_profile_authority_if_epoch_changed(pool, chain).await?;
     aggregate.resolver_profile_authority_epoch_guard_count += epoch_guard.epoch_guard_count;
@@ -145,7 +146,7 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
         normalized_event_summary.total_synced_count,
         normalized_event_summary.total_inserted_count,
     );
-    if reconcile_legacy_registry_full_source
+    if legacy_full_source
         || mode.selects_adapter(
             active_source_scope.as_deref(),
             NormalizedEventReplayAdapter::EnsV1SubregistryDiscovery,
@@ -173,13 +174,13 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
             block_hashes,
             active_source_scope.as_deref(),
             mode,
-            reconcile_legacy_registry_full_source,
+            legacy_full_source,
         )
         .await?;
         log_adapter_call_timing(
             chain,
             "ens_v1_subregistry_discovery",
-            ens_v1_subregistry_sync_operation(reconcile_legacy_registry_full_source),
+            ens_v1_subregistry_sync_operation(legacy_full_source),
             block_hashes.len(),
             source_scope_target_count,
             subregistry_discovery_summary.scanned_log_count,
@@ -337,7 +338,7 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
             chain, "ENSv1 unwrapped-authority adapter sync skipped outside selected source scope"
         );
     }
-    if reconcile_ens_v2_full_source
+    if ens_v2_full_source
         || mode.selects_adapter(
             source_scope,
             NormalizedEventReplayAdapter::EnsV2RegistryResourceSurface,
@@ -366,13 +367,13 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
             block_hashes,
             source_scope,
             mode,
-            reconcile_ens_v2_full_source,
+            ens_v2_full_source,
         )
         .await?;
         log_adapter_call_timing(
             chain,
             "ens_v2_registry_resource_surface",
-            ens_v2_registry_sync_operation(mode, reconcile_ens_v2_full_source),
+            ens_v2_registry_sync_operation(mode, ens_v2_full_source),
             block_hashes.len(),
             source_scope_target_count,
             ens_v2_registry_summary.scanned_log_count,

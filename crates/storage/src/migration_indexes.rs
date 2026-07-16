@@ -20,6 +20,40 @@ struct RequiredIndexDescriptor {
     create_concurrently_sql: &'static str,
 }
 
+const RECORD_INVENTORY_REPLAY_INDEX_DESCRIPTOR: RequiredIndexDescriptor = RequiredIndexDescriptor {
+    name: RECORD_INVENTORY_REPLAY_INDEX,
+    table: "public.normalized_events",
+    create_concurrently_sql: r#"
+            CREATE INDEX CONCURRENTLY normalized_events_record_inventory_resource_replay_idx
+            ON public.normalized_events (
+                resource_id,
+                block_number,
+                log_index NULLS FIRST,
+                normalized_event_id
+            )
+            WHERE resource_id IS NOT NULL
+              AND logical_name_id IS NOT NULL
+              AND chain_id IS NOT NULL
+              AND block_number IS NOT NULL
+              AND block_hash IS NOT NULL
+              AND derivation_kind IN (
+                  'ens_v1_unwrapped_authority',
+                  'ens_v2_registry_resource_surface',
+                  'ens_v2_resolver'
+              )
+              AND event_kind IN (
+                  'RecordChanged',
+                  'RecordVersionChanged',
+                  'ResolverChanged'
+              )
+              AND canonicality_state IN (
+                  'canonical'::public.canonicality_state,
+                  'safe'::public.canonicality_state,
+                  'finalized'::public.canonicality_state
+              )
+        "#,
+};
+
 const REQUIRED_CONTRACT_ADDRESS_INDEXES: &[RequiredIndexDescriptor] = &[
     RequiredIndexDescriptor {
         name: ACTIVE_CONTRACT_ADDRESS_INDEX,
@@ -293,6 +327,19 @@ async fn count_unready_normalized_event_indexes_with<'e, E>(
 where
     E: Executor<'e, Database = Postgres>,
 {
+    count_unready_indexes_with(executor, indexes, "public.normalized_events")
+        .await
+        .context("failed to inspect normalized-event index readiness")
+}
+
+async fn count_unready_indexes_with<'e, E>(
+    executor: E,
+    indexes: &[&str],
+    table: &str,
+) -> Result<i64>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     sqlx::query_scalar::<_, i64>(
         r#"
         SELECT COUNT(*)::BIGINT
@@ -301,16 +348,17 @@ where
             SELECT 1
             FROM pg_index AS index
             WHERE index.indexrelid = to_regclass(required.index_name)
-              AND index.indrelid = 'public.normalized_events'::regclass
+              AND index.indrelid = to_regclass($2)
               AND index.indisvalid
               AND index.indisready
         )
         "#,
     )
     .bind(indexes)
+    .bind(table)
     .fetch_one(executor)
     .await
-    .context("failed to inspect normalized-event index readiness")
+    .with_context(|| format!("failed to inspect readiness for indexes on {table}"))
 }
 
 pub(super) async fn run_migrations_and_ensure_required_indexes_ready(
@@ -342,60 +390,7 @@ pub(super) async fn run_migrations_and_ensure_required_indexes_ready(
 }
 
 async fn ensure_record_inventory_replay_index_ready(connection: &mut PgConnection) -> Result<()> {
-    if record_inventory_replay_index_ready(connection).await? {
-        return Ok(());
-    }
-
-    let index_exists = sqlx::query_scalar::<_, bool>("SELECT to_regclass($1) IS NOT NULL")
-        .bind(RECORD_INVENTORY_REPLAY_INDEX)
-        .fetch_one(&mut *connection)
-        .await
-        .context("failed to inspect record-inventory replay index relation")?;
-    if index_exists {
-        sqlx::query(&format!(
-            "DROP INDEX CONCURRENTLY IF EXISTS {RECORD_INVENTORY_REPLAY_INDEX}"
-        ))
-        .execute(&mut *connection)
-        .await
-        .context("failed to drop unready record-inventory replay index")?;
-    }
-
-    sqlx::query(
-        r#"
-        CREATE INDEX CONCURRENTLY normalized_events_record_inventory_resource_replay_idx
-        ON public.normalized_events (
-            resource_id,
-            block_number,
-            log_index NULLS FIRST,
-            normalized_event_id
-        )
-        WHERE resource_id IS NOT NULL
-          AND logical_name_id IS NOT NULL
-          AND chain_id IS NOT NULL
-          AND block_number IS NOT NULL
-          AND block_hash IS NOT NULL
-          AND derivation_kind IN (
-              'ens_v1_unwrapped_authority',
-              'ens_v2_registry_resource_surface',
-              'ens_v2_resolver'
-          )
-          AND event_kind IN ('RecordChanged', 'RecordVersionChanged', 'ResolverChanged')
-          AND canonicality_state IN (
-              'canonical'::public.canonicality_state,
-              'safe'::public.canonicality_state,
-              'finalized'::public.canonicality_state
-          )
-        "#,
-    )
-    .execute(&mut *connection)
-    .await
-    .context("failed to rebuild record-inventory replay index")?;
-
-    ensure!(
-        record_inventory_replay_index_ready(connection).await?,
-        "record-inventory replay index remains unready after rebuild"
-    );
-    Ok(())
+    ensure_required_index_ready(connection, &RECORD_INVENTORY_REPLAY_INDEX_DESCRIPTOR).await
 }
 
 async fn normalized_replay_indexes_intentionally_deferred(
@@ -419,8 +414,8 @@ async fn normalized_replay_indexes_intentionally_deferred(
 async fn record_inventory_replay_index_ready(connection: &mut PgConnection) -> Result<bool> {
     required_index_ready(
         connection,
-        RECORD_INVENTORY_REPLAY_INDEX,
-        "public.normalized_events",
+        RECORD_INVENTORY_REPLAY_INDEX_DESCRIPTOR.name,
+        RECORD_INVENTORY_REPLAY_INDEX_DESCRIPTOR.table,
     )
     .await
 }
@@ -467,23 +462,13 @@ async fn required_index_ready(
     index: &str,
     table: &str,
 ) -> Result<bool> {
-    sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM pg_index
-            WHERE indexrelid = to_regclass($1)
-              AND indrelid = to_regclass($2)
-              AND indisvalid
-              AND indisready
-        )
-        "#,
+    let indexes = [index];
+    Ok(
+        count_unready_indexes_with(&mut *connection, &indexes, table)
+            .await
+            .with_context(|| format!("failed to inspect index readiness for {index}"))?
+            == 0,
     )
-    .bind(index)
-    .bind(table)
-    .fetch_one(connection)
-    .await
-    .with_context(|| format!("failed to inspect index readiness for {index}"))
 }
 
 #[cfg(test)]

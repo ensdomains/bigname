@@ -194,7 +194,7 @@ async fn ens_v2_registrar_ignores_future_token_collision_from_another_registry()
             ),
             registry_event(
                 "child-registry-token-resource",
-                "ens:alice.child.eth",
+                "ens:alice.eth",
                 child_registry_resource_id,
                 "TokenResourceLinked",
                 20,

@@ -31,6 +31,14 @@ The two packages are complementary:
 scripts/test-db -- cargo test --manifest-path tests/e2e/Cargo.toml -- --test-threads=8
 ```
 
+The harness migrates one fingerprinted template database on that test server
+and clones it for each scenario. The template is reused only when its stored
+harness marker matches the checked-in migration set; scenario databases remain
+independent and are dropped normally. Direct connections to the completed
+template are disabled so PostgreSQL can clone it safely. Fingerprinted
+templates persist as a test-server cache, which is another reason to point the
+suite only at an isolated test PostgreSQL server.
+
 ## How a scenario runs
 
 1. **Chain** — `harness::anvil` starts a local node with a fixed genesis
@@ -406,11 +414,12 @@ route inventory or a claim that every protocol transition is covered.
   (upstream: .refs/basenames/src/L2/resolver/ContentHashResolver.sol:L32 @ basenames@1809bbc)
   (upstream: .refs/basenames/src/L2/resolver/ContentHashResolver.sol:L34 @ basenames@1809bbc).
 - `basenames_turn_m::unadmitted_resolver_rotation_stays_profile_gated_then_clears`
-  — rotates to an L2Resolver built against an alternate registry, pins the
-  immutable-dependent code-hash mismatch as empty selectors with
-  `resolver_family_unsupported` entries under `unsupported_families` (rather
-  than `explicit_gaps`), keeps its records profile-gated, then rotates to zero
-  and clears declared resolver state
+  — rotates to an L2Resolver built against an alternate registry. An initial
+  backfill discovers the resolver, then a focused watched-target backfill
+  retains its raw `TextChanged` log and code hash. The persisted
+  immutable-dependent code-hash mismatch is therefore the record-consumption
+  gate: zero `RecordChanged` events derive. A final rotation to zero clears
+  declared resolver state
   (upstream: .refs/basenames/src/L2/L2Resolver.sol:L113 @ basenames@1809bbc)
   (upstream: .refs/basenames/src/L2/L2Resolver.sol:L114 @ basenames@1809bbc).
 - `basenames_turn_m::legacy_reverse_registrar_stays_registry_and_raw_record_only`
@@ -450,7 +459,7 @@ route inventory or a claim that every protocol transition is covered.
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L206 @ ens_v2@48b3e2d)
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L637 @ ens_v2@48b3e2d)
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L647 @ ens_v2@48b3e2d).
-- `ens_v2_turn_l::renewal_promotes_coverage_and_registry_edges_follow` —
+- `ens_v2_turn_l::renewal_preserves_promoted_coverage_and_registry_edges_follow` —
   registrar renewal after registry expiry but within the post-audit grace period
   derives both fragments and preserves the promoted
   exact-name coverage end to end; a direct
@@ -546,14 +555,21 @@ route inventory or a claim that every protocol transition is covered.
 - `BIGNAME_E2E_KEEP_DB=1` keeps each scenario's database (the URL is
   printed) instead of dropping it.
 - The supervised `indexer run` session writes its full log to
-  `$TMPDIR/bigname-e2e-indexer-<pid>-<target block>.log`; failures include
-  the tail.
+  `$TMPDIR/bigname-e2e-indexer-<pid>-<label>-<sequence>.log`; supervised
+  worker logs use the corresponding `worker` prefix. The unique sequence
+  prevents parallel scenarios with the same label from truncating each
+  other's logs; failures include the tail.
 - Anvil startup writes its full log to
   `$TMPDIR/bigname-e2e-anvil-<pid>-<chain id>-<sequence>.log`. Normal
   teardown removes the file; an unexpected exit retains it and reports its
   path and tail.
-- `BIGNAME_E2E_READY_TIMEOUT_SECS` shortens the 600s readiness deadline
-  when reproducing intake wedges locally.
+- `BIGNAME_E2E_READY_TIMEOUT_SECS` sets the overall Anvil/API startup,
+  indexer-checkpoint, and worker-SQL readiness deadline (600s by default).
+  Timeout errors report the configured value.
+- `BIGNAME_E2E_COMMAND_TIMEOUT_SECS` bounds the one-time pipeline binary build,
+  one-shot indexer backfill/replay, and worker replay commands (600s by
+  default). A timed-out process is stopped and reaped; its unique stdout and
+  stderr logs are retained with their paths and tails in the error.
 - Full local runs are most stable with bounded parallelism
   (`-- --test-threads=8`): most scenarios spawn an anvil plus several
   pipeline processes, and unbounded parallelism saturates the shared

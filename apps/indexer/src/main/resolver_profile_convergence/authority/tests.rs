@@ -299,12 +299,16 @@ async fn journal_baselines_initial_authority_then_queues_later_removals() -> Res
         )?,
         removed
     );
-    let error = super::super::drain_resolver_profile_input_changes(database.pool())
-        .await
-        .expect_err("a later real change on unknown legacy history must fail closed");
-    assert!(
-        format!("{error:#}").contains("fully rebootstrap the database"),
-        "unexpected resolver-profile retention error: {error:#}"
+    let summary = super::super::drain_resolver_profile_input_changes(database.pool()).await?;
+    assert_eq!(summary.loaded_input_count, 1);
+    assert_eq!(summary.reconciled_target_count, 0);
+    assert_eq!(summary.invalidated_projection_key_count, 0);
+    assert_eq!(summary.acknowledged_input_count, 0);
+    assert_eq!(summary.deferred_input_count, 1);
+    assert_eq!(summary.deferred_chain_count, 1);
+    assert_eq!(
+        summary.deferred_chains,
+        BTreeSet::from(["ethereum-mainnet".to_owned()])
     );
     assert_eq!(
         sqlx::query_as::<_, (i64, i64)>(

@@ -18,7 +18,10 @@ use crate::runtime::{
 
 use super::sync_logging::log_adapter_call_timing;
 use crate::reconciliation::{
-    replay::{NormalizedEventReplayAdapter, ensure_full_closure_retention_authority_for_adapters},
+    replay::{
+        NormalizedEventReplayAdapter, ensure_full_closure_retention_authority_for_adapters,
+        replay_contract,
+    },
     types::PersistedRawPayloadAdapterSyncSummary,
 };
 
@@ -205,6 +208,7 @@ async fn sync_full_closure_normalized_events_without_lock(
             chain,
             range_start_block_number,
             target_block_number,
+            replay_contract(NormalizedEventReplayAdapter::EnsV1ReverseClaim).source_families,
             max_raw_logs_per_page,
         )
         .await?;

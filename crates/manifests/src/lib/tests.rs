@@ -1863,6 +1863,28 @@ fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
         normalize_address(&root_manifest.contracts[0].address),
         "0x11b5bfbe9078d826b1edbdd1cfc12f5828d9f50c"
     );
+    assert_eq!(
+        root_manifest
+            .abi
+            .events
+            .iter()
+            .map(|event| event.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "LabelRegistered",
+            "LabelReserved",
+            "LabelUnregistered",
+            "ExpiryUpdated",
+            "SubregistryUpdated",
+            "ResolverUpdated",
+            "TokenResource",
+            "TransferSingle",
+            "TransferBatch",
+            "EACRolesChanged",
+            "TokenRegenerated",
+            "ParentUpdated",
+        ]
+    );
 
     let registry_manifest = manifests_by_source_family_version[&("ens_v2_registry_l1", 2)];
     assert_eq!(registry_manifest.roots.len(), 1);
@@ -4657,6 +4679,48 @@ async fn scoped_discovery_reconciliation_keeps_unrelated_active_addresses() -> R
 }
 
 #[tokio::test]
+async fn scoped_discovery_transition_summary_accumulates_before_an_empty_final_transition()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+
+    let discovery_source = "unit-test-batched-summary";
+    let observation = DiscoveryObservation {
+        chain: "ethereum-sepolia".to_owned(),
+        from_address: "0x67b728a792e789a8978b30cf1b3b641f19354b43".to_owned(),
+        to_address: "0x0000000000000000000000000000000000000ba1".to_owned(),
+        edge_kind: "subregistry".to_owned(),
+        discovery_source: discovery_source.to_owned(),
+        active_from_block_number: Some(10),
+        active_from_block_hash: Some(format!("0x{:064x}", 10)),
+        active_to_block_number: None,
+        active_to_block_hash: None,
+        provenance: serde_json::json!({
+            "provider": "unit-test",
+            "observation_key": "batched-summary-edge",
+        }),
+    };
+    let transitions = [vec![observation], Vec::new()];
+
+    let summary = reconcile_scoped_discovery_observation_transitions(
+        database.pool(),
+        discovery_source,
+        &transitions,
+    )
+    .await?;
+
+    assert_eq!(summary.active_edge_count, 1);
+    assert_eq!(summary.admitted_edge_count, 1);
+    assert_eq!(summary.admitted_edges.len(), 1);
+    assert_eq!(summary.inserted_edge_count, 1);
+    assert_eq!(summary.deactivated_edge_count, 0);
+    assert_eq!(summary.admission_epoch_bump_count, 1);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn scoped_discovery_reconciliation_keeps_newer_assignment_current() -> Result<()> {
     let database = TestDatabase::new().await?;
     let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
@@ -5393,6 +5457,79 @@ async fn discovery_edge_reactivation_matches_the_complete_identity() -> Result<(
             (near_collision_edge_id, Some(20), Some(terminal_hash), false,),
         ],
         "reactivation must clear only the row matching all ten identity fields"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn discovery_edge_reactivation_batches_across_the_statement_boundary() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+
+    let discovery_source = "unit-test-bulk-reactivation";
+    let registry_address = "0x67b728a792e789a8978b30cf1b3b641f19354b43";
+    let observations = (1..=1001)
+        .map(|index| DiscoveryObservation {
+            chain: "ethereum-sepolia".to_owned(),
+            from_address: registry_address.to_owned(),
+            to_address: format!("0x{index:040x}"),
+            edge_kind: "subregistry".to_owned(),
+            discovery_source: discovery_source.to_owned(),
+            active_from_block_number: Some(10),
+            active_from_block_hash: Some(format!("0x{:064x}", 10)),
+            active_to_block_number: None,
+            active_to_block_hash: None,
+            provenance: serde_json::json!({
+                "provider": "unit-test",
+                "observation_key": format!("bulk-reactivation-{index}"),
+            }),
+        })
+        .collect::<Vec<_>>();
+
+    let initial =
+        reconcile_discovery_observations(database.pool(), discovery_source, &observations).await?;
+    assert_eq!(initial.inserted_edge_count, observations.len());
+
+    sqlx::query(
+        r#"
+        UPDATE discovery_edges
+        SET active_to_block_number = 20,
+            active_to_block_hash = $2,
+            deactivated_at = now(),
+            provenance = provenance || jsonb_build_object(
+                'active_to_transaction_index', 0,
+                'active_to_log_index', 1
+            )
+        WHERE discovery_source = $1
+        "#,
+    )
+    .bind(discovery_source)
+    .bind(format!("0x{:064x}", 20))
+    .execute(database.pool())
+    .await?;
+
+    let reactivated =
+        reconcile_discovery_observations(database.pool(), discovery_source, &observations).await?;
+    assert_eq!(reactivated.inserted_edge_count, observations.len());
+    assert_eq!(reactivated.active_edge_count, observations.len());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM discovery_edges
+            WHERE discovery_source = $1
+              AND deactivated_at IS NULL
+              AND active_to_block_number IS NULL
+              AND NOT (provenance ? 'active_to_transaction_index')
+              AND NOT (provenance ? 'active_to_log_index')
+            "#,
+        )
+        .bind(discovery_source)
+        .fetch_one(database.pool())
+        .await?,
+        observations.len() as i64,
     );
 
     database.cleanup().await

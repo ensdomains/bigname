@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use tracing::{info, warn};
 
 use crate::provider::ProviderRegistry;
-use crate::resolver_profile_convergence::drain_resolver_profile_input_changes;
+use crate::resolver_profile_convergence::{
+    ResolverProfileConvergenceSummary, drain_resolver_profile_input_changes,
+};
 
 use super::super::intake::{
     IntakeChainTask, intake_runtime_state, validate_provider_registry_for_intake_tasks,
@@ -35,7 +37,13 @@ pub(super) async fn refresh_discovery_watch_state(
         refresh_runtime_state_from_stored_discovery(pool, manifest_runtime_state).await
     };
     if refreshed_state.is_ok() {
-        drain_resolver_profile_input_changes(pool).await?;
+        if !resolver_profile_drain_succeeded(
+            drain_resolver_profile_input_changes(pool).await,
+            "timer",
+            "stored_discovery_state",
+        ) {
+            return Ok(false);
+        }
     }
     match refreshed_state {
         Ok(Some((next_manifest_runtime_state, next_tasks))) => {
@@ -105,5 +113,52 @@ pub(super) async fn refresh_discovery_watch_state(
             );
             Ok(false)
         }
+    }
+}
+
+pub(super) fn resolver_profile_drain_succeeded(
+    result: Result<ResolverProfileConvergenceSummary>,
+    refresh_reason: &'static str,
+    plan_source: &'static str,
+) -> bool {
+    match result {
+        Ok(_) => true,
+        Err(error) => {
+            warn!(
+                service = "indexer",
+                command = "resolver-profile-convergence",
+                refresh_reason,
+                plan_source,
+                error = ?error,
+                "failed to drain resolver-profile input changes; durable pending work will be retried on a later poll tick"
+            );
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::anyhow;
+
+    use super::resolver_profile_drain_succeeded;
+    use crate::resolver_profile_convergence::ResolverProfileConvergenceSummary;
+
+    #[test]
+    fn poll_loop_retries_transient_resolver_profile_drain_errors() {
+        assert!(!resolver_profile_drain_succeeded(
+            Err(anyhow!("transient database timeout")),
+            "timer",
+            "test",
+        ));
+    }
+
+    #[test]
+    fn poll_loop_accepts_successful_resolver_profile_drain() {
+        assert!(resolver_profile_drain_succeeded(
+            Ok(ResolverProfileConvergenceSummary::default()),
+            "timer",
+            "test",
+        ));
     }
 }

@@ -13,19 +13,29 @@ pub(super) async fn sync_ens_v1_reverse_claim_range_in_pages(
     chain: &str,
     range_start_block_number: i64,
     target_block_number: i64,
+    source_families: &[&str],
     max_raw_logs_per_page: usize,
 ) -> Result<bigname_adapters::EnsV1ReverseClaimSyncSummary> {
     ensure!(
         max_raw_logs_per_page > 0,
         "ENSv1 reverse-claim replay max logs per page must be positive"
     );
+    ensure!(
+        !source_families.is_empty(),
+        "ENSv1 reverse-claim replay contract must declare at least one source family"
+    );
     if range_start_block_number > target_block_number {
         return Ok(empty_reverse_claim_summary());
     }
 
-    let reverse_scope =
-        load_reverse_claim_replay_scope(pool, chain, range_start_block_number, target_block_number)
-            .await?;
+    let reverse_scope = load_reverse_claim_replay_scope(
+        pool,
+        chain,
+        range_start_block_number,
+        target_block_number,
+        source_families,
+    )
+    .await?;
     if reverse_scope.targets.is_empty() {
         return Ok(empty_reverse_claim_summary());
     }
@@ -94,16 +104,12 @@ async fn load_reverse_claim_replay_scope(
     chain: &str,
     range_start_block_number: i64,
     target_block_number: i64,
+    source_families: &[&str],
 ) -> Result<ReverseClaimReplayScope> {
     let watched_contracts = bigname_manifests::load_manifest_declared_watched_contracts(pool)
         .await?
         .into_iter()
-        .filter(|contract| {
-            matches!(
-                contract.source_family.as_str(),
-                "ens_v1_reverse_l1" | "basenames_base_primary"
-            )
-        })
+        .filter(|contract| source_families.contains(&contract.source_family.as_str()))
         .collect::<Vec<_>>();
     let source_scope = SourceScope::from_watched_contracts(
         &watched_contracts,

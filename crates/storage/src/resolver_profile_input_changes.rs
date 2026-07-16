@@ -27,10 +27,58 @@ pub async fn load_pending_resolver_profile_input_changes(
     pool: &PgPool,
     limit: i64,
 ) -> Result<Vec<ResolverProfileInputChange>> {
+    load_pending_resolver_profile_input_changes_excluding(pool, limit, &[]).await
+}
+
+/// Load pending transitions while excluding exact generations already
+/// attempted by the current bounded drain.
+///
+/// A concurrent generation increment no longer matches the exclusion and is
+/// therefore returned for a fresh decision. Exclusion is process-local only:
+/// it does not acknowledge or otherwise mutate durable queue work.
+pub async fn load_pending_resolver_profile_input_changes_excluding(
+    pool: &PgPool,
+    limit: i64,
+    excluded: &[ResolverProfileInputChange],
+) -> Result<Vec<ResolverProfileInputChange>> {
     ensure!(
         limit > 0,
         "resolver-profile input-change limit must be positive, got {limit}"
     );
+
+    let mut excluded = excluded
+        .iter()
+        .map(|input| {
+            ensure!(
+                !input.chain_id.trim().is_empty(),
+                "excluded resolver-profile input-change chain must not be empty"
+            );
+            ensure!(
+                input.generation > 0,
+                "excluded resolver-profile input-change generation must be positive, got {}",
+                input.generation
+            );
+            Ok((
+                input.chain_id.clone(),
+                normalize_evm_address(&input.contract_address),
+                input.generation,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    excluded.sort();
+    excluded.dedup();
+    let excluded_chains = excluded
+        .iter()
+        .map(|(chain, _, _)| chain.clone())
+        .collect::<Vec<_>>();
+    let excluded_addresses = excluded
+        .iter()
+        .map(|(_, address, _)| address.clone())
+        .collect::<Vec<_>>();
+    let excluded_generations = excluded
+        .iter()
+        .map(|(_, _, generation)| *generation)
+        .collect::<Vec<_>>();
 
     let rows = sqlx::query(
         r#"
@@ -62,11 +110,22 @@ pub async fn load_pending_resolver_profile_input_changes(
             LIMIT 1
         ) latest ON TRUE
         WHERE input.processed_generation < input.generation
+          AND NOT EXISTS (
+              SELECT 1
+              FROM unnest($2::TEXT[], $3::TEXT[], $4::BIGINT[])
+                  AS excluded(chain_id, contract_address, generation)
+              WHERE excluded.chain_id = input.chain_id
+                AND excluded.contract_address = input.contract_address
+                AND excluded.generation = input.generation
+          )
         ORDER BY input.last_changed_at, input.chain_id, input.contract_address
         LIMIT $1
         "#,
     )
     .bind(limit)
+    .bind(&excluded_chains)
+    .bind(&excluded_addresses)
+    .bind(&excluded_generations)
     .fetch_all(pool)
     .await
     .context("failed to load pending resolver-profile input changes")?;
@@ -277,6 +336,115 @@ pub async fn acknowledge_resolver_profile_input_change(
     })?;
 
     Ok(acknowledged.is_some())
+}
+
+/// Acknowledge a batch of exactly observed generations with one set-based
+/// compare-and-set update.
+///
+/// The returned count excludes rows whose generation changed after loading;
+/// those rows remain dirty for a later drain.
+pub async fn acknowledge_resolver_profile_input_changes(
+    pool: &PgPool,
+    inputs: &[ResolverProfileInputChange],
+) -> Result<usize> {
+    if inputs.is_empty() {
+        return Ok(0);
+    }
+
+    let mut acknowledgements = inputs
+        .iter()
+        .map(|input| {
+            ensure!(
+                !input.chain_id.trim().is_empty(),
+                "resolver-profile acknowledgement chain must not be empty"
+            );
+            ensure!(
+                input.generation > 0,
+                "resolver-profile acknowledgement generation must be positive, got {}",
+                input.generation
+            );
+            Ok((
+                input.chain_id.clone(),
+                normalize_evm_address(&input.contract_address),
+                input.generation,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    acknowledgements.sort();
+    acknowledgements.dedup();
+    let chain_ids = acknowledgements
+        .iter()
+        .map(|(chain, _, _)| chain.clone())
+        .collect::<Vec<_>>();
+    let contract_addresses = acknowledgements
+        .iter()
+        .map(|(_, address, _)| address.clone())
+        .collect::<Vec<_>>();
+    let generations = acknowledgements
+        .iter()
+        .map(|(_, _, generation)| *generation)
+        .collect::<Vec<_>>();
+
+    let acknowledged = sqlx::query_scalar::<_, i64>(
+        r#"
+        WITH acknowledgements AS (
+            SELECT DISTINCT chain_id, contract_address, generation
+            FROM unnest($1::TEXT[], $2::TEXT[], $3::BIGINT[])
+                AS input(chain_id, contract_address, generation)
+        ),
+        current_inputs AS (
+            SELECT
+                acknowledgement.chain_id,
+                acknowledgement.contract_address,
+                acknowledgement.generation,
+                latest.code_hash
+            FROM acknowledgements acknowledgement
+            LEFT JOIN LATERAL (
+                SELECT lower(code_hash.code_hash) AS code_hash
+                FROM raw_code_hashes code_hash
+                WHERE code_hash.chain_id = acknowledgement.chain_id
+                  AND code_hash.contract_address = acknowledgement.contract_address
+                  AND code_hash.canonicality_state <>
+                      'orphaned'::canonicality_state
+                ORDER BY
+                    code_hash.block_number DESC,
+                    CASE code_hash.canonicality_state
+                        WHEN 'finalized'::canonicality_state THEN 4
+                        WHEN 'safe'::canonicality_state THEN 3
+                        WHEN 'canonical'::canonicality_state THEN 2
+                        WHEN 'observed'::canonicality_state THEN 1
+                        ELSE 0
+                    END DESC,
+                    code_hash.raw_code_hash_id DESC
+                LIMIT 1
+            ) latest ON TRUE
+        ),
+        updated AS (
+            UPDATE resolver_profile_input_changes input
+            SET
+                processed_generation = input.generation,
+                current_code_hash = current_input.code_hash,
+                force_reconciliation = FALSE,
+                processed_at = now()
+            FROM current_inputs current_input
+            WHERE input.chain_id = current_input.chain_id
+              AND input.contract_address = current_input.contract_address
+              AND input.generation = current_input.generation
+              AND input.processed_generation < input.generation
+            RETURNING 1
+        )
+        SELECT COUNT(*)::BIGINT FROM updated
+        "#,
+    )
+    .bind(&chain_ids)
+    .bind(&contract_addresses)
+    .bind(&generations)
+    .fetch_one(pool)
+    .await
+    .context("failed to acknowledge resolver-profile input-change batch")?;
+
+    usize::try_from(acknowledged)
+        .context("acknowledged resolver-profile input-change count does not fit usize")
 }
 
 #[cfg(test)]

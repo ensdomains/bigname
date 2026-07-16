@@ -70,6 +70,7 @@ fn live_checkpoint_payload_round_trips_every_replay_collection() -> Result<()> {
         (registry.to_owned(), new_token.to_owned()),
         (registry.to_owned(), old_token.to_owned()),
     );
+    rebuild_registry_state_indexes(&mut replay_state)?;
     let snapshot = CachedLiveRegistryReplayState {
         through_block_number: 12,
         through_block_hash: "0xblock12".to_owned(),

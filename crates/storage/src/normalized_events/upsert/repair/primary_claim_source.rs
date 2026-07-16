@@ -1,12 +1,13 @@
 use std::collections::{HashMap, HashSet};
 
-use alloy_primitives::{Address, B256, keccak256};
+use alloy_primitives::{Address, B256};
 use anyhow::{Context, Result};
 use sqlx::Postgres;
 use uuid::Uuid;
 
 use super::super::super::types::NormalizedEvent;
 use super::super::{normalized_event_identity_differences, serialize_jsonb_value};
+use crate::evm_primitives::ens_namehash_label_bytes;
 
 pub(crate) async fn repair_primary_claim_source_after_states(
     executor: &mut sqlx::Transaction<'_, Postgres>,
@@ -400,7 +401,12 @@ fn ens_v1_primary_claim_source_valid(value: &serde_json::Value) -> bool {
         return false;
     };
     if reverse_node != format!("{parsed_reverse_node:#x}")
-        || parsed_reverse_node != ens_v1_reverse_node_for_address(address)
+        || parsed_reverse_node
+            != ens_namehash_label_bytes(&[
+                address.trim_start_matches("0x").as_bytes(),
+                b"addr",
+                b"reverse",
+            ])
     {
         return false;
     }
@@ -429,18 +435,6 @@ fn ens_v1_primary_claim_source_valid(value: &serde_json::Value) -> bool {
             == Some("reverse_registrar")
         && optional_primary_claim_source_uuid_valid(provenance.get("contract_instance_id"))
         && optional_primary_claim_source_address_valid(provenance.get("emitting_address"))
-}
-
-fn ens_v1_reverse_node_for_address(address: &str) -> B256 {
-    let mut node = B256::ZERO;
-    for label in ["reverse", "addr", address.trim_start_matches("0x")] {
-        let labelhash = keccak256(label.as_bytes());
-        let mut input = [0_u8; 64];
-        input[..32].copy_from_slice(node.as_slice());
-        input[32..].copy_from_slice(labelhash.as_slice());
-        node = keccak256(input);
-    }
-    node
 }
 
 fn json_object_has_exact_keys(

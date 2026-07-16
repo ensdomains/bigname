@@ -761,7 +761,7 @@ async fn unadmitted_resolver_rotation_stays_profile_gated_then_clears() -> Resul
         unadmitted.resolver.address,
     )
     .await?;
-    basenames::set_base_text_record(
+    let unadmitted_record = basenames::set_base_text_record(
         &rpc,
         unadmitted.resolver.address,
         alice,
@@ -773,9 +773,11 @@ async fn unadmitted_resolver_rotation_stays_profile_gated_then_clears() -> Resul
 
     // Live intake hangs on this rotation-to-discovered-instance chain (the
     // Base sibling of the reproduced compositional/reveal hang family; the
-    // ENSv1 twin of this scenario ingests live without issue). Both phases
-    // pin derivation and projections via backfill + replay; API-layer reads
-    // are impossible on this path.
+    // ENSv1 twin of this scenario ingests live without issue). The first
+    // backfill derives the resolver-discovery edge, then a watched-target
+    // backfill deliberately fetches the unadmitted instance. This preserves
+    // the profile-gate test even though API-layer reads remain unavailable
+    // without a promoted checkpoint.
     let unadmitted_address = format!("{:#x}", unadmitted.resolver.address);
     let rotated = support::backfill_basenames_and_replay_projections(
         &base,
@@ -794,6 +796,30 @@ async fn unadmitted_resolver_rotation_stays_profile_gated_then_clears() -> Resul
     .fetch_one(&rotated.db.pool)
     .await?;
     assert!(rotation_derived, "the rotation must derive ResolverChanged");
+    let unadmitted_contract_instance_id: Uuid = sqlx::query_scalar(
+        "SELECT edge.to_contract_instance_id FROM discovery_edges edge \
+         JOIN contract_instance_addresses target \
+           ON target.contract_instance_id = edge.to_contract_instance_id \
+          AND target.chain_id = edge.chain_id \
+         WHERE edge.chain_id = 'base-mainnet' \
+           AND edge.edge_kind = 'resolver' \
+           AND lower(target.address) = $1 \
+           AND edge.deactivated_at IS NULL \
+           AND target.deactivated_at IS NULL \
+         ORDER BY edge.active_from_block_number DESC NULLS LAST \
+         LIMIT 1",
+    )
+    .bind(&unadmitted_address)
+    .fetch_one(&rotated.db.pool)
+    .await?;
+    support::backfill_basenames_watched_target_and_replay_projections(
+        &rotated,
+        &base,
+        unadmitted_contract_instance_id,
+        unadmitted_record.block_number..=unadmitted_record.block_number,
+        "basenames-unadmitted-resolver-target",
+    )
+    .await?;
     let record_events: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events \
          WHERE logical_name_id = 'basenames:rotated.base.eth' \
@@ -820,13 +846,9 @@ async fn unadmitted_resolver_rotation_stays_profile_gated_then_clears() -> Resul
     .bind(&text_changed_topic)
     .fetch_one(&rotated.db.pool)
     .await?;
-    // Transport shape: the address-scoped backfill never fetches the
-    // unadmitted instance's logs (live intake retains them through the
-    // discovery-admitted watch scope — the ENSv1 twin pins that side), so
-    // profile gating here is enforced one layer earlier.
     assert_eq!(
-        raw_text_events, 0,
-        "the backfill target set excludes the unadmitted instance"
+        raw_text_events, 1,
+        "the watched-target backfill must retain the unadmitted resolver log"
     );
 
     let summary: Value = sqlx::query_scalar(
@@ -848,26 +870,35 @@ async fn unadmitted_resolver_rotation_stays_profile_gated_then_clears() -> Resul
         summary["record_inventory"]["status"], "unsupported",
         "stored inventory stays a stub: {summary}"
     );
-    let stored_hashes: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT lower(code_hash) FROM raw_code_hashes \
-         WHERE lower(contract_address) IN ($1, $2) \
+    let admitted_stored_hash: String = sqlx::query_scalar(
+        "SELECT lower(code_hash) FROM raw_code_hashes \
+         WHERE lower(contract_address) = $1 \
            AND canonicality_state = 'canonical' \
-         ORDER BY lower(code_hash)",
+         ORDER BY block_number DESC, raw_code_hash_id DESC LIMIT 1",
     )
     .bind(format!("{:#x}", deployment.l2_resolver.address))
-    .bind(&unadmitted_address)
-    .fetch_all(&rotated.db.pool)
+    .fetch_one(&rotated.db.pool)
     .await?;
-    // Like the log fetch, the discovered instance's code-hash fetch is
-    // live-path-only: backfill persists the watched resolver's hash alone.
-    // The on-chain generation mismatch itself is pinned above via RPC.
+    let unadmitted_stored_hash: String = sqlx::query_scalar(
+        "SELECT lower(code_hash) FROM raw_code_hashes \
+         WHERE lower(contract_address) = $1 \
+           AND canonicality_state = 'canonical' \
+         ORDER BY block_number DESC, raw_code_hash_id DESC LIMIT 1",
+    )
+    .bind(&unadmitted_address)
+    .fetch_one(&rotated.db.pool)
+    .await?;
     assert_eq!(
-        stored_hashes,
-        vec![format!(
-            "{:#x}",
-            keccak256(rpc.get_code(deployment.l2_resolver.address).await?)
-        )],
-        "backfill persists the watched resolver's code hash only"
+        admitted_stored_hash,
+        format!("{:#x}", keccak256(&admitted_code))
+    );
+    assert_eq!(
+        unadmitted_stored_hash,
+        format!("{:#x}", keccak256(&unadmitted_code))
+    );
+    assert_ne!(
+        admitted_stored_hash, unadmitted_stored_hash,
+        "persisted code hashes must exercise the resolver-profile mismatch gate"
     );
     rotated.db.cleanup().await?;
 

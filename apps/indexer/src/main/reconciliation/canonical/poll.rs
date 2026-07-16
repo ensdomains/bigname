@@ -78,10 +78,7 @@ pub(crate) async fn poll_provider_heads_with_adapter_sync(
                 }
                 Ok(None) => break,
                 Err(error) => {
-                    let Some(requirement) = error
-                        .downcast_ref::<bigname_adapters::EnsV2NewlyRequiredCoverage>()
-                        .cloned()
-                    else {
+                    let Some(requirement) = ens_v2_coverage_requirement(&error) else {
                         warn!(
                             service = "indexer",
                             chain = %task.chain,
@@ -157,4 +154,43 @@ pub(crate) async fn poll_provider_heads_with_adapter_sync(
         *tasks = next_tasks;
     }
     Ok(())
+}
+
+fn ens_v2_coverage_requirement(
+    error: &anyhow::Error,
+) -> Option<bigname_adapters::EnsV2NewlyRequiredCoverage> {
+    error.chain().find_map(|cause| {
+        cause
+            .downcast_ref::<bigname_adapters::EnsV2NewlyRequiredCoverage>()
+            .cloned()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ens_v2_coverage_requirement;
+
+    #[test]
+    fn coverage_requirement_survives_nested_reconciliation_context() {
+        let requirement = bigname_adapters::EnsV2NewlyRequiredCoverage {
+            chain: "ethereum-sepolia".to_owned(),
+            retention_generation: 3,
+            source_family: "ens_v2_resolver_l1".to_owned(),
+            address: "0x0000000000000000000000000000000000000001".to_owned(),
+            required_from_block: 10,
+            required_to_block: 20,
+        };
+        let error = (0..7).fold(anyhow::Error::new(requirement.clone()), |error, layer| {
+            error.context(format!("reconciliation layer {layer}"))
+        });
+
+        assert_eq!(ens_v2_coverage_requirement(&error), Some(requirement));
+    }
+
+    #[test]
+    fn unrelated_reconciliation_error_is_not_recoverable_coverage() {
+        let error = anyhow::anyhow!("provider failed").context("adapter sync failed");
+
+        assert_eq!(ens_v2_coverage_requirement(&error), None);
+    }
 }

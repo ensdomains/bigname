@@ -37,10 +37,9 @@ fn assert_exact_control(body: &Value, registrant: &str, registry_owner: &str, la
     // events themselves stay visible as history heads.
     assert_eq!(
         pointer(body, "/declared_state/control/latest_event_kind"),
-        "AuthorityEpochChanged",
-        "control latest event should be the epoch terminator; body: {body}"
+        latest,
+        "control latest event should match; body: {body}"
     );
-    let _ = latest;
 }
 
 fn assert_declared_primary(body: &Value, expected_name: &str) {

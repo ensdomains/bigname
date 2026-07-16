@@ -31,7 +31,6 @@ use super::refresh::{refresh_intake_chain_tasks, refresh_manifest_normalized_eve
 mod discovery_refresh;
 
 use discovery_refresh::refresh_discovery_watch_state;
-
 #[expect(clippy::too_many_arguments)]
 pub(crate) async fn run_poll_loop(
     pool: &sqlx::PgPool,
@@ -137,7 +136,13 @@ pub(crate) async fn run_poll_loop(
                                         || adapter_sync_on_manifest_refresh
                                         || live_poll_adapter_sync_restored_after_replay
                                     {
-                                        drain_resolver_profile_input_changes(pool).await?;
+                                        if !discovery_refresh::resolver_profile_drain_succeeded(
+                                            drain_resolver_profile_input_changes(pool).await,
+                                            "timer",
+                                            "repository_manifest_reload",
+                                        ) {
+                                            continue;
+                                        }
                                     }
 
                                     if manifest_state_changed {

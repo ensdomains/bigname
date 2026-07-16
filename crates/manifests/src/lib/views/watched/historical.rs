@@ -10,9 +10,16 @@ use super::{
     load_required_watched_tuples, sort_and_dedup_watched_contracts, watched_contracts_from_rows,
 };
 
-const ENS_V2_RETAINED_HISTORY_SOURCE_FAMILIES: [&str; 2] = ["ens_v2_root_l1", "ens_v2_registry_l1"];
-const ENS_V2_DISCOVERY_BOOTSTRAP_SOURCE_FAMILIES: [&str; 3] =
-    ["ens_v2_root_l1", "ens_v2_registry_l1", "ens_v2_resolver_l1"];
+pub const ENS_V2_RETAINED_HISTORY_SOURCE_FAMILIES: &[&str] =
+    &["ens_v2_root_l1", "ens_v2_registry_l1"];
+const ENS_V2_DISCOVERY_BOOTSTRAP_ADDITIONAL_SOURCE_FAMILIES: &[&str] = &["ens_v2_resolver_l1"];
+
+fn ens_v2_discovery_bootstrap_source_families() -> impl Iterator<Item = &'static str> {
+    ENS_V2_RETAINED_HISTORY_SOURCE_FAMILIES
+        .iter()
+        .chain(ENS_V2_DISCOVERY_BOOTSTRAP_ADDITIONAL_SOURCE_FAMILIES)
+        .copied()
+}
 
 /// Load finite provider-backfill targets for every known-start ENSv2 root,
 /// registry, or resolver discovery edge which remains authoritative under the
@@ -33,14 +40,13 @@ pub async fn load_ens_v2_authoritative_discovery_bootstrap_targets(
     }
 
     let active_log_producing_families = load_log_producing_source_families(pool, chain).await?;
-    let source_families = ENS_V2_DISCOVERY_BOOTSTRAP_SOURCE_FAMILIES
-        .iter()
+    let source_families = ens_v2_discovery_bootstrap_source_families()
         .filter(|source_family| {
             active_log_producing_families
                 .iter()
-                .any(|active| active == **source_family)
+                .any(|active| active.as_str() == *source_family)
         })
-        .map(|source_family| (*source_family).to_owned())
+        .map(str::to_owned)
         .collect::<Vec<_>>();
     if source_families.is_empty() {
         return Ok(Vec::new());
@@ -216,10 +222,16 @@ mod tests {
     #[test]
     fn automatic_discovery_bootstrap_is_limited_to_ens_v2_log_families() {
         assert_eq!(
-            ENS_V2_DISCOVERY_BOOTSTRAP_SOURCE_FAMILIES,
-            ["ens_v2_root_l1", "ens_v2_registry_l1", "ens_v2_resolver_l1",]
+            ens_v2_discovery_bootstrap_source_families().collect::<Vec<_>>(),
+            vec!["ens_v2_root_l1", "ens_v2_registry_l1", "ens_v2_resolver_l1",]
         );
-        assert!(!ENS_V2_DISCOVERY_BOOTSTRAP_SOURCE_FAMILIES.contains(&"ens_v1_resolver_l1"));
-        assert!(!ENS_V2_DISCOVERY_BOOTSTRAP_SOURCE_FAMILIES.contains(&"basenames_base_resolver"));
+        assert!(
+            !ens_v2_discovery_bootstrap_source_families()
+                .any(|family| family == "ens_v1_resolver_l1")
+        );
+        assert!(
+            !ens_v2_discovery_bootstrap_source_families()
+                .any(|family| family == "basenames_base_resolver")
+        );
     }
 }

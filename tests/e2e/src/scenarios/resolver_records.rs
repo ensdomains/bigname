@@ -562,7 +562,8 @@ async fn live_code_hash_profile_transition_orphans_and_reactivates_records() -> 
         &profile.root,
         &anvil.url,
         "resolver-profile-bootstrap",
-    )?;
+    )
+    .await?;
     let first_checkpoint = bootstrap_indexer
         .wait_for_first_checkpoint(&db.pool)
         .await?;
@@ -572,7 +573,7 @@ async fn live_code_hash_profile_transition_orphans_and_reactivates_records() -> 
     );
 
     let mut worker =
-        pipeline::WorkerRunSession::start(&root, &db.url, "resolver-profile-transition")?;
+        pipeline::WorkerRunSession::start(&root, &db.url, "resolver-profile-transition").await?;
     worker
         .wait_for_sql(
             &db.pool,
@@ -589,7 +590,8 @@ async fn live_code_hash_profile_transition_orphans_and_reactivates_records() -> 
         &profile.root,
         &chain_rpc_urls,
         "resolver-profile-transition",
-    )?;
+    )
+    .await?;
     rpc.mine(1).await?;
     let live_poll_head = rpc.block_number().await?;
     indexer

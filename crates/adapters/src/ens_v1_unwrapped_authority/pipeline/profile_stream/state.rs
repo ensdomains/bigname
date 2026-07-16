@@ -1,5 +1,6 @@
 use super::super::*;
 use anyhow::ensure;
+use serde_json::value::RawValue;
 use sqlx::{Postgres, QueryBuilder};
 
 pub(super) const ITEM_KIND_EVENT: &str = "normalized_event";
@@ -13,6 +14,12 @@ const ITEM_KIND_MIGRATED_NODE: &str = "migrated_registry_node";
 const STATE_INSERT_BATCH_SIZE: usize = 250;
 pub(super) const MAX_LIVE_STATE_ITEM_COUNT: usize = 10_000;
 pub(super) const MAX_LIVE_STATE_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+
+struct SerializedStateItem {
+    kind: &'static str,
+    key: String,
+    payload: Box<RawValue>,
+}
 
 pub(super) struct ProfilePageState {
     pub(super) histories: BTreeMap<String, NameHistory>,
@@ -181,16 +188,12 @@ impl ProfilePageState {
             item_rows.len(),
             MAX_LIVE_STATE_ITEM_COUNT
         );
-        let payload_bytes = item_rows
-            .iter()
-            .try_fold(0usize, |total, (_, _, payload)| {
-                let bytes = serde_json::to_vec(payload)
-                    .context("failed to size resolver-profile state payload")?
-                    .len();
-                total
-                    .checked_add(bytes)
-                    .context("resolver-profile state payload size overflow")
-            })?;
+        let payload_bytes = item_rows.iter().try_fold(0usize, |total, item| {
+            let bytes = item.payload.get().len();
+            total
+                .checked_add(bytes)
+                .context("resolver-profile state payload size overflow")
+        })?;
         ensure!(
             payload_bytes <= MAX_LIVE_STATE_PAYLOAD_BYTES,
             "resolver-profile page produced {payload_bytes} state payload bytes, exceeding hard bound {MAX_LIVE_STATE_PAYLOAD_BYTES}"
@@ -221,11 +224,11 @@ impl ProfilePageState {
         let event_rows = events
             .iter()
             .map(|event| {
-                Ok((
+                serialized_state_item(
                     ITEM_KIND_EVENT,
                     event.event_identity.clone(),
                     encode_item(event)?,
-                ))
+                )
             })
             .collect::<Result<Vec<_>>>()?;
         insert_items(&mut transaction, run_id, &event_rows).await?;
@@ -251,49 +254,75 @@ impl ProfilePageState {
         Ok(payload_bytes)
     }
 
-    fn item_rows(&self) -> Result<Vec<(&'static str, String, Value)>> {
+    fn item_rows(&self) -> Result<Vec<SerializedStateItem>> {
         let mut rows = Vec::new();
         for (key, value) in &self.histories {
-            rows.push((ITEM_KIND_HISTORY, key.clone(), encode_item(value)?));
+            rows.push(serialized_state_item(
+                ITEM_KIND_HISTORY,
+                key.clone(),
+                encode_item(value)?,
+            )?);
         }
         for (key, value) in &self.reverse_histories {
-            rows.push((ITEM_KIND_REVERSE_HISTORY, key.clone(), encode_item(value)?));
+            rows.push(serialized_state_item(
+                ITEM_KIND_REVERSE_HISTORY,
+                key.clone(),
+                encode_item(value)?,
+            )?);
         }
         for (key, value) in &self.known_names_by_namehash {
-            rows.push((ITEM_KIND_KNOWN_NAME, key.clone(), encode_item(value)?));
+            rows.push(serialized_state_item(
+                ITEM_KIND_KNOWN_NAME,
+                key.clone(),
+                encode_item(value)?,
+            )?);
         }
         for (key, value) in &self.known_name_refs_by_namehash {
-            rows.push((ITEM_KIND_KNOWN_NAME_REF, key.clone(), encode_item(value)?));
+            rows.push(serialized_state_item(
+                ITEM_KIND_KNOWN_NAME_REF,
+                key.clone(),
+                encode_item(value)?,
+            )?);
         }
         for (key, labelhash) in &self.namehash_to_labelhash {
-            rows.push((
+            rows.push(serialized_state_item(
                 ITEM_KIND_NAMEHASH_LABELHASH,
                 key.clone(),
                 json!({ "labelhash": labelhash }),
-            ));
+            )?);
         }
         for (key, value) in &self.pending_namehash_observations {
-            rows.push((
+            rows.push(serialized_state_item(
                 ITEM_KIND_PENDING_OBSERVATIONS,
                 key.clone(),
                 encode_item(value)?,
-            ));
+            )?);
         }
         for node in self.migrated_registry_nodes.delta_nodes() {
-            rows.push((
+            rows.push(serialized_state_item(
                 ITEM_KIND_MIGRATED_NODE,
                 node.clone(),
                 json!({ "node": node }),
-            ));
+            )?);
         }
         Ok(rows)
     }
 }
 
+fn serialized_state_item(
+    kind: &'static str,
+    key: String,
+    payload: Value,
+) -> Result<SerializedStateItem> {
+    let payload = serde_json::value::to_raw_value(&payload)
+        .context("failed to serialize resolver-profile state payload")?;
+    Ok(SerializedStateItem { kind, key, payload })
+}
+
 async fn insert_items(
     transaction: &mut sqlx::Transaction<'_, Postgres>,
     run_id: Uuid,
-    rows: &[(&'static str, String, Value)],
+    rows: &[SerializedStateItem],
 ) -> Result<()> {
     for chunk in rows.chunks(STATE_INSERT_BATCH_SIZE) {
         if chunk.is_empty() {
@@ -302,11 +331,11 @@ async fn insert_items(
         let mut builder = QueryBuilder::<Postgres>::new(
             "INSERT INTO resolver_profile_reconciliation_state_items (run_id, item_kind, item_key, item_payload) ",
         );
-        builder.push_values(chunk, |mut row, (kind, key, payload)| {
+        builder.push_values(chunk, |mut row, item| {
             row.push_bind(run_id)
-                .push_bind(*kind)
-                .push_bind(key)
-                .push_bind(payload);
+                .push_bind(item.kind)
+                .push_bind(&item.key)
+                .push_bind(sqlx::types::Json(item.payload.as_ref()));
         });
         builder.push(
             " ON CONFLICT (run_id, item_kind, item_key) DO UPDATE SET item_payload = EXCLUDED.item_payload, updated_at = now()",

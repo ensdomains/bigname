@@ -159,6 +159,117 @@ async fn wait_for_backend_lock(pool: &PgPool, backend_pid: i32) -> Result<()> {
     Ok(())
 }
 
+async fn insert_pending_input(pool: &PgPool, chain: &str, address: &str) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO resolver_profile_input_changes (
+            chain_id,
+            contract_address,
+            previous_code_hash,
+            current_code_hash
+        ) VALUES ($1, $2, NULL, NULL)
+        "#,
+    )
+    .bind(chain)
+    .bind(normalize_evm_address(address))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn pending_loader_excludes_only_the_exact_attempted_generation() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let pool = database.pool();
+    let addresses = [
+        "0x0000000000000000000000000000000000000001",
+        "0x0000000000000000000000000000000000000002",
+        "0x0000000000000000000000000000000000000003",
+    ];
+    for address in addresses {
+        insert_pending_input(pool, "eth-mainnet", address).await?;
+    }
+
+    let first_page = load_pending_resolver_profile_input_changes(pool, 2).await?;
+    assert_eq!(first_page.len(), 2);
+    let next_page =
+        load_pending_resolver_profile_input_changes_excluding(pool, 2, &first_page).await?;
+    assert_eq!(next_page.len(), 1);
+    assert_eq!(next_page[0].contract_address, addresses[2]);
+
+    sqlx::query(
+        r#"
+        UPDATE resolver_profile_input_changes
+        SET generation = generation + 1
+        WHERE chain_id = 'eth-mainnet' AND contract_address = $1
+        "#,
+    )
+    .bind(addresses[0])
+    .execute(pool)
+    .await?;
+    let after_concurrent_generation =
+        load_pending_resolver_profile_input_changes_excluding(pool, 3, &first_page).await?;
+    assert!(
+        after_concurrent_generation
+            .iter()
+            .any(|input| { input.contract_address == addresses[0] && input.generation == 2 })
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn batch_acknowledgement_keeps_concurrent_generations_pending() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let pool = database.pool();
+    let addresses = [
+        "0x0000000000000000000000000000000000000011",
+        "0x0000000000000000000000000000000000000012",
+        "0x0000000000000000000000000000000000000013",
+    ];
+    for address in addresses {
+        insert_pending_input(pool, "eth-mainnet", address).await?;
+    }
+    let loaded = load_pending_resolver_profile_input_changes(pool, 3).await?;
+    assert_eq!(loaded.len(), 3);
+
+    sqlx::query(
+        r#"
+        UPDATE resolver_profile_input_changes
+        SET generation = generation + 1
+        WHERE chain_id = 'eth-mainnet' AND contract_address = $1
+        "#,
+    )
+    .bind(addresses[1])
+    .execute(pool)
+    .await?;
+    assert_eq!(
+        acknowledge_resolver_profile_input_changes(pool, &loaded).await?,
+        2
+    );
+
+    let generations = sqlx::query_as::<_, (String, i64, i64)>(
+        r#"
+        SELECT contract_address, generation, processed_generation
+        FROM resolver_profile_input_changes
+        WHERE chain_id = 'eth-mainnet'
+        ORDER BY contract_address
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    assert_eq!(
+        generations,
+        vec![
+            (addresses[0].to_owned(), 1, 1),
+            (addresses[1].to_owned(), 2, 0),
+            (addresses[2].to_owned(), 1, 1),
+        ]
+    );
+
+    database.cleanup().await
+}
+
 #[tokio::test]
 async fn queue_coalesces_effective_changes_and_fences_acknowledgement() -> Result<()> {
     let database = TestDatabase::new().await?;

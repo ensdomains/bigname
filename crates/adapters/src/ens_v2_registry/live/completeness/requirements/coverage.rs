@@ -5,29 +5,26 @@ use sqlx::Row;
 use super::requirement_intervals_not_covered_by;
 use crate::ens_v2_registry::EnsV2NewlyRequiredCoverage;
 
+#[derive(Clone, Copy)]
+enum CoverageFailure {
+    ExistingRequirement,
+    NewlyRequired,
+}
+
 pub(in crate::ens_v2_registry::live::completeness) async fn ensure_generation_bound_coverage(
     connection: &mut sqlx::PgConnection,
     chain: &str,
     requirements: &[RequiredWatchedTuple],
     retention_generation: i64,
 ) -> Result<()> {
-    if let Some(uncovered) = find_uncovered_generation_bound_requirement(
+    ensure_requirements_have_generation_bound_coverage(
         connection,
         chain,
         requirements,
         retention_generation,
+        CoverageFailure::ExistingRequirement,
     )
-    .await?
-    {
-        anyhow::bail!(
-            "ENSv2 retained history on {chain} has no generation {retention_generation} coverage for {} {} over {}..={}",
-            uncovered.source_family,
-            uncovered.address,
-            uncovered.required_from_block,
-            uncovered.required_to_block
-        );
-    }
-    Ok(())
+    .await
 }
 
 pub(in crate::ens_v2_registry::live::completeness) async fn ensure_generation_bound_coverage_with_live_selection(
@@ -63,25 +60,13 @@ pub(in crate::ens_v2_registry::live::completeness) async fn ensure_generation_bo
         })
         .collect::<Vec<_>>();
     let remaining_requirements = requirement_intervals_not_covered_by(requirements, &live_coverage);
-    if let Some(uncovered) = find_uncovered_generation_bound_requirement(
+    ensure_newly_required_generation_bound_coverage(
         connection,
         chain,
         &remaining_requirements,
         retention_generation,
     )
-    .await?
-    {
-        return Err(EnsV2NewlyRequiredCoverage {
-            chain: chain.to_owned(),
-            retention_generation,
-            source_family: uncovered.source_family,
-            address: uncovered.address,
-            required_from_block: uncovered.required_from_block,
-            required_to_block: uncovered.required_to_block,
-        }
-        .into());
-    }
-    Ok(())
+    .await
 }
 
 pub(in crate::ens_v2_registry::live::completeness) async fn ensure_newly_required_generation_bound_coverage(
@@ -89,6 +74,23 @@ pub(in crate::ens_v2_registry::live::completeness) async fn ensure_newly_require
     chain: &str,
     requirements: &[RequiredWatchedTuple],
     retention_generation: i64,
+) -> Result<()> {
+    ensure_requirements_have_generation_bound_coverage(
+        connection,
+        chain,
+        requirements,
+        retention_generation,
+        CoverageFailure::NewlyRequired,
+    )
+    .await
+}
+
+async fn ensure_requirements_have_generation_bound_coverage(
+    connection: &mut sqlx::PgConnection,
+    chain: &str,
+    requirements: &[RequiredWatchedTuple],
+    retention_generation: i64,
+    failure: CoverageFailure,
 ) -> Result<()> {
     if let Some(uncovered) = find_uncovered_generation_bound_requirement(
         connection,
@@ -98,7 +100,31 @@ pub(in crate::ens_v2_registry::live::completeness) async fn ensure_newly_require
     )
     .await?
     {
-        return Err(EnsV2NewlyRequiredCoverage {
+        return Err(uncovered_coverage_error(
+            chain,
+            retention_generation,
+            uncovered,
+            failure,
+        ));
+    }
+    Ok(())
+}
+
+fn uncovered_coverage_error(
+    chain: &str,
+    retention_generation: i64,
+    uncovered: RequiredWatchedTuple,
+    failure: CoverageFailure,
+) -> anyhow::Error {
+    match failure {
+        CoverageFailure::ExistingRequirement => anyhow::anyhow!(
+            "ENSv2 retained history on {chain} has no generation {retention_generation} coverage for {} {} over {}..={}",
+            uncovered.source_family,
+            uncovered.address,
+            uncovered.required_from_block,
+            uncovered.required_to_block
+        ),
+        CoverageFailure::NewlyRequired => EnsV2NewlyRequiredCoverage {
             chain: chain.to_owned(),
             retention_generation,
             source_family: uncovered.source_family,
@@ -106,9 +132,8 @@ pub(in crate::ens_v2_registry::live::completeness) async fn ensure_newly_require
             required_from_block: uncovered.required_from_block,
             required_to_block: uncovered.required_to_block,
         }
-        .into());
+        .into(),
     }
-    Ok(())
 }
 
 async fn find_uncovered_generation_bound_requirement(
@@ -213,4 +238,36 @@ async fn find_uncovered_generation_bound_requirement(
             })
         })
         .transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn newly_required_coverage_error_keeps_retry_classification_and_requirement() {
+        let error = uncovered_coverage_error(
+            "ethereum-sepolia",
+            3,
+            RequiredWatchedTuple {
+                source_family: "ens_v2_registry_l1".to_owned(),
+                address: "0x0000000000000000000000000000000000000001".to_owned(),
+                required_from_block: 10,
+                required_to_block: 20,
+            },
+            CoverageFailure::NewlyRequired,
+        );
+
+        assert_eq!(
+            error.downcast_ref::<EnsV2NewlyRequiredCoverage>(),
+            Some(&EnsV2NewlyRequiredCoverage {
+                chain: "ethereum-sepolia".to_owned(),
+                retention_generation: 3,
+                source_family: "ens_v2_registry_l1".to_owned(),
+                address: "0x0000000000000000000000000000000000000001".to_owned(),
+                required_from_block: 10,
+                required_to_block: 20,
+            })
+        );
+    }
 }

@@ -398,7 +398,8 @@ async fn base_reorg_leaves_ethereum_canonicality_untouched() -> Result<()> {
         &profile.root,
         &chain_rpc_urls,
         "composed-reorg",
-    )?;
+    )
+    .await?;
     session
         .wait_for_chain_checkpoint(&db.pool, "ethereum-mainnet", eth_head, None)
         .await?;

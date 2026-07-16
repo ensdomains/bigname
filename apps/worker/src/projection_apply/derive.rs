@@ -62,12 +62,39 @@ pub(super) async fn derive_normalized_event_invalidations(
         bail!("projection apply derive batch limit must be positive, got {batch_limit}");
     }
 
+    let complete_upper = capture_normalized_event_change_watermark(pool).await?;
+    derive_normalized_event_invalidations_through(pool, batch_limit, complete_upper).await
+}
+
+pub(crate) async fn capture_normalized_event_change_watermark(
+    pool: &PgPool,
+) -> Result<NormalizedEventChangeCursor> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT public.capture_projection_normalized_event_change_watermark()",
+    )
+    .fetch_one(pool)
+    .await
+    .context("failed to capture complete normalized-event projection change watermark")
+    .map(|change_id| NormalizedEventChangeCursor { change_id })
+}
+
+pub(super) async fn derive_normalized_event_invalidations_through(
+    pool: &PgPool,
+    batch_limit: i64,
+    complete_upper: NormalizedEventChangeCursor,
+) -> Result<ProjectionInvalidationDeriveSummary> {
+    if batch_limit <= 0 {
+        bail!("projection apply derive batch limit must be positive, got {batch_limit}");
+    }
+
     let mut transaction = pool
         .begin()
         .await
         .context("failed to open projection invalidation transaction")?;
     let lower = load_cursor(&mut transaction).await?;
-    let Some(upper) = load_batch_watermark(&mut transaction, lower, batch_limit).await? else {
+    let Some(upper) =
+        load_batch_watermark(&mut transaction, lower, complete_upper, batch_limit).await?
+    else {
         transaction
             .commit()
             .await
@@ -119,6 +146,7 @@ async fn load_cursor(
 async fn load_batch_watermark(
     transaction: &mut Transaction<'_, Postgres>,
     lower: NormalizedEventChangeCursor,
+    complete_upper: NormalizedEventChangeCursor,
     batch_limit: i64,
 ) -> Result<Option<NormalizedEventChangeCursor>> {
     sqlx::query_scalar::<_, Option<i64>>(
@@ -127,14 +155,16 @@ async fn load_batch_watermark(
             SELECT change_id
             FROM projection_normalized_event_changes
             WHERE change_id > $1
+              AND change_id <= $2
             ORDER BY change_id ASC
-            LIMIT $2
+            LIMIT $3
         )
         SELECT MAX(change_id)
         FROM batch
         "#,
     )
     .bind(lower.change_id)
+    .bind(complete_upper.change_id)
     .bind(batch_limit)
     .fetch_one(&mut **transaction)
     .await

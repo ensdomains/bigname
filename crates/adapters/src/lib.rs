@@ -5,6 +5,7 @@ use std::sync::{Arc, OnceLock};
 
 mod adapter_manifest;
 mod block_derived_normalized_events;
+mod checkpoint_codec;
 mod ens_v1_reverse_claim;
 mod ens_v1_subregistry_discovery;
 mod ens_v1_unwrapped_authority;

@@ -269,5 +269,10 @@ fn validate_summary(summary: &PermissionsCurrentResourceSummary) -> Result<()> {
         "permissions_current resource summary {} manifest_version must be positive",
         summary.resource_id
     );
+    ensure!(
+        summary.last_recomputed_at > sqlx::types::time::OffsetDateTime::UNIX_EPOCH,
+        "permissions_current resource summary {} last_recomputed_at must be later than the Unix epoch",
+        summary.resource_id
+    );
     Ok(())
 }

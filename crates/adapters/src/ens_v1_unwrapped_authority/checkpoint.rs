@@ -1,16 +1,17 @@
 use super::*;
 use crate::ens_v1_subregistry_discovery::ReplayAdapterCheckpointContext;
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use bigname_storage::{
     RawLogStagingInputVersion, load_raw_log_staging_input_version,
     raw_log_staging_block_range_changed_since,
 };
 use futures_util::TryStreamExt;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
 
 mod persistence;
 
+use crate::checkpoint_codec::JsonbCheckpointCodec;
 use persistence::{delete_checkpoint, load_checkpoint_row};
 
 const ADAPTER: &str = DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY;
@@ -25,8 +26,10 @@ const ITEM_KIND_PENDING_OBSERVATIONS: &str = "pending_observations";
 const ITEM_KIND_MIGRATED_NODE: &str = "migrated_registry_node";
 const CHECKPOINT_ITEM_INSERT_BATCH_SIZE: usize = 250;
 const CHECKPOINT_ITEM_DELETE_BATCH_SIZE: usize = 1_000;
-const CHECKPOINT_ESCAPED_STRING_KEY: &str =
-    "__bigname_unwrapped_authority_checkpoint_string_v1_hex";
+const CHECKPOINT_CODEC: JsonbCheckpointCodec = JsonbCheckpointCodec::new(
+    "__bigname_unwrapped_authority_checkpoint_string_v1_hex",
+    "__bigname_unwrapped_authority_checkpoint_object_v1_hex",
+);
 
 #[derive(Default)]
 pub(super) struct UnwrappedAuthorityReplayCheckpointDelta {
@@ -653,7 +656,7 @@ fn checkpoint_item_rows(
             rows.push((
                 ITEM_KIND_NAMEHASH_LABELHASH,
                 key.clone(),
-                encode_checkpoint_payload(json!({ "labelhash": labelhash })),
+                CHECKPOINT_CODEC.encode(json!({ "labelhash": labelhash })),
             ));
         }
     }
@@ -674,7 +677,7 @@ fn checkpoint_item_rows(
         rows.push((
             ITEM_KIND_MIGRATED_NODE,
             node.clone(),
-            encode_checkpoint_payload(json!({ "node": node })),
+            CHECKPOINT_CODEC.encode(json!({ "node": node })),
         ));
     }
     Ok(rows)
@@ -855,104 +858,19 @@ where
 {
     let value = serde_json::to_value(value)
         .context("failed to encode unwrapped-authority checkpoint item")?;
-    Ok(encode_checkpoint_payload(value))
+    Ok(CHECKPOINT_CODEC.encode(value))
 }
 
 pub(super) fn decode_item<T>(value: Value, item_kind: &str) -> Result<T>
 where
     T: serde::de::DeserializeOwned,
 {
-    let value = decode_checkpoint_payload(value)?;
+    let value = CHECKPOINT_CODEC
+        .decode(value)
+        .context("failed to decode unwrapped-authority checkpoint JSONB encoding")?;
     serde_json::from_value(value).with_context(|| {
         format!("failed to decode unwrapped-authority checkpoint item {item_kind}")
     })
-}
-
-fn encode_checkpoint_payload(value: Value) -> Value {
-    match value {
-        Value::String(value) if value.contains('\0') => {
-            let mut object = Map::new();
-            object.insert(
-                CHECKPOINT_ESCAPED_STRING_KEY.to_owned(),
-                Value::String(hex_encode_utf8(&value)),
-            );
-            Value::Object(object)
-        }
-        Value::Array(values) => {
-            Value::Array(values.into_iter().map(encode_checkpoint_payload).collect())
-        }
-        Value::Object(object) => Value::Object(
-            object
-                .into_iter()
-                .map(|(key, value)| (key, encode_checkpoint_payload(value)))
-                .collect(),
-        ),
-        value => value,
-    }
-}
-
-fn decode_checkpoint_payload(value: Value) -> Result<Value> {
-    match value {
-        Value::Object(mut object) => {
-            if object.len() == 1 {
-                match object.remove(CHECKPOINT_ESCAPED_STRING_KEY) {
-                    Some(Value::String(encoded)) => {
-                        return Ok(Value::String(hex_decode_utf8(&encoded)?));
-                    }
-                    Some(_) => bail!(
-                        "unwrapped-authority checkpoint escaped string payload is not a string"
-                    ),
-                    None => {}
-                }
-            }
-            let object = object
-                .into_iter()
-                .map(|(key, value)| Ok((key, decode_checkpoint_payload(value)?)))
-                .collect::<Result<Map<_, _>>>()?;
-            Ok(Value::Object(object))
-        }
-        Value::Array(values) => {
-            let values = values
-                .into_iter()
-                .map(decode_checkpoint_payload)
-                .collect::<Result<Vec<_>>>()?;
-            Ok(Value::Array(values))
-        }
-        value => Ok(value),
-    }
-}
-
-fn hex_encode_utf8(value: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(value.len() * 2);
-    for byte in value.as_bytes() {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    output
-}
-
-fn hex_decode_utf8(value: &str) -> Result<String> {
-    if value.len() % 2 != 0 {
-        bail!("unwrapped-authority checkpoint escaped string hex has odd length");
-    }
-    let mut bytes = Vec::with_capacity(value.len() / 2);
-    for pair in value.as_bytes().chunks_exact(2) {
-        let high = hex_nibble(pair[0])?;
-        let low = hex_nibble(pair[1])?;
-        bytes.push((high << 4) | low);
-    }
-    String::from_utf8(bytes)
-        .context("unwrapped-authority checkpoint escaped string is not valid utf-8")
-}
-
-fn hex_nibble(byte: u8) -> Result<u8> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => bail!("unwrapped-authority checkpoint escaped string hex is invalid"),
-    }
 }
 
 fn summary_payload(summary: &EnsV1UnwrappedAuthoritySyncSummary) -> Value {
@@ -1031,12 +949,12 @@ mod tests {
             ]
         });
 
-        let encoded = encode_checkpoint_payload(payload.clone());
+        let encoded = CHECKPOINT_CODEC.encode(payload.clone());
         let encoded_json = serde_json::to_string(&encoded)?;
 
         assert_ne!(encoded, payload);
         assert!(!encoded_json.contains("\\u0000"));
-        assert_eq!(decode_checkpoint_payload(encoded)?, payload);
+        assert_eq!(CHECKPOINT_CODEC.decode(encoded)?, payload);
         Ok(())
     }
 
@@ -1047,10 +965,10 @@ mod tests {
             "nested": ["also ordinary"]
         });
 
-        let encoded = encode_checkpoint_payload(payload.clone());
+        let encoded = CHECKPOINT_CODEC.encode(payload.clone());
 
         assert_eq!(encoded, payload);
-        assert_eq!(decode_checkpoint_payload(encoded)?, payload);
+        assert_eq!(CHECKPOINT_CODEC.decode(encoded)?, payload);
         Ok(())
     }
 

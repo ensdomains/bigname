@@ -305,6 +305,25 @@ async fn keyed_permission_replacement_rolls_back_rows_when_summary_is_invalid() 
 }
 
 #[tokio::test]
+async fn permission_resource_summary_rejects_epoch_recomputation_time() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x60f4);
+    seed_resources(&database, &[resource_id]).await?;
+    let mut summary = permissions_current_resource_summary(resource_id, "registrar");
+    summary.last_recomputed_at = OffsetDateTime::UNIX_EPOCH;
+
+    upsert_permissions_current_resource_summary(database.pool(), &summary)
+        .await
+        .expect_err("epoch sentinel must not persist as a resource-summary timestamp");
+    assert_eq!(
+        load_permissions_current_resource_summary(database.pool(), resource_id).await?,
+        None
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn deleting_a_resource_cascades_its_permission_support_summary() -> Result<()> {
     let database = TestDatabase::new().await?;
     let resource_id = Uuid::from_u128(0x60f2);

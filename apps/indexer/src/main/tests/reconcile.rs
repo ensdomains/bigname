@@ -660,6 +660,124 @@ async fn live_tail_records_exact_ens_v2_coverage_above_latched_finalized_head() 
 }
 
 #[tokio::test]
+async fn reconcile_fetched_heads_refuses_checkpoint_for_deferred_resolver_profile_chain()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let resolver = "0x00000000000000000000000000000000000000ff";
+    let current = provider_block(
+        "0x0101010101010101010101010101010101010101010101010101010101010101",
+        Some("0x0000000000000000000000000000000000000000000000000000000000000000"),
+        41,
+    );
+    let latest = provider_block(
+        "0x0202020202020202020202020202020202020202020202020202020202020202",
+        Some(&current.block_hash),
+        42,
+    );
+    insert_chain_checkpoint(
+        database.pool(),
+        &ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO raw_log_staging_input_revisions (
+            chain_id,
+            revision,
+            retention_generation,
+            retained_history_complete,
+            incomplete_since
+        ) VALUES ($1, 0, 1, FALSE, now())
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    bigname_storage::enqueue_resolver_profile_reconciliations(
+        database.pool(),
+        &[bigname_storage::ResolverProfileReconciliationTarget {
+            chain_id: chain.to_owned(),
+            contract_address: resolver.to_owned(),
+        }],
+    )
+    .await?;
+    let task = IntakeChainTask {
+        chain: chain.to_owned(),
+        addresses: Vec::new(),
+        manifest_root_entry_count: 0,
+        manifest_contract_entry_count: 0,
+        discovery_edge_entry_count: 0,
+        checkpoint: ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(current.block_hash.clone()),
+            canonical_block_number: Some(current.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    };
+    let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
+        block: latest.clone(),
+        logs: Vec::new(),
+    }])
+    .await?;
+
+    let error = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: latest,
+            safe: None,
+            finalized: None,
+        },
+        true,
+        HeaderAuditMode::Minimal,
+        &[],
+        &ChainCoverageFrontiers::default(),
+    )
+    .await
+    .expect_err("deferred resolver-profile work must fence checkpoint publication");
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.contains("resolver-profile reconciliation")
+            && rendered.contains("refusing chain checkpoint advancement"),
+        "checkpoint refusal must name the deferred resolver-profile boundary: {rendered}"
+    );
+    let checkpoint = bigname_storage::load_chain_checkpoint(database.pool(), chain)
+        .await?
+        .expect("original checkpoint must remain stored");
+    assert_eq!(checkpoint.canonical_block_hash, Some(current.block_hash));
+    assert_eq!(
+        checkpoint.canonical_block_number,
+        Some(current.block_number)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM resolver_profile_input_changes WHERE processed_generation < generation"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "deferred profile generation must remain durable and unacknowledged"
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn reconcile_fetched_heads_live_tip_event_silent_retains_full_payload_and_call_observation()
 -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -777,8 +895,8 @@ async fn reconcile_fetched_heads_live_tip_event_silent_retains_full_payload_and_
 }
 
 #[tokio::test]
-async fn reconcile_fetched_heads_live_tip_retains_unlisted_generic_ensv1_resolver_log()
--> Result<()> {
+async fn reconcile_fetched_heads_live_tip_retains_unlisted_generic_ensv1_resolver_log() -> Result<()>
+{
     let database = TestDatabase::new().await?;
     let chain = "ethereum-mainnet";
     let selected_address = "0x00000000000000000000000000000000000000a1";
@@ -10236,14 +10354,12 @@ async fn reconcile_fetched_heads_backfills_ensv2_resolver_and_permission_events(
         safe: None,
         finalized: None,
     };
-    let missing_coverage_error = reconcile_fetched_heads(
-        database.pool(),
-        &tasks[0],
-        &provider,
-        &heads,
-    )
-    .await
-    .expect_err("ENSv2 resolver reconciliation must request newly discovered resolver coverage");
+    let missing_coverage_error =
+        reconcile_fetched_heads(database.pool(), &tasks[0], &provider, &heads)
+            .await
+            .expect_err(
+                "ENSv2 resolver reconciliation must request newly discovered resolver coverage",
+            );
     let missing_coverage = missing_coverage_error
         .downcast_ref::<bigname_adapters::EnsV2NewlyRequiredCoverage>()
         .context("ENSv2 reconciliation returned the wrong coverage error")?

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::Result;
 use bigname_manifests::DiscoveryObservation;
@@ -12,8 +12,10 @@ use super::{
     constants::*,
     discovery::{ens_v2_resolver_discovery_source, ens_v2_subregistry_discovery_source},
     names::{
-        closed_surface_binding_for_terminal, deactivate_registry_suffix, name_under_registry,
-        observe_name, remember_linked_resource_state, state_for_token_mut, take_states_for_name,
+        RegistryNameKey, RegistryTokenKey, closed_surface_binding_for_terminal,
+        deactivate_registry_suffix, discovery_observation_key, insert_registry_name_state,
+        name_under_registry, observe_name, remember_linked_resource_state, state_for_token_mut,
+        take_states_for_name,
     },
     normalized::normalized_event,
     types::{ObservationRef, RegistryNameState, RegistryObservation, RegistryResourceLink},
@@ -22,20 +24,26 @@ use super::{
 
 mod hydration;
 mod terminal;
+mod transfer;
 
 pub(super) use hydration::hydrate_subregistry_event_target_ids;
 use terminal::{
     append_terminal_discovery_observations, append_terminal_role_events,
     append_terminal_surface_unbound_event, apply_label_unregistered, apply_token_regenerated,
 };
+use transfer::apply_token_control_transferred;
 
 pub(super) struct RegistryObservationContext<'a> {
     pub(super) registry_suffix_by_address: &'a mut HashMap<String, String>,
     pub(super) registry_contract_by_address: &'a mut HashMap<String, Uuid>,
     pub(super) states_by_registry_token: &'a mut BTreeMap<(String, String), RegistryNameState>,
+    pub(super) state_keys_by_registry_namehash:
+        &'a mut HashMap<RegistryNameKey, BTreeSet<RegistryTokenKey>>,
     pub(super) linked_resource_states: &'a mut BTreeMap<Uuid, RegistryNameState>,
     pub(super) closed_bindings: &'a mut BTreeMap<Uuid, SurfaceBinding>,
     pub(super) token_aliases: &'a mut HashMap<(String, String), (String, String)>,
+    pub(super) current_token_alias_by_canonical_key:
+        &'a mut HashMap<RegistryTokenKey, RegistryTokenKey>,
     pub(super) observations: &'a mut Vec<DiscoveryObservation>,
     pub(super) graph_events: &'a mut Vec<NormalizedEvent>,
 }
@@ -115,7 +123,12 @@ pub(super) fn apply_registry_observation(
                 }),
                 format!("label-registered:{}", state.token_id),
             ));
-            context.states_by_registry_token.insert(key, state);
+            insert_registry_name_state(
+                context.states_by_registry_token,
+                context.state_keys_by_registry_namehash,
+                key,
+                state,
+            );
         }
         RegistryObservation::LabelReserved {
             token_id,
@@ -166,7 +179,12 @@ pub(super) fn apply_registry_observation(
                 true,
                 context,
             );
-            context.states_by_registry_token.insert(key, state);
+            insert_registry_name_state(
+                context.states_by_registry_token,
+                context.state_keys_by_registry_namehash,
+                key,
+                state,
+            );
             context.graph_events.push(normalized_event(
                 &reference,
                 None,
@@ -244,7 +262,7 @@ pub(super) fn apply_registry_observation(
         } => {
             let mut logical_name_id = None;
             let mut resource_id = None;
-            let mut observation_key = format!("{}:{token_id}", reference.emitting_address);
+            let observation_key = discovery_observation_key(&reference.emitting_address, &token_id);
             if let Some(state) = state_for_token_mut(
                 context.states_by_registry_token,
                 context.token_aliases,
@@ -263,7 +281,6 @@ pub(super) fn apply_registry_observation(
                 state.current_ref = reference.clone();
                 logical_name_id = Some(state.name.logical_name_id.clone());
                 resource_id = state.resource.as_ref().map(|link| link.resource_id);
-                observation_key = format!("{}:{}", reference.emitting_address, state.name.namehash);
                 if subregistry != ZERO_ADDRESS {
                     context
                         .registry_suffix_by_address
@@ -361,7 +378,7 @@ pub(super) fn apply_registry_observation(
                     provenance: json!({
                         "source": "raw_log",
                         "source_event": "ResolverUpdated",
-                        "observation_key": format!("resolver:{}:{}", reference.emitting_address, state.name.namehash),
+                        "observation_key": format!("resolver:{}", discovery_observation_key(&reference.emitting_address, &token_id)),
                         "token_id": token_id,
                         "from_address": reference.emitting_address,
                         "to_address": resolver.clone(),
@@ -432,45 +449,17 @@ pub(super) fn apply_registry_observation(
             source_event,
             transfer_index,
             reference,
-        } => {
-            let Some((logical_name_id, resource)) = state_for_token_mut(
-                context.states_by_registry_token,
-                context.token_aliases,
-                &reference.emitting_address,
-                &token_id,
-            )
-            .and_then(|state| {
-                state
-                    .resource
-                    .clone()
-                    .map(|resource| (state.name.logical_name_id.clone(), resource))
-            }) else {
-                return Ok(());
-            };
-            let identity_suffix = match transfer_index {
-                Some(index) => format!("token-control-transferred:{token_id}:batch:{index}"),
-                None => format!("token-control-transferred:{token_id}:single"),
-            };
-            context.graph_events.push(normalized_event(
-                &reference,
-                Some(logical_name_id),
-                Some(resource.resource_id),
-                EVENT_KIND_TOKEN_CONTROL_TRANSFERRED,
-                json!({"from": from}),
-                json!({
-                    "source_event": source_event,
-                    "token_id": token_id,
-                    "to": to,
-                    "operator": operator,
-                    "amount": amount,
-                    "transfer_index": transfer_index,
-                    "upstream_resource": resource.upstream_resource,
-                    "token_lineage_id": resource.token_lineage_id.to_string(),
-                    "registry_contract_instance_id": reference.emitting_contract_instance_id.to_string(),
-                }),
-                identity_suffix,
-            ));
-        }
+        } => apply_token_control_transferred(
+            token_id,
+            operator,
+            from,
+            to,
+            amount,
+            source_event,
+            transfer_index,
+            reference,
+            context,
+        ),
         RegistryObservation::ParentUpdated {
             parent,
             label,
@@ -520,6 +509,8 @@ fn retire_replaced_name_states(
     let replaced = take_states_for_name(
         context.states_by_registry_token,
         context.token_aliases,
+        context.state_keys_by_registry_namehash,
+        context.current_token_alias_by_canonical_key,
         &next_state.registry_address,
         &next_state.name.namehash,
     );

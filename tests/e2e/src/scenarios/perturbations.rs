@@ -221,13 +221,9 @@ async fn rich_chain_live_reorg_converges_to_winning_branch() -> Result<()> {
         &chain.deployment.manifest_targets(),
     )?;
     let db = HarnessDb::create().await?;
-    let mut session = pipeline::IndexerRunSession::start(
-        &root,
-        &db.url,
-        &profile.root,
-        &anvil.url,
-        "reorg-live",
-    )?;
+    let mut session =
+        pipeline::IndexerRunSession::start(&root, &db.url, &profile.root, &anvil.url, "reorg-live")
+            .await?;
     session
         .wait_for_checkpoint(
             &db.pool,

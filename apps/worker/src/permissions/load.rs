@@ -7,7 +7,8 @@ use super::types::{RelevantEvent, ResourceProjectionContext};
 use super::{
     CANONICAL_STATE_FILTER, EVENT_KIND_AUTHORITY_EPOCH_CHANGED, EVENT_KIND_PERMISSION_CHANGED,
     EVENT_KIND_PERMISSION_SCOPE_CHANGED, EVENT_KIND_REGISTRATION_GRANTED,
-    EVENT_KIND_ROOT_PERMISSION_CHANGED, SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
+    EVENT_KIND_ROOT_PERMISSION_CHANGED, EVENT_KIND_TOKEN_RESOURCE_LINKED,
+    SOURCE_FAMILY_ENS_V2_REGISTRY_L1, SOURCE_FAMILY_ENS_V2_ROOT_L1,
 };
 
 pub(super) fn stream_target_resource_ids<'a>(
@@ -27,8 +28,8 @@ pub(super) fn stream_target_resource_ids<'a>(
         WHERE (
               ne.event_kind IN ($1, $2, $3, $4)
               OR (
-                  ne.event_kind = $5
-                  AND ne.source_family = $6
+                  ne.event_kind IN ($5, $6)
+                  AND ne.source_family IN ($7, $8)
               )
           )
           AND ne.resource_id IS NOT NULL
@@ -45,7 +46,9 @@ pub(super) fn stream_target_resource_ids<'a>(
     .bind(EVENT_KIND_PERMISSION_SCOPE_CHANGED)
     .bind(EVENT_KIND_AUTHORITY_EPOCH_CHANGED)
     .bind(EVENT_KIND_REGISTRATION_GRANTED)
+    .bind(EVENT_KIND_TOKEN_RESOURCE_LINKED)
     .bind(SOURCE_FAMILY_ENS_V2_REGISTRY_L1)
+    .bind(SOURCE_FAMILY_ENS_V2_ROOT_L1)
     .fetch(pool)
     .map(|row| {
         row.context("failed to stream resource_ids for permissions_current rebuild")
@@ -119,8 +122,14 @@ pub(super) async fn load_permission_events(
         LEFT JOIN chain_lineage rb
           ON rb.chain_id = ne.chain_id
          AND rb.block_hash = ne.block_hash
-        WHERE ne.event_kind IN ($1, $2, $3, $4)
-          AND ne.resource_id = $5
+        WHERE (
+              ne.event_kind IN ($1, $2, $3, $4)
+              OR (
+                  ne.event_kind IN ($5, $6)
+                  AND ne.source_family IN ($7, $8)
+              )
+          )
+          AND ne.resource_id = $9
           AND ne.canonicality_state {CANONICAL_STATE_FILTER}
         ORDER BY
             ne.block_number ASC NULLS FIRST,
@@ -132,6 +141,10 @@ pub(super) async fn load_permission_events(
     .bind(EVENT_KIND_ROOT_PERMISSION_CHANGED)
     .bind(EVENT_KIND_PERMISSION_SCOPE_CHANGED)
     .bind(EVENT_KIND_AUTHORITY_EPOCH_CHANGED)
+    .bind(EVENT_KIND_REGISTRATION_GRANTED)
+    .bind(EVENT_KIND_TOKEN_RESOURCE_LINKED)
+    .bind(SOURCE_FAMILY_ENS_V2_REGISTRY_L1)
+    .bind(SOURCE_FAMILY_ENS_V2_ROOT_L1)
     .bind(resource_id)
     .fetch_all(pool)
     .await

@@ -1686,7 +1686,11 @@ async fn full_closure_replay_waits_for_chain_ownership_across_checkpoint_namespa
     let ownership = sqlx::postgres::PgAdvisoryLock::new(format!(
         "bigname:indexer:full-closure-replay:{deployment_profile}:{chain}"
     ));
-    let ownership_guard = ownership.acquire(database.pool().acquire().await?).await?;
+    let mut ownership_connection = database.pool().acquire().await?;
+    let ownership_backend_pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+        .fetch_one(&mut *ownership_connection)
+        .await?;
+    let ownership_guard = ownership.acquire(ownership_connection).await?;
 
     let pool = database.pool().clone();
     let mut manual_replay = tokio::spawn(async move {
@@ -1707,6 +1711,24 @@ async fn full_closure_replay_waits_for_chain_ownership_across_checkpoint_namespa
             .await
             .is_err(),
         "manual full-closure replay must wait while automatic catch-up owns the profile/chain fence"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND pid <> pg_backend_pid()
+              AND pid <> $1
+              AND state = 'active'
+              AND query LIKE 'SELECT pg_advisory_lock(%'
+            "#,
+        )
+        .bind(ownership_backend_pid)
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "a full-closure contender must poll instead of retaining a blocking advisory-lock statement"
     );
 
     ownership_guard.release_now().await?;

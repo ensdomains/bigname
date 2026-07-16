@@ -4,10 +4,13 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgRow};
 
 use super::{
     LIVE_REGISTRY_REPLAY_CHECKPOINT_ADAPTER, LIVE_REGISTRY_REPLAY_CHECKPOINT_CURSOR_KIND,
-    LIVE_REGISTRY_REPLAY_CHECKPOINT_SCOPE,
+    LIVE_REGISTRY_REPLAY_CHECKPOINT_SCOPE, LIVE_REGISTRY_REPLAY_CHECKPOINT_STAGING_SCOPE,
     payload::{SnapshotItemCounts, decode_metadata, decode_replay_state, encode_snapshot},
 };
 use crate::ens_v2_registry::live::cache::CachedLiveRegistryReplayState;
+
+mod publication;
+pub(in crate::ens_v2_registry) use publication::finalize_live_registry_replay_checkpoint;
 
 const CHECKPOINT_ITEM_INSERT_BATCH_SIZE: usize = 256;
 
@@ -35,6 +38,7 @@ pub(in crate::ens_v2_registry) struct StagedLiveRegistryReplayCheckpoint {
     through_block_number: i64,
     raw_log_input_revision: i64,
     raw_log_retention_generation: i64,
+    item_count: i64,
     state_payload: Value,
 }
 
@@ -196,7 +200,7 @@ pub(in crate::ens_v2_registry::live) async fn stage_live_registry_replay_checkpo
     .bind(chain)
     .bind(LIVE_REGISTRY_REPLAY_CHECKPOINT_CURSOR_KIND)
     .bind(LIVE_REGISTRY_REPLAY_CHECKPOINT_ADAPTER)
-    .bind(LIVE_REGISTRY_REPLAY_CHECKPOINT_SCOPE)
+    .bind(LIVE_REGISTRY_REPLAY_CHECKPOINT_STAGING_SCOPE)
     .bind(snapshot.through_block_number)
     .bind(staged_item_count)
     .bind(&state_payload)
@@ -221,7 +225,7 @@ pub(in crate::ens_v2_registry::live) async fn stage_live_registry_replay_checkpo
     .bind(chain)
     .bind(LIVE_REGISTRY_REPLAY_CHECKPOINT_CURSOR_KIND)
     .bind(LIVE_REGISTRY_REPLAY_CHECKPOINT_ADAPTER)
-    .bind(LIVE_REGISTRY_REPLAY_CHECKPOINT_SCOPE)
+    .bind(LIVE_REGISTRY_REPLAY_CHECKPOINT_STAGING_SCOPE)
     .execute(transaction.as_mut())
     .await
     .context("failed to clear prior ENSv2 live checkpoint items")?;
@@ -245,7 +249,7 @@ pub(in crate::ens_v2_registry::live) async fn stage_live_registry_replay_checkpo
                 .push_bind(chain)
                 .push_bind(LIVE_REGISTRY_REPLAY_CHECKPOINT_CURSOR_KIND)
                 .push_bind(LIVE_REGISTRY_REPLAY_CHECKPOINT_ADAPTER)
-                .push_bind(LIVE_REGISTRY_REPLAY_CHECKPOINT_SCOPE)
+                .push_bind(LIVE_REGISTRY_REPLAY_CHECKPOINT_STAGING_SCOPE)
                 .push_bind(item.item_kind)
                 .push_bind(&item.item_key)
                 .push_bind(&item.item_payload);
@@ -265,50 +269,9 @@ pub(in crate::ens_v2_registry::live) async fn stage_live_registry_replay_checkpo
         through_block_number: snapshot.through_block_number,
         raw_log_input_revision: snapshot.raw_log_input_revision,
         raw_log_retention_generation: snapshot.raw_log_retention_generation,
+        item_count: staged_item_count,
         state_payload,
     })
-}
-
-pub(in crate::ens_v2_registry) async fn finalize_live_registry_replay_checkpoint(
-    connection: &mut sqlx::PgConnection,
-    checkpoint: &StagedLiveRegistryReplayCheckpoint,
-) -> Result<()> {
-    let result = sqlx::query(
-        r#"
-        UPDATE normalized_replay_adapter_checkpoints
-        SET status = 'completed',
-            completed_at = now(),
-            updated_at = now(),
-            last_failure_reason = NULL
-        WHERE deployment_profile = $1
-          AND chain_id = $2
-          AND cursor_kind = $3
-          AND adapter = $4
-          AND checkpoint_scope = $5
-          AND status = 'running'
-          AND replay_target_block_number = $6
-          AND raw_log_retention_generation = $7
-          AND raw_log_input_revision = $8
-          AND state_payload = $9
-        "#,
-    )
-    .bind(&checkpoint.deployment_profile)
-    .bind(&checkpoint.chain)
-    .bind(LIVE_REGISTRY_REPLAY_CHECKPOINT_CURSOR_KIND)
-    .bind(LIVE_REGISTRY_REPLAY_CHECKPOINT_ADAPTER)
-    .bind(LIVE_REGISTRY_REPLAY_CHECKPOINT_SCOPE)
-    .bind(checkpoint.through_block_number)
-    .bind(checkpoint.raw_log_retention_generation)
-    .bind(checkpoint.raw_log_input_revision)
-    .bind(&checkpoint.state_payload)
-    .execute(connection)
-    .await
-    .context("failed to finalize ENSv2 live checkpoint")?;
-    ensure!(
-        result.rows_affected() == 1,
-        "ENSv2 live checkpoint finalization did not match its staged row"
-    );
-    Ok(())
 }
 
 pub(in crate::ens_v2_registry::live) async fn clear_live_registry_replay_checkpoint(
@@ -323,7 +286,7 @@ pub(in crate::ens_v2_registry::live) async fn clear_live_registry_replay_checkpo
           AND chain_id = $2
           AND cursor_kind = $3
           AND adapter = $4
-          AND checkpoint_scope = $5
+          AND checkpoint_scope IN ($5, $6)
         "#,
     )
     .bind(deployment_profile)
@@ -331,6 +294,7 @@ pub(in crate::ens_v2_registry::live) async fn clear_live_registry_replay_checkpo
     .bind(LIVE_REGISTRY_REPLAY_CHECKPOINT_CURSOR_KIND)
     .bind(LIVE_REGISTRY_REPLAY_CHECKPOINT_ADAPTER)
     .bind(LIVE_REGISTRY_REPLAY_CHECKPOINT_SCOPE)
+    .bind(LIVE_REGISTRY_REPLAY_CHECKPOINT_STAGING_SCOPE)
     .execute(pool)
     .await
     .context("failed to clear invalid ENSv2 live checkpoint")?;

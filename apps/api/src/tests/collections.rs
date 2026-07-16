@@ -23,6 +23,36 @@ fn role_summary_fails_closed_when_resource_authority_summary_is_missing() {
     );
 }
 
+#[test]
+fn resource_permissions_response_does_not_publish_epoch_last_updated() {
+    let resource_id = Uuid::from_u128(0xc011);
+    let row_summary = bigname_storage::PermissionsCurrentFullFilterSummary {
+        row_count: 0,
+        provenance: Vec::new(),
+        coverage: None,
+        chain_positions: Vec::new(),
+        canonicality_summaries: Vec::new(),
+        last_recomputed_at: None,
+    };
+    let mut resource_summary =
+        permission_current_resource_summary(resource_id, Some("ens_v2_registry"));
+    resource_summary.last_recomputed_at = OffsetDateTime::UNIX_EPOCH;
+
+    let response = build_resource_permissions_response_from_summary(
+        &row_summary,
+        &[],
+        Some(&resource_summary),
+        HistoryPageResponse {
+            cursor: None,
+            next_cursor: None,
+            page_size: 50,
+            sort: "subject_scope_asc".to_owned(),
+        },
+    );
+
+    assert_ne!(response.last_updated, "1970-01-01T00:00:00Z");
+}
+
 #[tokio::test]
 async fn get_name_children_compact_default_returns_rows_with_summary_meta() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -31,8 +61,8 @@ async fn get_name_children_compact_default_returns_rows_with_summary_meta() -> R
     let registrant = "0x0000000000000000000000000000000000000DEF";
     let alice_labelhash = labelhash_for_display_name("alice.parent.eth")
         .expect("alice child labelhash must be available");
-    let bob_labelhash =
-        labelhash_for_display_name("bob.parent.eth").expect("bob child labelhash must be available");
+    let bob_labelhash = labelhash_for_display_name("bob.parent.eth")
+        .expect("bob child labelhash must be available");
 
     bigname_storage::upsert_name_surfaces(
         &database.pool,
@@ -155,15 +185,13 @@ async fn get_name_children_compact_default_returns_rows_with_summary_meta() -> R
 }
 
 #[tokio::test]
-async fn get_name_children_compact_returns_unknown_label_rows_without_child_surface() -> Result<()> {
+async fn get_name_children_compact_returns_unknown_label_rows_without_child_surface() -> Result<()>
+{
     let database = TestDatabase::new_migrated().await?;
     let parent_logical_name_id = "ens:parent.eth";
     let labelhash = labelhash_for_display_name("mystery.parent.eth")
         .expect("mystery child labelhash must be available");
-    let placeholder = format!(
-        "[{}].parent.eth",
-        labelhash.trim_start_matches("0x")
-    );
+    let placeholder = format!("[{}].parent.eth", labelhash.trim_start_matches("0x"));
     let owner = "0x0000000000000000000000000000000000000abc";
     let mut child_row = declared_child_row(
         parent_logical_name_id,
@@ -323,16 +351,13 @@ async fn get_name_children_compact_paginates_unknown_label_rows_without_child_su
 }
 
 #[tokio::test]
-async fn get_name_children_compact_counts_marks_unknown_label_child_count_unsupported()
--> Result<()> {
+async fn get_name_children_compact_counts_marks_unknown_label_child_count_unsupported() -> Result<()>
+{
     let database = TestDatabase::new_migrated().await?;
     let parent_logical_name_id = "ens:parent.eth";
     let labelhash = labelhash_for_display_name("mystery.parent.eth")
         .expect("mystery child labelhash must be available");
-    let placeholder = format!(
-        "[{}].parent.eth",
-        labelhash.trim_start_matches("0x")
-    );
+    let placeholder = format!("[{}].parent.eth", labelhash.trim_start_matches("0x"));
     let mut child_row = declared_child_row(
         parent_logical_name_id,
         "ens:mystery.parent.eth",
@@ -375,7 +400,10 @@ async fn get_name_children_compact_counts_marks_unknown_label_child_count_unsupp
 
     let payload: Value = read_json(response).await?;
     assert_eq!(payload["data"][0]["subname_count"], Value::Null);
-    assert_eq!(payload["meta"]["unsupported_fields"], json!(["subname_count"]));
+    assert_eq!(
+        payload["meta"]["unsupported_fields"],
+        json!(["subname_count"])
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -847,7 +875,10 @@ async fn get_name_children_defaults_to_first_page_of_fifty_rows() -> Result<()> 
     let second_page_payload: ChildrenResponse = read_json(second_page_response).await?;
     assert_eq!(second_page_payload.page.page_size, 50);
     assert_eq!(second_page_payload.data.len(), 5);
-    assert_eq!(second_page_payload.page.cursor.as_deref(), Some(cursor.as_str()));
+    assert_eq!(
+        second_page_payload.page.cursor.as_deref(),
+        Some(cursor.as_str())
+    );
     assert_eq!(second_page_payload.page.next_cursor, None);
     assert_eq!(
         second_page_payload
@@ -3469,9 +3500,11 @@ async fn get_address_names_include_role_summary_reads_ensv2_projection_outputs_w
     let manifest_versions = payload.provenance["manifest_versions"]
         .as_array()
         .expect("role-summary provenance manifest_versions must be an array");
-    assert!(manifest_versions.iter().any(|manifest| {
-        manifest.get("source_family") == Some(&json!("ens_v2_registry_l1"))
-    }));
+    assert!(
+        manifest_versions.iter().any(|manifest| {
+            manifest.get("source_family") == Some(&json!("ens_v2_registry_l1"))
+        })
+    );
     let normalized_event_ids = payload.provenance["normalized_event_ids"]
         .as_array()
         .expect("role-summary provenance normalized_event_ids must be an array");

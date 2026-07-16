@@ -379,6 +379,10 @@ pub async fn deploy_ens_v1(rpc: &RpcClient, repo_root: &Path) -> Result<EnsV1Dep
     // whose constructor resolves the owner of `addr.reverse` and claims a
     // reverse record through it — the registry namespace wiring must exist
     // before they deploy.
+    // (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseClaimer.sol:L8 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseClaimer.sol:L11 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseClaimer.sol:L13 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseClaimer.sol:L15 @ ens_v1@91c966f)
     wire_registry_nodes(
         rpc,
         deployer,
@@ -663,13 +667,7 @@ async fn send_checked_receipt(
     to: Address,
     data: &[u8],
 ) -> Result<TxReceipt> {
-    let receipt = rpc
-        .send_transaction(from, Some(to), data, U256::ZERO)
-        .await?;
-    if !receipt.status_ok {
-        bail!("call to {to} reverted (tx {})", receipt.tx_hash);
-    }
-    Ok(receipt)
+    rpc.send_checked(from, to, data, U256::ZERO, "call").await
 }
 
 /// Create `<label>.<parent>` in the registry, owned by `owner`. `from` must
@@ -1043,22 +1041,19 @@ pub async fn renew_eth_name(
         )
         .await?;
     let price = rentPriceCall::abi_decode_returns(&price_raw).context("rentPrice decode")?;
-    let receipt = rpc
-        .send_transaction(
-            from,
-            Some(d.controller.address),
-            &renewCall {
-                label: label.to_string(),
-                duration: U256::from(duration_secs),
-                referrer: B256::ZERO,
-            }
-            .abi_encode(),
-            price.base + price.premium,
-        )
-        .await?;
-    if !receipt.status_ok {
-        bail!("renew of {label}.eth reverted (tx {})", receipt.tx_hash);
-    }
+    rpc.send_checked(
+        from,
+        d.controller.address,
+        &renewCall {
+            label: label.to_string(),
+            duration: U256::from(duration_secs),
+            referrer: B256::ZERO,
+        }
+        .abi_encode(),
+        price.base + price.premium,
+        &format!("renew of {label}.eth"),
+    )
+    .await?;
     Ok(())
 }
 
@@ -1717,16 +1712,14 @@ pub async fn register_eth_name_with_options(
         makeCommitmentCall::abi_decode_returns(&commitment_raw).context("makeCommitment decode")?;
 
     let commit_receipt = rpc
-        .send_transaction(
+        .send_checked(
             owner,
-            Some(d.controller.address),
+            d.controller.address,
             &commitCall { commitment }.abi_encode(),
             U256::ZERO,
+            "commit",
         )
         .await?;
-    if !commit_receipt.status_ok {
-        bail!("commit reverted (tx {})", commit_receipt.tx_hash);
-    }
 
     rpc.increase_time(61).await?;
 
@@ -1743,19 +1736,14 @@ pub async fn register_eth_name_with_options(
     let price = rentPriceCall::abi_decode_returns(&price_raw).context("rentPrice decode")?;
 
     let register_receipt = rpc
-        .send_transaction(
+        .send_checked(
             owner,
-            Some(d.controller.address),
+            d.controller.address,
             &registerCall { registration }.abi_encode(),
             price.base + price.premium,
+            &format!("register of {label}.eth"),
         )
         .await?;
-    if !register_receipt.status_ok {
-        bail!(
-            "register of {label}.eth reverted (tx {})",
-            register_receipt.tx_hash
-        );
-    }
 
     Ok(RegisteredName {
         label: label.to_string(),
@@ -1803,19 +1791,14 @@ pub async fn register_wrapped_eth_name(
             .context("wrapped makeCommitment decode")?;
 
     let commit_receipt = rpc
-        .send_transaction(
+        .send_checked(
             owner,
-            Some(d.wrapped_controller.address),
+            d.wrapped_controller.address,
             &wrapped_controller_calls::commitCall { commitment }.abi_encode(),
             U256::ZERO,
+            "wrapped-controller commit",
         )
         .await?;
-    if !commit_receipt.status_ok {
-        bail!(
-            "wrapped-controller commit reverted (tx {})",
-            commit_receipt.tx_hash
-        );
-    }
 
     rpc.increase_time(61).await?;
 
@@ -1832,9 +1815,9 @@ pub async fn register_wrapped_eth_name(
     let price = wrapped_controller_calls::rentPriceCall::abi_decode_returns(&price_raw)
         .context("wrapped rentPrice decode")?;
     let register_receipt = rpc
-        .send_transaction(
+        .send_checked(
             owner,
-            Some(d.wrapped_controller.address),
+            d.wrapped_controller.address,
             &wrapped_controller_calls::registerCall {
                 name: label.to_owned(),
                 owner,
@@ -1847,14 +1830,9 @@ pub async fn register_wrapped_eth_name(
             }
             .abi_encode(),
             price.base + price.premium,
+            &format!("wrapped registration of {label}.eth"),
         )
         .await?;
-    if !register_receipt.status_ok {
-        bail!(
-            "wrapped registration of {label}.eth reverted (tx {})",
-            register_receipt.tx_hash
-        );
-    }
 
     Ok(RegisteredName {
         label: label.to_owned(),

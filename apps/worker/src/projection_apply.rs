@@ -14,7 +14,10 @@ use tracing::info;
 
 use crate::record_inventory;
 
-pub(crate) use derive::{normalized_event_cursor_exists, seed_normalized_event_cursor_if_absent};
+pub(crate) use derive::{
+    capture_normalized_event_change_watermark as load_normalized_event_change_watermark,
+    normalized_event_cursor_exists, seed_normalized_event_cursor_if_absent,
+};
 
 const NORMALIZED_EVENT_CURSOR: &str = "normalized_events_to_projection_invalidations";
 const NORMALIZED_EVENT_DERIVE_BATCH_LIMIT: i64 = 5_000;
@@ -140,21 +143,6 @@ pub(crate) async fn has_primary_hydration_blocking_work(pool: &PgPool) -> Result
     .fetch_one(pool)
     .await
     .context("failed to inspect projection apply work before primary-name hydration")
-}
-
-pub(crate) async fn load_normalized_event_change_watermark(
-    pool: &PgPool,
-) -> Result<NormalizedEventChangeCursor> {
-    sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT COALESCE(MAX(change_id), 0)
-        FROM projection_normalized_event_changes
-        "#,
-    )
-    .fetch_one(pool)
-    .await
-    .context("failed to load normalized-event projection apply watermark")
-    .map(|change_id| NormalizedEventChangeCursor { change_id })
 }
 
 pub(crate) async fn load_chain_checkpoint_max_block(pool: &PgPool) -> Result<Option<i64>> {

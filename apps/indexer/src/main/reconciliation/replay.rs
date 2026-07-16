@@ -34,8 +34,8 @@ pub(crate) use classification::{
     NormalizedEventReplayAdapter, RawFactReplayContractPlan,
     active_closure_or_dependency_replay_adapters, chain_has_closure_or_dependency_replay_adapter,
     ensure_full_closure_retention_authority_for_adapters,
-    ensure_legacy_registry_closure_retention_authority_for_adapters, source_scope_includes_adapter,
-    unsupported_closure_replay_adapters,
+    ensure_legacy_registry_closure_retention_authority_for_adapters, replay_contract,
+    source_scope_includes_adapter, unsupported_closure_replay_adapters,
 };
 
 pub(crate) async fn replay_raw_fact_normalized_events(

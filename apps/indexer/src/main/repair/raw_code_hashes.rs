@@ -370,9 +370,12 @@ async fn repair_raw_code_hashes(
     }
 
     apply_corrections(pool, &config, &classification.updates, &mut outcome).await?;
-    crate::resolver_profile_convergence::drain_resolver_profile_input_changes(pool)
-        .await
-        .context("failed to converge resolver profiles after raw code-hash correction")?;
+    let profile_convergence =
+        crate::resolver_profile_convergence::drain_resolver_profile_input_changes(pool)
+            .await
+            .context("failed to converge resolver profiles after raw code-hash correction")?;
+    profile_convergence
+        .ensure_chain_completion_allowed(&config.chain, "raw code-hash correction completion")?;
     Ok(outcome)
 }
 

@@ -1,10 +1,18 @@
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::{Value, json};
 use sqlx::{Row, types::time::OffsetDateTime};
 use uuid::Uuid;
 
-use super::{derive::derive_normalized_event_invalidations, has_primary_hydration_blocking_work};
+use super::{
+    derive::{
+        capture_normalized_event_change_watermark, derive_normalized_event_invalidations,
+        derive_normalized_event_invalidations_through,
+    },
+    has_primary_hydration_blocking_work,
+};
 
 async fn test_database() -> Result<TestDatabase> {
     TestDatabase::create_migrated(
@@ -336,6 +344,163 @@ async fn derives_key_scoped_invalidations_from_normalized_event_changes() -> Res
         "address_names_current",
         "0x0000000000000000000000000000000000000ddd:ens:alice.eth"
     ));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn derive_releases_complete_prefix_fence_before_processing_changes() -> Result<()> {
+    let database = test_database().await?;
+    let observed_at = timestamp(1_800_000_001);
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:fenced-change",
+            namespace: "ens",
+            logical_name_id: Some("ens:fenced.eth"),
+            resource_id: None,
+            event_kind: "ResolverChanged",
+            source_family: "ens_v1_registry_l1",
+            derivation_kind: "ens_v1_unwrapped_authority",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(1),
+            block_hash: Some("0xfenced1"),
+            before_state: json!({}),
+            after_state: json!({}),
+            observed_at,
+        },
+    )
+    .await?;
+    insert_event(
+        &database,
+        EventSeed {
+            event_identity: "projection-apply:post-bound-change",
+            namespace: "ens",
+            logical_name_id: Some("ens:post-bound.eth"),
+            resource_id: None,
+            event_kind: "ResolverChanged",
+            source_family: "ens_v1_registry_l1",
+            derivation_kind: "ens_v1_unwrapped_authority",
+            chain_id: Some("ethereum-mainnet"),
+            block_number: Some(2),
+            block_hash: Some("0xfenced2"),
+            before_state: json!({}),
+            after_state: json!({}),
+            observed_at,
+        },
+    )
+    .await?;
+    sqlx::query("DELETE FROM projection_normalized_event_changes")
+        .execute(database.pool())
+        .await?;
+
+    let first_change_id =
+        insert_projection_change(&database, "projection-apply:fenced-change").await?;
+    insert_invalidation(&database, "name_current", "ens:fenced.eth").await?;
+    let mut invalidation_blocker = database.pool().begin().await?;
+    sqlx::query(
+        r#"
+        UPDATE projection_invalidations
+        SET generation = generation
+        WHERE projection = 'name_current'
+          AND projection_key = 'ens:fenced.eth'
+        "#,
+    )
+    .execute(&mut *invalidation_blocker)
+    .await?;
+
+    let derive_pool = database.pool().clone();
+    let derive =
+        tokio::spawn(async move { derive_normalized_event_invalidations(&derive_pool, 100).await });
+    wait_for_transaction_lock(database.pool()).await?;
+
+    let second_change_id = match tokio::time::timeout(
+        Duration::from_secs(2),
+        insert_projection_change(&database, "projection-apply:post-bound-change"),
+    )
+    .await
+    {
+        Ok(result) => result?,
+        Err(_) => {
+            derive.abort();
+            invalidation_blocker.rollback().await?;
+            database.cleanup().await?;
+            anyhow::bail!("change-log writer waited for the invalidation derive phase");
+        }
+    };
+    assert!(second_change_id > first_change_id);
+
+    invalidation_blocker.commit().await?;
+    let first_summary = tokio::time::timeout(Duration::from_secs(2), derive)
+        .await
+        .context("derive remained blocked after invalidation row lock released")?
+        .context("derive task failed")??;
+    assert_eq!(first_summary.scanned_event_count, 1);
+    assert_eq!(load_apply_cursor(&database).await?, first_change_id);
+
+    let second_summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
+    assert_eq!(second_summary.scanned_event_count, 1);
+    assert_eq!(load_apply_cursor(&database).await?, second_change_id);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn two_capturers_resume_from_the_serialized_apply_cursor() -> Result<()> {
+    let database = test_database().await?;
+    let observed_at = timestamp(1_800_000_002);
+    for (event_identity, logical_name_id, block_number) in [
+        ("projection-apply:capturer-one", "ens:capturer-one.eth", 1),
+        ("projection-apply:capturer-two", "ens:capturer-two.eth", 2),
+    ] {
+        insert_event(
+            &database,
+            EventSeed {
+                event_identity,
+                namespace: "ens",
+                logical_name_id: Some(logical_name_id),
+                resource_id: None,
+                event_kind: "ResolverChanged",
+                source_family: "ens_v1_registry_l1",
+                derivation_kind: "ens_v1_unwrapped_authority",
+                chain_id: Some("ethereum-mainnet"),
+                block_number: Some(block_number),
+                block_hash: Some("0xtwo-capturers"),
+                before_state: json!({}),
+                after_state: json!({}),
+                observed_at,
+            },
+        )
+        .await?;
+    }
+    sqlx::query(
+        r#"
+        INSERT INTO projection_apply_cursors (cursor_name, last_change_id)
+        VALUES ('normalized_events_to_projection_invalidations', 0)
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    let first_bound = capture_normalized_event_change_watermark(database.pool()).await?;
+    let second_bound = capture_normalized_event_change_watermark(database.pool()).await?;
+    assert_eq!(first_bound, second_bound);
+
+    let first_pool = database.pool().clone();
+    let first = tokio::spawn(async move {
+        derive_normalized_event_invalidations_through(&first_pool, 1, first_bound).await
+    });
+    let second_pool = database.pool().clone();
+    let second = tokio::spawn(async move {
+        derive_normalized_event_invalidations_through(&second_pool, 1, second_bound).await
+    });
+    let (first_summary, second_summary) = tokio::try_join!(first, second)?;
+    let first_summary = first_summary?;
+    let second_summary = second_summary?;
+
+    assert_eq!(first_summary.scanned_event_count, 1);
+    assert_eq!(second_summary.scanned_event_count, 1);
+    assert_eq!(load_apply_cursor(&database).await?, first_bound.change_id);
 
     database.cleanup().await
 }
@@ -1301,6 +1466,69 @@ async fn ensv2_registration_without_role_events_invalidates_permissions_summary(
 }
 
 #[tokio::test]
+async fn ensv2_root_registration_and_reserved_resource_link_invalidate_permission_summaries()
+-> Result<()> {
+    let database = test_database().await?;
+    let root_registration_resource_id = Uuid::new_v4();
+    let reserved_resource_id = Uuid::new_v4();
+    insert_resource(&database, root_registration_resource_id).await?;
+    insert_resource(&database, reserved_resource_id).await?;
+
+    for (resource_id, event_kind, source_family, event_identity, logical_name_id) in [
+        (
+            root_registration_resource_id,
+            "RegistrationGranted",
+            "ens_v2_root_l1",
+            "projection-apply:ensv2-root-registration",
+            "ens:eth",
+        ),
+        (
+            reserved_resource_id,
+            "TokenResourceLinked",
+            "ens_v2_registry_l1",
+            "projection-apply:ensv2-reserved-resource-link",
+            "ens:reserved.eth",
+        ),
+    ] {
+        insert_event(
+            &database,
+            EventSeed {
+                event_identity,
+                namespace: "ens",
+                logical_name_id: Some(logical_name_id),
+                resource_id: Some(resource_id),
+                event_kind,
+                source_family,
+                derivation_kind: "ens_v2_registry_resource_surface",
+                chain_id: Some("ethereum-mainnet"),
+                block_number: Some(25),
+                block_hash: Some("0xensv2permissionevidence25"),
+                before_state: json!({}),
+                after_state: json!({
+                    "registry_contract_instance_id": Uuid::from_u128(0xe201),
+                    "upstream_resource": resource_id.to_string(),
+                }),
+                observed_at: timestamp(1_800_000_225),
+            },
+        )
+        .await?;
+    }
+
+    let summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
+    assert_eq!(summary.scanned_event_count, 2);
+    let invalidations = load_invalidations(&database).await?;
+    for resource_id in [root_registration_resource_id, reserved_resource_id] {
+        assert!(has_key(
+            &invalidations,
+            "permissions_current",
+            &resource_id.to_string()
+        ));
+    }
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn authority_epoch_changes_invalidate_zero_holder_permission_summaries() -> Result<()> {
     let database = test_database().await?;
     let resource_id = Uuid::new_v4();
@@ -2068,6 +2296,69 @@ async fn insert_event(database: &TestDatabase, event: EventSeed<'_>) -> Result<(
     .with_context(|| format!("failed to insert normalized event {}", event.event_identity))?;
 
     Ok(())
+}
+
+async fn insert_projection_change(database: &TestDatabase, event_identity: &str) -> Result<i64> {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO projection_normalized_event_changes (
+            normalized_event_id,
+            changed_at,
+            change_kind,
+            canonicality_state
+        )
+        SELECT
+            normalized_event_id,
+            now(),
+            'canonicality_update',
+            canonicality_state
+        FROM normalized_events
+        WHERE event_identity = $1
+        RETURNING change_id
+        "#,
+    )
+    .bind(event_identity)
+    .fetch_one(database.pool())
+    .await
+    .with_context(|| format!("failed to insert projection change for {event_identity}"))
+}
+
+async fn load_apply_cursor(database: &TestDatabase) -> Result<i64> {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT last_change_id
+        FROM projection_apply_cursors
+        WHERE cursor_name = 'normalized_events_to_projection_invalidations'
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await
+    .context("failed to load normalized-event apply cursor")
+}
+
+async fn wait_for_transaction_lock(pool: &sqlx::PgPool) -> Result<()> {
+    for _ in 0..500 {
+        let waiting = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_locks waiting_lock
+                JOIN pg_stat_activity activity
+                  ON activity.pid = waiting_lock.pid
+                WHERE activity.datname = current_database()
+                  AND waiting_lock.locktype = 'transactionid'
+                  AND NOT waiting_lock.granted
+            )
+            "#,
+        )
+        .fetch_one(pool)
+        .await?;
+        if waiting {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    anyhow::bail!("derive did not wait on the held invalidation row")
 }
 
 fn timestamp(seconds: i64) -> OffsetDateTime {

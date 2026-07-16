@@ -2240,7 +2240,7 @@ async fn upserts_and_loads_normalized_events() -> Result<()> {
 }
 
 #[tokio::test]
-async fn projection_change_ids_cannot_publish_past_a_delayed_writer() -> Result<()> {
+async fn projection_change_writers_can_commit_while_an_earlier_writer_is_open() -> Result<()> {
     let database = TestDatabase::new().await?;
     let first_event = normalized_event(
         "commit-order:first-writer",
@@ -2291,16 +2291,9 @@ async fn projection_change_ids_cannot_publish_past_a_delayed_writer() -> Result<
     .fetch_one(&mut *first_writer)
     .await?;
 
-    let (pid_sender, pid_receiver) = tokio::sync::oneshot::channel();
     let second_pool = database.pool().clone();
-    let second_writer = tokio::spawn(async move {
+    let mut second_writer = tokio::spawn(async move {
         let mut transaction = second_pool.begin().await?;
-        let backend_pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
-            .fetch_one(&mut *transaction)
-            .await?;
-        pid_sender.send(backend_pid).map_err(|_| {
-            anyhow::anyhow!("commit-order test stopped before receiving writer pid")
-        })?;
         let change_id = sqlx::query_scalar::<_, i64>(
             r#"
             INSERT INTO projection_normalized_event_changes (
@@ -2319,53 +2312,26 @@ async fn projection_change_ids_cannot_publish_past_a_delayed_writer() -> Result<
         transaction.commit().await?;
         Ok::<i64, anyhow::Error>(change_id)
     });
-    let second_backend_pid = pid_receiver
-        .await
-        .context("second projection-change writer stopped before publishing its backend pid")?;
+    let second_change_id =
+        match tokio::time::timeout(Duration::from_secs(2), &mut second_writer).await {
+            Ok(result) => result.context("second projection-change writer task failed")??,
+            Err(_) => {
+                second_writer.abort();
+                first_writer.rollback().await?;
+                database.cleanup().await?;
+                anyhow::bail!("an unrelated projection-change writer waited for the open writer");
+            }
+        };
+    assert!(first_change_id < second_change_id);
 
-    let mut second_waits_for_commit_order = false;
-    for _ in 0..500 {
-        second_waits_for_commit_order = sqlx::query_scalar::<_, bool>(
-            r#"
-            SELECT EXISTS (
-                SELECT 1
-                FROM pg_locks
-                WHERE pid = $1
-                  AND locktype = 'advisory'
-                  AND NOT granted
-            )
-            "#,
-        )
-        .bind(second_backend_pid)
-        .fetch_one(database.pool())
-        .await?;
-        if second_waits_for_commit_order || second_writer.is_finished() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-
-    if !second_waits_for_commit_order {
-        second_writer.abort();
-        first_writer.rollback().await?;
-        database.cleanup().await?;
-        anyhow::bail!(
-            "second projection-change writer did not wait for the first writer's commit-order lock"
-        );
-    }
-
-    let captured_watermark = sqlx::query_scalar::<_, i64>(
+    let visible_watermark = sqlx::query_scalar::<_, i64>(
         "SELECT COALESCE(MAX(change_id), 0) FROM projection_normalized_event_changes",
     )
     .fetch_one(database.pool())
     .await?;
-    assert_eq!(captured_watermark, 0);
+    assert_eq!(visible_watermark, second_change_id);
 
     first_writer.commit().await?;
-    let second_change_id = second_writer
-        .await
-        .context("second projection-change writer task failed")??;
-    assert!(first_change_id < second_change_id);
 
     let committed_change_ids = sqlx::query_scalar::<_, i64>(
         r#"
@@ -2375,7 +2341,7 @@ async fn projection_change_ids_cannot_publish_past_a_delayed_writer() -> Result<
         ORDER BY change_id
         "#,
     )
-    .bind(captured_watermark)
+    .bind(0_i64)
     .fetch_all(database.pool())
     .await?;
     assert_eq!(
@@ -2384,6 +2350,141 @@ async fn projection_change_ids_cannot_publish_past_a_delayed_writer() -> Result<
     );
 
     database.cleanup().await
+}
+
+#[tokio::test]
+async fn projection_change_watermark_waits_for_prior_writer_and_excludes_queued_writer()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let first_event = normalized_event(
+        "commit-prefix:first-writer",
+        "SourceManifestUpdated",
+        CanonicalityState::Canonical,
+    );
+    let second_event = normalized_event(
+        "commit-prefix:queued-writer",
+        "SourceManifestUpdated",
+        CanonicalityState::Canonical,
+    );
+    upsert_normalized_events(
+        database.pool(),
+        &[first_event.clone(), second_event.clone()],
+    )
+    .await?;
+    let first_event_id = sqlx::query_scalar::<_, i64>(
+        "SELECT normalized_event_id FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&first_event.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    let second_event_id = sqlx::query_scalar::<_, i64>(
+        "SELECT normalized_event_id FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&second_event.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    sqlx::query("DELETE FROM projection_normalized_event_changes")
+        .execute(database.pool())
+        .await?;
+
+    let mut first_writer = database.pool().begin().await?;
+    let first_change_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO projection_normalized_event_changes (
+            normalized_event_id,
+            changed_at,
+            change_kind,
+            canonicality_state
+        )
+        VALUES ($1, now(), 'canonicality_update', 'canonical')
+        RETURNING change_id
+        "#,
+    )
+    .bind(first_event_id)
+    .fetch_one(&mut *first_writer)
+    .await?;
+
+    let capture_pool = database.pool().clone();
+    let capture = tokio::spawn(async move {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT public.capture_projection_normalized_event_change_watermark()",
+        )
+        .fetch_one(&capture_pool)
+        .await
+        .context("failed to capture projection-change watermark")
+    });
+    wait_for_relation_lock(
+        database.pool(),
+        "ShareLock",
+        "watermark capture did not wait for the prior writer",
+    )
+    .await?;
+
+    let second_pool = database.pool().clone();
+    let second_writer = tokio::spawn(async move {
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            INSERT INTO projection_normalized_event_changes (
+                normalized_event_id,
+                changed_at,
+                change_kind,
+                canonicality_state
+            )
+            VALUES ($1, now(), 'canonicality_update', 'canonical')
+            RETURNING change_id
+            "#,
+        )
+        .bind(second_event_id)
+        .fetch_one(&second_pool)
+        .await
+        .context("failed to insert queued projection change")
+    });
+    wait_for_relation_lock(
+        database.pool(),
+        "RowExclusiveLock",
+        "later writer did not queue behind the watermark capture",
+    )
+    .await?;
+
+    first_writer.commit().await?;
+    let captured_change_id = tokio::time::timeout(Duration::from_secs(2), capture)
+        .await
+        .context("watermark capture remained blocked after the prior writer committed")?
+        .context("watermark capture task failed")??;
+    let second_change_id = tokio::time::timeout(Duration::from_secs(2), second_writer)
+        .await
+        .context("queued writer remained blocked after watermark capture committed")?
+        .context("queued projection-change writer task failed")??;
+
+    assert_eq!(captured_change_id, first_change_id);
+    assert!(second_change_id > captured_change_id);
+
+    database.cleanup().await
+}
+
+async fn wait_for_relation_lock(pool: &PgPool, mode: &str, failure: &str) -> Result<()> {
+    for _ in 0..500 {
+        let waiting = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_locks
+                WHERE database = (SELECT oid FROM pg_database WHERE datname = current_database())
+                  AND relation = 'projection_normalized_event_changes'::regclass
+                  AND mode = $1
+                  AND NOT granted
+            )
+            "#,
+        )
+        .bind(mode)
+        .fetch_one(pool)
+        .await?;
+        if waiting {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    anyhow::bail!(failure.to_owned())
 }
 
 #[tokio::test]

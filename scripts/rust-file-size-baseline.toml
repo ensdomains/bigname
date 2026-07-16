@@ -32,7 +32,7 @@ justification = "Phase 7 allowlist for an oversized production file; future chan
 
 [[files]]
 path = "crates/adapters/src/ens_v1_unwrapped_authority/checkpoint.rs"
-loc = 1093
+loc = 1011
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 review_justification = "Explicit review accepted this file above 900 LOC; future changes should split or shrink it."
 

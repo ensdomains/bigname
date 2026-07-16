@@ -499,11 +499,7 @@ async fn send_checked_receipt(
     data: &[u8],
     value: U256,
 ) -> Result<TxReceipt> {
-    let receipt = rpc.send_transaction(from, Some(to), data, value).await?;
-    if !receipt.status_ok {
-        bail!("call to {to} reverted (tx {})", receipt.tx_hash);
-    }
-    Ok(receipt)
+    rpc.send_checked(from, to, data, value, "call").await
 }
 
 pub async fn register_base_name(
@@ -535,19 +531,14 @@ pub async fn register_base_name(
         reverseRecord: false,
     };
     let receipt = rpc
-        .send_transaction(
+        .send_checked(
             from,
-            Some(d.registrar_controller.address),
+            d.registrar_controller.address,
             &registerCall { request }.abi_encode(),
             price,
+            &format!("register of {label}.base.eth"),
         )
         .await?;
-    if !receipt.status_ok {
-        bail!(
-            "register of {label}.base.eth reverted (tx {})",
-            receipt.tx_hash
-        );
-    }
     Ok(RegisteredBasename {
         label: label.to_owned(),
         owner,
@@ -903,8 +894,8 @@ pub async fn set_base_text_record(
     name: &str,
     key: &str,
     value: &str,
-) -> Result<()> {
-    send_checked(
+) -> Result<TxReceipt> {
+    send_checked_receipt(
         rpc,
         from,
         resolver,
@@ -914,6 +905,7 @@ pub async fn set_base_text_record(
             value: value.to_owned(),
         }
         .abi_encode(),
+        U256::ZERO,
     )
     .await
 }

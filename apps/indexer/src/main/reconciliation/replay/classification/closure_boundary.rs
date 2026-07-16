@@ -54,18 +54,7 @@ pub(super) async fn ensure_full_closure_retention_authority(
     closure_source_families: &[&str],
     through_block: i64,
 ) -> Result<()> {
-    #[cfg(test)]
-    if sqlx::query_scalar::<_, Option<String>>(
-        "SELECT to_regclass('raw_log_staging_input_revisions')::TEXT",
-    )
-    .fetch_one(pool)
-    .await
-    .context("failed to inspect the raw-log retention test schema")?
-    .is_none()
-    {
-        // Most indexer unit tests use a hand-built pre-migration schema. The
-        // production migrator always installs this authority table; focused
-        // retention tests create it explicitly.
+    if closure_source_families.is_empty() {
         return Ok(());
     }
 
@@ -90,13 +79,6 @@ pub(super) async fn ensure_full_closure_retention_authority(
     .with_context(|| {
         format!("failed to load raw-log retention authority for replay on chain {chain}")
     })?;
-    #[cfg(test)]
-    if state.is_none() {
-        // Hand-built unit schemas do not install the production raw-log
-        // revision triggers. Their absent row represents the generation-zero
-        // fixture; production still fails closed below.
-        return Ok(());
-    }
     let state = state.with_context(|| {
         format!("normalized-event replay on chain {chain} has no raw-log retention authority state")
     })?;
@@ -177,18 +159,6 @@ pub(super) async fn ensure_legacy_registry_closure_retention_authority(
                 == RetentionClosureAuthorityKind::LegacyRegistryCoverage,
         "legacy registry closure authority accepts only ENSv1/Basenames registry source families"
     );
-
-    #[cfg(test)]
-    if sqlx::query_scalar::<_, Option<String>>(
-        "SELECT to_regclass('raw_log_staging_input_revisions')::TEXT",
-    )
-    .fetch_one(pool)
-    .await
-    .context("failed to inspect the legacy registry retention test schema")?
-    .is_none()
-    {
-        return load_discovery_admission_epoch(pool, chain).await;
-    }
 
     let input_before = load_raw_log_staging_input_version(pool, chain).await?;
     let admission_epoch = load_discovery_admission_epoch(pool, chain).await?;
@@ -382,6 +352,8 @@ pub(super) async fn earliest_required_raw_fact_block(
 
 #[cfg(test)]
 mod tests {
+    use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+
     use super::*;
 
     #[test]
@@ -406,5 +378,33 @@ mod tests {
             ]),
             RetentionClosureAuthorityKind::Unsupported
         );
+    }
+
+    #[tokio::test]
+    async fn full_closure_fails_closed_without_retention_authority_state() -> Result<()> {
+        let database = TestDatabase::create_migrated(
+            TestDatabaseConfig::new("indexer_closure_boundary_missing_authority"),
+            &bigname_storage::MIGRATOR,
+            "failed to apply migrations for closure-boundary test",
+        )
+        .await?;
+
+        let error = ensure_full_closure_retention_authority(
+            database.pool(),
+            "unconfigured-testnet",
+            &[SOURCE_FAMILY_ENS_V2_REGISTRY_L1],
+            1,
+        )
+        .await
+        .expect_err("full closure without durable retention authority must fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("has no raw-log retention authority state"),
+            "unexpected missing-authority error: {error:#}"
+        );
+
+        database.cleanup().await
     }
 }

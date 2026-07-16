@@ -292,6 +292,22 @@ async fn insert_raw_reverse_claim_log(
 }
 
 #[test]
+fn ens_v1_writer_reverse_node_matches_shared_namehash_for_canonical_address() -> Result<()> {
+    let address = "0x0000000000000000000000000000000000001234";
+    let expected = "0x1378947657d42d9154dde03fb7f77bc334f2644cbeab9b53de179fb457806802";
+    let writer_node = reverse_node_for_source_family(SOURCE_FAMILY_ENS_V1_REVERSE_L1, address)?;
+    let shared_node = bigname_storage::ens_namehash_label_bytes(&[
+        b"0000000000000000000000000000000000001234",
+        b"addr",
+        b"reverse",
+    ]);
+
+    assert_eq!(writer_node, expected);
+    assert_eq!(writer_node, format!("{shared_node:#x}"));
+    Ok(())
+}
+
+#[test]
 fn reverse_claimed_node_mismatch_drops_log_without_error() -> Result<()> {
     let claimed_address = "0x1111111111111111111111111111111111111111";
     let raw_log = raw_logs::ReverseRawLogRow {
