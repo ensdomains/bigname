@@ -738,6 +738,8 @@ dependencies = [
  "alloy-json-abi",
  "alloy-primitives",
  "anyhow",
+ "bigname-domain",
+ "bigname-storage",
  "serde",
  "serde_json",
  "sqlx",
@@ -774,6 +776,7 @@ dependencies = [
  "bigname-execution",
  "bigname-manifests",
  "bigname-storage",
+ "bigname-test-support",
  "clap",
  "hex",
  "serde",
@@ -784,6 +787,14 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "bigname-test-support"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "sqlx",
 ]
 
 [[package]]

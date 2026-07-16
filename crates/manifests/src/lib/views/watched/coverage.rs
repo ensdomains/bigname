@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use sqlx::{Executor, PgConnection, PgPool, Postgres, Row};
 
-fn required_watched_tuples_cte() -> String {
+pub(super) fn required_watched_tuples_cte() -> String {
     super::intervals::with_watched_intervals(&format!(
         r#"
 , watched AS (
@@ -52,47 +52,6 @@ pub struct UncoveredWatchedTuple {
     pub address: String,
     pub required_from_block: i64,
     pub required_to_block: i64,
-}
-
-/// Earliest explicit block at which a currently declared or historically
-/// admitted log-producing tuple became watched, bounded by `through_block`.
-/// Unknown starts remain unknown rather than being synthesized as block zero.
-/// Stored-lineage coverage uses this after an admission-epoch change so a
-/// retroactively admitted tuple cannot inherit an already-advanced checkpoint.
-pub async fn load_earliest_known_watched_block(
-    pool: &PgPool,
-    chain: &str,
-    through_block: i64,
-    log_producing_source_families: &[String],
-) -> Result<Option<i64>> {
-    if log_producing_source_families.is_empty() {
-        return Ok(None);
-    }
-
-    let required_watched_tuples_cte = required_watched_tuples_cte();
-    let query = format!(
-        r#"
-        {required_watched_tuples_cte}
-        SELECT MIN(active_from_block_number)::BIGINT
-        FROM watched
-        WHERE active_from_block_number IS NOT NULL
-          AND active_from_block_number <= $3::BIGINT
-        "#
-    );
-    sqlx::query_scalar::<_, Option<i64>>(&query)
-        .bind(chain)
-        // `required_tuples` is unused by this SELECT, but its parameterized
-        // definition shares the CTE so the watched-set rules stay identical.
-        .bind(through_block)
-        .bind(through_block)
-        .bind(log_producing_source_families)
-        .fetch_one(pool)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to load earliest known watched block for chain {chain} through {through_block}"
-            )
-        })
 }
 
 /// Load every active manifest declaration and discovery tuple backed by active
@@ -324,8 +283,28 @@ pub async fn find_uncovered_required_watched_tuples(
     requirements: &[RequiredWatchedTuple],
     limit: i64,
 ) -> Result<Vec<UncoveredWatchedTuple>> {
+    let mut connection = pool
+        .acquire()
+        .await
+        .context("failed to acquire connection for explicit watched coverage verification")?;
     find_uncovered_required_watched_tuples_with_retention_generation(
-        pool,
+        &mut connection,
+        chain,
+        requirements,
+        None,
+        limit,
+    )
+    .await
+}
+
+pub async fn find_uncovered_required_watched_tuples_in_transaction(
+    connection: &mut PgConnection,
+    chain: &str,
+    requirements: &[RequiredWatchedTuple],
+    limit: i64,
+) -> Result<Vec<UncoveredWatchedTuple>> {
+    find_uncovered_required_watched_tuples_with_retention_generation(
+        connection,
         chain,
         requirements,
         None,
@@ -350,8 +329,33 @@ pub async fn find_uncovered_required_watched_tuples_for_retention_generation(
             "raw-log retention generation must not be negative, got {retention_generation}"
         );
     }
+    let mut connection = pool.acquire().await.context(
+        "failed to acquire connection for generation-bound watched coverage verification",
+    )?;
+    find_uncovered_required_watched_tuples_for_retention_generation_in_transaction(
+        &mut connection,
+        chain,
+        requirements,
+        retention_generation,
+        limit,
+    )
+    .await
+}
+
+pub async fn find_uncovered_required_watched_tuples_for_retention_generation_in_transaction(
+    connection: &mut PgConnection,
+    chain: &str,
+    requirements: &[RequiredWatchedTuple],
+    retention_generation: i64,
+    limit: i64,
+) -> Result<Vec<UncoveredWatchedTuple>> {
+    if retention_generation < 0 {
+        anyhow::bail!(
+            "raw-log retention generation must not be negative, got {retention_generation}"
+        );
+    }
     find_uncovered_required_watched_tuples_with_retention_generation(
-        pool,
+        connection,
         chain,
         requirements,
         Some(retention_generation),
@@ -361,7 +365,7 @@ pub async fn find_uncovered_required_watched_tuples_for_retention_generation(
 }
 
 async fn find_uncovered_required_watched_tuples_with_retention_generation(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     chain: &str,
     requirements: &[RequiredWatchedTuple],
     retention_generation: Option<i64>,
@@ -460,7 +464,7 @@ async fn find_uncovered_required_watched_tuples_with_retention_generation(
     .bind(&required_to_blocks)
     .bind(retention_generation)
     .bind(limit)
-    .fetch_all(pool)
+    .fetch_all(connection)
     .await
     .with_context(|| {
         format!(

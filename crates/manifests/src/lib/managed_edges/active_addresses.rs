@@ -384,23 +384,22 @@ async fn load_desired_active_address_specs(
         if let (Some(implementation_contract_instance_id), Some(implementation_address)) = (
             implementation_contract_instance_id,
             declared_implementation_address,
-        ) {
-            if !scoped || scope_ids.contains(&implementation_contract_instance_id) {
-                specs
-                    .entry(implementation_contract_instance_id)
-                    .or_insert(ActiveAddressSpec {
-                        contract_instance_id: implementation_contract_instance_id,
-                        chain: chain.clone(),
-                        address: implementation_address.clone(),
-                        source_manifest_id: Some(manifest_id),
-                        provenance_json: serde_json::json!({
-                            "source": "manifest_proxy_implementation",
-                            "proxy_contract_instance_id": contract_instance_id,
-                            "proxy_address": declared_address,
-                        })
-                        .to_string(),
-                    });
-            }
+        ) && (!scoped || scope_ids.contains(&implementation_contract_instance_id))
+        {
+            specs
+                .entry(implementation_contract_instance_id)
+                .or_insert(ActiveAddressSpec {
+                    contract_instance_id: implementation_contract_instance_id,
+                    chain: chain.clone(),
+                    address: implementation_address.clone(),
+                    source_manifest_id: Some(manifest_id),
+                    provenance_json: serde_json::json!({
+                        "source": "manifest_proxy_implementation",
+                        "proxy_contract_instance_id": contract_instance_id,
+                        "proxy_address": declared_address,
+                    })
+                    .to_string(),
+                });
         }
     }
 

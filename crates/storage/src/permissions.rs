@@ -16,13 +16,15 @@ pub use reads::{
 };
 pub use resource_summary::{
     load_permissions_current_resource_summaries, load_permissions_current_resource_summary,
+    publish_permissions_current_compatibility_in_transaction,
     replace_permissions_current_resource_projection, upsert_permissions_current_resource_summary,
 };
 pub use types::{
-    PermissionScope, PermissionsCurrentAccountResourceCursor,
-    PermissionsCurrentAccountResourcePage, PermissionsCurrentFullFilterSummary,
-    PermissionsCurrentKeysetCursor, PermissionsCurrentPage, PermissionsCurrentResourceSummary,
-    PermissionsCurrentRow,
+    PERMISSIONS_CURRENT_PUBLICATION_VERSION, PermissionCoverageExhaustiveness,
+    PermissionCoverageStatus, PermissionCoverageUnsupportedReason, PermissionScope,
+    PermissionsCurrentAccountResourceCursor, PermissionsCurrentAccountResourcePage,
+    PermissionsCurrentFullFilterSummary, PermissionsCurrentKeysetCursor, PermissionsCurrentPage,
+    PermissionsCurrentResourceSummary, PermissionsCurrentRow, ResourcePermissionCoverage,
 };
 pub use writes::{
     clear_permissions_current, delete_permissions_current, upsert_permissions_current_rows,

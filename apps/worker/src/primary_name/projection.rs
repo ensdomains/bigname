@@ -20,44 +20,28 @@ use staged_rebuild::{
 
 #[cfg(test)]
 pub(crate) mod test_hooks {
-    use std::{
-        collections::BTreeMap,
-        sync::{Arc, Mutex},
-    };
+    use std::sync::Arc;
 
-    use anyhow::{Context, Result};
+    use anyhow::Result;
+    use bigname_test_support::{
+        ScopedTestHookGuard, ScopedTestHookRegistry, current_test_database,
+    };
     use sqlx::PgPool;
 
-    type TargetedRebuildAfterInvalidationHook =
+    pub(crate) type TargetedRebuildAfterInvalidationHook =
         Arc<dyn Fn(&str, &str, &str) + Send + Sync + 'static>;
 
-    static TARGETED_REBUILD_AFTER_INVALIDATION_HOOKS: Mutex<
-        BTreeMap<String, TargetedRebuildAfterInvalidationHook>,
-    > = Mutex::new(BTreeMap::new());
-
-    pub(crate) struct TargetedRebuildAfterInvalidationHookGuard {
-        database: String,
-    }
-
-    impl Drop for TargetedRebuildAfterInvalidationHookGuard {
-        fn drop(&mut self) {
-            TARGETED_REBUILD_AFTER_INVALIDATION_HOOKS
-                .lock()
-                .expect("targeted rebuild after invalidation hook mutex poisoned")
-                .remove(&self.database);
-        }
-    }
+    static TARGETED_REBUILD_AFTER_INVALIDATION_HOOKS: ScopedTestHookRegistry<
+        String,
+        TargetedRebuildAfterInvalidationHook,
+    > = ScopedTestHookRegistry::new();
 
     pub(crate) async fn install_targeted_rebuild_after_invalidation_hook(
         pool: &PgPool,
         hook: TargetedRebuildAfterInvalidationHook,
-    ) -> Result<TargetedRebuildAfterInvalidationHookGuard> {
+    ) -> Result<ScopedTestHookGuard<String, TargetedRebuildAfterInvalidationHook>> {
         let database = current_database(pool).await?;
-        TARGETED_REBUILD_AFTER_INVALIDATION_HOOKS
-            .lock()
-            .expect("targeted rebuild after invalidation hook mutex poisoned")
-            .insert(database.clone(), hook);
-        Ok(TargetedRebuildAfterInvalidationHookGuard { database })
+        Ok(TARGETED_REBUILD_AFTER_INVALIDATION_HOOKS.install(database, hook))
     }
 
     pub(super) fn run_targeted_rebuild_after_invalidation_hook(
@@ -66,21 +50,14 @@ pub(crate) mod test_hooks {
         namespace: &str,
         coin_type: &str,
     ) {
-        let hook = TARGETED_REBUILD_AFTER_INVALIDATION_HOOKS
-            .lock()
-            .expect("targeted rebuild after invalidation hook mutex poisoned")
-            .get(database)
-            .cloned();
+        let hook = TARGETED_REBUILD_AFTER_INVALIDATION_HOOKS.get_cloned(&database.to_owned());
         if let Some(hook) = hook {
             hook(address, namespace, coin_type);
         }
     }
 
     pub(super) async fn current_database(pool: &PgPool) -> Result<String> {
-        sqlx::query_scalar("SELECT current_database()")
-            .fetch_one(pool)
-            .await
-            .context("failed to identify targeted primary-name rebuild test database")
+        current_test_database(pool).await
     }
 }
 
@@ -140,7 +117,7 @@ async fn rebuild_all_primary_names(pool: &PgPool) -> Result<PrimaryNamesCurrentR
             projections.clear();
         }
 
-        if requested_tuple_count % 5_000 == 0 {
+        if requested_tuple_count.is_multiple_of(5_000) {
             tracing::info!(
                 projection = "primary_names_current",
                 queued_tuple_count = requested_tuple_count,

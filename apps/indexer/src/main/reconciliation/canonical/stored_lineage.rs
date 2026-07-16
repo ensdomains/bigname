@@ -23,7 +23,7 @@ mod topic_drift;
 use admission_epoch_fence::StoredLineageAdmissionEpochFence;
 pub(crate) use coverage::ChainCoverageFrontiers;
 use coverage::stored_path_has_required_raw_fact_coverage;
-pub(crate) use topic_drift::ensure_required_topic_sets_undrifted_for_retention_generation;
+pub(crate) use topic_drift::find_uncovered_generation_bound_coverage_with_current_topics;
 
 const MAX_STORED_ANCHOR_PARENT_FETCH_DEPTH: usize =
     (MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS as usize) * 4;
@@ -118,7 +118,7 @@ pub(super) async fn reconcile_large_checkpoint_gap_from_stored_lineage(
         .release()
         .await?;
     #[cfg(test)]
-    admission_epoch_fence::pause_after_admission_epoch_verification_for_tests(chain).await;
+    admission_epoch_fence::pause_after_admission_epoch_verification_for_tests(pool, chain).await;
 
     let target = path
         .last()

@@ -99,7 +99,7 @@ impl ResolverProfileGate {
     fn from_admissions(admissions: Vec<bigname_manifests::ResolverProfileAdmission>) -> Self {
         let admissions = admissions
             .into_iter()
-            .filter(|admission| resolver_profile_admitted(admission))
+            .filter(resolver_profile_admitted)
             .map(|admission| {
                 (
                     (

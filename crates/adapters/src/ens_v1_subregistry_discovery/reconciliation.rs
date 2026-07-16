@@ -1,8 +1,7 @@
 use anyhow::Result;
 use bigname_manifests::{
-    DiscoveryObservation, DiscoveryReconciliationSummary, reconcile_discovery_observations,
-    reconcile_discovery_observations_through_block,
-    reconcile_discovery_observations_through_block_with_expected_admission_epoch,
+    DiscoveryObservation, DiscoveryReconciliationSummary, ExpectedDiscoveryAdmissionEpoch,
+    FullDiscoveryReconciliationOptions, reconcile_discovery_observations,
 };
 use sqlx::PgPool;
 
@@ -39,8 +38,13 @@ pub(super) async fn reconcile_subregistry_discovery_from_checkpoint(
                     .collect::<Result<Vec<_>>>()?,
             );
         }
-        let source_reconciliation =
-            reconcile_discovery_observations(pool, discovery_source, &source_observations).await?;
+        let source_reconciliation = reconcile_discovery_observations(
+            pool,
+            discovery_source,
+            &source_observations,
+            FullDiscoveryReconciliationOptions::default(),
+        )
+        .await?;
         reconciliation.active_edge_count += source_reconciliation.active_edge_count;
         reconciliation.admitted_edge_count += source_reconciliation.admitted_edge_count;
         reconciliation.inserted_edge_count += source_reconciliation.inserted_edge_count;
@@ -57,23 +61,15 @@ pub(super) async fn reconcile_subregistry_discovery_source_through_block(
     through_block: i64,
     expected_admission_epoch: Option<i64>,
 ) -> Result<DiscoveryReconciliationSummary> {
-    if let Some(expected_epoch) = expected_admission_epoch {
-        reconcile_discovery_observations_through_block_with_expected_admission_epoch(
-            pool,
-            discovery_source,
-            observations,
-            through_block,
-            chain,
-            expected_epoch,
-        )
-        .await
-    } else {
-        reconcile_discovery_observations_through_block(
-            pool,
-            discovery_source,
-            observations,
-            through_block,
-        )
-        .await
-    }
+    reconcile_discovery_observations(
+        pool,
+        discovery_source,
+        observations,
+        FullDiscoveryReconciliationOptions {
+            through_block_number: Some(through_block),
+            expected_admission_epoch: expected_admission_epoch
+                .map(|epoch| ExpectedDiscoveryAdmissionEpoch { chain, epoch }),
+        },
+    )
+    .await
 }

@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use bigname_domain::block_interval::InclusiveBlockInterval;
 use sqlx::PgPool;
 
 use crate::{
@@ -153,6 +154,19 @@ pub async fn load_ens_v2_retained_history_recovery_targets(
     let mut targets = std::collections::BTreeSet::new();
 
     for requirement in requirements {
+        let required_interval = InclusiveBlockInterval::new(
+            requirement.required_from_block,
+            requirement.required_to_block,
+        )
+        .with_context(|| {
+            format!(
+                "required retained-history tuple {}/{} has an inverted interval {}..={}",
+                requirement.source_family,
+                requirement.address,
+                requirement.required_from_block,
+                requirement.required_to_block
+            )
+        })?;
         let mut covered_intervals = Vec::new();
         for contract in historical.iter().filter(|contract| {
             contract.source_family == requirement.source_family
@@ -170,7 +184,10 @@ pub async fn load_ens_v2_retained_history_recovery_targets(
                 continue;
             }
 
-            covered_intervals.push((effective_from_block, effective_to_block));
+            covered_intervals.push(
+                InclusiveBlockInterval::new(effective_from_block, effective_to_block)
+                    .expect("clamped historical watched interval must not be inverted"),
+            );
 
             targets.insert(ManifestBootstrapTarget {
                 source_family: requirement.source_family.clone(),
@@ -181,27 +198,7 @@ pub async fn load_ens_v2_retained_history_recovery_targets(
             });
         }
 
-        covered_intervals.sort_unstable();
-        let mut next_required_block = requirement.required_from_block;
-        let mut fully_covered = false;
-        for (covered_from_block, covered_to_block) in covered_intervals {
-            if covered_from_block > next_required_block {
-                break;
-            }
-            if covered_to_block < next_required_block {
-                continue;
-            }
-            if covered_to_block >= requirement.required_to_block {
-                fully_covered = true;
-                break;
-            }
-            next_required_block = covered_to_block.checked_add(1).with_context(|| {
-                format!(
-                    "retained-history recovery interval ended at overflowing block {covered_to_block}"
-                )
-            })?;
-        }
-        if !fully_covered {
+        if !retained_requirement_is_covered(required_interval, covered_intervals) {
             anyhow::bail!(
                 "required retained-history tuple {}/{} over {}..={} has no gap-free known-start historical contract identity",
                 requirement.source_family,
@@ -213,6 +210,13 @@ pub async fn load_ens_v2_retained_history_recovery_targets(
     }
 
     Ok(targets.into_iter().collect())
+}
+
+fn retained_requirement_is_covered(
+    required: InclusiveBlockInterval,
+    covered: impl IntoIterator<Item = InclusiveBlockInterval>,
+) -> bool {
+    required.is_covered_by(covered)
 }
 
 #[cfg(test)]
@@ -233,5 +237,29 @@ mod tests {
             !ens_v2_discovery_bootstrap_source_families()
                 .any(|family| family == "basenames_base_resolver")
         );
+    }
+
+    #[test]
+    fn retained_requirement_uses_gap_free_union_through_terminal_block() {
+        let interval = |from_block, through_block| {
+            InclusiveBlockInterval::new(from_block, through_block)
+                .expect("test interval must not be inverted")
+        };
+        let required = interval(i64::MAX - 3, i64::MAX);
+
+        assert!(retained_requirement_is_covered(
+            required,
+            [
+                interval(i64::MAX, i64::MAX),
+                interval(i64::MAX - 3, i64::MAX - 1),
+            ]
+        ));
+        assert!(!retained_requirement_is_covered(
+            required,
+            [
+                interval(i64::MAX - 3, i64::MAX - 2),
+                interval(i64::MAX, i64::MAX),
+            ]
+        ));
     }
 }

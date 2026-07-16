@@ -74,12 +74,9 @@ async fn remaining_record_families_derive_normalized_but_stay_unenumerated() -> 
     .await?;
     ens_v1::set_text_record(&rpc, resolver, alice, "families.eth", "probe", "done").await?;
 
-    let ready_sql = "SELECT EXISTS (SELECT 1 FROM normalized_events \
-         WHERE logical_name_id = 'ens:families.eth' \
-         AND event_kind = 'RecordChanged' \
-         AND after_state->>'record_key' = 'text:probe' \
-         AND canonicality_state = 'canonical')";
-    let run = support::ingest_and_serve(&anvil, &deployment, Some(ready_sql)).await?;
+    let ready_sql =
+        support::canonical_event_ready_sql("ens:families.eth", "RecordChanged", Some("text:probe"));
+    let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
 
     let derived: Vec<(String, Value)> = sqlx::query_as(
         "SELECT event_kind, after_state FROM normalized_events \
@@ -191,12 +188,9 @@ async fn pubkey_write_on_admitted_resolver_stays_raw_only() -> Result<()> {
     .await?;
     ens_v1::set_text_record(&rpc, resolver, alice, "pubkey.eth", "probe", "done").await?;
 
-    let ready_sql = "SELECT EXISTS (SELECT 1 FROM normalized_events \
-         WHERE logical_name_id = 'ens:pubkey.eth' \
-         AND event_kind = 'RecordChanged' \
-         AND after_state->>'record_key' = 'text:probe' \
-         AND canonicality_state = 'canonical')";
-    let run = support::ingest_and_serve(&anvil, &deployment, Some(ready_sql)).await?;
+    let ready_sql =
+        support::canonical_event_ready_sql("ens:pubkey.eth", "RecordChanged", Some("text:probe"));
+    let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
 
     // PubkeyChanged(bytes32,bytes32,bytes32) topic0.
     let pubkey_topic = format!(

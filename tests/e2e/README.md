@@ -469,10 +469,21 @@ route inventory or a claim that every protocol transition is covered.
   (upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L84 @ ens_v2@48b3e2d).
 - `ens_v2_turn_l::resolver_and_subregistry_edges_follow_set_change_zero` —
   resolver set/change/zero and subregistry attach/detach derive NULL-edge
-  detaches; pinned via backfill + replay because the composed live chain
-  hangs intake (a reproduced defect; every op ingests cleanly alone), which also pinned
-  the backfill/live parity gap: backfill derives zero v2
-  `PermissionChanged`.
+  detaches. The composed chain runs through normal automatic intake, proving
+  normalized replay recovers exact generation-bound coverage for the
+  dynamically admitted resolver and subregistry intervals before live
+  handoff. Automatic startup + replay also derives exactly one registry-scoped
+  `PermissionChanged` from the registration owner's `EACRolesChanged`,
+  attributed to the registered resource and owner. The registrar defines the
+  registration role bitmap and calls the registry
+  (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L17 @ ens_v2@48b3e2d)
+  (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L151 @ ens_v2@48b3e2d),
+  the registry's nonzero-owner path grants it on the constructed resource
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L463 @ ens_v2@48b3e2d)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L469 @ ens_v2@48b3e2d),
+  and the role grant compares the existing bitmap before emitting the change
+  (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L267 @ ens_v2@48b3e2d)
+  (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L274 @ ens_v2@48b3e2d).
 - `ens_v2_live_poll::ens_v2_registry_state_survives_distinct_live_polls` —
   keeps one indexer live while registration, resolver attachment, subregistry
   attachment, token regeneration, and unregister land in distinct polls. It

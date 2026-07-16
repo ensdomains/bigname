@@ -10,11 +10,14 @@ use super::{
 };
 use crate::{
     provider::ProviderBlock,
-    reconciliation::{logging::log_chain_reconciliation_outcome, types::HeaderAuditMode},
+    reconciliation::{
+        logging::log_chain_reconciliation_outcome, replay::LegacyRegistryNewlyRequiredCoverage,
+        types::HeaderAuditMode,
+    },
     runtime::checkpoint_mode,
 };
 
-const MAX_ENS_V2_LIVE_COVERAGE_RECOVERY_ATTEMPTS: usize = 32;
+const MAX_LIVE_COVERAGE_RECOVERY_ATTEMPTS: usize = 32;
 
 #[allow(dead_code)]
 pub(crate) async fn poll_provider_heads(
@@ -78,7 +81,7 @@ pub(crate) async fn poll_provider_heads_with_adapter_sync(
                 }
                 Ok(None) => break,
                 Err(error) => {
-                    let Some(requirement) = ens_v2_coverage_requirement(&error) else {
+                    let Some(requirement) = live_coverage_requirement(&error) else {
                         warn!(
                             service = "indexer",
                             chain = %task.chain,
@@ -88,24 +91,25 @@ pub(crate) async fn poll_provider_heads_with_adapter_sync(
                         );
                         break;
                     };
-                    if coverage_recovery_attempt >= MAX_ENS_V2_LIVE_COVERAGE_RECOVERY_ATTEMPTS {
+                    if coverage_recovery_attempt >= MAX_LIVE_COVERAGE_RECOVERY_ATTEMPTS {
                         warn!(
                             service = "indexer",
                             chain = %task.chain,
                             error = ?error,
                             coverage_recovery_attempt,
                             intake_checkpoint_mode = checkpoint_mode(&task.checkpoint),
-                            "ENSv2 live coverage recovery did not converge within its bounded retry limit"
+                            "live generation-bound coverage recovery did not converge within its bounded retry limit"
                         );
                         break;
                     }
                     coverage_recovery_attempt += 1;
+                    let recovery_requirement = requirement.as_recovery_requirement();
                     match recover_ens_v2_live_coverage_requirement(
                         pool,
                         deployment_profile,
                         provider,
                         header_audit_mode,
-                        &requirement,
+                        &recovery_requirement,
                     )
                     .await
                     {
@@ -124,7 +128,7 @@ pub(crate) async fn poll_provider_heads_with_adapter_sync(
                                     EnsV2LiveCoverageRecoveryStatus::Recovered => "recovered",
                                     EnsV2LiveCoverageRecoveryStatus::AuthorityChanged => "authority_changed_replan",
                                 },
-                                "retrying unchanged live poll after exact ENSv2 coverage recovery"
+                                "retrying unchanged live poll after exact generation-bound coverage recovery"
                             );
                         }
                         Err(recovery_error) => {
@@ -141,7 +145,7 @@ pub(crate) async fn poll_provider_heads_with_adapter_sync(
                                 error = ?recovery_error,
                                 reconciliation_error = ?error,
                                 intake_checkpoint_mode = checkpoint_mode(&task.checkpoint),
-                                "provider-backed ENSv2 live coverage recovery failed"
+                                "provider-backed live coverage recovery failed"
                             );
                             break;
                         }
@@ -156,23 +160,61 @@ pub(crate) async fn poll_provider_heads_with_adapter_sync(
     Ok(())
 }
 
-fn ens_v2_coverage_requirement(
-    error: &anyhow::Error,
-) -> Option<bigname_adapters::EnsV2NewlyRequiredCoverage> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LiveCoverageRequirement {
+    chain: String,
+    retention_generation: i64,
+    source_family: String,
+    address: String,
+    required_from_block: i64,
+    required_to_block: i64,
+}
+
+impl LiveCoverageRequirement {
+    fn as_recovery_requirement(&self) -> bigname_adapters::EnsV2MissingCoverage {
+        bigname_adapters::EnsV2MissingCoverage {
+            chain: self.chain.clone(),
+            retention_generation: self.retention_generation,
+            source_family: self.source_family.clone(),
+            address: self.address.clone(),
+            required_from_block: self.required_from_block,
+            required_to_block: self.required_to_block,
+        }
+    }
+}
+
+fn live_coverage_requirement(error: &anyhow::Error) -> Option<LiveCoverageRequirement> {
     error.chain().find_map(|cause| {
+        if let Some(requirement) = cause.downcast_ref::<bigname_adapters::EnsV2MissingCoverage>() {
+            return Some(LiveCoverageRequirement {
+                chain: requirement.chain.clone(),
+                retention_generation: requirement.retention_generation,
+                source_family: requirement.source_family.clone(),
+                address: requirement.address.clone(),
+                required_from_block: requirement.required_from_block,
+                required_to_block: requirement.required_to_block,
+            });
+        }
         cause
-            .downcast_ref::<bigname_adapters::EnsV2NewlyRequiredCoverage>()
-            .cloned()
+            .downcast_ref::<LegacyRegistryNewlyRequiredCoverage>()
+            .map(|requirement| LiveCoverageRequirement {
+                chain: requirement.chain.clone(),
+                retention_generation: requirement.retention_generation,
+                source_family: requirement.source_family.clone(),
+                address: requirement.address.clone(),
+                required_from_block: requirement.required_from_block,
+                required_to_block: requirement.required_to_block,
+            })
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ens_v2_coverage_requirement;
+    use super::*;
 
     #[test]
     fn coverage_requirement_survives_nested_reconciliation_context() {
-        let requirement = bigname_adapters::EnsV2NewlyRequiredCoverage {
+        let requirement = bigname_adapters::EnsV2MissingCoverage {
             chain: "ethereum-sepolia".to_owned(),
             retention_generation: 3,
             source_family: "ens_v2_resolver_l1".to_owned(),
@@ -184,13 +226,69 @@ mod tests {
             error.context(format!("reconciliation layer {layer}"))
         });
 
-        assert_eq!(ens_v2_coverage_requirement(&error), Some(requirement));
+        assert_eq!(
+            live_coverage_requirement(&error),
+            Some(LiveCoverageRequirement {
+                chain: requirement.chain,
+                retention_generation: requirement.retention_generation,
+                source_family: requirement.source_family,
+                address: requirement.address,
+                required_from_block: requirement.required_from_block,
+                required_to_block: requirement.required_to_block,
+            })
+        );
+    }
+
+    #[test]
+    fn admitted_legacy_registry_coverage_requirements_preserve_exact_recovery_bounds() {
+        for (chain, source_family) in [
+            ("ethereum-mainnet", "ens_v1_registry_l1"),
+            ("base-mainnet", "basenames_base_registry"),
+        ] {
+            let requirement = LegacyRegistryNewlyRequiredCoverage {
+                chain: chain.to_owned(),
+                retention_generation: 3,
+                source_family: source_family.to_owned(),
+                address: "0x0000000000000000000000000000000000000001".to_owned(),
+                required_from_block: 10,
+                required_to_block: 20,
+            };
+            let error = (0..7).fold(anyhow::Error::new(requirement.clone()), |error, layer| {
+                error.context(format!("reconciliation layer {layer}"))
+            });
+            let recovered = live_coverage_requirement(&error)
+                .expect("typed legacy registry coverage must be recoverable by live polling");
+
+            assert_eq!(
+                recovered,
+                LiveCoverageRequirement {
+                    chain: requirement.chain,
+                    retention_generation: requirement.retention_generation,
+                    source_family: requirement.source_family,
+                    address: requirement.address,
+                    required_from_block: requirement.required_from_block,
+                    required_to_block: requirement.required_to_block,
+                }
+            );
+            assert_eq!(
+                recovered.as_recovery_requirement(),
+                bigname_adapters::EnsV2MissingCoverage {
+                    chain: chain.to_owned(),
+                    retention_generation: 3,
+                    source_family: source_family.to_owned(),
+                    address: "0x0000000000000000000000000000000000000001".to_owned(),
+                    required_from_block: 10,
+                    required_to_block: 20,
+                },
+                "the provider recovery request must not widen the typed tuple or its inclusive bounds"
+            );
+        }
     }
 
     #[test]
     fn unrelated_reconciliation_error_is_not_recoverable_coverage() {
         let error = anyhow::anyhow!("provider failed").context("adapter sync failed");
 
-        assert_eq!(ens_v2_coverage_requirement(&error), None);
+        assert_eq!(live_coverage_requirement(&error), None);
     }
 }

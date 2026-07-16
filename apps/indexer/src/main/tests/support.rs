@@ -1419,7 +1419,18 @@ async fn create_ops_catchup_backfill_job_tables(pool: &PgPool) -> Result<()> {
     .context("failed to create active lease token index for ops catch-up tests")?;
 
     create_backfill_coverage_facts_table(pool).await?;
+    create_stored_lineage_coverage_frontier_tables(pool).await?;
 
+    Ok(())
+}
+
+async fn create_stored_lineage_coverage_frontier_tables(pool: &PgPool) -> Result<()> {
+    sqlx::raw_sql(include_str!(
+        "../../../../../migrations/20260716122000_stored_lineage_coverage_frontiers.sql"
+    ))
+    .execute(pool)
+    .await
+    .context("failed to apply the stored-lineage coverage frontier migration for indexer tests")?;
     Ok(())
 }
 

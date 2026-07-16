@@ -2353,7 +2353,7 @@ async fn projection_change_writers_can_commit_while_an_earlier_writer_is_open() 
 }
 
 #[tokio::test]
-async fn projection_change_watermark_waits_for_prior_writer_and_excludes_queued_writer()
+async fn projection_change_watermark_bounds_writer_barrier_and_retries_complete_prefix()
 -> Result<()> {
     let database = TestDatabase::new().await?;
     let first_event = normalized_event(
@@ -2386,6 +2386,30 @@ async fn projection_change_watermark_waits_for_prior_writer_and_excludes_queued_
     sqlx::query("DELETE FROM projection_normalized_event_changes")
         .execute(database.pool())
         .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO projection_apply_cursors (cursor_name, last_change_id)
+        VALUES ('normalized_events_to_projection_invalidations', 0)
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    let capture_settings = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT array_to_string(proconfig, ',')
+        FROM pg_proc
+        WHERE oid = 'public.capture_projection_normalized_event_change_watermark()'::regprocedure
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert!(
+        capture_settings
+            .split(',')
+            .any(|setting| setting == "lock_timeout=100ms"),
+        "projection-change capture must carry its bounded lock timeout: {capture_settings}"
+    );
 
     let mut first_writer = database.pool().begin().await?;
     let first_change_id = sqlx::query_scalar::<_, i64>(
@@ -2439,25 +2463,44 @@ async fn projection_change_watermark_waits_for_prior_writer_and_excludes_queued_
         .await
         .context("failed to insert queued projection change")
     });
-    wait_for_relation_lock(
-        database.pool(),
-        "RowExclusiveLock",
-        "later writer did not queue behind the watermark capture",
-    )
-    .await?;
 
-    first_writer.commit().await?;
-    let captured_change_id = tokio::time::timeout(Duration::from_secs(2), capture)
+    let capture_result = tokio::time::timeout(Duration::from_secs(2), capture)
         .await
-        .context("watermark capture remained blocked after the prior writer committed")?
-        .context("watermark capture task failed")??;
+        .context("watermark capture exceeded its bounded lock wait")?
+        .context("watermark capture task failed")?;
+    let capture_error =
+        capture_result.expect_err("watermark capture unexpectedly crossed an open earlier writer");
+    assert!(
+        capture_error
+            .chain()
+            .any(|cause| cause.to_string().contains("lock timeout")),
+        "unexpected projection-change capture error: {capture_error:#}"
+    );
+
     let second_change_id = tokio::time::timeout(Duration::from_secs(2), second_writer)
         .await
-        .context("queued writer remained blocked after watermark capture committed")?
+        .context("later writer remained blocked after watermark capture timed out")?
         .context("queued projection-change writer task failed")??;
 
-    assert_eq!(captured_change_id, first_change_id);
-    assert!(second_change_id > captured_change_id);
+    assert!(second_change_id > first_change_id);
+    let cursor_after_timeout = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT last_change_id
+        FROM projection_apply_cursors
+        WHERE cursor_name = 'normalized_events_to_projection_invalidations'
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(cursor_after_timeout, 0);
+
+    first_writer.commit().await?;
+    let captured_change_id = sqlx::query_scalar::<_, i64>(
+        "SELECT public.capture_projection_normalized_event_change_watermark()",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(captured_change_id, second_change_id);
 
     database.cleanup().await
 }
@@ -2943,6 +2986,9 @@ async fn normalized_event_upsert_repairs_ens_v1_wrapper_token_before_state_from_
     database.cleanup().await
 }
 
+// Keeping the captured event coordinates explicit makes these replay fixtures
+// directly comparable with the source event tuple exercised by each test.
+#[allow(clippy::too_many_arguments)]
 fn ens_v1_wrapper_token_control_transferred_event(
     event_identity: &str,
     logical_name_id: &str,
@@ -8726,8 +8772,7 @@ async fn normalized_event_upsert_rejects_token_transfer_before_state_change() ->
 }
 
 #[tokio::test]
-async fn normalized_event_upsert_repairs_ens_v1_reverse_name_profile_source_both_directions()
--> Result<()> {
+async fn normalized_event_upsert_enriches_ens_v1_reverse_name_profile_source() -> Result<()> {
     let database = TestDatabase::new().await?;
     let without_source = ens_v1_reverse_name_observation_event(false);
     let with_source = ens_v1_reverse_name_observation_event(true);
@@ -8743,16 +8788,6 @@ async fn normalized_event_upsert_repairs_ens_v1_reverse_name_profile_source_both
             .await?;
     assert_eq!(stored_supported, with_source.after_state);
 
-    let unsupported =
-        upsert_normalized_events(database.pool(), std::slice::from_ref(&without_source)).await?;
-    assert_eq!(unsupported[0].after_state, without_source.after_state);
-    let stored_unsupported: serde_json::Value =
-        sqlx::query_scalar("SELECT after_state FROM normalized_events WHERE event_identity = $1")
-            .bind(&without_source.event_identity)
-            .fetch_one(database.pool())
-            .await?;
-    assert_eq!(stored_unsupported, without_source.after_state);
-
     let change_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*)::BIGINT \
          FROM projection_normalized_event_changes change \
@@ -8764,7 +8799,7 @@ async fn normalized_event_upsert_repairs_ens_v1_reverse_name_profile_source_both
     .bind(&without_source.event_identity)
     .fetch_one(database.pool())
     .await?;
-    assert_eq!(change_count, 2);
+    assert_eq!(change_count, 1);
     let (generation, payload): (i64, serde_json::Value) = sqlx::query_as(
         "SELECT generation, key_payload \
          FROM projection_invalidations \
@@ -8773,7 +8808,7 @@ async fn normalized_event_upsert_repairs_ens_v1_reverse_name_profile_source_both
     )
     .fetch_one(database.pool())
     .await?;
-    assert_eq!(generation, 1);
+    assert_eq!(generation, 0);
     assert_eq!(
         payload,
         json!({
@@ -8782,6 +8817,42 @@ async fn normalized_event_upsert_repairs_ens_v1_reverse_name_profile_source_both
             "coin_type": "60",
         })
     );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_upsert_rejects_ens_v1_reverse_name_profile_source_removal() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let with_source = ens_v1_reverse_name_observation_event(true);
+    let without_source = ens_v1_reverse_name_observation_event(false);
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&with_source)).await?;
+
+    let error = upsert_normalized_events(database.pool(), std::slice::from_ref(&without_source))
+        .await
+        .expect_err("replay without profile proof must not strip durable claim provenance");
+    assert!(
+        error
+            .to_string()
+            .contains("normalized event identity mismatch"),
+        "unexpected error: {error:#}"
+    );
+
+    let (stored_after_state, change_count): (serde_json::Value, i64) = sqlx::query_as(
+        "SELECT event.after_state, COUNT(change.change_id)::BIGINT \
+         FROM normalized_events event \
+         LEFT JOIN projection_normalized_event_changes change \
+           ON change.normalized_event_id = event.normalized_event_id \
+          AND change.change_kind = 'canonicality_update' \
+         WHERE event.event_identity = $1 \
+         GROUP BY event.after_state",
+    )
+    .bind(&with_source.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(stored_after_state, with_source.after_state);
+    assert_eq!(change_count, 0);
 
     database.cleanup().await
 }

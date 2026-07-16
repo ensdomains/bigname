@@ -183,7 +183,7 @@ async fn stage_all_address_rows(
             rows.clear();
         }
 
-        if completed_binding_count % 5_000 == 0 {
+        if completed_binding_count.is_multiple_of(5_000) {
             tracing::info!(
                 projection = "address_names_current",
                 queued_binding_count,
@@ -344,7 +344,7 @@ async fn stage_one_address_rows(
             rows.clear();
         }
 
-        if completed_binding_count % 5_000 == 0 {
+        if completed_binding_count.is_multiple_of(5_000) {
             tracing::info!(
                 projection = "address_names_current",
                 address = %normalized_address,

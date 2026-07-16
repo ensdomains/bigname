@@ -514,10 +514,7 @@ async fn load_current_projection_replay_marker_count(
     pool: &PgPool,
     replay_target_block: Option<i64>,
 ) -> Result<i64> {
-    let projections = replay::ALL_CURRENT_PROJECTION_ORDER
-        .iter()
-        .copied()
-        .collect::<Vec<_>>();
+    let projections = replay::ALL_CURRENT_PROJECTION_ORDER.to_vec();
 
     sqlx::query_scalar::<_, i64>(
         r#"

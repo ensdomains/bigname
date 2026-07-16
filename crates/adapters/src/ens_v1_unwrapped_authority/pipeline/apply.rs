@@ -106,8 +106,8 @@ pub(super) fn apply_authority_raw_log(
         }
         return Ok(false);
     }
-    let resolver_fact_has_supported_profile =
-        resolver_profile_gate.supports_resolver_local_fact(raw_log, event_topics)?;
+    let resolver_fact_profile_status =
+        resolver_profile_gate.resolver_local_fact_profile_status(raw_log, event_topics)?;
     let observations = build_authority_observations(raw_log, event_topics)?;
     if let Some(node) = migration_guard.mark_migrated_node() {
         if migrated_registry_nodes.insert(node.to_owned())
@@ -131,7 +131,7 @@ pub(super) fn apply_authority_raw_log(
             pending_namehash_observations,
             same_tx_name_intro_positions,
             reverse_claim_sources,
-            resolver_fact_has_supported_profile,
+            resolver_fact_profile_status,
             block_index,
             checkpoint_delta.as_deref_mut(),
         )?;
@@ -169,7 +169,7 @@ fn apply_authority_observation(
     pending_namehash_observations: &mut HashMap<String, Vec<AuthorityObservation>>,
     same_tx_name_intro_positions: &HashMap<String, Vec<RawLogPosition>>,
     reverse_claim_sources: &HashMap<String, ReverseClaimSource>,
-    resolver_fact_has_supported_profile: bool,
+    resolver_fact_profile_status: Option<ResolverFactProfileStatus>,
     block_index: &CanonicalBlockIndex,
     mut checkpoint_delta: Option<&mut UnwrappedAuthorityReplayCheckpointDelta>,
 ) -> Result<()> {
@@ -254,7 +254,7 @@ fn apply_authority_observation(
             apply_reverse_claim_source_observation(
                 history,
                 observation,
-                resolver_fact_has_supported_profile,
+                resolver_fact_profile_status,
             )?;
             if let Some(delta) = checkpoint_delta.as_deref_mut() {
                 delta.mark_reverse_history(normalized_namehash);

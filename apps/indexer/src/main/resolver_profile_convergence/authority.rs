@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use bigname_manifests::{
     ResolverProfileAdmission, WatchedContractSource, load_basenames_l2_resolver_profile_admissions,
     load_ens_v1_public_resolver_profile_admissions,
@@ -151,12 +151,26 @@ pub(crate) async fn journal_resolver_profile_authority_if_epoch_changed(
     pool: &sqlx::PgPool,
     chain: &str,
 ) -> Result<ResolverProfileAuthorityJournalSummary> {
-    let persisted = load_resolver_profile_authority_journal(pool).await?;
-    let persisted_epochs =
-        serde_json::from_value::<BTreeMap<String, i64>>(persisted.discovery_epoch_snapshot)
-            .context("failed to decode persisted resolver-profile discovery-epoch snapshot")?;
+    let (revision, persisted_epoch) = sqlx::query_as::<_, (i64, i64)>(
+        r#"
+        SELECT
+            revision,
+            COALESCE((discovery_epoch_snapshot ->> $2)::BIGINT, 0)
+        FROM resolver_profile_authority_journal
+        WHERE journal_key = $1
+        "#,
+    )
+    .bind("active_resolver_profiles")
+    .bind(chain)
+    .fetch_one(pool)
+    .await
+    .context("failed to load resolver-profile authority epoch guard")?;
+    ensure!(
+        revision >= 0,
+        "resolver-profile authority journal revision must not be negative"
+    );
     let current_epoch = bigname_manifests::load_discovery_admission_epoch(pool, chain).await?;
-    if persisted_epochs.get(chain).copied().unwrap_or_default() == current_epoch {
+    if persisted_epoch == current_epoch {
         return Ok(ResolverProfileAuthorityJournalSummary {
             epoch_guard_count: 1,
             ..ResolverProfileAuthorityJournalSummary::default()

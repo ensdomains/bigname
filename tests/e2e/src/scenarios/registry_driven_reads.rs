@@ -86,7 +86,7 @@ async fn registry_driven_reads() -> Result<()> {
     // --- layer 4: exact-name declared state now carries registry facts ---
     let (status, body) = run.api.get_json("/v1/names/ens/alice.eth").await?;
     assert_eq!(status, 200, "exact-name lookup failed: {body}");
-    let pointer = |path: &str| -> Value { body.pointer(path).cloned().unwrap_or(Value::Null) };
+    let pointer = |path: &str| crate::harness::responses::pointer(&body, path);
     assert_eq!(
         pointer("/declared_state/resolver/address"),
         format!("{resolver:#x}"),

@@ -1,20 +1,19 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Context, Result, ensure};
-use bigname_storage::{PermissionsCurrentResourceSummary, ens_v2_registry_resource_id};
+use bigname_storage::{
+    PermissionsCurrentResourceSummary, ResourcePermissionCoverage, ens_v2_registry_resource_id,
+};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::canonicality::{build_canonicality_summary, build_chain_positions, format_timestamp};
 use super::types::{RelevantEvent, ResourceProjectionContext};
 
-const ENSV1_WRAPPER_SOURCE_FAMILY: &str = "ens_v1_wrapper_l1";
 const ENSV2_ROOT_SOURCE_FAMILY: &str = "ens_v2_root_l1";
 const ENSV2_REGISTRY_SOURCE_FAMILY: &str = "ens_v2_registry_l1";
 const ENSV2_ROOT_UPSTREAM_RESOURCE: &str =
     "0x0000000000000000000000000000000000000000000000000000000000000000";
-const WRAPPER_UNSUPPORTED_REASON: &str = "ensv1_wrapper_holder_permissions_not_projected";
-const UNKNOWN_AUTHORITY_REASON: &str = "resource_permission_authority_not_projected";
 
 pub(super) fn build_resource_summary(
     context: &ResourceProjectionContext,
@@ -55,41 +54,19 @@ pub(super) fn build_resource_summary(
         build_canonicality_summary(&event_refs)
     };
     let coverage = match authority_kind.as_deref() {
-        Some("wrapper") => json!({
-            "status": "unsupported",
-            "exhaustiveness": "not_applicable",
-            "source_classes_considered": ["permissions_current", ENSV1_WRAPPER_SOURCE_FAMILY],
-            "enumeration_basis": "resource_permissions",
-            "unsupported_reason": WRAPPER_UNSUPPORTED_REASON,
-        }),
+        Some("wrapper") => {
+            ResourcePermissionCoverage::ensv1_wrapper_holder_permissions_not_projected()
+        }
         Some(
             "registrar" | "registry" | "registry_only" | "registry_owner" | "registrant"
             | "resolver" | "ens_v2_registry",
-        ) => json!({
-            "status": "full",
-            "exhaustiveness": "authoritative",
-            "source_classes_considered": ["permissions_current"],
-            "enumeration_basis": "resource_permissions",
-            "unsupported_reason": Value::Null,
-        }),
-        Some(_) | None => json!({
-            "status": "partial",
-            "exhaustiveness": "best_effort",
-            "source_classes_considered": ["permissions_current"],
-            "enumeration_basis": "resource_permissions",
-            "unsupported_reason": UNKNOWN_AUTHORITY_REASON,
-        }),
+        ) => ResourcePermissionCoverage::authoritative(["permissions_current"]),
+        Some(_) | None => ResourcePermissionCoverage::resource_authority_not_projected(),
     };
     let source_families = events
         .iter()
         .map(|event| event.source_family.clone())
-        .chain(
-            context
-                .provenance
-                .get("source_family")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-        )
+        .chain(resource_source_families(&context.provenance).map(str::to_owned))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
@@ -101,12 +78,7 @@ pub(super) fn build_resource_summary(
     let manifest_version = events
         .iter()
         .map(|event| event.manifest_version)
-        .chain(
-            context
-                .provenance
-                .get("manifest_version")
-                .and_then(Value::as_i64),
-        )
+        .chain(resource_manifest_versions(&context.provenance))
         .max()
         .filter(|manifest_version| *manifest_version > 0)
         .with_context(|| {
@@ -144,6 +116,18 @@ pub(super) fn build_resource_summary(
     })
 }
 
+fn resource_source_families(provenance: &Value) -> impl Iterator<Item = &str> {
+    ["source_family", "binding_source_family"]
+        .into_iter()
+        .filter_map(|key| provenance.get(key).and_then(Value::as_str))
+}
+
+fn resource_manifest_versions(provenance: &Value) -> impl Iterator<Item = i64> + '_ {
+    ["manifest_version", "binding_manifest_version"]
+        .into_iter()
+        .filter_map(|key| provenance.get(key).and_then(Value::as_i64))
+}
+
 fn projected_authority_kind(
     context: &ResourceProjectionContext,
     events: &[RelevantEvent],
@@ -162,10 +146,7 @@ fn projected_authority_kind(
         .provenance
         .get("authority_kind")
         .and_then(Value::as_str);
-    let source_family = context
-        .provenance
-        .get("source_family")
-        .and_then(Value::as_str);
+    let source_family = resource_source_families(&context.provenance).next();
 
     event_authority
         .or(resource_permission_authority)
@@ -259,25 +240,42 @@ mod tests {
         let summary = build_resource_summary(&context("future_authority"), &[]).unwrap();
 
         assert_eq!(summary.authority_kind.as_deref(), Some("future_authority"));
-        assert_eq!(summary.coverage["status"], "partial");
-        assert_eq!(summary.coverage["exhaustiveness"], "best_effort");
         assert_eq!(
-            summary.coverage["unsupported_reason"],
-            UNKNOWN_AUTHORITY_REASON
+            summary.coverage,
+            ResourcePermissionCoverage::resource_authority_not_projected()
         );
     }
 
     #[test]
     fn known_and_wrapper_authorities_publish_explicit_support() {
         let supported = build_resource_summary(&context("registrar"), &[]).unwrap();
-        assert_eq!(supported.coverage["status"], "full");
-        assert_eq!(supported.coverage["exhaustiveness"], "authoritative");
+        assert_eq!(
+            supported.coverage,
+            ResourcePermissionCoverage::authoritative(["permissions_current"])
+        );
 
         let wrapper = build_resource_summary(&context("wrapper"), &[]).unwrap();
-        assert_eq!(wrapper.coverage["status"], "unsupported");
         assert_eq!(
-            wrapper.coverage["unsupported_reason"],
-            WRAPPER_UNSUPPORTED_REASON
+            wrapper.coverage,
+            ResourcePermissionCoverage::ensv1_wrapper_holder_permissions_not_projected()
+        );
+    }
+
+    #[test]
+    fn zero_event_ensv1_authority_uses_binding_provenance_fallback() {
+        let mut context = context("registrar");
+        context.provenance = json!({
+            "authority_kind": "registrar",
+            "binding_source_family": "ens_v1_registrar_l1",
+            "binding_manifest_version": 7,
+        });
+
+        let summary = build_resource_summary(&context, &[]).unwrap();
+
+        assert_eq!(summary.manifest_version, 7);
+        assert_eq!(
+            summary.provenance["source_families"],
+            json!(["ens_v1_registrar_l1"])
         );
     }
 
@@ -335,8 +333,10 @@ mod tests {
         let summary = build_resource_summary(&context(""), &events).unwrap();
 
         assert_eq!(summary.authority_kind.as_deref(), Some("registrant"));
-        assert_eq!(summary.coverage["status"], "full");
-        assert_eq!(summary.coverage["exhaustiveness"], "authoritative");
+        assert_eq!(
+            summary.coverage,
+            ResourcePermissionCoverage::authoritative(["permissions_current"])
+        );
     }
 
     #[test]

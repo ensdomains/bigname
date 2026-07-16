@@ -190,7 +190,7 @@ async fn load_reverse_claim_sources_internal(
 pub(super) fn apply_reverse_claim_source_observation(
     history: &mut ReverseClaimSourceHistory,
     observation: AuthorityObservation,
-    resolver_fact_has_supported_profile: bool,
+    resolver_fact_profile_status: Option<ResolverFactProfileStatus>,
 ) -> Result<()> {
     match observation {
         AuthorityObservation::ResolverChanged(event) => {
@@ -232,8 +232,19 @@ pub(super) fn apply_reverse_claim_source_observation(
             // Generic ENSv1 NameChanged intake retains one reverse-source
             // observation across profile reclassification, but only a
             // supported name profile may turn it into declared primary-name
-            // identity.
-            let claim_source = resolver_fact_has_supported_profile.then_some(&history.claim_source);
+            // identity. Pending evidence keeps the enrichment-compatible
+            // identity. Explicitly unsupported evidence uses a distinct
+            // identity so reconciliation can orphan a prior claim without
+            // rewriting its durable provenance.
+            let (claim_source, identity_kind) = match resolver_fact_profile_status
+                .context("reverse-name record observation is missing resolver profile status")?
+            {
+                ResolverFactProfileStatus::Supported => {
+                    (Some(&history.claim_source), "record-change")
+                }
+                ResolverFactProfileStatus::Pending => (None, "record-change"),
+                ResolverFactProfileStatus::Unsupported => (None, "record-change-unsupported"),
+            };
             history.events.push(build_normalized_event(
                 &event.reference,
                 None,
@@ -242,7 +253,7 @@ pub(super) fn apply_reverse_claim_source_observation(
                 json!({}),
                 record_changed_after_state(&event, claim_source),
                 format!(
-                    "record-change:{}:{}:{}",
+                    "{identity_kind}:{}:{}:{}",
                     event.reference.block_hash,
                     event
                         .reference

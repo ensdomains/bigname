@@ -337,23 +337,25 @@ async fn registration_with_records_reverse_and_referrer_derives_single_burst() -
         )
         .await?;
     assert_eq!(status, 200, "burst.eth records lookup failed: {records}");
-    assert_ne!(
+    assert_eq!(
         pointer(&records, "/data/coin_addresses/60/status"),
-        "success",
+        "not_found",
         "burst-written addr must not serve from the current anchor: {records}"
     );
-    assert_eq!(
-        pointer(&records, "/data/coin_addresses/60/value"),
-        Value::Null
+    assert!(
+        records.pointer("/data/coin_addresses/60/value").is_none(),
+        "not_found addr must omit value: {records}"
     );
-    assert_ne!(
+    assert_eq!(
         pointer(&records, "/data/text_records/com.twitter/status"),
-        "success",
+        "not_found",
         "burst-written text must not serve from the current anchor: {records}"
     );
-    assert_eq!(
-        pointer(&records, "/data/text_records/com.twitter/value"),
-        Value::Null
+    assert!(
+        records
+            .pointer("/data/text_records/com.twitter/value")
+            .is_none(),
+        "not_found text must omit value: {records}"
     );
 
     let (topics, data): (Vec<String>, Vec<u8>) = sqlx::query_as(

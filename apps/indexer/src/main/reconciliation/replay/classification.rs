@@ -13,6 +13,7 @@ use crate::reconciliation::types::{
 #[path = "classification/closure_boundary.rs"]
 mod closure_boundary;
 
+pub(crate) use closure_boundary::LegacyRegistryNewlyRequiredCoverage;
 use closure_boundary::{
     earliest_required_raw_fact_block, ensure_full_closure_retention_authority,
     ensure_legacy_registry_closure_retention_authority,
@@ -337,22 +338,27 @@ pub(crate) async fn classify_raw_fact_replay_contract(
         *to_block,
     )
     .await?;
-    let Some(closure_start_block) = earliest_required_raw_fact_block(
+    let closure_start_block = earliest_required_raw_fact_block(
         pool,
         &request.chain,
         closure_validation_source_scope,
         &closure_source_families,
     )
-    .await?
-    else {
-        bail!(
-            "normalized-event replay for closure/context-dependent adapter(s) {adapter_list} has no retained canonical raw fact boundary; explicit historical backfill/refetch or log-audit retention is required"
-        );
-    };
-    if from_block > closure_start_block {
-        bail!(
-            "normalized-event replay for closure/context-dependent adapter(s) {adapter_list} must start at closure boundary block {closure_start_block}; requested block {from_block}"
-        );
+    .await?;
+    if let Some(closure_start_block) = closure_start_block {
+        if from_block > closure_start_block {
+            bail!(
+                "normalized-event replay for closure/context-dependent adapter(s) {adapter_list} must start at closure boundary block {closure_start_block}; requested block {from_block}"
+            );
+        }
+    } else {
+        let input_version =
+            bigname_storage::load_raw_log_staging_input_version(pool, &request.chain).await?;
+        if from_block != 0 || input_version.retention_generation != 0 {
+            bail!(
+                "normalized-event replay for closure/context-dependent adapter(s) {adapter_list} has no retained canonical raw fact boundary; explicit historical backfill/refetch or log-audit retention is required"
+            );
+        }
     }
 
     let unsupported_adapters = nonstateless_contracts

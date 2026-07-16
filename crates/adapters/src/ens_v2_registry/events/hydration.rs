@@ -1,26 +1,26 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail, ensure};
 use bigname_storage::{NormalizedEvent, ens_v2_registry_resource_id, sql_row};
 use serde_json::Value;
-use sqlx::{PgPool, Postgres, QueryBuilder, Row, types::Uuid};
+use sqlx::{PgPool, postgres::PgRow, types::Uuid};
 
 use super::super::{
     constants::{
-        ABI_EVENT_LABEL_REGISTERED_SIGNATURE, ABI_EVENT_LABEL_RESERVED_SIGNATURE,
-        ABI_EVENT_LABEL_UNREGISTERED_SIGNATURE, ABI_EVENT_SIGNATURES,
-        ABI_EVENT_TOKEN_REGENERATED_SIGNATURE, ABI_EVENT_TOKEN_RESOURCE_SIGNATURE,
-        EVENT_KIND_SUBREGISTRY_CHANGED, EVENT_KIND_TOKEN_CONTROL_TRANSFERRED,
-        SOURCE_FAMILY_ENS_V2_ROOT_L1,
+        ABI_EVENT_SIGNATURES, EVENT_KIND_SUBREGISTRY_CHANGED, EVENT_KIND_TOKEN_CONTROL_TRANSFERRED,
     },
     decode::build_registry_observations,
     names::{observe_name, versionless_token_id},
     types::{ObservationRef, RegistryObservation, RegistryRawLogRow},
     util::{deterministic_uuid, normalize_address},
 };
+
+mod history;
+
 use crate::{
     adapter_manifest::ActiveManifestEventTopic0sBySignature, evm_abi::keccak_signature_hex,
 };
+use history::{load_linked_transfer_states, load_subregistry_target_rows};
 
 struct TargetRequest {
     event_index: i64,
@@ -43,8 +43,44 @@ struct TransferRequest {
     registry_address: String,
     token_id: String,
     block_number: i64,
+    block_hash: String,
     transaction_index: i64,
     log_index: i64,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct TransferHydrationKey {
+    chain_id: String,
+    namespace: String,
+    source_family: String,
+    source_manifest_id: i64,
+    manifest_version: i64,
+    registry_contract_instance_id: Uuid,
+    registry_address: String,
+    token_id: String,
+    block_number: i64,
+    block_hash: String,
+    transaction_index: i64,
+    log_index: i64,
+}
+
+impl From<&TransferRequest> for TransferHydrationKey {
+    fn from(request: &TransferRequest) -> Self {
+        Self {
+            chain_id: request.chain_id.clone(),
+            namespace: request.namespace.clone(),
+            source_family: request.source_family.clone(),
+            source_manifest_id: request.source_manifest_id,
+            manifest_version: request.manifest_version,
+            registry_contract_instance_id: request.registry_contract_instance_id,
+            registry_address: request.registry_address.clone(),
+            token_id: request.token_id.clone(),
+            block_number: request.block_number,
+            block_hash: request.block_hash.clone(),
+            transaction_index: request.transaction_index,
+            log_index: request.log_index,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -53,6 +89,13 @@ struct LinkedTransferState {
     upstream_resource: String,
     resource_id: Uuid,
     token_lineage_id: Uuid,
+}
+
+struct TransferLifecycle {
+    label: String,
+    registration_ref: ObservationRef,
+    current_token: String,
+    upstream_resource: Option<String>,
 }
 
 pub(in crate::ens_v2_registry) async fn hydrate_subregistry_event_target_ids(
@@ -121,81 +164,8 @@ pub(in crate::ens_v2_registry) async fn hydrate_subregistry_event_target_ids(
         return hydrate_cold_token_control_events(pool, events).await;
     }
 
-    let mut query = QueryBuilder::<Postgres>::new(
-        r#"
-        WITH requested (
-            event_index,
-            chain_id,
-            from_contract_instance_id,
-            target_address,
-            block_number,
-            block_hash
-        ) AS (
-        "#,
-    );
-    query.push_values(&requests, |mut row, request| {
-        row.push_bind(request.event_index)
-            .push_bind(&request.chain_id)
-            .push_bind(request.from_contract_instance_id)
-            .push_bind(&request.target_address)
-            .push_bind(request.block_number)
-            .push_bind(&request.block_hash);
-    });
-    query.push(
-        r#"
-        )
-        SELECT
-            requested.event_index,
-            discovery_edges.to_contract_instance_id
-        FROM requested
-        JOIN discovery_edges
-         ON discovery_edges.chain_id = requested.chain_id
-         AND discovery_edges.edge_kind = 'subregistry'
-         AND discovery_edges.from_contract_instance_id = requested.from_contract_instance_id
-         AND lower(discovery_edges.provenance ->> 'to_address') = requested.target_address
-         AND (
-             discovery_edges.deactivated_at IS NULL
-             OR discovery_edges.active_to_block_number IS NOT NULL
-         )
-         AND NOT EXISTS (
-             SELECT 1
-             FROM chain_lineage edge_start
-             WHERE edge_start.chain_id = discovery_edges.chain_id
-               AND edge_start.block_hash = discovery_edges.active_from_block_hash
-               AND edge_start.canonicality_state = 'orphaned'::canonicality_state
-         )
-         AND (
-             discovery_edges.active_from_block_number < requested.block_number
-             OR (
-                 discovery_edges.active_from_block_number = requested.block_number
-                 AND discovery_edges.active_from_block_hash = requested.block_hash
-             )
-         )
-         AND (
-             discovery_edges.active_to_block_number IS NULL
-             OR discovery_edges.active_to_block_number > requested.block_number
-             OR (
-                 discovery_edges.active_to_block_number = requested.block_number
-                 AND discovery_edges.active_to_block_hash = requested.block_hash
-             )
-         )
-        ORDER BY requested.event_index, discovery_edges.discovery_edge_id
-        "#,
-    );
-
-    let rows = query
-        .build()
-        .fetch_all(pool)
-        .await
-        .context("failed to load historical ENSv2 subregistry discovery targets")?;
     let mut targets_by_event = BTreeMap::<i64, Uuid>::new();
-    for row in rows {
-        let event_index = row
-            .try_get::<i64, _>("event_index")
-            .context("failed to read SubregistryChanged event index")?;
-        let target_id = row
-            .try_get::<Uuid, _>("to_contract_instance_id")
-            .context("failed to read SubregistryChanged target contract instance")?;
+    for (event_index, target_id) in load_subregistry_target_rows(pool, &requests).await? {
         if targets_by_event
             .insert(event_index, target_id)
             .is_some_and(|existing| existing != target_id)
@@ -231,15 +201,12 @@ async fn hydrate_cold_token_control_events(
         })
         .map(|(event_index, event)| transfer_request(event_index, event))
         .collect::<Result<Vec<_>>>()?;
-    let mut hydrated = HashMap::<TransferRequest, LinkedTransferState>::new();
+    let hydrated = load_linked_transfer_states(pool, &requests).await?;
     for request in requests {
-        let state = if let Some(state) = hydrated.get(&request) {
-            state.clone()
-        } else {
-            let state = load_linked_transfer_state(pool, &request).await?;
-            hydrated.insert(request.clone(), state.clone());
-            state
-        };
+        let state = hydrated
+            .get(&TransferHydrationKey::from(&request))
+            .cloned()
+            .context("cold ENSv2 transfer hydration result is absent")?;
         let event = events
             .get_mut(request.event_index)
             .context("cold ENSv2 transfer request has an unknown event index")?;
@@ -296,6 +263,10 @@ fn transfer_request(event_index: usize, event: &NormalizedEvent) -> Result<Trans
         block_number: event
             .block_number
             .with_context(|| format!("TokenControlTransferred event {identity} is missing block_number"))?,
+        block_hash: event
+            .block_hash
+            .clone()
+            .with_context(|| format!("TokenControlTransferred event {identity} is missing block_hash"))?,
         transaction_index: event.raw_fact_ref["transaction_index"]
             .as_i64()
             .with_context(|| {
@@ -307,67 +278,14 @@ fn transfer_request(event_index: usize, event: &NormalizedEvent) -> Result<Trans
     })
 }
 
-async fn load_linked_transfer_state(
-    pool: &PgPool,
+fn linked_transfer_state_from_rows(
     request: &TransferRequest,
+    event_topics: &ActiveManifestEventTopic0sBySignature,
+    rows: Vec<PgRow>,
+    suffix: &str,
 ) -> Result<LinkedTransferState> {
-    let event_topics = registry_event_topics();
-    let predecessor_topics = [
-        ABI_EVENT_LABEL_REGISTERED_SIGNATURE,
-        ABI_EVENT_LABEL_RESERVED_SIGNATURE,
-        ABI_EVENT_LABEL_UNREGISTERED_SIGNATURE,
-        ABI_EVENT_TOKEN_RESOURCE_SIGNATURE,
-        ABI_EVENT_TOKEN_REGENERATED_SIGNATURE,
-    ]
-    .into_iter()
-    .map(|signature| keccak_signature_hex(signature))
-    .collect::<Vec<_>>();
-    let rows = sqlx::query(
-        r#"
-        SELECT
-            raw.chain_id,
-            raw.block_hash,
-            raw.block_number,
-            lineage.block_timestamp,
-            raw.transaction_hash,
-            raw.transaction_index,
-            raw.log_index,
-            raw.emitting_address,
-            raw.topics,
-            raw.data,
-            raw.canonicality_state::TEXT AS canonicality_state
-        FROM raw_logs raw
-        JOIN chain_lineage lineage
-          ON lineage.chain_id = raw.chain_id
-         AND lineage.block_hash = raw.block_hash
-         AND lineage.block_number = raw.block_number
-        WHERE raw.chain_id = $1
-          AND lower(raw.emitting_address) = $2
-          AND raw.topics[1] = ANY($3::TEXT[])
-          AND raw.canonicality_state <> 'orphaned'::canonicality_state
-          AND lineage.canonicality_state <> 'orphaned'::canonicality_state
-          AND (raw.block_number, raw.transaction_index, raw.log_index)
-              < ($4::BIGINT, $5::BIGINT, $6::BIGINT)
-        ORDER BY raw.block_number, raw.transaction_index, raw.log_index, raw.raw_log_id
-        "#,
-    )
-    .bind(&request.chain_id)
-    .bind(&request.registry_address)
-    .bind(&predecessor_topics)
-    .bind(request.block_number)
-    .bind(request.transaction_index)
-    .bind(request.log_index)
-    .fetch_all(pool)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to load retained ENSv2 transfer predecessors for {} {}",
-            request.registry_address, request.token_id
-        )
-    })?;
-
     let target_identity = versionless_token_id(&request.token_id);
-    let mut lifecycle: Option<(String, ObservationRef, String, Option<String>)> = None;
+    let mut lifecycle = None::<TransferLifecycle>;
     for row in rows {
         let raw_log = RegistryRawLogRow {
             chain_id: sql_row::get(&row, "chain_id")?,
@@ -388,7 +306,7 @@ async fn load_linked_transfer_state(
             manifest_version: request.manifest_version,
             normalizer_version: String::new(),
         };
-        for observation in build_registry_observations(&raw_log, &event_topics)? {
+        for observation in build_registry_observations(&raw_log, event_topics)? {
             match observation {
                 RegistryObservation::LabelRegistered {
                     token_id,
@@ -396,14 +314,15 @@ async fn load_linked_transfer_state(
                     reference,
                     ..
                 } if versionless_token_id(&token_id) == target_identity => {
-                    lifecycle = Some((label, reference, token_id, None));
+                    lifecycle = Some(TransferLifecycle {
+                        label,
+                        registration_ref: reference,
+                        current_token: token_id,
+                        upstream_resource: None,
+                    });
                 }
                 RegistryObservation::LabelReserved { token_id, .. }
-                    if versionless_token_id(&token_id) == target_identity =>
-                {
-                    lifecycle = None;
-                }
-                RegistryObservation::LabelUnregistered { token_id, .. }
+                | RegistryObservation::LabelUnregistered { token_id, .. }
                     if versionless_token_id(&token_id) == target_identity =>
                 {
                     lifecycle = None;
@@ -414,9 +333,12 @@ async fn load_linked_transfer_state(
                     ..
                 } if lifecycle
                     .as_ref()
-                    .is_some_and(|(_, _, current_token, _)| current_token == &token_id) =>
+                    .is_some_and(|lifecycle| lifecycle.current_token == token_id) =>
                 {
-                    lifecycle.as_mut().expect("checked lifecycle").3 = Some(upstream_resource);
+                    lifecycle
+                        .as_mut()
+                        .expect("checked lifecycle")
+                        .upstream_resource = Some(upstream_resource);
                 }
                 RegistryObservation::TokenRegenerated {
                     old_token_id,
@@ -424,41 +346,45 @@ async fn load_linked_transfer_state(
                     ..
                 } if lifecycle
                     .as_ref()
-                    .is_some_and(|(_, _, current_token, _)| current_token == &old_token_id) =>
+                    .is_some_and(|lifecycle| lifecycle.current_token == old_token_id) =>
                 {
-                    lifecycle.as_mut().expect("checked lifecycle").2 = new_token_id;
+                    lifecycle.as_mut().expect("checked lifecycle").current_token = new_token_id;
                 }
                 _ => {}
             }
         }
     }
 
-    let (label, registration_ref, current_token, upstream_resource) = lifecycle.with_context(|| {
+    let lifecycle = lifecycle.with_context(|| {
         format!(
             "ENSv2 TokenControlTransferred {} {} is missing a retained non-orphaned LabelRegistered predecessor",
             request.registry_address, request.token_id
         )
     })?;
     ensure!(
-        current_token == request.token_id,
+        lifecycle.current_token == request.token_id,
         "ENSv2 TokenControlTransferred {} {} is missing a complete retained TokenRegenerated predecessor chain",
         request.registry_address,
         request.token_id
     );
-    let upstream_resource = upstream_resource.with_context(|| {
+    let upstream_resource = lifecycle.upstream_resource.with_context(|| {
         format!(
             "ENSv2 TokenControlTransferred {} {} is missing a retained non-orphaned TokenResource predecessor",
             request.registry_address, request.token_id
         )
     })?;
-    let suffix = load_registry_suffix(pool, request).await?;
     let full_name = if suffix.is_empty() {
-        label.clone()
+        lifecycle.label.clone()
     } else {
-        format!("{label}.{suffix}")
+        format!("{}.{suffix}", lifecycle.label)
     };
-    let name = observe_name(&request.namespace, &full_name, &registration_ref, &label)
-        .with_context(|| format!("failed to normalize retained ENSv2 transfer name {full_name}"))?;
+    let name = observe_name(
+        &request.namespace,
+        &full_name,
+        &lifecycle.registration_ref,
+        &lifecycle.label,
+    )
+    .with_context(|| format!("failed to normalize retained ENSv2 transfer name {full_name}"))?;
     let resource_id = ens_v2_registry_resource_id(
         &request.chain_id,
         request.registry_contract_instance_id,
@@ -474,69 +400,6 @@ async fn load_linked_transfer_state(
         resource_id,
         token_lineage_id,
     })
-}
-
-async fn load_registry_suffix(pool: &PgPool, request: &TransferRequest) -> Result<String> {
-    if request.source_family == SOURCE_FAMILY_ENS_V2_ROOT_L1 {
-        return Ok(String::new());
-    }
-    let manifest_declared = sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM manifest_contract_instances
-            WHERE manifest_id = $1
-              AND contract_instance_id = $2
-        )
-        "#,
-    )
-    .bind(request.source_manifest_id)
-    .bind(request.registry_contract_instance_id)
-    .fetch_one(pool)
-    .await
-    .context("failed to classify ENSv2 transfer registry emitter")?;
-    if manifest_declared {
-        return Ok("eth".to_owned());
-    }
-
-    let logical_name_id = sqlx::query_scalar::<_, Option<String>>(
-        r#"
-        SELECT edge.provenance ->> 'logical_name_id'
-        FROM discovery_edges edge
-        WHERE edge.chain_id = $1
-          AND edge.edge_kind = 'subregistry'
-          AND edge.to_contract_instance_id = $2
-          AND (edge.deactivated_at IS NULL OR edge.active_to_block_number IS NOT NULL)
-          AND NOT EXISTS (
-              SELECT 1
-              FROM chain_lineage edge_start
-              WHERE edge_start.chain_id = edge.chain_id
-                AND edge_start.block_hash = edge.active_from_block_hash
-                AND edge_start.canonicality_state = 'orphaned'::canonicality_state
-          )
-          AND edge.active_from_block_number <= $3
-          AND (edge.active_to_block_number IS NULL OR edge.active_to_block_number >= $3)
-        ORDER BY edge.active_from_block_number DESC, edge.discovery_edge_id DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(&request.chain_id)
-    .bind(request.registry_contract_instance_id)
-    .bind(request.block_number)
-    .fetch_optional(pool)
-    .await
-    .context("failed to load discovered ENSv2 registry suffix for transfer")?
-    .flatten()
-    .with_context(|| {
-        format!(
-            "ENSv2 TokenControlTransferred {} {} has no retained canonical registry-parent discovery edge",
-            request.registry_address, request.token_id
-        )
-    })?;
-    logical_name_id
-        .strip_prefix(&format!("{}:", request.namespace))
-        .map(str::to_owned)
-        .with_context(|| format!("ENSv2 registry parent {logical_name_id} has the wrong namespace"))
 }
 
 fn registry_event_topics() -> ActiveManifestEventTopic0sBySignature {

@@ -306,7 +306,11 @@ fn query_encode(value: &str) -> String {
 fn authoritative_position_timestamp(chain_positions: &Value) -> Result<&str> {
     chain_positions
         .as_object()
-        .and_then(|positions| positions.get("ethereum").or_else(|| positions.values().next()))
+        .and_then(|positions| {
+            positions
+                .get("ethereum")
+                .or_else(|| positions.values().next())
+        })
         .and_then(|position| position.get("timestamp"))
         .and_then(Value::as_str)
         .context("chain_positions must include an authoritative timestamp")
@@ -1028,8 +1032,9 @@ async fn assert_ensv1_dynamic_profile_pending_or_unsupported_readback(
         resolver_family_reason(record_inventory_row, "addr").context("missing addr reason")?;
     let text_unsupported_reason =
         resolver_family_reason(record_inventory_row, "text").context("missing text reason")?;
-    let contenthash_unsupported_reason = resolver_family_reason(record_inventory_row, "contenthash")
-        .context("missing contenthash reason")?;
+    let contenthash_unsupported_reason =
+        resolver_family_reason(record_inventory_row, "contenthash")
+            .context("missing contenthash reason")?;
     let payload = get_resolution_payload(
         database,
         "/v1/profiles/names/alice.eth?mode=declared&meta=full",
@@ -1136,8 +1141,9 @@ async fn assert_basenames_dynamic_profile_pending_or_unsupported_readback(
         resolver_family_reason(record_inventory_row, "addr").context("missing addr reason")?;
     let text_unsupported_reason =
         resolver_family_reason(record_inventory_row, "text").context("missing text reason")?;
-    let contenthash_unsupported_reason = resolver_family_reason(record_inventory_row, "contenthash")
-        .context("missing contenthash reason")?;
+    let contenthash_unsupported_reason =
+        resolver_family_reason(record_inventory_row, "contenthash")
+            .context("missing contenthash reason")?;
     let payload = get_resolution_payload(
         database,
         "/v1/profiles/names/alice.base.eth?mode=declared&meta=full",
@@ -1299,10 +1305,7 @@ async fn assert_basenames_dynamic_profile_pending_or_unsupported_overview(
         Some(&json!("resolver_family_pending")),
         "case {case_label}"
     );
-    assert!(
-        payload.get("verified_state").is_none(),
-        "case {case_label}"
-    );
+    assert!(payload.get("verified_state").is_none(), "case {case_label}");
 
     Ok(())
 }
@@ -2022,10 +2025,7 @@ async fn dynamic_resolver_profile_gate_controls_basenames_l2resolver_readback() 
                 "namehash": "namehash:alice.base.eth",
         }])
     );
-    assert_eq!(
-        supported_overview_payload["data"]["aliases"],
-        json!([])
-    );
+    assert_eq!(supported_overview_payload["data"]["aliases"], json!([]));
     assert_eq!(supported_overview_payload["data"]["roles"], json!([]));
     assert_eq!(supported_overview_payload["data"]["events"], Value::Null);
     assert_eq!(
@@ -2038,8 +2038,7 @@ async fn dynamic_resolver_profile_gate_controls_basenames_l2resolver_readback() 
         })
     );
     assert_eq!(
-        supported_overview_payload["meta"]["coverage"]
-            .get("unsupported_reason"),
+        supported_overview_payload["meta"]["coverage"].get("unsupported_reason"),
         Some(&Value::Null)
     );
     assert_eq!(
@@ -2301,19 +2300,14 @@ async fn resolution_inferred_route_matches_canonical_basenames_and_keeps_verifie
     let inferred_verified_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(
-                    "/v1/resolve/alice.base.eth?mode=verified&records=text:com.twitter,addr:60",
-                )
+                .uri("/v1/resolve/alice.base.eth?mode=verified&records=text:com.twitter,addr:60")
                 .body(Body::empty())
                 .expect("inferred Basenames verified request must build"),
         )
         .await
         .context("inferred Basenames verified resolution request failed")?;
 
-    assert_eq!(
-        canonical_verified_response.status(),
-        StatusCode::CONFLICT
-    );
+    assert_eq!(canonical_verified_response.status(), StatusCode::CONFLICT);
     assert_eq!(inferred_verified_response.status(), StatusCode::CONFLICT);
 
     assert_eq!(inferred_declared_payload, canonical_declared_payload);
@@ -3568,10 +3562,8 @@ async fn resolution_contract_reuses_exact_name_envelope_fields() -> Result<()> {
         name_row.chain_positions.clone(),
     )?;
     let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000068);
-    let persisted_verified_queries = resolution_execution_verified_queries(
-        execution_trace_id,
-        &["text:com.twitter", "addr:60"],
-    );
+    let persisted_verified_queries =
+        resolution_execution_verified_queries(execution_trace_id, &["text:com.twitter", "addr:60"]);
     upsert_execution_trace(
         &database.pool,
         &resolution_execution_trace(
@@ -3695,10 +3687,7 @@ async fn resolution_contract_reuses_exact_name_snapshot_selector_for_at_and_chai
     );
 
     for (case_label, selector_query) in [
-        (
-            "at",
-            format!("at={selected_at}&consistency=finalized"),
-        ),
+        ("at", format!("at={selected_at}&consistency=finalized")),
         (
             "chain_positions",
             format!("chain_positions={selected_chain_positions}&consistency=finalized"),
@@ -3736,7 +3725,10 @@ async fn resolution_contract_reuses_exact_name_snapshot_selector_for_at_and_chai
             resolution_payload.provenance, name_payload.provenance,
             "{case_label}"
         );
-        assert_eq!(resolution_payload.coverage, name_payload.coverage, "{case_label}");
+        assert_eq!(
+            resolution_payload.coverage, name_payload.coverage,
+            "{case_label}"
+        );
         assert_eq!(
             resolution_payload.chain_positions, name_payload.chain_positions,
             "{case_label}"
@@ -4945,14 +4937,8 @@ async fn resolver_overview_contract_returns_declared_state_with_shared_projectio
     assert_eq!(response.status(), StatusCode::OK);
 
     let payload: Value = read_json(response).await?;
-    assert_eq!(
-        payload["data"]["chain_id"],
-        json!(chain_id)
-    );
-    assert_eq!(
-        payload["data"]["resolver_address"],
-        json!(resolver_address)
-    );
+    assert_eq!(payload["data"]["chain_id"], json!(chain_id));
+    assert_eq!(payload["data"]["resolver_address"], json!(resolver_address));
     assert_eq!(
         payload["data"]["counts"],
         json!({
@@ -5042,7 +5028,10 @@ async fn resolver_overview_contract_returns_declared_state_with_shared_projectio
         })
     );
     assert_eq!(payload["meta"]["consistency"], json!("finalized"));
-    assert_eq!(payload["meta"]["last_updated"], json!("2025-06-01T17:50:02Z"));
+    assert_eq!(
+        payload["meta"]["last_updated"],
+        json!("2025-06-01T17:50:02Z")
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -5179,15 +5168,9 @@ async fn resolver_overview_contract_reads_basenames_truth_from_resolver_and_perm
     assert_eq!(raw_only_response.status(), StatusCode::OK);
 
     let raw_only_payload: Value = read_json(raw_only_response).await?;
-    assert_eq!(
-        raw_only_payload["data"]["counts"]["nodes"],
-        json!(1)
-    );
+    assert_eq!(raw_only_payload["data"]["counts"]["nodes"], json!(1));
     assert_eq!(raw_only_payload["data"]["counts"]["aliases"], json!(0));
-    assert_eq!(
-        raw_only_payload["data"]["counts"]["role_holders"],
-        json!(0)
-    );
+    assert_eq!(raw_only_payload["data"]["counts"]["role_holders"], json!(0));
     assert_eq!(raw_only_payload["data"]["counts"]["events"], json!(1));
     assert_eq!(raw_only_payload["data"]["aliases"], json!([]));
     assert_eq!(raw_only_payload["data"]["roles"], json!([]));
@@ -5213,22 +5196,13 @@ async fn resolver_overview_contract_reads_basenames_truth_from_resolver_and_perm
     assert_eq!(response.status(), StatusCode::OK);
 
     let payload: Value = read_json(response).await?;
-    assert_eq!(
-        payload["data"]["chain_id"],
-        json!("base-mainnet")
-    );
-    assert_eq!(
-        payload["data"]["resolver_address"],
-        json!(resolver_address)
-    );
+    assert_eq!(payload["data"]["chain_id"], json!("base-mainnet"));
+    assert_eq!(payload["data"]["resolver_address"], json!(resolver_address));
     assert_eq!(payload["data"]["counts"]["nodes"], json!(1));
     assert_eq!(payload["data"]["counts"]["aliases"], json!(0));
     assert_eq!(payload["data"]["counts"]["role_holders"], json!(1));
     assert_eq!(payload["data"]["counts"]["events"], json!(3));
-    assert_eq!(
-        payload["data"]["aliases"],
-        json!([])
-    );
+    assert_eq!(payload["data"]["aliases"], json!([]));
     assert_eq!(
         payload["data"]["roles"][0],
         json!({
@@ -5342,15 +5316,9 @@ async fn resolver_overview_contract_reads_ensv2_summary_without_expanding_permis
     assert_eq!(raw_only_response.status(), StatusCode::OK);
 
     let raw_only_payload: Value = read_json(raw_only_response).await?;
-    assert_eq!(
-        raw_only_payload["data"]["counts"]["nodes"],
-        json!(1)
-    );
+    assert_eq!(raw_only_payload["data"]["counts"]["nodes"], json!(1));
     assert_eq!(raw_only_payload["data"]["counts"]["aliases"], json!(0));
-    assert_eq!(
-        raw_only_payload["data"]["counts"]["role_holders"],
-        json!(0)
-    );
+    assert_eq!(raw_only_payload["data"]["counts"]["role_holders"], json!(0));
     assert_eq!(raw_only_payload["data"]["counts"]["events"], json!(1));
     assert_eq!(raw_only_payload["data"]["aliases"], json!([]));
     assert_eq!(raw_only_payload["data"]["roles"], json!([]));
@@ -5405,19 +5373,10 @@ async fn resolver_overview_contract_reads_ensv2_summary_without_expanding_permis
     assert_eq!(response.status(), StatusCode::OK);
 
     let payload: Value = read_json(response).await?;
-    assert_eq!(
-        payload["data"]["chain_id"],
-        json!("ethereum-mainnet")
-    );
-    assert_eq!(
-        payload["data"]["resolver_address"],
-        json!(resolver_address)
-    );
+    assert_eq!(payload["data"]["chain_id"], json!("ethereum-mainnet"));
+    assert_eq!(payload["data"]["resolver_address"], json!(resolver_address));
     assert_eq!(payload["data"]["counts"]["nodes"], json!(1));
-    assert_eq!(
-        payload["data"]["nodes"][0]["name"],
-        json!("Alice.eth")
-    );
+    assert_eq!(payload["data"]["nodes"][0]["name"], json!("Alice.eth"));
     assert_eq!(
         payload["data"]["nodes"][0]["normalized_name"],
         json!("alice.eth")
@@ -5477,6 +5436,100 @@ async fn resolver_overview_contract_reads_ensv2_summary_without_expanding_permis
 }
 
 #[tokio::test]
+async fn permission_publication_version_gates_every_permission_backed_route_and_expansion()
+-> Result<()> {
+    let database = HarnessDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    let resource_id = Uuid::from_u128(0xa2ff);
+    bigname_storage::upsert_raw_blocks(
+        &database.pool,
+        &[raw_block(
+            "ethereum-mainnet",
+            "0xpermissionpublication",
+            None,
+            200,
+            1_776_000_200,
+        )],
+    )
+    .await
+    .context("failed to seed permission publication snapshot lineage")?;
+
+    let v2_snapshot = "at=2100-01-01T00%3A00%3A00Z&finality=latest";
+    let gated_routes = [
+        format!("/v1/roles?account={address}"),
+        "/v1/names/ens/publication-gate.eth/roles".to_owned(),
+        format!("/v1/resources/{resource_id}/permissions"),
+        format!("/v1/addresses/{address}/names?include=role_summary"),
+        format!("/v2/permissions?address={address}&{v2_snapshot}"),
+        format!(
+            "/v2/addresses/{address}/names?include=role_summary&{v2_snapshot}"
+        ),
+    ];
+    let ungated_base_routes = [
+        format!("/v1/addresses/{address}/names"),
+        format!("/v2/addresses/{address}/names?{v2_snapshot}"),
+    ];
+
+    for version_case in ["absent", "old"] {
+        if version_case == "old" {
+            sqlx::query(
+                r#"
+                INSERT INTO permissions_current_publication (projection, publication_version)
+                VALUES ('permissions_current', 1)
+                "#,
+            )
+            .execute(&database.pool)
+            .await
+            .context("failed to insert old permission publication version")?;
+        }
+
+        for uri in &gated_routes {
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("permission publication request must build"),
+                )
+                .await
+                .with_context(|| format!("{version_case} publication request failed for {uri}"))?;
+            assert_eq!(
+                response.status(),
+                StatusCode::CONFLICT,
+                "{version_case} publication must gate {uri}"
+            );
+            let payload: Value = read_json(response).await?;
+            assert_eq!(
+                payload["error"]["code"],
+                json!("stale"),
+                "{version_case} publication must fail closed for {uri}"
+            );
+        }
+
+        for uri in &ungated_base_routes {
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("base address-name request must build"),
+                )
+                .await
+                .with_context(|| {
+                    format!("{version_case} publication base request failed for {uri}")
+                })?;
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "permission publication compatibility must be conditional for {uri}"
+            );
+        }
+    }
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn resource_permissions_contract_returns_rows_with_shared_collection_envelope() -> Result<()>
 {
     let database = HarnessDatabase::new().await?;
@@ -5525,6 +5578,7 @@ async fn resource_permissions_contract_returns_rows_with_shared_collection_envel
     )
     .await
     .context("failed to upsert permissions_current resource summary for conformance")?;
+    mark_permissions_current_projection_ready(&database).await?;
 
     let response = app_router(database.app_state())
         .oneshot(
@@ -6059,6 +6113,7 @@ async fn resource_permissions_contract_honors_subject_and_scope_filters() -> Res
     )
     .await
     .context("failed to upsert permissions_current filter rows for conformance")?;
+    mark_permissions_current_projection_ready(&database).await?;
 
     let subject_response = app_router(database.app_state())
         .oneshot(

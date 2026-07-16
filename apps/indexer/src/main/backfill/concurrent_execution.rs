@@ -171,6 +171,8 @@ pub(crate) async fn run_resumable_hash_pinned_backfill_job_concurrently(
     );
 }
 
+// The concurrent runner keeps its independently validated job inputs explicit.
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn run_resumable_coinbase_sql_backfill_job_concurrently<
     H: HistoricalBackfillSourceOps + Clone + Send + Sync + 'static,
 >(

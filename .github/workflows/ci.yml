@@ -68,8 +68,31 @@ jobs:
       - name: cargo check (e2e workspace)
         run: cargo check --manifest-path tests/e2e/Cargo.toml --locked --all-targets
 
-      - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --all-features
+      - name: cargo clippy (strict workspace packages)
+        run: cargo clippy --workspace --all-targets --all-features --exclude bigname-adapters --no-deps -- -D warnings
+
+      # The adapter crate still carries pre-existing warning classes. Deny
+      # every other warning here so new lint classes cannot silently widen the
+      # baseline while those targeted classes are paid down.
+      - name: cargo clippy (adapter warning-class baseline)
+        run: >-
+          cargo clippy -p bigname-adapters --all-targets --all-features --
+          -D warnings
+          -A clippy::unusual-byte-groupings
+          -A clippy::too-many-arguments
+          -A clippy::needless-question-mark
+          -A clippy::collapsible-if
+          -A clippy::needless-borrows-for-generic-args
+          -A clippy::explicit-auto-deref
+          -A clippy::needless-borrow
+          -A clippy::filter-map-bool-then
+          -A clippy::match-like-matches-macro
+          -A clippy::borrow-deref-ref
+          -A clippy::needless-option-as-deref
+          -A clippy::needless-return
+          -A clippy::redundant-closure
+          -A clippy::bool-assert-comparison
+          -A clippy::cloned-ref-to-slice-refs
 
       - name: cargo clippy (e2e workspace)
         run: cargo clippy --manifest-path tests/e2e/Cargo.toml --locked --all-targets -- -D warnings

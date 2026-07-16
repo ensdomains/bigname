@@ -56,9 +56,9 @@ pub(crate) async fn load_backfill_topic_plan(
     let source_families_without_topics = source_families
         .iter()
         .filter(|source_family| {
-            !topics_by_family
+            topics_by_family
                 .get(*source_family)
-                .is_some_and(|topics| !topics.is_empty())
+                .is_none_or(|topics| topics.is_empty())
         })
         .cloned()
         .collect::<BTreeSet<_>>();

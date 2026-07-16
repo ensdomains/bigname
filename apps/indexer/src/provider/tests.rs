@@ -662,7 +662,7 @@ fn provider_registry_rejects_configured_chains_outside_admitted_set() -> Result<
     ])?;
 
     let error = registry
-        .ensure_configured_chains_admitted(["base-mainnet", "ethereum-mainnet"].into_iter())
+        .ensure_configured_chains_admitted(["base-mainnet", "ethereum-mainnet"])
         .expect_err("out-of-profile provider must be rejected");
 
     assert!(

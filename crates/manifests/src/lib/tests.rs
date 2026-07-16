@@ -157,6 +157,38 @@ impl TestDatabase {
     }
 }
 
+async fn reconcile_discovery_observations(
+    pool: &PgPool,
+    discovery_source: &str,
+    observations: &[DiscoveryObservation],
+) -> Result<DiscoveryReconciliationSummary> {
+    super::reconcile_discovery_observations(
+        pool,
+        discovery_source,
+        observations,
+        FullDiscoveryReconciliationOptions::default(),
+    )
+    .await
+}
+
+async fn reconcile_discovery_observations_through_block(
+    pool: &PgPool,
+    discovery_source: &str,
+    observations: &[DiscoveryObservation],
+    through_block_number: i64,
+) -> Result<DiscoveryReconciliationSummary> {
+    super::reconcile_discovery_observations(
+        pool,
+        discovery_source,
+        observations,
+        FullDiscoveryReconciliationOptions {
+            through_block_number: Some(through_block_number),
+            expected_admission_epoch: None,
+        },
+    )
+    .await
+}
+
 fn manifest_contents(
     rollout_status: &str,
     root_address: &str,
@@ -638,6 +670,10 @@ async fn insert_test_chain_lineage_state(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "coverage trust fixtures keep job bounds and fact bounds explicit at each call site"
+)]
 async fn insert_untrusted_backfill_coverage_fact(
     pool: &PgPool,
     chain: &str,
@@ -5680,6 +5716,111 @@ async fn full_discovery_reconciliation_preserves_newer_same_address_epoch() -> R
         .await?,
         vec![(30, Some(40), false), (40, None, true)],
         "same-address epochs must remain chronological across a bounded full replay"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn scoped_discovery_reconciliation_rejects_orphaned_same_source_ancestry() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+
+    let chain = "ethereum-sepolia";
+    let discovery_source = "ens_v2_registry_subregistry:ethereum-sepolia";
+    let registry_address = "0x67b728a792e789a8978b30cf1b3b641f19354b43";
+    let losing_child = "0x0000000000000000000000000000000000000e40";
+    let inadmissible_grandchild = "0x0000000000000000000000000000000000000e41";
+    let losing_hash = format!("0x{:064x}", 140);
+    let later_hash = format!("0x{:064x}", 141);
+    insert_test_chain_lineage_state(database.pool(), chain, &losing_hash, 140, "canonical").await?;
+    insert_test_chain_lineage_state(database.pool(), chain, &later_hash, 141, "canonical").await?;
+    let observation =
+        |key: &str, from_address: &str, to_address: &str, block_number: i64, block_hash: &str| {
+            DiscoveryObservation {
+                chain: chain.to_owned(),
+                from_address: from_address.to_owned(),
+                to_address: to_address.to_owned(),
+                edge_kind: "subregistry".to_owned(),
+                discovery_source: discovery_source.to_owned(),
+                active_from_block_number: Some(block_number),
+                active_from_block_hash: Some(block_hash.to_owned()),
+                active_to_block_number: None,
+                active_to_block_hash: None,
+                provenance: serde_json::json!({
+                    "provider": "unit-test",
+                    "observation_key": key,
+                }),
+            }
+        };
+
+    let initial = reconcile_scoped_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[observation(
+            "orphaned-ancestry-parent",
+            registry_address,
+            losing_child,
+            140,
+            &losing_hash,
+        )],
+    )
+    .await?;
+    assert_eq!(initial.inserted_edge_count, 1);
+    sqlx::query(
+        r#"
+        UPDATE chain_lineage
+        SET canonicality_state = 'orphaned'::canonicality_state
+        WHERE chain_id = $1
+          AND block_hash = $2
+        "#,
+    )
+    .bind(chain)
+    .bind(&losing_hash)
+    .execute(database.pool())
+    .await?;
+    let epoch_before_descendant = load_discovery_admission_epoch(database.pool(), chain).await?;
+
+    let descendant = reconcile_scoped_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[observation(
+            "orphaned-ancestry-descendant",
+            losing_child,
+            inadmissible_grandchild,
+            141,
+            &later_hash,
+        )],
+    )
+    .await?;
+
+    assert_eq!(descendant.active_edge_count, 1);
+    assert_eq!(descendant.admitted_edge_count, 0);
+    assert_eq!(descendant.inserted_edge_count, 0);
+    assert_eq!(descendant.admission_epoch_bump_count, 0);
+    assert_eq!(
+        load_discovery_admission_epoch(database.pool(), chain).await?,
+        epoch_before_descendant,
+        "an orphaned same-source edge must not authorize a descendant or bump the admission epoch"
+    );
+    assert_eq!(
+        query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM discovery_edges edge
+            JOIN contract_instance_addresses address
+              ON address.contract_instance_id = edge.to_contract_instance_id
+            WHERE edge.discovery_source = $1
+              AND address.address = $2
+            "#,
+        )
+        .bind(discovery_source)
+        .bind(inadmissible_grandchild)
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "the orphaned ancestry window must not materialize a descendant edge"
     );
 
     database.cleanup().await

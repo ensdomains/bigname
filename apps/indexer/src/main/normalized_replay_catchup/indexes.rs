@@ -4,10 +4,12 @@ use bigname_storage::{
     TEMPORARY_NORMALIZED_REPLAY_INDEXES, acquire_normalized_replay_index_ddl_guard,
     count_unready_normalized_event_indexes,
 };
-use sqlx::{PgConnection, PgPool, Row};
+use sqlx::{PgConnection, PgPool};
 use tracing::info;
 
-use super::{CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS, NormalizedReplayCursor};
+use crate::reconciliation::guard_release::prioritize_operation_error;
+
+use super::{CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS, NormalizedReplayCursor, cursors};
 
 const CURRENT_PROJECTION_TABLES: &[&str] = &[
     "address_names_current",
@@ -170,10 +172,7 @@ async fn finish_normalized_replay_index_ddl<T>(
     operation: Result<T>,
 ) -> Result<T> {
     let release = guard.release().await;
-    match (operation, release) {
-        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
-        (Ok(value), Ok(())) => Ok(value),
-    }
+    prioritize_operation_error(operation, release)
 }
 
 async fn projection_indexes_need_restore(pool: &PgPool) -> Result<bool> {
@@ -224,6 +223,8 @@ async fn current_projection_tables_empty(connection: &mut PgConnection) -> Resul
 }
 
 #[cfg(test)]
+// These focused index-readiness tests stay beside the helper they exercise.
+#[expect(clippy::items_after_test_module)]
 mod tests {
     use sqlx::types::time::OffsetDateTime;
 
@@ -269,79 +270,7 @@ pub(super) async fn all_configured_cursors_complete(
     deployment_profile: &str,
     chains: &[String],
 ) -> Result<bool> {
-    let cursor_rows = sqlx::query(
-        r#"
-        WITH configured_chains AS (
-            SELECT DISTINCT UNNEST($3::TEXT[]) AS chain_id
-        )
-        SELECT
-            configured_chains.chain_id,
-            cursor.next_block_number,
-            cursor.target_block_number
-        FROM configured_chains
-        LEFT JOIN normalized_replay_cursors AS cursor
-          ON cursor.deployment_profile = $1
-         AND cursor.cursor_kind = $2
-         AND cursor.chain_id = configured_chains.chain_id
-        "#,
-    )
-    .bind(deployment_profile)
-    .bind(CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS)
-    .bind(chains)
-    .fetch_all(pool)
-    .await
-    .with_context(|| {
-        format!("failed to inspect normalized replay cursor completion for {deployment_profile}")
-    })?;
-
-    let mut missing_cursor_chains = Vec::new();
-    for row in cursor_rows {
-        let chain_id = row
-            .try_get::<String, _>("chain_id")
-            .context("missing configured chain id")?;
-        let next_block_number = row
-            .try_get::<Option<i64>, _>("next_block_number")
-            .context("missing normalized replay next block number")?;
-        let target_block_number = row
-            .try_get::<Option<i64>, _>("target_block_number")
-            .context("missing normalized replay target block number")?;
-        match (next_block_number, target_block_number) {
-            (Some(next), Some(target)) if next > target => {}
-            (Some(_), Some(_)) => return Ok(false),
-            _ => missing_cursor_chains.push(chain_id),
-        }
-    }
-
-    for chain in missing_cursor_chains {
-        if chain_has_canonical_raw_logs(pool, &chain).await? {
-            return Ok(false);
-        }
-    }
-
-    Ok(true)
-}
-
-async fn chain_has_canonical_raw_logs(pool: &PgPool, chain: &str) -> Result<bool> {
-    sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT (
-            SELECT raw_log_id
-            FROM raw_logs
-            WHERE raw_logs.chain_id = $1
-              AND raw_logs.canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
-            ORDER BY raw_logs.block_number DESC
-            LIMIT 1
-        ) IS NOT NULL
-        "#,
-    )
-    .bind(chain)
-    .fetch_one(pool)
-    .await
-    .with_context(|| format!("failed to inspect canonical raw logs for {chain}"))
+    cursors::all_configured_cursors_complete(pool, deployment_profile, chains).await
 }
 
 async fn relation_exists(pool: &PgPool, relation: &str) -> Result<bool> {

@@ -183,7 +183,7 @@ impl JsonRpcProvider {
         }
 
         let logs = self
-            .fetch_logs_by_block_range_segments(resolved_blocks, &addresses)
+            .fetch_logs_by_block_range_segments(resolved_blocks, addresses)
             .await?;
         for (log_position, value) in logs.iter().enumerate() {
             let block_number = ProviderLog::block_number_from_value(value)?;
@@ -226,7 +226,7 @@ impl JsonRpcProvider {
         }
 
         let logs = self
-            .fetch_logs_by_block_range_topic0_segments(resolved_blocks, &topic0s, &addresses)
+            .fetch_logs_by_block_range_topic0_segments(resolved_blocks, topic0s, addresses)
             .await?;
         for (log_position, value) in logs.iter().enumerate() {
             let block_number = ProviderLog::block_number_from_value(value)?;

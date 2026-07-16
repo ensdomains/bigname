@@ -10831,7 +10831,8 @@ async fn sync_ens_v1_reverse_name_observation_converges_across_profile_reclassif
         "SELECT after_state FROM normalized_events \
          WHERE event_kind = 'RecordChanged' \
            AND logical_name_id IS NULL \
-           AND after_state->>'record_key' = 'name'",
+           AND after_state->>'record_key' = 'name' \
+           AND canonicality_state IN ('canonical', 'safe', 'finalized')",
     )
     .fetch_one(database.pool())
     .await?;
@@ -10839,6 +10840,15 @@ async fn sync_ens_v1_reverse_name_observation_converges_across_profile_reclassif
         supported_after_state["primary_claim_source"]["address"],
         fixture.claimed_address
     );
+    let supported_event_identity: String = sqlx::query_scalar(
+        "SELECT event_identity FROM normalized_events \
+         WHERE event_kind = 'RecordChanged' \
+           AND logical_name_id IS NULL \
+           AND after_state ? 'primary_claim_source' \
+           AND canonicality_state IN ('canonical', 'safe', 'finalized')",
+    )
+    .fetch_one(database.pool())
+    .await?;
 
     upsert_raw_code_hashes(
         database.pool(),
@@ -10855,13 +10865,14 @@ async fn sync_ens_v1_reverse_name_observation_converges_across_profile_reclassif
         &[fixture.resolver_address.to_owned()],
     )
     .await?;
-    assert_eq!(unsupported.orphaned_normalized_event_count, 1);
+    assert_eq!(unsupported.orphaned_normalized_event_count, 2);
     let transitioned_row: Value = sqlx::query_scalar(
         "SELECT to_jsonb(event) - 'normalized_event_id' - 'observed_at' \
          FROM normalized_events event \
          WHERE event_kind = 'RecordChanged' \
            AND logical_name_id IS NULL \
-           AND after_state->>'record_key' = 'name'",
+           AND after_state->>'record_key' = 'name' \
+           AND canonicality_state IN ('canonical', 'safe', 'finalized')",
     )
     .fetch_one(database.pool())
     .await?;
@@ -10870,6 +10881,27 @@ async fn sync_ens_v1_reverse_name_observation_converges_across_profile_reclassif
             .get("primary_claim_source")
             .is_none(),
         "an unsupported resolver profile must keep the observation but remove declared primary-name identity: {transitioned_row}"
+    );
+    assert_ne!(transitioned_row["event_identity"], supported_event_identity);
+    assert!(
+        transitioned_row["event_identity"]
+            .as_str()
+            .is_some_and(|identity| identity.contains(":record-change-unsupported:")),
+        "unsupported observation must use its own deterministic identity: {transitioned_row}"
+    );
+    let (durable_supported_state, durable_supported_canonicality): (Value, String) =
+        sqlx::query_as(
+            "SELECT after_state, canonicality_state::TEXT \
+             FROM normalized_events \
+             WHERE event_identity = $1",
+        )
+        .bind(&supported_event_identity)
+        .fetch_one(database.pool())
+        .await?;
+    assert_eq!(durable_supported_canonicality, "orphaned");
+    assert_eq!(
+        durable_supported_state["primary_claim_source"]["address"],
+        fixture.claimed_address
     );
     assert_eq!(
         sqlx::query_scalar::<_, String>(
@@ -10904,7 +10936,7 @@ async fn sync_ens_v1_reverse_name_observation_converges_across_profile_reclassif
     .bind(format!("{}:ens:60", fixture.claimed_address))
     .fetch_one(database.pool())
     .await?;
-    assert_eq!(generation, 1);
+    assert_eq!(generation, 0);
     assert_eq!(
         key_payload,
         json!({
@@ -10951,6 +10983,7 @@ async fn sync_ens_v1_reverse_name_observation_converges_across_profile_reclassif
     .fetch_one(clean_database.pool())
     .await?;
     assert_eq!(transitioned_unsupported_rows, clean_unsupported_rows);
+    clean_database.cleanup().await?;
 
     upsert_raw_code_hashes(
         database.pool(),
@@ -10967,7 +11000,7 @@ async fn sync_ens_v1_reverse_name_observation_converges_across_profile_reclassif
         &[fixture.resolver_address.to_owned()],
     )
     .await?;
-    assert_eq!(reactivated.orphaned_normalized_event_count, 0);
+    assert_eq!(reactivated.orphaned_normalized_event_count, 1);
     assert_eq!(
         sqlx::query_scalar::<_, String>(
             "SELECT canonicality_state::TEXT FROM normalized_events \
@@ -10978,11 +11011,12 @@ async fn sync_ens_v1_reverse_name_observation_converges_across_profile_reclassif
         .await?,
         "canonical"
     );
-    let reactivated_after_state: Value = sqlx::query_scalar(
-        "SELECT after_state FROM normalized_events \
+    let (reactivated_event_identity, reactivated_after_state): (String, Value) = sqlx::query_as(
+        "SELECT event_identity, after_state FROM normalized_events \
          WHERE event_kind = 'RecordChanged' \
            AND logical_name_id IS NULL \
-           AND after_state->>'record_key' = 'name'",
+           AND after_state->>'record_key' = 'name' \
+           AND canonicality_state IN ('canonical', 'safe', 'finalized')",
     )
     .fetch_one(database.pool())
     .await?;
@@ -10990,7 +11024,10 @@ async fn sync_ens_v1_reverse_name_observation_converges_across_profile_reclassif
         reactivated_after_state["primary_claim_source"]["address"],
         fixture.claimed_address
     );
+    assert_eq!(reactivated_event_identity, supported_event_identity);
 
+    let clean_database = TestDatabase::new().await?;
+    let clean_fixture = seed_reverse_name_profile_transition_fixture(clean_database.pool()).await?;
     upsert_raw_code_hashes(
         clean_database.pool(),
         &[raw_code_hash_for_address_at_block(
@@ -11029,6 +11066,100 @@ async fn sync_ens_v1_reverse_name_observation_converges_across_profile_reclassif
     assert_eq!(transitioned_canonical_rows, clean_canonical_rows);
 
     clean_database.cleanup().await?;
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn resolver_profile_reconciliation_fails_closed_while_code_hash_is_pending() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+    let fixture = seed_reverse_name_profile_transition_fixture(database.pool()).await?;
+
+    sync_ens_v1_unwrapped_authority(database.pool(), "ethereum-mainnet").await?;
+    let before: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(event) - 'normalized_event_id' - 'observed_at' \
+         FROM normalized_events event \
+         WHERE event.event_kind = 'RecordChanged' \
+           AND event.logical_name_id IS NULL \
+           AND event.after_state->>'record_key' = 'name' \
+           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert!(before["after_state"].get("primary_claim_source").is_none());
+
+    let error = reconcile_resolver_profile_events(
+        database.pool(),
+        "ethereum-mainnet",
+        &[fixture.resolver_address.to_owned()],
+    )
+    .await
+    .expect_err("pending code-hash evidence must stop profile publication");
+    assert!(
+        error
+            .to_string()
+            .contains("cannot publish pending profile evidence"),
+        "unexpected pending-profile error: {error:#}"
+    );
+    let after: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(event) - 'normalized_event_id' - 'observed_at' \
+         FROM normalized_events event \
+         WHERE event.event_kind = 'RecordChanged' \
+           AND event.logical_name_id IS NULL \
+           AND event.after_state->>'record_key' = 'name' \
+           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(after, before);
+
+    let pending_run_id: Uuid = sqlx::query_scalar(
+        "SELECT run_id FROM resolver_profile_reconciliation_runs \
+         WHERE chain_id = 'ethereum-mainnet' AND status = 'running'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+
+    upsert_raw_code_hashes(
+        database.pool(),
+        &[raw_code_hash_for_address_at_block(
+            fixture.resolver_address,
+            fixture.supported_code_hash,
+            43,
+        )],
+    )
+    .await?;
+    reconcile_resolver_profile_events(
+        database.pool(),
+        "ethereum-mainnet",
+        &[fixture.resolver_address.to_owned()],
+    )
+    .await?;
+
+    let (old_run_count, old_state_count): (i64, i64) = sqlx::query_as(
+        "SELECT \
+             (SELECT COUNT(*)::BIGINT FROM resolver_profile_reconciliation_runs WHERE run_id = $1), \
+             (SELECT COUNT(*)::BIGINT FROM resolver_profile_reconciliation_state_items WHERE run_id = $1)",
+    )
+    .bind(pending_run_id)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!((old_run_count, old_state_count), (0, 0));
+
+    let supported_after_state: Value = sqlx::query_scalar(
+        "SELECT after_state FROM normalized_events \
+         WHERE event_kind = 'RecordChanged' \
+           AND logical_name_id IS NULL \
+           AND after_state->>'record_key' = 'name' \
+           AND canonicality_state IN ('canonical', 'safe', 'finalized')",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        supported_after_state["primary_claim_source"]["address"],
+        fixture.claimed_address
+    );
+
     database.cleanup().await
 }
 

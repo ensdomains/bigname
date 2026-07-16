@@ -1,11 +1,14 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail, ensure};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgPool, Postgres, Transaction, types::Json};
 use uuid::Uuid;
 
 use super::{
-    types::{PermissionsCurrentResourceSummary, PermissionsCurrentRow},
+    types::{
+        PERMISSIONS_CURRENT_PUBLICATION_VERSION, PermissionsCurrentResourceSummary,
+        PermissionsCurrentRow,
+    },
     validation::validate_permissions_current_row,
     writes::upsert_permissions_current_row,
 };
@@ -33,13 +36,37 @@ const SUMMARY_WRITE_COLUMNS: &str = r#"
     last_recomputed_at
 "#;
 
-const CURRENT_RESOURCE_FILTER: &str = r#"
-    resource.canonicality_state IN (
-        'canonical'::canonicality_state,
-        'safe'::canonicality_state,
-        'finalized'::canonicality_state
-    )
+const CURRENT_SUMMARY_FILTER: &str = r#"
+    summary.canonicality_summary ->> 'status' IN ('canonical', 'safe', 'finalized')
 "#;
+
+/// Publish the permission projection's reader-compatibility version inside the caller's full
+/// replacement transaction. The data revision advances in that same transaction so readers can
+/// reject a response assembled across two publications.
+pub async fn publish_permissions_current_compatibility_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO permissions_current_publication AS publication (
+            projection,
+            publication_version,
+            data_revision,
+            published_at
+        )
+        VALUES ('permissions_current', $1, 1, now())
+        ON CONFLICT (projection) DO UPDATE SET
+            publication_version = EXCLUDED.publication_version,
+            data_revision = publication.data_revision + 1,
+            published_at = EXCLUDED.published_at
+        "#,
+    )
+    .bind(PERMISSIONS_CURRENT_PUBLICATION_VERSION)
+    .execute(&mut **transaction)
+    .await
+    .context("failed to publish permissions_current compatibility version")?;
+    Ok(())
+}
 
 /// Load projection-owned authority/support metadata for one permission resource.
 pub async fn load_permissions_current_resource_summary(
@@ -49,8 +76,7 @@ pub async fn load_permissions_current_resource_summary(
     sqlx::query_as::<_, PermissionsCurrentResourceSummary>(&format!(
         "SELECT {SUMMARY_SELECT_COLUMNS} \
          FROM permissions_current_resource_summary summary \
-         JOIN resources resource ON resource.resource_id = summary.resource_id \
-         WHERE summary.resource_id = $1 AND {CURRENT_RESOURCE_FILTER}"
+         WHERE summary.resource_id = $1 AND {CURRENT_SUMMARY_FILTER}"
     ))
     .bind(resource_id)
     .fetch_optional(pool)
@@ -72,9 +98,8 @@ pub async fn load_permissions_current_resource_summaries(
     let rows = sqlx::query_as::<_, PermissionsCurrentResourceSummary>(&format!(
         "SELECT {SUMMARY_SELECT_COLUMNS} \
          FROM permissions_current_resource_summary summary \
-         JOIN resources resource ON resource.resource_id = summary.resource_id \
          WHERE summary.resource_id = ANY($1::UUID[]) \
-           AND {CURRENT_RESOURCE_FILTER} \
+           AND {CURRENT_SUMMARY_FILTER} \
          ORDER BY summary.resource_id"
     ))
     .bind(resource_ids)
@@ -155,12 +180,32 @@ pub async fn replace_permissions_current_resource_projection(
                 })?;
         }
     }
+    advance_permissions_current_data_revision(&mut transaction).await?;
 
     transaction
         .commit()
         .await
         .context("failed to commit permissions_current resource replacement")?;
     Ok((rows.len(), deleted))
+}
+
+async fn advance_permissions_current_data_revision(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE permissions_current_publication
+        SET data_revision = data_revision + 1,
+            published_at = now()
+        WHERE projection = 'permissions_current'
+          AND publication_version = $1
+        "#,
+    )
+    .bind(PERMISSIONS_CURRENT_PUBLICATION_VERSION)
+    .execute(&mut **transaction)
+    .await
+    .context("failed to advance permissions_current publication data revision")?;
+    Ok(())
 }
 
 async fn upsert_summary(
@@ -187,7 +232,7 @@ async fn upsert_summary(
     .bind(summary.resource_id)
     .bind(&summary.authority_kind)
     .bind(summary.root_resource_id)
-    .bind(&summary.coverage)
+    .bind(Json(&summary.coverage))
     .bind(&summary.provenance)
     .bind(&summary.chain_positions)
     .bind(&summary.canonicality_summary)
@@ -244,11 +289,12 @@ fn validate_summary(summary: &PermissionsCurrentResourceSummary) -> Result<()> {
             summary.resource_id
         );
     }
-    ensure!(
-        summary.coverage.is_object(),
-        "permissions_current resource summary {} coverage must be an object",
-        summary.resource_id
-    );
+    summary.coverage.validate().with_context(|| {
+        format!(
+            "permissions_current resource summary {} has invalid coverage",
+            summary.resource_id
+        )
+    })?;
     ensure!(
         summary.provenance.is_object(),
         "permissions_current resource summary {} provenance must be an object",

@@ -36,8 +36,8 @@ async fn sync_ens_v2_registry_resource_surface_live_poll(
 }
 
 #[test]
-fn newly_required_coverage_error_remains_downcastable_through_context() {
-    let error = anyhow::Error::new(EnsV2NewlyRequiredCoverage {
+fn missing_coverage_error_remains_downcastable_through_context() {
+    let error = anyhow::Error::new(EnsV2MissingCoverage {
         chain: "sepolia".to_owned(),
         retention_generation: 3,
         source_family: SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
@@ -47,7 +47,50 @@ fn newly_required_coverage_error_remains_downcastable_through_context() {
     })
     .context("full-source adapter sync failed");
 
-    assert!(is_ens_v2_newly_required_coverage(&error));
+    assert!(is_ens_v2_missing_coverage(&error));
+}
+
+#[test]
+fn ens_v2_guard_release_preserves_primary_operation_error_priority() {
+    let primary = prioritize_operation_error::<()>(
+        Err(anyhow::anyhow!("primary operation failed")),
+        Err(anyhow::anyhow!("guard release failed")),
+    )
+    .expect_err("the primary operation error must win");
+    assert_eq!(primary.to_string(), "primary operation failed");
+
+    let release = prioritize_operation_error(Ok(()), Err(anyhow::anyhow!("guard release failed")))
+        .expect_err("a release error must surface after successful work");
+    assert_eq!(release.to_string(), "guard release failed");
+}
+
+#[test]
+fn ens_v2_suffix_initialization_preserves_resumed_tombstones() {
+    let registry = "0x00000000000000000000000000000000000000aa";
+    let emitters = [test_active_emitter(
+        registry,
+        Uuid::from_u128(0x1711),
+        7,
+        Some(0),
+        None,
+    )];
+    let mut resumed = RegistryReplayState::default();
+
+    initialize_registry_suffixes(&mut resumed, &emitters, true);
+    assert!(
+        !resumed
+            .registry_suffix_by_address
+            .contains_key(&normalize_address(registry))
+    );
+
+    initialize_registry_suffixes(&mut resumed, &emitters, false);
+    assert_eq!(
+        resumed
+            .registry_suffix_by_address
+            .get(&normalize_address(registry))
+            .map(String::as_str),
+        Some("eth")
+    );
 }
 
 #[test]
@@ -310,6 +353,68 @@ async fn ens_v2_expiry_reregistration_rotates_binding_in_one_sync_batch() -> Res
     fixture.sync(database.pool(), &[10, 20]).await?;
 
     assert_reregistered_surface(database.pool(), 10).await?;
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn ens_v2_resumed_replay_does_not_reseed_a_removed_manifest_suffix() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-sepolia";
+    let registry = "0x00000000000000000000000000000000000000aa";
+    let manifest_id = insert_test_registry_manifest(database.pool(), chain).await?;
+    insert_test_registry_contract(
+        database.pool(),
+        manifest_id,
+        "registry",
+        Uuid::from_u128(0x1711),
+        registry,
+        0,
+    )
+    .await?;
+
+    let (_, cold_state) = sync_ens_v2_registry_resource_surface_with_scope_and_state(
+        database.pool(),
+        chain,
+        true,
+        &[],
+        None,
+        RawLogCanonicalityFilter::IncludeObserved,
+        None,
+        None,
+        true,
+        false,
+        None,
+    )
+    .await?;
+    assert_eq!(
+        cold_state
+            .registry_suffix_by_address
+            .get(&normalize_address(registry))
+            .map(String::as_str),
+        Some("eth")
+    );
+
+    let (_, resumed_state) = sync_ens_v2_registry_resource_surface_with_scope_and_state(
+        database.pool(),
+        chain,
+        true,
+        &[],
+        None,
+        RawLogCanonicalityFilter::IncludeObserved,
+        None,
+        Some(RegistryReplayState::default()),
+        true,
+        false,
+        None,
+    )
+    .await?;
+    assert!(
+        !resumed_state
+            .registry_suffix_by_address
+            .contains_key(&normalize_address(registry)),
+        "an incremental replay must preserve a prior suffix tombstone"
+    );
+
     database.cleanup().await
 }
 
@@ -891,11 +996,9 @@ async fn ens_v2_cold_scoped_transfer_hydrates_from_retained_raw_predecessors() -
         .insert_registration(database.pool(), 10, 1, 101, "alice")
         .await?;
     let transfer_hash = lifecycle_block_hash(11);
-    upsert_raw_blocks(
-        database.pool(),
-        &[test_raw_block(fixture.chain, &transfer_hash, 11)],
-    )
-    .await?;
+    let mut transfer_block = test_raw_block(fixture.chain, &transfer_hash, 11);
+    transfer_block.parent_hash = Some(lifecycle_block_hash(10));
+    upsert_raw_blocks(database.pool(), &[transfer_block]).await?;
     upsert_raw_logs(
         database.pool(),
         &[transfer_single_raw_log(
@@ -947,6 +1050,133 @@ async fn ens_v2_cold_scoped_transfer_hydrates_from_retained_raw_predecessors() -
 }
 
 #[tokio::test]
+async fn ens_v2_cold_transfer_hydration_uses_only_its_selected_ancestor_path() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let fixture = RegistryLifecycleFixture::insert(database.pool()).await?;
+    let registration_hash = lifecycle_branch_block_hash(10, 0);
+    let losing_hash = lifecycle_branch_block_hash(11, 1);
+    let winning_hash = lifecycle_branch_block_hash(11, 2);
+    let transfer_hash = lifecycle_branch_block_hash(12, 0);
+    fixture
+        .insert_registration_at_hash(database.pool(), &registration_hash, 10, 1, 101, "alice")
+        .await?;
+
+    let mut losing_block = test_raw_block(fixture.chain, &losing_hash, 11);
+    losing_block.parent_hash = Some(registration_hash.clone());
+    losing_block.canonicality_state = CanonicalityState::Observed;
+    let mut winning_block = test_raw_block(fixture.chain, &winning_hash, 11);
+    winning_block.parent_hash = Some(registration_hash);
+    let mut transfer_block = test_raw_block(fixture.chain, &transfer_hash, 12);
+    transfer_block.parent_hash = Some(winning_hash);
+    upsert_raw_blocks(
+        database.pool(),
+        &[losing_block, winning_block, transfer_block],
+    )
+    .await?;
+
+    let mut sibling_unregister =
+        label_unregistered_raw_log(fixture.chain, &losing_hash, 11, fixture.address, 0, 1);
+    sibling_unregister.canonicality_state = CanonicalityState::Observed;
+    let transfer = transfer_single_raw_log(
+        fixture.chain,
+        &transfer_hash,
+        12,
+        fixture.address,
+        0,
+        "0x0000000000000000000000000000000000000a11",
+        "0x0000000000000000000000000000000000000a11",
+        "0x0000000000000000000000000000000000000b0b",
+        1,
+        1,
+    );
+    upsert_raw_logs(database.pool(), &[sibling_unregister, transfer]).await?;
+
+    let summary = EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_source_scope(
+        database.pool(),
+        fixture.chain,
+        &[transfer_hash],
+        &[(
+            SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+            fixture.address.to_owned(),
+            12,
+            12,
+        )],
+    )
+    .await?;
+    assert_eq!(
+        summary.by_kind.get(EVENT_KIND_TOKEN_CONTROL_TRANSFERRED),
+        Some(&1),
+        "a non-orphaned sibling unregister must not erase selected-path transfer history"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn ens_v2_cold_transfer_hydration_filters_unrelated_token_history_before_decode() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let fixture = RegistryLifecycleFixture::insert(database.pool()).await?;
+    fixture
+        .insert_registration(database.pool(), 10, 1, 101, "alice")
+        .await?;
+    let registration_hash = lifecycle_block_hash(10);
+    let mut malformed_unrelated = token_resource_raw_log(
+        fixture.chain,
+        &registration_hash,
+        10,
+        fixture.address,
+        2,
+        2,
+        202,
+    );
+    malformed_unrelated.topics.pop();
+    malformed_unrelated.topics[1] = format!("0x{}00000002", "11".repeat(28));
+    upsert_raw_logs(database.pool(), &[malformed_unrelated]).await?;
+
+    let transfer_hash = lifecycle_block_hash(11);
+    let mut transfer_block = test_raw_block(fixture.chain, &transfer_hash, 11);
+    transfer_block.parent_hash = Some(registration_hash);
+    upsert_raw_blocks(database.pool(), &[transfer_block]).await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[transfer_single_raw_log(
+            fixture.chain,
+            &transfer_hash,
+            11,
+            fixture.address,
+            0,
+            "0x0000000000000000000000000000000000000a11",
+            "0x0000000000000000000000000000000000000a11",
+            "0x0000000000000000000000000000000000000b0b",
+            1,
+            1,
+        )],
+    )
+    .await?;
+
+    let summary = EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_source_scope(
+        database.pool(),
+        fixture.chain,
+        &[transfer_hash],
+        &[(
+            SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+            fixture.address.to_owned(),
+            11,
+            11,
+        )],
+    )
+    .await?;
+    assert_eq!(
+        summary.by_kind.get(EVENT_KIND_TOKEN_CONTROL_TRANSFERRED),
+        Some(&1),
+        "unrelated token history must be excluded by the batched predecessor query"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn ens_v2_cold_scoped_transfer_fails_without_complete_raw_predecessors() -> Result<()> {
     let database = TestDatabase::new().await?;
     let fixture = RegistryLifecycleFixture::insert(database.pool()).await?;
@@ -971,11 +1201,9 @@ async fn ens_v2_cold_scoped_transfer_fails_without_complete_raw_predecessors() -
     )
     .await?;
     let transfer_hash = lifecycle_block_hash(11);
-    upsert_raw_blocks(
-        database.pool(),
-        &[test_raw_block(fixture.chain, &transfer_hash, 11)],
-    )
-    .await?;
+    let mut transfer_block = test_raw_block(fixture.chain, &transfer_hash, 11);
+    transfer_block.parent_hash = Some(registration_hash);
+    upsert_raw_blocks(database.pool(), &[transfer_block]).await?;
     upsert_raw_logs(
         database.pool(),
         &[transfer_single_raw_log(
@@ -2004,6 +2232,7 @@ async fn ens_v2_subregistry_change_retains_historical_endpoint_id_after_replacem
     let contract_instance_id = Uuid::from_u128(0x1234);
     let token = "0x00000000000000000000000000000000000000000000000000000000000000a1".to_owned();
     let mut harness = RegistryHarness::new(&registry, contract_instance_id, "eth");
+    insert_finalized_reference_lineage(database.pool(), 10, 20).await?;
 
     harness.apply(RegistryObservation::LabelRegistered {
         token_id: token.clone(),
@@ -2309,6 +2538,215 @@ async fn ens_v2_subregistry_change_retains_historical_endpoint_id_after_replacem
 }
 
 #[tokio::test]
+async fn ens_v2_subregistry_hydration_ignores_bounded_observed_sibling_edge() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-sepolia";
+    let registry = "0x00000000000000000000000000000000000000aa";
+    let child = "0x00000000000000000000000000000000000000c1";
+    let registry_id = Uuid::from_u128(0x1751);
+    let selected_target_id = Uuid::from_u128(0x1752);
+    let sibling_target_id = Uuid::from_u128(0x1753);
+    let finalized_hash = lifecycle_branch_block_hash(10, 0);
+    let selected_start_hash = lifecycle_branch_block_hash(11, 1);
+    let sibling_start_hash = lifecycle_branch_block_hash(11, 2);
+    let event_hash = lifecycle_branch_block_hash(12, 1);
+    let sibling_mid_hash = lifecycle_branch_block_hash(12, 2);
+    let selected_close_hash = lifecycle_branch_block_hash(13, 1);
+    let sibling_close_hash = lifecycle_branch_block_hash(13, 2);
+    let after_close_hash = lifecycle_branch_block_hash(14, 1);
+
+    let finalized = test_raw_block(chain, &finalized_hash, 10);
+    let mut selected_start = test_raw_block(chain, &selected_start_hash, 11);
+    selected_start.parent_hash = Some(finalized_hash.clone());
+    selected_start.canonicality_state = CanonicalityState::Observed;
+    let mut sibling_start = test_raw_block(chain, &sibling_start_hash, 11);
+    sibling_start.parent_hash = Some(finalized_hash.clone());
+    sibling_start.canonicality_state = CanonicalityState::Observed;
+    let mut event_block = test_raw_block(chain, &event_hash, 12);
+    event_block.parent_hash = Some(selected_start_hash.clone());
+    event_block.canonicality_state = CanonicalityState::Observed;
+    let mut sibling_mid = test_raw_block(chain, &sibling_mid_hash, 12);
+    sibling_mid.parent_hash = Some(sibling_start_hash.clone());
+    sibling_mid.canonicality_state = CanonicalityState::Observed;
+    let mut selected_close = test_raw_block(chain, &selected_close_hash, 13);
+    selected_close.parent_hash = Some(event_hash.clone());
+    selected_close.canonicality_state = CanonicalityState::Observed;
+    let mut sibling_close = test_raw_block(chain, &sibling_close_hash, 13);
+    sibling_close.parent_hash = Some(sibling_mid_hash);
+    sibling_close.canonicality_state = CanonicalityState::Observed;
+    let mut after_close = test_raw_block(chain, &after_close_hash, 14);
+    after_close.parent_hash = Some(selected_close_hash.clone());
+    after_close.canonicality_state = CanonicalityState::Observed;
+    upsert_raw_blocks(
+        database.pool(),
+        &[
+            finalized,
+            selected_start,
+            sibling_start,
+            event_block,
+            sibling_mid,
+            selected_close,
+            sibling_close,
+            after_close,
+        ],
+    )
+    .await?;
+
+    let token_id = format!("0x{:064x}", 0xa1);
+    let mut harness = RegistryHarness::new(registry, registry_id, "eth");
+    let mut registration_ref = reference(registry, registry_id, 10, 0);
+    registration_ref.block_hash = finalized_hash;
+    harness.apply(RegistryObservation::LabelRegistered {
+        token_id: token_id.clone(),
+        labelhash: labelhash("alice"),
+        label: "alice".to_owned(),
+        owner: "0x0000000000000000000000000000000000000a11".to_owned(),
+        expiry: 1_900_000_000,
+        sender: "0x0000000000000000000000000000000000000dad".to_owned(),
+        reference: registration_ref,
+    })?;
+    let mut subregistry_ref = reference(registry, registry_id, 12, 0);
+    subregistry_ref.block_hash = event_hash;
+    subregistry_ref.canonicality_state = CanonicalityState::Observed;
+    harness.apply(RegistryObservation::SubregistryUpdated {
+        token_id,
+        subregistry: child.to_owned(),
+        sender: "0x0000000000000000000000000000000000000dad".to_owned(),
+        reference: subregistry_ref,
+    })?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instances (
+            contract_instance_id,
+            chain_id,
+            contract_kind
+        )
+        VALUES ($1, $4, 'registry'),
+               ($2, $4, 'contract'),
+               ($3, $4, 'contract')
+        "#,
+    )
+    .bind(registry_id)
+    .bind(selected_target_id)
+    .bind(sibling_target_id)
+    .bind(chain)
+    .execute(database.pool())
+    .await
+    .context("failed to insert sibling-fork subregistry contract instances")?;
+    sqlx::query(
+        r#"
+        INSERT INTO discovery_edges (
+            chain_id,
+            edge_kind,
+            from_contract_instance_id,
+            to_contract_instance_id,
+            discovery_source,
+            admission,
+            active_from_block_number,
+            active_from_block_hash,
+            active_to_block_number,
+            active_to_block_hash,
+            deactivated_at,
+            provenance
+        )
+        VALUES (
+            $1,
+            'subregistry',
+            $2,
+            $3,
+            'ens_v2_registry_l1:selected-history',
+            'admitted',
+            11,
+            $4,
+            13,
+            $5,
+            now(),
+            jsonb_build_object('to_address', $6::text)
+        ), (
+            $1,
+            'subregistry',
+            $2,
+            $7,
+            'ens_v2_registry_l1:sibling-history',
+            'admitted',
+            11,
+            $8,
+            13,
+            $9,
+            now(),
+            jsonb_build_object('to_address', $6::text)
+        )
+        "#,
+    )
+    .bind(chain)
+    .bind(registry_id)
+    .bind(selected_target_id)
+    .bind(selected_start_hash)
+    .bind(&selected_close_hash)
+    .bind(child)
+    .bind(sibling_target_id)
+    .bind(sibling_start_hash)
+    .bind(&sibling_close_hash)
+    .execute(database.pool())
+    .await
+    .context("failed to insert overlapping selected and sibling discovery edges")?;
+
+    hydrate_subregistry_event_target_ids(database.pool(), &mut harness.graph_events).await?;
+    let hydrated = harness
+        .graph_events
+        .iter()
+        .find(|event| event.event_kind == EVENT_KIND_SUBREGISTRY_CHANGED)
+        .context("hydrated SubregistryChanged should remain present")?;
+    assert_eq!(
+        hydrated.after_state["to_contract_instance_id"],
+        selected_target_id.to_string(),
+        "the exact observed ancestor must win over an overlapping bounded sibling edge"
+    );
+
+    let mut after_close_event = hydrated.clone();
+    after_close_event.block_number = Some(14);
+    after_close_event.block_hash = Some(after_close_hash);
+    sqlx::query(
+        "UPDATE discovery_edges SET active_to_block_hash = $2 WHERE to_contract_instance_id = $1",
+    )
+    .bind(selected_target_id)
+    .bind(&sibling_close_hash)
+    .execute(database.pool())
+    .await?;
+    hydrate_subregistry_event_target_ids(
+        database.pool(),
+        std::slice::from_mut(&mut after_close_event),
+    )
+    .await?;
+    assert_eq!(
+        after_close_event.after_state["to_contract_instance_id"],
+        selected_target_id.to_string(),
+        "a sibling-only close must not deactivate the selected-path historical edge"
+    );
+
+    sqlx::query(
+        "UPDATE discovery_edges SET active_to_block_hash = $2 WHERE to_contract_instance_id = $1",
+    )
+    .bind(selected_target_id)
+    .bind(selected_close_hash)
+    .execute(database.pool())
+    .await?;
+    hydrate_subregistry_event_target_ids(
+        database.pool(),
+        std::slice::from_mut(&mut after_close_event),
+    )
+    .await?;
+    assert_eq!(
+        after_close_event.after_state["to_contract_instance_id"],
+        Value::Null,
+        "a selected-path close must deactivate the historical edge after its boundary"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn ens_v2_full_history_replay_retains_each_subregistry_transition() -> Result<()> {
     let database = TestDatabase::new().await?;
     let chain = "ethereum-sepolia";
@@ -2318,6 +2756,7 @@ async fn ens_v2_full_history_replay_retains_each_subregistry_transition() -> Res
     let contract_instance_id = Uuid::from_u128(0x1234);
     let token = "0x00000000000000000000000000000000000000000000000000000000000000a1".to_owned();
     let manifest_id = insert_test_registry_manifest(database.pool(), chain).await?;
+    insert_finalized_reference_lineage(database.pool(), 10, 13).await?;
     insert_test_registry_contract(
         database.pool(),
         manifest_id,
@@ -2439,6 +2878,7 @@ async fn ens_v2_repeated_same_subregistry_hydrates_from_continuous_edge_epoch() 
     let contract_instance_id = Uuid::from_u128(0x1749);
     let token_id = format!("0x{:064x}", 0xa1);
     let manifest_id = insert_test_registry_manifest(database.pool(), chain).await?;
+    insert_finalized_reference_lineage(database.pool(), 10, 12).await?;
     insert_test_registry_contract(
         database.pool(),
         manifest_id,
@@ -2898,6 +3338,18 @@ async fn ens_v2_live_poll_cache_is_incremental_and_rehydrates_on_unsafe_anchors(
             .any(|contract| contract.address == normalize_address(observed_child))
     );
 
+    let unchanged_head = sync_ens_v2_registry_resource_surface_live_poll(
+        database.pool(),
+        chain,
+        10,
+        std::slice::from_ref(&block_10_hash),
+    )
+    .await?;
+    assert_eq!(
+        unchanged_head.scanned_log_count, 0,
+        "an unchanged selected head with unchanged raw input must preserve and reuse its cache"
+    );
+
     invalidate_live_registry_replay_state(database.pool(), chain);
     let observed_fallback = sync_ens_v2_registry_resource_surface_live_poll(
         database.pool(),
@@ -3292,7 +3744,7 @@ async fn ens_v2_overweight_live_checkpoint_advances_and_preserves_completed_stat
     .await
     .err()
     .context("new discovery without retained coverage must fail after checkpoint staging")?;
-    assert!(error.downcast_ref::<EnsV2NewlyRequiredCoverage>().is_some());
+    assert!(error.downcast_ref::<EnsV2MissingCoverage>().is_some());
     let (status, target, _) =
         load_live_registry_checkpoint_position(database.pool(), chain).await?;
     assert_eq!(
@@ -3532,9 +3984,17 @@ async fn ens_v2_cold_live_poll_fails_closed_after_raw_log_staging_compaction() -
             .await
             .err()
             .context("non-live full-source replay must reject compacted raw-log history")?;
-    assert!(
-        format!("{non_live_error:#}").contains("has no generation 1 coverage"),
-        "unexpected non-live compaction refusal: {non_live_error:#}"
+    assert_eq!(
+        ens_v2_missing_coverage(&non_live_error),
+        Some(&EnsV2MissingCoverage {
+            chain: chain.to_owned(),
+            retention_generation: 1,
+            source_family: SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+            address: normalize_address(registry),
+            required_from_block: 0,
+            required_to_block: 10,
+        }),
+        "an already-admitted restart requirement must remain an exact typed recovery tuple through context"
     );
     let error = sync_ens_v2_registry_resource_surface_live_poll(
         database.pool(),
@@ -3545,9 +4005,17 @@ async fn ens_v2_cold_live_poll_fails_closed_after_raw_log_staging_compaction() -
     .await
     .err()
     .context("cold live replay must reject compacted raw-log history")?;
-    assert!(
-        format!("{error:#}").contains("has no generation 1 coverage"),
-        "unexpected cold-replay refusal: {error:#}"
+    assert_eq!(
+        ens_v2_missing_coverage(&error),
+        Some(&EnsV2MissingCoverage {
+            chain: chain.to_owned(),
+            retention_generation: 1,
+            source_family: SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+            address: normalize_address(registry),
+            required_from_block: 0,
+            required_to_block: 10,
+        }),
+        "cold live replay must preserve the exact typed restart requirement"
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -3660,11 +4128,11 @@ async fn ens_v2_proof_advance_requires_coverage_for_newly_admitted_registry_inte
         .err()
         .context("a pre-sync proof must not authorize a newly admitted historical child")?;
     let newly_required = error
-        .downcast_ref::<EnsV2NewlyRequiredCoverage>()
+        .downcast_ref::<EnsV2MissingCoverage>()
         .context("newly admitted interval refusal must be typed")?;
     assert_eq!(
         newly_required,
-        &EnsV2NewlyRequiredCoverage {
+        &EnsV2MissingCoverage {
             chain: chain.to_owned(),
             retention_generation: 0,
             source_family: SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
@@ -3774,11 +4242,11 @@ async fn ens_v2_proof_advance_requires_history_for_newly_admitted_resolver_inter
         .err()
         .context("a pre-sync proof must not authorize newly admitted resolver history")?;
     let newly_required = error
-        .downcast_ref::<EnsV2NewlyRequiredCoverage>()
+        .downcast_ref::<EnsV2MissingCoverage>()
         .context("newly admitted resolver-history refusal must be typed")?;
     assert_eq!(
         newly_required,
-        &EnsV2NewlyRequiredCoverage {
+        &EnsV2MissingCoverage {
             chain: chain.to_owned(),
             retention_generation: 0,
             source_family: SOURCE_FAMILY_ENS_V2_RESOLVER_L1.to_owned(),
@@ -6363,6 +6831,30 @@ fn test_raw_block(chain: &str, block_hash: &str, block_number: i64) -> RawBlock 
     }
 }
 
+async fn insert_finalized_reference_lineage(
+    pool: &PgPool,
+    from_block: i64,
+    through_block: i64,
+) -> Result<()> {
+    let blocks = (from_block..=through_block)
+        .map(|block_number| {
+            let mut block = test_raw_block(
+                "ethereum-sepolia",
+                &format!("0xblock{block_number}"),
+                block_number,
+            );
+            if block_number > from_block {
+                block.parent_hash = Some(format!("0xblock{}", block_number - 1));
+            }
+            raw_block_to_test_lineage(&block)
+        })
+        .collect::<Vec<_>>();
+    upsert_chain_lineage_blocks(pool, &blocks)
+        .await
+        .context("failed to insert finalized ENSv2 reference lineage")?;
+    Ok(())
+}
+
 fn raw_block_to_test_lineage(block: &RawBlock) -> ChainLineageBlock {
     ChainLineageBlock {
         chain_id: block.chain_id.clone(),
@@ -6386,11 +6878,11 @@ fn assert_resolver_live_coverage_requirement(
     required_to_block: i64,
 ) -> Result<()> {
     let newly_required = error
-        .downcast_ref::<EnsV2NewlyRequiredCoverage>()
+        .downcast_ref::<EnsV2MissingCoverage>()
         .context("resolver live-coverage refusal must be typed")?;
     assert_eq!(
         newly_required,
-        &EnsV2NewlyRequiredCoverage {
+        &EnsV2MissingCoverage {
             chain: chain.to_owned(),
             retention_generation: 0,
             source_family: SOURCE_FAMILY_ENS_V2_RESOLVER_L1.to_owned(),

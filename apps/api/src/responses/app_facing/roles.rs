@@ -1,9 +1,11 @@
 pub(crate) type CompactRolesResponse = JsonValue;
 pub(crate) type ResourceLookupResponse = JsonValue;
 pub(crate) const ENSV1_WRAPPER_PERMISSIONS_UNSUPPORTED_REASON: &str =
-    "ensv1_wrapper_holder_permissions_not_projected";
+    bigname_storage::PermissionCoverageUnsupportedReason::Ensv1WrapperHolderPermissionsNotProjected
+        .as_str();
 pub(crate) const RESOURCE_PERMISSION_AUTHORITY_NOT_PROJECTED_REASON: &str =
-    "resource_permission_authority_not_projected";
+    bigname_storage::PermissionCoverageUnsupportedReason::ResourcePermissionAuthorityNotProjected
+        .as_str();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CompactRolesSupport {

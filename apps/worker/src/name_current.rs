@@ -144,7 +144,7 @@ async fn rebuild_all_name_current(pool: &PgPool) -> Result<NameCurrentRebuildSum
             replacement.stage_rows(&rows).await?;
             rows.clear();
         }
-        if completed_name_count % 5_000 == 0 {
+        if completed_name_count.is_multiple_of(5_000) {
             tracing::info!(
                 projection = "name_current",
                 requested_name_count,

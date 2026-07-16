@@ -301,6 +301,11 @@ Field ownership:
 - Status semantics: no matching permission rows returns `200` with empty
   `data`, including when a `name` filter has no registration anchor in the
   selected snapshot. Unsupported filter combinations return `422 unsupported`.
+  After snapshot selection, an absent or older projection-owned permission
+  publication version returns `409 stale` before permission rows are decoded.
+  A publication revision change while rows and summaries are read also returns
+  `409 stale`. The version and revision are schema/publication compatibility and
+  request-coherence guards, not freshness watermarks.
 - Replaces (v1): `GET /v1/resources/{resource_id}/permissions`,
   `GET /v1/roles`, `GET /v1/names/{namespace}/{name}/roles`, and
   `GET /v1/resources/lookup`.
@@ -346,7 +351,11 @@ Field ownership:
   `address_names_current` projection; true as-of address-name enumeration is
   deferred to a storage follow-up.
 - Status semantics: no related names returns `200` with empty `data`.
-  Malformed addresses return `400 invalid_input`.
+  Malformed addresses return `400 invalid_input`. `include=role_summary`
+  conditionally returns `409 stale` when the compatible projection-owned
+  permission publication version is absent or old; the same address-name read
+  without that expansion remains available. The expansion also returns `409
+  stale` when the permission publication revision changes while it is assembled.
 - Replaces (v1): `GET /v1/addresses/{address}/names` and address-relation
   uses of `GET /v1/names`.
 

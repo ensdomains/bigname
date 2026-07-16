@@ -115,6 +115,71 @@ fn live_checkpoint_payload_rejects_unknown_version() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn live_checkpoint_jsonb_encoding_fixture_and_contexts_remain_stable() -> Result<()> {
+    let payload = serde_json::json!({"label": "before\0after"});
+    let encoded = encode_value(&payload)?;
+    assert_eq!(
+        encoded,
+        serde_json::json!({
+            "label": {
+                "__bigname_live_checkpoint_utf8_hex_v1":
+                    "6265666f7265006166746572"
+            }
+        })
+    );
+    assert_eq!(decode_value::<Value>(encoded)?, payload);
+
+    let codec_error = decode_value::<Value>(serde_json::json!({
+        "__bigname_live_checkpoint_utf8_hex_v1": 1
+    }))
+    .expect_err("invalid live checkpoint envelope must fail");
+    assert_eq!(
+        format!("{codec_error:#}"),
+        "failed to decode ENSv2 live checkpoint JSONB encoding: checkpoint escaped string payload is not a string"
+    );
+
+    let payload_error = decode_value::<u64>(Value::String("not a number".to_owned()))
+        .expect_err("invalid live checkpoint payload must fail");
+    assert!(
+        format!("{payload_error:#}")
+            .starts_with("failed to decode ENSv2 live checkpoint payload: invalid type")
+    );
+    Ok(())
+}
+
+#[test]
+fn live_checkpoint_payload_preserves_per_kind_corruption_detection() -> Result<()> {
+    let suffix = RegistrySuffixPayload {
+        address: "0x00000000000000000000000000000000000000aa".to_owned(),
+        suffix: "eth".to_owned(),
+    };
+    let item = encoded_item(
+        ITEM_KIND_REGISTRY_SUFFIX,
+        single_key(&suffix.address)?,
+        &suffix,
+    )?;
+    let expected = SnapshotItemCounts {
+        registry_suffixes: 0,
+        registry_contracts: 1,
+        registry_name_states: 0,
+        token_aliases: 0,
+    };
+
+    let error = decode_replay_state(
+        "ethereum-sepolia",
+        vec![(item.item_kind.to_owned(), item.item_key, item.item_payload)],
+        expected,
+    )
+    .expect_err("same-total per-kind corruption must fail");
+
+    assert_eq!(
+        error.to_string(),
+        "ENSv2 live checkpoint per-kind counts do not match metadata"
+    );
+    Ok(())
+}
+
 fn observation_ref(
     chain: &str,
     block_number: i64,

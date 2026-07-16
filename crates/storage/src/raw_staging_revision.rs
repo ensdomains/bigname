@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use anyhow::{Context, Result, ensure};
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
 
@@ -6,6 +8,20 @@ use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
 pub struct RawLogStagingInputVersion {
     pub retention_generation: i64,
     pub revision: i64,
+}
+
+/// Compatibility of a previously consumed inclusive raw-log boundary with the
+/// currently fenced staging corpus.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RawLogStagingBoundaryStatus {
+    Accepted(RawLogStagingInputVersion),
+    RetentionGenerationChanged {
+        observed: RawLogStagingInputVersion,
+    },
+    ChangedAtOrBefore {
+        observed: RawLogStagingInputVersion,
+        earliest_block: i64,
+    },
 }
 
 /// A long-lived same-chain semantic-mutation fence plus a raw-log truncation
@@ -44,67 +60,44 @@ impl RawLogStagingReadGuard {
         expected: RawLogStagingInputVersion,
         consumed_through_block: i64,
     ) -> Result<RawLogStagingInputVersion> {
-        ensure!(
-            expected.retention_generation >= 0 && expected.revision >= 0,
-            "expected raw-log staging input version must not be negative"
-        );
-        ensure!(
-            consumed_through_block >= 0,
-            "raw-log staging consumed boundary must not be negative"
-        );
-        let observed = self.version;
-        ensure!(
-            observed.retention_generation == expected.retention_generation,
-            "raw-log staging retention generation changed for {}: expected {}, observed {}",
-            self.chain,
-            expected.retention_generation,
-            observed.retention_generation
-        );
-        ensure!(
-            observed.revision >= expected.revision,
-            "raw-log staging revision moved backwards for {}: expected at least {}, observed {}",
-            self.chain,
-            expected.revision,
-            observed.revision
-        );
-        if observed.revision == expected.revision {
-            return Ok(observed);
+        match self
+            .classify_newer_revisions_after(expected, consumed_through_block)
+            .await?
+        {
+            RawLogStagingBoundaryStatus::Accepted(observed) => Ok(observed),
+            RawLogStagingBoundaryStatus::RetentionGenerationChanged { observed } => {
+                anyhow::bail!(
+                    "raw-log staging retention generation changed for {}: expected {}, observed {}",
+                    self.chain,
+                    expected.retention_generation,
+                    observed.retention_generation
+                )
+            }
+            RawLogStagingBoundaryStatus::ChangedAtOrBefore { earliest_block, .. } => {
+                anyhow::bail!(
+                    "raw-log staging input changed for {} at block {} at or before consumed block {} after revision {}",
+                    self.chain,
+                    earliest_block,
+                    consumed_through_block,
+                    expected.revision
+                )
+            }
         }
+    }
 
-        let earliest_changed_block = sqlx::query_scalar::<_, Option<i64>>(
-            r#"
-            SELECT MIN(block_number)
-            FROM raw_log_staging_block_revisions
-            WHERE chain_id = $1
-              AND revision > $2
-            "#,
-        )
-        .bind(&self.chain)
-        .bind(expected.revision)
-        .fetch_one(self.transaction.as_mut())
-        .await
-        .with_context(|| {
-            format!(
-                "failed to inspect fenced raw-log staging changes for {} after revision {}",
-                self.chain, expected.revision
-            )
-        })?;
-        let earliest_changed_block = earliest_changed_block.with_context(|| {
-            format!(
-                "raw-log staging revision advanced for {} from {} to {} without per-block revision evidence",
-                self.chain, expected.revision, observed.revision
-            )
-        })?;
-        ensure!(
-            earliest_changed_block > consumed_through_block,
-            "raw-log staging input changed for {} at block {} at or before consumed block {} after revision {}",
-            self.chain,
-            earliest_changed_block,
+    pub async fn classify_newer_revisions_after(
+        &mut self,
+        expected: RawLogStagingInputVersion,
+        consumed_through_block: i64,
+    ) -> Result<RawLogStagingBoundaryStatus> {
+        classify_newer_revisions_after(
+            self.transaction.as_mut(),
+            &self.chain,
+            self.version,
+            expected,
             consumed_through_block,
-            expected.revision
-        );
-
-        Ok(observed)
+        )
+        .await
     }
 
     pub async fn ensure_current(&mut self) -> Result<()> {
@@ -131,6 +124,70 @@ impl RawLogStagingReadGuard {
                 self.chain
             )
         })
+    }
+}
+
+/// One-transaction read fence for a sorted set of chains. Raw writers for
+/// other chains remain live, and the guarded set consumes only one pool
+/// connection regardless of chain count.
+pub struct RawLogStagingReadSetGuard {
+    transaction: Transaction<'static, Postgres>,
+    versions: BTreeMap<String, RawLogStagingInputVersion>,
+}
+
+impl RawLogStagingReadSetGuard {
+    pub fn version(&self, chain: &str) -> Option<RawLogStagingInputVersion> {
+        self.versions.get(chain).copied()
+    }
+
+    pub fn connection_mut(&mut self) -> &mut PgConnection {
+        self.transaction.as_mut()
+    }
+
+    pub async fn classify_newer_revisions_after(
+        &mut self,
+        chain: &str,
+        expected: RawLogStagingInputVersion,
+        consumed_through_block: i64,
+    ) -> Result<RawLogStagingBoundaryStatus> {
+        let observed =
+            self.versions.get(chain).copied().with_context(|| {
+                format!("raw-log staging read set does not guard chain {chain}")
+            })?;
+        classify_newer_revisions_after(
+            self.transaction.as_mut(),
+            chain,
+            observed,
+            expected,
+            consumed_through_block,
+        )
+        .await
+    }
+
+    pub async fn ensure_current(&mut self) -> Result<()> {
+        for (chain, expected) in &self.versions {
+            let observed =
+                load_raw_log_staging_input_version_in_transaction(&mut self.transaction, chain)
+                    .await?;
+            ensure!(
+                observed == *expected,
+                "raw-log staging input changed for {} while its read-set fence was held: expected generation {} revision {}, observed generation {} revision {}",
+                chain,
+                expected.retention_generation,
+                expected.revision,
+                observed.retention_generation,
+                observed.revision
+            );
+        }
+        Ok(())
+    }
+
+    pub async fn release(mut self) -> Result<()> {
+        self.ensure_current().await?;
+        self.transaction
+            .commit()
+            .await
+            .context("failed to release raw-log staging read-set fence")
     }
 }
 
@@ -166,6 +223,111 @@ pub async fn acquire_raw_log_staging_read_guard(
         chain: chain.to_owned(),
         version,
     })
+}
+
+pub async fn acquire_raw_log_staging_read_set_guard(
+    pool: &PgPool,
+    chains: &[String],
+) -> Result<RawLogStagingReadSetGuard> {
+    ensure!(
+        !chains.is_empty(),
+        "raw-log staging read set must contain at least one chain"
+    );
+    for chain in chains {
+        ensure!(
+            !chain.trim().is_empty(),
+            "raw-log staging read-set chain must not be empty"
+        );
+    }
+    let chains = chains.iter().collect::<BTreeSet<_>>();
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to start raw-log staging read-set fence")?;
+    for chain in &chains {
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("raw_log_staging:{chain}"))
+            .execute(transaction.as_mut())
+            .await
+            .with_context(|| format!("failed to fence raw-log staging mutation for {chain}"))?;
+    }
+    sqlx::query("LOCK TABLE raw_logs IN ACCESS SHARE MODE")
+        .execute(transaction.as_mut())
+        .await
+        .context("failed to fence raw-log staging truncation for read set")?;
+
+    let mut versions = BTreeMap::new();
+    for chain in chains {
+        let version =
+            load_raw_log_staging_input_version_in_transaction(&mut transaction, chain).await?;
+        versions.insert((*chain).clone(), version);
+    }
+    Ok(RawLogStagingReadSetGuard {
+        transaction,
+        versions,
+    })
+}
+
+async fn classify_newer_revisions_after(
+    connection: &mut PgConnection,
+    chain: &str,
+    observed: RawLogStagingInputVersion,
+    expected: RawLogStagingInputVersion,
+    consumed_through_block: i64,
+) -> Result<RawLogStagingBoundaryStatus> {
+    ensure!(
+        expected.retention_generation >= 0 && expected.revision >= 0,
+        "expected raw-log staging input version must not be negative"
+    );
+    ensure!(
+        consumed_through_block >= 0,
+        "raw-log staging consumed boundary must not be negative"
+    );
+    if observed.retention_generation != expected.retention_generation {
+        return Ok(RawLogStagingBoundaryStatus::RetentionGenerationChanged { observed });
+    }
+    ensure!(
+        observed.revision >= expected.revision,
+        "raw-log staging revision moved backwards for {chain}: expected at least {}, observed {}",
+        expected.revision,
+        observed.revision
+    );
+    if observed.revision == expected.revision {
+        return Ok(RawLogStagingBoundaryStatus::Accepted(observed));
+    }
+
+    let earliest_changed_block = sqlx::query_scalar::<_, Option<i64>>(
+        r#"
+        SELECT MIN(block_number)
+        FROM raw_log_staging_block_revisions
+        WHERE chain_id = $1
+          AND revision > $2
+        "#,
+    )
+    .bind(chain)
+    .bind(expected.revision)
+    .fetch_one(connection)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to inspect fenced raw-log staging changes for {chain} after revision {}",
+            expected.revision
+        )
+    })?;
+    let earliest_changed_block = earliest_changed_block.with_context(|| {
+        format!(
+            "raw-log staging revision advanced for {chain} from {} to {} without per-block revision evidence",
+            expected.revision, observed.revision
+        )
+    })?;
+    if earliest_changed_block <= consumed_through_block {
+        return Ok(RawLogStagingBoundaryStatus::ChangedAtOrBefore {
+            observed,
+            earliest_block: earliest_changed_block,
+        });
+    }
+
+    Ok(RawLogStagingBoundaryStatus::Accepted(observed))
 }
 
 pub async fn load_raw_log_staging_input_version(

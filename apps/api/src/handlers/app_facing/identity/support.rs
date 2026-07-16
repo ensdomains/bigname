@@ -142,9 +142,7 @@ pub(super) fn reverse_identity_is_primary(
     })
 }
 
-pub(super) fn reverse_identity_role_rank(
-    record: &bigname_storage::ReverseIdentityRecordRow,
-) -> u8 {
+pub(super) fn reverse_identity_role_rank(record: &bigname_storage::ReverseIdentityRecordRow) -> u8 {
     if record.relation_facets.iter().any(|relation| {
         matches!(
             relation,
@@ -216,7 +214,12 @@ pub(super) fn reverse_identity_storage_cursor_item(
 pub(super) fn parse_identity_lookup_profile(
     value: Option<&str>,
 ) -> ApiResult<IdentityLookupProfile> {
-    match value.unwrap_or("detail").trim().to_ascii_lowercase().as_str() {
+    match value
+        .unwrap_or("detail")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "feed" => Ok(IdentityLookupProfile::Feed),
         "detail" => Ok(IdentityLookupProfile::Detail),
         "shadow" => Ok(IdentityLookupProfile::Shadow),

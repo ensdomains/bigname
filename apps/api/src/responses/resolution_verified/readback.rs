@@ -8,6 +8,8 @@ pub(super) fn supported_resolution_verified_readback_records(
     bigname_storage::supported_resolution_verified_readback_records(row, records)
 }
 
+// Successful cache hits keep the outcome inline to avoid an extra allocation.
+#[expect(clippy::large_enum_variant)]
 pub(crate) enum ResolutionVerifiedOutcomeLookup {
     Found(ExecutionOutcome),
     CacheMiss,

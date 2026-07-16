@@ -33,7 +33,12 @@ mod sync_logging;
 #[cfg(test)]
 #[path = "adapter_sync/test_hooks.rs"]
 mod test_hooks;
-pub(crate) use backlog::sync_live_adapter_backlog_after_normalized_replay;
+#[cfg(test)]
+pub(crate) use backlog::install_backlog_after_adapter_sync_test_hook;
+pub(crate) use backlog::{
+    BacklogHandoffStatus, sync_live_adapter_backlog_after_normalized_replay,
+    validate_chain_handoff_while_guarded,
+};
 use ens_v1_subregistry::{ens_v1_subregistry_sync_operation, sync_ens_v1_subregistry_for_mode};
 use ens_v2_registry::{ens_v2_registry_sync_operation, sync_ens_v2_registry_for_mode};
 pub(crate) use entrypoints::{
@@ -51,12 +56,13 @@ pub(crate) use full_closure::{
 };
 use mode::{PersistedRawPayloadAdapterSyncMode, ensure_raw_fact_adapter_allowed};
 use scope::load_live_adapter_source_scope;
-use sync_logging::log_adapter_call_timing;
+use sync_logging::{log_adapter_call_timing, log_live_poll_adapter_sync_completion};
 #[cfg(test)]
 use test_hooks::fail_after_discovery_mutation as fail_after_discovery_mutation_for_test;
 #[cfg(test)]
 pub(crate) use test_hooks::install_post_discovery_mutation_failure as install_post_discovery_mutation_failure_for_test;
-
+// Adapter synchronization keeps deployment, scope, mode, and reconciliation inputs explicit.
+#[expect(clippy::too_many_arguments)]
 async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
     pool: &sqlx::PgPool,
     live_deployment_profile: Option<&str>,
@@ -85,7 +91,6 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
     aggregate.resolver_profile_authority_epoch_guard_count += epoch_guard.epoch_guard_count;
     aggregate.resolver_profile_authority_scan_count += epoch_guard.authority_scan_count;
     let mut active_source_scope = source_scope.map(<[_]>::to_vec);
-
     let adapter_started = Instant::now();
     let source_scope_target_count = active_source_scope.as_deref().map_or(0, <[_]>::len);
     ensure_raw_fact_adapter_allowed(
@@ -200,7 +205,7 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
             || subregistry_discovery_summary.deactivated_edge_count > 0;
         #[cfg(test)]
         if discovery_mutated {
-            fail_after_discovery_mutation_for_test(pool)?;
+            fail_after_discovery_mutation_for_test(pool).await?;
         }
         let epoch_guard = journal_resolver_profile_authority_if_epoch_changed(pool, chain).await?;
         aggregate.resolver_profile_authority_epoch_guard_count += epoch_guard.epoch_guard_count;
@@ -399,9 +404,9 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
     }
     let source_scope = active_source_scope.as_deref();
     let source_scope_target_count = source_scope.map_or(0, <[_]>::len);
-    if source_scope.is_some()
-        && mode.selects_adapter(source_scope, NormalizedEventReplayAdapter::EnsV2Registrar)
-    {
+    if let Some(source_scope) = source_scope.filter(|scope| {
+        mode.selects_adapter(Some(*scope), NormalizedEventReplayAdapter::EnsV2Registrar)
+    }) {
         ensure_raw_fact_adapter_allowed(mode, NormalizedEventReplayAdapter::EnsV2Registrar)?;
         let adapter_started = Instant::now();
         info!(
@@ -419,7 +424,7 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
                 pool,
                 chain,
                 block_hashes,
-                source_scope.expect("registrar source scope was checked before scoped sync"),
+                source_scope,
             )
             .await?;
         log_adapter_call_timing(
@@ -580,20 +585,11 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
         );
     }
     if mode == PersistedRawPayloadAdapterSyncMode::LivePoll {
-        info!(
-            service = "indexer",
-            command = "poll",
+        log_live_poll_adapter_sync_completion(
             chain,
-            block_hash_count = block_hashes.len(),
-            source_scope_target_count = source_scope.map_or(0, <[_]>::len),
-            scanned_log_count = aggregate.scanned_log_count,
-            matched_log_count = aggregate.matched_log_count,
-            normalized_event_sync_total_count = aggregate.total_synced_count,
-            normalized_event_inserted_total_count = aggregate.total_inserted_count,
-            resolver_profile_authority_epoch_guard_count =
-                aggregate.resolver_profile_authority_epoch_guard_count,
-            resolver_profile_authority_scan_count = aggregate.resolver_profile_authority_scan_count,
-            "live poll adapter sync completed"
+            block_hashes.len(),
+            source_scope.map_or(0, <[_]>::len),
+            &aggregate,
         );
     }
     Ok(aggregate)

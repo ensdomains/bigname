@@ -11,6 +11,17 @@ pub(super) async fn address_names(
     let include = parse_address_names_include(query.include.as_deref())?;
     let pagination = parse_pagination(query.cursor.as_deref(), query.page_size)?;
     let normalized_address = parse_evm_address(&address, "address")?;
+    let permission_read = if include.role_summary {
+        Some(
+            begin_permissions_current_read(
+            &state.pool,
+            "/v1/addresses/{address}/names?include=role_summary",
+        )
+            .await?,
+        )
+    } else {
+        None
+    };
 
     let mut filters = BTreeMap::new();
     if let Some(namespace) = namespace.as_ref() {
@@ -99,6 +110,14 @@ pub(super) async fn address_names(
         )
     };
 
+    if let Some(permission_read) = permission_read {
+        finish_permissions_current_read(
+            &state.pool,
+            "/v1/addresses/{address}/names?include=role_summary",
+            permission_read,
+        )
+        .await?;
+    }
     Ok(Json(response))
 }
 
@@ -327,6 +346,11 @@ pub(super) async fn resource_permissions(
     let subject = parse_permissions_subject(query.subject.as_deref());
     let scope = parse_permission_scope_filter(query.scope.as_deref())?;
     let pagination = parse_pagination(query.cursor.as_deref(), query.page_size)?;
+    let permission_read = begin_permissions_current_read(
+        &state.pool,
+        "/v1/resources/{resource_id}/permissions",
+    )
+    .await?;
 
     let mut filters = BTreeMap::new();
     if let Some(subject) = subject.as_ref() {
@@ -353,22 +377,22 @@ pub(super) async fn resource_permissions(
         .await?;
     }
 
-    let resource_summary = bigname_storage::load_permissions_current_resource_summary(
-        &state.pool,
-        resource_id,
-    )
-        .await
-        .map_err(|load_error| {
-            error!(
-                service = "api",
-                resource_id = %resource_id,
-                error = ?load_error,
-                "failed to load projection-owned permissions support metadata"
-            );
-            ApiError::internal_error(format!(
-                "failed to load permissions for resource {resource_id}"
-            ))
-        })?;
+    let resource_summary =
+        bigname_storage::load_permissions_current_resource_summary(&state.pool, resource_id)
+            .await
+            .map_err(|load_error| {
+                error!(
+                    service = "api",
+                    resource_id = %resource_id,
+                    error = ?load_error,
+                    "failed to load projection-owned permissions support metadata"
+                );
+                ApiError::internal_error(format!(
+                    "failed to load permissions for resource {resource_id}"
+                ))
+            })?;
+    #[cfg(test)]
+    handler_permissions_support::test_hooks::run(&state.pool).await?;
     let storage_page = bigname_storage::load_permissions_current_page(
         &state.pool,
         resource_id,
@@ -400,12 +424,19 @@ pub(super) async fn resource_permissions(
             .map(permissions_cursor_item),
     );
 
-    Ok(Json(build_resource_permissions_response_from_summary(
+    let response = build_resource_permissions_response_from_summary(
         &storage_page.summary,
         &storage_page.rows,
         resource_summary.as_ref(),
         page,
-    )))
+    );
+    finish_permissions_current_read(
+        &state.pool,
+        "/v1/resources/{resource_id}/permissions",
+        permission_read,
+    )
+    .await?;
+    Ok(Json(response))
 }
 
 async fn build_address_names_response_with_role_summary(

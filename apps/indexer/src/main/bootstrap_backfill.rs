@@ -104,6 +104,8 @@ impl BootstrapBackfillOutcome {
     }
 }
 
+// Startup orchestration keeps provider, replay, audit, and worker settings explicit.
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn run_startup_bootstrap_backfills(
     pool: &sqlx::PgPool,
     manifests_root: &Path,

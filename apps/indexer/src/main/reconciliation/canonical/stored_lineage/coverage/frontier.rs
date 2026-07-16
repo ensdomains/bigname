@@ -1,308 +1,224 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use bigname_manifests::RequiredWatchedTuple;
+use bigname_storage::{
+    STORED_LINEAGE_COVERAGE_PROOF_FORMAT_VERSION, StoredLineageCoverageFrontierHeader,
+};
 
 pub(super) type Topic0sByFamily = BTreeMap<String, BTreeSet<String>>;
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct WatchedTupleKey {
-    source_family: String,
-    address: String,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct BlockInterval {
-    from_block: i64,
-    through_block: i64,
-}
-
-type RequirementSnapshot = BTreeMap<WatchedTupleKey, Vec<BlockInterval>>;
-
-/// Process-local proof state for one chain. Requirements retain exactly which
-/// watched tuple intervals were covered, allowing an admission-epoch change
-/// to verify only newly required intervals instead of discarding all history.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct VerifiedCoverageState {
-    pub(super) from_block: i64,
-    pub(super) through_block: i64,
-    pub(super) topic0s_by_family: Topic0sByFamily,
-    pub(super) discovery_admission_epoch: i64,
-    requirements: RequirementSnapshot,
+pub(super) struct CoveragePublicationPlan {
+    pub(super) expected_snapshot_revision: Option<i64>,
+    pub(super) verified_from_block: i64,
+    pub(super) verified_through_block: i64,
+    pub(super) topic_changed_source_families: Vec<String>,
+    pub(super) reverify_all: bool,
 }
 
-impl VerifiedCoverageState {
-    pub(super) fn empty(
-        from_block: i64,
-        topic0s_by_family: Topic0sByFamily,
-        discovery_admission_epoch: i64,
-    ) -> Self {
-        Self {
-            from_block,
-            through_block: from_block.saturating_sub(1),
-            topic0s_by_family,
-            discovery_admission_epoch,
-            requirements: BTreeMap::new(),
-        }
-    }
-
-    /// Return only intervals not proved by the previous requirement snapshot.
-    /// A topic-selector change invalidates every current interval in that
-    /// family while leaving unrelated families' proofs intact.
-    pub(super) fn differential_requirements(
-        &self,
-        current: &[RequiredWatchedTuple],
-        current_topic0s_by_family: &Topic0sByFamily,
-    ) -> Vec<RequiredWatchedTuple> {
-        let current = normalize_requirements(current);
-        let changed_topic_families =
-            changed_topic_families(&self.topic0s_by_family, current_topic0s_by_family);
-        let mut differential = Vec::new();
-
-        for (key, current_intervals) in &current {
-            if changed_topic_families.contains(&key.source_family) {
-                differential.extend(required_tuples(key, current_intervals));
-                continue;
-            }
-            let previous = self.requirements.get(key).map(Vec::as_slice).unwrap_or(&[]);
-            differential.extend(required_tuples(
-                key,
-                &subtract_intervals(current_intervals, previous),
-            ));
-        }
-        differential
-    }
-
-    pub(super) fn replace_requirements(
-        &mut self,
-        from_block: i64,
-        current: &[RequiredWatchedTuple],
-        current_topic0s_by_family: Topic0sByFamily,
-        discovery_admission_epoch: i64,
-    ) {
-        self.from_block = self.from_block.min(from_block);
-        self.requirements = normalize_requirements(current);
-        self.topic0s_by_family = current_topic0s_by_family;
-        self.discovery_admission_epoch = discovery_admission_epoch;
-    }
-
-    pub(super) fn extend_requirements(
-        &mut self,
-        requirements: &[RequiredWatchedTuple],
-        through_block: i64,
-        current_topic0s_by_family: Topic0sByFamily,
-        discovery_admission_epoch: i64,
-    ) {
-        let mut combined = self.requirements_as_tuples();
-        combined.extend_from_slice(requirements);
-        self.requirements = normalize_requirements(&combined);
-        self.through_block = through_block;
-        self.topic0s_by_family = current_topic0s_by_family;
-        self.discovery_admission_epoch = discovery_admission_epoch;
-    }
-
-    fn requirements_as_tuples(&self) -> Vec<RequiredWatchedTuple> {
-        self.requirements
-            .iter()
-            .flat_map(|(key, intervals)| required_tuples(key, intervals))
-            .collect()
-    }
-}
-
-fn changed_topic_families(
-    previous: &Topic0sByFamily,
-    current: &Topic0sByFamily,
-) -> BTreeSet<String> {
-    current
+pub(super) fn canonical_topic_sets(topics: &Topic0sByFamily) -> BTreeMap<String, Vec<String>> {
+    topics
         .iter()
-        .filter_map(|(family, topics)| {
-            (previous.get(family) != Some(topics)).then_some(family.clone())
-        })
+        .map(|(family, topics)| (family.clone(), topics.iter().cloned().collect()))
         .collect()
 }
 
-fn normalize_requirements(requirements: &[RequiredWatchedTuple]) -> RequirementSnapshot {
-    let mut by_tuple = RequirementSnapshot::new();
-    for requirement in requirements {
-        by_tuple
-            .entry(WatchedTupleKey {
-                source_family: requirement.source_family.clone(),
-                address: requirement.address.to_ascii_lowercase(),
-            })
-            .or_default()
-            .push(BlockInterval {
-                from_block: requirement.required_from_block,
-                through_block: requirement.required_to_block,
-            });
+#[expect(
+    clippy::too_many_arguments,
+    reason = "publication planning keeps the persisted proof inputs explicit for auditability"
+)]
+pub(super) fn plan_publication(
+    header: Option<&StoredLineageCoverageFrontierHeader>,
+    persisted_requirements_valid: bool,
+    current_topics: &BTreeMap<String, Vec<String>>,
+    discovery_admission_epoch: i64,
+    earliest_known_watched_block: Option<i64>,
+    required_from_block: i64,
+    required_through_block: i64,
+    verify_ahead_through_block: i64,
+    verification_chunk_blocks: i64,
+) -> Result<Option<CoveragePublicationPlan>, String> {
+    let verify_ahead_through_block = verify_ahead_through_block.max(required_through_block);
+    if let Some(header) = header
+        && header.proof_format_version != STORED_LINEAGE_COVERAGE_PROOF_FORMAT_VERSION
+    {
+        return Err(format!(
+            "stored-lineage coverage frontier for chain {} uses unsupported proof format {}; this binary recognizes only {} and will not overwrite or downgrade the saved proof",
+            header.chain_id,
+            header.proof_format_version,
+            STORED_LINEAGE_COVERAGE_PROOF_FORMAT_VERSION
+        ));
     }
-    for intervals in by_tuple.values_mut() {
-        *intervals = merge_intervals(std::mem::take(intervals));
-    }
-    by_tuple
-}
 
-fn merge_intervals(mut intervals: Vec<BlockInterval>) -> Vec<BlockInterval> {
-    intervals.sort_by_key(|interval| (interval.from_block, interval.through_block));
-    let mut merged: Vec<BlockInterval> = Vec::with_capacity(intervals.len());
-    for interval in intervals {
-        if let Some(previous) = merged.last_mut()
-            && interval.from_block <= previous.through_block.saturating_add(1)
-        {
-            previous.through_block = previous.through_block.max(interval.through_block);
-        } else {
-            merged.push(interval);
-        }
-    }
-    merged
-}
+    let topic_changed_source_families = header
+        .map(|header| changed_topic_families(&header.topic0s_by_family, current_topics))
+        .unwrap_or_default();
+    let deep_regression =
+        header.is_some_and(|header| required_from_block < header.verified_from_block);
+    let epoch_regression =
+        header.is_some_and(|header| header.discovery_admission_epoch > discovery_admission_epoch);
+    let cold_rebuild =
+        header.is_none() || !persisted_requirements_valid || deep_regression || epoch_regression;
 
-fn subtract_intervals(current: &[BlockInterval], previous: &[BlockInterval]) -> Vec<BlockInterval> {
-    let mut added = Vec::new();
-    for interval in current {
-        let mut cursor = interval.from_block;
-        for proved in previous {
-            if proved.through_block < cursor {
-                continue;
-            }
-            if proved.from_block > interval.through_block {
-                break;
-            }
-            if proved.from_block > cursor {
-                added.push(BlockInterval {
-                    from_block: cursor,
-                    through_block: interval
-                        .through_block
-                        .min(proved.from_block.saturating_sub(1)),
-                });
-            }
-            cursor = cursor.max(proved.through_block.saturating_add(1));
-            if cursor > interval.through_block {
-                break;
-            }
-        }
-        if cursor <= interval.through_block {
-            added.push(BlockInterval {
-                from_block: cursor,
-                through_block: interval.through_block,
-            });
-        }
+    if let Some(header) = header
+        && !cold_rebuild
+        && header.discovery_admission_epoch == discovery_admission_epoch
+        && topic_changed_source_families.is_empty()
+        && header.verified_from_block <= required_from_block
+        && header.verified_through_block >= required_through_block
+    {
+        return Ok(None);
     }
-    added
-}
 
-fn required_tuples(
-    key: &WatchedTupleKey,
-    intervals: &[BlockInterval],
-) -> Vec<RequiredWatchedTuple> {
-    intervals
-        .iter()
-        .map(|interval| RequiredWatchedTuple {
-            source_family: key.source_family.clone(),
-            address: key.address.clone(),
-            required_from_block: interval.from_block,
-            required_to_block: interval.through_block,
+    let verified_from_block = if cold_rebuild {
+        earliest_known_watched_block.map_or(required_from_block, |earliest| {
+            earliest.min(required_from_block)
         })
+    } else {
+        let header = header.expect("a non-cold publication must have a saved header");
+        earliest_known_watched_block.map_or(header.verified_from_block, |earliest| {
+            earliest.min(header.verified_from_block)
+        })
+    };
+    let verified_through_block = match header {
+        Some(header)
+            if !cold_rebuild && required_through_block <= header.verified_through_block =>
+        {
+            header.verified_through_block
+        }
+        Some(header) if !cold_rebuild => header
+            .verified_through_block
+            .saturating_add(verification_chunk_blocks)
+            .min(verify_ahead_through_block),
+        _ => verified_from_block
+            .saturating_add(verification_chunk_blocks.saturating_sub(1))
+            .min(verify_ahead_through_block),
+    };
+
+    Ok(Some(CoveragePublicationPlan {
+        expected_snapshot_revision: header.map(|header| header.snapshot_revision),
+        verified_from_block,
+        verified_through_block,
+        topic_changed_source_families,
+        reverify_all: cold_rebuild,
+    }))
+}
+
+fn changed_topic_families(
+    previous: &BTreeMap<String, Vec<String>>,
+    current: &BTreeMap<String, Vec<String>>,
+) -> Vec<String> {
+    previous
+        .keys()
+        .chain(current.keys())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|family| previous.get(*family) != current.get(*family))
+        .cloned()
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
+    use sqlx::types::time::OffsetDateTime;
+
     use super::*;
 
-    fn requirement(family: &str, address: &str, from: i64, through: i64) -> RequiredWatchedTuple {
-        RequiredWatchedTuple {
-            source_family: family.to_owned(),
-            address: address.to_owned(),
-            required_from_block: from,
-            required_to_block: through,
+    fn header(from: i64, through: i64) -> StoredLineageCoverageFrontierHeader {
+        StoredLineageCoverageFrontierHeader {
+            chain_id: "test-chain".to_owned(),
+            snapshot_revision: 4,
+            proof_format_version: STORED_LINEAGE_COVERAGE_PROOF_FORMAT_VERSION.to_owned(),
+            discovery_admission_epoch: 2,
+            verified_from_block: from,
+            verified_through_block: through,
+            topic0s_by_family: BTreeMap::from([(
+                "family".to_owned(),
+                vec![format!("0x{:064x}", 1)],
+            )]),
+            requirement_row_count: 1,
+            requirement_digest: "00000000000000000000000000000000".to_owned(),
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+            is_well_formed: true,
         }
     }
 
     #[test]
-    fn differential_keeps_only_added_intervals_and_changed_topic_families() {
-        let mut state = VerifiedCoverageState::empty(
-            10,
-            BTreeMap::from([
-                ("unchanged".to_owned(), BTreeSet::from(["0x01".to_owned()])),
-                ("changed".to_owned(), BTreeSet::from(["0x02".to_owned()])),
-            ]),
-            1,
-        );
-        state.through_block = 100;
-        state.replace_requirements(
-            10,
-            &[
-                requirement("unchanged", "0xA", 10, 100),
-                requirement("changed", "0xB", 20, 100),
-            ],
-            state.topic0s_by_family.clone(),
-            1,
-        );
-
-        let differential = state.differential_requirements(
-            &[
-                requirement("unchanged", "0xA", 10, 100),
-                requirement("unchanged", "0xC", 90, 100),
-                requirement("changed", "0xB", 20, 100),
-            ],
-            &BTreeMap::from([
-                ("unchanged".to_owned(), BTreeSet::from(["0x01".to_owned()])),
-                ("changed".to_owned(), BTreeSet::from(["0x03".to_owned()])),
-            ]),
-        );
-
+    fn unchanged_eligible_header_is_reused() {
+        let header = header(10, 100);
         assert_eq!(
-            differential,
-            vec![
-                requirement("changed", "0xb", 20, 100),
-                requirement("unchanged", "0xc", 90, 100),
-            ]
+            plan_publication(
+                Some(&header),
+                true,
+                &header.topic0s_by_family,
+                2,
+                Some(10),
+                50,
+                60,
+                100,
+                32,
+            )
+            .expect("current proof must plan"),
+            None
         );
     }
 
     #[test]
-    fn removing_or_shortening_requirements_adds_no_verification_work() {
-        let topics = BTreeMap::from([("family".to_owned(), BTreeSet::from(["0x01".to_owned()]))]);
-        let mut state = VerifiedCoverageState::empty(1, topics.clone(), 1);
-        state.through_block = 100;
-        state.replace_requirements(
-            1,
-            &[
-                requirement("family", "0xA", 1, 100),
-                requirement("family", "0xB", 20, 80),
-            ],
-            topics.clone(),
-            1,
-        );
-
-        assert!(
-            state
-                .differential_requirements(&[requirement("family", "0xA", 1, 50)], &topics,)
-                .is_empty()
-        );
+    fn deep_regression_forces_cold_full_candidate() {
+        let header = header(50, 100);
+        let plan = plan_publication(
+            Some(&header),
+            true,
+            &header.topic0s_by_family,
+            2,
+            Some(10),
+            20,
+            30,
+            100,
+            32,
+        )
+        .expect("deep regression must plan")
+        .expect("deep regression must publish");
+        assert!(plan.reverify_all);
+        assert_eq!(plan.verified_from_block, 10);
+        assert_eq!(plan.expected_snapshot_revision, Some(4));
     }
 
     #[test]
-    fn removing_all_family_topics_drops_proofs_before_later_readmission() {
-        let family = "family";
-        let requirements = [requirement(family, "0xA", 1, 100)];
-        let topics = BTreeMap::from([(family.to_owned(), BTreeSet::from(["0x01".to_owned()]))]);
-        let mut state = VerifiedCoverageState::empty(1, topics.clone(), 1);
-        state.through_block = 100;
-        state.replace_requirements(1, &requirements, topics.clone(), 1);
+    fn malformed_child_integrity_forces_cold_full_candidate() {
+        let header = header(10, 100);
+        let plan = plan_publication(
+            Some(&header),
+            false,
+            &header.topic0s_by_family,
+            2,
+            Some(10),
+            50,
+            60,
+            100,
+            32,
+        )
+        .expect("malformed child integrity must plan")
+        .expect("malformed child integrity must publish");
+        assert!(plan.reverify_all);
+        assert_eq!(plan.expected_snapshot_revision, Some(4));
+    }
 
-        // With no topic-bearing event the family is no longer log-producing:
-        // it has no current coverage requirement, but its old proof must also
-        // leave the snapshot rather than surviving for later reuse.
-        assert!(
-            state
-                .differential_requirements(&[], &BTreeMap::new())
-                .is_empty()
-        );
-        state.replace_requirements(1, &[], BTreeMap::new(), 2);
-
-        assert_eq!(
-            state.differential_requirements(&requirements, &topics),
-            vec![requirement(family, "0xa", 1, 100)]
-        );
+    #[test]
+    fn unknown_proof_format_is_never_overwritten() {
+        let mut header = header(10, 100);
+        header.proof_format_version = "stored_lineage_coverage_v2".to_owned();
+        let error = plan_publication(
+            Some(&header),
+            true,
+            &header.topic0s_by_family,
+            2,
+            Some(10),
+            20,
+            30,
+            100,
+            32,
+        )
+        .expect_err("unknown format must hard-refuse");
+        assert!(error.contains("will not overwrite or downgrade"));
     }
 }

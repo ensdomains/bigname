@@ -936,6 +936,30 @@ async fn rebuild_permissions_current(
     .await
     .context("worker permissions_current rebuild task panicked")??;
 
+    mark_permissions_current_projection_ready(database).await?;
+    Ok(())
+}
+
+async fn mark_permissions_current_projection_ready(database: &HarnessDatabase) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO permissions_current_publication (
+            projection,
+            publication_version,
+            data_revision,
+            published_at
+        )
+        VALUES ('permissions_current', $1, 1, now())
+        ON CONFLICT (projection) DO UPDATE SET
+            publication_version = EXCLUDED.publication_version,
+            data_revision = permissions_current_publication.data_revision + 1,
+            published_at = EXCLUDED.published_at
+        "#,
+    )
+    .bind(bigname_storage::PERMISSIONS_CURRENT_PUBLICATION_VERSION)
+    .execute(&database.pool)
+    .await
+    .context("failed to publish permissions_current compatibility for conformance")?;
     Ok(())
 }
 
@@ -1806,6 +1830,7 @@ fn permission_current_resource_summary(
     chain_id: &str,
     block_number: i64,
 ) -> bigname_storage::PermissionsCurrentResourceSummary {
+    assert_eq!(enumeration_basis, "resource_permissions");
     let chain_slot = if chain_id.starts_with("base") {
         "base"
     } else {
@@ -1815,13 +1840,9 @@ fn permission_current_resource_summary(
         resource_id,
         authority_kind: Some(authority_kind.to_owned()),
         root_resource_id: None,
-        coverage: json!({
-            "status": "full",
-            "exhaustiveness": "authoritative",
-            "source_classes_considered": source_classes_considered,
-            "enumeration_basis": enumeration_basis,
-            "unsupported_reason": null,
-        }),
+        coverage: bigname_storage::ResourcePermissionCoverage::authoritative(
+            source_classes_considered.iter().copied(),
+        ),
         provenance: json!({
             "derivation_kind": "permissions_current_resource_summary_rebuild",
         }),

@@ -8,6 +8,9 @@ mod generic_topic_identity;
 mod lease_heartbeat;
 #[path = "reservation_execution/scan_all.rs"]
 mod scan_all;
+#[cfg(test)]
+#[path = "reservation_execution/tests.rs"]
+mod tests;
 
 use anyhow::{Context, Result, bail};
 use bigname_manifests::{WatchedSourceSelectorKind, WatchedSourceSelectorPlan};
@@ -124,24 +127,25 @@ pub(crate) async fn create_coinbase_sql_backfill_job_with_ranges(
     topic_plan: &BackfillTopicPlan,
     ranges: Vec<BackfillRangeSpec>,
 ) -> Result<BackfillJobRecord> {
-    create_backfill_job(
-        pool,
-        &BackfillJobCreate {
-            deployment_profile: config.deployment_profile.clone(),
-            chain_id: source_plan.watched_chain_plan.chain.clone(),
-            source_identity: coinbase_sql_backfill_job_source_identity_payload(
-                source_plan,
-                coinbase_config,
-                topic_plan,
-            )?,
-            scan_mode: COINBASE_SQL_BACKFILL_SCAN_MODE.to_owned(),
-            range_start_block_number: config.range.from_block,
-            range_end_block_number: config.range.to_block,
-            idempotency_key: config.idempotency_key.clone(),
-            ranges,
-        },
-    )
-    .await
+    let request = BackfillJobCreate {
+        deployment_profile: config.deployment_profile.clone(),
+        chain_id: source_plan.watched_chain_plan.chain.clone(),
+        source_identity: coinbase_sql_backfill_job_source_identity_payload(
+            source_plan,
+            coinbase_config,
+            topic_plan,
+        )?,
+        scan_mode: COINBASE_SQL_BACKFILL_SCAN_MODE.to_owned(),
+        range_start_block_number: config.range.from_block,
+        range_end_block_number: config.range.to_block,
+        idempotency_key: config.idempotency_key.clone(),
+        ranges,
+    };
+    if config.scope_idempotency_to_raw_log_retention_generation {
+        create_generation_scoped_backfill_job(pool, &request).await
+    } else {
+        create_backfill_job(pool, &request).await
+    }
 }
 
 pub(crate) fn hash_pinned_backfill_range_specs(

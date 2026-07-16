@@ -56,17 +56,9 @@ async fn wrapped_renewal_tracks_registrar_expiry_without_wrapper_event() -> Resu
         "current-controller renewal touches the registrar, leaving wrapper storage stale"
     );
 
-    let run = support::ingest_and_serve(
-        &anvil,
-        &deployment,
-        Some(
-            "SELECT EXISTS (SELECT 1 FROM normalized_events \
-             WHERE logical_name_id = 'ens:renewwrapped.eth' \
-               AND event_kind = 'RegistrationRenewed' \
-               AND canonicality_state = 'canonical')",
-        ),
-    )
-    .await?;
+    let ready_sql =
+        support::canonical_event_ready_sql("ens:renewwrapped.eth", "RegistrationRenewed", None);
+    let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
 
     let (renewal_tx, renewal_expiry, registrar_resource): (String, i64, Uuid) = sqlx::query_as(
         "SELECT transaction_hash, (after_state->>'expiry')::BIGINT, resource_id \

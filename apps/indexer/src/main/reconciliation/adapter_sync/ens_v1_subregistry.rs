@@ -1,6 +1,7 @@
 use anyhow::Result;
 use bigname_storage::acquire_raw_log_staging_read_guard;
 
+use crate::reconciliation::guard_release::prioritize_operation_error;
 use crate::reconciliation::replay::{
     NormalizedEventReplayAdapter, ensure_legacy_registry_closure_retention_authority_for_adapters,
 };
@@ -44,7 +45,7 @@ pub(super) async fn sync_ens_v1_subregistry_for_mode(
         }
         .await;
         let release_result = raw_log_guard.release().await;
-        return prioritize_sync_error(sync_result, release_result);
+        return prioritize_operation_error(sync_result, release_result);
     }
 
     match mode {
@@ -88,43 +89,10 @@ pub(super) async fn sync_ens_v1_subregistry_for_mode(
     }
 }
 
-fn prioritize_sync_error<T>(sync_result: Result<T>, release_result: Result<()>) -> Result<T> {
-    match (sync_result, release_result) {
-        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
-        (Ok(value), Ok(())) => Ok(value),
-    }
-}
-
 pub(super) const fn ens_v1_subregistry_sync_operation(reconcile_full_source: bool) -> &'static str {
     if reconcile_full_source {
         "sync_ens_v1_subregistry_discovery_through_block"
     } else {
         "sync_for_block_hashes"
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use anyhow::anyhow;
-
-    use super::prioritize_sync_error;
-
-    #[test]
-    fn sync_error_has_priority_over_guard_release_error() {
-        let error = prioritize_sync_error::<()>(
-            Err(anyhow!("actionable sync failure")),
-            Err(anyhow!("secondary guard release failure")),
-        )
-        .expect_err("the sync failure must remain actionable");
-
-        assert_eq!(error.to_string(), "actionable sync failure");
-    }
-
-    #[test]
-    fn guard_release_error_is_returned_after_successful_sync() {
-        let error = prioritize_sync_error(Ok(()), Err(anyhow!("guard release failure")))
-            .expect_err("a failed guard release must fail the sync");
-
-        assert_eq!(error.to_string(), "guard release failure");
     }
 }

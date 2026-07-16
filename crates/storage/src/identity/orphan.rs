@@ -195,8 +195,7 @@ async fn repair_surface_bindings_closed_by_orphaned_evidence(
         r#"
         WITH normalized_closures AS NOT MATERIALIZED (
             SELECT
-                event.resource_id,
-                event.logical_name_id,
+                closing_binding.surface_binding_id,
                 event.chain_id,
                 event.block_hash,
                 event.canonicality_state,
@@ -207,24 +206,29 @@ async fn repair_surface_bindings_closed_by_orphaned_evidence(
                              'RegistrationReleased',
                              'SurfaceUnbound'
                          )
-                    THEN event_block.block_timestamp
-                         + (
-                             (
-                                 CASE
-                                     WHEN event.raw_fact_ref->>'transaction_index'
-                                         ~ '^[0-9]+$'
-                                     THEN (
-                                         event.raw_fact_ref->>'transaction_index'
-                                     )::BIGINT
-                                     ELSE 0
-                                 END
-                                 * 1000
-                                 + GREATEST(
-                                     COALESCE(event.log_index, 0),
-                                     0
-                                 )
-                             ) * INTERVAL '1 microsecond'
-                         )
+                    -- The terminal writer makes a zero-length close readable by
+                    -- clamping it just after the binding start.
+                    THEN GREATEST(
+                        event_block.block_timestamp
+                            + (
+                                (
+                                    CASE
+                                        WHEN event.raw_fact_ref->>'transaction_index'
+                                            ~ '^[0-9]+$'
+                                        THEN (
+                                            event.raw_fact_ref->>'transaction_index'
+                                        )::BIGINT
+                                        ELSE 0
+                                    END
+                                    * 1000
+                                    + GREATEST(
+                                        COALESCE(event.log_index, 0),
+                                        0
+                                    )
+                                ) * INTERVAL '1 microsecond'
+                            ),
+                        closing_binding.active_from + INTERVAL '1 microsecond'
+                    )
                     WHEN event.derivation_kind = 'ens_v1_unwrapped_authority'
                          AND event.event_kind = 'SurfaceUnbound'
                          AND event.after_state->>'active_to' ~ '^[0-9]+$'
@@ -236,6 +240,35 @@ async fn repair_surface_bindings_closed_by_orphaned_evidence(
             LEFT JOIN chain_lineage event_block
               ON event_block.chain_id = event.chain_id
              AND event_block.block_hash = event.block_hash
+            JOIN LATERAL (
+                SELECT binding.surface_binding_id, binding.active_from
+                FROM surface_bindings binding
+                WHERE binding.chain_id = event.chain_id
+                  AND binding.logical_name_id = event.logical_name_id
+                  AND binding.resource_id = event.resource_id
+                  AND binding.binding_kind = 'declared_registry_path'
+                  AND (
+                      (
+                          event.derivation_kind =
+                              'ens_v2_registry_resource_surface'
+                          AND (
+                              event.event_kind = 'RegistrationReleased'
+                              OR event.before_state->>'surface_binding_id' =
+                                  binding.surface_binding_id::TEXT
+                              OR event.after_state->>'surface_binding_id' =
+                                  binding.surface_binding_id::TEXT
+                          )
+                      )
+                      OR (
+                          event.derivation_kind =
+                              'ens_v1_unwrapped_authority'
+                          AND right(event.event_identity, 36) =
+                              binding.surface_binding_id::TEXT
+                      )
+                  )
+                ORDER BY binding.block_number, binding.surface_binding_id
+                LIMIT 1
+            ) closing_binding ON TRUE
             WHERE event.resource_id IS NOT NULL
               AND event.logical_name_id IS NOT NULL
               AND (
@@ -254,7 +287,7 @@ async fn repair_surface_bindings_closed_by_orphaned_evidence(
               )
         ),
         orphaned_normalized_closures AS (
-            SELECT resource_id, logical_name_id, close_at
+            SELECT surface_binding_id, close_at
             FROM normalized_closures
             WHERE chain_id = $1
               AND block_hash = ANY($2::TEXT[])
@@ -278,23 +311,32 @@ async fn repair_surface_bindings_closed_by_orphaned_evidence(
                               'safe'::canonicality_state,
                               'finalized'::canonicality_state
                           )
-                          AND surviving_successor.active_from >
-                              predecessor.active_from
+                          -- active_from encodes only a position within its block.
+                          -- Adjacent blocks can share a timestamp, so block order
+                          -- must decide whether this is a successor.
+                          AND (
+                              surviving_successor.block_number >
+                                  predecessor.block_number
+                              OR (
+                                  surviving_successor.block_number =
+                                      predecessor.block_number
+                                  AND surviving_successor.active_from >
+                                      predecessor.active_from
+                              )
+                        )
                         UNION ALL
                         SELECT surviving_close.close_at
                         FROM normalized_closures surviving_close
                         WHERE predecessor.binding_kind =
                                 'declared_registry_path'
                           AND surviving_close.chain_id = predecessor.chain_id
-                          AND surviving_close.resource_id = predecessor.resource_id
-                          AND surviving_close.logical_name_id =
-                              predecessor.logical_name_id
+                          AND surviving_close.surface_binding_id =
+                              predecessor.surface_binding_id
                           AND surviving_close.canonicality_state IN (
                               'canonical'::canonicality_state,
                               'safe'::canonicality_state,
                               'finalized'::canonicality_state
                           )
-                          AND surviving_close.close_at > predecessor.active_from
                     ) surviving_boundary
                 ) AS repaired_active_to
             FROM surface_bindings predecessor
@@ -322,9 +364,8 @@ async fn repair_surface_bindings_closed_by_orphaned_evidence(
                   OR EXISTS (
                       SELECT 1
                       FROM orphaned_normalized_closures orphaned_close
-                      WHERE orphaned_close.resource_id = predecessor.resource_id
-                        AND orphaned_close.logical_name_id =
-                            predecessor.logical_name_id
+                      WHERE orphaned_close.surface_binding_id =
+                            predecessor.surface_binding_id
                         AND orphaned_close.close_at = predecessor.active_to
                         AND predecessor.binding_kind = 'declared_registry_path'
                   )

@@ -6,6 +6,7 @@ mod fail;
 mod lease;
 mod read;
 mod sql;
+mod topic_evidence;
 mod types;
 mod validate;
 
@@ -24,6 +25,11 @@ pub use fail::{fail_backfill_job, fail_backfill_range};
 pub use lease::{advance_backfill_range, reserve_backfill_range};
 pub use read::{
     load_backfill_job, load_backfill_ranges, load_completed_backfill_jobs_intersecting_range,
+};
+pub use topic_evidence::{
+    BackfillTopicCoverageRequirement, BackfillTopicCoverageViolation,
+    MAX_BACKFILL_TOPIC_EVIDENCE_REQUIREMENTS, find_backfill_topic_coverage_violations,
+    materialize_completed_backfill_topic_evidence,
 };
 pub use types::{
     BackfillJob, BackfillJobCreate, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange,

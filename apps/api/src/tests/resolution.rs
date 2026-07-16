@@ -34,6 +34,32 @@ async fn get_resolution_execution_explain_rejects_snapshot_selector_query_parame
 }
 
 #[tokio::test]
+async fn get_resolution_execution_explain_ignores_unknown_query_parameters() -> Result<()> {
+    let database = TestDatabase::new(false).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(
+                    "/v1/explain/resolutions/ens/alice.eth/execution?records=:avatar&bogus=ignored",
+                )
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("resolution execution explain request with unknown query parameter failed")?;
+
+    assert_public_invalid_input_response(
+        response,
+        "records must contain only valid record selectors",
+    )
+    .await?;
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_resolution_execution_explain_sanitizes_snapshot_storage_failure() -> Result<()> {
     let database = TestDatabase::new(false).await?;
 

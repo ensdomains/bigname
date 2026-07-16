@@ -118,6 +118,46 @@ fn seed_admission_semantics_change_ripples_to_unchanged_candidates() {
 }
 
 #[tokio::test]
+async fn unchanged_epoch_guard_does_not_load_the_authority_snapshot() -> Result<()> {
+    let database = TestDatabase::create_migrated(
+        TestDatabaseConfig::new("indexer_resolver_profile_epoch_only_guard"),
+        &bigname_storage::MIGRATOR,
+        "failed to apply migrations for resolver-profile epoch guard test",
+    )
+    .await?;
+
+    // The production constraint keeps this payload valid. Dropping it in this
+    // isolated database makes the test prove that the cheap guard does not
+    // fetch or validate the unrelated authority JSONB column.
+    sqlx::query(
+        r#"
+        ALTER TABLE resolver_profile_authority_journal
+        DROP CONSTRAINT resolver_profile_authority_journal_snapshot_check
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE resolver_profile_authority_journal
+        SET authority_snapshot = 'null'::JSONB
+        WHERE journal_key = 'active_resolver_profiles'
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    let summary =
+        journal_resolver_profile_authority_if_epoch_changed(database.pool(), "ethereum-mainnet")
+            .await?;
+    assert_eq!(summary.epoch_guard_count, 1);
+    assert_eq!(summary.authority_scan_count, 0);
+    assert!(!summary.journal_advanced);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn empty_initial_capture_establishes_baseline_before_later_addition() -> Result<()> {
     let database = TestDatabase::create_migrated(
         TestDatabaseConfig::new("indexer_resolver_profile_empty_authority_baseline"),
@@ -305,7 +345,6 @@ async fn journal_baselines_initial_authority_then_queues_later_removals() -> Res
     assert_eq!(summary.invalidated_projection_key_count, 0);
     assert_eq!(summary.acknowledged_input_count, 0);
     assert_eq!(summary.deferred_input_count, 1);
-    assert_eq!(summary.deferred_chain_count, 1);
     assert_eq!(
         summary.deferred_chains,
         BTreeSet::from(["ethereum-mainnet".to_owned()])

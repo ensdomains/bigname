@@ -3,9 +3,11 @@ use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use uuid::Uuid;
 
 use super::{
-    ResolverProfileAuthoritySnapshot, ResolverProfileConvergenceSummary,
+    ResolverProfileAuthorityIndex, ResolverProfileAuthoritySnapshot,
+    ResolverProfileConvergenceSummary,
     authority::{ResolverProfileAdmissionSemantics, ResolverProfileAuthorityEntry},
     drain_resolver_profile_input_changes, expanded_reconciliation_targets,
+    expanded_reconciliation_targets_with_family_count, input_requires_reconciliation,
     invalidations::{
         enqueue_resolver_profile_projection_invalidations,
         load_resolver_profile_projection_invalidation_plan,
@@ -15,7 +17,6 @@ use super::{
 #[test]
 fn completion_guard_refuses_only_the_deferred_chain() {
     let summary = ResolverProfileConvergenceSummary {
-        deferred_chain_count: 1,
         deferred_chains: std::collections::BTreeSet::from(["ethereum-mainnet".to_owned()]),
         ..ResolverProfileConvergenceSummary::default()
     };
@@ -90,6 +91,10 @@ fn entry(
     }
 }
 
+fn authority_index(authority: ResolverProfileAuthoritySnapshot) -> ResolverProfileAuthorityIndex {
+    ResolverProfileAuthorityIndex::from_snapshot(authority)
+}
+
 #[test]
 fn candidate_change_reconciles_only_the_dirty_address() {
     let dirty = "0x0000000000000000000000000000000000000002";
@@ -104,7 +109,10 @@ fn candidate_change_reconciles_only_the_dirty_address() {
         .collect(),
     };
 
-    let targets = expanded_reconciliation_targets(&[input("ethereum-mainnet", dirty)], &authority);
+    let targets = expanded_reconciliation_targets(
+        &[input("ethereum-mainnet", dirty)],
+        &authority_index(authority),
+    );
     assert_eq!(targets["ethereum-mainnet"].len(), 1);
     assert!(targets["ethereum-mainnet"].contains(dirty));
 }
@@ -122,7 +130,10 @@ fn any_ens_v1_known_resolver_seed_change_ripples_all_active_candidates() {
         .collect(),
     };
 
-    let targets = expanded_reconciliation_targets(&[input("ethereum-mainnet", seed)], &authority);
+    let targets = expanded_reconciliation_targets(
+        &[input("ethereum-mainnet", seed)],
+        &authority_index(authority),
+    );
     assert_eq!(targets["ethereum-mainnet"].len(), 2);
     assert!(targets["ethereum-mainnet"].contains(candidate));
 }
@@ -142,7 +153,10 @@ fn basenames_seed_change_ripples_only_the_basenames_family() {
         .collect(),
     };
 
-    let targets = expanded_reconciliation_targets(&[input("base-mainnet", seed)], &authority);
+    let targets = expanded_reconciliation_targets(
+        &[input("base-mainnet", seed)],
+        &authority_index(authority),
+    );
     assert!(targets["base-mainnet"].contains(seed));
     assert!(targets["base-mainnet"].contains(candidate));
     assert!(!targets["base-mainnet"].contains(unrelated));
@@ -153,7 +167,7 @@ fn removed_profile_address_with_an_authority_kick_gets_an_absence_aware_pass() {
     let dirty = "0x0000000000000000000000000000000000000099";
     let targets = expanded_reconciliation_targets(
         &[forced_input("ethereum-mainnet", dirty)],
-        &ResolverProfileAuthoritySnapshot::default(),
+        &authority_index(ResolverProfileAuthoritySnapshot::default()),
     );
     assert_eq!(
         targets["ethereum-mainnet"]
@@ -169,9 +183,132 @@ fn ordinary_non_resolver_raw_code_change_has_no_reconciliation_target() {
     let dirty = "0x0000000000000000000000000000000000000099";
     let targets = expanded_reconciliation_targets(
         &[input("ethereum-mainnet", dirty)],
-        &ResolverProfileAuthoritySnapshot::default(),
+        &authority_index(ResolverProfileAuthoritySnapshot::default()),
     );
     assert!(targets.is_empty());
+}
+
+fn reference_expanded_reconciliation_targets(
+    pending: &[ResolverProfileInputChange],
+    authority: &ResolverProfileAuthoritySnapshot,
+) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
+    let mut targets =
+        std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+
+    for input in pending {
+        let current_entries = authority
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.chain == input.chain_id && entry.address == input.contract_address
+            })
+            .collect::<Vec<_>>();
+        if current_entries.is_empty() && !input.force_reconciliation {
+            continue;
+        }
+        targets
+            .entry(input.chain_id.clone())
+            .or_default()
+            .insert(input.contract_address.clone());
+        for seed in current_entries.into_iter().filter(|entry| entry.is_seed) {
+            for candidate in authority.entries.iter().filter(|candidate| {
+                candidate.chain == seed.chain && candidate.source_family == seed.source_family
+            }) {
+                targets
+                    .entry(candidate.chain.clone())
+                    .or_default()
+                    .insert(candidate.address.clone());
+            }
+        }
+    }
+
+    targets
+}
+
+#[test]
+fn indexed_authority_matches_full_scans_for_load_shaped_inputs() {
+    let mut entries = std::collections::BTreeSet::new();
+    for address_index in 1..=96 {
+        entries.insert(entry(
+            "ethereum-mainnet",
+            "ens_v1_resolver_l1",
+            &format!("0x{address_index:040x}"),
+            address_index <= 80,
+        ));
+        entries.insert(entry(
+            "base-mainnet",
+            "basenames_base_resolver",
+            &format!("0x{:040x}", address_index + 0x100),
+            address_index <= 80,
+        ));
+    }
+    // One target may have multiple current authority entries; exact lookup
+    // retains them while the family-address index still stores the address once.
+    entries.insert(entry(
+        "ethereum-mainnet",
+        "ens_v1_resolver_l1",
+        "0x0000000000000000000000000000000000000001",
+        true,
+    ));
+    entries.insert(entry(
+        "base-mainnet",
+        "ens_v1_resolver_l1",
+        "0x0000000000000000000000000000000000000201",
+        false,
+    ));
+    let authority = ResolverProfileAuthoritySnapshot { entries };
+    let authority_entry_count = authority.entries.len();
+    let mut pending = Vec::new();
+    for address_index in 1..=80 {
+        pending.push(input(
+            "ethereum-mainnet",
+            &format!("0x{address_index:040x}"),
+        ));
+        pending.push(input(
+            "base-mainnet",
+            &format!("0x{:040x}", address_index + 0x100),
+        ));
+    }
+    pending.extend((0..40).map(|index| {
+        input(
+            if index % 2 == 0 {
+                "ethereum-mainnet"
+            } else {
+                "base-mainnet"
+            },
+            &format!("0x{:040x}", 0x1_000 + index),
+        )
+    }));
+    pending.push(forced_input(
+        "ethereum-mainnet",
+        "0x000000000000000000000000000000000000ffff",
+    ));
+    assert!(pending.len() > 128);
+
+    let expected = reference_expanded_reconciliation_targets(&pending, &authority);
+    let index = authority_index(authority.clone());
+    let (actual, expanded_seed_family_count) =
+        expanded_reconciliation_targets_with_family_count(&pending, &index);
+
+    assert_eq!(actual, expected);
+    assert_eq!(index.indexed_entry_count, authority_entry_count);
+    assert_eq!(
+        index
+            .entries_for(
+                "ethereum-mainnet",
+                "0x0000000000000000000000000000000000000001"
+            )
+            .map(<[_]>::len),
+        Some(2)
+    );
+    assert_eq!(expanded_seed_family_count, 2);
+    for candidate in &pending {
+        let expected = candidate.force_reconciliation
+            || authority.entries.iter().any(|entry| {
+                entry.chain == candidate.chain_id && entry.address == candidate.contract_address
+            });
+        assert_eq!(input_requires_reconciliation(candidate, &index), expected);
+    }
 }
 
 #[tokio::test]
@@ -374,7 +511,6 @@ async fn fully_compacted_history_keeps_profile_generation_pending() -> anyhow::R
 
     let summary = drain_resolver_profile_input_changes(database.pool()).await?;
     assert_eq!(summary.deferred_input_count, 1);
-    assert_eq!(summary.deferred_chain_count, 1);
     assert_eq!(summary.acknowledged_input_count, 0);
     assert_resolver_profile_generation_pending(database.pool(), chain, resolver).await?;
 
@@ -416,7 +552,6 @@ async fn partially_compacted_history_keeps_profile_generation_pending() -> anyho
 
     let summary = drain_resolver_profile_input_changes(database.pool()).await?;
     assert_eq!(summary.deferred_input_count, 1);
-    assert_eq!(summary.deferred_chain_count, 1);
     assert_eq!(summary.acknowledged_input_count, 0);
     assert_resolver_profile_generation_pending(database.pool(), chain, resolver).await?;
 
@@ -463,7 +598,6 @@ async fn unavailable_chain_does_not_block_eligible_chain_convergence() -> anyhow
 
     let summary = drain_resolver_profile_input_changes(database.pool()).await?;
     assert_eq!(summary.deferred_input_count, 1);
-    assert_eq!(summary.deferred_chain_count, 1);
     assert_eq!(summary.acknowledged_input_count, 1);
     assert_eq!(
         sqlx::query_as::<_, (i64, i64)>(

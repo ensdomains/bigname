@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::{Context, Result};
 use bigname_storage::{
     CanonicalityState, NormalizedEvent, PermissionScope, PermissionsCurrentResourceSummary,
-    PermissionsCurrentRow, RawBlock, Resource, default_database_url, load_permissions_current,
-    load_permissions_current_resource_summary, upsert_normalized_events,
+    PermissionsCurrentRow, RawBlock, Resource, ResourcePermissionCoverage, default_database_url,
+    load_permissions_current, load_permissions_current_resource_summary, upsert_normalized_events,
     upsert_permissions_current_resource_summary, upsert_permissions_current_rows,
     upsert_raw_blocks, upsert_resources,
 };
@@ -613,6 +613,170 @@ async fn full_rebuild_publishes_summary_for_ensv2_registration_without_role_even
 }
 
 #[tokio::test]
+async fn keyed_rebuild_clears_rows_after_last_event_with_binding_provenance_fallback() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x73d1);
+    let block_hash = "0xensv1bindingauthority73d1";
+    let block_number = 147;
+    let subject = "0x0000000000000000000000000000000000000abc";
+
+    upsert_resources(
+        database.pool(),
+        &[Resource {
+            resource_id,
+            token_lineage_id: None,
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: block_hash.to_owned(),
+            block_number,
+            provenance: json!({
+                "authority_kind": "registrar",
+                "binding_source_family": "ens_v1_registrar_l1",
+                "binding_manifest_version": 7,
+            }),
+            canonicality_state: CanonicalityState::Finalized,
+        }],
+    )
+    .await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[raw_block(
+            "ethereum-mainnet",
+            block_hash,
+            block_number,
+            1_776_100_147,
+        )],
+    )
+    .await?;
+    upsert_permissions_current_rows(
+        database.pool(),
+        &[PermissionsCurrentRow {
+            resource_id,
+            subject: subject.to_owned(),
+            scope: PermissionScope::Resource,
+            effective_powers: json!(["resource_control"]),
+            grant_source: json!({}),
+            revocation_source: None,
+            inheritance_path: json!([]),
+            transfer_behavior: json!({}),
+            provenance: json!({"derivation_kind": "pre_reorg_test_projection"}),
+            coverage: json!({"enumeration_basis": PERMISSIONS_ENUMERATION_BASIS}),
+            chain_positions: json!({}),
+            canonicality_summary: json!({"status": "finalized", "chains": {}}),
+            manifest_version: 7,
+            last_recomputed_at: timestamp(1_776_100_147),
+        }],
+    )
+    .await?;
+
+    let rebuild =
+        rebuild_permissions_current(database.pool(), Some(&resource_id.to_string())).await?;
+
+    assert_eq!(rebuild.deleted_row_count, 1);
+    assert!(
+        load_permissions_current(database.pool(), resource_id, None, None)
+            .await?
+            .is_empty(),
+        "rebuild after the last canonical permission event must clear the stale row"
+    );
+    let summary = load_permissions_current_resource_summary(database.pool(), resource_id)
+        .await?
+        .context("binding-authority resource must retain a zero-row support summary")?;
+    assert_eq!(summary.manifest_version, 7);
+    assert_eq!(
+        summary.provenance["source_families"],
+        json!(["ens_v1_registrar_l1"])
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn full_rebuild_matches_keyed_zero_event_resource_and_alone_publishes_compatibility()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x73d3);
+    let block_hash = "0xensv1zeroeventfull73d3";
+
+    upsert_resources(
+        database.pool(),
+        &[Resource {
+            resource_id,
+            token_lineage_id: None,
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: block_hash.to_owned(),
+            block_number: 149,
+            provenance: json!({
+                "authority_kind": "registrar",
+                "binding_source_family": "ens_v1_registrar_l1",
+                "binding_manifest_version": 7,
+            }),
+            canonicality_state: CanonicalityState::Finalized,
+        }],
+    )
+    .await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[raw_block(
+            "ethereum-mainnet",
+            block_hash,
+            149,
+            1_776_100_149,
+        )],
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO permissions_current_publication (projection, publication_version)
+        VALUES ('permissions_current', 1)
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    let keyed =
+        rebuild_permissions_current(database.pool(), Some(&resource_id.to_string())).await?;
+    assert_eq!(
+        (keyed.requested_resource_count, keyed.upserted_row_count),
+        (1, 0)
+    );
+    let keyed_summary = load_permissions_current_resource_summary(database.pool(), resource_id)
+        .await?
+        .context("keyed zero-event rebuild must publish its support summary")?;
+    let publication_after_keyed = sqlx::query_as::<_, (i32, i64)>(
+        "SELECT publication_version, data_revision FROM permissions_current_publication",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        publication_after_keyed,
+        (1, 1),
+        "a keyed rebuild must not graduate global publication compatibility"
+    );
+
+    let full = rebuild_permissions_current(database.pool(), None).await?;
+    assert_eq!(
+        (full.requested_resource_count, full.upserted_row_count),
+        (1, 0)
+    );
+    let full_summary = load_permissions_current_resource_summary(database.pool(), resource_id)
+        .await?
+        .context("full rebuild must include canonical zero-event permission resources")?;
+    assert_eq!(full_summary, keyed_summary);
+    let publication_after_full = sqlx::query_as::<_, (i32, i64)>(
+        "SELECT publication_version, data_revision FROM permissions_current_publication",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        publication_after_full,
+        (bigname_storage::PERMISSIONS_CURRENT_PUBLICATION_VERSION, 2)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn full_rebuild_covers_ensv2_root_registration_and_reserved_token_resource() -> Result<()> {
     let database = TestDatabase::new().await?;
     let root_registration_resource_id = Uuid::from_u128(0x73d1);
@@ -871,10 +1035,9 @@ async fn wrapper_scope_fuses_mask_resource_control_powers() -> Result<()> {
         .await?
         .expect("zero-holder wrapper must still publish a resource summary");
     assert_eq!(resource_summary.authority_kind.as_deref(), Some("wrapper"));
-    assert_eq!(resource_summary.coverage["status"], "unsupported");
     assert_eq!(
-        resource_summary.coverage["unsupported_reason"],
-        "ensv1_wrapper_holder_permissions_not_projected"
+        resource_summary.coverage,
+        ResourcePermissionCoverage::ensv1_wrapper_holder_permissions_not_projected()
     );
     assert_eq!(
         resource_summary.chain_positions["ethereum-mainnet"]["block_number"],
@@ -1125,13 +1288,7 @@ async fn keyed_rebuild_keeps_visible_rows_when_projection_build_fails() -> Resul
             resource_id,
             authority_kind: Some("registrar".to_owned()),
             root_resource_id: None,
-            coverage: json!({
-                "status": "full",
-                "exhaustiveness": "authoritative",
-                "source_classes_considered": ["permissions_current"],
-                "enumeration_basis": "resource_permissions",
-                "unsupported_reason": null,
-            }),
+            coverage: ResourcePermissionCoverage::authoritative(["permissions_current"]),
             provenance: json!({"derivation_kind": "preexisting_test_projection"}),
             chain_positions: json!({}),
             canonicality_summary: json!({"status": "finalized", "chains": {}}),
@@ -1225,13 +1382,7 @@ async fn full_rebuild_keeps_visible_rows_when_projection_build_fails() -> Result
             resource_id: visible_resource_id,
             authority_kind: Some("registrar".to_owned()),
             root_resource_id: None,
-            coverage: json!({
-                "status": "full",
-                "exhaustiveness": "authoritative",
-                "source_classes_considered": ["permissions_current"],
-                "enumeration_basis": "resource_permissions",
-                "unsupported_reason": null,
-            }),
+            coverage: ResourcePermissionCoverage::authoritative(["permissions_current"]),
             provenance: json!({"derivation_kind": "preexisting_test_projection"}),
             chain_positions: json!({}),
             canonicality_summary: json!({"status": "finalized", "chains": {}}),

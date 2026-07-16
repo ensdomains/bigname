@@ -15,6 +15,13 @@ pub(super) async fn explain_resolution_execution_current(
             message: "query parameters are invalid".to_owned(),
         }
     })?;
+    if query.at.is_some() || query.chain_positions.is_some() || query.consistency.is_some() {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_input",
+            message: "query parameters are invalid".to_owned(),
+        });
+    }
     let name = parse_exact_name_path_name(&namespace, &name)?;
 
     let records = parse_resolution_record_keys(query.records.as_deref(), ResolutionMode::Verified)?;

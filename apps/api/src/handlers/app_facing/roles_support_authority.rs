@@ -19,43 +19,13 @@ async fn compact_roles_support_for_resource(
             ApiError::internal_error("failed to load roles support metadata")
         })?;
 
-    Ok(match summary.as_ref().and_then(projected_support_status) {
-        Some("full")
-            if summary
-                .as_ref()
-                .and_then(|summary| {
-                    summary
-                        .coverage
-                        .get("exhaustiveness")
-                        .and_then(JsonValue::as_str)
-                })
-                == Some("authoritative") =>
-        {
-            CompactRolesSupport::Supported
+    Ok(match summary.map(|summary| summary.coverage.status()) {
+        Some(bigname_storage::PermissionCoverageStatus::Full) => CompactRolesSupport::Supported,
+        Some(bigname_storage::PermissionCoverageStatus::Partial) | None => {
+            CompactRolesSupport::ResourceAuthorityPartial
         }
-        Some("unsupported")
-            if summary
-                .as_ref()
-                .and_then(projected_unsupported_reason)
-                == Some(ENSV1_WRAPPER_PERMISSIONS_UNSUPPORTED_REASON) =>
-        {
+        Some(bigname_storage::PermissionCoverageStatus::Unsupported) => {
             CompactRolesSupport::WrapperHolderPermissionsUnsupported
         }
-        _ => CompactRolesSupport::ResourceAuthorityPartial,
     })
-}
-
-fn projected_support_status(
-    summary: &bigname_storage::PermissionsCurrentResourceSummary,
-) -> Option<&str> {
-    summary.coverage.get("status").and_then(JsonValue::as_str)
-}
-
-fn projected_unsupported_reason(
-    summary: &bigname_storage::PermissionsCurrentResourceSummary,
-) -> Option<&str> {
-    summary
-        .coverage
-        .get("unsupported_reason")
-        .and_then(JsonValue::as_str)
 }

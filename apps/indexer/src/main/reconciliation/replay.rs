@@ -31,7 +31,7 @@ use scoped::load_replay_raw_log_selection_for_scoped_range;
 const MANUAL_FULL_CLOSURE_CHECKPOINT_CURSOR_PREFIX: &str = "manual_raw_fact_normalized_events";
 
 pub(crate) use classification::{
-    NormalizedEventReplayAdapter, RawFactReplayContractPlan,
+    LegacyRegistryNewlyRequiredCoverage, NormalizedEventReplayAdapter, RawFactReplayContractPlan,
     active_closure_or_dependency_replay_adapters, chain_has_closure_or_dependency_replay_adapter,
     ensure_full_closure_retention_authority_for_adapters,
     ensure_legacy_registry_closure_retention_authority_for_adapters, replay_contract,

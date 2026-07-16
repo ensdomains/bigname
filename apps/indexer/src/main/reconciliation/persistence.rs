@@ -85,6 +85,8 @@ pub(crate) async fn persist_reconciled_raw_blocks(
     Ok(())
 }
 
+// Raw-state persistence keeps deployment, heads, canonicality, and refresh inputs explicit.
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn persist_reconciled_raw_state(
     pool: &sqlx::PgPool,
     deployment_profile: &str,
@@ -117,6 +119,8 @@ pub(crate) async fn persist_reconciled_raw_state(
         .await
 }
 
+// Raw-payload persistence keeps selection, heads, canonicality, and adapter inputs explicit.
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn persist_reconciled_raw_payloads(
     pool: &sqlx::PgPool,
     deployment_profile: &str,

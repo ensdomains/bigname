@@ -9,14 +9,21 @@ use sqlx::types::time::OffsetDateTime;
 use tokio::time::sleep;
 use tracing::{info, warn};
 
-use crate::reconciliation::{
-    RawFactNormalizedEventReplayOutcome, RawFactNormalizedEventReplayRequest,
-    RawFactNormalizedEventReplaySelection, active_closure_or_dependency_replay_adapters,
-    chain_has_closure_or_dependency_replay_adapter, replay_raw_fact_normalized_events,
-    sync_full_closure_normalized_events_from_persisted_raw_payloads,
-    unsupported_closure_replay_adapters,
+#[cfg(test)]
+use crate::provider::ChainProvider;
+use crate::{
+    provider::{ChainProviderOps, ProviderRegistry},
+    reconciliation::{
+        HeaderAuditMode, RawFactNormalizedEventReplayOutcome, RawFactNormalizedEventReplayRequest,
+        RawFactNormalizedEventReplaySelection, active_closure_or_dependency_replay_adapters,
+        chain_has_closure_or_dependency_replay_adapter, replay_raw_fact_normalized_events,
+        sync_full_closure_normalized_events_from_persisted_raw_payloads,
+        unsupported_closure_replay_adapters,
+    },
 };
 
+#[path = "normalized_replay_catchup/coverage_recovery.rs"]
+mod coverage_recovery;
 #[path = "normalized_replay_catchup/cursors.rs"]
 mod cursors;
 #[path = "normalized_replay_catchup/indexes.rs"]
@@ -30,6 +37,7 @@ mod test_hook;
 #[cfg(test)]
 pub(crate) use test_hook::install_after_rewind as install_after_rewind_test_hook;
 
+use coverage_recovery::replay_full_closure_with_coverage_recovery;
 use cursors::{
     advance_cursor, ensure_cursor, record_cursor_failure,
     rewind_cursor_for_newly_observed_older_logs,
@@ -213,6 +221,8 @@ impl NormalizedReplayCatchupConfig {
 pub(crate) async fn run_normalized_replay_catchup(
     pool: PgPool,
     config: NormalizedReplayCatchupConfig,
+    provider_registry: ProviderRegistry,
+    header_audit_mode: HeaderAuditMode,
 ) -> Result<()> {
     info!(
         service = "indexer",
@@ -230,7 +240,15 @@ pub(crate) async fn run_normalized_replay_catchup(
     loop {
         let mut progressed = false;
         for chain in &config.chains {
-            match run_normalized_replay_catchup_iteration(&pool, &config, chain).await {
+            match run_normalized_replay_catchup_iteration_with_provider(
+                &pool,
+                &config,
+                chain,
+                provider_registry.provider_for(chain),
+                header_audit_mode,
+            )
+            .await
+            {
                 Ok(CatchupIterationStatus::Progressed) => {
                     progressed = true;
                 }
@@ -263,10 +281,47 @@ pub(crate) async fn normalized_replay_cursors_complete(
     indexes::all_configured_cursors_complete(pool, deployment_profile, chains).await
 }
 
+#[cfg(test)]
 pub(crate) async fn run_normalized_replay_catchup_iteration(
     pool: &PgPool,
     config: &NormalizedReplayCatchupConfig,
     chain: &str,
+) -> Result<CatchupIterationStatus> {
+    let provider: Option<&ChainProvider> = None;
+    run_normalized_replay_catchup_iteration_with_provider(
+        pool,
+        config,
+        chain,
+        provider,
+        HeaderAuditMode::Minimal,
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(crate) async fn run_normalized_replay_catchup_iteration_with_provider_for_test(
+    pool: &PgPool,
+    config: &NormalizedReplayCatchupConfig,
+    chain: &str,
+    provider: &(impl ChainProviderOps + ?Sized),
+    header_audit_mode: HeaderAuditMode,
+) -> Result<CatchupIterationStatus> {
+    run_normalized_replay_catchup_iteration_with_provider(
+        pool,
+        config,
+        chain,
+        Some(provider),
+        header_audit_mode,
+    )
+    .await
+}
+
+async fn run_normalized_replay_catchup_iteration_with_provider(
+    pool: &PgPool,
+    config: &NormalizedReplayCatchupConfig,
+    chain: &str,
+    provider: Option<&(impl ChainProviderOps + ?Sized)>,
+    header_audit_mode: HeaderAuditMode,
 ) -> Result<CatchupIterationStatus> {
     let pending_base_rederive_replay_target =
         bigname_storage::pending_base_normalized_rederive_replay_target(
@@ -379,16 +434,18 @@ pub(crate) async fn run_normalized_replay_catchup_iteration(
     };
     let started = Instant::now();
     let (outcome, raw_log_input_version) = if closure_or_dependency_replay {
-        let outcome = replay_full_closure_or_dependency_normalized_events(
+        replay_full_closure_with_coverage_recovery(
             pool,
             &config.deployment_profile,
             chain,
             from_block,
             to_block,
             config.max_raw_logs_per_chunk,
+            provider,
+            header_audit_mode,
+            rewind_inspection_input_version,
         )
-        .await?;
-        (outcome, rewind_inspection_input_version)
+        .await?
     } else {
         let outcome = replay_raw_fact_normalized_events(
             pool,

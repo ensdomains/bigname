@@ -13,9 +13,9 @@ fn assert_declared_not_found(body: &Value) {
         "not_found",
         "claim without an admitted name record must not mint a candidate; body: {body}"
     );
-    assert_eq!(
-        pointer(body, "/declared_state/claimed_primary_name/name"),
-        Value::Null,
+    assert!(
+        body.pointer("/declared_state/claimed_primary_name/name")
+            .is_none(),
         "not_found claim must not carry a candidate name; body: {body}"
     );
 }

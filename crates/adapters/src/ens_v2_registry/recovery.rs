@@ -1,13 +1,13 @@
 use std::{error::Error, fmt};
 
-/// ENSv2 reconciliation requires an authoritative watched interval whose
-/// current raw-log retention generation has not been fetched yet.
+/// ENSv2 reconciliation requires an exact authoritative watched interval
+/// whose current raw-log retention generation has not been fetched yet.
 ///
-/// Automatic startup or live polling may downcast this error to run bounded,
-/// provider-backed recovery convergence. Other sync failures must continue to
-/// propagate unchanged.
+/// Automatic startup, normalized replay catch-up, or live polling may
+/// downcast this error to run bounded, provider-backed recovery convergence.
+/// Other sync failures must continue to propagate unchanged.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EnsV2NewlyRequiredCoverage {
+pub struct EnsV2MissingCoverage {
     pub chain: String,
     pub retention_generation: i64,
     pub source_family: String,
@@ -16,11 +16,11 @@ pub struct EnsV2NewlyRequiredCoverage {
     pub required_to_block: i64,
 }
 
-impl fmt::Display for EnsV2NewlyRequiredCoverage {
+impl fmt::Display for EnsV2MissingCoverage {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "ENSv2 full reconciliation on {} newly requires generation {} coverage for {} {} over {}..={}",
+            "ENSv2 full reconciliation on {} requires missing generation {} coverage for {} {} over {}..={}",
             self.chain,
             self.retention_generation,
             self.source_family,
@@ -31,8 +31,14 @@ impl fmt::Display for EnsV2NewlyRequiredCoverage {
     }
 }
 
-impl Error for EnsV2NewlyRequiredCoverage {}
+impl Error for EnsV2MissingCoverage {}
 
-pub fn is_ens_v2_newly_required_coverage(error: &anyhow::Error) -> bool {
-    error.downcast_ref::<EnsV2NewlyRequiredCoverage>().is_some()
+pub fn ens_v2_missing_coverage(error: &anyhow::Error) -> Option<&EnsV2MissingCoverage> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<EnsV2MissingCoverage>())
+}
+
+pub fn is_ens_v2_missing_coverage(error: &anyhow::Error) -> bool {
+    ens_v2_missing_coverage(error).is_some()
 }

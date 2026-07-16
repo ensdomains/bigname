@@ -22,10 +22,9 @@ pub use loading::load_discovery_admission_state;
 pub use persistence::persist_discovery_observation;
 pub use provenance::discovery_observation_evm_event_position;
 pub use reconciliation::{
-    reconcile_discovery_observations, reconcile_discovery_observations_through_block,
-    reconcile_discovery_observations_through_block_with_expected_admission_epoch,
-    reconcile_discovery_observations_with_expected_admission_epoch,
-    reconcile_scoped_discovery_observation_transitions, reconcile_scoped_discovery_observations,
+    ExpectedDiscoveryAdmissionEpoch, FullDiscoveryReconciliationOptions,
+    reconcile_discovery_observations, reconcile_scoped_discovery_observation_transitions,
+    reconcile_scoped_discovery_observations,
 };
 pub use types::{
     AdmittedDiscoveryEdge, DiscoveryCandidate, DiscoveryObservation, DiscoveryPersistenceSummary,

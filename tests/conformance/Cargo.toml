@@ -27,6 +27,7 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt", "json"] }
 
 [dev-dependencies]
+bigname-test-support = { path = "../../crates/test-support" }
 tower = { version = "0.5.2", features = ["util"] }
 
 [workspace]

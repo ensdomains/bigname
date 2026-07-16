@@ -320,6 +320,16 @@ pub async fn count_unready_normalized_event_indexes(
     count_unready_normalized_event_indexes_with(pool, indexes).await
 }
 
+fn prioritize_operation_error<T>(
+    operation_result: Result<T>,
+    release_result: Result<()>,
+) -> Result<T> {
+    match (operation_result, release_result) {
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        (Ok(value), Ok(())) => Ok(value),
+    }
+}
+
 async fn count_unready_normalized_event_indexes_with<'e, E>(
     executor: E,
     indexes: &[&str],
@@ -383,10 +393,7 @@ pub(super) async fn run_migrations_and_ensure_required_indexes_ready(
     .await;
     let unlock_result = guard.release().await;
 
-    match (migration_result, unlock_result) {
-        (Err(error), _) | (Ok(()), Err(error)) => Err(error),
-        (Ok(()), Ok(())) => Ok(()),
-    }
+    prioritize_operation_error(migration_result, unlock_result)
 }
 
 async fn ensure_record_inventory_replay_index_ready(connection: &mut PgConnection) -> Result<()> {

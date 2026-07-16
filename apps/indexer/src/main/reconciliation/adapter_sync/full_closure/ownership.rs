@@ -3,6 +3,8 @@ use std::future::Future;
 use anyhow::{Context, Result};
 use sqlx::{Connection, Either, PgConnection, PgPool, postgres::PgAdvisoryLock};
 
+use crate::reconciliation::guard_release::prioritize_operation_error;
+
 pub(super) async fn with_full_closure_replay_lock<T, Operation, OperationFuture>(
     pool: &PgPool,
     deployment_profile: &str,
@@ -56,10 +58,7 @@ where
             )
         })
         .map(|_| ());
-    match (operation_result, release_result) {
-        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
-        (Ok(value), Ok(())) => Ok(value),
-    }
+    prioritize_operation_error(operation_result, release_result)
 }
 
 #[cfg(test)]
@@ -67,70 +66,76 @@ pub(crate) use test_hook::install as install_ownership_release_test_hook;
 
 #[cfg(test)]
 mod test_hook {
-    use std::{
-        collections::BTreeMap,
-        sync::{Arc, LazyLock, Mutex},
-    };
+    use std::sync::Arc;
 
+    use bigname_test_support::{
+        ScopedTestHookGuard, ScopedTestHookRegistry, current_test_database,
+    };
     use sqlx::PgPool;
     use tokio::sync::Notify;
 
-    #[derive(Clone)]
     pub(crate) struct FullClosureOwnershipReleaseTestHook {
+        state: FullClosureOwnershipReleaseTestHookState,
+        _registration: ScopedTestHookGuard<HookKey, FullClosureOwnershipReleaseTestHookState>,
+    }
+
+    #[derive(Clone)]
+    struct FullClosureOwnershipReleaseTestHookState {
         before_release: Arc<Notify>,
         resume: Arc<Notify>,
     }
 
     impl FullClosureOwnershipReleaseTestHook {
         pub(crate) async fn wait_until_before_release(&self) {
-            self.before_release.notified().await;
+            self.state.before_release.notified().await;
         }
 
         pub(crate) fn resume(&self) {
-            self.resume.notify_one();
+            self.state.resume.notify_one();
         }
     }
 
-    static HOOKS: LazyLock<
-        Mutex<BTreeMap<(String, String, String), FullClosureOwnershipReleaseTestHook>>,
-    > = LazyLock::new(|| Mutex::new(BTreeMap::new()));
+    impl Drop for FullClosureOwnershipReleaseTestHook {
+        fn drop(&mut self) {
+            self.state.resume.notify_one();
+        }
+    }
+
+    type HookKey = (String, String, String);
+
+    static HOOKS: ScopedTestHookRegistry<HookKey, FullClosureOwnershipReleaseTestHookState> =
+        ScopedTestHookRegistry::new();
 
     pub(crate) async fn install(
         pool: &PgPool,
         deployment_profile: &str,
         chain: &str,
     ) -> FullClosureOwnershipReleaseTestHook {
-        let database = current_database(pool).await;
-        let hook = FullClosureOwnershipReleaseTestHook {
+        let database = current_test_database(pool)
+            .await
+            .expect("full-closure ownership test hook must identify its database");
+        let state = FullClosureOwnershipReleaseTestHookState {
             before_release: Arc::new(Notify::new()),
             resume: Arc::new(Notify::new()),
         };
-        HOOKS
-            .lock()
-            .expect("full-closure ownership release hook lock must not be poisoned")
-            .insert(
-                (database, deployment_profile.to_owned(), chain.to_owned()),
-                hook.clone(),
-            );
-        hook
+        let registration = HOOKS.install(
+            (database, deployment_profile.to_owned(), chain.to_owned()),
+            state.clone(),
+        );
+        FullClosureOwnershipReleaseTestHook {
+            state,
+            _registration: registration,
+        }
     }
 
     pub(super) async fn pause_before_release(pool: &PgPool, deployment_profile: &str, chain: &str) {
-        let database = current_database(pool).await;
-        let hook = HOOKS
-            .lock()
-            .expect("full-closure ownership release hook lock must not be poisoned")
-            .remove(&(database, deployment_profile.to_owned(), chain.to_owned()));
+        let database = current_test_database(pool)
+            .await
+            .expect("full-closure ownership test hook must identify its database");
+        let hook = HOOKS.take(&(database, deployment_profile.to_owned(), chain.to_owned()));
         if let Some(hook) = hook {
             hook.before_release.notify_one();
             hook.resume.notified().await;
         }
-    }
-
-    async fn current_database(pool: &PgPool) -> String {
-        sqlx::query_scalar("SELECT current_database()")
-            .fetch_one(pool)
-            .await
-            .expect("full-closure ownership test hook must identify its database")
     }
 }

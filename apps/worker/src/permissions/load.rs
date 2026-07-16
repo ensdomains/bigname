@@ -16,29 +16,56 @@ pub(super) fn stream_target_resource_ids<'a>(
 ) -> impl Stream<Item = Result<Uuid>> + 'a {
     sqlx::query(
         r#"
-        SELECT DISTINCT ne.resource_id
-        FROM normalized_events ne
-        JOIN resources resource
-          ON resource.resource_id = ne.resource_id
-         AND resource.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-        WHERE (
-              ne.event_kind IN ($1, $2, $3, $4)
-              OR (
-                  ne.event_kind IN ($5, $6)
-                  AND ne.source_family IN ($7, $8)
+        SELECT targets.resource_id
+        FROM (
+            SELECT ne.resource_id
+            FROM normalized_events ne
+            JOIN resources resource
+              ON resource.resource_id = ne.resource_id
+             AND resource.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
               )
-          )
-          AND ne.resource_id IS NOT NULL
-          AND ne.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-        ORDER BY ne.resource_id
+            WHERE (
+                  ne.event_kind IN ($1, $2, $3, $4)
+                  OR (
+                      ne.event_kind IN ($5, $6)
+                      AND ne.source_family IN ($7, $8)
+                  )
+              )
+              AND ne.resource_id IS NOT NULL
+              AND ne.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+
+            UNION
+
+            SELECT resource.resource_id
+            FROM resources resource
+            WHERE resource.canonicality_state IN (
+                      'canonical'::canonicality_state,
+                      'safe'::canonicality_state,
+                      'finalized'::canonicality_state
+                  )
+              AND (
+                  (
+                      NULLIF(BTRIM(resource.provenance ->> 'source_family'), '') IS NOT NULL
+                      AND jsonb_typeof(resource.provenance -> 'manifest_version') = 'number'
+                      AND (resource.provenance ->> 'manifest_version')::NUMERIC > 0
+                      AND (resource.provenance ->> 'manifest_version')::NUMERIC <= 9223372036854775807
+                  )
+                  OR (
+                      NULLIF(BTRIM(resource.provenance ->> 'binding_source_family'), '') IS NOT NULL
+                      AND jsonb_typeof(resource.provenance -> 'binding_manifest_version') = 'number'
+                      AND (resource.provenance ->> 'binding_manifest_version')::NUMERIC > 0
+                      AND (resource.provenance ->> 'binding_manifest_version')::NUMERIC <= 9223372036854775807
+                  )
+              )
+        ) targets
+        ORDER BY targets.resource_id
         "#,
     )
     .bind(EVENT_KIND_PERMISSION_CHANGED)

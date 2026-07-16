@@ -3,8 +3,16 @@ use super::*;
 #[derive(Clone, Debug, Default)]
 pub(super) struct ResolverProfileGate {
     supported_fact_families: HashSet<(String, String, String, &'static str)>,
+    pending_fact_families: HashSet<(String, String, String, &'static str)>,
     observable_fact_families: HashSet<(String, String, String, &'static str)>,
     classified_profile_addresses: HashSet<(String, String, String)>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ResolverFactProfileStatus {
+    Supported,
+    Pending,
+    Unsupported,
 }
 
 impl ResolverProfileGate {
@@ -102,6 +110,20 @@ impl ResolverProfileGate {
                 })
             })
             .collect();
+        let pending_fact_families = admissions
+            .iter()
+            .filter(|admission| admission.status == "pending")
+            .filter_map(|admission| {
+                resolver_fact_family_key(&admission.fact_family).map(|fact_family| {
+                    (
+                        admission.chain.clone(),
+                        admission.source_family.clone(),
+                        admission.address.to_ascii_lowercase(),
+                        fact_family,
+                    )
+                })
+            })
+            .collect();
         let observable_fact_families = admissions
             .iter()
             .filter(|admission| {
@@ -124,34 +146,59 @@ impl ResolverProfileGate {
 
         Self {
             supported_fact_families,
+            pending_fact_families,
             observable_fact_families,
             classified_profile_addresses,
         }
     }
 
-    pub(super) fn supports_resolver_local_fact(
+    pub(super) fn resolver_local_fact_profile_status(
         &self,
         raw_log: &AuthorityRawLogRow,
         event_topics: &AuthorityEventTopics,
-    ) -> Result<bool> {
+    ) -> Result<Option<ResolverFactProfileStatus>> {
+        if !resolver_source_family_has_profiles(&raw_log.source_family) {
+            return Ok(None);
+        }
+
         let Some(topic0) = raw_log.topics.first() else {
-            return Ok(false);
+            return Ok(None);
         };
         let fact_families =
             resolver_fact_families_for_topic0(&raw_log.source_family, topic0, event_topics)?;
+        let Some(first_fact_family) = fact_families.first() else {
+            return Ok(None);
+        };
         let chain_id = raw_log.chain_id.clone();
         let source_family = raw_log.source_family.clone();
         let emitting_address = raw_log.emitting_address.to_ascii_lowercase();
 
-        let Some(&fact_family) = fact_families.first() else {
-            return Ok(false);
-        };
-        Ok(self.supported_fact_families.contains(&(
-            chain_id,
-            source_family,
-            emitting_address,
-            fact_family,
-        )))
+        if self.supported_fact_families.contains(&(
+            chain_id.clone(),
+            source_family.clone(),
+            emitting_address.clone(),
+            first_fact_family,
+        )) {
+            return Ok(Some(ResolverFactProfileStatus::Supported));
+        }
+        if fact_families.iter().any(|fact_family| {
+            self.pending_fact_families.contains(&(
+                chain_id.clone(),
+                source_family.clone(),
+                emitting_address.clone(),
+                fact_family,
+            ))
+        }) || (source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1
+            && !self.classified_profile_addresses.contains(&(
+                chain_id,
+                source_family,
+                emitting_address,
+            )))
+        {
+            return Ok(Some(ResolverFactProfileStatus::Pending));
+        }
+
+        Ok(Some(ResolverFactProfileStatus::Unsupported))
     }
 
     pub(super) fn rejects_resolver_local_fact(
@@ -369,6 +416,12 @@ mod tests {
                     "resolver_record:multicoin_addr",
                 ),
             ]),
+            pending_fact_families: HashSet::from([(
+                "ethereum-mainnet".to_owned(),
+                SOURCE_FAMILY_ENS_V1_RESOLVER_L1.to_owned(),
+                pending_resolver.to_owned(),
+                "resolver_record",
+            )]),
             observable_fact_families: HashSet::from([
                 (
                     "ethereum-mainnet".to_owned(),
@@ -446,22 +499,34 @@ mod tests {
             &resolver_log(pending_resolver, name_changed_topic0()),
             &event_topics
         )?);
-        assert!(gate.supports_resolver_local_fact(
-            &resolver_log(supported_resolver, name_changed_topic0()),
-            &event_topics
-        )?);
-        assert!(!gate.supports_resolver_local_fact(
-            &resolver_log(unclassified_resolver, name_changed_topic0()),
-            &event_topics
-        )?);
-        assert!(!gate.supports_resolver_local_fact(
-            &resolver_log(pending_resolver, name_changed_topic0()),
-            &event_topics
-        )?);
-        assert!(!gate.supports_resolver_local_fact(
-            &resolver_log(unsupported_resolver, name_changed_topic0()),
-            &event_topics
-        )?);
+        assert_eq!(
+            gate.resolver_local_fact_profile_status(
+                &resolver_log(supported_resolver, name_changed_topic0()),
+                &event_topics,
+            )?,
+            Some(ResolverFactProfileStatus::Supported)
+        );
+        assert_eq!(
+            gate.resolver_local_fact_profile_status(
+                &resolver_log(pending_resolver, name_changed_topic0()),
+                &event_topics,
+            )?,
+            Some(ResolverFactProfileStatus::Pending)
+        );
+        assert_eq!(
+            gate.resolver_local_fact_profile_status(
+                &resolver_log(unclassified_resolver, name_changed_topic0()),
+                &event_topics,
+            )?,
+            Some(ResolverFactProfileStatus::Pending)
+        );
+        assert_eq!(
+            gate.resolver_local_fact_profile_status(
+                &resolver_log(unsupported_resolver, name_changed_topic0()),
+                &event_topics,
+            )?,
+            Some(ResolverFactProfileStatus::Unsupported)
+        );
         assert!(!gate.rejects_resolver_local_fact(
             &resolver_log(supported_resolver, version_changed_topic0(),),
             &event_topics

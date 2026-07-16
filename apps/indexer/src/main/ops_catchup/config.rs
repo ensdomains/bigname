@@ -21,7 +21,19 @@ pub(crate) struct CapacityGuardConfig { pub(crate) postgres_max_bytes: Option<u6
 
 #[rustfmt::skip]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+/// Run-wide counters. Plan-shape fields are the sum of the final stable plan
+/// snapshot for each active chain in each follow iteration; convergence retry
+/// passes do not multiply them. Work fields such as capacity checks and drained
+/// jobs count the operations actually performed across all passes.
 pub(crate) struct OpsCatchupOutcome { pub(crate) follow_iteration_count: u64, pub(crate) active_chain_count: usize, pub(crate) provider_configured_chain_count: usize, pub(crate) missing_provider_chain_count: usize, pub(crate) no_finalized_head_chain_count: usize, pub(crate) skipped_unknown_start_target_count: usize, pub(crate) skipped_future_target_count: usize, pub(crate) planned_chunk_count: usize, pub(crate) reused_completed_chunk_count: usize, pub(crate) capacity_check_count: usize, pub(crate) drained_job_count: usize, pub(crate) reserved_range_count: usize, pub(crate) completed_range_count: usize }
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct OpsCatchupPlanSnapshotOutcome {
+    pub(super) skipped_unknown_start_target_count: usize,
+    pub(super) skipped_future_target_count: usize,
+    pub(super) planned_chunk_count: usize,
+    pub(super) reused_completed_chunk_count: usize,
+}
 
 impl OpsCatchupConfig {
     pub(crate) fn from_args(args: &OpsCatchupArgs) -> Result<Self> {
@@ -66,6 +78,13 @@ impl OpsCatchupConfig {
 }
 
 impl OpsCatchupOutcome {
+    pub(super) fn add_plan_snapshot(&mut self, snapshot: OpsCatchupPlanSnapshotOutcome) {
+        self.skipped_unknown_start_target_count += snapshot.skipped_unknown_start_target_count;
+        self.skipped_future_target_count += snapshot.skipped_future_target_count;
+        self.planned_chunk_count += snapshot.planned_chunk_count;
+        self.reused_completed_chunk_count += snapshot.reused_completed_chunk_count;
+    }
+
     pub(super) fn add_job(&mut self, outcome: &BackfillJobRunOutcome) {
         self.drained_job_count += 1;
         self.reserved_range_count += outcome.reserved_range_count;

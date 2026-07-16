@@ -1602,6 +1602,7 @@
             .context(
                 "failed to upsert permissions_current resource summary for role-summary conformance",
             )?;
+            mark_permissions_current_projection_ready(&database).await?;
 
             let base_response = app_router(database.app_state())
                 .oneshot(
@@ -2204,6 +2205,7 @@
             bigname_storage::upsert_permissions_current_rows(&database.pool, &permission_rows)
                 .await
                 .context("failed to upsert larger permissions rows")?;
+            mark_permissions_current_projection_ready(&database).await?;
 
             let children_response = app_router(database.app_state())
                 .oneshot(

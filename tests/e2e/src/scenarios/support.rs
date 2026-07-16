@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use alloy_primitives::Address;
 use anyhow::Result;
 use sqlx::types::Uuid;
@@ -149,6 +151,31 @@ pub fn resolver_code_hash_comparison_sql(
     )
 }
 
+/// Readiness predicate for an exactly identified canonical normalized event.
+/// Scenarios with additional constraints should keep spelling out those
+/// constraints so this helper does not weaken their stop condition.
+pub fn canonical_event_ready_sql(
+    logical_name_id: &str,
+    event_kind: &str,
+    record_key: Option<&str>,
+) -> String {
+    fn quoted(value: &str) -> String {
+        value.replace('\'', "''")
+    }
+
+    let logical_name_id = quoted(logical_name_id);
+    let event_kind = quoted(event_kind);
+    let record_key =
+        record_key.map(|key| format!(" AND after_state->>'record_key' = '{}'", quoted(key)));
+    format!(
+        "SELECT EXISTS (SELECT 1 FROM normalized_events \
+         WHERE logical_name_id = '{logical_name_id}' \
+         AND event_kind = '{event_kind}'{} \
+         AND canonicality_state = 'canonical')",
+        record_key.as_deref().unwrap_or_default()
+    )
+}
+
 /// Ingest the chain as it stands (live intake to the current head, then a
 /// full projection replay) and serve the API. The manifest profile mirrors
 /// every shipped mainnet ENSv1 family manifest version with addresses
@@ -265,32 +292,6 @@ pub async fn ingest_ens_v2_sepolia_and_serve(
             &deployment.manifest_targets(),
         )
     })
-    .await
-}
-
-/// Sepolia twin of `backfill_and_replay_projections`: derive the ENSv2 chain
-/// via backfill and rebuild projections without a live run. No API — the
-/// backfill path promotes no canonical checkpoint.
-pub async fn backfill_ens_v2_sepolia_and_replay_projections(
-    sepolia_anvil: &Anvil,
-    deployment: &EnsV2Deployment,
-    idempotency_key: &str,
-) -> Result<BackfillRun> {
-    backfill_local_chain(
-        LocalChain {
-            anvil: sepolia_anvil,
-            id: "ethereum-sepolia",
-        },
-        idempotency_key,
-        true,
-        |scratch, repo_root| {
-            manifests::generate_local_sepolia_profile(
-                scratch,
-                repo_root,
-                &deployment.manifest_targets(),
-            )
-        },
-    )
     .await
 }
 
@@ -483,17 +484,25 @@ pub async fn route_snapshots(
 /// generated manifest profile from it).
 pub struct TempDir(std::path::PathBuf);
 
+static NEXT_TEMP_DIR_ID: AtomicU64 = AtomicU64::new(0);
+
 impl TempDir {
     pub fn create() -> Result<Self> {
-        let dir = std::env::temp_dir().join(format!(
-            "bigname-e2e-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .subsec_nanos()
-        ));
-        std::fs::create_dir_all(&dir)?;
-        Ok(Self(dir))
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        loop {
+            let id = NEXT_TEMP_DIR_ID.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "bigname-e2e-{}-{created_at}-{id}",
+                std::process::id()
+            ));
+            match std::fs::create_dir(&dir) {
+                Ok(()) => return Ok(Self(dir)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 
     pub fn path(&self) -> &std::path::Path {
@@ -504,5 +513,41 @@ impl TempDir {
 impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::{TempDir, canonical_event_ready_sql};
+
+    #[test]
+    fn temp_dirs_created_concurrently_are_distinct() {
+        let handles = (0..32)
+            .map(|_| std::thread::spawn(TempDir::create))
+            .collect::<Vec<_>>();
+        let dirs = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("temp-dir thread panicked").unwrap())
+            .collect::<Vec<_>>();
+        let paths = dirs.iter().map(TempDir::path).collect::<BTreeSet<_>>();
+
+        assert_eq!(paths.len(), dirs.len());
+        assert!(paths.iter().all(|path| path.is_dir()));
+    }
+
+    #[test]
+    fn canonical_event_readiness_adds_only_requested_record_key() {
+        assert_eq!(
+            canonical_event_ready_sql("ens:o'hare.eth", "RecordChanged", Some("text:it's")),
+            "SELECT EXISTS (SELECT 1 FROM normalized_events WHERE logical_name_id = \
+             'ens:o''hare.eth' AND event_kind = 'RecordChanged' AND \
+             after_state->>'record_key' = 'text:it''s' AND canonicality_state = 'canonical')"
+        );
+        assert!(
+            !canonical_event_ready_sql("ens:alice.eth", "RegistrationGranted", None)
+                .contains("record_key")
+        );
     }
 }

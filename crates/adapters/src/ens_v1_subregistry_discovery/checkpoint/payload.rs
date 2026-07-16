@@ -1,5 +1,5 @@
 use alloy_primitives::hex;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use bigname_storage::CanonicalityState;
 use serde_json::{Value, json};
 use sqlx::types::Uuid;
@@ -38,7 +38,7 @@ fn raw_log_payload(raw_log: &RegistryRawLogRow) -> Value {
         "emitting_address": raw_log.emitting_address,
         "topics": raw_log.topics,
         "data_hex": hex_string(&raw_log.data),
-        "canonicality_state": canonicality_state_str(raw_log.canonicality_state),
+        "canonicality_state": raw_log.canonicality_state.as_str(),
         "emitting_contract_instance_id": raw_log.emitting_contract_instance_id.to_string(),
         "source_manifest_id": raw_log.source_manifest_id,
         "namespace": raw_log.namespace,
@@ -71,6 +71,9 @@ fn raw_log_from_payload(payload: &Value) -> Result<RegistryRawLogRow> {
     let data_hex = string_field(payload, "data_hex")?;
     let data_hex = data_hex.strip_prefix("0x").unwrap_or(&data_hex);
     let data = hex::decode(data_hex).context("checkpointed raw log data_hex is invalid")?;
+    let canonicality_state = string_field(payload, "canonicality_state")?;
+    let canonicality_state = CanonicalityState::parse(&canonicality_state)
+        .map_err(|_| anyhow!("unknown checkpointed canonicality_state {canonicality_state}"))?;
     Ok(RegistryRawLogRow {
         chain_id: string_field(payload, "chain_id")?,
         block_hash: string_field(payload, "block_hash")?,
@@ -81,10 +84,7 @@ fn raw_log_from_payload(payload: &Value) -> Result<RegistryRawLogRow> {
         emitting_address: string_field(payload, "emitting_address")?,
         topics: string_vec_field(payload, "topics")?,
         data,
-        canonicality_state: canonicality_state_from_str(&string_field(
-            payload,
-            "canonicality_state",
-        )?)?,
+        canonicality_state,
         emitting_contract_instance_id: Uuid::parse_str(&string_field(
             payload,
             "emitting_contract_instance_id",
@@ -146,27 +146,6 @@ fn discovery_kind_from_str(value: &str) -> Result<RegistryDiscoveryKind> {
     }
 }
 
-const fn canonicality_state_str(state: CanonicalityState) -> &'static str {
-    match state {
-        CanonicalityState::Observed => "observed",
-        CanonicalityState::Canonical => "canonical",
-        CanonicalityState::Safe => "safe",
-        CanonicalityState::Finalized => "finalized",
-        CanonicalityState::Orphaned => "orphaned",
-    }
-}
-
-fn canonicality_state_from_str(value: &str) -> Result<CanonicalityState> {
-    match value {
-        "observed" => Ok(CanonicalityState::Observed),
-        "canonical" => Ok(CanonicalityState::Canonical),
-        "safe" => Ok(CanonicalityState::Safe),
-        "finalized" => Ok(CanonicalityState::Finalized),
-        "orphaned" => Ok(CanonicalityState::Orphaned),
-        _ => bail!("unknown checkpointed canonicality_state {value}"),
-    }
-}
-
 fn string_field(payload: &Value, field: &str) -> Result<String> {
     payload
         .get(field)
@@ -221,4 +200,73 @@ fn string_vec_field(payload: &Value, field: &str) -> Result<Vec<String>> {
                 .with_context(|| format!("checkpoint payload field {field} contains non-string"))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_log_canonicality_encoding_remains_backward_compatible() -> Result<()> {
+        for (state, persisted) in [
+            (CanonicalityState::Observed, "observed"),
+            (CanonicalityState::Canonical, "canonical"),
+            (CanonicalityState::Safe, "safe"),
+            (CanonicalityState::Finalized, "finalized"),
+            (CanonicalityState::Orphaned, "orphaned"),
+        ] {
+            let raw_log = RegistryRawLogRow {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: "0xblock".to_owned(),
+                block_number: 1,
+                transaction_hash: "0xtx".to_owned(),
+                transaction_index: 2,
+                log_index: 3,
+                emitting_address: "0x0000000000000000000000000000000000000001".to_owned(),
+                topics: vec!["0xtopic".to_owned()],
+                data: vec![0, 1, 255],
+                canonicality_state: state,
+                emitting_contract_instance_id: Uuid::from_u128(1),
+                source_manifest_id: 4,
+                namespace: "ens_v1".to_owned(),
+                source_family: "ens_v1_registry".to_owned(),
+                manifest_version: 5,
+                contract_role: Some("registry".to_owned()),
+            };
+
+            let payload = raw_log_payload(&raw_log);
+            assert_eq!(
+                payload.get("canonicality_state").and_then(Value::as_str),
+                Some(persisted)
+            );
+            assert_eq!(raw_log_from_payload(&payload)?.canonicality_state, state);
+        }
+
+        let mut invalid = raw_log_payload(&RegistryRawLogRow {
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: "0xblock".to_owned(),
+            block_number: 1,
+            transaction_hash: "0xtx".to_owned(),
+            transaction_index: 2,
+            log_index: 3,
+            emitting_address: "0x0000000000000000000000000000000000000001".to_owned(),
+            topics: vec![],
+            data: vec![],
+            canonicality_state: CanonicalityState::Observed,
+            emitting_contract_instance_id: Uuid::from_u128(1),
+            source_manifest_id: 4,
+            namespace: "ens_v1".to_owned(),
+            source_family: "ens_v1_registry".to_owned(),
+            manifest_version: 5,
+            contract_role: None,
+        });
+        invalid["canonicality_state"] = Value::String("invalid".to_owned());
+        assert_eq!(
+            raw_log_from_payload(&invalid)
+                .expect_err("unknown canonicality must fail")
+                .to_string(),
+            "unknown checkpointed canonicality_state invalid"
+        );
+        Ok(())
+    }
 }

@@ -61,10 +61,9 @@ async fn v2_get_address_names_returns_record_rows_with_relations_and_primary_fla
 
 #[tokio::test]
 async fn v2_get_address_names_filters_owner_relation_and_q_prefix() -> Result<()> {
-    let (database, owner_payload) = v2_address_names_payload(&format!(
-        "/v2/addresses/{V2_ADDRESS}/names?relation=owner"
-    ))
-    .await?;
+    let (database, owner_payload) =
+        v2_address_names_payload(&format!("/v2/addresses/{V2_ADDRESS}/names?relation=owner"))
+            .await?;
 
     let owner_rows = owner_payload["data"]
         .as_array()
@@ -81,7 +80,9 @@ async fn v2_get_address_names_filters_owner_relation_and_q_prefix() -> Result<()
         &format!("/v2/addresses/{V2_ADDRESS}/names?q=ga"),
     )
     .await?;
-    let q_rows = q_payload["data"].as_array().expect("q data must be an array");
+    let q_rows = q_payload["data"]
+        .as_array()
+        .expect("q data must be an array");
     assert_eq!(names(q_rows), vec!["gamma.eth"]);
 
     let lowercase_q_payload = v2_address_names_payload_for_database(
@@ -228,10 +229,8 @@ async fn v2_get_address_names_scopes_primary_claim_by_row_namespace() -> Result<
 
 #[tokio::test]
 async fn v2_get_address_names_dedupe_name_vs_registration() -> Result<()> {
-    let (database, dedupe_name) = v2_address_names_payload(&format!(
-        "/v2/addresses/{V2_ADDRESS}/names?dedupe=name"
-    ))
-    .await?;
+    let (database, dedupe_name) =
+        v2_address_names_payload(&format!("/v2/addresses/{V2_ADDRESS}/names?dedupe=name")).await?;
     let dedupe_registration = v2_address_names_payload_for_database(
         &database,
         &format!("/v2/addresses/{V2_ADDRESS}/names?dedupe=registration"),
@@ -324,10 +323,8 @@ async fn v2_get_address_names_sorts_by_expiry_and_registered_at() -> Result<()> 
 
 #[tokio::test]
 async fn v2_get_address_names_paginates_and_rejects_bound_cursor_reuse() -> Result<()> {
-    let (database, first_page) = v2_address_names_payload(&format!(
-        "/v2/addresses/{V2_ADDRESS}/names?page_size=2"
-    ))
-    .await?;
+    let (database, first_page) =
+        v2_address_names_payload(&format!("/v2/addresses/{V2_ADDRESS}/names?page_size=2")).await?;
     let next_cursor = first_page["page"]["next_cursor"]
         .as_str()
         .expect("first page must include a cursor")
@@ -358,7 +355,9 @@ async fn v2_get_address_names_paginates_and_rejects_bound_cursor_reuse() -> Resu
 
     let cross_sort = v2_address_names_response_for_database(
         &database,
-        &format!("/v2/addresses/{V2_ADDRESS}/names?sort=expires_at&page_size=2&cursor={next_cursor}"),
+        &format!(
+            "/v2/addresses/{V2_ADDRESS}/names?sort=expires_at&page_size=2&cursor={next_cursor}"
+        ),
     )
     .await?;
     assert_eq!(cross_sort.status(), StatusCode::BAD_REQUEST);
@@ -410,6 +409,27 @@ async fn v2_get_address_names_paginates_and_rejects_bound_cursor_reuse() -> Resu
 }
 
 #[tokio::test]
+async fn v2_address_role_summary_requires_compatible_permission_publication() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    sqlx::query("DELETE FROM permissions_current_publication")
+    .execute(&database.pool)
+    .await?;
+
+    let response = v2_address_names_response_for_database(
+        &database,
+        &format!("/v2/addresses/{V2_ADDRESS}/names?include=role_summary"),
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("stale"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_get_address_names_include_role_summary_groups_permissions_by_address() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
@@ -419,8 +439,11 @@ async fn v2_get_address_names_include_role_summary_groups_permissions_by_address
         .expect("alpha address-name fixture must exist");
     let current_inventory = address_name_record_inventory_current_row(&alpha);
     let mut stale_inventory = current_inventory.clone();
-    stale_inventory.record_version_boundary =
-        address_name_record_inventory_boundary_with_pointer(&alpha, Some(9_999), Some("TextChanged"));
+    stale_inventory.record_version_boundary = address_name_record_inventory_boundary_with_pointer(
+        &alpha,
+        Some(9_999),
+        Some("TextChanged"),
+    );
     stale_inventory.selectors = json!([
         {
             "record_key": "addr:60",
@@ -528,7 +551,11 @@ async fn v2_get_address_names_include_role_summary_groups_permissions_by_address
         ])
     );
     assert!(row["role_summary"][0].get("subject").is_none());
-    assert!(row["role_summary"][0]["grants"][0].get("effective_powers").is_none());
+    assert!(
+        row["role_summary"][0]["grants"][0]
+            .get("effective_powers")
+            .is_none()
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -537,13 +564,13 @@ async fn v2_get_address_names_include_role_summary_groups_permissions_by_address
 #[tokio::test]
 async fn v2_get_address_names_rejects_bad_address_and_unknown_include() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    database.seed_default_ens_snapshot_selector_position().await?;
+    database
+        .seed_default_ens_snapshot_selector_position()
+        .await?;
 
-    let bad_address = v2_address_names_response_for_database(
-        &database,
-        "/v2/addresses/not-an-address/names",
-    )
-    .await?;
+    let bad_address =
+        v2_address_names_response_for_database(&database, "/v2/addresses/not-an-address/names")
+            .await?;
     assert_eq!(bad_address.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
         read_json::<Value>(bad_address).await?["error"]["code"],
@@ -568,7 +595,9 @@ async fn v2_get_address_names_rejects_bad_address_and_unknown_include() -> Resul
 #[tokio::test]
 async fn v2_get_address_names_empty_returns_200_empty_page() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    database.seed_default_ens_snapshot_selector_position().await?;
+    database
+        .seed_default_ens_snapshot_selector_position()
+        .await?;
 
     let payload = v2_address_names_payload_for_database(
         &database,
@@ -686,11 +715,7 @@ async fn seed_v2_address_name_storage(
         .iter()
         .filter(|spec| seen_token_lineages.insert(spec.token_lineage_id))
         .map(|spec| {
-            address_name_token_lineage(
-                spec.token_lineage_id,
-                spec.block_hash,
-                spec.block_number,
-            )
+            address_name_token_lineage(spec.token_lineage_id, spec.block_hash, spec.block_number)
         })
         .collect::<Vec<_>>();
     let bindings = specs
@@ -864,6 +889,7 @@ async fn seed_v2_address_name_permissions(database: &TestDatabase) -> Result<()>
         ],
     )
     .await?;
+    mark_permissions_current_projection_ready(database).await?;
     Ok(())
 }
 
@@ -980,7 +1006,8 @@ fn address_name_record_inventory_current_row(
     spec: &V2AddressNameSpec,
 ) -> bigname_storage::RecordInventoryCurrentRow {
     let mut row = record_inventory_current_row(spec.logical_name_id, spec.resource_id);
-    row.record_version_boundary = address_name_record_inventory_boundary_with_pointer(spec, None, None);
+    row.record_version_boundary =
+        address_name_record_inventory_boundary_with_pointer(spec, None, None);
     row.chain_positions = json!({
         "ethereum-mainnet": address_name_record_inventory_chain_position(spec)
     });

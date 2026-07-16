@@ -1,5 +1,7 @@
 #[path = "watched/coverage.rs"]
 mod coverage;
+#[path = "watched/frontier.rs"]
+mod frontier;
 #[path = "watched/historical.rs"]
 mod historical;
 #[path = "watched/intervals.rs"]
@@ -16,9 +18,16 @@ use crate::{WatchedContract, WatchedContractSource, normalize_address};
 
 pub use coverage::{
     RequiredWatchedTuple, UncoveredWatchedTuple, find_uncovered_required_watched_tuples,
-    find_uncovered_required_watched_tuples_for_retention_generation, find_uncovered_watched_tuples,
-    load_earliest_known_watched_block, load_required_watched_tuples,
-    load_required_watched_tuples_in_transaction,
+    find_uncovered_required_watched_tuples_for_retention_generation,
+    find_uncovered_required_watched_tuples_for_retention_generation_in_transaction,
+    find_uncovered_required_watched_tuples_in_transaction, find_uncovered_watched_tuples,
+    load_required_watched_tuples, load_required_watched_tuples_in_transaction,
+};
+pub use frontier::{
+    StoredLineageCoverageCandidateSummary, StoredLineageCoverageDeltaCursor,
+    StoredLineageCoverageDeltaPage, load_earliest_known_watched_block,
+    load_stored_lineage_coverage_candidate_delta_page,
+    materialize_stored_lineage_coverage_candidate,
 };
 pub use historical::{
     ENS_V2_RETAINED_HISTORY_SOURCE_FAMILIES, load_ens_v2_authoritative_discovery_bootstrap_targets,

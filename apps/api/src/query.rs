@@ -106,9 +106,11 @@ pub(crate) struct NameProfileQuery {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct ResolutionExecutionExplainQuery {
     pub(crate) records: Option<String>,
+    pub(crate) at: Option<String>,
+    pub(crate) chain_positions: Option<String>,
+    pub(crate) consistency: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

@@ -1,10 +1,12 @@
+use std::collections::BTreeSet;
+
 use anyhow::{Context, Result};
 use bigname_storage::{
-    RawLogStagingInputVersion, acquire_raw_log_staging_read_guard,
+    RawLogStagingBoundaryStatus, RawLogStagingInputVersion, acquire_raw_log_staging_read_guard,
     earliest_raw_log_staging_block_changed_since, load_raw_log_staging_input_version,
 };
-use sqlx::PgPool;
 use sqlx::types::time::OffsetDateTime;
+use sqlx::{PgConnection, PgPool};
 
 use crate::reconciliation::RawFactNormalizedEventReplayOutcome;
 
@@ -202,6 +204,99 @@ pub(super) async fn rewind_cursor_for_newly_observed_older_logs(
     ))
 }
 
+pub(super) async fn all_configured_cursors_complete(
+    pool: &PgPool,
+    deployment_profile: &str,
+    chains: &[String],
+) -> Result<bool> {
+    for chain in chains.iter().collect::<BTreeSet<_>>() {
+        if !configured_cursor_complete(pool, deployment_profile, chain).await? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+async fn configured_cursor_complete(
+    pool: &PgPool,
+    deployment_profile: &str,
+    chain: &str,
+) -> Result<bool> {
+    let mut raw_log_guard = acquire_raw_log_staging_read_guard(pool, chain).await?;
+    let readiness = async {
+        let cursor = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+            r#"
+            SELECT
+                next_block_number,
+                target_block_number,
+                raw_log_input_revision,
+                raw_log_retention_generation
+            FROM normalized_replay_cursors
+            WHERE deployment_profile = $1
+              AND chain_id = $2
+              AND cursor_kind = $3
+            "#,
+        )
+        .bind(deployment_profile)
+        .bind(chain)
+        .bind(CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS)
+        .fetch_optional(raw_log_guard.connection_mut())
+        .await
+        .with_context(|| {
+            format!(
+                "failed to inspect normalized replay cursor completion for {deployment_profile}/{chain}"
+            )
+        })?;
+
+        let Some((next_block, target_block, input_revision, retention_generation)) = cursor else {
+            return Ok(raw_log_guard.version().retention_generation == 0
+                && !chain_has_canonical_raw_logs(raw_log_guard.connection_mut(), chain).await?);
+        };
+        if next_block <= target_block {
+            return Ok(false);
+        }
+
+        let expected_input = RawLogStagingInputVersion {
+            retention_generation,
+            revision: input_revision,
+        };
+        Ok(matches!(
+            raw_log_guard
+                .classify_newer_revisions_after(expected_input, target_block)
+                .await?,
+            RawLogStagingBoundaryStatus::Accepted(_)
+        ))
+    }
+    .await;
+    let release = raw_log_guard.release().await;
+    crate::reconciliation::guard_release::prioritize_operation_error(readiness, release)
+}
+
+async fn chain_has_canonical_raw_logs(connection: &mut PgConnection, chain: &str) -> Result<bool> {
+    sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT (
+            SELECT raw_log_id
+            FROM raw_logs
+            WHERE raw_logs.chain_id = $1
+              AND raw_logs.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+            ORDER BY raw_logs.block_number DESC
+            LIMIT 1
+        ) IS NOT NULL
+        "#,
+    )
+    .bind(chain)
+    .fetch_one(connection)
+    .await
+    .with_context(|| format!("failed to inspect canonical raw logs for {chain}"))
+}
+
+// Cursor persistence keeps replay identity, bounds, outcome, and input version explicit.
+#[expect(clippy::too_many_arguments)]
 pub(super) async fn advance_cursor(
     pool: &PgPool,
     deployment_profile: &str,

@@ -174,9 +174,9 @@ async fn reverse_claim_invalid_name_surfaces_raw_claim() -> Result<()> {
         invalid_claim,
         "invalid_name should preserve the raw claim string; body: {body}"
     );
-    assert_eq!(
-        pointer(&body, "/declared_state/claimed_primary_name/name"),
-        Value::Null,
+    assert!(
+        body.pointer("/declared_state/claimed_primary_name/name")
+            .is_none(),
         "invalid_name must not silently coerce a claimed_primary_name.name; body: {body}"
     );
     assert_eq!(

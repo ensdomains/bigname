@@ -277,24 +277,27 @@ async fn sync_ens_v2_registry_resource_surface_live_poll_locked(
 
     let sync_result = if let Some(cached) = cached {
         let incremental_block_hashes = selected_path.hashes_after(cached.through_block_number);
-        ensure!(
-            !incremental_block_hashes.is_empty(),
-            "ENSv2 live-poll target {target_block_number} on {chain} does not advance its selected ancestor path"
-        );
-        sync_ens_v2_registry_resource_surface_with_scope_and_state(
-            pool,
-            chain,
-            true,
-            &incremental_block_hashes,
-            None,
-            RawLogCanonicalityFilter::IncludeObserved,
-            Some(target_block_number),
-            Some(cached.replay_state),
-            true,
-            false,
-            Some(closure_proof.discovery_admission_epoch),
-        )
-        .await
+        if incremental_block_hashes.is_empty() {
+            Ok((
+                EnsV2RegistryResourceSurfaceSyncSummary::empty(0),
+                cached.replay_state,
+            ))
+        } else {
+            sync_ens_v2_registry_resource_surface_with_scope_and_state(
+                pool,
+                chain,
+                true,
+                &incremental_block_hashes,
+                None,
+                RawLogCanonicalityFilter::IncludeObserved,
+                Some(target_block_number),
+                Some(cached.replay_state),
+                true,
+                false,
+                Some(closure_proof.discovery_admission_epoch),
+            )
+            .await
+        }
     } else {
         let selected_path_hashes = selected_path.all_hashes();
         sync_ens_v2_registry_resource_surface_with_scope_and_state(
@@ -447,7 +450,7 @@ async fn reusable_checkpoint_path(
 ) -> Result<Option<(RawLogClosureProof, SelectedRegistryPath)>> {
     let Some(proof) = current_closure_proof.filter(|proof| {
         proof.proven_through_block >= through_block_number
-            && target_block_number > through_block_number
+            && target_block_number >= through_block_number
     }) else {
         return Ok(None);
     };

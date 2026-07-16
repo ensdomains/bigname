@@ -373,7 +373,7 @@ mod tests {
 
         let filled = fill_log_payloads_from_validation_provider(
             &provider,
-            &vec![
+            &[
                 ProviderResolvedBlock {
                     block_number: 10,
                     block_hash: BLOCK_HASH.to_owned(),
@@ -425,7 +425,7 @@ mod tests {
 
         let filled = fill_log_payloads_from_validation_provider(
             &provider,
-            &vec![
+            &[
                 ProviderResolvedBlock {
                     block_number: 10,
                     block_hash: BLOCK_HASH.to_owned(),

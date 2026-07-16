@@ -2,6 +2,8 @@
 mod adapter_sync;
 #[path = "reconciliation/canonical.rs"]
 mod canonical;
+#[path = "reconciliation/guard_release.rs"]
+pub(crate) mod guard_release;
 #[path = "reconciliation/lineage.rs"]
 mod lineage;
 #[path = "reconciliation/logging.rs"]
@@ -15,28 +17,26 @@ mod replay;
 #[path = "reconciliation/types.rs"]
 mod types;
 
-#[cfg(test)]
-pub(crate) use adapter_sync::{
-    install_ownership_release_test_hook, install_post_discovery_mutation_failure_for_test,
-    sync_manual_full_closure_normalized_events_from_persisted_raw_payloads,
-};
 #[allow(unused_imports)]
 pub(crate) use adapter_sync::{
-    sync_adapter_state_from_persisted_raw_payloads,
+    BacklogHandoffStatus, sync_adapter_state_from_persisted_raw_payloads,
     sync_adapter_state_from_scoped_persisted_raw_payloads,
     sync_full_closure_normalized_events_from_persisted_raw_payloads,
     sync_live_adapter_backlog_after_normalized_replay,
-    sync_live_adapter_state_from_persisted_raw_payloads,
+    sync_live_adapter_state_from_persisted_raw_payloads, validate_chain_handoff_while_guarded,
+};
+#[cfg(test)]
+pub(crate) use adapter_sync::{
+    install_backlog_after_adapter_sync_test_hook, install_ownership_release_test_hook,
+    install_post_discovery_mutation_failure_for_test,
+    sync_manual_full_closure_normalized_events_from_persisted_raw_payloads,
 };
 #[allow(unused_imports)]
 pub(crate) use canonical::{
-    ChainCoverageFrontiers, orphan_canonical_branch, poll_provider_heads,
-    poll_provider_heads_with_adapter_sync, reconcile_canonical_head, reconcile_fetched_heads,
-    reconcile_fetched_heads_with_adapter_sync, reconcile_intake_chain_task,
-};
-#[cfg(test)]
-pub(crate) use canonical::{
-    EnsV2LiveCoverageRecoveryStatus, recover_ens_v2_live_coverage_requirement,
+    ChainCoverageFrontiers, EnsV2LiveCoverageRecoveryStatus, orphan_canonical_branch,
+    poll_provider_heads, poll_provider_heads_with_adapter_sync, reconcile_canonical_head,
+    reconcile_fetched_heads, reconcile_fetched_heads_with_adapter_sync,
+    reconcile_intake_chain_task, recover_ens_v2_live_coverage_requirement,
 };
 #[allow(unused_imports)]
 pub(crate) use lineage::{

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, ensure};
-use bigname_manifests::reconcile_discovery_observations;
+use bigname_manifests::{FullDiscoveryReconciliationOptions, reconcile_discovery_observations};
 use sqlx::PgPool;
 
 use crate::registry_migration_cache::MigratedRegistryNodes;
@@ -352,8 +352,13 @@ pub(super) async fn sync_ens_v1_subregistry_discovery_with_scope(
                     )
                     .await?
                 } else {
-                    reconcile_discovery_observations(pool, discovery_source, &source_observations)
-                        .await?
+                    reconcile_discovery_observations(
+                        pool,
+                        discovery_source,
+                        &source_observations,
+                        FullDiscoveryReconciliationOptions::default(),
+                    )
+                    .await?
                 };
                 reconciliation.active_edge_count += source_reconciliation.active_edge_count;
                 reconciliation.admitted_edge_count += source_reconciliation.admitted_edge_count;

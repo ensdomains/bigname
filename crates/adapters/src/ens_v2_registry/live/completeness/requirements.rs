@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, ensure};
+use bigname_domain::block_interval::InclusiveBlockInterval;
 use bigname_manifests::{RequiredWatchedTuple, load_required_watched_tuples};
 use sqlx::PgPool;
 
@@ -58,64 +59,46 @@ pub(super) fn requirement_intervals_not_covered_by(
     required: &[RequiredWatchedTuple],
     covered: &[RequiredWatchedTuple],
 ) -> Vec<RequiredWatchedTuple> {
-    let mut covered_by_tuple = BTreeMap::<(String, String), Vec<(i64, i64)>>::new();
+    let mut covered_by_tuple = BTreeMap::<(String, String), Vec<InclusiveBlockInterval>>::new();
     for requirement in covered {
+        let Some(interval) = InclusiveBlockInterval::new(
+            requirement.required_from_block,
+            requirement.required_to_block,
+        ) else {
+            continue;
+        };
         covered_by_tuple
             .entry((
                 requirement.source_family.clone(),
                 requirement.address.clone(),
             ))
             .or_default()
-            .push((
-                requirement.required_from_block,
-                requirement.required_to_block,
-            ));
-    }
-    for intervals in covered_by_tuple.values_mut() {
-        intervals.sort_unstable();
+            .push(interval);
     }
 
     let mut gaps = Vec::new();
     for requirement in required {
+        let Some(required_interval) = InclusiveBlockInterval::new(
+            requirement.required_from_block,
+            requirement.required_to_block,
+        ) else {
+            continue;
+        };
         let key = (
             requirement.source_family.clone(),
             requirement.address.clone(),
         );
-        let mut next_required = Some(requirement.required_from_block);
-        for &(covered_from, covered_to) in covered_by_tuple.get(&key).into_iter().flatten() {
-            let Some(cursor) = next_required else {
-                break;
-            };
-            if covered_to < cursor {
-                continue;
-            }
-            if covered_from > requirement.required_to_block {
-                break;
-            }
-            if covered_from > cursor {
-                gaps.push(RequiredWatchedTuple {
+        gaps.extend(
+            required_interval
+                .uncovered_by(covered_by_tuple.get(&key).into_iter().flatten().copied())
+                .into_iter()
+                .map(|gap| RequiredWatchedTuple {
                     source_family: requirement.source_family.clone(),
                     address: requirement.address.clone(),
-                    required_from_block: cursor,
-                    required_to_block: (covered_from - 1).min(requirement.required_to_block),
-                });
-            }
-            if covered_to >= requirement.required_to_block {
-                next_required = None;
-                break;
-            }
-            next_required = covered_to.checked_add(1).map(|next| next.max(cursor));
-        }
-        if let Some(cursor) = next_required
-            && cursor <= requirement.required_to_block
-        {
-            gaps.push(RequiredWatchedTuple {
-                source_family: requirement.source_family.clone(),
-                address: requirement.address.clone(),
-                required_from_block: cursor,
-                required_to_block: requirement.required_to_block,
-            });
-        }
+                    required_from_block: gap.from_block(),
+                    required_to_block: gap.through_block(),
+                }),
+        );
     }
     gaps
 }

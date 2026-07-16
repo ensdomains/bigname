@@ -5,9 +5,13 @@ use anyhow::{Context, Result, bail};
 use bigname_storage::{
     ChildrenCurrentRow, PermissionsCurrentResourceSummary, PermissionsCurrentRow,
     PrimaryNameCurrentSnapshot, RecordInventoryCurrentRow, ResolverCurrentRow,
+    publish_permissions_current_compatibility_in_transaction,
 };
 use serde_json::Value;
-use sqlx::{Connection, PgConnection, Postgres, QueryBuilder, types::Uuid};
+use sqlx::{
+    Connection, PgConnection, Postgres, QueryBuilder,
+    types::{Json, Uuid},
+};
 
 pub(crate) const CHILDREN_CURRENT_COLUMNS: &[&str] = &[
     "parent_logical_name_id",
@@ -207,6 +211,7 @@ pub(crate) async fn publish_permissions_current_stage_tables(
     .await
     .context("failed to publish permissions_current rows")?
     .rows_affected();
+    publish_permissions_current_compatibility_in_transaction(&mut tx).await?;
     tx.commit()
         .await
         .context("failed to commit permissions_current replacement")?;
@@ -294,7 +299,7 @@ pub(crate) async fn stage_permissions_current_resource_summaries(
         values.push_bind(summary.resource_id);
         values.push_bind(&summary.authority_kind);
         values.push_bind(summary.root_resource_id);
-        values.push_bind(summary.coverage.clone());
+        values.push_bind(Json(summary.coverage.clone()));
         values.push_bind(summary.provenance.clone());
         values.push_bind(summary.chain_positions.clone());
         values.push_bind(summary.canonicality_summary.clone());

@@ -29,6 +29,8 @@ The bigname public read contract. Wire format for the model defined in [`archite
 
 Each route documents the subset it honors. Defaults: `consistency=head`, `mode=declared`, no `at` and no `chain_positions` selects the latest stored checkpoint per required chain. On-demand verified execution targets the same selected positions, never a provider's newer head.
 
+Unknown or undocumented query parameters are ignored unless a route explicitly documents that it rejects them. This preserves forward compatibility for `v1` clients; callers must not infer that an ignored parameter affected the response.
+
 ## Snapshot selection
 
 Snapshot selection resolves caller input to one `ChainPositions` object before any route-specific read. The selected object is echoed in the response.
@@ -241,7 +243,7 @@ For Basenames, complete family coverage requires a discovered Base resolver to b
 
 ### `RoleSummary`
 
-`subjects[*]` with `subject`, `scopes[*].scope`, `scopes[*].effective_powers`. Per-resource summary view of current effective permission rows, with support classification from the projection-owned per-resource permission summary. For a current ENSv1 wrapper resource, the object additionally carries `status="unsupported"` and `unsupported_reason="ensv1_wrapper_holder_permissions_not_projected"`; `subjects` contains only rows that were actually projected and is not an exhaustive holder-power answer. If the resource summary is absent or its authority classification is unrecognized, the object carries `status="partial"` and `unsupported_reason="resource_permission_authority_not_projected"`. Row-granular lineage stays on `GET /v1/resources/{resource_id}/permissions`.
+`subjects[*]` with `subject`, `scopes[*].scope`, `scopes[*].effective_powers`. Per-resource summary view of current effective permission rows, with support classification from the projection-owned per-resource permission summary. For a current ENSv1 wrapper resource, the object additionally carries `status="unsupported"` and `unsupported_reason="ensv1_wrapper_holder_permissions_not_projected"`; `subjects` contains only rows that were actually projected and is not an exhaustive holder-power answer. If the resource summary is absent or its authority classification is unrecognized, the object carries `status="partial"` and `unsupported_reason="resource_permission_authority_not_projected"`. Permission coverage uses a closed stored vocabulary; unknown stored status, exhaustiveness, or unsupported-reason values are rejected at the storage boundary. Row-granular lineage stays on `GET /v1/resources/{resource_id}/permissions`. Permission-backed routes and expansions return `409 stale` when the projection-owned permission publication version is absent or incompatible, or when its read-consistency revision changes while the request is assembled. These are wire/schema and request-coherence checks, not freshness claims.
 
 ### `HistoryPointer`
 

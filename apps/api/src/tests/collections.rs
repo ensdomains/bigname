@@ -2661,9 +2661,9 @@ async fn get_address_names_include_role_summary_adds_projection_backed_expansion
         72,
     );
     resolver_permission.canonicality_summary = json!({
-        "status": "head",
+        "status": "canonical",
         "chains": {
-            "ethereum-mainnet": "head",
+            "ethereum-mainnet": "canonical",
         }
     });
 
@@ -3631,6 +3631,7 @@ async fn get_address_names_include_role_summary_reads_basenames_permissions_from
         ],
     )
     .await?;
+    mark_permissions_current_projection_ready(&database).await?;
     database
         .rebuild_permissions_current(Some(resource_id))
         .await?;
@@ -3719,6 +3720,158 @@ async fn get_address_names_rejects_unknown_include_values() -> Result<()> {
 
     database.cleanup().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn resource_permissions_require_compatible_permission_publication() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let resource_id = Uuid::from_u128(0xa38f);
+    let request = || {
+        Request::builder()
+            .uri(format!("/v1/resources/{resource_id}/permissions"))
+            .body(Body::empty())
+            .expect("request must build")
+    };
+
+    let missing_marker = app_router(database.app_state())
+        .oneshot(request())
+        .await
+        .context("resource permissions request without publication version failed")?;
+    assert_eq!(missing_marker.status(), StatusCode::CONFLICT);
+    let missing_payload: ErrorResponse = read_json(missing_marker).await?;
+    assert_eq!(missing_payload.error.code, "stale");
+
+    sqlx::query(
+        r#"
+        INSERT INTO permissions_current_publication (
+            projection,
+            publication_version
+        )
+        VALUES ('permissions_current', 1)
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+    let old_marker = app_router(database.app_state())
+        .oneshot(request())
+        .await
+        .context("resource permissions request with old publication version failed")?;
+    assert_eq!(old_marker.status(), StatusCode::CONFLICT);
+
+    mark_permissions_current_projection_ready(&database).await?;
+    let current_marker = app_router(database.app_state())
+        .oneshot(request())
+        .await
+        .context("resource permissions request with current publication version failed")?;
+    assert_eq!(current_marker.status(), StatusCode::OK);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn resource_permissions_rejects_keyed_publication_interleaved_between_summary_and_rows()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let resource_id = Uuid::from_u128(0xa389);
+    bigname_storage::upsert_resources(&database.pool, &[resource(resource_id)]).await?;
+
+    let initial_row = permission_current_row(
+        resource_id,
+        "0x0000000000000000000000000000000000000a01",
+        PermissionScope::Resource,
+        11,
+        80,
+    );
+    let initial_summary = permission_current_resource_summary(resource_id, Some("registrar"));
+    bigname_storage::replace_permissions_current_resource_projection(
+        &database.pool,
+        resource_id,
+        std::slice::from_ref(&initial_row),
+        Some(&initial_summary),
+    )
+    .await?;
+    mark_permissions_current_projection_ready(&database).await?;
+
+    let (_hook_guard, control) =
+        handler_permissions_support::test_hooks::install(&database.pool).await?;
+    let request = app_router(database.app_state()).oneshot(
+        Request::builder()
+            .uri(format!("/v1/resources/{resource_id}/permissions"))
+            .body(Body::empty())
+            .expect("request must build"),
+    );
+    let request_task = tokio::spawn(request);
+
+    control.wait_until_reached().await;
+    let replacement_row = permission_current_row(
+        resource_id,
+        "0x0000000000000000000000000000000000000b02",
+        PermissionScope::Registry,
+        12,
+        81,
+    );
+    let replacement_summary = permission_current_resource_summary(resource_id, Some("wrapper"));
+    let replacement_result = bigname_storage::replace_permissions_current_resource_projection(
+        &database.pool,
+        resource_id,
+        std::slice::from_ref(&replacement_row),
+        Some(&replacement_summary),
+    )
+    .await;
+    control.resume().await;
+    replacement_result?;
+
+    let response = request_task
+        .await
+        .context("permission interleave request task failed")?
+        .context("permission interleave request failed")?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: ErrorResponse = read_json(response).await?;
+    assert_eq!(payload.error.code, "stale");
+    assert!(payload.error.message.contains("changed during the request"));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT data_revision FROM permissions_current_publication WHERE projection = 'permissions_current'",
+        )
+        .fetch_one(&database.pool)
+        .await?,
+        2
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn address_role_summary_requires_compatible_permission_publication_but_base_page_does_not()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000a38";
+
+    let base_page = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/addresses/{address}/names"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await?;
+    assert_eq!(base_page.status(), StatusCode::OK);
+
+    let role_summary = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/addresses/{address}/names?include=role_summary"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await?;
+    assert_eq!(role_summary.status(), StatusCode::CONFLICT);
+    let payload: ErrorResponse = read_json(role_summary).await?;
+    assert_eq!(payload.error.code, "stale");
+
+    database.cleanup().await
 }
 
 #[tokio::test]

@@ -1,5 +1,3 @@
-#[path = "handlers/collections.rs"]
-mod handler_collections;
 #[path = "handlers/app_facing/events.rs"]
 mod handler_app_facing_events;
 #[path = "handlers/app_facing/identity/mod.rs"]
@@ -12,6 +10,8 @@ mod handler_app_facing_records;
 mod handler_app_facing_resolver_overview;
 #[path = "handlers/app_facing/roles.rs"]
 mod handler_app_facing_roles;
+#[path = "handlers/collections.rs"]
+mod handler_collections;
 #[path = "handlers/exact_name.rs"]
 mod handler_exact_name;
 #[path = "handlers/health.rs"]
@@ -20,6 +20,8 @@ mod handler_health;
 mod handler_history;
 #[path = "handlers/namespaces.rs"]
 mod handler_namespaces;
+#[path = "handlers/permissions_support.rs"]
+mod handler_permissions_support;
 #[path = "handlers/primary_names.rs"]
 mod handler_primary_names;
 #[path = "handlers/resolution.rs"]
@@ -42,6 +44,9 @@ use self::{
     handler_health::health,
     handler_history::{address_history, name_history, resource_history},
     handler_namespaces::{namespace_manifests, namespace_metadata},
+    handler_permissions_support::{
+        begin_permissions_current_read, finish_permissions_current_read,
+    },
     handler_primary_names::primary_names,
     handler_resolution::{explain_resolution_execution_current, name_profile},
 };

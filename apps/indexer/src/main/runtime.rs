@@ -41,6 +41,11 @@ pub(crate) use manifest::{
 };
 #[allow(unused_imports)]
 pub(crate) use poll_loop::run_poll_loop;
+#[cfg(test)]
+pub(crate) use poll_loop::{
+    ReplayHandoffLatchStatus, install_replay_handoff_before_latch_test_hook,
+    latch_replay_handoff_if_stable,
+};
 #[allow(unused_imports)]
 pub(crate) use refresh::{
     refresh_intake_chain_tasks, refresh_manifest_normalized_events_from_storage,

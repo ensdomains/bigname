@@ -177,6 +177,56 @@ async fn insert_pending_input(pool: &PgPool, chain: &str, address: &str) -> Resu
     Ok(())
 }
 
+async fn acknowledge_generation(
+    pool: &PgPool,
+    chain: &str,
+    address: &str,
+    generation: i64,
+) -> Result<bool> {
+    let acknowledged = acknowledge_resolver_profile_input_changes(
+        pool,
+        &[ResolverProfileInputChange {
+            chain_id: chain.to_owned(),
+            contract_address: address.to_owned(),
+            generation,
+            processed_generation: 0,
+            previous_code_hash: None,
+            current_code_hash: None,
+            force_reconciliation: false,
+        }],
+    )
+    .await?;
+    Ok(acknowledged == 1)
+}
+
+#[test]
+fn all_current_state_queries_use_the_shared_code_hash_ranking() {
+    let queries = [
+        (
+            load_pending_resolver_profile_input_changes_sql(),
+            CurrentCodeHashCaller::PendingInput,
+        ),
+        (
+            enqueue_resolver_profile_reconciliations_sql(),
+            CurrentCodeHashCaller::ReconciliationTarget,
+        ),
+        (
+            acknowledge_resolver_profile_input_changes_sql(),
+            CurrentCodeHashCaller::Acknowledgement,
+        ),
+    ];
+
+    for (sql, caller) in queries {
+        let shared_lookup = latest_non_orphaned_code_hash_lateral(caller);
+        assert_eq!(sql.matches(&shared_lookup).count(), 1);
+        assert_eq!(
+            sql.matches(LATEST_NON_ORPHANED_CODE_HASH_RANKING_SQL)
+                .count(),
+            1
+        );
+    }
+}
+
 #[tokio::test]
 async fn pending_loader_excludes_only_the_exact_attempted_generation() -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -294,10 +344,7 @@ async fn queue_coalesces_effective_changes_and_fences_acknowledgement() -> Resul
     assert_eq!(first.previous_code_hash, None);
     assert_eq!(first.current_code_hash.as_deref(), Some("0xaaaa"));
     assert!(!first.force_reconciliation);
-    assert!(
-        acknowledge_resolver_profile_input_change(pool, "eth-mainnet", address, first.generation)
-            .await?
-    );
+    assert!(acknowledge_generation(pool, "eth-mainnet", address, first.generation).await?);
 
     // The small conflict path executes INSERT ... DO NOTHING followed by an
     // UPDATE. Promotion and a later same-hash observation do not change the
@@ -361,19 +408,8 @@ async fn queue_coalesces_effective_changes_and_fences_acknowledgement() -> Resul
     assert_eq!(coalesced.generation, 3);
     assert_eq!(coalesced.previous_code_hash.as_deref(), Some("0xaaaa"));
     assert_eq!(coalesced.current_code_hash.as_deref(), Some("0xcccc"));
-    assert!(
-        !acknowledge_resolver_profile_input_change(pool, "eth-mainnet", address, second.generation)
-            .await?
-    );
-    assert!(
-        acknowledge_resolver_profile_input_change(
-            pool,
-            "eth-mainnet",
-            address,
-            coalesced.generation
-        )
-        .await?
-    );
+    assert!(!acknowledge_generation(pool, "eth-mainnet", address, second.generation).await?);
+    assert!(acknowledge_generation(pool, "eth-mainnet", address, coalesced.generation).await?);
 
     let forced_count = enqueue_resolver_profile_reconciliations(
         pool,
@@ -391,10 +427,7 @@ async fn queue_coalesces_effective_changes_and_fences_acknowledgement() -> Resul
     assert_eq!(forced.previous_code_hash.as_deref(), Some("0xcccc"));
     assert_eq!(forced.current_code_hash.as_deref(), Some("0xcccc"));
     assert!(forced.force_reconciliation);
-    assert!(
-        acknowledge_resolver_profile_input_change(pool, "eth-mainnet", address, forced.generation)
-            .await?
-    );
+    assert!(acknowledge_generation(pool, "eth-mainnet", address, forced.generation).await?);
 
     // Simulate the duplicate effective notification PostgreSQL can expose to
     // statement triggers around INSERT ... ON CONFLICT DO UPDATE. The second
@@ -448,15 +481,7 @@ async fn queue_coalesces_effective_changes_and_fences_acknowledgement() -> Resul
         .await?
         .context("same-rank higher raw row id must win")?;
     assert_eq!(id_tie.current_code_hash.as_deref(), Some("0xbbbb"));
-    assert!(
-        acknowledge_resolver_profile_input_change(
-            pool,
-            "eth-mainnet",
-            tie_address,
-            id_tie.generation
-        )
-        .await?
-    );
+    assert!(acknowledge_generation(pool, "eth-mainnet", tie_address, id_tie.generation).await?);
     upsert_raw_code_hashes(
         pool,
         &[RawCodeHash {
@@ -508,13 +533,7 @@ async fn queue_coalesces_effective_changes_and_fences_acknowledgement() -> Resul
         .await?
         .context("reorg target setup must enqueue work")?;
     assert!(
-        acknowledge_resolver_profile_input_change(
-            pool,
-            "eth-mainnet",
-            reorg_address,
-            before_reorg.generation
-        )
-        .await?
+        acknowledge_generation(pool, "eth-mainnet", reorg_address, before_reorg.generation).await?
     );
     let orphaned =
         mark_raw_block_facts_range_orphaned(pool, "eth-mainnet", "0xb202", Some("0xb201")).await?;
@@ -568,7 +587,7 @@ async fn queue_coalesces_effective_changes_and_fences_acknowledgement() -> Resul
         .await?
         .context("correction target setup must enqueue work")?;
     assert!(
-        acknowledge_resolver_profile_input_change(
+        acknowledge_generation(
             pool,
             "eth-mainnet",
             correction_address,
@@ -635,13 +654,7 @@ async fn mixed_bulk_conflicts_do_not_fabricate_or_double_queue_transitions() -> 
         .await?
         .context("bulk conflict setup must enqueue work")?;
     assert!(
-        acknowledge_resolver_profile_input_change(
-            pool,
-            "eth-mainnet",
-            existing_address,
-            initial.generation
-        )
-        .await?
+        acknowledge_generation(pool, "eth-mainnet", existing_address, initial.generation).await?
     );
 
     let mut mixed = Vec::with_capacity(128);
@@ -771,7 +784,7 @@ async fn concurrent_writers_cannot_hide_stale_snapshot_or_reversal_work() -> Res
         .context("concurrent target must remain dirty")?;
     assert_eq!(authoritative.current_code_hash.as_deref(), Some("0xaaaa"));
     assert!(
-        acknowledge_resolver_profile_input_change(
+        acknowledge_generation(
             pool,
             "eth-mainnet",
             converged_address,

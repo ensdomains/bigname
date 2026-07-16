@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, ensure};
+use bigname_domain::block_interval::{InclusiveBlockInterval, coalesce_inclusive_block_intervals};
 use sqlx::PgPool;
 
 #[derive(Clone, Copy)]
@@ -129,15 +130,38 @@ pub(super) async fn load_selected_live_block_intervals(
         );
         block_numbers.push(block_number);
     }
-    let mut intervals = Vec::<(i64, i64)>::new();
-    for block_number in block_numbers {
-        if let Some((_, interval_to)) = intervals.last_mut()
-            && interval_to.checked_add(1) == Some(block_number)
-        {
-            *interval_to = block_number;
-        } else {
-            intervals.push((block_number, block_number));
-        }
+    Ok(coalesced_block_number_intervals(block_numbers))
+}
+
+fn coalesced_block_number_intervals(
+    block_numbers: impl IntoIterator<Item = i64>,
+) -> Vec<(i64, i64)> {
+    coalesce_inclusive_block_intervals(block_numbers.into_iter().map(|block_number| {
+        InclusiveBlockInterval::new(block_number, block_number)
+            .expect("single-block interval must not be inverted")
+    }))
+    .into_iter()
+    .map(|interval| (interval.from_block(), interval.through_block()))
+    .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selected_block_numbers_coalesce_in_order_without_crossing_gaps() {
+        assert_eq!(
+            coalesced_block_number_intervals([2, 3, 4, 8, 9, 10]),
+            vec![(2, 4), (8, 10)]
+        );
     }
-    Ok(intervals)
+
+    #[test]
+    fn selected_terminal_block_numbers_coalesce_without_overflow() {
+        assert_eq!(
+            coalesced_block_number_intervals([i64::MAX - 2, i64::MAX - 1, i64::MAX]),
+            vec![(i64::MAX - 2, i64::MAX)]
+        );
+    }
 }

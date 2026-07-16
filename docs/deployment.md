@@ -78,19 +78,59 @@ current projection family has a marker for the new replay version and
 the remaining new workers. Indexers may continue ingesting while workers are
 stopped; their durable changes will be consumed after replay handoff.
 
-Replay version 8 is such an upgrade: it backfills the projection-owned
-`permissions_current_resource_summary` for every current permission resource,
-including resources with zero permission rows, and atomically republishes it
-with `permissions_current`. A version-7 completion marker cannot satisfy this
-upgrade because it predates that companion projection. Version-7 and version-8
-workers must never overlap, and the API must remain drained until every
-version-8 marker is current and pending invalidations are empty. Replay version
-7 was the preceding upgrade that made retained ENSv2 fresh registrar
-registrations part of `name_current` exact-name-profile evidence; version 8
-retains that behavior. The replay-version marker prevents a new worker from
-trusting old bootstrap completion; it does not fence an old worker from claiming
-a later invalidation. Container healthchecks report version skew but do not stop
-an old process, so they are not a substitute for this drain.
+Replay version 9 is such an upgrade: it forces the full permission cutover that
+discovers canonical zero-event resources and seeds
+`permissions_current_publication` version 2 plus its read-consistency revision.
+A version-8 completion marker cannot satisfy this upgrade because an upgraded
+database may otherwise retain its apply cursor, skip full replay, and leave the
+new publication artifact empty. Version-8 and version-9 workers must never
+overlap, and the API must remain drained until every version-9 marker is current
+and pending invalidations are empty. Replay version 8 was the preceding upgrade
+that backfilled `permissions_current_resource_summary`; version 9 retains that
+behavior and the version-7 ENSv2 exact-name-profile evidence. The replay-version
+marker prevents a new worker from trusting old bootstrap completion; it does not
+fence an old worker from claiming a later invalidation. Container healthchecks
+report version skew but do not stop an old process, so they are not a substitute
+for this drain.
+
+The version-9 full permission cutover writes publication version 2 and advances
+its monotonic `data_revision` atomically with holder rows and per-resource
+summaries. Compatible keyed permission rebuilds advance that revision in their
+own row-and-summary transaction without creating or upgrading a missing or old
+compatibility version. Permission-backed API reads capture the revision before
+reading and verify it again before returning; a change fails closed with `409
+stale`. The revision is request-coherence evidence only, not freshness. The API
+does not read `current_projection_replay_status`, and operators still wait for
+all replay markers and pending invalidations before undraining traffic.
+
+### Stored-lineage coverage frontier upgrade
+
+Migration `20260716122000_stored_lineage_coverage_frontiers.sql` creates the
+durable stored-lineage coverage header and normalized requirement tables. It is
+schema-only: it does not seed proof from a chain checkpoint, stored lineage,
+projection state, prior process memory, backfill job identity, or migration-time
+scan. Each upgraded chain therefore starts cold and publishes proof format
+`stored_lineage_coverage_v1` only after the new indexer verifies the current
+candidate against durable `backfill_coverage_facts`.
+
+This indexer change is not compatible with a mixed old/new rolling deployment.
+Stop every old indexer before applying the migration and do not restart one after
+a new indexer has begun publishing frontier revisions. An old process can still
+promote from its process-local memo and does not participate in the durable
+compare-and-swap fence. API and worker processes do not read these tables, so
+this upgrade alone does not require a projection rebuild or API drain; stored-
+lineage promotion may pause while the first cold proof runs. Migration
+healthchecks expose version skew but, as elsewhere, do not stop an already
+running old process.
+
+On the first large-gap promotion for a chain, expect a complete, chunked coverage
+verification from the earliest required watched interval at least through the
+current promotion target and, when covered, through the chosen stored anchor.
+Missing or stale facts, epoch drift, and a frontier publication conflict leave
+the checkpoint unchanged. The indexer reloads and replans on a compare-and-swap
+conflict, but never promotes from the losing unpublished candidate. Once a proof
+publishes, restarts and additional new-version indexer processes reuse it;
+unchanged history is not verified again.
 
 The indexer loads exactly one manifest profile root. Use `/app/manifests/mainnet`
 for the mainnet profile or `/app/manifests/sepolia` for the ENSv2 Sepolia
@@ -496,8 +536,8 @@ topics-complete scans (ENSv1 generic resolver scans, Base Basenames registry
 Coinbase SQL scan-all) that cover every address of the family over each fact
 interval. Overlapping or adjacent facts from independently completed jobs may
 form the union, so the default sequence of 32-block `ops-catchup` jobs can
-prove a 1,024-block promotion step. A one-block gap still refuses, and one
-source family's facts never credit another family at the same address.
+prove a 1,024-block promotion step. A one-block gap still refuses, and one source family's facts never
+credit another family at the same address.
 Manifest source families that have no active ABI event topics, such as
 execution-only transport entrypoints, do not impose historical selected-log
 coverage for checkpoint promotion.
@@ -506,30 +546,54 @@ Coverage is verified by an indexed per-tuple probe that merges only matching
 exact-address and family fact intervals. Declaration-only requirements come
 from active manifest versions; deprecated, shadow, and draft declarations do
 not create open-ended coverage obligations. Closed discovery intervals remain
-historical requirements for the blocks where they were admitted. When the
-process-local verified frontier is empty — at process start or after a
-checkpoint regression, manifest ABI topic change, or discovery-admission epoch
-change — verification starts at the earlier of the promotion path and the
-earliest explicit watched `active_from_block` through the stored anchor. This
-includes closed historical discovery intervals, so a tuple admitted
-retroactively cannot inherit an already-advanced checkpoint. An unknown start
-remains unknown rather than becoming block zero. After that widened interval is
-verified once, its lower bound stays in the process-local frontier, so ordinary
-promotion polls do not rescan full history. The check is executed in large
-block chunks
-(`131072` blocks per verification query) that extend an in-process per-chain
-verified frontier as far ahead as the stored anchor; after the frontier
-covers a range once, every subsequent promotion step consults it in memory.
-The frontier is not persisted, so a process restart performs that bounded,
-chunked re-verification again. Verification also fails closed on topic-set
-drift: fact coverage is complete only relative to the family's manifest ABI
-event set at fetch time, so promotion validates the immutable topic plan of
-each topic-filtered (Coinbase SQL) fact that could supply a required watched
-tuple interval. A stale or missing persisted topic set refuses promotion only
-when its evidence is still needed; a gap-free union of current-topic or
+historical requirements for the blocks where they were admitted.
+
+The saved coverage frontier has one chain header with a revision, proof format,
+discovery-admission epoch, inclusive verified bounds, and the exact active event
+topic set for each log-producing source family. It also stores the exact child
+row count and constant-state 128-bit integrity fingerprint. Its companion
+snapshot has one row per `(source_family, address)` with coalesced inclusive
+required intervals.
+Postgres materializes the complete current candidate and computes the interval
+difference against that snapshot in a transaction-local table. The indexer
+receives only proof work: added intervals for unchanged-topic families and every
+current interval for a family whose topic set changed. Removed and shortened
+requirements need no historical read, but publication atomically replaces the
+old snapshot so removed coverage cannot survive a later readmission.
+
+Cold or missing proof, malformed current-format proof (including a child count
+or fingerprint mismatch), and proof made range-stale by a deep checkpoint
+regression are never partially reused. An unsupported proof
+format is a hard refusal and is not overwritten. The cold candidate starts at
+the earlier of the promotion path and the earliest explicit watched
+`active_from_block` through the attempted stored anchor. This includes closed
+historical discovery intervals, so a tuple admitted retroactively cannot inherit
+an already-advanced checkpoint. An unknown start remains unknown rather than
+becoming block zero. A checkpoint regression whose next path begins below the
+saved lower bound invalidates the whole frontier and requires the same cold
+proof. Verification runs in large block chunks (`131072` blocks per fact query).
+If look-ahead through the stored anchor finds a gap above the current promotion
+target, the indexer retries exactly through the target and publishes only that
+shorter verified bound; an unverified suffix is never saved.
+
+After proof, the indexer takes the discovery-admission epoch fence and publishes
+the whole candidate with a compare-and-swap on the saved revision. Epoch drift
+or a revision conflict publishes nothing and leaves checkpoint promotion
+fail-closed until a reloaded candidate succeeds. A successful revision is
+durable across process restarts, so later polls verify only added or topic-
+changed intervals and bound extensions. Verification still fails closed on
+topic-set drift: fact coverage is complete only relative to the family's
+manifest ABI event set at fetch time, so promotion validates the immutable topic
+plan of each topic-filtered (Coinbase SQL) fact that could supply a required
+watched tuple interval. A stale or missing persisted topic set refuses promotion
+only when its evidence is still needed; a gap-free union of current-topic or
 topic-unfiltered facts over the same required interval replaces it.
-Address-enumerated hash-pinned fetches are topic-unfiltered and immune to
-drift.
+Address-enumerated hash-pinned fetches are topic-unfiltered and immune to drift.
+
+The saved frontier is not a lineage or fork proof. Every promotion still checks
+the provider anchor and target hash, stored parent path, same-height non-orphan
+forks, selected-log companion rows, and the discovery-admission epoch again in
+the checkpoint-write transaction.
 
 Promotion reconstructs family-selected companion obligations the same way the
 backfill write side does: a stored log is selected only when its emitter is

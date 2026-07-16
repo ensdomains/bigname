@@ -6,7 +6,9 @@ use serde_json::Value;
 use super::pipeline::ApiServer;
 
 pub fn pointer(body: &Value, path: &str) -> Value {
-    body.pointer(path).cloned().unwrap_or(Value::Null)
+    body.pointer(path)
+        .unwrap_or_else(|| panic!("response is missing JSON pointer {path}: {body}"))
+        .clone()
 }
 
 pub fn data_array(body: &Value) -> Vec<Value> {
@@ -54,4 +56,26 @@ pub async fn primary_name(
         "{namespace} primary-name lookup for {address} mode={mode} failed: {body}"
     );
     Ok(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::pointer;
+
+    #[test]
+    fn pointer_preserves_explicit_null() {
+        let body = json!({"data": {"value": null}});
+
+        assert_eq!(pointer(&body, "/data/value"), Value::Null);
+    }
+
+    #[test]
+    #[should_panic(expected = "response is missing JSON pointer /data/value")]
+    fn pointer_rejects_missing_path() {
+        let body = json!({"data": {}});
+
+        let _ = pointer(&body, "/data/value");
+    }
 }

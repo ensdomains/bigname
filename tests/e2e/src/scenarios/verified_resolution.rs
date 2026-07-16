@@ -232,17 +232,13 @@ async fn direct_path_verified_query_via_local_universal_resolver_persists_trace(
     )
     .await?;
 
+    let ready_sql =
+        support::canonical_event_ready_sql("ens:verified.eth", "RecordChanged", Some("addr:60"));
     let run = support::ingest_and_serve_with_ens_execution(
         &anvil,
         &deployment,
         &universal_resolver,
-        Some(
-            "SELECT EXISTS (SELECT 1 FROM normalized_events \
-             WHERE logical_name_id = 'ens:verified.eth' \
-             AND event_kind = 'RecordChanged' \
-             AND canonicality_state = 'canonical' \
-             AND after_state->>'record_key' = 'addr:60')",
-        ),
+        Some(&ready_sql),
     )
     .await?;
 

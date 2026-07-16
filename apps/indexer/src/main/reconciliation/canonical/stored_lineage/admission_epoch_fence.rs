@@ -1,8 +1,10 @@
 use anyhow::{Context, Result, ensure};
 use bigname_storage::{
     ChainCheckpoint, ChainCheckpointUpdate, CheckpointBlockRef, advance_chain_checkpoints,
-    advance_chain_checkpoints_rejecting_non_orphaned_lineage_forks,
+    advance_chain_checkpoints_rejecting_non_orphaned_lineage_forks_in_transaction,
 };
+
+use crate::reconciliation::guard_release::prioritize_operation_error;
 
 /// Briefly locks the chain's admission-epoch row while a previously observed
 /// epoch is revalidated. Stored-lineage promotion verifies coverage and does
@@ -76,6 +78,30 @@ impl StoredLineageAdmissionEpochFence {
             .await
             .context("failed to release stored-lineage admission-epoch fence")
     }
+
+    async fn advance_checkpoint(
+        mut self,
+        update: &ChainCheckpointUpdate,
+    ) -> Result<ChainCheckpoint> {
+        let checkpoint =
+            advance_chain_checkpoints_rejecting_non_orphaned_lineage_forks_in_transaction(
+                &mut self.transaction,
+                update,
+            )
+            .await;
+        let release = if checkpoint.is_ok() {
+            self.transaction
+                .commit()
+                .await
+                .context("failed to commit checkpoint advancement under admission-epoch fence")
+        } else {
+            self.transaction
+                .rollback()
+                .await
+                .context("failed to roll back checkpoint advancement under admission-epoch fence")
+        };
+        prioritize_operation_error(checkpoint, release)
+    }
 }
 
 impl super::coverage::ChainCoverageFrontiers {
@@ -92,15 +118,6 @@ impl super::coverage::ChainCoverageFrontiers {
             .map(Some)
     }
 
-    pub(crate) async fn release_promotion_fence(
-        fence: Option<StoredLineageAdmissionEpochFence>,
-    ) -> Result<()> {
-        if let Some(fence) = fence {
-            fence.release().await?;
-        }
-        Ok(())
-    }
-
     pub(crate) async fn advance_checkpoint_with_promotion_epoch(
         pool: &sqlx::PgPool,
         chain: &str,
@@ -109,22 +126,16 @@ impl super::coverage::ChainCoverageFrontiers {
         safe: Option<CheckpointBlockRef>,
         finalized: Option<CheckpointBlockRef>,
     ) -> Result<ChainCheckpoint> {
-        let fence = Self::reacquire_promotion_fence(pool, chain, expected_epoch).await?;
         let update = ChainCheckpointUpdate {
             chain_id: chain.to_owned(),
             canonical,
             safe,
             finalized,
         };
-        let checkpoint = if expected_epoch.is_some() {
-            advance_chain_checkpoints_rejecting_non_orphaned_lineage_forks(pool, &update).await
+        if let Some(fence) = Self::reacquire_promotion_fence(pool, chain, expected_epoch).await? {
+            fence.advance_checkpoint(&update).await
         } else {
             advance_chain_checkpoints(pool, &update).await
-        };
-        let release = Self::release_promotion_fence(fence).await;
-        match (checkpoint, release) {
-            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
-            (Ok(checkpoint), Ok(())) => Ok(checkpoint),
         }
     }
 }
@@ -138,49 +149,66 @@ pub(super) use test_hook::pause as pause_after_admission_epoch_verification_for_
 
 #[cfg(test)]
 mod test_hook {
-    use std::{
-        collections::BTreeMap,
-        sync::{Arc, LazyLock, Mutex},
-    };
+    use std::sync::Arc;
 
+    use bigname_test_support::{
+        ScopedTestHookGuard, ScopedTestHookRegistry, current_test_database,
+    };
+    use sqlx::PgPool;
     use tokio::sync::Notify;
 
-    #[derive(Clone)]
     pub(crate) struct AdmissionEpochFenceTestHook {
+        state: AdmissionEpochFenceTestHookState,
+        _registration: ScopedTestHookGuard<HookKey, AdmissionEpochFenceTestHookState>,
+    }
+
+    #[derive(Clone)]
+    struct AdmissionEpochFenceTestHookState {
         acquired: Arc<Notify>,
         resume: Arc<Notify>,
     }
 
     impl AdmissionEpochFenceTestHook {
         pub(crate) async fn wait_until_verified(&self) {
-            self.acquired.notified().await;
+            self.state.acquired.notified().await;
         }
 
         pub(crate) fn resume(&self) {
-            self.resume.notify_one();
+            self.state.resume.notify_one();
         }
     }
 
-    static HOOKS: LazyLock<Mutex<BTreeMap<String, AdmissionEpochFenceTestHook>>> =
-        LazyLock::new(|| Mutex::new(BTreeMap::new()));
+    impl Drop for AdmissionEpochFenceTestHook {
+        fn drop(&mut self) {
+            self.state.resume.notify_one();
+        }
+    }
 
-    pub(crate) fn install(chain: &str) -> AdmissionEpochFenceTestHook {
-        let hook = AdmissionEpochFenceTestHook {
+    type HookKey = (String, String);
+
+    static HOOKS: ScopedTestHookRegistry<HookKey, AdmissionEpochFenceTestHookState> =
+        ScopedTestHookRegistry::new();
+
+    pub(crate) async fn install(pool: &PgPool, chain: &str) -> AdmissionEpochFenceTestHook {
+        let database = current_test_database(pool)
+            .await
+            .expect("admission epoch fence test hook must identify its database");
+        let state = AdmissionEpochFenceTestHookState {
             acquired: Arc::new(Notify::new()),
             resume: Arc::new(Notify::new()),
         };
-        HOOKS
-            .lock()
-            .expect("admission epoch fence test hook lock must not be poisoned")
-            .insert(chain.to_owned(), hook.clone());
-        hook
+        let registration = HOOKS.install((database, chain.to_owned()), state.clone());
+        AdmissionEpochFenceTestHook {
+            state,
+            _registration: registration,
+        }
     }
 
-    pub(crate) async fn pause(chain: &str) {
-        let hook = HOOKS
-            .lock()
-            .expect("admission epoch fence test hook lock must not be poisoned")
-            .remove(chain);
+    pub(crate) async fn pause(pool: &PgPool, chain: &str) {
+        let database = current_test_database(pool)
+            .await
+            .expect("admission epoch fence test hook must identify its database");
+        let hook = HOOKS.take(&(database, chain.to_owned()));
         if let Some(hook) = hook {
             hook.acquired.notify_one();
             hook.resume.notified().await;

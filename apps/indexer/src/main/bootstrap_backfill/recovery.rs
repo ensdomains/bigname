@@ -13,58 +13,35 @@ const MAX_RETENTION_AUTHORITY_RETRIES: usize = 4;
 const MAX_ENS_V2_DISCOVERY_EXPANSION_PASSES: usize = 1_024;
 
 #[cfg(test)]
-static FORCED_RETENTION_ROTATION_CHAIN: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
-    std::sync::OnceLock::new();
+type ForcedRetentionRotationKey = (String, String);
 
 #[cfg(test)]
-pub(crate) struct ForcedRetentionRotationGuard {
-    chain: String,
+static FORCED_RETENTION_ROTATIONS: bigname_test_support::ScopedTestHookRegistry<
+    ForcedRetentionRotationKey,
+    (),
+> = bigname_test_support::ScopedTestHookRegistry::new();
+
+#[cfg(test)]
+fn forced_retention_rotation_key(database: String, chain: &str) -> ForcedRetentionRotationKey {
+    (database, chain.to_owned())
 }
 
 #[cfg(test)]
-impl Drop for ForcedRetentionRotationGuard {
-    fn drop(&mut self) {
-        let mut forced = FORCED_RETENTION_ROTATION_CHAIN
-            .get_or_init(Default::default)
-            .lock()
-            .expect("forced retention-rotation test lock must not be poisoned");
-        if forced.as_deref() == Some(self.chain.as_str()) {
-            *forced = None;
-        }
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn install_forced_retention_rotation(chain: &str) -> ForcedRetentionRotationGuard {
-    let mut forced = FORCED_RETENTION_ROTATION_CHAIN
-        .get_or_init(Default::default)
-        .lock()
-        .expect("forced retention-rotation test lock must not be poisoned");
-    assert!(
-        forced.is_none(),
-        "only one forced rotation may be installed"
-    );
-    *forced = Some(chain.to_owned());
-    ForcedRetentionRotationGuard {
-        chain: chain.to_owned(),
-    }
+pub(crate) async fn install_forced_retention_rotation(
+    pool: &sqlx::PgPool,
+    chain: &str,
+) -> Result<bigname_test_support::ScopedTestHookGuard<ForcedRetentionRotationKey, ()>> {
+    let database = bigname_test_support::current_test_database(pool).await?;
+    Ok(FORCED_RETENTION_ROTATIONS.install(forced_retention_rotation_key(database, chain), ()))
 }
 
 #[cfg(test)]
 async fn maybe_force_retention_rotation(pool: &sqlx::PgPool, chain: &str) -> Result<()> {
-    let should_rotate = {
-        let mut forced = FORCED_RETENTION_ROTATION_CHAIN
-            .get_or_init(Default::default)
-            .lock()
-            .expect("forced retention-rotation test lock must not be poisoned");
-        if forced.as_deref() == Some(chain) {
-            *forced = None;
-            true
-        } else {
-            false
-        }
-    };
-    if !should_rotate {
+    let database = bigname_test_support::current_test_database(pool).await?;
+    if FORCED_RETENTION_ROTATIONS
+        .take(&forced_retention_rotation_key(database, chain))
+        .is_none()
+    {
         return Ok(());
     }
     let updated = sqlx::query(
@@ -291,7 +268,7 @@ pub(crate) async fn converge_ens_v2_retained_history_through_block(
     .await
     {
         Ok(_) => Ok(false),
-        Err(error) if bigname_adapters::is_ens_v2_newly_required_coverage(&error) => Ok(true),
+        Err(error) if bigname_adapters::is_ens_v2_missing_coverage(&error) => Ok(true),
         Err(error) => Err(error).with_context(|| {
             format!(
                 "failed to converge ENSv2 full-source authority on chain {chain} through block {through_block}"
@@ -310,7 +287,10 @@ pub(super) async fn finish_bootstrap_convergence_pass(
     #[cfg(test)]
     maybe_force_retention_rotation(pool, chain).await?;
 
-    let newly_required_coverage = if requested_adapter_sync_mode == BackfillAdapterSyncMode::Auto {
+    let newly_required_coverage = if requested_adapter_sync_mode == BackfillAdapterSyncMode::RawOnly
+    {
+        false
+    } else {
         converge_ens_v2_retained_history_through_block(
             pool,
             chain,
@@ -318,12 +298,14 @@ pub(super) async fn finish_bootstrap_convergence_pass(
             planned.has_ens_v2_history_requirements,
         )
         .await?
-    } else {
-        false
     };
 
     let current = load_bootstrap_retention_snapshot(pool, chain, through_block).await?;
-    if !newly_required_coverage && retention_snapshots_are_stable(planned, current) {
+    if !newly_required_coverage
+        && (requested_adapter_sync_mode == BackfillAdapterSyncMode::RawOnly
+            || !current.requires_ens_v2_history_recovery)
+        && retention_snapshots_are_stable(planned, current)
+    {
         Ok(BootstrapPassStatus::Stable)
     } else if current.generation != planned.generation {
         Ok(BootstrapPassStatus::RetentionAuthorityChanged)
@@ -390,6 +372,18 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn forced_rotation_hook_key_isolates_database_and_chain() {
+        let ethereum_a =
+            forced_retention_rotation_key("test_database_a".to_owned(), "ethereum-sepolia");
+        let ethereum_b =
+            forced_retention_rotation_key("test_database_b".to_owned(), "ethereum-sepolia");
+        let base_a = forced_retention_rotation_key("test_database_a".to_owned(), "base-mainnet");
+
+        assert_ne!(ethereum_a, ethereum_b);
+        assert_ne!(ethereum_a, base_a);
     }
 
     #[test]

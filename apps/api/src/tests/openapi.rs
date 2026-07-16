@@ -396,6 +396,23 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
         openapi_response_description(name_profile, "409"),
         "Snapshot conflict or stale projection"
     );
+
+    let resource_permissions =
+        openapi_operation(&document, "/v1/resources/{resource_id}/permissions");
+    assert_eq!(
+        openapi_response_description(resource_permissions, "409"),
+        "Snapshot conflict or stale projection"
+    );
+    for path in [
+        "/v1/roles",
+        "/v1/names/{namespace}/{name}/roles",
+    ] {
+        assert_eq!(
+            openapi_response_description(openapi_operation(&document, path), "409"),
+            "Snapshot conflict or stale projection",
+            "permission-backed role route must declare its publication-version conflict: {path}"
+        );
+    }
     let mode = openapi_parameter(name_profile, "mode");
     assert_eq!(
         mode.get("schema"),
@@ -713,7 +730,11 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
         Some(&json!({ "$ref": "#/components/schemas/ResourceLookupData" }))
     );
 
-    assert_compact_schema_omits(&document, "CompactDomainSummary", &["resource_id", "provenance"]);
+    assert_compact_schema_omits(
+        &document,
+        "CompactDomainSummary",
+        &["resource_id", "provenance"],
+    );
     assert_compact_schema_omits(
         &document,
         "CompactRecordSummary",

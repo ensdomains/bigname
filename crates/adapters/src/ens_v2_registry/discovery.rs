@@ -2,11 +2,9 @@ use std::collections::{BTreeMap, HashSet};
 
 use anyhow::{Context, Result};
 use bigname_manifests::{
-    DiscoveryObservation, DiscoveryReconciliationSummary, discovery_observation_evm_event_position,
-    reconcile_discovery_observations, reconcile_discovery_observations_through_block,
-    reconcile_discovery_observations_through_block_with_expected_admission_epoch,
-    reconcile_discovery_observations_with_expected_admission_epoch,
-    reconcile_scoped_discovery_observation_transitions,
+    DiscoveryObservation, DiscoveryReconciliationSummary, ExpectedDiscoveryAdmissionEpoch,
+    FullDiscoveryReconciliationOptions, discovery_observation_evm_event_position,
+    reconcile_discovery_observations, reconcile_scoped_discovery_observation_transitions,
 };
 use serde_json::Value;
 use sqlx::PgPool;
@@ -178,46 +176,24 @@ async fn reconcile_discovery_observation_history(
                         })
                 })
                 .transpose()?;
-            let source_summary = match (reconcile_through_block_number, expected_epoch) {
-                (Some(through_block_number), Some(expected_epoch)) => {
-                    let chain = expected_chain
-                        .context("expected ENSv2 discovery admission epoch is missing its chain")?;
-                    reconcile_discovery_observations_through_block_with_expected_admission_epoch(
-                        pool,
-                        &discovery_source,
-                        &latest_observations,
-                        through_block_number,
-                        chain,
-                        expected_epoch,
-                    )
-                    .await
-                }
-                (Some(through_block_number), None) => {
-                    reconcile_discovery_observations_through_block(
-                        pool,
-                        &discovery_source,
-                        &latest_observations,
-                        through_block_number,
-                    )
-                    .await
-                }
-                (None, Some(expected_epoch)) => {
-                    let chain = expected_chain
-                        .context("expected ENSv2 discovery admission epoch is missing its chain")?;
-                    reconcile_discovery_observations_with_expected_admission_epoch(
-                        pool,
-                        &discovery_source,
-                        &latest_observations,
-                        chain,
-                        expected_epoch,
-                    )
-                    .await
-                }
-                (None, None) => {
-                    reconcile_discovery_observations(pool, &discovery_source, &latest_observations)
-                        .await
-                }
-            }
+            let expected_admission_epoch = match expected_epoch {
+                Some(epoch) => Some(ExpectedDiscoveryAdmissionEpoch {
+                    chain: expected_chain
+                        .context("expected ENSv2 discovery admission epoch is missing its chain")?,
+                    epoch,
+                }),
+                None => None,
+            };
+            let source_summary = reconcile_discovery_observations(
+                pool,
+                &discovery_source,
+                &latest_observations,
+                FullDiscoveryReconciliationOptions {
+                    through_block_number: reconcile_through_block_number,
+                    expected_admission_epoch,
+                },
+            )
+            .await
             .with_context(|| format!("failed to finalize discovery_source {discovery_source}"))?;
             source_active_edge_count = source_summary.active_edge_count;
             source_admitted_edge_count = source_summary.admitted_edge_count;

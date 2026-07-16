@@ -25,20 +25,12 @@ async fn register_without_resolver_keeps_declared_resolver_empty() -> Result<()>
 
     ens_v1::register_eth_name(&rpc, &deployment, "erin", alice, YEAR, Address::ZERO).await?;
 
-    let run = support::ingest_and_serve(
-        &anvil,
-        &deployment,
-        Some(
-            "SELECT EXISTS (SELECT 1 FROM normalized_events \
-             WHERE logical_name_id = 'ens:erin.eth' AND event_kind = 'RegistrationGranted' \
-             AND canonicality_state = 'canonical')",
-        ),
-    )
-    .await?;
+    let ready_sql = support::canonical_event_ready_sql("ens:erin.eth", "RegistrationGranted", None);
+    let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
 
     let (status, body) = run.api.get_json("/v1/names/ens/erin.eth").await?;
     assert_eq!(status, 200, "exact-name lookup failed: {body}");
-    let pointer = |path: &str| -> Value { body.pointer(path).cloned().unwrap_or(Value::Null) };
+    let pointer = |path: &str| crate::harness::responses::pointer(&body, path);
     assert_eq!(pointer("/data/normalized_name"), "erin.eth");
     assert_eq!(pointer("/coverage/status"), "full");
     assert_eq!(pointer("/coverage/exhaustiveness"), "authoritative");
@@ -92,16 +84,9 @@ async fn renew_and_transfer_keep_identity() -> Result<()> {
     ens_v1::renew_eth_name(&rpc, &deployment, alice, "carol", YEAR).await?;
     ens_v1::transfer_eth_name(&rpc, &deployment, alice, bob, "carol").await?;
 
-    let run = support::ingest_and_serve(
-        &anvil,
-        &deployment,
-        Some(
-            "SELECT EXISTS (SELECT 1 FROM normalized_events \
-             WHERE logical_name_id = 'ens:carol.eth' AND event_kind = 'TokenControlTransferred' \
-             AND canonicality_state = 'canonical')",
-        ),
-    )
-    .await?;
+    let ready_sql =
+        support::canonical_event_ready_sql("ens:carol.eth", "TokenControlTransferred", None);
+    let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
 
     let event_kinds: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT event_kind FROM normalized_events \
@@ -148,7 +133,7 @@ async fn renew_and_transfer_keep_identity() -> Result<()> {
 
     let (status, body) = run.api.get_json("/v1/names/ens/carol.eth").await?;
     assert_eq!(status, 200, "exact-name lookup failed: {body}");
-    let pointer = |path: &str| -> Value { body.pointer(path).cloned().unwrap_or(Value::Null) };
+    let pointer = |path: &str| crate::harness::responses::pointer(&body, path);
     assert_eq!(
         pointer("/data/resource_id").as_str(),
         Some(registration_resource.to_string().as_str()),
@@ -214,15 +199,11 @@ async fn expiry_grace_and_reregistration_rotate_identity() -> Result<()> {
     // consumers derive the grace window from `expiry` plus the upstream
     // grace period.
     assert_eq!(
-        body.pointer("/declared_state/registration/status")
-            .cloned()
-            .unwrap_or(Value::Null),
+        crate::harness::responses::pointer(&body, "/declared_state/registration/status"),
         "active"
     );
     assert_eq!(
-        body.pointer("/declared_state/registration/released_at")
-            .cloned()
-            .unwrap_or(Value::Null),
+        crate::harness::responses::pointer(&body, "/declared_state/registration/released_at"),
         Value::Null
     );
     let in_grace_expiry = body
@@ -259,7 +240,7 @@ async fn expiry_grace_and_reregistration_rotate_identity() -> Result<()> {
 
     let (status, body) = after.api.get_json("/v1/names/ens/dave.eth").await?;
     assert_eq!(status, 200, "post-lapse lookup failed: {body}");
-    let pointer = |path: &str| -> Value { body.pointer(path).cloned().unwrap_or(Value::Null) };
+    let pointer = |path: &str| crate::harness::responses::pointer(&body, path);
     assert_eq!(pointer("/declared_state/registration/status"), "active");
     assert_eq!(
         pointer("/declared_state/registration/registrant"),
@@ -328,16 +309,9 @@ async fn expire_without_reregistration_releases_and_unlists_registration() -> Re
     rpc.increase_time(MIN_REGISTRATION + GRACE_PERIOD + 24 * 60 * 60)
         .await?;
 
-    let quiet = support::ingest_and_serve(
-        &anvil,
-        &deployment,
-        Some(
-            "SELECT EXISTS (SELECT 1 FROM normalized_events \
-             WHERE logical_name_id = 'ens:frank.eth' AND event_kind = 'RegistrationGranted' \
-             AND canonicality_state = 'canonical')",
-        ),
-    )
-    .await?;
+    let quiet_ready_sql =
+        support::canonical_event_ready_sql("ens:frank.eth", "RegistrationGranted", None);
+    let quiet = support::ingest_and_serve(&anvil, &deployment, Some(&quiet_ready_sql)).await?;
     let released_on_quiet_chain: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM normalized_events \
          WHERE logical_name_id = 'ens:frank.eth' AND event_kind = 'RegistrationReleased')",
@@ -355,20 +329,13 @@ async fn expire_without_reregistration_releases_and_unlists_registration() -> Re
     // boundary past the grace end.
     ens_v1::register_eth_name(&rpc, &deployment, "george", bob, MIN_REGISTRATION, resolver).await?;
 
-    let run = support::ingest_and_serve(
-        &anvil,
-        &deployment,
-        Some(
-            "SELECT EXISTS (SELECT 1 FROM normalized_events \
-             WHERE logical_name_id = 'ens:frank.eth' AND event_kind = 'RegistrationReleased' \
-             AND canonicality_state = 'canonical')",
-        ),
-    )
-    .await?;
+    let released_ready_sql =
+        support::canonical_event_ready_sql("ens:frank.eth", "RegistrationReleased", None);
+    let run = support::ingest_and_serve(&anvil, &deployment, Some(&released_ready_sql)).await?;
 
     let (status, body) = run.api.get_json("/v1/names/ens/frank.eth").await?;
     assert_eq!(status, 200, "exact-name lookup failed: {body}");
-    let pointer = |path: &str| -> Value { body.pointer(path).cloned().unwrap_or(Value::Null) };
+    let pointer = |path: &str| crate::harness::responses::pointer(&body, path);
     assert_eq!(
         pointer("/declared_state/registration/status"),
         "released",

@@ -14,9 +14,8 @@ mod scoped;
 mod support;
 
 pub use full::{
-    reconcile_discovery_observations, reconcile_discovery_observations_through_block,
-    reconcile_discovery_observations_through_block_with_expected_admission_epoch,
-    reconcile_discovery_observations_with_expected_admission_epoch,
+    ExpectedDiscoveryAdmissionEpoch, FullDiscoveryReconciliationOptions,
+    reconcile_discovery_observations,
 };
 pub use scoped::{
     reconcile_scoped_discovery_observation_transitions, reconcile_scoped_discovery_observations,

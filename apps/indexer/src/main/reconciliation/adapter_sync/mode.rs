@@ -20,7 +20,7 @@ impl PersistedRawPayloadAdapterSyncMode {
         source_scope: Option<&[(String, String, i64, i64)]>,
         adapter: NormalizedEventReplayAdapter,
     ) -> bool {
-        source_scope.map_or(true, |scope| source_scope_includes_adapter(scope, adapter))
+        source_scope.is_none_or(|scope| source_scope_includes_adapter(scope, adapter))
             && match self {
                 Self::RawFactReplay {
                     replay_contract_plan,

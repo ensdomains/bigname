@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, ensure};
 use bigname_manifests::{
-    find_uncovered_required_watched_tuples_for_retention_generation,
+    ENS_V2_RETAINED_HISTORY_SOURCE_FAMILIES, UncoveredWatchedTuple,
     load_active_manifest_abi_events_by_chain_and_source_families, load_discovery_admission_epoch,
     load_required_watched_tuples,
 };
@@ -12,11 +12,10 @@ use sqlx::Row;
 use crate::ens_v1_resolver::{
     GENERIC_SOURCE_SCOPE_ADDRESS, SOURCE_FAMILY_ENS_V1_RESOLVER_L1, generic_resolver_record_topic0s,
 };
-use crate::reconciliation::canonical::stored_lineage::ensure_required_topic_sets_undrifted_for_retention_generation;
+use crate::reconciliation::canonical::stored_lineage::find_uncovered_generation_bound_coverage_with_current_topics;
 
 use super::{
-    SOURCE_FAMILY_BASENAMES_BASE_REGISTRY, SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
-    SOURCE_FAMILY_ENS_V2_REGISTRY_L1, SOURCE_FAMILY_ENS_V2_ROOT_L1, source_family_in,
+    SOURCE_FAMILY_BASENAMES_BASE_REGISTRY, SOURCE_FAMILY_ENS_V1_REGISTRY_L1, source_family_in,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -27,12 +26,10 @@ enum RetentionClosureAuthorityKind {
 }
 
 fn retention_closure_authority_kind(source_families: &[&str]) -> RetentionClosureAuthorityKind {
-    if source_families.iter().all(|family| {
-        matches!(
-            *family,
-            SOURCE_FAMILY_ENS_V2_ROOT_L1 | SOURCE_FAMILY_ENS_V2_REGISTRY_L1
-        )
-    }) {
+    if source_families
+        .iter()
+        .all(|family| ENS_V2_RETAINED_HISTORY_SOURCE_FAMILIES.contains(family))
+    {
         RetentionClosureAuthorityKind::EnsV2Proof
     } else if source_families.iter().all(|family| {
         matches!(
@@ -47,6 +44,40 @@ fn retention_closure_authority_kind(source_families: &[&str]) -> RetentionClosur
 }
 
 const MAX_REPORTED_LEGACY_CLOSURE_COVERAGE_GAPS: i64 = 20;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LegacyRegistryNewlyRequiredCoverage {
+    pub(crate) chain: String,
+    pub(crate) retention_generation: i64,
+    pub(crate) source_family: String,
+    pub(crate) address: String,
+    pub(crate) required_from_block: i64,
+    pub(crate) required_to_block: i64,
+}
+
+impl std::fmt::Display for LegacyRegistryNewlyRequiredCoverage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "legacy registry closure on chain {} cannot use raw-log retention generation {}: current-generation backfill coverage is missing or stale for (source_family {}, address {}, blocks {}..={}); run generation-bound historical backfill/refetch and retry",
+            self.chain,
+            self.retention_generation,
+            self.source_family,
+            self.address,
+            self.required_from_block,
+            self.required_to_block,
+        )
+    }
+}
+
+impl std::error::Error for LegacyRegistryNewlyRequiredCoverage {}
+
+struct GenerationBoundCoverageProof {
+    input_version: bigname_storage::RawLogStagingInputVersion,
+    admission_epoch: i64,
+    requirement_count: usize,
+    uncovered: Vec<UncoveredWatchedTuple>,
+}
 
 pub(super) async fn ensure_full_closure_retention_authority(
     pool: &sqlx::PgPool,
@@ -94,42 +125,62 @@ pub(super) async fn ensure_full_closure_retention_authority(
         return Ok(());
     }
 
-    let unsupported_family = closure_source_families.iter().find(|family| {
-        !matches!(
-            **family,
-            SOURCE_FAMILY_ENS_V2_ROOT_L1 | SOURCE_FAMILY_ENS_V2_REGISTRY_L1
-        )
-    });
-    if let Some(unsupported_family) = unsupported_family {
-        anyhow::bail!(
-            "normalized-event replay cannot establish full closure from incomplete raw-log retention generation {retention_generation} on chain {chain}: source family {unsupported_family} has no generation-bound closure proof; run explicit historical backfill/refetch or restore a versioned adapter snapshot"
-        );
+    let ens_v2_proof_required = closure_source_families
+        .iter()
+        .any(|family| ENS_V2_RETAINED_HISTORY_SOURCE_FAMILIES.contains(family));
+    if ens_v2_proof_required {
+        let retained_history_complete = state
+            .try_get::<bool, _>("retained_history_complete")
+            .context("missing retained-history completeness state")?;
+        let proven_retention_generation = state
+            .try_get::<Option<i64>, _>("proven_retention_generation")
+            .context("missing proven raw-log retention generation")?;
+        let proven_discovery_admission_epoch = state
+            .try_get::<Option<i64>, _>("proven_discovery_admission_epoch")
+            .context("missing proven discovery-admission epoch")?;
+        let proven_through_block = state
+            .try_get::<Option<i64>, _>("proven_through_block")
+            .context("missing retained-history proof boundary")?;
+        let current_discovery_admission_epoch = state
+            .try_get::<Option<i64>, _>("current_discovery_admission_epoch")
+            .context("missing current discovery-admission epoch")?;
+        if !retained_history_complete
+            || proven_retention_generation != Some(retention_generation)
+            || proven_discovery_admission_epoch != current_discovery_admission_epoch
+            || current_discovery_admission_epoch.is_none()
+            || proven_through_block.is_none_or(|proven| proven < through_block)
+        {
+            anyhow::bail!(
+                "normalized-event replay cannot establish full closure from incomplete raw-log retention generation {retention_generation} on chain {chain}: the ENSv2 root/registry proof is absent, stale, or does not cover target block {through_block}; run generation-bound historical backfill/refetch"
+            );
+        }
     }
 
-    let retained_history_complete = state
-        .try_get::<bool, _>("retained_history_complete")
-        .context("missing retained-history completeness state")?;
-    let proven_retention_generation = state
-        .try_get::<Option<i64>, _>("proven_retention_generation")
-        .context("missing proven raw-log retention generation")?;
-    let proven_discovery_admission_epoch = state
-        .try_get::<Option<i64>, _>("proven_discovery_admission_epoch")
-        .context("missing proven discovery-admission epoch")?;
-    let proven_through_block = state
-        .try_get::<Option<i64>, _>("proven_through_block")
-        .context("missing retained-history proof boundary")?;
-    let current_discovery_admission_epoch = state
-        .try_get::<Option<i64>, _>("current_discovery_admission_epoch")
-        .context("missing current discovery-admission epoch")?;
-    if !retained_history_complete
-        || proven_retention_generation != Some(retention_generation)
-        || proven_discovery_admission_epoch != current_discovery_admission_epoch
-        || current_discovery_admission_epoch.is_none()
-        || proven_through_block.is_none_or(|proven| proven < through_block)
-    {
-        anyhow::bail!(
-            "normalized-event replay cannot establish full closure from incomplete raw-log retention generation {retention_generation} on chain {chain}: the ENSv2 root/registry proof is absent, stale, or does not cover target block {through_block}; run generation-bound historical backfill/refetch"
+    let generation_covered_families = closure_source_families
+        .iter()
+        .copied()
+        .filter(|family| !ENS_V2_RETAINED_HISTORY_SOURCE_FAMILIES.contains(family))
+        .collect::<Vec<_>>();
+    if !generation_covered_families.is_empty() {
+        let proof = load_generation_bound_coverage_proof(
+            pool,
+            chain,
+            &generation_covered_families,
+            through_block,
+        )
+        .await?;
+        ensure!(
+            proof.requirement_count > 0,
+            "normalized-event replay cannot establish full closure from raw-log retention generation {retention_generation} on chain {chain}: no historically authoritative watched tuple exists for source families {}; declare finite history or restore a versioned adapter snapshot",
+            generation_covered_families.join(", ")
         );
+        if !proof.uncovered.is_empty() {
+            let listed = render_uncovered_tuples(&proof.uncovered);
+            let suffix = elided_gap_suffix(&proof.uncovered);
+            anyhow::bail!(
+                "normalized-event replay cannot establish full closure from incomplete raw-log retention generation {retention_generation} on chain {chain}: current-generation backfill coverage is missing or stale for {listed}{suffix}; run generation-bound historical backfill/refetch"
+            );
+        }
     }
     Ok(())
 }
@@ -160,24 +211,53 @@ pub(super) async fn ensure_legacy_registry_closure_retention_authority(
         "legacy registry closure authority accepts only ENSv1/Basenames registry source families"
     );
 
+    let proof =
+        load_generation_bound_coverage_proof(pool, chain, closure_source_families, through_block)
+            .await?;
+    if proof.input_version.retention_generation == 0 {
+        return Ok(proof.admission_epoch);
+    }
+    ensure!(
+        proof.requirement_count > 0,
+        "legacy registry closure on chain {chain} in raw-log retention generation {} has no historically authoritative watched tuple through block {through_block}",
+        proof.input_version.retention_generation
+    );
+    if let Some(uncovered) = proof.uncovered.first() {
+        return Err(anyhow::Error::new(LegacyRegistryNewlyRequiredCoverage {
+            chain: chain.to_owned(),
+            retention_generation: proof.input_version.retention_generation,
+            source_family: uncovered.source_family.clone(),
+            address: uncovered.address.clone(),
+            required_from_block: uncovered.required_from_block,
+            required_to_block: uncovered.required_to_block,
+        }));
+    }
+    Ok(proof.admission_epoch)
+}
+
+async fn load_generation_bound_coverage_proof(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    source_families: &[&str],
+    through_block: i64,
+) -> Result<GenerationBoundCoverageProof> {
     let input_before = load_raw_log_staging_input_version(pool, chain).await?;
     let admission_epoch = load_discovery_admission_epoch(pool, chain).await?;
     if input_before.retention_generation == 0 {
-        return Ok(admission_epoch);
+        return Ok(GenerationBoundCoverageProof {
+            input_version: input_before,
+            admission_epoch,
+            requirement_count: 0,
+            uncovered: Vec::new(),
+        });
     }
 
-    let source_families = closure_source_families
+    let source_families = source_families
         .iter()
         .map(|family| (*family).to_owned())
         .collect::<Vec<_>>();
     let requirements =
         load_required_watched_tuples(pool, chain, 0, through_block, &source_families).await?;
-    ensure!(
-        !requirements.is_empty(),
-        "legacy registry closure on chain {chain} in raw-log retention generation {} has no historically authoritative watched tuple through block {through_block}",
-        input_before.retention_generation
-    );
-
     let events =
         load_active_manifest_abi_events_by_chain_and_source_families(pool, chain, &source_families)
             .await?;
@@ -190,53 +270,21 @@ pub(super) async fn ensure_legacy_registry_closure_retention_authority(
                 .insert(topic0.to_ascii_lowercase());
         }
     }
-    ensure_required_topic_sets_undrifted_for_retention_generation(
+    let uncovered = find_uncovered_generation_bound_coverage_with_current_topics(
         pool,
         chain,
         &current_topic0s_by_family,
         &requirements,
         input_before.retention_generation,
+        MAX_REPORTED_LEGACY_CLOSURE_COVERAGE_GAPS,
     )
     .await
     .map_err(anyhow::Error::msg)?;
 
-    let uncovered = find_uncovered_required_watched_tuples_for_retention_generation(
-        pool,
-        chain,
-        &requirements,
-        input_before.retention_generation,
-        MAX_REPORTED_LEGACY_CLOSURE_COVERAGE_GAPS,
-    )
-    .await?;
-    if !uncovered.is_empty() {
-        let listed = uncovered
-            .iter()
-            .map(|tuple| {
-                format!(
-                    "(source_family {}, address {}, blocks {}..={})",
-                    tuple.source_family,
-                    tuple.address,
-                    tuple.required_from_block,
-                    tuple.required_to_block
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let suffix = if uncovered.len() as i64 >= MAX_REPORTED_LEGACY_CLOSURE_COVERAGE_GAPS {
-            " (further violations elided)"
-        } else {
-            ""
-        };
-        anyhow::bail!(
-            "legacy registry closure on chain {chain} cannot use raw-log retention generation {} through block {through_block}: current-generation backfill coverage is missing or stale for {listed}{suffix}; run generation-bound historical backfill/refetch and retry",
-            input_before.retention_generation
-        );
-    }
-
     let input_after = load_raw_log_staging_input_version(pool, chain).await?;
     ensure!(
         input_after == input_before,
-        "raw-log staging input changed while proving legacy registry closure for chain {chain}: expected generation {} revision {}, observed generation {} revision {}",
+        "raw-log staging input changed while proving generation-bound closure for chain {chain}: expected generation {} revision {}, observed generation {} revision {}",
         input_before.retention_generation,
         input_before.revision,
         input_after.retention_generation,
@@ -245,9 +293,38 @@ pub(super) async fn ensure_legacy_registry_closure_retention_authority(
     let admission_epoch_after = load_discovery_admission_epoch(pool, chain).await?;
     ensure!(
         admission_epoch_after == admission_epoch,
-        "discovery admission epoch changed while proving legacy registry closure for chain {chain}: expected {admission_epoch}, observed {admission_epoch_after}"
+        "discovery admission epoch changed while proving generation-bound closure for chain {chain}: expected {admission_epoch}, observed {admission_epoch_after}"
     );
-    Ok(admission_epoch)
+    Ok(GenerationBoundCoverageProof {
+        input_version: input_before,
+        admission_epoch,
+        requirement_count: requirements.len(),
+        uncovered,
+    })
+}
+
+fn render_uncovered_tuples(uncovered: &[UncoveredWatchedTuple]) -> String {
+    uncovered
+        .iter()
+        .map(|tuple| {
+            format!(
+                "(source_family {}, address {}, blocks {}..={})",
+                tuple.source_family,
+                tuple.address,
+                tuple.required_from_block,
+                tuple.required_to_block
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn elided_gap_suffix(uncovered: &[UncoveredWatchedTuple]) -> &'static str {
+    if uncovered.len() as i64 >= MAX_REPORTED_LEGACY_CLOSURE_COVERAGE_GAPS {
+        " (further violations elided)"
+    } else {
+        ""
+    }
 }
 
 pub(super) async fn earliest_required_raw_fact_block(
@@ -355,9 +432,14 @@ mod tests {
     use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 
     use super::*;
+    use crate::reconciliation::replay::classification::SOURCE_FAMILY_ENS_V2_REGISTRY_L1;
 
     #[test]
     fn legacy_registry_closure_has_generation_bound_coverage_strategy() {
+        assert_eq!(
+            retention_closure_authority_kind(ENS_V2_RETAINED_HISTORY_SOURCE_FAMILIES),
+            RetentionClosureAuthorityKind::EnsV2Proof
+        );
         for source_families in [
             &[SOURCE_FAMILY_ENS_V1_REGISTRY_L1][..],
             &[SOURCE_FAMILY_BASENAMES_BASE_REGISTRY][..],

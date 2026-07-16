@@ -77,6 +77,7 @@ pub(super) async fn upsert_token_lineage(
 
     #[cfg(test)]
     test_hooks::maybe_wait_after_reload(
+        executor,
         "token_lineages",
         token_lineage.token_lineage_id.to_string(),
     )
@@ -200,7 +201,8 @@ pub(super) async fn upsert_resource(
         })?;
 
     #[cfg(test)]
-    test_hooks::maybe_wait_after_reload("resources", resource.resource_id.to_string()).await;
+    test_hooks::maybe_wait_after_reload(executor, "resources", resource.resource_id.to_string())
+        .await;
 
     ensure_resource_identity_matches(&existing, resource)?;
     let next_token_lineage_id =
@@ -378,8 +380,12 @@ pub(super) async fn upsert_name_surface(
             })?;
 
     #[cfg(test)]
-    test_hooks::maybe_wait_after_reload("name_surfaces", name_surface.logical_name_id.clone())
-        .await;
+    test_hooks::maybe_wait_after_reload(
+        executor,
+        "name_surfaces",
+        name_surface.logical_name_id.clone(),
+    )
+    .await;
 
     ensure_name_surface_identity_matches(&existing, name_surface)?;
     let repair_normalized_path =

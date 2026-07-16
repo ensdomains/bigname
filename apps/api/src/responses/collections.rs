@@ -430,35 +430,15 @@ fn build_permissions_coverage_from_resource_summary(
     let Some(coverage) = summary.map(|summary| &summary.coverage) else {
         return unknown_permission_authority_coverage();
     };
-    let Some(status) = coverage.get("status").and_then(JsonValue::as_str) else {
-        return unknown_permission_authority_coverage();
-    };
-    let Some(exhaustiveness) = coverage.get("exhaustiveness").and_then(JsonValue::as_str) else {
-        return unknown_permission_authority_coverage();
-    };
-    if !matches!(
-        (status, exhaustiveness),
-        ("full", "authoritative") | ("partial", "best_effort") | ("unsupported", "not_applicable")
-    ) {
-        return unknown_permission_authority_coverage();
-    }
 
     CoverageResponse {
-        status: status.to_owned(),
-        exhaustiveness: exhaustiveness.to_owned(),
-        source_classes_considered: match coverage.get("source_classes_considered") {
-            Some(JsonValue::Array(values)) => values.iter().filter_map(value_to_string).collect(),
-            _ => vec!["permissions_current".to_owned()],
-        },
-        enumeration_basis: coverage
-            .get("enumeration_basis")
-            .and_then(JsonValue::as_str)
-            .unwrap_or("resource_permissions")
-            .to_owned(),
+        status: coverage.status().as_str().to_owned(),
+        exhaustiveness: coverage.exhaustiveness().as_str().to_owned(),
+        source_classes_considered: coverage.source_classes_considered().to_vec(),
+        enumeration_basis: coverage.enumeration_basis().to_owned(),
         unsupported_reason: coverage
-            .get("unsupported_reason")
-            .and_then(JsonValue::as_str)
-            .map(str::to_owned),
+            .unsupported_reason()
+            .map(|reason| reason.as_str().to_owned()),
     }
 }
 

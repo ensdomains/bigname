@@ -10,11 +10,7 @@ use super::{
 };
 
 pub(super) const DEFAULT_PERMISSIONS_CURRENT_READ_FILTER: &str = r#"
-  AND resource.canonicality_state IN (
-      'canonical'::canonicality_state,
-      'safe'::canonicality_state,
-      'finalized'::canonicality_state
-  )
+  AND pc.canonicality_summary ->> 'status' IN ('canonical', 'safe', 'finalized')
 "#;
 
 /// Load resource-centric permission rows with optional exact subject and scope filters.
@@ -45,8 +41,6 @@ pub async fn load_permissions_current(
             pc.manifest_version,
             pc.last_recomputed_at
         FROM permissions_current pc
-        JOIN resources resource
-          ON resource.resource_id = pc.resource_id
         WHERE "#,
     );
     push_permissions_current_filters(
@@ -102,8 +96,6 @@ pub async fn load_permissions_current_by_resource_ids(
             pc.manifest_version,
             pc.last_recomputed_at
         FROM permissions_current pc
-        JOIN resources resource
-          ON resource.resource_id = pc.resource_id
         WHERE pc.resource_id IN ("#,
     );
     {
@@ -162,15 +154,9 @@ pub async fn load_permissions_current_for_resolver_scope(
             pc.manifest_version,
             pc.last_recomputed_at
         FROM permissions_current pc
-        JOIN resources resource
-          ON resource.resource_id = pc.resource_id
         WHERE pc.scope = $1
           AND pc.scope_kind = 'resolver'
-          AND resource.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
+          AND pc.canonicality_summary ->> 'status' IN ('canonical', 'safe', 'finalized')
         ORDER BY pc.subject ASC, pc.resource_id ASC, pc.manifest_version ASC
         "#,
     )
@@ -198,18 +184,12 @@ pub async fn load_permissions_current_resolver_targets(
             pc.scope_detail->>'chain_id' AS chain_id,
             LOWER(pc.scope_detail->>'resolver_address') AS resolver_address
         FROM permissions_current pc
-        JOIN resources resource
-          ON resource.resource_id = pc.resource_id
         WHERE pc.scope_kind = 'resolver'
           AND pc.scope_detail->>'chain_id' IS NOT NULL
           AND pc.scope_detail->>'chain_id' <> ''
           AND pc.scope_detail->>'resolver_address' IS NOT NULL
           AND pc.scope_detail->>'resolver_address' <> ''
-          AND resource.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
+          AND pc.canonicality_summary ->> 'status' IN ('canonical', 'safe', 'finalized')
         ORDER BY chain_id, resolver_address
         "#,
     )

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, ensure};
-use bigname_adapters::EnsV2NewlyRequiredCoverage;
+use bigname_adapters::EnsV2MissingCoverage;
 use bigname_manifests::{
     WatchedSourceSelector, WatchedTargetIdentity, load_historical_watched_contracts_by_chain,
     resolve_watched_source_selector,
@@ -38,7 +38,7 @@ pub(crate) async fn recover_ens_v2_live_coverage_requirement(
     deployment_profile: &str,
     provider: &(impl ChainProviderOps + ?Sized),
     header_audit_mode: HeaderAuditMode,
-    requirement: &EnsV2NewlyRequiredCoverage,
+    requirement: &EnsV2MissingCoverage,
 ) -> Result<EnsV2LiveCoverageRecoveryStatus> {
     let initial_authority = load_retention_authority(pool, &requirement.chain).await?;
     if initial_authority.retention_generation != requirement.retention_generation {

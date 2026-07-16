@@ -1,4 +1,25 @@
 #[tokio::test]
+async fn v2_permissions_require_compatible_permission_publication() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    sqlx::query("DELETE FROM permissions_current_publication")
+    .execute(&database.pool)
+    .await?;
+
+    let response = v2_permissions_response_for_database(
+        &database,
+        &format!("/v2/permissions?address={V2_PERMISSIONS_SUBJECT}"),
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("stale"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_get_permissions_requires_at_least_one_filter() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
 
@@ -146,7 +167,10 @@ async fn v2_get_permissions_maps_rows_and_lineage() -> Result<()> {
         })
     );
 
-    assert_eq!(stale["registration_id"], json!(stale_resource_id.to_string()));
+    assert_eq!(
+        stale["registration_id"],
+        json!(stale_resource_id.to_string())
+    );
     assert!(stale.get("name").is_none());
     assert_eq!(
         stale["grant_scope"],
@@ -216,7 +240,13 @@ async fn v2_get_permissions_filters_by_name_registration_and_address() -> Result
         by_address_and_registration["data"][0]["address"],
         json!(V2_PERMISSIONS_OTHER_SUBJECT)
     );
-    assert_eq!(by_address_and_registration["data"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        by_address_and_registration["data"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -229,8 +259,8 @@ async fn v2_get_permissions_name_filter_resolves_at_selected_snapshot() -> Resul
     seed_v2_permissions_sepolia_checkpoint(&database).await?;
     let current_resource_id = v2_permissions_current_resource_id();
 
-    let no_at = v2_permissions_payload_for_database(&database, "/v2/permissions?name=Perms.eth")
-        .await?;
+    let no_at =
+        v2_permissions_payload_for_database(&database, "/v2/permissions?name=Perms.eth").await?;
     let no_at_rows = no_at["data"]
         .as_array()
         .expect("no-at name-filtered permissions data");
@@ -311,7 +341,9 @@ async fn v2_get_permissions_paginates_and_rejects_mismatched_cursor() -> Result<
 
     let second_page = v2_permissions_payload_for_database(
         &database,
-        &format!("/v2/permissions?address={V2_PERMISSIONS_SUBJECT}&page_size=1&cursor={next_cursor}"),
+        &format!(
+            "/v2/permissions?address={V2_PERMISSIONS_SUBJECT}&page_size=1&cursor={next_cursor}"
+        ),
     )
     .await?;
     assert_eq!(second_page["page"]["cursor"], json!(next_cursor));
@@ -351,7 +383,10 @@ async fn v2_get_permissions_paginates_and_rejects_mismatched_cursor() -> Result<
 #[tokio::test]
 async fn v2_get_permissions_empty_results_return_empty_page() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    database.seed_default_ens_snapshot_selector_position().await?;
+    database
+        .seed_default_ens_snapshot_selector_position()
+        .await?;
+    mark_permissions_current_projection_ready(&database).await?;
 
     let by_address = v2_permissions_payload_for_database(
         &database,
@@ -388,10 +423,7 @@ async fn v2_permissions_payload(uri: &str) -> Result<(TestDatabase, Value)> {
     Ok((database, payload))
 }
 
-async fn v2_permissions_payload_for_database(
-    database: &TestDatabase,
-    uri: &str,
-) -> Result<Value> {
+async fn v2_permissions_payload_for_database(database: &TestDatabase, uri: &str) -> Result<Value> {
     let response = v2_permissions_response_for_database(database, uri).await?;
     assert_eq!(response.status(), StatusCode::OK);
     read_json(response).await
@@ -558,6 +590,7 @@ async fn seed_v2_permissions_fixture(database: &TestDatabase) -> Result<()> {
         ],
     )
     .await?;
+    mark_permissions_current_projection_ready(database).await?;
 
     Ok(())
 }
@@ -632,7 +665,11 @@ fn v2_permissions_at_token(
     Ok(crate::v2::encode_at_token(&selected))
 }
 
-fn apply_raw_log_permission_lineage(row: &mut bigname_storage::PermissionsCurrentRow, power: &str, suffix: i64) {
+fn apply_raw_log_permission_lineage(
+    row: &mut bigname_storage::PermissionsCurrentRow,
+    power: &str,
+    suffix: i64,
+) {
     row.grant_source = json!({
         "kind": "raw_log",
         "source_event": "EACRolesChanged",

@@ -12,6 +12,7 @@ mod authority;
 #[path = "resolver_profile_convergence/invalidations.rs"]
 mod invalidations;
 
+use authority::ResolverProfileAuthorityEntry;
 pub(crate) use authority::{
     ResolverProfileAuthoritySnapshot, capture_resolver_profile_authority,
     journal_resolver_profile_authority, journal_resolver_profile_authority_if_epoch_changed,
@@ -21,8 +22,10 @@ use invalidations::{
     load_resolver_profile_projection_invalidation_plan,
 };
 
-const INPUT_CHANGE_BATCH_SIZE: i64 = 128;
-const MAX_DRAIN_BATCHES: usize = 1_024;
+// Preserve the previous bounded-drain budget while loading one aggregate pass.
+// Resolver-profile reconciliation replays chain-global context, so splitting
+// these inputs into 128-row pages repeats the same authority and event scans.
+const MAX_DRAIN_INPUTS: usize = 128 * 1_024;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ResolverProfileConvergenceSummary {
@@ -32,8 +35,56 @@ pub(crate) struct ResolverProfileConvergenceSummary {
     pub(crate) acknowledged_input_count: usize,
     pub(crate) concurrent_input_count: usize,
     pub(crate) deferred_input_count: usize,
-    pub(crate) deferred_chain_count: usize,
     pub(crate) deferred_chains: BTreeSet<String>,
+}
+
+#[derive(Debug, Default)]
+struct ResolverProfileAuthorityIndex {
+    entries_by_chain_and_address:
+        BTreeMap<String, BTreeMap<String, Vec<ResolverProfileAuthorityEntry>>>,
+    addresses_by_chain_and_source_family: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
+    #[cfg(test)]
+    indexed_entry_count: usize,
+}
+
+impl ResolverProfileAuthorityIndex {
+    fn from_snapshot(authority: ResolverProfileAuthoritySnapshot) -> Self {
+        let mut index = Self::default();
+        for entry in authority.entries {
+            index
+                .addresses_by_chain_and_source_family
+                .entry(entry.chain.clone())
+                .or_default()
+                .entry(entry.source_family.clone())
+                .or_default()
+                .insert(entry.address.clone());
+            index
+                .entries_by_chain_and_address
+                .entry(entry.chain.clone())
+                .or_default()
+                .entry(entry.address.clone())
+                .or_default()
+                .push(entry);
+            #[cfg(test)]
+            {
+                index.indexed_entry_count += 1;
+            }
+        }
+        index
+    }
+
+    fn entries_for(&self, chain: &str, address: &str) -> Option<&[ResolverProfileAuthorityEntry]> {
+        self.entries_by_chain_and_address
+            .get(chain)?
+            .get(address)
+            .map(Vec::as_slice)
+    }
+
+    fn addresses_for_family(&self, chain: &str, source_family: &str) -> Option<&BTreeSet<String>> {
+        self.addresses_by_chain_and_source_family
+            .get(chain)?
+            .get(source_family)
+    }
 }
 
 impl ResolverProfileConvergenceSummary {
@@ -62,11 +113,14 @@ pub(crate) async fn drain_resolver_profile_input_changes(
     let mut aggregate = ResolverProfileConvergenceSummary::default();
     let mut deferred_inputs = Vec::<ResolverProfileInputChange>::new();
     let mut deferred_chains = BTreeMap::<String, i64>::new();
+    let mut authority_index = None;
 
-    for _ in 0..MAX_DRAIN_BATCHES {
+    while aggregate.loaded_input_count < MAX_DRAIN_INPUTS {
+        let remaining_input_count = MAX_DRAIN_INPUTS - aggregate.loaded_input_count;
         let pending = load_pending_resolver_profile_input_changes_excluding(
             pool,
-            INPUT_CHANGE_BATCH_SIZE,
+            i64::try_from(remaining_input_count)
+                .context("resolver-profile drain input budget does not fit i64")?,
             &deferred_inputs,
         )
         .await?;
@@ -81,7 +135,7 @@ pub(crate) async fn drain_resolver_profile_input_changes(
                     acknowledged_input_count = aggregate.acknowledged_input_count,
                     concurrent_input_count = aggregate.concurrent_input_count,
                     deferred_input_count = aggregate.deferred_input_count,
-                    deferred_chain_count = aggregate.deferred_chain_count,
+                    deferred_chain_count = aggregate.deferred_chains.len(),
                     "resolver-profile input-change drain completed"
                 );
             }
@@ -89,8 +143,18 @@ pub(crate) async fn drain_resolver_profile_input_changes(
         }
 
         aggregate.loaded_input_count += pending.len();
-        let authority = capture_resolver_profile_authority(pool).await?;
-        let targets_by_chain = expanded_reconciliation_targets(&pending, &authority);
+        // One authority snapshot is sufficient for the bounded drain. A
+        // concurrent authority mutation is itself journaled as forced target
+        // work, and the adapter reloads current admission while reconciling.
+        if authority_index.is_none() {
+            authority_index = Some(ResolverProfileAuthorityIndex::from_snapshot(
+                capture_resolver_profile_authority(pool).await?,
+            ));
+        }
+        let authority_index = authority_index
+            .as_ref()
+            .context("resolver-profile authority was not captured for pending work")?;
+        let targets_by_chain = expanded_reconciliation_targets(&pending, authority_index);
 
         let mut eligible_targets_by_chain = BTreeMap::new();
         for (chain, addresses) in &targets_by_chain {
@@ -118,17 +182,16 @@ pub(crate) async fn drain_resolver_profile_input_changes(
                 );
             }
         }
-        aggregate.deferred_chain_count = deferred_chains.len();
         aggregate.deferred_chains = deferred_chains.keys().cloned().collect();
         aggregate.reconciled_target_count += eligible_targets_by_chain
             .values()
             .map(BTreeSet::len)
             .sum::<usize>();
 
+        let invalidation_plan =
+            load_resolver_profile_projection_invalidation_plan(pool, &eligible_targets_by_chain)
+                .await?;
         for (chain, addresses) in &eligible_targets_by_chain {
-            let chain_targets = BTreeMap::from([(chain.clone(), addresses.clone())]);
-            let invalidation_plan =
-                load_resolver_profile_projection_invalidation_plan(pool, &chain_targets).await?;
             let addresses = addresses.iter().cloned().collect::<Vec<_>>();
             let summary =
                 bigname_adapters::reconcile_resolver_profile_events(pool, chain, &addresses)
@@ -152,13 +215,13 @@ pub(crate) async fn drain_resolver_profile_input_changes(
                 orphaned_normalized_event_count = summary.orphaned_normalized_event_count,
                 "resolver-profile event reconciliation completed"
             );
-            aggregate.invalidated_projection_key_count +=
-                enqueue_resolver_profile_projection_invalidations(pool, &invalidation_plan).await?;
         }
+        aggregate.invalidated_projection_key_count +=
+            enqueue_resolver_profile_projection_invalidations(pool, &invalidation_plan).await?;
 
         let mut acknowledgement_candidates = Vec::new();
         for input in pending {
-            if input_requires_reconciliation(&input, &authority)
+            if input_requires_reconciliation(&input, authority_index)
                 && deferred_chains.contains_key(&input.chain_id)
             {
                 aggregate.deferred_input_count += 1;
@@ -182,39 +245,40 @@ pub(crate) async fn drain_resolver_profile_input_changes(
         return Ok(aggregate);
     }
     bail!(
-        "resolver-profile convergence exceeded {MAX_DRAIN_BATCHES} batches; pending generations remain durable"
+        "resolver-profile convergence exceeded its bounded {MAX_DRAIN_INPUTS}-input budget; pending generations remain durable"
     )
 }
 
 fn input_requires_reconciliation(
     input: &ResolverProfileInputChange,
-    authority: &ResolverProfileAuthoritySnapshot,
+    authority: &ResolverProfileAuthorityIndex,
 ) -> bool {
     input.force_reconciliation
         || authority
-            .entries
-            .iter()
-            .any(|entry| entry.chain == input.chain_id && entry.address == input.contract_address)
+            .entries_for(&input.chain_id, &input.contract_address)
+            .is_some()
 }
 
 fn expanded_reconciliation_targets(
     pending: &[ResolverProfileInputChange],
-    authority: &ResolverProfileAuthoritySnapshot,
+    authority: &ResolverProfileAuthorityIndex,
 ) -> BTreeMap<String, BTreeSet<String>> {
+    expanded_reconciliation_targets_with_family_count(pending, authority).0
+}
+
+fn expanded_reconciliation_targets_with_family_count(
+    pending: &[ResolverProfileInputChange],
+    authority: &ResolverProfileAuthorityIndex,
+) -> (BTreeMap<String, BTreeSet<String>>, usize) {
     let mut targets = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut seed_families = BTreeSet::<(String, String)>::new();
 
     for input in pending {
-        let current_entries = authority
-            .entries
-            .iter()
-            .filter(|entry| {
-                entry.chain == input.chain_id && entry.address == input.contract_address
-            })
-            .collect::<Vec<_>>();
+        let current_entries = authority.entries_for(&input.chain_id, &input.contract_address);
         // Raw-code triggers observe every watched contract. Ordinary changes
         // outside resolver-profile authority are acknowledged as irrelevant;
         // an explicit authority kick retains removed targets for cleanup.
-        if current_entries.is_empty() && !input.force_reconciliation {
+        if current_entries.is_none() && !input.force_reconciliation {
             continue;
         }
         targets
@@ -222,19 +286,25 @@ fn expanded_reconciliation_targets(
             .or_default()
             .insert(input.contract_address.clone());
 
-        for seed in current_entries.into_iter().filter(|entry| entry.is_seed) {
-            for candidate in authority.entries.iter().filter(|candidate| {
-                candidate.chain == seed.chain && candidate.source_family == seed.source_family
-            }) {
-                targets
-                    .entry(candidate.chain.clone())
-                    .or_default()
-                    .insert(candidate.address.clone());
+        if let Some(current_entries) = current_entries {
+            for seed in current_entries.iter().filter(|entry| entry.is_seed) {
+                seed_families.insert((seed.chain.clone(), seed.source_family.clone()));
             }
         }
     }
 
-    targets
+    let expanded_seed_family_count = seed_families.len();
+    for (chain, source_family) in seed_families {
+        let Some(addresses) = authority.addresses_for_family(&chain, &source_family) else {
+            continue;
+        };
+        targets
+            .entry(chain)
+            .or_default()
+            .extend(addresses.iter().cloned());
+    }
+
+    (targets, expanded_seed_family_count)
 }
 
 #[cfg(test)]

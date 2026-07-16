@@ -129,7 +129,7 @@ async fn rebuild_all_resolvers(pool: &PgPool) -> Result<ResolverCurrentRebuildSu
             rows.clear();
         }
 
-        if completed_resolver_count % RESOLVER_CURRENT_REBUILD_LOG_INTERVAL == 0 {
+        if completed_resolver_count.is_multiple_of(RESOLVER_CURRENT_REBUILD_LOG_INTERVAL) {
             tracing::info!(
                 projection = "resolver_current",
                 requested_resolver_count,

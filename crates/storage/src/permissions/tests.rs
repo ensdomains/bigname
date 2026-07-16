@@ -188,21 +188,9 @@ fn permissions_current_resource_summary(
         authority_kind: Some(authority_kind.to_owned()),
         root_resource_id: None,
         coverage: if wrapper {
-            json!({
-                "status": "unsupported",
-                "exhaustiveness": "not_applicable",
-                "source_classes_considered": ["permissions_current", "ens_v1_wrapper_l1"],
-                "enumeration_basis": "resource_permissions",
-                "unsupported_reason": "ensv1_wrapper_holder_permissions_not_projected",
-            })
+            ResourcePermissionCoverage::ensv1_wrapper_holder_permissions_not_projected()
         } else {
-            json!({
-                "status": "full",
-                "exhaustiveness": "authoritative",
-                "source_classes_considered": ["permissions_current"],
-                "enumeration_basis": "resource_permissions",
-                "unsupported_reason": null,
-            })
+            ResourcePermissionCoverage::authoritative(["permissions_current"])
         },
         provenance: json!({
             "derivation_kind": "permissions_current_resource_summary_rebuild",
@@ -224,9 +212,107 @@ fn permissions_current_resource_summary(
     }
 }
 
+#[test]
+fn permission_resource_coverage_json_boundary_rejects_unknown_vocabulary() {
+    let valid = ResourcePermissionCoverage::authoritative(["permissions_current"]);
+    assert_eq!(
+        serde_json::to_value(&valid).unwrap(),
+        json!({
+            "status": "full",
+            "exhaustiveness": "authoritative",
+            "source_classes_considered": ["permissions_current"],
+            "enumeration_basis": "resource_permissions",
+            "unsupported_reason": null,
+        })
+    );
+    let invalid = json!({
+        "status": "complete_enough",
+        "exhaustiveness": "authoritative",
+        "source_classes_considered": ["permissions_current"],
+        "enumeration_basis": "resource_permissions",
+        "unsupported_reason": null,
+    });
+    assert!(serde_json::from_value::<ResourcePermissionCoverage>(invalid).is_err());
+}
+
+#[test]
+fn permission_resource_coverage_json_boundary_accepts_typed_partial_and_unsupported_states() {
+    for expected in [
+        ResourcePermissionCoverage::resource_authority_not_projected(),
+        ResourcePermissionCoverage::ensv1_wrapper_holder_permissions_not_projected(),
+    ] {
+        let encoded = serde_json::to_value(&expected).unwrap();
+        let decoded = serde_json::from_value::<ResourcePermissionCoverage>(encoded).unwrap();
+        assert_eq!(decoded, expected);
+    }
+}
+
+#[test]
+fn permission_resource_coverage_json_boundary_rejects_inconsistent_combinations() {
+    let inconsistent = [
+        json!({
+            "status": "full",
+            "exhaustiveness": "best_effort",
+            "source_classes_considered": ["permissions_current"],
+            "enumeration_basis": "resource_permissions",
+            "unsupported_reason": null,
+        }),
+        json!({
+            "status": "partial",
+            "exhaustiveness": "best_effort",
+            "source_classes_considered": ["permissions_current"],
+            "enumeration_basis": "resource_permissions",
+            "unsupported_reason": "ensv1_wrapper_holder_permissions_not_projected",
+        }),
+        json!({
+            "status": "unsupported",
+            "exhaustiveness": "not_applicable",
+            "source_classes_considered": ["permissions_current"],
+            "enumeration_basis": "resource_permissions",
+            "unsupported_reason": "resource_permission_authority_not_projected",
+        }),
+    ];
+
+    for coverage in inconsistent {
+        assert!(
+            serde_json::from_value::<ResourcePermissionCoverage>(coverage).is_err(),
+            "inconsistent permission coverage must fail closed"
+        );
+    }
+}
+
+#[test]
+fn permission_api_projection_read_queries_do_not_reference_adapter_resource_identity() {
+    let query_sources = [
+        ("permission row reads", include_str!("reads.rs")),
+        ("permission paging", include_str!("paging.rs")),
+        (
+            "permission resource summaries",
+            include_str!("resource_summary.rs"),
+        ),
+    ];
+    let adapter_table = ["resour", "ces"].concat();
+    let forbidden_references = [
+        format!("join {adapter_table}"),
+        format!("join public.{adapter_table}"),
+        format!("from {adapter_table}"),
+        format!("from public.{adapter_table}"),
+        format!("{adapter_table} resource"),
+    ];
+
+    for (label, source) in query_sources {
+        let source = source.to_ascii_lowercase();
+        for forbidden in &forbidden_references {
+            assert!(
+                !source.contains(forbidden),
+                "{label} must read only permission projection tables, found {forbidden}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
-async fn permission_resource_summary_persists_for_zero_holder_wrapper_and_hides_when_orphaned()
--> Result<()> {
+async fn permission_resource_summary_uses_projection_owned_canonicality() -> Result<()> {
     let database = TestDatabase::new().await?;
     let resource_id = Uuid::from_u128(0x60f0);
     seed_resources(&database, &[resource_id]).await?;
@@ -242,14 +328,30 @@ async fn permission_resource_summary_persists_for_zero_holder_wrapper_and_hides_
     assert_eq!((upserted, deleted), (0, 0));
     assert_eq!(
         load_permissions_current_resource_summary(database.pool(), resource_id).await?,
-        Some(summary)
+        Some(summary.clone())
     );
 
     orphan_resource(&database, resource_id).await?;
     assert_eq!(
         load_permissions_current_resource_summary(database.pool(), resource_id).await?,
+        Some(summary),
+        "adapter identity canonicality must not hide projection-owned support metadata"
+    );
+
+    sqlx::query(
+        r#"
+        UPDATE permissions_current_resource_summary
+        SET canonicality_summary = '{"status":"orphaned","chains":{"ethereum-mainnet":"orphaned"}}'::jsonb
+        WHERE resource_id = $1
+        "#,
+    )
+    .bind(resource_id)
+    .execute(database.pool())
+    .await?;
+    assert_eq!(
+        load_permissions_current_resource_summary(database.pool(), resource_id).await?,
         None,
-        "orphaned projection metadata must not claim public support before replay removes it"
+        "noncanonical projection metadata must not claim public support"
     );
 
     database.cleanup().await
@@ -282,7 +384,7 @@ async fn keyed_permission_replacement_rolls_back_rows_when_summary_is_invalid() 
         2,
     );
     let mut invalid_summary = permissions_current_resource_summary(resource_id, "wrapper");
-    invalid_summary.coverage = json!([]);
+    invalid_summary.authority_kind = Some(String::new());
     replace_permissions_current_resource_projection(
         database.pool(),
         resource_id,
@@ -299,6 +401,91 @@ async fn keyed_permission_replacement_rolls_back_rows_when_summary_is_invalid() 
     assert_eq!(
         load_permissions_current_resource_summary(database.pool(), resource_id).await?,
         Some(old_summary)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn keyed_permission_replacement_advances_only_current_publication_revision() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x60f5);
+    seed_resources(&database, &[resource_id]).await?;
+    let row = permissions_current_row(
+        resource_id,
+        "0x0000000000000000000000000000000000000aaa",
+        PermissionScope::Resource,
+        1,
+    );
+    let summary = permissions_current_resource_summary(resource_id, "registrar");
+
+    replace_permissions_current_resource_projection(
+        database.pool(),
+        resource_id,
+        std::slice::from_ref(&row),
+        Some(&summary),
+    )
+    .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM permissions_current_publication")
+            .fetch_one(database.pool())
+            .await?,
+        0,
+        "a keyed write must not create global compatibility state"
+    );
+
+    sqlx::query(
+        r#"
+        INSERT INTO permissions_current_publication (
+            projection,
+            publication_version,
+            data_revision
+        )
+        VALUES ('permissions_current', $1, 7)
+        "#,
+    )
+    .bind(PERMISSIONS_CURRENT_PUBLICATION_VERSION - 1)
+    .execute(database.pool())
+    .await?;
+    replace_permissions_current_resource_projection(
+        database.pool(),
+        resource_id,
+        std::slice::from_ref(&row),
+        Some(&summary),
+    )
+    .await?;
+    let old_publication = sqlx::query_as::<_, (i32, i64)>(
+        "SELECT publication_version, data_revision FROM permissions_current_publication",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        old_publication,
+        (PERMISSIONS_CURRENT_PUBLICATION_VERSION - 1, 7),
+        "a keyed write must not advance an incompatible publication"
+    );
+
+    sqlx::query(
+        "UPDATE permissions_current_publication SET publication_version = $1 WHERE projection = 'permissions_current'",
+    )
+    .bind(PERMISSIONS_CURRENT_PUBLICATION_VERSION)
+    .execute(database.pool())
+    .await?;
+    replace_permissions_current_resource_projection(
+        database.pool(),
+        resource_id,
+        std::slice::from_ref(&row),
+        Some(&summary),
+    )
+    .await?;
+    let current_publication = sqlx::query_as::<_, (i32, i64)>(
+        "SELECT publication_version, data_revision FROM permissions_current_publication",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        current_publication,
+        (PERMISSIONS_CURRENT_PUBLICATION_VERSION, 8)
     );
 
     database.cleanup().await
@@ -561,7 +748,7 @@ async fn permissions_current_delete_and_clear_support_rebuild_workflows() -> Res
 }
 
 #[tokio::test]
-async fn permissions_current_excludes_orphaned_resources_across_readers() -> Result<()> {
+async fn permission_row_readers_and_pages_use_projection_owned_canonicality() -> Result<()> {
     let database = TestDatabase::new().await?;
     let resource_id = Uuid::from_u128(0x6480);
     seed_resources(&database, &[resource_id]).await?;
@@ -579,12 +766,70 @@ async fn permissions_current_excludes_orphaned_resources_across_readers() -> Res
 
     orphan_resource(&database, resource_id).await?;
 
+    assert_eq!(
+        load_permissions_current(database.pool(), resource_id, None, None).await?,
+        vec![resolver_row.clone()],
+        "adapter identity canonicality must not hide a current permission projection row"
+    );
+
+    let page =
+        load_permissions_current_page(database.pool(), resource_id, None, None, None, 10).await?;
+    assert_eq!(page.rows, vec![resolver_row.clone()]);
+    assert_eq!(page.summary.row_count, 1);
+    assert_eq!(page.summary.canonicality_summaries.len(), 1);
+
+    let grouped = load_permissions_current_by_resource_ids(database.pool(), &[resource_id]).await?;
+    assert_eq!(
+        grouped
+            .get(&resource_id)
+            .expect("requested resource id must be present in grouped output"),
+        std::slice::from_ref(&resolver_row)
+    );
+
+    assert_eq!(
+        load_permissions_current_for_resolver_scope(
+            database.pool(),
+            "ethereum-mainnet",
+            "0x0000000000000000000000000000000000000def",
+        )
+        .await?,
+        vec![resolver_row.clone()]
+    );
+    assert_eq!(
+        load_permissions_current_resolver_targets(database.pool()).await?,
+        vec![(
+            "ethereum-mainnet".to_owned(),
+            "0x0000000000000000000000000000000000000def".to_owned()
+        )]
+    );
+
+    let account_page = load_permissions_current_account_resource_page(
+        database.pool(),
+        None,
+        Some(resource_id),
+        None,
+        10,
+    )
+    .await?;
+    assert_eq!(account_page.rows, vec![resolver_row.clone()]);
+    assert_eq!(account_page.summary.row_count, 1);
+
+    sqlx::query(
+        r#"
+        UPDATE permissions_current
+        SET canonicality_summary = '{"status":"orphaned","chains":{"ethereum-mainnet":"orphaned"}}'::jsonb
+        WHERE resource_id = $1
+        "#,
+    )
+    .bind(resource_id)
+    .execute(database.pool())
+    .await?;
+
     assert!(
         load_permissions_current(database.pool(), resource_id, None, None)
             .await?
             .is_empty()
     );
-
     let page =
         load_permissions_current_page(database.pool(), resource_id, None, None, None, 10).await?;
     assert!(page.rows.is_empty());
@@ -602,7 +847,6 @@ async fn permissions_current_excludes_orphaned_resources_across_readers() -> Res
             .expect("requested resource id must be present in grouped output")
             .is_empty()
     );
-
     assert!(
         load_permissions_current_for_resolver_scope(
             database.pool(),
@@ -617,6 +861,17 @@ async fn permissions_current_excludes_orphaned_resources_across_readers() -> Res
             .await?
             .is_empty()
     );
+
+    let account_page = load_permissions_current_account_resource_page(
+        database.pool(),
+        None,
+        Some(resource_id),
+        None,
+        10,
+    )
+    .await?;
+    assert!(account_page.rows.is_empty());
+    assert_eq!(account_page.summary.row_count, 0);
 
     database.cleanup().await
 }

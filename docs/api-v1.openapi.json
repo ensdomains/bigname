@@ -2130,6 +2130,16 @@
             },
             "description": "Invalid request"
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Snapshot conflict or stale projection"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -4124,6 +4134,16 @@
             },
             "description": "Requested resource was not found"
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Snapshot conflict or stale projection"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -4728,6 +4748,16 @@
             },
             "description": "Invalid request"
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Snapshot conflict or stale projection"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -4868,6 +4898,16 @@
               }
             },
             "description": "Invalid request"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Snapshot conflict or stale projection"
           },
           "500": {
             "content": {

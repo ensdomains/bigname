@@ -124,6 +124,18 @@ pub(super) async fn sync_resolver_profile_stream(
             let profile_gate =
                 ResolverProfileGate::load_for_raw_logs(input.pool, &raw_logs, input.event_topics)
                     .await?;
+            for raw_log in &raw_logs {
+                if profile_gate.resolver_local_fact_profile_status(raw_log, input.event_topics)?
+                    == Some(ResolverFactProfileStatus::Pending)
+                {
+                    bail!(
+                        "resolver-profile reconciliation cannot publish pending profile evidence for {} on {} at block {}; wait for a complete code-hash classification",
+                        raw_log.emitting_address,
+                        raw_log.chain_id,
+                        raw_log.block_number,
+                    );
+                }
+            }
             let mut delta = UnwrappedAuthorityReplayCheckpointDelta::default();
             for raw_log in &raw_logs {
                 if apply_authority_raw_log(

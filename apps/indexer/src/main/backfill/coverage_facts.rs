@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
+use bigname_domain::block_interval::{InclusiveBlockInterval, coalesce_inclusive_block_intervals};
 use bigname_manifests::WatchedSourceSelectorPlan;
 use bigname_storage::{
     BackfillCoverageFactScope, BackfillCoverageFactWrite, BackfillRange,
@@ -159,22 +160,17 @@ pub(crate) fn merged_covered_block_segments(
     job_start_block: i64,
     job_end_block: i64,
 ) -> Vec<(i64, i64)> {
-    let mut clamped = windows
-        .into_iter()
-        .filter_map(|(from_block, to_block)| {
-            covered_block_interval(from_block, to_block, job_start_block, job_end_block)
-        })
-        .collect::<Vec<_>>();
-    clamped.sort_unstable();
-
-    let mut segments: Vec<(i64, i64)> = Vec::new();
-    for (from_block, to_block) in clamped {
-        match segments.last_mut() {
-            Some(last) if from_block <= last.1.saturating_add(1) => last.1 = last.1.max(to_block),
-            _ => segments.push((from_block, to_block)),
-        }
-    }
-    segments
+    coalesce_inclusive_block_intervals(windows.into_iter().filter_map(|(from_block, to_block)| {
+        covered_block_interval(from_block, to_block, job_start_block, job_end_block).map(
+            |(covered_from_block, covered_to_block)| {
+                InclusiveBlockInterval::new(covered_from_block, covered_to_block)
+                    .expect("clamped covered block interval must not be inverted")
+            },
+        )
+    }))
+    .into_iter()
+    .map(|interval| (interval.from_block(), interval.through_block()))
+    .collect()
 }
 
 #[cfg(test)]
@@ -421,6 +417,11 @@ mod tests {
         assert_eq!(
             merged_covered_block_segments(std::iter::empty(), 10, 20),
             Vec::<(i64, i64)>::new()
+        );
+        let max = i64::MAX;
+        assert_eq!(
+            merged_covered_block_segments([(max, max), (max - 1, max - 1)], max - 1, max),
+            vec![(max - 1, max)]
         );
     }
 

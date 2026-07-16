@@ -538,12 +538,12 @@ async fn live_tail_records_exact_ens_v2_coverage_above_latched_finalized_head() 
     .await
     .expect_err("an address omitted from the provider selection must not inherit live coverage");
     let requirement = error
-        .downcast_ref::<bigname_adapters::EnsV2NewlyRequiredCoverage>()
+        .downcast_ref::<bigname_adapters::EnsV2MissingCoverage>()
         .cloned()
         .with_context(|| format!("unexpected unselected-target refusal: {error:#}"))?;
     assert_eq!(
         requirement,
-        bigname_adapters::EnsV2NewlyRequiredCoverage {
+        bigname_adapters::EnsV2MissingCoverage {
             chain: chain.to_owned(),
             retention_generation: 0,
             source_family: "ens_v2_registry_l1".to_owned(),
@@ -901,7 +901,7 @@ async fn reconcile_fetched_heads_live_tip_retains_unlisted_generic_ensv1_resolve
     let chain = "ethereum-mainnet";
     let selected_address = "0x00000000000000000000000000000000000000a1";
     let generic_resolver_address = "0x00000000000000000000000000000000000000b1";
-    let unrelated_address = "0x00000000000000000000000000000000000000c1";
+    let sibling_only_address = "0x00000000000000000000000000000000000000c1";
     sqlx::query(
         r#"
         INSERT INTO manifest_versions (
@@ -980,15 +980,12 @@ async fn reconcile_fetched_heads_live_tip_retains_unlisted_generic_ensv1_resolve
         "description",
         0,
     );
-    let mut unrelated_log = rpc_log_payload(&latest);
-    unrelated_log["address"] = json!(unrelated_address);
-    unrelated_log["transactionHash"] =
-        json!("0x3333333333333333333333333333333333333333333333333333333333333333");
-    unrelated_log["transactionIndex"] = json!("0x1");
-    unrelated_log["logIndex"] = json!("0x1");
+    let mut sibling_only_log = rpc_log_payload(&latest);
+    sibling_only_log["address"] = json!(sibling_only_address);
+    sibling_only_log["logIndex"] = json!("0x1");
     let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
         block: latest.clone(),
-        logs: vec![generic_log, unrelated_log],
+        logs: vec![generic_log, sibling_only_log],
     }])
     .await?;
 
@@ -1019,8 +1016,11 @@ async fn reconcile_fetched_heads_live_tip_retains_unlisted_generic_ensv1_resolve
         )
         .fetch_one(database.pool())
         .await?,
-        vec![generic_resolver_address.to_owned()],
-        "manifest-declared generic resolver topics must retain all emitters without retaining unrelated logs"
+        vec![
+            generic_resolver_address.to_owned(),
+            sibling_only_address.to_owned(),
+        ],
+        "generic resolver selection must retain same-transaction sibling logs as transaction context"
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_transactions")
@@ -1035,6 +1035,18 @@ async fn reconcile_fetched_heads_live_tip_retains_unlisted_generic_ensv1_resolve
             .await?,
         1,
         "the generic resolver log receipt must be retained"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<String>>(
+            "SELECT ARRAY_AGG(contract_address ORDER BY contract_address) FROM raw_code_hashes"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        vec![
+            selected_address.to_owned(),
+            generic_resolver_address.to_owned(),
+        ],
+        "live code observation must include the watched baseline and unlisted generic resolver emitter, but not its sibling-only emitter"
     );
 
     server.abort();
@@ -4709,6 +4721,258 @@ async fn reconcile_fetched_heads_verified_frontier_extends_incrementally_across_
     Ok(())
 }
 
+/// A fresh process-local coordinator reuses the durable proof after all
+/// completed-job facts are removed as a test-only detector. Reuse does not
+/// bypass the live same-height-fork check on the next promotion attempt.
+#[tokio::test]
+async fn reconcile_fetched_heads_reuses_persisted_coverage_after_restart() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let chain = "base-mainnet";
+    let first_process = ChainCoverageFrontiers::default();
+    let (task, heads, provider, server) =
+        promote_one_covered_slice(&database, chain, &first_process).await?;
+    let persisted_before_restart =
+        bigname_storage::load_stored_lineage_coverage_frontier_header(database.pool(), chain)
+            .await?
+            .expect("the first promotion must publish durable coverage");
+    drop(first_process);
+    sqlx::query("DELETE FROM backfill_coverage_facts WHERE chain_id = $1")
+        .bind(chain)
+        .execute(database.pool())
+        .await
+        .context("failed to remove facts after durable frontier publication")?;
+
+    let restarted_process = ChainCoverageFrontiers::default();
+    let (task, outcome) = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &heads,
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+        &restarted_process,
+    )
+    .await
+    .expect("a restarted indexer must reuse an unchanged durable frontier")
+    .expect("durable frontier reuse must advance the checkpoint");
+    assert_eq!(
+        outcome.canonical_status,
+        CanonicalReconciliationStatus::StoredLineagePromoted
+    );
+    assert_eq!(
+        bigname_storage::load_stored_lineage_coverage_frontier_header(database.pool(), chain)
+            .await?
+            .expect("the frontier remains durable")
+            .snapshot_revision,
+        persisted_before_restart.snapshot_revision,
+        "unchanged restart reuse must not republish the requirement snapshot"
+    );
+    assert!(
+        restarted_process
+            .take_required_tuple_range_scans_for_tests(chain)
+            .is_empty(),
+        "restart reuse validates saved row shape without re-verifying historical fact intervals"
+    );
+
+    let fork_block_number = task
+        .checkpoint
+        .canonical_block_number
+        .expect("restart promotion must persist its checkpoint")
+        + 1;
+    let fork = provider_block(
+        "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff41",
+        Some(&format!("0x{:064x}", fork_block_number - 1)),
+        fork_block_number,
+    );
+    insert_chain_lineage_for_block(
+        database.pool(),
+        chain,
+        &fork,
+        CanonicalityState::Observed,
+    )
+    .await?;
+    let error = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &heads,
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+        &ChainCoverageFrontiers::default(),
+    )
+    .await
+    .expect_err("durable coverage must not suppress the live fork refusal");
+    assert!(format!("{error:#}").contains("non-orphaned same-height fork"));
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// A saved proof whose lower bound is above the requested stored path is not
+/// eligible. The indexer must reprove the full current candidate before CAS
+/// replacement, leaving the narrowed revision unchanged when facts are absent.
+#[tokio::test]
+async fn reconcile_fetched_heads_deep_regression_cold_reproves_before_replacement() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let chain = "base-mainnet";
+    let coverage_frontiers = ChainCoverageFrontiers::default();
+    let selected_address = "0x0000000000000000000000000000000000000001";
+    let (task, heads, provider, server) =
+        promote_one_covered_slice(&database, chain, &coverage_frontiers).await?;
+    let original =
+        bigname_storage::load_stored_lineage_coverage_frontier_header(database.pool(), chain)
+            .await?
+            .expect("the first promotion must publish durable coverage");
+    let requested_from = task
+        .checkpoint
+        .canonical_block_number
+        .expect("the first promotion must advance its checkpoint")
+        + 1;
+    let narrowed_from = requested_from + 100;
+    let original_fact_from = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT MIN(covered_from_block)::BIGINT
+        FROM backfill_coverage_facts
+        WHERE chain_id = $1
+          AND address = $2
+        "#,
+    )
+    .bind(chain)
+    .bind(selected_address)
+    .fetch_one(database.pool())
+    .await?;
+    assert!(narrowed_from < original.verified_through_block);
+    sqlx::query(
+        r#"
+        UPDATE stored_lineage_coverage_frontiers
+        SET verified_from_block = $2
+        WHERE chain_id = $1
+        "#,
+    )
+    .bind(chain)
+    .bind(narrowed_from)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE stored_lineage_coverage_frontier_requirements
+        SET required_intervals = required_intervals
+            * int8multirange(int8range($2, $3 + 1, '[)'))
+        WHERE chain_id = $1
+        "#,
+    )
+    .bind(chain)
+    .bind(narrowed_from)
+    .bind(original.verified_through_block)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        WITH row_hashes AS (
+            SELECT md5(
+                jsonb_build_array(source_family, address, required_intervals::TEXT)::TEXT
+            ) AS row_hash
+            FROM stored_lineage_coverage_frontier_requirements
+            WHERE chain_id = $1
+        ), integrity AS (
+            SELECT
+                COUNT(*)::BIGINT AS row_count,
+                LPAD(to_hex(COALESCE(bit_xor(('x' || SUBSTRING(row_hash, 1, 16))::BIT(64)::BIGINT), 0)), 16, '0')
+                || LPAD(to_hex(COALESCE(bit_xor(('x' || SUBSTRING(row_hash, 17, 16))::BIT(64)::BIGINT), 0)), 16, '0')
+                    AS digest
+            FROM row_hashes
+        )
+        UPDATE stored_lineage_coverage_frontiers header
+        SET requirement_row_count = integrity.row_count,
+            requirement_digest = integrity.digest
+        FROM integrity
+        WHERE header.chain_id = $1
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE backfill_coverage_facts
+        SET covered_from_block = $2
+        WHERE chain_id = $1
+          AND address = $3
+        "#,
+    )
+    .bind(chain)
+    .bind(narrowed_from)
+    .bind(selected_address)
+    .execute(database.pool())
+    .await?;
+
+    let error = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &heads,
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+        &ChainCoverageFrontiers::default(),
+    )
+    .await
+    .expect_err("deep regression must not reuse a proof whose lower bound is too high");
+    assert!(format!("{error:#}").contains("do not form gap-free coverage"));
+    let refused =
+        bigname_storage::load_stored_lineage_coverage_frontier_header(database.pool(), chain)
+            .await?
+            .expect("the narrowed proof remains after refusal");
+    assert_eq!(refused.snapshot_revision, original.snapshot_revision);
+    assert_eq!(refused.verified_from_block, narrowed_from);
+
+    sqlx::query(
+        r#"
+        UPDATE backfill_coverage_facts
+        SET covered_from_block = $3
+        WHERE chain_id = $1
+          AND address = $2
+        "#,
+    )
+    .bind(chain)
+    .bind(selected_address)
+    .bind(original_fact_from)
+    .execute(database.pool())
+    .await?;
+    let (_, outcome) = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &heads,
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+        &ChainCoverageFrontiers::default(),
+    )
+    .await
+    .expect("restored full facts must permit cold reproving")
+    .expect("cold reproving must advance the checkpoint");
+    assert_eq!(
+        outcome.canonical_status,
+        CanonicalReconciliationStatus::StoredLineagePromoted
+    );
+    let repaired =
+        bigname_storage::load_stored_lineage_coverage_frontier_header(database.pool(), chain)
+            .await?
+            .expect("cold reproving must replace the saved frontier");
+    assert_eq!(repaired.snapshot_revision, original.snapshot_revision + 1);
+    assert!(repaired.verified_from_block < narrowed_from);
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
 /// Strategy-1 anchoring: when the provider's block at the stored canonical
 /// frontier height matches the stored hash, promotion anchors there directly
 /// with no parent-hash walk — the mock provider has NO walkable parents, so
@@ -5790,6 +6054,7 @@ async fn admit_resolver_edge_observation(
                 "observation_key": "reconcile-e2e-edge",
             }),
         }],
+        bigname_manifests::FullDiscoveryReconciliationOptions::default(),
     )
     .await?;
     assert_eq!(
@@ -5877,7 +6142,7 @@ async fn reconcile_fetched_heads_differential_coverage_adds_near_head_watch_only
 }
 
 /// Removing a watch has no newly required interval. Once both original tuple
-/// proofs are memoized, deleting every durable fact makes any historical scan
+/// proofs are durably saved, deleting every durable fact makes any historical scan
 /// visible; the removal epoch still advances without one.
 #[tokio::test]
 async fn reconcile_fetched_heads_differential_coverage_removal_skips_historical_scan() -> Result<()>
@@ -5921,11 +6186,12 @@ async fn reconcile_fetched_heads_differential_coverage_removal_skips_historical_
         .bind(chain)
         .execute(database.pool())
         .await
-        .context("failed to remove memoized coverage facts")?;
+        .context("failed to remove facts behind the saved coverage proof")?;
     let summary = bigname_manifests::reconcile_discovery_observations(
         database.pool(),
         "reconcile-e2e-admission",
         &[],
+        bigname_manifests::FullDiscoveryReconciliationOptions::default(),
     )
     .await?;
     assert_eq!(summary.deactivated_edge_count, 1);
@@ -6087,7 +6353,7 @@ async fn reconcile_fetched_heads_differential_coverage_refuses_retroactive_admis
     );
     assert_eq!(task.checkpoint.canonical_block_number, Some(2049));
 
-    // The successful epoch recheck memoizes the widened interval through the
+    // The successful epoch recheck publishes the widened interval through the
     // stored anchor. A later promotion step using the same frontier proceeds
     // without turning the historical recheck into a per-poll scan.
     let (task, outcome) = reconcile_fetched_heads_with_adapter_sync(
@@ -6101,7 +6367,7 @@ async fn reconcile_fetched_heads_differential_coverage_refuses_retroactive_admis
         &coverage_frontiers,
     )
     .await
-    .expect("a verified retroactive interval must remain memoized")
+    .expect("a verified retroactive interval must remain durable")
     .expect("the next stored-lineage slice must advance the checkpoint");
     assert_eq!(
         outcome.canonical_status,
@@ -6130,7 +6396,11 @@ async fn reconcile_fetched_heads_revalidates_admission_epoch_before_checkpoint_a
     let (task, heads, provider, server) =
         promote_one_covered_slice(&database, chain, &coverage_frontiers).await?;
 
-    let hook = ChainCoverageFrontiers::install_admission_epoch_verification_test_hook(chain);
+    let hook = ChainCoverageFrontiers::install_admission_epoch_verification_test_hook(
+        database.pool(),
+        chain,
+    )
+    .await;
     let reconcile_pool = database.pool().clone();
     let reconcile_task = task.clone();
     let reconcile_heads = heads.clone();
@@ -6221,6 +6491,53 @@ async fn reconcile_fetched_heads_revalidates_admission_epoch_before_checkpoint_a
     Ok(())
 }
 
+#[tokio::test]
+async fn admission_epoch_checkpoint_advance_uses_one_pool_connection() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let chain = "single-connection-epoch-fence";
+    let coverage_frontiers = ChainCoverageFrontiers::default();
+    let (task, _heads, _provider, server) =
+        promote_one_covered_slice(&database, chain, &coverage_frontiers).await?;
+    let epoch = bigname_manifests::load_discovery_admission_epoch(database.pool(), chain).await?;
+    let one_connection_pool = database.additional_pool(1).await?;
+    let canonical = task
+        .checkpoint
+        .canonical_block_hash
+        .as_ref()
+        .zip(task.checkpoint.canonical_block_number)
+        .map(|(block_hash, block_number)| CheckpointBlockRef {
+            block_hash: block_hash.clone(),
+            block_number,
+        });
+    let safe = task
+        .checkpoint
+        .safe_block_hash
+        .as_ref()
+        .zip(task.checkpoint.safe_block_number)
+        .map(|(block_hash, block_number)| CheckpointBlockRef {
+            block_hash: block_hash.clone(),
+            block_number,
+        });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        ChainCoverageFrontiers::advance_checkpoint_with_promotion_epoch(
+            &one_connection_pool,
+            chain,
+            Some(epoch),
+            canonical,
+            safe,
+            None,
+        ),
+    )
+    .await
+    .context("admission-fenced checkpoint advancement tried to acquire a second connection")??;
+
+    one_connection_pool.close().await;
+    server.abort();
+    database.cleanup().await
+}
+
 /// A competing stored branch may arrive after optimistic coverage verification.
 /// Final checkpoint persistence must repeat the fork check while excluding
 /// lineage writers, otherwise number-keyed coverage could promote an ambiguous
@@ -6235,7 +6552,11 @@ async fn reconcile_fetched_heads_rechecks_same_height_forks_before_checkpoint_ad
     let (task, heads, provider, server) =
         promote_one_covered_slice(&database, chain, &coverage_frontiers).await?;
 
-    let hook = ChainCoverageFrontiers::install_admission_epoch_verification_test_hook(chain);
+    let hook = ChainCoverageFrontiers::install_admission_epoch_verification_test_hook(
+        database.pool(),
+        chain,
+    )
+    .await;
     let reconcile_pool = database.pool().clone();
     let reconcile_task = task.clone();
     let reconcile_heads = heads.clone();
@@ -6370,10 +6691,10 @@ async fn reconcile_fetched_heads_promotes_after_reverifying_covered_admitted_tup
 }
 
 /// A manifest reload that changes the chain's ABI event sets invalidates the
-/// frontier memo by fingerprint alone: the newly admitted uncovered tuple is
+/// persisted frontier by its topic sets: the newly admitted uncovered tuple is
 /// caught on re-verification even without an explicit clamp.
 #[tokio::test]
-async fn reconcile_fetched_heads_manifest_abi_change_invalidates_the_frontier_memo() -> Result<()> {
+async fn reconcile_fetched_heads_manifest_abi_change_invalidates_persisted_frontier() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_ops_catchup_backfill_job_tables(database.pool()).await?;
     let chain = "base-mainnet";
@@ -6382,7 +6703,7 @@ async fn reconcile_fetched_heads_manifest_abi_change_invalidates_the_frontier_me
     let late_address = "0x0000000000000000000000000000000000000004";
     let late_active_from = chunk + 100;
     // A NEW family changes the log-producing topic-set fingerprint; no clamp
-    // is issued — the fingerprint mismatch alone must drop the memo.
+    // is issued — the topic mismatch alone must invalidate the saved family proof.
     let (task, heads, provider, server) =
         promote_one_covered_slice(&database, chain, &coverage_frontiers).await?;
     insert_reconcile_watched_manifest_contract(
@@ -6431,7 +6752,7 @@ async fn reconcile_fetched_heads_manifest_abi_change_invalidates_the_frontier_me
 /// A topic selector change invalidates the changed family's tuple proofs, not
 /// every source family on the chain. Both families' durable facts are removed:
 /// the changed family refuses, while the unchanged family is absent from the
-/// refusal and remains memoized.
+/// refusal and remains saved.
 #[tokio::test]
 async fn reconcile_fetched_heads_differential_coverage_topic_change_is_family_scoped() -> Result<()>
 {
@@ -6799,7 +7120,7 @@ admission = "reachable_from_root"
 /// surface grows between two promotions sharing a frontier — a real
 /// `sync_repository` run adds a same-family contract entry with no discovery
 /// edge and no ABI change, so only the sync-time admission-epoch bump can
-/// invalidate the memo. `covered` selects whether a family-scope fact covers
+/// invalidate the saved frontier. `covered` selects whether a family-scope fact covers
 /// the new tuple.
 async fn manifest_growth_promotion_scenario(covered: bool) -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -7113,7 +7434,7 @@ async fn coverage_fact_union_scale_guard() -> Result<()> {
         started_at.elapsed()
     );
 
-    let probe_address = format!("0x{}", format!("{:040x}", 0x1234_5678_u64));
+    let probe_address = format!("0x{:040x}", 0x1234_5678_u64);
     let plan_rows = sqlx::query_scalar::<_, String>(&format!(
         r#"
         EXPLAIN (FORMAT TEXT)
@@ -10361,7 +10682,7 @@ async fn reconcile_fetched_heads_backfills_ensv2_resolver_and_permission_events(
                 "ENSv2 resolver reconciliation must request newly discovered resolver coverage",
             );
     let missing_coverage = missing_coverage_error
-        .downcast_ref::<bigname_adapters::EnsV2NewlyRequiredCoverage>()
+        .downcast_ref::<bigname_adapters::EnsV2MissingCoverage>()
         .context("ENSv2 reconciliation returned the wrong coverage error")?
         .clone();
     assert_eq!(missing_coverage.source_family, "ens_v2_resolver_l1");

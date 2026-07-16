@@ -107,6 +107,15 @@ step-3-gate vocabulary needed by the route schemas:
 | `to_block` | inclusive upper block-number filter | `to_block` (unchanged) |
 | `data` | envelope root payload, and event-row payload when nested inside an event row | compact event payload objects |
 
+`GET /v2/permissions` and `GET /v2/addresses/{address}/names?include=role_summary`
+require the compatible projection-owned permission publication version after
+snapshot selection. Missing or older versions return `409 stale`. These reads
+also verify the publication's read-consistency revision is unchanged before
+returning; an interleaved keyed or full publication returns `409 stale` rather
+than a mixed-generation response. These are schema/publication compatibility
+and request-coherence guards; they do not assert projection freshness.
+The base v2 address-name collection remains available without the expansion.
+
 Rules:
 
 - Timestamps are RFC 3339 UTC everywhere, including the lookup route.

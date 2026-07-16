@@ -871,9 +871,7 @@ async fn bootstrap_auto_backfill_clamps_numeric_coverage_to_finalized_head_and_p
     assert_eq!(outcome.provider_configured_chain_count, 1);
     assert_eq!(outcome.missing_provider_chain_count, 1);
     assert_eq!(
-        outcome
-            .latched_finalized_heads
-            .get("ethereum-mainnet"),
+        outcome.latched_finalized_heads.get("ethereum-mainnet"),
         Some(&block_42),
         "live reconciliation must receive the exact finalized head latched by bootstrap"
     );
@@ -1291,7 +1289,7 @@ async fn bootstrap_auto_backfill_clamps_numeric_coverage_to_finalized_head_and_p
 }
 
 #[tokio::test]
-async fn bootstrap_recovery_covers_fresh_ensv2_registry_and_resolver_then_rotates_generation()
+async fn bootstrap_recovery_keeps_raw_only_adapter_free_then_inline_converges_after_rotation()
 -> Result<()> {
     let database = TestDatabase::new().await?;
     create_bootstrap_backfill_job_tables(database.pool()).await?;
@@ -1631,12 +1629,33 @@ async fn bootstrap_recovery_covers_fresh_ensv2_registry_and_resolver_then_rotate
             Ok(_) => anyhow::bail!("generation-zero child coverage restored generation one"),
             Err(error) => error,
         };
-    assert!(
-        stale_error.to_string().contains("no generation 1 coverage"),
-        "unexpected stale-generation error: {stale_error:#}"
+    assert_eq!(
+        bigname_adapters::ens_v2_missing_coverage(&stale_error),
+        Some(&bigname_adapters::EnsV2MissingCoverage {
+            chain: chain.to_owned(),
+            retention_generation: 1,
+            source_family: "ens_v2_registry_l1".to_owned(),
+            address: registry_address.to_owned(),
+            required_from_block: 1,
+            required_to_block: 4,
+        }),
+        "unexpected stale-generation error: {stale_error:#}",
     );
+    let adapter_owned_counts_before_raw_only = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+        r#"
+            SELECT
+                (SELECT COUNT(*) FROM resources),
+                (SELECT COUNT(*) FROM surface_bindings),
+                (SELECT COUNT(*) FROM normalized_events),
+                (SELECT COUNT(*) FROM discovery_edges)
+            "#,
+    )
+    .fetch_one(database.pool())
+    .await?;
 
-    let _forced_rotation = crate::bootstrap_backfill::install_forced_retention_rotation(chain);
+    let _forced_rotation =
+        crate::bootstrap_backfill::install_forced_retention_rotation(database.pool(), chain)
+            .await?;
     let second = run_startup_bootstrap_backfills(
         &adapter_pool,
         &manifest_root,
@@ -1675,10 +1694,6 @@ async fn bootstrap_recovery_covers_fresh_ensv2_registry_and_resolver_then_rotate
         .await?,
         vec![0, 1, 2]
     );
-
-    let sync_summary =
-        bigname_adapters::sync_ens_v2_registry_resource_surface(&adapter_pool, chain).await?;
-    assert_eq!(sync_summary.matched_log_count, 5);
     assert_eq!(
         sqlx::query_as::<_, (bool, Option<i64>, Option<i64>)>(
             r#"
@@ -1693,7 +1708,59 @@ async fn bootstrap_recovery_covers_fresh_ensv2_registry_and_resolver_then_rotate
         .bind(chain)
         .fetch_one(database.pool())
         .await?,
-        (true, Some(2), Some(4))
+        (false, None, None),
+        "raw-only bootstrap must leave retained-history reconciliation for a later adapter-enabled run"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64, i64, i64)>(
+            r#"
+            SELECT
+                (SELECT COUNT(*) FROM resources),
+                (SELECT COUNT(*) FROM surface_bindings),
+                (SELECT COUNT(*) FROM normalized_events),
+                (SELECT COUNT(*) FROM discovery_edges)
+            "#,
+        )
+        .fetch_one(database.pool())
+        .await?,
+        adapter_owned_counts_before_raw_only,
+        "raw-only bootstrap may refresh raw facts and coverage but must not write adapter-owned identity, event, or discovery rows"
+    );
+
+    let inline = run_startup_bootstrap_backfills(
+        &adapter_pool,
+        &manifest_root,
+        &intake_tasks,
+        &provider_registry,
+        crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
+        crate::backfill::BackfillAdapterSyncMode::Inline,
+        false,
+        HeaderAuditMode::Minimal,
+        1,
+        crate::bootstrap_backfill::DEFAULT_BOOTSTRAP_BACKFILL_RANGE_BLOCKS,
+    )
+    .await?;
+    assert_eq!(
+        inline.drained_job_count, 0,
+        "inline convergence must reuse current-generation raw coverage rather than inventing new provider work"
+    );
+
+    assert_eq!(
+        sqlx::query_as::<_, (bool, Option<i64>, Option<i64>)>(
+            r#"
+            SELECT
+                retained_history_complete,
+                proven_retention_generation,
+                proven_through_block
+            FROM raw_log_staging_input_revisions
+            WHERE chain_id = $1
+            "#,
+        )
+        .bind(chain)
+        .fetch_one(database.pool())
+        .await?,
+        (true, Some(2), Some(4)),
+        "inline bootstrap must publish the current-generation retained-history proof before reporting stable"
     );
     assert!(
         sqlx::query_scalar::<_, bool>(

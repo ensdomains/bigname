@@ -2177,6 +2177,7 @@ async fn replay_normalized_events_full_closure_mutates_selected_discovery_only()
 async fn replay_normalized_events_full_closure_fails_closed_after_raw_log_compaction() -> Result<()>
 {
     let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
     create_normalized_replay_adapter_checkpoint_tables(database.pool()).await?;
     let chain = "ethereum-mainnet";
     create_complete_raw_log_staging_input_fixture(database.pool(), chain, 73).await?;
@@ -2325,6 +2326,42 @@ async fn replay_normalized_events_full_closure_fails_closed_after_raw_log_compac
         1,
         "failed replay must not deactivate retained discovery"
     );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn replay_normalized_events_accepts_empty_generation_zero_closure_from_block_zero()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_normalized_replay_adapter_checkpoint_tables(database.pool()).await?;
+    let chain = "ethereum-mainnet";
+    create_complete_raw_log_staging_input_fixture(database.pool(), chain, 0).await?;
+    insert_active_replay_watched_contract(
+        database.pool(),
+        33,
+        chain,
+        Uuid::from_u128(0x933),
+        "0x00000000000000000000000000000000000000d4",
+    )
+    .await?;
+
+    let outcome = replay_raw_fact_normalized_events(
+        database.pool(),
+        RawFactNormalizedEventReplayRequest {
+            deployment_profile: "mainnet".to_owned(),
+            chain: chain.to_owned(),
+            selection: RawFactNormalizedEventReplaySelection::BlockRange {
+                from_block: 0,
+                to_block: 0,
+            },
+        },
+    )
+    .await?;
+
+    assert_eq!(outcome.selected_block_count, 0);
+    assert_eq!(outcome.canonical_raw_log_count, 0);
+    assert_eq!(outcome.normalized_event_synced_count, 0);
 
     database.cleanup().await
 }

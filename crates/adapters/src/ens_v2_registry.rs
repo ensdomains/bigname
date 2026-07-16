@@ -50,7 +50,7 @@ use util::normalize_address;
 pub use live::{
     record_ens_v2_live_selected_raw_log_coverage, sync_ens_v2_registry_resource_surface_live_poll,
 };
-pub use recovery::{EnsV2NewlyRequiredCoverage, is_ens_v2_newly_required_coverage};
+pub use recovery::{EnsV2MissingCoverage, ens_v2_missing_coverage, is_ens_v2_missing_coverage};
 
 #[cfg(test)]
 use crate::evm_abi::keccak_signature_hex;
@@ -304,8 +304,12 @@ async fn sync_ens_v2_registry_resource_surface_with_scope(
     } else {
         Ok(())
     };
-    match (result, release) {
-        (Ok((summary, _)), Ok(())) => Ok(summary),
+    prioritize_operation_error(result.map(|(summary, _)| summary), release)
+}
+
+fn prioritize_operation_error<T>(operation: Result<T>, release: Result<()>) -> Result<T> {
+    match (operation, release) {
+        (Ok(value), Ok(())) => Ok(value),
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error),
     }
@@ -325,6 +329,7 @@ async fn sync_ens_v2_registry_resource_surface_with_scope_and_state(
     reconcile_full_sources: bool,
     expected_discovery_admission_epoch: Option<i64>,
 ) -> Result<(EnsV2RegistryResourceSurfaceSyncSummary, RegistryReplayState)> {
+    let is_resumed_replay = replay_state.is_some();
     let mut replay_state = replay_state.unwrap_or_default();
     let source_scope = source_scope.map(normalized_source_scope_targets);
     if source_scope.as_ref().is_some_and(Vec::is_empty) {
@@ -378,12 +383,7 @@ async fn sync_ens_v2_registry_resource_surface_with_scope_and_state(
     .await?;
     let scanned_log_count = raw_logs.len();
     let mut matched_log_count = 0usize;
-    for (address, suffix) in initial_registry_suffixes(&active_emitters) {
-        replay_state
-            .registry_suffix_by_address
-            .entry(address)
-            .or_insert(suffix);
-    }
+    initialize_registry_suffixes(&mut replay_state, &active_emitters, is_resumed_replay);
     replay_state.registry_contract_by_address = active_emitters
         .iter()
         .map(|emitter| (emitter.address.clone(), emitter.contract_instance_id))
@@ -507,6 +507,16 @@ async fn sync_ens_v2_registry_resource_surface_with_scope_and_state(
             current_token_alias_by_canonical_key,
         },
     ))
+}
+
+fn initialize_registry_suffixes(
+    replay_state: &mut RegistryReplayState,
+    active_emitters: &[ActiveEmitter],
+    is_resumed_replay: bool,
+) {
+    if !is_resumed_replay {
+        replay_state.registry_suffix_by_address = initial_registry_suffixes(active_emitters);
+    }
 }
 
 #[cfg(test)]

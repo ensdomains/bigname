@@ -54,9 +54,10 @@ use anyhow::{Context, Result};
 use backfill::{
     BackfillAdapterSyncMode, BackfillBlockRange, BackfillJobRunConfig, BackfillSourceKind,
     CoinbaseSqlBackfillConfig, CoinbaseSqlSourceRegistry, hash_pinned_backfill_range_specs,
-    is_base_chain, run_resumable_coinbase_sql_backfill_job,
+    is_base_chain, load_existing_job_id, run_resumable_coinbase_sql_backfill_job,
     run_resumable_coinbase_sql_backfill_job_concurrently, run_resumable_hash_pinned_backfill_job,
     selected_backfill_source, standalone_backfill_profile_convergence_enabled,
+    warn_if_stale_generation_backfill_job_was_reused,
 };
 #[cfg(test)]
 use bigname_manifests::{
@@ -213,7 +214,7 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
         &args.chain,
         coinbase_sql_registry.has_source_for(&args.chain),
     );
-
+    let existing_backfill_job_id = load_existing_job_id(&pool, &args.idempotency_key).await?;
     let deployment_profile = args
         .deployment_profile
         .unwrap_or_else(|| deployment_profile_from_manifest_root(&args.manifests_root));
@@ -247,10 +248,9 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
         adapter_sync_mode: adapter_sync_mode.hash_pinned_backfill_mode(),
         header_audit_mode,
     };
-
-    match selected_backfill_source {
+    let job_outcome = match selected_backfill_source {
         BackfillSourceKind::HashPinned => {
-            run_resumable_hash_pinned_backfill_job(&pool, &source_plan, provider, config).await?;
+            run_resumable_hash_pinned_backfill_job(&pool, &source_plan, provider, config).await?
         }
         BackfillSourceKind::CoinbaseSql => {
             if !is_base_chain(&args.chain) {
@@ -285,7 +285,7 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
                     ranges,
                     args.coinbase_sql_workers,
                 )
-                .await?;
+                .await?
             } else {
                 run_resumable_coinbase_sql_backfill_job(
                     &pool,
@@ -295,11 +295,18 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
                     config,
                     coinbase_sql_config,
                 )
-                .await?;
+                .await?
             }
         }
         BackfillSourceKind::Auto => unreachable!("auto must be resolved before execution"),
-    }
+    };
+    warn_if_stale_generation_backfill_job_was_reused(
+        &pool,
+        &args.chain,
+        existing_backfill_job_id,
+        job_outcome.backfill_job_id,
+    )
+    .await?;
     if profile_convergence_enabled {
         let profile_convergence = drain_resolver_profile_input_changes(&pool).await?;
         profile_convergence

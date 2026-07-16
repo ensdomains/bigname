@@ -33,6 +33,33 @@ async fn normalized_event_index_definitions(pool: &PgPool) -> Result<BTreeMap<St
     Ok(definitions)
 }
 
+#[test]
+fn migration_error_has_priority_over_guard_release_error() {
+    let error = prioritize_operation_error::<()>(
+        Err(anyhow::anyhow!("actionable migration failure")),
+        Err(anyhow::anyhow!("secondary guard release failure")),
+    )
+    .expect_err("the migration failure must remain actionable");
+
+    assert_eq!(error.to_string(), "actionable migration failure");
+}
+
+#[test]
+fn guard_release_error_is_returned_after_successful_migration() {
+    let error = prioritize_operation_error(Ok(()), Err(anyhow::anyhow!("guard release failure")))
+        .expect_err("a failed guard release must fail migration setup");
+
+    assert_eq!(error.to_string(), "guard release failure");
+}
+
+#[test]
+fn successful_migration_returns_its_value_after_successful_release() {
+    let value = prioritize_operation_error(Ok(42), Ok(()))
+        .expect("successful migration setup must return the operation value");
+
+    assert_eq!(value, 42);
+}
+
 #[tokio::test]
 async fn runtime_rebuild_matches_all_migrated_deferred_index_definitions() -> Result<()> {
     let database = test_database().await?;

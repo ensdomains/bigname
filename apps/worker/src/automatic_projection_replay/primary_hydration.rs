@@ -121,14 +121,17 @@ mod tests {
 
         assert!(trigger_changed(&None, &[]));
         assert!(!trigger_changed(&Some(Vec::new()), &[]));
-        assert!(trigger_changed(&Some(Vec::new()), &[trigger.clone()]));
+        assert!(trigger_changed(
+            &Some(Vec::new()),
+            std::slice::from_ref(&trigger)
+        ));
         assert!(!trigger_changed(
             &Some(vec![trigger.clone()]),
-            &[trigger.clone()]
+            std::slice::from_ref(&trigger)
         ));
         assert!(trigger_changed(
             &Some(vec![trigger.clone()]),
-            &[later_trigger.clone()]
+            std::slice::from_ref(&later_trigger)
         ));
         assert!(trigger_changed(&Some(vec![trigger.clone()]), &[]));
         assert!(trigger_changed(
@@ -162,7 +165,11 @@ mod tests {
         };
         let last_trigger = Some(vec![trigger.clone()]);
 
-        assert!(!needs_hydration(&last_trigger, &[trigger.clone()], false));
+        assert!(!needs_hydration(
+            &last_trigger,
+            std::slice::from_ref(&trigger),
+            false
+        ));
         assert!(needs_hydration(&last_trigger, &[trigger], true));
     }
 

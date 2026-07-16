@@ -4,7 +4,9 @@ use sqlx::{PgPool, Postgres, Row};
 use crate::lineage::ChainLineageBlock;
 
 use super::{
-    ChainCheckpoint, ChainCheckpointUpdate, advance_chain_checkpoints_with_lineage_fork_policy,
+    ChainCheckpoint, ChainCheckpointUpdate,
+    advance::advance_chain_checkpoints_with_lineage_fork_policy,
+    advance_chain_checkpoints_in_transaction_with_lineage_fork_policy,
 };
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -22,6 +24,18 @@ pub async fn advance_chain_checkpoints_rejecting_non_orphaned_lineage_forks(
 ) -> Result<ChainCheckpoint> {
     advance_chain_checkpoints_with_lineage_fork_policy(pool, update, LineageForkPolicy::Reject)
         .await
+}
+
+pub async fn advance_chain_checkpoints_rejecting_non_orphaned_lineage_forks_in_transaction(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    update: &ChainCheckpointUpdate,
+) -> Result<ChainCheckpoint> {
+    advance_chain_checkpoints_in_transaction_with_lineage_fork_policy(
+        transaction,
+        update,
+        LineageForkPolicy::Reject,
+    )
+    .await
 }
 
 pub(super) async fn lock_lineage_writes_for_guarded_promotion(

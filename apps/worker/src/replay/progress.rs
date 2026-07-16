@@ -10,7 +10,10 @@ use super::CurrentProjectionReplayStepSummary;
 /// Version 8 covers `permissions_current_resource_summary` backfill and atomic publication with
 /// `permissions_current`, including resources with zero permission rows, while retaining version 7
 /// exact-name-profile evidence.
-pub const CURRENT_PROJECTION_REPLAY_VERSION: i32 = 8;
+/// Version 9 forces the full permission cutover that seeds publication compatibility and its
+/// monotonic read-consistency revision, including zero-event resources discovered from canonical
+/// resource identity evidence.
+pub const CURRENT_PROJECTION_REPLAY_VERSION: i32 = 9;
 
 pub(super) async fn projection_replay_completed(
     pool: &PgPool,

@@ -112,7 +112,7 @@ async fn rebuild_all_resources(pool: &PgPool) -> Result<PermissionsCurrentRebuil
             summaries.clear();
         }
 
-        if completed_resource_count % 5_000 == 0 {
+        if completed_resource_count.is_multiple_of(5_000) {
             tracing::info!(
                 projection = "permissions_current",
                 queued_resource_count = requested_resource_count,

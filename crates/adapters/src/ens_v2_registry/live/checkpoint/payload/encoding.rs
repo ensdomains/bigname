@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -10,14 +10,13 @@ const CHECKPOINT_CODEC: JsonbCheckpointCodec = JsonbCheckpointCodec::new(
 );
 
 pub(super) fn encode_value<T: Serialize>(value: &T) -> Result<Value> {
-    let value =
-        serde_json::to_value(value).context("failed to encode ENSv2 live checkpoint payload")?;
-    Ok(CHECKPOINT_CODEC.encode(value))
+    CHECKPOINT_CODEC.encode_serde(value, "failed to encode ENSv2 live checkpoint payload")
 }
 
 pub(super) fn decode_value<T: serde::de::DeserializeOwned>(value: Value) -> Result<T> {
-    let value = CHECKPOINT_CODEC
-        .decode(value)
-        .context("failed to decode ENSv2 live checkpoint JSONB encoding")?;
-    serde_json::from_value(value).context("failed to decode ENSv2 live checkpoint payload")
+    CHECKPOINT_CODEC.decode_serde(
+        value,
+        "failed to decode ENSv2 live checkpoint JSONB encoding",
+        "failed to decode ENSv2 live checkpoint payload",
+    )
 }

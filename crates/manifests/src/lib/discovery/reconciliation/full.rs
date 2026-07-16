@@ -30,81 +30,34 @@ use crate::{
     reconcile_active_contract_instance_addresses,
 };
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FullDiscoveryReconciliationOptions<'a> {
+    /// Inclusive target for a complete retained-history replay. A later
+    /// non-orphaned assignment remains current.
+    pub through_block_number: Option<i64>,
+    /// Optional writer-fence expectation checked before absence-based
+    /// reconciliation changes discovery authority.
+    pub expected_admission_epoch: Option<ExpectedDiscoveryAdmissionEpoch<'a>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExpectedDiscoveryAdmissionEpoch<'a> {
+    pub chain: &'a str,
+    pub epoch: i64,
+}
+
+/// Reconcile a complete retained observation history, optionally through an
+/// inclusive block boundary and/or under one chain's admission-epoch fence.
 pub async fn reconcile_discovery_observations(
     pool: &PgPool,
     discovery_source: &str,
     observations: &[DiscoveryObservation],
+    options: FullDiscoveryReconciliationOptions<'_>,
 ) -> Result<DiscoveryReconciliationSummary> {
-    reconcile_discovery_observations_with_boundary(pool, discovery_source, observations, None, None)
-        .await
-}
-
-/// Full-source reconciliation fenced to one chain's expected discovery
-/// admission epoch. The comparison happens after the writer lock is acquired
-/// and before any absence-based mutation.
-pub async fn reconcile_discovery_observations_with_expected_admission_epoch(
-    pool: &PgPool,
-    discovery_source: &str,
-    observations: &[DiscoveryObservation],
-    chain: &str,
-    expected_admission_epoch: i64,
-) -> Result<DiscoveryReconciliationSummary> {
-    reconcile_discovery_observations_with_boundary(
-        pool,
-        discovery_source,
-        observations,
-        None,
-        Some((chain, expected_admission_epoch)),
-    )
-    .await
-}
-
-/// Reconcile the complete retained observation history through an inclusive
-/// block boundary. Active edges which start later than the boundary are
-/// preserved unless their start block is explicitly orphaned.
-pub async fn reconcile_discovery_observations_through_block(
-    pool: &PgPool,
-    discovery_source: &str,
-    observations: &[DiscoveryObservation],
-    through_block_number: i64,
-) -> Result<DiscoveryReconciliationSummary> {
-    reconcile_discovery_observations_with_boundary(
-        pool,
-        discovery_source,
-        observations,
-        Some(through_block_number),
-        None,
-    )
-    .await
-}
-
-/// Boundary-limited full-source reconciliation fenced to one chain's expected
-/// discovery admission epoch.
-pub async fn reconcile_discovery_observations_through_block_with_expected_admission_epoch(
-    pool: &PgPool,
-    discovery_source: &str,
-    observations: &[DiscoveryObservation],
-    through_block_number: i64,
-    chain: &str,
-    expected_admission_epoch: i64,
-) -> Result<DiscoveryReconciliationSummary> {
-    reconcile_discovery_observations_with_boundary(
-        pool,
-        discovery_source,
-        observations,
-        Some(through_block_number),
-        Some((chain, expected_admission_epoch)),
-    )
-    .await
-}
-
-async fn reconcile_discovery_observations_with_boundary(
-    pool: &PgPool,
-    discovery_source: &str,
-    observations: &[DiscoveryObservation],
-    through_block_number: Option<i64>,
-    expected_admission_epoch: Option<(&str, i64)>,
-) -> Result<DiscoveryReconciliationSummary> {
+    let through_block_number = options.through_block_number;
+    let expected_admission_epoch = options
+        .expected_admission_epoch
+        .map(|expected| (expected.chain, expected.epoch));
     let mut transaction = pool
         .begin()
         .await

@@ -56,16 +56,15 @@ fn assert_no_resolver(body: &Value) {
     );
 }
 
-fn assert_compact_record_not_success(body: &Value, path: &str, old_value: Value) {
-    let status = pointer(body, &format!("{path}/status"));
-    assert_ne!(
-        status, "success",
-        "old resolver cache must not remain successful at {path}; body: {body}"
+fn assert_compact_record_not_success(body: &Value, path: &str) {
+    assert_eq!(
+        pointer(body, &format!("{path}/status")),
+        "not_found",
+        "old resolver cache must become not_found at {path}; body: {body}"
     );
-    assert_ne!(
-        pointer(body, &format!("{path}/value")),
-        old_value,
-        "old resolver value must not be attributed to the current resolver at {path}; body: {body}"
+    assert!(
+        body.pointer(&format!("{path}/value")).is_none(),
+        "not_found record must omit value at {path}; body: {body}"
     );
 }
 
@@ -83,16 +82,8 @@ async fn resolver_changes_follow_registry_and_zero_releases() -> Result<()> {
     ens_v1::register_eth_name(&rpc, &deployment, "flip", alice, YEAR, first_resolver).await?;
 
     {
-        let run = support::ingest_and_serve(
-            &anvil,
-            &deployment,
-            Some(
-                "SELECT EXISTS (SELECT 1 FROM normalized_events \
-                 WHERE logical_name_id = 'ens:flip.eth' AND event_kind = 'ResolverChanged' \
-                 AND canonicality_state = 'canonical')",
-            ),
-        )
-        .await?;
+        let ready_sql = support::canonical_event_ready_sql("ens:flip.eth", "ResolverChanged", None);
+        let run = support::ingest_and_serve(&anvil, &deployment, Some(&ready_sql)).await?;
         let body = exact_name(&run.api, "ens", "flip.eth").await?;
         assert_resolver(&body, first_resolver);
         run.db.cleanup().await?;
@@ -333,19 +324,8 @@ async fn records_route_values_and_version_boundaries_follow_current_resolver() -
         pointer(&replaced_records, "/data/resolver_address"),
         replacement_addr
     );
-    assert_compact_record_not_success(
-        &replaced_records,
-        "/data/coin_addresses/0",
-        json!(MULTICOIN_HEX),
-    );
-    assert_compact_record_not_success(
-        &replaced_records,
-        "/data/content_hash",
-        json!({
-            "encoding": "hex",
-            "bytes": CONTENTHASH_HEX,
-        }),
-    );
+    assert_compact_record_not_success(&replaced_records, "/data/coin_addresses/0");
+    assert_compact_record_not_success(&replaced_records, "/data/content_hash");
 
     let cleared_exact = exact_name(&current.api, "ens", "clearable.eth").await?;
     let cleared_boundary = boundary(&cleared_exact)?;
@@ -359,11 +339,7 @@ async fn records_route_values_and_version_boundaries_follow_current_resolver() -
         "?texts=com.twitter&mode=declared&meta=full",
     )
     .await?;
-    assert_compact_record_not_success(
-        &cleared_records,
-        "/data/text_records/com.twitter",
-        json!("before-clear"),
-    );
+    assert_compact_record_not_success(&cleared_records, "/data/text_records/com.twitter");
 
     current.db.cleanup().await?;
     Ok(())
@@ -825,13 +801,11 @@ async fn live_code_hash_profile_transition_orphans_and_reactivates_records() -> 
         ),
         "unsupported"
     );
-    assert_ne!(
-        pointer(
-            &unsupported_records,
-            &format!("/data/text_records/{TEXT_KEY}/value")
-        ),
-        TEXT_VALUE,
-        "the stale declared value must disappear while the profile is unsupported"
+    assert!(
+        unsupported_records
+            .pointer(&format!("/data/text_records/{TEXT_KEY}/value"))
+            .is_none(),
+        "the stale declared value must be omitted while the profile is unsupported: {unsupported_records}"
     );
     assert_eq!(
         pointer(&unsupported_records, "/data/known_text_keys/status"),

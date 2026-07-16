@@ -198,7 +198,7 @@ pub(crate) const API_ROUTE_DEFINITIONS: &[ApiRouteDefinition] = &[
             "Collections",
             ADDRESS_NAMES_PARAMETERS,
             "CollectionResponse",
-            ApiRouteErrorResponses::new(true, false),
+            ApiRouteErrorResponses::conflict(false),
         ),
     ),
     ApiRouteDefinition::public_get(
@@ -318,7 +318,7 @@ pub(crate) const API_ROUTE_DEFINITIONS: &[ApiRouteDefinition] = &[
             "Collections",
             NAME_ROLES_PARAMETERS,
             "CompactRolesResponse",
-            ApiRouteErrorResponses::new(true, true),
+            ApiRouteErrorResponses::conflict(true),
         ),
     ),
     ApiRouteDefinition::public_get(
@@ -366,7 +366,7 @@ pub(crate) const API_ROUTE_DEFINITIONS: &[ApiRouteDefinition] = &[
             "Collections",
             ROLES_PARAMETERS,
             "CompactRolesResponse",
-            ApiRouteErrorResponses::new(true, false),
+            ApiRouteErrorResponses::conflict(false),
         ),
     ),
     ApiRouteDefinition::public_get(
@@ -426,7 +426,7 @@ pub(crate) const API_ROUTE_DEFINITIONS: &[ApiRouteDefinition] = &[
             "Collections",
             RESOURCE_PERMISSIONS_PARAMETERS,
             "CollectionResponse",
-            ApiRouteErrorResponses::new(true, false),
+            ApiRouteErrorResponses::conflict(false),
         ),
     ),
     ApiRouteDefinition::public_get(

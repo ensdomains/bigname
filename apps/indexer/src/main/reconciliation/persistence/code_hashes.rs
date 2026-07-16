@@ -16,6 +16,7 @@ use super::super::{
     },
     types::{CanonicalReconciliation, CanonicalReconciliationStatus, HeadChangeSet},
 };
+use super::load_live_generic_resolver_topic0s;
 
 pub(crate) async fn persist_reconciled_raw_code_hashes(
     pool: &sqlx::PgPool,
@@ -26,9 +27,6 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
     head_change_set: HeadChangeSet,
 ) -> Result<()> {
     if canonical.status == CanonicalReconciliationStatus::StoredLineagePromoted {
-        return Ok(());
-    }
-    if task.addresses.is_empty() {
         return Ok(());
     }
 
@@ -53,18 +51,37 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
     let watched_addresses = selected_address_set(&task.addresses)
         .into_iter()
         .collect::<Vec<_>>();
+    let generic_resolver_topic0s = load_live_generic_resolver_topic0s(pool, &task.chain)
+        .await?
+        .into_iter()
+        .collect::<Vec<_>>();
     let emitter_addresses_by_block_hash = load_raw_log_emitter_addresses_by_block_hashes(
         pool,
         &task.chain,
         &candidate_hashes,
         &watched_addresses,
+        &generic_resolver_topic0s,
     )
     .await?;
+    let code_observation_addresses = watched_addresses
+        .iter()
+        .cloned()
+        .chain(
+            emitter_addresses_by_block_hash
+                .values()
+                .flat_map(|addresses| addresses.iter().cloned()),
+        )
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if code_observation_addresses.is_empty() {
+        return Ok(());
+    }
     let stored_code_addresses_by_block_hash = load_raw_code_addresses_by_block_hashes(
         pool,
         &task.chain,
         &candidate_hashes,
-        &watched_addresses,
+        &code_observation_addresses,
     )
     .await?;
     let baseline_addresses =
@@ -130,8 +147,11 @@ async fn load_raw_log_emitter_addresses_by_block_hashes(
     chain: &str,
     block_hashes: &[String],
     watched_addresses: &[String],
+    generic_resolver_topic0s: &[String],
 ) -> Result<BTreeMap<String, BTreeSet<String>>> {
-    if block_hashes.is_empty() || watched_addresses.is_empty() {
+    if block_hashes.is_empty()
+        || (watched_addresses.is_empty() && generic_resolver_topic0s.is_empty())
+    {
         return Ok(BTreeMap::new());
     }
 
@@ -143,7 +163,10 @@ async fn load_raw_log_emitter_addresses_by_block_hashes(
         FROM raw_logs
         WHERE chain_id = $1
           AND block_hash = ANY($2::TEXT[])
-          AND LOWER(emitting_address) = ANY($3::TEXT[])
+          AND (
+              LOWER(emitting_address) = ANY($3::TEXT[])
+              OR LOWER(topics[1]) = ANY($4::TEXT[])
+          )
         GROUP BY block_hash, LOWER(emitting_address)
         ORDER BY block_hash, LOWER(emitting_address)
         "#,
@@ -151,6 +174,7 @@ async fn load_raw_log_emitter_addresses_by_block_hashes(
     .bind(chain)
     .bind(block_hashes)
     .bind(watched_addresses)
+    .bind(generic_resolver_topic0s)
     .fetch_all(pool)
     .await
     .with_context(|| {
@@ -181,9 +205,9 @@ async fn load_raw_code_addresses_by_block_hashes(
     pool: &sqlx::PgPool,
     chain: &str,
     block_hashes: &[String],
-    watched_addresses: &[String],
+    code_observation_addresses: &[String],
 ) -> Result<BTreeMap<String, BTreeSet<String>>> {
-    if block_hashes.is_empty() || watched_addresses.is_empty() {
+    if block_hashes.is_empty() || code_observation_addresses.is_empty() {
         return Ok(BTreeMap::new());
     }
 
@@ -203,7 +227,7 @@ async fn load_raw_code_addresses_by_block_hashes(
     )
     .bind(chain)
     .bind(block_hashes)
-    .bind(watched_addresses)
+    .bind(code_observation_addresses)
     .fetch_all(pool)
     .await
     .with_context(|| {

@@ -338,7 +338,7 @@ fn ens_v1_reverse_name_primary_claim_source_after_state_repair_allowed(
         existing.after_state.get("primary_claim_source"),
         incoming.after_state.get("primary_claim_source"),
     ) {
-        (None, Some(source)) | (Some(source), None) => ens_v1_primary_claim_source_valid(source),
+        (None, Some(source)) => ens_v1_primary_claim_source_valid(source),
         _ => false,
     }
 }

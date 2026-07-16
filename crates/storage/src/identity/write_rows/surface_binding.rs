@@ -80,6 +80,7 @@ pub(in crate::identity) async fn upsert_surface_binding(
 
     #[cfg(test)]
     super::test_hooks::maybe_wait_after_reload(
+        executor,
         "surface_bindings",
         binding.surface_binding_id.to_string(),
     )

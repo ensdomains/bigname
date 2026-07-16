@@ -99,7 +99,7 @@ async fn register_eth_name_end_to_end() -> Result<()> {
     // --- layer 4: public API output ---
     let (status, body) = run.api.get_json("/v1/names/ens/alice.eth").await?;
     assert_eq!(status, 200, "exact-name lookup failed: {body}");
-    let pointer = |path: &str| -> Value { body.pointer(path).cloned().unwrap_or(Value::Null) };
+    let pointer = |path: &str| crate::harness::responses::pointer(&body, path);
     assert_eq!(
         pointer("/data/normalized_name"),
         "alice.eth",
@@ -180,17 +180,10 @@ async fn live_worker_applies_registration_and_renewal_while_api_serves() -> Resu
     .await?;
     rpc.mine(2).await?;
     let registration_head = rpc.block_number().await?;
+    let registration_ready_sql =
+        support::canonical_event_ready_sql(LOGICAL_NAME_ID, "RegistrationGranted", None);
     indexer
-        .wait_for_checkpoint(
-            &db.pool,
-            registration_head,
-            Some(
-                "SELECT EXISTS (SELECT 1 FROM normalized_events \
-                 WHERE logical_name_id = 'ens:liveworker.eth' \
-                 AND event_kind = 'RegistrationGranted' \
-                 AND canonicality_state = 'canonical')",
-            ),
-        )
+        .wait_for_checkpoint(&db.pool, registration_head, Some(&registration_ready_sql))
         .await?;
     worker
         .wait_for_sql(
@@ -211,17 +204,10 @@ async fn live_worker_applies_registration_and_renewal_while_api_serves() -> Resu
     ens_v1::renew_eth_name(&rpc, &deployment, user, LABEL, 24 * 60 * 60).await?;
     rpc.mine(2).await?;
     let renewal_head = rpc.block_number().await?;
+    let renewal_ready_sql =
+        support::canonical_event_ready_sql(LOGICAL_NAME_ID, "RegistrationRenewed", None);
     indexer
-        .wait_for_checkpoint(
-            &db.pool,
-            renewal_head,
-            Some(
-                "SELECT EXISTS (SELECT 1 FROM normalized_events \
-                 WHERE logical_name_id = 'ens:liveworker.eth' \
-                 AND event_kind = 'RegistrationRenewed' \
-                 AND canonicality_state = 'canonical')",
-            ),
-        )
+        .wait_for_checkpoint(&db.pool, renewal_head, Some(&renewal_ready_sql))
         .await?;
     worker
         .wait_for_sql(

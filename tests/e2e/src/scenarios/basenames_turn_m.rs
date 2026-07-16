@@ -90,17 +90,13 @@ async fn renew_release_and_premium_reregistration_rotate_lineage() -> Result<()>
     let renewal = basenames::renew_base_name(&rpc, &deployment, alice, "phoenix", YEAR).await?;
     rpc.increase_time(2 * YEAR + DAY).await?;
 
-    let grace = support::ingest_basenames_and_serve(
-        &base,
-        &deployment,
-        Some(
-            "SELECT EXISTS (SELECT 1 FROM normalized_events \
-             WHERE logical_name_id = 'basenames:phoenix.base.eth' \
-               AND event_kind = 'RegistrationRenewed' \
-               AND canonicality_state = 'canonical')",
-        ),
-    )
-    .await?;
+    let renewal_ready_sql = support::canonical_event_ready_sql(
+        "basenames:phoenix.base.eth",
+        "RegistrationRenewed",
+        None,
+    );
+    let grace =
+        support::ingest_basenames_and_serve(&base, &deployment, Some(&renewal_ready_sql)).await?;
     let renewal_events: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events \
          WHERE transaction_hash = $1 \
@@ -135,17 +131,13 @@ async fn renew_release_and_premium_reregistration_rotate_lineage() -> Result<()>
     let activity =
         basenames::register_base_name(&rpc, &deployment, alice, "releaseprobe", alice, YEAR)
             .await?;
-    let released = support::ingest_basenames_and_serve(
-        &base,
-        &deployment,
-        Some(
-            "SELECT EXISTS (SELECT 1 FROM normalized_events \
-             WHERE logical_name_id = 'basenames:phoenix.base.eth' \
-               AND event_kind = 'RegistrationReleased' \
-               AND canonicality_state = 'canonical')",
-        ),
-    )
-    .await?;
+    let released_ready_sql = support::canonical_event_ready_sql(
+        "basenames:phoenix.base.eth",
+        "RegistrationReleased",
+        None,
+    );
+    let released =
+        support::ingest_basenames_and_serve(&base, &deployment, Some(&released_ready_sql)).await?;
     let release_block: i64 = sqlx::query_scalar(
         "SELECT block_number FROM normalized_events \
          WHERE logical_name_id = 'basenames:phoenix.base.eth' \
@@ -669,17 +661,12 @@ async fn l2_resolver_records_clear_and_contenthash_gap() -> Result<()> {
     initial.db.cleanup().await?;
 
     basenames::clear_base_records(&rpc, resolver, alice, "records.base.eth").await?;
-    let current = support::ingest_basenames_and_serve(
-        &base,
-        &deployment,
-        Some(
-            "SELECT EXISTS (SELECT 1 FROM normalized_events \
-             WHERE logical_name_id = 'basenames:records.base.eth' \
-               AND event_kind = 'RecordVersionChanged' \
-               AND canonicality_state = 'canonical')",
-        ),
-    )
-    .await?;
+    let ready_sql = support::canonical_event_ready_sql(
+        "basenames:records.base.eth",
+        "RecordVersionChanged",
+        None,
+    );
+    let current = support::ingest_basenames_and_serve(&base, &deployment, Some(&ready_sql)).await?;
     let version_events: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM normalized_events \
          WHERE logical_name_id = 'basenames:records.base.eth' \

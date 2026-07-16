@@ -36,14 +36,14 @@ pub(super) async fn refresh_discovery_watch_state(
     } else {
         refresh_runtime_state_from_stored_discovery(pool, manifest_runtime_state).await
     };
-    if refreshed_state.is_ok() {
-        if !resolver_profile_drain_succeeded(
+    if refreshed_state.is_ok()
+        && !resolver_profile_drain_succeeded(
             drain_resolver_profile_input_changes(pool).await,
             "timer",
             "stored_discovery_state",
-        ) {
-            return Ok(false);
-        }
+        )
+    {
+        return Ok(false);
     }
     match refreshed_state {
         Ok(Some((next_manifest_runtime_state, next_tasks))) => {

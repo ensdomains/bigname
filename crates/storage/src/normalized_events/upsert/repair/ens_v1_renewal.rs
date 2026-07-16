@@ -476,10 +476,10 @@ fn registration_release_before_state_repair_allowed(
     after_state: &Value,
 ) -> bool {
     if !after_state.get("released_at").is_some_and(Value::is_number)
-        || !after_state
+        || after_state
             .get("labelhash")
             .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
+            .is_none_or(|value| value.trim().is_empty())
     {
         return false;
     }

@@ -325,12 +325,12 @@ async fn load_record_inventory_current_by_requests(
             .push(inventory);
     }
     for (resource_id, rows) in rows_by_resource {
-        if rows.len() == 1 {
-            if let Some(inventory) = rows.into_iter().next() {
-                inventories
-                    .by_unambiguous_resource
-                    .insert(resource_id, inventory);
-            }
+        if rows.len() == 1
+            && let Some(inventory) = rows.into_iter().next()
+        {
+            inventories
+                .by_unambiguous_resource
+                .insert(resource_id, inventory);
         }
     }
 

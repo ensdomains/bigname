@@ -124,8 +124,16 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         )?
         .with_defer_projection_indexes(args.normalized_replay_defer_projection_indexes);
         let catchup_pool = pool.clone();
+        let catchup_provider_registry = provider_registry.clone();
         tokio::spawn(async move {
-            if let Err(error) = run_normalized_replay_catchup(catchup_pool, catchup_config).await {
+            if let Err(error) = run_normalized_replay_catchup(
+                catchup_pool,
+                catchup_config,
+                catchup_provider_registry,
+                header_audit_mode,
+            )
+            .await
+            {
                 tracing::warn!(
                     service = "indexer",
                     error = ?error,

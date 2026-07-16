@@ -196,10 +196,11 @@ async fn renewal_preserves_promoted_coverage_and_registry_edges_follow() -> Resu
 
 /// Rows 3 and 9: the declared resolver edge follows set/change/zero,
 /// subregistry detach-to-zero removes the edge, and admin-half role bits
-/// render distinctly. A chain composing renewal + three resolver changes +
-/// attach/detach on one name hangs live intake even though every op ingests
-/// cleanly in isolation (probed one by one; compositional trigger recorded
-/// with the reproduced wedge) — these edges are pinned via backfill + replay.
+/// render distinctly. This composed chain previously wedged automatic intake
+/// when full-closure replay admitted finite-start resolver and subregistry
+/// intervals without recovering their exact generation-bound coverage. Keep
+/// it on the standard live helper to prove catch-up closes those intervals
+/// before adapter ownership is handed back to live polling.
 #[tokio::test]
 async fn resolver_and_subregistry_edges_follow_set_change_zero() -> Result<()> {
     let anvil = Anvil::spawn_ethereum_sepolia().await?;
@@ -208,7 +209,7 @@ async fn resolver_and_subregistry_edges_follow_set_change_zero() -> Result<()> {
     let accounts = rpc.accounts().await?;
     let alice = accounts[1];
 
-    ens_v2::register_eth_name(
+    let registration = ens_v2::register_eth_name(
         &rpc,
         &deployment,
         ens_v2::RegisterEthName {
@@ -241,10 +242,16 @@ async fn resolver_and_subregistry_edges_follow_set_change_zero() -> Result<()> {
             .await?;
     }
 
-    let run = support::backfill_ens_v2_sepolia_and_replay_projections(
+    let run = support::ingest_ens_v2_sepolia_and_serve(
         &anvil,
         &deployment,
-        "ens-v2-edges",
+        Some(
+            "SELECT EXISTS (SELECT 1 FROM normalized_events \
+             WHERE logical_name_id = 'ens:edges.eth' \
+               AND event_kind = 'SubregistryChanged' \
+               AND after_state->>'subregistry' IS NULL \
+               AND canonicality_state = 'canonical')",
+        ),
     )
     .await?;
 
@@ -290,19 +297,59 @@ async fn resolver_and_subregistry_edges_follow_set_change_zero() -> Result<()> {
         "subregistry edge must attach then detach"
     );
 
-    // Pinned asymmetry: the live path derives PermissionChanged from every
-    // registration's EACRolesChanged, but the backfill path derives none —
-    // ENSv2 permission derivation is live-only today (parity gap recorded
-    // with the ledger row).
-    let backfill_permissions: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM normalized_events \
-         WHERE event_kind = 'PermissionChanged' AND canonicality_state = 'canonical'",
+    // Registrar registration defines the owner's role bitmap and calls the
+    // registry
+    // (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L17 @ ens_v2@48b3e2d)
+    // (upstream: .refs/ens_v2/contracts/src/registrar/ETHRegistrar.sol:L151 @ ens_v2@48b3e2d).
+    // The nonzero-owner path grants those roles on the constructed resource
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L463 @ ens_v2@48b3e2d)
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L469 @ ens_v2@48b3e2d),
+    // and the grant compares the current roles before emitting EACRolesChanged
+    // (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L267 @ ens_v2@48b3e2d)
+    // (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L274 @ ens_v2@48b3e2d).
+    // Automatic startup + replay must retain exactly that registry-scoped
+    // permission derivation, attributed to the registered resource and owner.
+    let edges_resource = name_resource(&run.db.pool, "ens:edges.eth").await?;
+    type RegistrationPermission = (
+        Uuid,
+        String,
+        String,
+        i64,
+        String,
+        String,
+        String,
+        String,
+        String,
+    );
+    let registration_permissions: Vec<RegistrationPermission> = sqlx::query_as(
+        "SELECT resource_id, source_family, derivation_kind, block_number, \
+                after_state->>'subject', after_state->>'source_event', \
+                after_state->'scope'->>'kind', \
+                after_state->'scope'->>'registry_address', \
+                after_state->>'upstream_resource' \
+         FROM normalized_events \
+         WHERE event_kind = 'PermissionChanged' \
+           AND resource_id = $1 \
+           AND canonicality_state = 'canonical' \
+         ORDER BY block_number, log_index",
     )
-    .fetch_one(&run.db.pool)
+    .bind(edges_resource)
+    .fetch_all(&run.db.pool)
     .await?;
     assert_eq!(
-        backfill_permissions, 0,
-        "backfill currently derives no v2 PermissionChanged"
+        registration_permissions,
+        vec![(
+            edges_resource,
+            "ens_v2_registry_l1".to_owned(),
+            "ens_v2_permissions".to_owned(),
+            registration.register_block as i64,
+            format!("{alice:#x}"),
+            "EACRolesChanged".to_owned(),
+            "registry".to_owned(),
+            format!("{:#x}", deployment.eth_registry.address),
+            format!("0x{:064x}", registration.resource_id),
+        )],
+        "automatic intake must derive exactly the registration's registry-scoped permission change"
     );
 
     run.db.cleanup().await?;
@@ -1040,10 +1087,11 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
         );
     }
 
-    // Row 9's admin-half pin rides this live corpus (backfill derives no
-    // PermissionChanged): the registrar bitmap's admin bits must render as
-    // distinct powers rather than merging with regular ones. Post-sale the
-    // migrated roles belong to the buyer.
+    // Row 9's admin-half pin rides this live sale corpus so it also checks the
+    // role migration: the registrar bitmap's admin bits must render as distinct
+    // powers rather than merging with regular ones, and post-sale the migrated
+    // roles must belong to the buyer. The separate backfill + replay scenario
+    // pins the registration grant's initial PermissionChanged.
     let sale_resource = name_resource(&run.db.pool, "ens:sale.eth").await?;
     let power_rows: Vec<Value> = sqlx::query_scalar(
         "SELECT effective_powers FROM permissions_current \

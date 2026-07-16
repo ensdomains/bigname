@@ -1,6 +1,8 @@
 use alloy_primitives::hex;
 use anyhow::{Context, Result, bail};
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
+use std::fmt::Display;
 
 pub(crate) struct JsonbCheckpointCodec {
     escaped_string_key: &'static str,
@@ -118,6 +120,30 @@ impl JsonbCheckpointCodec {
             value => Ok(value),
         }
     }
+
+    pub(crate) fn encode_serde<T, C>(&self, value: &T, context: C) -> Result<Value>
+    where
+        T: Serialize + ?Sized,
+        C: Display + Send + Sync + 'static,
+    {
+        let value = serde_json::to_value(value).context(context)?;
+        Ok(self.encode(value))
+    }
+
+    pub(crate) fn decode_serde<T, C, D>(
+        &self,
+        value: Value,
+        codec_context: C,
+        payload_context: D,
+    ) -> Result<T>
+    where
+        T: DeserializeOwned,
+        C: Display + Send + Sync + 'static,
+        D: Display + Send + Sync + 'static,
+    {
+        let value = self.decode(value).context(codec_context)?;
+        serde_json::from_value(value).context(payload_context)
+    }
 }
 
 fn decode_utf8_hex(value: &str) -> Result<String> {
@@ -178,6 +204,43 @@ mod tests {
             }));
             assert_eq!(CODEC.decode(encoded)?, payload);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn serde_helpers_preserve_encoding_and_error_contexts() -> Result<()> {
+        let payload = json!({"record": "before\0after"});
+        let expected = json!({
+            "record": {"__checkpoint_string_v1": "6265666f7265006166746572"}
+        });
+
+        let encoded = CODEC.encode_serde(&payload, "encode context")?;
+        assert_eq!(encoded, expected);
+        assert_eq!(
+            CODEC.decode_serde::<Value, _, _>(encoded, "codec context", "payload context",)?,
+            payload
+        );
+
+        let codec_error = CODEC
+            .decode_serde::<Value, _, _>(
+                json!({"__checkpoint_string_v1": 1}),
+                "codec context",
+                "payload context",
+            )
+            .expect_err("invalid envelope must fail");
+        assert_eq!(
+            format!("{codec_error:#}"),
+            "codec context: checkpoint escaped string payload is not a string"
+        );
+
+        let payload_error = CODEC
+            .decode_serde::<u64, _, _>(
+                Value::String("not a number".to_owned()),
+                "codec context",
+                "payload context",
+            )
+            .expect_err("invalid payload must fail");
+        assert!(format!("{payload_error:#}").starts_with("payload context: invalid type"));
         Ok(())
     }
 }

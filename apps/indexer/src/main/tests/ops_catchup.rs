@@ -147,6 +147,28 @@ async fn ops_catchup_does_not_leave_precreated_job_pending_when_retention_rotate
         Some(1),
     )
     .await?;
+    insert_ops_watched_manifest_contract(
+        database.pool(),
+        4_111,
+        "ens",
+        "ethereum-mainnet",
+        "ens_v1_resolver_l1",
+        Uuid::from_u128(41_102),
+        "0x0000000000000000000000000000000000000102",
+        None,
+    )
+    .await?;
+    insert_ops_watched_manifest_contract(
+        database.pool(),
+        4_112,
+        "ens",
+        "ethereum-mainnet",
+        "ens_v1_registrar_l1",
+        Uuid::from_u128(41_103),
+        "0x0000000000000000000000000000000000000103",
+        Some(3),
+    )
+    .await?;
 
     sqlx::query(
         r#"
@@ -191,7 +213,10 @@ async fn ops_catchup_does_not_leave_precreated_job_pending_when_retention_rotate
     .await?;
 
     assert_eq!(outcome.drained_job_count, 2);
+    assert_eq!(outcome.planned_chunk_count, 1);
     assert_eq!(outcome.reused_completed_chunk_count, 0);
+    assert_eq!(outcome.skipped_unknown_start_target_count, 1);
+    assert_eq!(outcome.skipped_future_target_count, 1);
     let jobs = sqlx::query_as::<_, (i64, String, String)>(
         r#"
         SELECT
@@ -280,6 +305,12 @@ async fn ops_catchup_retry_reloads_targets_admitted_during_prior_pass() -> Resul
         outcome.drained_job_count >= 2,
         "discovery-epoch retry must execute a second target plan"
     );
+    assert_eq!(
+        outcome.planned_chunk_count, 1,
+        "the outcome reports the stable expanded plan once, not both convergence passes"
+    );
+    assert_eq!(outcome.skipped_unknown_start_target_count, 0);
+    assert_eq!(outcome.skipped_future_target_count, 0);
     assert!(
         sqlx::query_scalar::<_, bool>(
             r#"
