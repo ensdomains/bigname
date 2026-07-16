@@ -892,6 +892,221 @@ async fn successful_idle_iteration_clears_stale_cursor_failure() -> Result<()> {
     database.cleanup().await
 }
 
+#[tokio::test]
+async fn caught_up_idle_iteration_clears_only_matching_cursor_failure() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_normalized_replay_cursor_table(database.pool()).await?;
+    let chain = "ethereum-mainnet";
+    let other_chain = "base-mainnet";
+    let target_block = provider_block(
+        "0x4242424242424242424242424242424242424242424242424242424242424242",
+        Some("0x4141414141414141414141414141414141414141414141414141414141414141"),
+        42,
+    );
+    insert_chain_lineage_for_block(
+        database.pool(),
+        chain,
+        &target_block,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_reverse_claimed_log(
+        database.pool(),
+        chain,
+        &target_block,
+        "0x0000000000000000000000000000000000000042",
+        "0x4242424242424242424242424242424242424242",
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_replay_cursors (
+            deployment_profile,
+            chain_id,
+            cursor_kind,
+            range_start_block_number,
+            next_block_number,
+            target_block_number,
+            last_completed_block_number,
+            last_failure_reason,
+            last_failure_at
+        )
+        VALUES
+            ('mainnet', $1, 'raw_fact_normalized_events', 42, 43, 42, 42, 'target failure', now()),
+            ('mainnet', $2, 'raw_fact_normalized_events', 42, 43, 42, 42, 'other failure', now())
+        "#,
+    )
+    .bind(chain)
+    .bind(other_chain)
+    .execute(database.pool())
+    .await?;
+
+    let config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
+        "mainnet".to_owned(),
+        vec![chain.to_owned()],
+        1_000,
+        1_000,
+        1,
+    )?;
+    assert!(config.defer_projection_indexes);
+    assert_eq!(
+        normalized_replay_catchup::run_normalized_replay_catchup_iteration(
+            database.pool(),
+            &config,
+            chain,
+        )
+        .await?,
+        normalized_replay_catchup::CatchupIterationStatus::Idle
+    );
+
+    let failures = sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<String>,
+            Option<sqlx::types::time::OffsetDateTime>,
+        ),
+    >(
+        r#"
+        SELECT chain_id, last_failure_reason, last_failure_at
+        FROM normalized_replay_cursors
+        WHERE deployment_profile = 'mainnet'
+          AND cursor_kind = 'raw_fact_normalized_events'
+        ORDER BY chain_id
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(failures.len(), 2);
+    assert_eq!(failures[0].0, other_chain);
+    assert_eq!(failures[0].1.as_deref(), Some("other failure"));
+    assert!(failures[0].2.is_some());
+    assert_eq!(failures[1], (chain.to_owned(), None, None));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn caught_up_idle_iteration_retries_checkpoint_cleanup() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_normalized_replay_cursor_table(database.pool()).await?;
+    let chain = "ethereum-mainnet";
+    let target_block = provider_block(
+        "0x5252525252525252525252525252525252525252525252525252525252525252",
+        Some("0x5151515151515151515151515151515151515151515151515151515151515151"),
+        52,
+    );
+    insert_chain_lineage_for_block(
+        database.pool(),
+        chain,
+        &target_block,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_reverse_claimed_log(
+        database.pool(),
+        chain,
+        &target_block,
+        "0x0000000000000000000000000000000000000052",
+        "0x5252525252525252525252525252525252525252",
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_active_replay_manifest(
+        database.pool(),
+        52,
+        "ens",
+        "ens_v1_registry_l1",
+        chain,
+        "ens_v1",
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_replay_cursors (
+            deployment_profile,
+            chain_id,
+            cursor_kind,
+            range_start_block_number,
+            next_block_number,
+            target_block_number,
+            last_completed_block_number,
+            last_failure_reason,
+            last_failure_at
+        )
+        VALUES (
+            'mainnet', $1, 'raw_fact_normalized_events', 52, 53, 52, 52,
+            'checkpoint cleanup failure', now()
+        )
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_replay_adapter_checkpoints (
+            deployment_profile,
+            chain_id,
+            cursor_kind,
+            adapter,
+            checkpoint_scope,
+            replay_start_block_number,
+            replay_target_block_number
+        )
+        VALUES (
+            'mainnet', $1, 'raw_fact_normalized_events',
+            'ens_v1_subregistry_discovery', 'full_closure', 52, 52
+        )
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+
+    let config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
+        "mainnet".to_owned(),
+        vec![chain.to_owned()],
+        1_000,
+        1_000,
+        1,
+    )?;
+    assert_eq!(
+        normalized_replay_catchup::run_normalized_replay_catchup_iteration(
+            database.pool(),
+            &config,
+            chain,
+        )
+        .await?,
+        normalized_replay_catchup::CatchupIterationStatus::Idle
+    );
+
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM normalized_replay_adapter_checkpoints"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+    let failure = sqlx::query_as::<_, (Option<String>, Option<OffsetDateTime>)>(
+        r#"
+        SELECT last_failure_reason, last_failure_at
+        FROM normalized_replay_cursors
+        WHERE deployment_profile = 'mainnet'
+          AND chain_id = $1
+          AND cursor_kind = 'raw_fact_normalized_events'
+        "#,
+    )
+    .bind(chain)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(failure, (None, None));
+
+    database.cleanup().await
+}
+
 async fn create_normalized_replay_cursor_table(pool: &PgPool) -> Result<()> {
     sqlx::query(
         r#"

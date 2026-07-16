@@ -25,8 +25,8 @@ mod indexes;
 mod sources;
 
 use cursors::{
-    advance_cursor, clear_cursor_failure, ensure_cursor, record_cursor_failure,
-    rewind_cursor_for_newly_observed_older_logs,
+    advance_cursor, clear_cursor_failure, cursor_has_recorded_failure, ensure_cursor,
+    record_cursor_failure, rewind_cursor_for_newly_observed_older_logs,
 };
 use indexes::{
     ensure_projection_indexes_after_catchup, prepare_deferred_projection_indexes_for_fresh_replay,
@@ -268,16 +268,7 @@ pub(crate) async fn run_normalized_replay_catchup_iteration(
             pending_base_rederive_replay_target.is_none(),
             "Base normalized-event rederive replay cursor is pending but no retained canonical raw-log bounds are available for {chain}"
         );
-        if config.defer_projection_indexes {
-            ensure_projection_indexes_after_catchup(
-                pool,
-                &config.deployment_profile,
-                &config.chains,
-            )
-            .await?;
-        }
-        clear_cursor_failure(pool, &config.deployment_profile, chain).await?;
-        return Ok(CatchupIterationStatus::Idle);
+        return complete_idle_iteration(pool, config, chain).await;
     };
     if pending_base_rederive_replay_target.is_some() {
         ensure!(
@@ -327,16 +318,18 @@ pub(crate) async fn run_normalized_replay_catchup_iteration(
         .await?;
     }
     if cursor.next_block_number > cursor.target_block_number {
-        if config.defer_projection_indexes {
-            ensure_projection_indexes_after_catchup(
+        if closure_or_dependency_replay
+            && cursor_has_recorded_failure(pool, &config.deployment_profile, chain).await?
+        {
+            bigname_adapters::clear_replay_adapter_checkpoints(
                 pool,
                 &config.deployment_profile,
-                &config.chains,
+                chain,
+                CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS,
             )
             .await?;
         }
-        clear_cursor_failure(pool, &config.deployment_profile, chain).await?;
-        return Ok(CatchupIterationStatus::Idle);
+        return complete_idle_iteration(pool, config, chain).await;
     }
 
     if config.defer_projection_indexes {
@@ -440,6 +433,19 @@ pub(crate) async fn run_normalized_replay_catchup_iteration(
     );
 
     Ok(CatchupIterationStatus::Progressed)
+}
+
+async fn complete_idle_iteration(
+    pool: &PgPool,
+    config: &NormalizedReplayCatchupConfig,
+    chain: &str,
+) -> Result<CatchupIterationStatus> {
+    if config.defer_projection_indexes {
+        ensure_projection_indexes_after_catchup(pool, &config.deployment_profile, &config.chains)
+            .await?;
+    }
+    clear_cursor_failure(pool, &config.deployment_profile, chain).await?;
+    Ok(CatchupIterationStatus::Idle)
 }
 
 async fn replay_full_closure_or_dependency_normalized_events(
