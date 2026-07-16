@@ -35,7 +35,13 @@ jobs:
           components: clippy,rustfmt
 
       - name: Set up sccache
+        id: sccache
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Fall back without sccache
+        if: steps.sccache.outcome != 'success'
+        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -150,7 +156,13 @@ jobs:
           sudo apt-get install -y --no-install-recommends clang libclang-dev
 
       - name: Set up sccache
+        id: sccache
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Fall back without sccache
+        if: steps.sccache.outcome != 'success'
+        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -193,7 +205,13 @@ jobs:
           sudo apt-get install -y --no-install-recommends clang libclang-dev
 
       - name: Set up sccache
+        id: sccache
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Fall back without sccache
+        if: steps.sccache.outcome != 'success'
+        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -242,7 +260,13 @@ jobs:
           version: ${{ env.FOUNDRY_VERSION }}
 
       - name: Set up sccache
+        id: sccache
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Fall back without sccache
+        if: steps.sccache.outcome != 'success'
+        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -312,7 +336,13 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
 
       - name: Set up sccache
+        id: sccache
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Fall back without sccache
+        if: steps.sccache.outcome != 'success'
+        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
