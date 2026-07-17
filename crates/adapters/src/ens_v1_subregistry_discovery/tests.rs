@@ -1067,7 +1067,11 @@ async fn checkpointed_subregistry_replay_resets_for_late_lower_position_in_consu
 -> Result<()> {
     let _permit = crate::acquire_test_db_permit().await;
     let test_dir = TestDir::new()?;
-    let database = TestDatabase::new_with_max_connections(2).await?;
+    // The streamed finalize reconcile pages staged assignments over a second
+    // pooled connection while its reconciliation transaction is open, so a
+    // checkpointed replay needs three connections: the raw-log staging
+    // guard, the reconcile transaction, and the page reads.
+    let database = TestDatabase::new_with_max_connections(3).await?;
 
     let chain = "ethereum-mainnet";
     let registry_address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";

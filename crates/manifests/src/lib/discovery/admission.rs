@@ -52,15 +52,21 @@ impl DiscoveryAdmissionState {
             active_contracts.iter().filter(|contract| {
                 contract.chain == candidate.chain && contract.address == normalized_from_address
             }),
+            &self.known_contract_instances_by_address,
             candidate,
             &normalized_from_address,
             &normalized_to_address,
         )
     }
 
-    pub(super) fn admit_candidate_against_contract_lookup(
+    /// Admission against an address-keyed contract lookup with an explicit
+    /// known-address map, so callers may resolve
+    /// `contract_instance_addresses` in scoped batches (or pass the state's
+    /// own full map) instead of always loading the whole table.
+    pub(super) fn admit_candidate_against_contract_lookup_with_known_addresses(
         &self,
         active_contracts_by_address: &HashMap<(String, String), Vec<StoredActiveContract>>,
+        known_contract_instances_by_address: &HashMap<(String, String), Uuid>,
         candidate: &DiscoveryCandidate<'_>,
     ) -> Vec<AdmittedDiscoveryEdge> {
         let normalized_from_address = normalize_address(candidate.from_address);
@@ -72,6 +78,7 @@ impl DiscoveryAdmissionState {
 
         self.admit_candidate_against_matching_contracts(
             active_contracts.iter(),
+            known_contract_instances_by_address,
             candidate,
             &normalized_from_address,
             &normalized_to_address,
@@ -81,6 +88,7 @@ impl DiscoveryAdmissionState {
     fn admit_candidate_against_matching_contracts<'a>(
         &self,
         active_contracts: impl Iterator<Item = &'a StoredActiveContract>,
+        known_contract_instances_by_address: &HashMap<(String, String), Uuid>,
         candidate: &DiscoveryCandidate<'_>,
         normalized_from_address: &str,
         normalized_to_address: &str,
@@ -106,8 +114,7 @@ impl DiscoveryAdmissionState {
                     source_manifest_id: contract.manifest_id,
                     chain: candidate.chain.to_owned(),
                     from_contract_instance_id: contract.contract_instance_id,
-                    to_contract_instance_id: self
-                        .known_contract_instances_by_address
+                    to_contract_instance_id: known_contract_instances_by_address
                         .get(&(candidate.chain.to_owned(), normalized_to_address.to_owned()))
                         .copied(),
                     from_address: normalized_from_address.to_owned(),

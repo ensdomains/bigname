@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
 use sqlx::{PgPool, Row, postgres::PgConnection};
+use uuid::Uuid;
 
 use super::admission::DiscoveryAdmissionState;
 use super::provenance::TRANSITIVE_DISCOVERY_EDGE_KIND;
@@ -20,19 +21,64 @@ struct DiscoveryAdmissionScope {
     known_address_addresses: Vec<String>,
 }
 
+/// How `known_contract_instances_by_address` is materialized on the loaded
+/// admission state.
+enum KnownAddressLoad {
+    /// Every `contract_instance_addresses` row (historical behavior of the
+    /// unscoped loaders).
+    All,
+    /// Only the scoped observation target addresses.
+    Scoped,
+    /// Left empty: the caller resolves known addresses per batch via
+    /// `load_known_contract_instance_addresses` instead of holding the whole
+    /// table in memory.
+    Skip,
+}
+
 pub async fn load_discovery_admission_state(pool: &PgPool) -> Result<DiscoveryAdmissionState> {
     let mut connection = pool
         .acquire()
         .await
         .context("failed to acquire connection for discovery admission state loading")?;
-    load_discovery_admission_state_inner(&mut connection, None, None).await
+    load_discovery_admission_state_inner(&mut connection, None, None, KnownAddressLoad::All).await
 }
 
 pub(super) async fn load_discovery_admission_state_with_excluded_source(
     executor: &mut PgConnection,
     excluded_discovery_source: Option<&str>,
 ) -> Result<DiscoveryAdmissionState> {
-    load_discovery_admission_state_inner(executor, excluded_discovery_source, None).await
+    load_discovery_admission_state_inner(
+        executor,
+        excluded_discovery_source,
+        None,
+        KnownAddressLoad::All,
+    )
+    .await
+}
+
+/// Admission state for the streamed full-source reconcile: roots, contracts,
+/// rules, and transitive discovered parents load unscoped exactly as for the
+/// in-memory full reconcile, but the known-address map stays empty — the
+/// streamed walk resolves target addresses per observation page.
+///
+/// The unscoped discovered-parent load stays in memory deliberately: it is
+/// filtered to active, non-orphaned, role-propagating (`subregistry` +
+/// `reachable_from_root` + `propagated_role`) edges of OTHER discovery
+/// sources, so for a per-chain registry source it is bounded by the other
+/// chains'/families' derived registries — orders of magnitude below the
+/// excluded source's own per-node edge count, and identical to what the
+/// in-memory full reconcile already loads today.
+pub(super) async fn load_streamed_discovery_admission_state_with_excluded_source(
+    executor: &mut PgConnection,
+    excluded_discovery_source: Option<&str>,
+) -> Result<DiscoveryAdmissionState> {
+    load_discovery_admission_state_inner(
+        executor,
+        excluded_discovery_source,
+        None,
+        KnownAddressLoad::Skip,
+    )
+    .await
 }
 
 pub(super) async fn load_scoped_discovery_admission_state_with_excluded_source(
@@ -66,6 +112,7 @@ pub(super) async fn load_scoped_discovery_admission_state_with_excluded_source(
             known_address_chains,
             known_address_addresses,
         }),
+        KnownAddressLoad::Scoped,
     )
     .await
 }
@@ -74,6 +121,7 @@ async fn load_discovery_admission_state_inner(
     executor: &mut PgConnection,
     excluded_discovery_source: Option<&str>,
     scope: Option<DiscoveryAdmissionScope>,
+    known_address_load: KnownAddressLoad,
 ) -> Result<DiscoveryAdmissionState> {
     let (
         scoped,
@@ -229,37 +277,35 @@ async fn load_discovery_admission_state_inner(
     .await
     .context("failed to load active discovery rules")?;
 
-    let known_address_rows = if scoped {
-        sqlx::query(
-            r#"
-            WITH scoped_addresses AS (
-                SELECT DISTINCT chain_id, address
-                FROM UNNEST($1::TEXT[], $2::TEXT[]) AS scope(chain_id, address)
+    let known_contract_instances_by_address = match known_address_load {
+        KnownAddressLoad::All => {
+            // The contract_instance_id tiebreak keeps the per-key winner
+            // deterministic when an address has only deactivated rows with
+            // equal admitted_at, so per-batch resolution (the streamed
+            // reconcile) and this full load always agree.
+            let known_address_rows = sqlx::query(
+                r#"
+                SELECT chain_id, address, contract_instance_id
+                FROM contract_instance_addresses
+                ORDER BY chain_id, address, (deactivated_at IS NULL) DESC, admitted_at DESC,
+                         contract_instance_id
+                "#,
             )
-            SELECT cia.chain_id, cia.address, cia.contract_instance_id
-            FROM scoped_addresses scope
-            JOIN contract_instance_addresses cia
-              ON cia.chain_id = scope.chain_id
-             AND cia.address = scope.address
-            ORDER BY cia.chain_id, cia.address, (cia.deactivated_at IS NULL) DESC, cia.admitted_at DESC
-            "#,
-        )
-        .bind(&known_address_scope_chains)
-        .bind(&known_address_scope_addresses)
-        .fetch_all(&mut *executor)
-        .await
-    } else {
-        sqlx::query(
-            r#"
-            SELECT chain_id, address, contract_instance_id
-            FROM contract_instance_addresses
-            ORDER BY chain_id, address, (deactivated_at IS NULL) DESC, admitted_at DESC
-            "#,
-        )
-        .fetch_all(&mut *executor)
-        .await
-    }
-    .context("failed to load known contract-instance addresses")?;
+            .fetch_all(&mut *executor)
+            .await
+            .context("failed to load known contract-instance addresses")?;
+            fold_known_contract_instance_addresses(known_address_rows)?
+        }
+        KnownAddressLoad::Scoped => {
+            load_known_contract_instance_addresses(
+                executor,
+                &known_address_scope_chains,
+                &known_address_scope_addresses,
+            )
+            .await?
+        }
+        KnownAddressLoad::Skip => HashMap::new(),
+    };
 
     let active_roots = active_root_rows
         .into_iter()
@@ -332,6 +378,60 @@ async fn load_discovery_admission_state_inner(
             .push(rule);
     }
 
+    let active_rule_count = rules_by_manifest_id.values().map(Vec::len).sum();
+
+    Ok(DiscoveryAdmissionState {
+        active_manifest_count,
+        active_root_count: active_roots.len(),
+        active_contract_count: active_contracts.len(),
+        active_rule_count,
+        active_roots,
+        active_root_manifest_ids,
+        active_contracts,
+        known_contract_instances_by_address,
+        rules_by_manifest_id,
+    })
+}
+
+/// Resolve `contract_instance_addresses` for one batch of
+/// `(chain, normalized address)` keys, preferring the active and most
+/// recently admitted row per key exactly like the full known-address load.
+pub(super) async fn load_known_contract_instance_addresses(
+    executor: &mut PgConnection,
+    chains: &[String],
+    addresses: &[String],
+) -> Result<HashMap<(String, String), Uuid>> {
+    if chains.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let known_address_rows = sqlx::query(
+        r#"
+        WITH scoped_addresses AS (
+            SELECT DISTINCT chain_id, address
+            FROM UNNEST($1::TEXT[], $2::TEXT[]) AS scope(chain_id, address)
+        )
+        SELECT cia.chain_id, cia.address, cia.contract_instance_id
+        FROM scoped_addresses scope
+        JOIN contract_instance_addresses cia
+          ON cia.chain_id = scope.chain_id
+         AND cia.address = scope.address
+        ORDER BY cia.chain_id, cia.address, (cia.deactivated_at IS NULL) DESC, cia.admitted_at DESC,
+                 cia.contract_instance_id
+        "#,
+    )
+    .bind(chains)
+    .bind(addresses)
+    .fetch_all(&mut *executor)
+    .await
+    .context("failed to load known contract-instance addresses")?;
+
+    fold_known_contract_instance_addresses(known_address_rows)
+}
+
+fn fold_known_contract_instance_addresses(
+    known_address_rows: Vec<sqlx::postgres::PgRow>,
+) -> Result<HashMap<(String, String), Uuid>> {
     let mut known_contract_instances_by_address = HashMap::new();
     for row in known_address_rows {
         let chain = row
@@ -348,23 +448,10 @@ async fn load_discovery_admission_state_inner(
                     .context("failed to read known address contract_instance_id")?,
             );
     }
-
-    let active_rule_count = rules_by_manifest_id.values().map(Vec::len).sum();
-
-    Ok(DiscoveryAdmissionState {
-        active_manifest_count,
-        active_root_count: active_roots.len(),
-        active_contract_count: active_contracts.len(),
-        active_rule_count,
-        active_roots,
-        active_root_manifest_ids,
-        active_contracts,
-        known_contract_instances_by_address,
-        rules_by_manifest_id,
-    })
+    Ok(known_contract_instances_by_address)
 }
 
-fn scoped_address_key_vectors(
+pub(super) fn scoped_address_key_vectors(
     keys: impl Iterator<Item = (String, String)>,
 ) -> (Vec<String>, Vec<String>) {
     let mut keys = keys.collect::<HashSet<_>>().into_iter().collect::<Vec<_>>();

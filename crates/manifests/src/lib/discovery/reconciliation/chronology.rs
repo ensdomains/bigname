@@ -126,7 +126,7 @@ impl<'a> ScopedDiscoveryChronology<'a> {
     }
 }
 
-fn same_assignment(
+pub(super) fn same_assignment(
     existing_edge: &ExistingReconciledDiscoveryEdge,
     desired_edge: &ReconciledDiscoveryEdgeSpec,
 ) -> bool {
@@ -140,7 +140,7 @@ fn same_assignment(
         && existing_edge.spec.admission == desired_edge.admission
 }
 
-fn assignment_starts_no_later(
+pub(super) fn assignment_starts_no_later(
     existing_edge: &ExistingReconciledDiscoveryEdge,
     desired_edge: &ReconciledDiscoveryEdgeSpec,
 ) -> bool {
@@ -179,7 +179,7 @@ pub(super) fn edge_starts_after_terminal(
     )
 }
 
-fn edge_starts_after_spec(
+pub(super) fn edge_starts_after_spec(
     edge: &ExistingReconciledDiscoveryEdge,
     desired_edge: &ReconciledDiscoveryEdgeSpec,
 ) -> bool {
@@ -212,7 +212,7 @@ fn starts_after(
     }
 }
 
-fn compare_edge_starts(
+pub(super) fn compare_edge_starts(
     left: &&ExistingReconciledDiscoveryEdge,
     right: &&ExistingReconciledDiscoveryEdge,
 ) -> Ordering {
