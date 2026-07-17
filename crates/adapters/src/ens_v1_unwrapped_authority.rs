@@ -128,6 +128,8 @@ struct RawLogPosition {
     transaction_hash: String,
     log_index: i64,
     #[serde(default)]
+    is_registration_granted: bool,
+    #[serde(default)]
     is_wrapper_name_wrapped: bool,
 }
 

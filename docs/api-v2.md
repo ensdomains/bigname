@@ -116,6 +116,21 @@ than a mixed-generation response. These are schema/publication compatibility
 and request-coherence guards; they do not assert projection freshness.
 The base v2 address-name collection remains available without the expansion.
 
+Permission-backed v2 reads also classify the served resources from the typed
+projection-owned per-resource permission summary. For a resource-bound
+`GET /v2/permissions` read, a missing or partial summary produces
+`meta.completeness=partial` with `permission_support_unknown`; an ENSv1 wrapper
+summary produces `meta.completeness=unsupported` with
+`wrapper_holder_permissions_not_supported`. An address-only permissions read
+is always at least `partial` with the wrapper reason because a wrapper resource
+with zero holder rows cannot be discovered from the permission-row collection.
+For `include=role_summary`, any non-full resource summary makes the overall
+address-name response `partial`, lists `role_summary` in
+`meta.unsupported_fields`, and uses the same product reason mapping. Projected
+permission rows remain visible, but an empty or populated expansion is not
+authoritative when that metadata is present. Missing summary metadata takes
+precedence over the known wrapper limitation when both occur on one page.
+
 Rules:
 
 - Timestamps are RFC 3339 UTC everywhere, including the lookup route.

@@ -14,6 +14,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::cursor::invalid_cursor_error;
+use super::permission_support::{
+    apply_role_summary_support_meta, permission_support_for_resources,
+};
 use super::{
     AddressNamesDedupe, AddressNamesSort, Envelope, Page, QueryParamAllowlist, RegistrationStatus,
     Relation, RelationSet, SnapshotReadResource, SortOrder, StrictQueryParams, V2Error, V2Result,
@@ -227,6 +230,17 @@ pub(crate) async fn get_address_names(
     } else {
         std::collections::BTreeMap::new()
     };
+    let permission_summaries = if let Some(resource_ids) = role_resource_ids.as_deref() {
+        bigname_storage::load_permissions_current_resource_summaries(&state.pool, resource_ids)
+            .await
+            .map_err(|_| {
+                V2Error::internal_error(format!(
+                    "failed to load address-name role support for {normalized_address}"
+                ))
+            })?
+    } else {
+        BTreeMap::new()
+    };
     let record_counts_by_name = if include_role_summary {
         load_address_name_record_counts(&state.pool, &storage_page.entries, &name_rows)
             .await
@@ -269,7 +283,12 @@ pub(crate) async fn get_address_names(
             ))
         })
         .collect::<V2Result<Vec<_>>>()?;
-    let meta = snapshot_meta(&selected_snapshot)?;
+    let mut meta = snapshot_meta(&selected_snapshot)?;
+    if let Some(resource_ids) = role_resource_ids.as_deref() {
+        let permission_support =
+            permission_support_for_resources(resource_ids, &permission_summaries);
+        apply_role_summary_support_meta(&mut meta, permission_support);
+    }
 
     let response = Json(Envelope {
         data,

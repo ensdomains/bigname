@@ -81,9 +81,14 @@ suite only at an isolated test PostgreSQL server.
    scenario does not deploy get deterministic placeholder addresses with no
    code or logs. The mirror is structurally faithful to the selected checked-in
    families, but it is not production-identity-equivalent and a silent
-   placeholder does not test that role's behavior. The ENSv1 mirror includes
-   the active registry v3 manifest and its old-registry role. Execution-plane
-   ENS scenarios also mirror
+   placeholder does not test that role's behavior. Target substitution also
+   removes optional authored root `code_hash` pins because production hashes do
+   not describe local deployments or placeholders. The current checked-in
+   profiles declare no such pins, but the generated profile does not test
+   production code-hash drift pins. ENSv1 resolver-profile admission still uses
+   code hashes observed from the local seed and target deployments. The ENSv1
+   mirror includes the active registry v3 manifest and its old-registry role.
+   Execution-plane ENS scenarios also mirror
    `ens_execution` when they supply a local `universal_resolver` target; the
    base ENSv1 scenarios keep execution manifests out of the generated profile.
    Basenames scenarios mirror the shipped

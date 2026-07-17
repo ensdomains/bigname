@@ -413,8 +413,8 @@ async fn v2_address_role_summary_requires_compatible_permission_publication() ->
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
     sqlx::query("DELETE FROM permissions_current_publication")
-    .execute(&database.pool)
-    .await?;
+        .execute(&database.pool)
+        .await?;
 
     let response = v2_address_names_response_for_database(
         &database,
@@ -425,6 +425,75 @@ async fn v2_address_role_summary_requires_compatible_permission_publication() ->
     assert_eq!(response.status(), StatusCode::CONFLICT);
     let payload: Value = read_json(response).await?;
     assert_eq!(payload["error"]["code"], json!("stale"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_address_role_summary_missing_support_is_partial() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    let resource_id = Uuid::from_u128(0xa100);
+    sqlx::query("DELETE FROM permissions_current_resource_summary WHERE resource_id = $1")
+        .bind(resource_id)
+        .execute(&database.pool)
+        .await?;
+    mark_permissions_current_projection_ready(&database).await?;
+
+    let payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v2/addresses/{V2_ADDRESS}/names?q=alpha&include=role_summary"),
+    )
+    .await?;
+
+    assert_eq!(payload["data"][0]["name"], json!("alpha.eth"));
+    assert!(
+        payload["data"][0]["role_summary"]
+            .as_array()
+            .is_some_and(|summary| !summary.is_empty())
+    );
+    assert_eq!(payload["meta"]["completeness"], json!("partial"));
+    assert_eq!(
+        payload["meta"]["unsupported_fields"],
+        json!(["role_summary"])
+    );
+    assert_eq!(
+        payload["meta"]["unsupported_reason"],
+        json!("permission_support_unknown")
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_address_role_summary_marks_wrapper_empty_as_non_authoritative() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    let resource_id = Uuid::from_u128(0xb100);
+    bigname_storage::upsert_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(resource_id, Some("wrapper")),
+    )
+    .await?;
+    mark_permissions_current_projection_ready(&database).await?;
+
+    let payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v2/addresses/{V2_ADDRESS}/names?q=beta&include=role_summary"),
+    )
+    .await?;
+
+    assert_eq!(payload["data"][0]["name"], json!("beta.eth"));
+    assert_eq!(payload["data"][0]["role_summary"], json!([]));
+    assert_eq!(payload["meta"]["completeness"], json!("partial"));
+    assert_eq!(
+        payload["meta"]["unsupported_fields"],
+        json!(["role_summary"])
+    );
+    assert_eq!(
+        payload["meta"]["unsupported_reason"],
+        json!("wrapper_holder_permissions_not_supported")
+    );
 
     database.cleanup().await
 }
@@ -556,6 +625,7 @@ async fn v2_get_address_names_include_role_summary_groups_permissions_by_address
             .get("effective_powers")
             .is_none()
     );
+    assert!(payload["meta"].get("completeness").is_none());
 
     database.cleanup().await?;
     Ok(())
@@ -660,7 +730,7 @@ async fn seed_v2_address_names_fixture(database: &TestDatabase) -> Result<()> {
     seed_v2_address_name_storage(database, &specs).await?;
     seed_v2_address_name_current_rows(database, &specs).await?;
     seed_v2_address_name_relations(database, &specs).await?;
-    seed_v2_address_name_permissions(database).await?;
+    seed_v2_address_name_permissions(database, &specs).await?;
     upsert_primary_name_current_snapshots(
         &database.pool,
         &[PrimaryNameCurrentSnapshot {
@@ -820,7 +890,10 @@ async fn seed_v2_address_name_relations(
     Ok(())
 }
 
-async fn seed_v2_address_name_permissions(database: &TestDatabase) -> Result<()> {
+async fn seed_v2_address_name_permissions(
+    database: &TestDatabase,
+    specs: &[V2AddressNameSpec],
+) -> Result<()> {
     let alpha_resource_id = Uuid::from_u128(0xa100);
     let mut resource_row = permission_current_row(
         alpha_resource_id,
@@ -889,6 +962,17 @@ async fn seed_v2_address_name_permissions(database: &TestDatabase) -> Result<()>
         ],
     )
     .await?;
+    for resource_id in specs
+        .iter()
+        .map(|spec| spec.resource_id)
+        .collect::<BTreeSet<_>>()
+    {
+        bigname_storage::upsert_permissions_current_resource_summary(
+            &database.pool,
+            &permission_current_resource_summary(resource_id, Some("registrar")),
+        )
+        .await?;
+    }
     mark_permissions_current_projection_ready(database).await?;
     Ok(())
 }

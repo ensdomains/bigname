@@ -56,7 +56,13 @@ evidence, that:
   does not promote the checkpoints snapshot-selected API reads need.
 - Manifest profiles can be generated per scenario by preserving shipped
   family/version/capability structure while substituting local contract
-  identities, addresses, and start blocks; checked-in manifests never change.
+  identities, addresses, and start blocks. Optional authored root `code_hash`
+  pins are removed because they describe the production target rather than the
+  substituted local or placeholder deployment; the current checked-in profiles
+  declare no such pins. The generated profiles therefore do not test production
+  code-hash drift pins. ENSv1 resolver-profile admission still uses code hashes
+  observed from the local seed and target deployments, and checked-in manifests
+  never change.
 - Chain time can be warped (`evm_increaseTime`), so expiry, grace, premium
   decay, and commit-age waits are testable in seconds.
 
@@ -72,11 +78,13 @@ seed. In reality families version their manifests in place:
 the old registry (`registry_old`), the resolver/subregistry discovery
 rules, and the registry event ABI. Production does ingest the registry.
 The harness now mirrors every `v*.toml` per family, and all
-registry-driven scenarios pass under the true shipped profile with no
-divergence. Standing rule: a "faithful mirror" claim requires mirroring
-every manifest version, and any future "production doesn't do X" finding
-must be validated against the complete profile (and, where possible, the
-live API) before it is reported.
+registry-driven scenarios pass under the shipped family/version and admission
+structure. Standing rule: a "faithful mirror" claim requires mirroring every
+manifest version and disclosing that local target substitution removes optional
+production root `code_hash` pins. The current checked-in manifests have no such
+pins, but a generated profile does not claim production drift-pin coverage. Any
+future "production doesn't do X" finding must be validated against the complete
+profile (and, where possible, the live API) before it is reported.
 
 ## Scenario matrices
 
@@ -135,12 +143,12 @@ mode, failure class, or protocol path is exhaustive.
 
 | Transition | Key assertions | Status |
 | --- | --- | --- |
-| Wrap a registrar name | adapter layer rotates fully (surface binding follows the wrapper resource + lineage; canonical AuthorityTransferred to the NameWrapper derives), and the wrapped holder shows as registrant; **REVIEW POINT**: the stored `name_current.declared_summary.control` input retains the pre-wrap registry owner and a registrar-anchored authority key, so the internal projection and adapter disagree for names wrapped after registrar birth (wrapper-born children isolate the wrap-window ordering). The public exact-name route detects the current wrapper resource and suppresses those inputs behind an explicit unsupported control summary | known_broken(wrapper_wrap_fuses_subnames_and_unwrap_restore_identity) |
+| Wrap a registrar name | adapter layer rotates fully (surface binding follows the wrapper resource + lineage; canonical AuthorityTransferred to the NameWrapper derives), and the wrapped holder shows as registrant. `name_current` detects the current wrapper resource from the binding and stores explicit unsupported control, so neither the stored projection nor the public exact-name route publishes the pre-wrap owner as effective control. **REVIEW POINT**: the registration authority key remains registrar-anchored for a name wrapped after registrar birth, while wrapper-holder effective powers are not yet projected | known_broken(wrapper_wrap_fuses_subnames_and_unwrap_restore_identity) |
 | Unwrap before lease end | prior registrar anchor and lineage reactivate | covered_e2e(wrapper_wrap_fuses_subnames_and_unwrap_restore_identity) |
 | Burn CANNOT_UNWRAP / CANNOT_TRANSFER / CANNOT_SET_RESOLVER | fuse changes arrive as PermissionScopeChanged scope events with exact raw bitmaps (196608 → 196621, validating pinned fuse constants); wrapper resources publish no subject grants, and the NameWrapper contract holds the registrar-anchor resource_control grant while wrapped; **REVIEW POINT**: no published effective-powers row exists for the wrapped holder anywhere, so the public docs explicitly classify fuse masking and wrapper-holder powers as unprojected | known_broken(wrapper_wrap_fuses_subnames_and_unwrap_restore_identity) |
 | Emancipate a wrapped subname (PARENT_CANNOT_CONTROL) | no parent-owner powers published over the child (trivially satisfied today because wrapper-anchored resources publish no grants at all — see the fuse-row review point) | known_broken(wrapper_wrap_fuses_subnames_and_unwrap_restore_identity) |
 | Wrapped expiry/grace edge | wrapETH2LD projects wrapper expiry as registrar expiry plus grace; exact-name expiry follows the wrapper authority | covered_e2e(wrapper_wrap_fuses_subnames_and_unwrap_restore_identity) |
-| Wrapped owner ≠ registrant | wrapped holder appears as the registration registrant while the pre-wrap owner remains in the stale internal control input described above; the public exact-name control section stays explicitly unsupported and does not expose that owner as effective control | known_broken(wrapper_wrap_fuses_subnames_and_unwrap_restore_identity) |
+| Wrapped owner ≠ registrant | wrapped holder appears as the registration registrant; stored and public exact-name control stay explicitly unsupported, with no pre-wrap owner retained in that control summary or exposed as effective wrapper control. Publishing the holder's actual fuse-masked powers remains unsupported | known_broken(wrapper_wrap_fuses_subnames_and_unwrap_restore_identity) |
 | Wrapper-created subname | wrapper-born child projects fully wrapper-anchored: wrapper authority_kind/key, its own resource, registry_owner = the NameWrapper contract, holder as registrant, setSubnodeRecord resolver projected | covered_e2e(wrapper_wrap_fuses_subnames_and_unwrap_restore_identity) |
 | Register born-wrapped via the wrapped controller (registerAndWrapETH2LD) | the admitted mainnet wrapped-controller artifact drives a single-tx `RegistrationGranted` + `NameWrapped` + registry owner→wrapper path through registerAndWrapETH2LD (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289 @ ens_v1@91c966f), with one wrapper resource and no registrar holder-transfer derivation from the zero-address mint; the same-transaction wrapper introduction remains authoritative even though `NameWrapped` precedes the controller's registration log, and exact-name serves the wrapper resource while returning control as explicitly unsupported | covered_e2e(born_wrapped_registration_retains_wrapper_authority) |
 | Renew a wrapped 2LD via the controller | controller renew touches only the registrar (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L366 @ ens_v1@91c966f) while the wrapper's separate renewal path updates stored expiry without emitting `ExpiryExtended` (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L337 @ ens_v1@91c966f): the current-controller transaction derives `RegistrationRenewed` and no wrapper `ExpiryChanged`, onchain wrapper expiry stays stale, but exact-name expiry honestly follows the registrar renewal while the wrapper resource and lineage remain stable | covered_e2e(wrapped_renewal_tracks_registrar_expiry_without_wrapper_event) |

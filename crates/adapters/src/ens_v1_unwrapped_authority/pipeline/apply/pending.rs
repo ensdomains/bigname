@@ -158,6 +158,10 @@ pub(super) fn observation_raw_log_position(
         block_hash: reference.block_hash.clone(),
         transaction_hash: reference.transaction_hash.clone()?,
         log_index: reference.log_index?,
+        is_registration_granted: matches!(
+            observation,
+            AuthorityObservation::RegistrationGranted(_)
+        ),
         is_wrapper_name_wrapped: matches!(observation, AuthorityObservation::WrapperNameWrapped(_)),
     })
 }

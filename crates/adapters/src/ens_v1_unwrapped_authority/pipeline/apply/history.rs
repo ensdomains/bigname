@@ -226,17 +226,33 @@ pub(super) fn should_defer_preloaded_namehash_observation(
         return false;
     };
     let normalized_namehash = namehash.to_ascii_lowercase();
-    let has_later_same_tx_intro = same_tx_name_intro_positions
-        .get(&normalized_namehash)
-        .is_some_and(|positions| {
-            positions.iter().any(|intro| {
-                intro.block_hash == position.block_hash
-                    && intro.transaction_hash == position.transaction_hash
-                    && position.log_index < intro.log_index
-            })
-        });
+    let Some(intro_positions) = same_tx_name_intro_positions.get(&normalized_namehash) else {
+        return false;
+    };
+    let is_later_same_tx_intro = |intro: &RawLogPosition| {
+        intro.block_hash == position.block_hash
+            && intro.transaction_hash == position.transaction_hash
+            && position.log_index < intro.log_index
+    };
+    let has_later_same_tx_intro = intro_positions
+        .iter()
+        .any(|intro| is_later_same_tx_intro(intro));
     if !has_later_same_tx_intro {
         return false;
+    }
+    // Full replay holds the controller's registry-owner and resolver setup
+    // until the later registration grant, even when an older registry
+    // authority exists. Restricted replay must do the same after preloading
+    // that authority. Record writes, renewals, and wraps retain their
+    // event-time authority.
+    if matches!(
+        observation,
+        AuthorityObservation::RegistryOwnerChanged(_) | AuthorityObservation::ResolverChanged(_)
+    ) && intro_positions
+        .iter()
+        .any(|intro| is_later_same_tx_intro(intro) && intro.is_registration_granted)
+    {
+        return true;
     }
     if namehash_to_labelhash.contains_key(&normalized_namehash)
         && let Some(history) = histories.get(&normalized_namehash)

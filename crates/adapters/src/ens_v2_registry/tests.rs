@@ -1050,6 +1050,222 @@ async fn ens_v2_cold_scoped_transfer_hydrates_from_retained_raw_predecessors() -
 }
 
 #[tokio::test]
+async fn ens_v2_cold_transfer_hydration_respects_same_block_parent_edge_positions() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-sepolia";
+    let registry = "0x00000000000000000000000000000000000000a1";
+    let registry_id = Uuid::from_u128(0x12f1);
+    let old_parent_id = Uuid::from_u128(0x12f2);
+    let new_parent_id = Uuid::from_u128(0x12f3);
+    let block_hash = "0xblock10";
+    let token_id = format!("0x{:064x}", 1);
+    insert_finalized_reference_lineage(database.pool(), 9, 10).await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            label_registered_raw_log(chain, "0xblock9", 9, registry, 0, "leaf", 1, "alice"),
+            token_resource_raw_log(chain, "0xblock9", 9, registry, 1, 1, 101),
+        ],
+    )
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+        VALUES ($1, $4, 'registry'), ($2, $4, 'registry'), ($3, $4, 'registry')
+        "#,
+    )
+    .bind(registry_id)
+    .bind(old_parent_id)
+    .bind(new_parent_id)
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+
+    // Insert the newer edge first so discovery_edge_id order opposes event chronology.
+    sqlx::query(
+        r#"
+        INSERT INTO discovery_edges (
+            chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id,
+            discovery_source, admission, active_from_block_number, active_from_block_hash,
+            provenance
+        ) VALUES (
+            $1, 'subregistry', $2, $3, 'ens_v2_registry_l1:test-new-parent', 'admitted',
+            10, $4, jsonb_build_object(
+                'to_address', $5::TEXT, 'logical_name_id', 'ens:new.eth',
+                'transaction_index', 3, 'log_index', 8
+            )
+        )
+        "#,
+    )
+    .bind(chain)
+    .bind(new_parent_id)
+    .bind(registry_id)
+    .bind(block_hash)
+    .bind(registry)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO discovery_edges (
+            chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id,
+            discovery_source, admission, active_from_block_number, active_from_block_hash,
+            active_to_block_number, active_to_block_hash, deactivated_at, provenance
+        ) VALUES (
+            $1, 'subregistry', $2, $3, 'ens_v2_registry_l1:test-old-parent', 'admitted',
+            10, $4, 10, $4, now(), jsonb_build_object(
+                'to_address', $5::TEXT, 'logical_name_id', 'ens:old.eth',
+                'transaction_index', 0, 'log_index', 1,
+                'active_to_transaction_index', 3, 'active_to_log_index', 8
+            )
+        )
+        "#,
+    )
+    .bind(chain)
+    .bind(old_parent_id)
+    .bind(registry_id)
+    .bind(block_hash)
+    .bind(registry)
+    .execute(database.pool())
+    .await?;
+
+    let mut harness = RegistryHarness::new(registry, registry_id, "");
+    for (transaction_index, log_index) in [(0, 2), (4, 9)] {
+        let mut transfer_ref = reference(registry, registry_id, 10, log_index);
+        transfer_ref.transaction_index = transaction_index;
+        harness.apply(RegistryObservation::TokenControlTransferred {
+            token_id: token_id.clone(),
+            operator: "0x0000000000000000000000000000000000000f00".to_owned(),
+            from: "0x0000000000000000000000000000000000000a11".to_owned(),
+            to: "0x0000000000000000000000000000000000000b0b".to_owned(),
+            amount: "1".to_owned(),
+            source_event: "TransferSingle",
+            transfer_index: None,
+            reference: transfer_ref,
+        })?;
+    }
+
+    hydrate_subregistry_event_target_ids(database.pool(), &mut harness.graph_events).await?;
+    let names = harness
+        .graph_events
+        .iter()
+        .map(|event| event.logical_name_id.as_deref())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        vec![Some("ens:leaf.old.eth"), Some("ens:leaf.new.eth")]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn ens_v2_subregistry_target_hydration_respects_same_block_edge_positions() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-sepolia";
+    let registry = "0x00000000000000000000000000000000000000aa";
+    let future_child = "0x00000000000000000000000000000000000000c1";
+    let closed_child = "0x00000000000000000000000000000000000000c2";
+    let registry_id = Uuid::from_u128(0x1301);
+    let future_child_id = Uuid::from_u128(0x1302);
+    let closed_child_id = Uuid::from_u128(0x1303);
+    let token_id = format!("0x{:064x}", 1);
+    insert_finalized_reference_lineage(database.pool(), 9, 10).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+        VALUES ($1, $4, 'registry'), ($2, $4, 'registry'), ($3, $4, 'registry')
+        "#,
+    )
+    .bind(registry_id)
+    .bind(future_child_id)
+    .bind(closed_child_id)
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO discovery_edges (
+            chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id,
+            discovery_source, admission, active_from_block_number, active_from_block_hash,
+            provenance
+        ) VALUES (
+            $1, 'subregistry', $2, $3, 'ens_v2_registry_l1:test-future', 'admitted',
+            10, '0xblock10', jsonb_build_object(
+                'to_address', $4::TEXT, 'transaction_index', 3, 'log_index', 8
+            )
+        )
+        "#,
+    )
+    .bind(chain)
+    .bind(registry_id)
+    .bind(future_child_id)
+    .bind(future_child)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO discovery_edges (
+            chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id,
+            discovery_source, admission, active_from_block_number, active_from_block_hash,
+            active_to_block_number, active_to_block_hash, deactivated_at, provenance
+        ) VALUES (
+            $1, 'subregistry', $2, $3, 'ens_v2_registry_l1:test-closed', 'admitted',
+            10, '0xblock10', 10, '0xblock10', now(), jsonb_build_object(
+                'to_address', $4::TEXT, 'transaction_index', 0, 'log_index', 1,
+                'active_to_transaction_index', 3, 'active_to_log_index', 8
+            )
+        )
+        "#,
+    )
+    .bind(chain)
+    .bind(registry_id)
+    .bind(closed_child_id)
+    .bind(closed_child)
+    .execute(database.pool())
+    .await?;
+
+    let mut harness = RegistryHarness::new(registry, registry_id, "eth");
+    harness.apply(RegistryObservation::LabelRegistered {
+        token_id: token_id.clone(),
+        labelhash: labelhash("leaf"),
+        label: "leaf".to_owned(),
+        owner: "0x0000000000000000000000000000000000000a11".to_owned(),
+        expiry: 1_900_000_000,
+        sender: "0x0000000000000000000000000000000000000dad".to_owned(),
+        reference: reference(registry, registry_id, 9, 0),
+    })?;
+    let mut before_boundary = reference(registry, registry_id, 10, 2);
+    before_boundary.transaction_index = 0;
+    harness.apply(RegistryObservation::SubregistryUpdated {
+        token_id: token_id.clone(),
+        subregistry: future_child.to_owned(),
+        sender: "0x0000000000000000000000000000000000000dad".to_owned(),
+        reference: before_boundary,
+    })?;
+    let mut after_boundary = reference(registry, registry_id, 10, 9);
+    after_boundary.transaction_index = 4;
+    harness.apply(RegistryObservation::SubregistryUpdated {
+        token_id,
+        subregistry: closed_child.to_owned(),
+        sender: "0x0000000000000000000000000000000000000dad".to_owned(),
+        reference: after_boundary,
+    })?;
+
+    hydrate_subregistry_event_target_ids(database.pool(), &mut harness.graph_events).await?;
+    let targets = harness
+        .graph_events
+        .iter()
+        .filter(|event| event.event_kind == EVENT_KIND_SUBREGISTRY_CHANGED)
+        .map(|event| event.after_state["to_contract_instance_id"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(targets, vec![Value::Null, Value::Null]);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn ens_v2_cold_transfer_hydration_uses_only_its_selected_ancestor_path() -> Result<()> {
     let database = TestDatabase::new().await?;
     let fixture = RegistryLifecycleFixture::insert(database.pool()).await?;

@@ -15,6 +15,7 @@ mod name_records;
 mod name_records_inventory;
 mod namespaces;
 mod params;
+mod permission_support;
 mod permission_values;
 mod permissions;
 mod primary_name;

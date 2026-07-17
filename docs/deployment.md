@@ -81,17 +81,24 @@ stopped; their durable changes will be consumed after replay handoff.
 Replay version 9 is such an upgrade: it forces the full permission cutover that
 discovers canonical zero-event resources and seeds
 `permissions_current_publication` version 2 plus its read-consistency revision.
+A version-9 all-current replay also republishes `name_current` so every name whose
+current binding is an ENSv1 wrapper resource stores explicit unsupported control
+instead of stale pre-wrap control facets. Exact-name reads have no equivalent of
+the permission publication compatibility gate: before that `name_current` replay
+finishes, a row last written before the wrapper-control mask was introduced can
+still expose its pre-wrap control summary.
 A version-8 completion marker cannot satisfy this upgrade because an upgraded
 database may otherwise retain its apply cursor, skip full replay, and leave the
 new publication artifact empty. Version-8 and version-9 workers must never
-overlap, and the API must remain drained until every version-9 marker is current
-and pending invalidations are empty. Replay version 8 was the preceding upgrade
-that backfilled `permissions_current_resource_summary`; version 9 retains that
-behavior and the version-7 ENSv2 exact-name-profile evidence. The replay-version
-marker prevents a new worker from trusting old bootstrap completion; it does not
-fence an old worker from claiming a later invalidation. Container healthchecks
-report version skew but do not stop an old process, so they are not a substitute
-for this drain.
+overlap, and the API must remain drained until pending invalidations are empty
+and every version-9 marker, including `name_current`, is current. Replay version
+8 was the preceding upgrade that backfilled
+`permissions_current_resource_summary` and introduced the current-wrapper
+unsupported control summary; version 9 retains those behaviors and the version-7
+ENSv2 exact-name-profile evidence. The replay-version marker prevents a new
+worker from trusting old bootstrap completion; it does not fence an old worker
+from claiming a later invalidation. Container healthchecks report version skew
+but do not stop an old process, so they are not a substitute for this drain.
 
 The version-9 full permission cutover writes publication version 2 and advances
 its monotonic `data_revision` atomically with holder rows and per-resource

@@ -12,6 +12,12 @@ use toml::Value;
 /// ABI declarations, and discovery rules are preserved verbatim, so the
 /// generated profile carries the shipped semantics — including the active
 /// registry v3 admission with its old-registry role and discovery rules.
+/// Optional authored root `code_hash` pins are deliberately removed after
+/// target substitution because a production hash does not describe the local
+/// deployment or a placeholder. The checked-in profiles currently declare no
+/// such pins, but this harness does not test production code-hash drift pins.
+/// ENSv1 resolver-profile admission still compares code hashes observed from
+/// the local seed and target deployments.
 /// Roles a scenario does not deploy are re-pointed at deterministic
 /// placeholder addresses (no code, no logs). Nothing under the checked-in
 /// `manifests/` tree changes.

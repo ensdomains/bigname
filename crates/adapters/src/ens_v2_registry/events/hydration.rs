@@ -29,6 +29,8 @@ struct TargetRequest {
     target_address: String,
     block_number: i64,
     block_hash: String,
+    transaction_index: i64,
+    log_index: i64,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -153,6 +155,20 @@ pub(in crate::ens_v2_registry) async fn hydrate_subregistry_event_target_ids(
                 block_hash: event.block_hash.clone().with_context(|| {
                     format!(
                         "SubregistryChanged event {} is missing block_hash",
+                        event.event_identity
+                    )
+                })?,
+                transaction_index: event.raw_fact_ref["transaction_index"]
+                    .as_i64()
+                    .with_context(|| {
+                        format!(
+                            "SubregistryChanged event {} is missing transaction_index",
+                            event.event_identity
+                        )
+                    })?,
+                log_index: event.log_index.with_context(|| {
+                    format!(
+                        "SubregistryChanged event {} is missing log_index",
                         event.event_identity
                     )
                 })?,

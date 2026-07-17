@@ -26,6 +26,8 @@ fn test_target_request(index: usize) -> TargetRequest {
         target_address: "0x0000000000000000000000000000000000000002".to_owned(),
         block_number: 12,
         block_hash: format!("0x{:064x}", index + 1),
+        transaction_index: 1,
+        log_index: 2,
     }
 }
 
@@ -42,7 +44,7 @@ fn subregistry_hydration_chunks_queries_below_the_postgres_bind_limit() {
     assert_eq!(requests.len(), former_single_query_limit + 1);
     assert_eq!(
         chunks.iter().map(|chunk| chunk.len()).collect::<Vec<_>>(),
-        vec![10_000, 923]
+        vec![8_000, 192]
     );
     for chunk in chunks {
         let query = build_subregistry_target_query(chunk);
@@ -69,6 +71,25 @@ fn registry_suffix_lookups_deduplicate_the_same_registry_position() {
 }
 
 #[test]
+fn registry_suffix_lookups_keep_distinct_same_block_event_positions() {
+    let before = test_transfer_request(0);
+    let mut after = before.clone();
+    after.event_index = 1;
+    after.transaction_index = 3;
+    after.log_index = 8;
+    let requests = [before, after];
+    let keyed = requests
+        .iter()
+        .map(|request| (TransferHydrationKey::from(request), request))
+        .collect::<Vec<_>>();
+
+    let positions = unique_registry_suffix_positions(&keyed);
+
+    assert_eq!(positions.len(), 2);
+    assert_eq!(unique_registry_authorities(&positions).len(), 1);
+}
+
+#[test]
 fn registry_suffix_history_queries_chunk_below_the_postgres_bind_limit() {
     let former_single_query_limit =
         POSTGRES_BIND_PARAMETER_LIMIT / REGISTRY_SUFFIX_REQUEST_BIND_COUNT;
@@ -91,7 +112,7 @@ fn registry_suffix_history_queries_chunk_below_the_postgres_bind_limit() {
     assert_eq!(positions.len(), former_single_query_limit + 1);
     assert_eq!(
         chunks.iter().map(|chunk| chunk.len()).collect::<Vec<_>>(),
-        vec![12_000, 1_108]
+        vec![9_000, 363]
     );
     for chunk in chunks {
         let query = build_registry_suffix_history_query(chunk);

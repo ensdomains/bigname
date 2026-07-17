@@ -1072,23 +1072,30 @@ When a code change widens the normalized-event set consumed by a projection,
 already-consumed change cursors do not by themselves revisit old current rows.
 Replay version 9 therefore forces an all-current worker replay that seeds the
 permission publication version/revision and discovers canonical zero-event
-permission resources. Accepting a version-8 completion marker could preserve an
-existing apply cursor, skip bootstrap, and leave the publication artifact empty.
-Version 9 retains the version-8 resource-summary backfill and version-7 ENSv2
+permission resources. That all-current replay also rebuilds `name_current`: for
+an ENSv1 name whose current binding is a wrapper resource, the worker stores
+explicit unsupported control instead of carrying pre-wrap control facets into
+the public exact-name summary. Accepting a version-8 completion marker could
+preserve an existing apply cursor, skip bootstrap, and leave the publication
+artifact empty. Version 9 retains both the version-8 resource-summary backfill
+and current-wrapper unsupported control behavior, plus version-7 ENSv2
 exact-name-profile evidence. The replay changes no raw fact, normalized event,
 or identity row; the normal worker rebuild remains the projection write owner
 and re-evaluates canonicality and manifest evidence from retained inputs. Replay
 versioning is a bootstrap gate, not a mixed-version writer fence. Deployments
 must stop or drain every version-8 worker before any version-9 worker starts,
-keep public reads drained until the version-9 replay and pending invalidations
-finish, and never run the two worker versions concurrently; an older worker can
-otherwise publish the superseded result after the new replay.
+keep public reads drained until every version-9 marker (including
+`name_current`) is current and all pending invalidations have drained, and never
+run the two worker versions concurrently; an older worker can otherwise publish
+the superseded result after the new replay.
 Permission-backed v1/v2 routes and permission-derived address-name expansions
 enforce `permissions_current_publication` version 2 and return `409 stale` when
 it is absent or old. Address-name reads without the permission expansion remain
 available. This compatibility gate prevents readers from decoding a legacy
-permission row/summary contract, but it does not prove freshness; the drain
-remains required for replay and pending invalidations.
+permission row/summary contract, but it does not prove freshness. Exact-name
+reads have no corresponding replay-version gate, so the drain remains required
+for the `name_current` replay and pending invalidations as well as the permission
+cutover.
 
 Historical projection materializations are projection-owned caches, not truth. When a worker materializes an `at` or `chain_positions` snapshot, the rows are keyed by the normal projection key plus exact chain-position context or an equivalent snapshot key. They may be bounded and evicted by policy; absence returns `stale`. A historical materialization must never overwrite a newer current row in place, and the API must never fill a missing historical projection from raw facts or provider data.
 

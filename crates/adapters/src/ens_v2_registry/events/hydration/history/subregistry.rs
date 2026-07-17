@@ -9,10 +9,10 @@ use super::{
 };
 use crate::ens_v2_registry::constants::SOURCE_FAMILY_ENS_V2_ROOT_L1;
 
-const SUBREGISTRY_REQUEST_BIND_COUNT: usize = 6;
-const SUBREGISTRY_REQUEST_CHUNK_SIZE: usize = 10_000;
-const REGISTRY_SUFFIX_REQUEST_BIND_COUNT: usize = 5;
-const REGISTRY_SUFFIX_REQUEST_CHUNK_SIZE: usize = 12_000;
+const SUBREGISTRY_REQUEST_BIND_COUNT: usize = 8;
+const SUBREGISTRY_REQUEST_CHUNK_SIZE: usize = 8_000;
+const REGISTRY_SUFFIX_REQUEST_BIND_COUNT: usize = 7;
+const REGISTRY_SUFFIX_REQUEST_CHUNK_SIZE: usize = 9_000;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) struct RegistryAuthorityKey {
@@ -28,6 +28,8 @@ struct RegistrySuffixPosition {
     authority: RegistryAuthorityKey,
     block_number: i64,
     block_hash: String,
+    transaction_index: i64,
+    log_index: i64,
 }
 
 impl From<&TransferRequest> for RegistrySuffixPosition {
@@ -42,6 +44,8 @@ impl From<&TransferRequest> for RegistrySuffixPosition {
             },
             block_number: request.block_number,
             block_hash: request.block_hash.clone(),
+            transaction_index: request.transaction_index,
+            log_index: request.log_index,
         }
     }
 }
@@ -164,7 +168,7 @@ fn build_registry_suffix_history_query<'args>(
     requests: &'args [(RegistrySuffixPosition, &'args TransferRequest)],
 ) -> QueryBuilder<'args, Postgres> {
     let mut query = QueryBuilder::<Postgres>::new(
-        "WITH RECURSIVE requested (request_index, chain_id, registry_id, block_number, block_hash) AS (",
+        "WITH RECURSIVE requested (request_index, chain_id, registry_id, block_number, block_hash, transaction_index, log_index) AS (",
     );
     query.push_values(
         requests.iter().enumerate(),
@@ -173,7 +177,9 @@ fn build_registry_suffix_history_query<'args>(
                 .push_bind(&position.chain_id)
                 .push_bind(position.authority.registry_contract_instance_id)
                 .push_bind(position.block_number)
-                .push_bind(&position.block_hash);
+                .push_bind(&position.block_hash)
+                .push_bind(position.transaction_index)
+                .push_bind(position.log_index);
         },
     );
     query.push(
@@ -212,7 +218,15 @@ fn build_registry_suffix_history_query<'args>(
          AND edge.edge_kind = 'subregistry'
          AND edge.to_contract_instance_id = requested.registry_id
          AND (edge.deactivated_at IS NULL OR edge.active_to_block_number IS NOT NULL)
-         AND edge.active_from_block_number <= requested.block_number
+         AND (edge.active_from_block_number < requested.block_number OR (
+             edge.active_from_block_number = requested.block_number AND (
+                 ((edge.provenance ->> 'transaction_index')::BIGINT IS NULL
+                  AND (edge.provenance ->> 'log_index')::BIGINT IS NULL)
+                 OR ((edge.provenance ->> 'transaction_index')::BIGINT,
+                     (edge.provenance ->> 'log_index')::BIGINT)
+                    <= (requested.transaction_index, requested.log_index)
+             )
+         ))
         JOIN chain_lineage edge_start
           ON edge_start.chain_id = edge.chain_id
          AND edge_start.block_number = edge.active_from_block_number
@@ -226,7 +240,14 @@ fn build_registry_suffix_history_query<'args>(
             edge_start.canonicality_state IN ('canonical', 'safe', 'finalized')
             AND edge_start.block_number <= selected_boundaries.stable_through_block
         )) AND (edge.active_to_block_number IS NULL
-            OR edge.active_to_block_number >= requested.block_number
+            OR edge.active_to_block_number > requested.block_number
+            OR (edge.active_to_block_number = requested.block_number AND (
+                ((edge.provenance ->> 'active_to_transaction_index')::BIGINT IS NULL
+                 AND (edge.provenance ->> 'active_to_log_index')::BIGINT IS NULL)
+                OR ((edge.provenance ->> 'active_to_transaction_index')::BIGINT,
+                    (edge.provenance ->> 'active_to_log_index')::BIGINT)
+                   > (requested.transaction_index, requested.log_index)
+            ))
             OR NOT EXISTS (
                 SELECT 1 FROM chain_lineage edge_close
                 LEFT JOIN selected_tail selected_close
@@ -243,6 +264,8 @@ fn build_registry_suffix_history_query<'args>(
                   ))
             ))
         ORDER BY requested.request_index, edge.active_from_block_number DESC,
+                 (edge.provenance ->> 'transaction_index')::BIGINT DESC NULLS LAST,
+                 (edge.provenance ->> 'log_index')::BIGINT DESC NULLS LAST,
                  edge.discovery_edge_id DESC
         "#,
     );
@@ -290,7 +313,9 @@ fn build_subregistry_target_query(requests: &[TargetRequest]) -> QueryBuilder<'_
             from_contract_instance_id,
             target_address,
             block_number,
-            block_hash
+            block_hash,
+            transaction_index,
+            log_index
         ) AS (
         "#,
     );
@@ -300,7 +325,9 @@ fn build_subregistry_target_query(requests: &[TargetRequest]) -> QueryBuilder<'_
             .push_bind(request.from_contract_instance_id)
             .push_bind(&request.target_address)
             .push_bind(request.block_number)
-            .push_bind(&request.block_hash);
+            .push_bind(&request.block_hash)
+            .push_bind(request.transaction_index)
+            .push_bind(request.log_index);
     });
     query.push(
         r#"
@@ -362,7 +389,15 @@ fn build_subregistry_target_query(requests: &[TargetRequest]) -> QueryBuilder<'_
          AND edge.from_contract_instance_id = requested.from_contract_instance_id
          AND lower(edge.provenance ->> 'to_address') = requested.target_address
          AND (edge.deactivated_at IS NULL OR edge.active_to_block_number IS NOT NULL)
-         AND edge.active_from_block_number <= requested.block_number
+         AND (edge.active_from_block_number < requested.block_number OR (
+             edge.active_from_block_number = requested.block_number AND (
+                 ((edge.provenance ->> 'transaction_index')::BIGINT IS NULL
+                  AND (edge.provenance ->> 'log_index')::BIGINT IS NULL)
+                 OR ((edge.provenance ->> 'transaction_index')::BIGINT,
+                     (edge.provenance ->> 'log_index')::BIGINT)
+                    <= (requested.transaction_index, requested.log_index)
+             )
+         ))
         JOIN chain_lineage edge_start
           ON edge_start.chain_id = edge.chain_id
          AND edge_start.block_number = edge.active_from_block_number
@@ -385,7 +420,14 @@ fn build_subregistry_target_query(requests: &[TargetRequest]) -> QueryBuilder<'_
         )
           AND (
               edge.active_to_block_number IS NULL
-              OR edge.active_to_block_number >= requested.block_number
+              OR edge.active_to_block_number > requested.block_number
+              OR (edge.active_to_block_number = requested.block_number AND (
+                  ((edge.provenance ->> 'active_to_transaction_index')::BIGINT IS NULL
+                   AND (edge.provenance ->> 'active_to_log_index')::BIGINT IS NULL)
+                  OR ((edge.provenance ->> 'active_to_transaction_index')::BIGINT,
+                      (edge.provenance ->> 'active_to_log_index')::BIGINT)
+                     > (requested.transaction_index, requested.log_index)
+              ))
               OR NOT EXISTS (
                   SELECT 1
                   FROM chain_lineage edge_close
