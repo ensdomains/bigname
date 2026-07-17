@@ -202,6 +202,7 @@ pub(super) async fn stage_streamed_observations(
     .execute(&mut *executor)
     .await
     .context("failed to index the streamed reconcile observation temp table")?;
+    analyze_temp_table(&mut *executor, "reconcile_observations").await?;
 
     Ok(StagedStreamedObservations {
         staged_observation_count,
@@ -313,6 +314,17 @@ pub(super) async fn load_streamed_observations_for_keys(
     rows.into_iter()
         .map(|row| Ok(streamed_observation_from_row(row)?.observation))
         .collect()
+}
+
+/// Temp tables are never autoanalyzed; without stats the diff's correlated
+/// NOT EXISTS probes can plan as unindexed nested loops at full-closure
+/// scale, so every temp table is analyzed right after its bulk fill.
+pub(super) async fn analyze_temp_table(executor: &mut PgConnection, table: &str) -> Result<()> {
+    sqlx::query(&format!("ANALYZE pg_temp.{table}"))
+        .execute(executor)
+        .await
+        .with_context(|| format!("failed to analyze streamed reconcile temp table {table}"))?;
+    Ok(())
 }
 
 pub(super) async fn count_temp_rows(executor: &mut PgConnection, table: &str) -> Result<usize> {

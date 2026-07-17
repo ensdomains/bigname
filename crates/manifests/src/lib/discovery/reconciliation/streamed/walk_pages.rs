@@ -17,7 +17,7 @@ use super::super::walk::DiscoveryAdmissionWalk;
 use super::StreamedDiscoveryReconciliationOptions;
 use super::staging::{
     STREAMED_OBSERVATION_COLUMNS, STREAMED_OBSERVATION_COLUMNS_QUALIFIED, StreamedObservationRow,
-    streamed_observation_from_row,
+    analyze_temp_table, streamed_observation_from_row,
 };
 use crate::normalize_address;
 
@@ -122,10 +122,12 @@ pub(super) async fn run_streamed_admission_walk(
     flush_desired_edge_buffer(&mut *executor, &mut desired_buffer).await?;
     flush_admitted_edge_buffer(&mut *executor, &mut admitted_buffer).await?;
     insert_pending_contract_instance_seeds(
-        executor,
+        &mut *executor,
         &walk.into_sorted_pending_contract_instance_seeds(),
     )
     .await?;
+    analyze_temp_table(&mut *executor, "reconcile_desired_edges").await?;
+    analyze_temp_table(&mut *executor, "reconcile_admitted_edges").await?;
     Ok(())
 }
 

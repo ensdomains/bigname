@@ -273,6 +273,8 @@ pub(crate) async fn reconcile_discovery_observations_streamed_with_options(
     let historical_edges = collect_streamed_historical_edges(
         transaction.as_mut(),
         discovery_source,
+        i64::try_from(options.mutation_batch_size)
+            .context("streamed reconcile mutation batch size overflowed i64")?,
         &mut retained_newer_edge_ids,
     )
     .await?;

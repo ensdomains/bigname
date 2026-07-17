@@ -16,6 +16,7 @@ use super::super::chronology::{
     assignment_starts_no_later, compare_edge_starts, edge_starts_after_spec,
 };
 use super::super::existing::edge_from_row;
+use super::staging::analyze_temp_table;
 
 /// Exact stored-spec equality between an active `discovery_edges` row (`de`,
 /// with `cia` as its active to-address join) and a staged desired row
@@ -327,6 +328,7 @@ pub(super) async fn materialize_streamed_insert_candidates(
     .execute(&mut *executor)
     .await
     .context("failed to materialize streamed discovery-edge insert candidates")?;
+    analyze_temp_table(&mut *executor, "reconcile_insert_candidates").await?;
 
     Ok(())
 }
@@ -449,84 +451,106 @@ pub(super) async fn collect_same_assignment_retained_edges(
 /// (same observation key, chain, edge kind, and from-instance, starting
 /// strictly after the desired start) become closed historical epochs with
 /// the successor's start as their terminal; the successor is retained.
+///
+/// The candidate scan is paged by `desired_row_id` (re-evaluated on the
+/// transaction's pinned snapshot before any mutation, so pages stay
+/// consistent) instead of one full fetch. The returned historical set is
+/// still held in memory: it is the input to the historical materialization
+/// batch and is bounded by the successor diff, which for a full-closure
+/// finalize means retained edges newer than the replay target.
 pub(super) async fn collect_streamed_historical_edges(
     executor: &mut PgConnection,
     discovery_source: &str,
+    page_limit: i64,
     retained_newer_edge_ids: &mut HashSet<i64>,
 ) -> Result<Vec<(i64, ReconciledDiscoveryEdgeSpec, ObservationTerminalState)>> {
-    let rows = sqlx::query(&format!(
-        r#"
-        SELECT {STREAMED_DESIRED_EDGE_COLUMNS}
-        FROM pg_temp.reconcile_desired_edges desired
-        WHERE desired.active_from_block_number IS NOT NULL
-          AND EXISTS (
-              SELECT 1
-              FROM discovery_edges de
-              JOIN contract_instance_addresses cia
-                ON cia.contract_instance_id = de.to_contract_instance_id
-               AND cia.deactivated_at IS NULL
-              WHERE de.discovery_source = $1
-                AND de.deactivated_at IS NULL
-                AND de.provenance ->> 'observation_key' = desired.observation_key
-                AND de.chain_id = desired.chain_id
-                AND de.edge_kind = desired.edge_kind
-                AND de.from_contract_instance_id = desired.from_contract_instance_id
-                AND NOT {STREAMED_EDGE_IS_ORPHANED_SQL}
-                AND {STREAMED_STARTS_AFTER_SQL}
-          )
-        ORDER BY desired.desired_row_id
-        "#
-    ))
-    .bind(discovery_source)
-    .fetch_all(&mut *executor)
-    .await
-    .context("failed to load streamed historical desired discovery edges")?;
-    let historical_desired = rows
-        .iter()
-        .map(desired_edge_spec_from_row)
-        .collect::<Result<Vec<_>>>()?;
-
     let mut historical_edges = Vec::new();
-    for (desired_row_id, desired) in historical_desired {
+    let mut after_row_id = 0i64;
+    loop {
         let rows = sqlx::query(&format!(
             r#"
-            {STREAMED_EXISTING_EDGE_SELECT_SQL}
-            {STREAMED_ACTIVE_EDGE_FROM_SQL}
-              AND de.provenance ->> 'observation_key' = $2
-              AND de.chain_id = $3
-              AND de.edge_kind = $4
-              AND de.from_contract_instance_id = $5
+            SELECT {STREAMED_DESIRED_EDGE_COLUMNS}
+            FROM pg_temp.reconcile_desired_edges desired
+            WHERE desired.desired_row_id > $2
+              AND desired.active_from_block_number IS NOT NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM discovery_edges de
+                  JOIN contract_instance_addresses cia
+                    ON cia.contract_instance_id = de.to_contract_instance_id
+                   AND cia.deactivated_at IS NULL
+                  WHERE de.discovery_source = $1
+                    AND de.deactivated_at IS NULL
+                    AND de.provenance ->> 'observation_key' = desired.observation_key
+                    AND de.chain_id = desired.chain_id
+                    AND de.edge_kind = desired.edge_kind
+                    AND de.from_contract_instance_id = desired.from_contract_instance_id
+                    AND NOT {STREAMED_EDGE_IS_ORPHANED_SQL}
+                    AND {STREAMED_STARTS_AFTER_SQL}
+              )
+            ORDER BY desired.desired_row_id
+            LIMIT $3
             "#
         ))
         .bind(discovery_source)
-        .bind(&desired.observation_key)
-        .bind(&desired.chain)
-        .bind(&desired.edge_kind)
-        .bind(desired.from_contract_instance_id)
+        .bind(after_row_id)
+        .bind(page_limit)
         .fetch_all(&mut *executor)
         .await
-        .context("failed to load successor candidates for a historical desired edge")?;
-        let successor_candidates = rows
-            .into_iter()
-            .map(edge_from_row)
-            .collect::<Result<Vec<_>>>()?;
-        let Some(successor) = successor_candidates
+        .context("failed to page streamed historical desired discovery edges")?;
+        if rows.is_empty() {
+            break;
+        }
+        let page = rows
             .iter()
-            .filter(|edge| {
-                !edge.active_from_block_is_orphaned && edge_starts_after_spec(edge, &desired)
-            })
-            .min_by(compare_edge_starts)
-        else {
-            continue;
-        };
-        retained_newer_edge_ids.insert(successor.discovery_edge_id);
-        let terminal_state = ObservationTerminalState {
-            chain: successor.spec.chain.clone(),
-            block_number: successor.spec.active_from_block_number,
-            block_hash: successor.spec.active_from_block_hash.clone(),
-            event_position: successor.spec.active_from_event_position,
-        };
-        historical_edges.push((desired_row_id, desired, terminal_state));
+            .map(desired_edge_spec_from_row)
+            .collect::<Result<Vec<_>>>()?;
+        after_row_id = page
+            .last()
+            .map(|(desired_row_id, _)| *desired_row_id)
+            .expect("a non-empty historical page has a last row");
+
+        for (desired_row_id, desired) in page {
+            let rows = sqlx::query(&format!(
+                r#"
+                {STREAMED_EXISTING_EDGE_SELECT_SQL}
+                {STREAMED_ACTIVE_EDGE_FROM_SQL}
+                  AND de.provenance ->> 'observation_key' = $2
+                  AND de.chain_id = $3
+                  AND de.edge_kind = $4
+                  AND de.from_contract_instance_id = $5
+                "#
+            ))
+            .bind(discovery_source)
+            .bind(&desired.observation_key)
+            .bind(&desired.chain)
+            .bind(&desired.edge_kind)
+            .bind(desired.from_contract_instance_id)
+            .fetch_all(&mut *executor)
+            .await
+            .context("failed to load successor candidates for a historical desired edge")?;
+            let successor_candidates = rows
+                .into_iter()
+                .map(edge_from_row)
+                .collect::<Result<Vec<_>>>()?;
+            let Some(successor) = successor_candidates
+                .iter()
+                .filter(|edge| {
+                    !edge.active_from_block_is_orphaned && edge_starts_after_spec(edge, &desired)
+                })
+                .min_by(compare_edge_starts)
+            else {
+                continue;
+            };
+            retained_newer_edge_ids.insert(successor.discovery_edge_id);
+            let terminal_state = ObservationTerminalState {
+                chain: successor.spec.chain.clone(),
+                block_number: successor.spec.active_from_block_number,
+                block_hash: successor.spec.active_from_block_hash.clone(),
+                event_position: successor.spec.active_from_event_position,
+            };
+            historical_edges.push((desired_row_id, desired, terminal_state));
+        }
     }
     Ok(historical_edges)
 }
