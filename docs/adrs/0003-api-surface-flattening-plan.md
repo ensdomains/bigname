@@ -511,7 +511,7 @@ Plan:
    - requested namespace/name or inferred namespace/name
    - selected `ChainPositions`
    - `consistency`
-   - deployment-profile context
+   - profile/deployment context
    - route family
 2. Make exact-name, coverage, resolution, and explain routes call that selector first.
 3. Make storage expose route-ready projection reads for a selected snapshot instead of
