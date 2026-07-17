@@ -87,7 +87,7 @@ docker compose --env-file .env.server \
   stop indexer
 ```
 
-To freeze projection writes as well:
+To freeze [projection](../glossary.md) writes as well:
 
 ```sh
 docker compose --env-file .env.server \
@@ -230,7 +230,7 @@ docker compose --env-file .env.server \
 ```
 
 The live identity validation checks for stale display rows in the API-readable
-current projections and identity-feed sidecar after this replay.
+current projections and identity-feed [sidecar](../glossary.md) after this replay.
 
 Backfill and projection apply:
 
@@ -287,8 +287,8 @@ docker compose --env-file .env.server \
   logs --tail=300 worker
 ```
 
-For normalized-event mismatch failures, stop the indexer before retry loops
+For [normalized-event](../glossary.md) mismatch failures, stop the indexer before retry loops
 generate noise. Decide whether the fix is code, a data repair migration, or
-both. If a migration changes normalized event canonicality or identity fields,
+both. If a migration changes normalized event [canonicality](../glossary.md) or identity fields,
 it must also enqueue projection invalidation through
 `projection_normalized_event_changes`.

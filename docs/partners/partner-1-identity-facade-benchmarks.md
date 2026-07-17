@@ -13,7 +13,7 @@ Environment:
 
 - Forward and reverse identity record loading no longer reads large `name_current.provenance` or unused record-inventory JSON fields.
 - Reverse batch defaults to `page_size=1`, matching feed rendering. Reverse single keeps the profile-style `page_size=100` default.
-- Reverse `total_count` is read from `address_names_current_identity_counts`, an indexed sidecar maintained from `address_names_current` and readable `name_current` eligibility, rather than counted on the request path.
+- Reverse `total_count` is read from `address_names_current_identity_counts`, an indexed [sidecar](../glossary.md) maintained from `address_names_current` and readable `name_current` eligibility, rather than counted on the request path.
 - ENS token IDs fall back to the current surface labelhash as a uint256 string for second-level `.eth` names when projected authority/registration/control summaries do not carry a token ID.
 - `POST /v1/identity:lookup` with `profile=feed` is the native compact feed DTO for latency-sensitive identity rendering. It returns one identity record per address plus `total_count`, skips full `IdentityRecord` hydration, and is backed by indexed count/identity sidecars.
 
@@ -58,7 +58,7 @@ After the API image was rebuilt from this branch, the latency check was repeated
 | `POST /v1/identity:lookup` `profile=feed`, 250 random address inputs | 117.73 KB | 6.90 ms |
 | `POST /v1/identity:lookup` `profile=feed`, 1000 random address inputs | 470.99 KB | 21.06 ms |
 
-The 100-input row is from a 400-request measured rerun after a 50-request warmup. Worker/indexer replay was paused for the benchmark and restarted afterward; measuring while a full projection replay is actively scanning/writing `name_current` can push p95 above the feed SLO and is not the steady-state API-path measurement.
+The 100-input row is from a 400-request measured rerun after a 50-request warmup. Worker/indexer replay was paused for the benchmark and restarted afterward; measuring while a full [projection](../glossary.md) replay is actively scanning/writing `name_current` can push p95 above the feed SLO and is not the steady-state API-path measurement.
 
 Re-run the live validation with `scripts/identity-10k-normalization-check`. The script samples reverse-address feed rows and API-readable current forward names from the live projection database, checks `/v1/identity:lookup`, and fails if current surfaces still carry unclassified normalization drift without a recorded normalization-repair finding.
 
@@ -74,4 +74,4 @@ A 100-name ENS sample from live projections returned:
 - unsupported `manager_address`: 14
 - unsupported `owner_address`: 14
 
-For `taytems.eth`, the live façade returned no unsupported fields after the token-id fallback and slim record-inventory path.
+For `taytems.eth`, the live identity façade (the identity read surface) returned no unsupported fields after the token-id fallback and slim record-inventory path.

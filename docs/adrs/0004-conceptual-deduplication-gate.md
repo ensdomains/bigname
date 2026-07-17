@@ -14,7 +14,7 @@ one capability, and less hand-written production code.
 The first ADR 0003 implementation pass exposed a failure mode in that plan: a slice
 can centralize some metadata, introduce shared helpers, preserve compatibility, and
 still leave the old conceptual owners in place. That kind of change can be useful
-preparation, but it is not the same as de-slopping the subsystem. It can even increase
+preparation, but it is not the same as de-slopping (removing duplicated concepts from) the subsystem. It can even increase
 production LOC while making the code look more organized.
 
 Examples of this failure mode:
@@ -26,7 +26,7 @@ Examples of this failure mode:
   summaries separately
 - a snapshot request type exists, but handlers and readback code still assemble
   selected-snapshot behavior independently
-- a normalized-event persistence helper exists, but scoped replay and raw-log loading
+- a [normalized-event](../glossary.md) persistence helper exists, but scoped replay and raw-log loading
   remain per-adapter concepts
 
 ADR 0003 remains the product and compatibility plan. This ADR adds the completion
@@ -52,7 +52,7 @@ conditions:
 Helper extraction alone does not satisfy the gate. A new helper counts only when it
 also removes the old call-site concept or when it is paired with an immediate follow-up
 deletion slice. If the old concept still exists at every call site, the change is
-scaffolding, not conceptual deduplication.
+scaffolding (temporary throwaway structure), not conceptual deduplication.
 
 Compatibility preservation remains required, but compatibility shims must be explicit:
 
@@ -123,7 +123,7 @@ Not enough:
 Done means:
 
 - one snapshot-selection service returns the selected snapshot and route-ready
-  projection reads
+  [projection](../glossary.md) reads
 - exact-name, coverage, resolution, compact-record, and explain paths use that service
   instead of re-assembling snapshot behavior
 - stale, not-found, conflict, and unsupported mappings are shared vocabulary, not
