@@ -93,15 +93,16 @@ suite only at an isolated test PostgreSQL server.
    base ENSv1 scenarios keep execution manifests out of the generated profile.
    Basenames scenarios mirror the shipped
    `manifests/mainnet/base/basenames` family versions with local Base
-   addresses; the Phase 5 declared-state slice does not mirror
+   addresses; the Basenames declared-state scenarios do not mirror
    `manifests/mainnet/ethereum/basenames` because no L1-compatibility or
    execution-plane row runs yet. ENSv2 scenarios mirror the shipped
    `manifests/sepolia/ethereum/ens` families into a generated
    `manifests-sepolia` root so the selected profile remains the post-audit Sepolia
    one. Cross-protocol scenarios structurally mirror the eleven
    non-`ens_execution` mainnet families across both chains, including the two
-   ethereum-chain glue families (`basenames_l1_compat`,
-   `basenames_execution`), into one generated root and run a single live
+   Basenames source families that run on the Ethereum chain
+   (`basenames_l1_compat`, `basenames_execution`) — "L1 Basenames families"
+   below — into one generated root and run a single live
    session over two anvils. The twelfth checked-in family, shadow
    `ens_execution`, is omitted from that composed corpus and exercised
    separately by the verified-resolution scenario; the cross-protocol run is
@@ -142,7 +143,8 @@ route inventory or a claim that every protocol transition is covered.
 
 ## Scenarios
 
-- `register_eth_name` — walking skeleton. Registers `alice.eth` through the
+- `register_eth_name` — the first end-to-end scenario (a "walking skeleton"
+  in XP terms). Registers `alice.eth` through the
   controller's commit/reveal flow (time-warped past the minimum commitment
   age) and asserts raw-log persistence, canonical normalized event kinds,
   and the exact-name route's registration/coverage output. Verified
@@ -186,7 +188,8 @@ route inventory or a claim that every protocol transition is covered.
 - `registration_burst::registration_with_records_reverse_and_referrer_derives_single_burst`
   — supplies controller registration data and the Ethereum reverse bit,
   deriving registrar, registry, resolver, and reverse facts from one
-  transaction
+  transaction — a single-transaction registration that also writes records
+  and a reverse claim (the "burst" shape)
   (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L307 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L319 @ ens_v1@91c966f);
   the nonzero referrer is decoded from the retained controller log
@@ -220,11 +223,11 @@ route inventory or a claim that every protocol transition is covered.
   — observes a label through a later controller registration
   (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L334 @ ens_v1@91c966f),
   upgrades the bracketed child display, and confirms that label proof alone
-  does not mint an exact-name surface. Phase 2 pins the reveal via
+  does not mint an exact-name surface. This scenario pins the reveal via
   backfill + projection replay because live re-ingest of the reveal chain
   hangs the run loop before checkpoint promotion (a reproduced live-intake defect);
   `BIGNAME_E2E_READY_TIMEOUT_SECS` shortens the readiness deadline when
-  reproducing that wedge.
+  reproducing that hang.
 - `unadmitted_controller::unadmitted_controller_registration_derives_registry_side_only`
   — adds a fresh EOA as a registrar controller and registers directly on
   the registrar
@@ -303,20 +306,22 @@ route inventory or a claim that every protocol transition is covered.
   `PARENT_CANNOT_CONTROL`, checks wrapper expiry vs registrar expiry, and
   unwraps a separate name before lease end to confirm the prior registrar
   resource and lineage reactivate.
-- `wrapper_turn_k::born_wrapped_registration_exposes_trailing_grant_rebind`
+- `wrapper_registration::born_wrapped_registration_retains_wrapper_authority`
   — deploys and authorises the manifest-admitted mainnet
   WrappedETHRegistrarController artifact, registers through its flat
   commit/reveal ABI and NameWrapper's registerAndWrapETH2LD entrypoint
   (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289 @ ens_v1@91c966f),
-  and pins the current mixed result: one transient wrapper resource, a final
-  registrar binding, and registry-only exact-name authority fields.
-- `wrapper_turn_k_transfers::wrapped_renewal_tracks_registrar_expiry_without_wrapper_event`
+  and pins the born-wrapped outcome: the same-transaction wrapper introduction
+  remains authoritative — the wrapper resource stays active, exact-name
+  resolution serves the wrapper resource, and the authority fields report the
+  wrapper (`authority_kind = "wrapper"`, `wrapper:`-prefixed authority key).
+- `wrapper_renewal_and_transfers::wrapped_renewal_tracks_registrar_expiry_without_wrapper_event`
   — renews a wrapped 2LD through the current controller, proving the wrapper
   emits no expiry event and its onchain expiry stays stale while exact-name
   follows the registrar `RegistrationRenewed` value
   (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L366 @ ens_v1@91c966f).
-- `wrapper_turn_k_transfers::wrapped_erc1155_single_and_batch_transfers_preserve_identity`
+- `wrapper_renewal_and_transfers::wrapped_erc1155_single_and_batch_transfers_preserve_identity`
   — performs real single and two-id batch ERC1155 transfers, pins per-id
   `TransferBatch` fan-out, holder-following registrants, stable wrapper
   resource/lineage, and zero registry/lifecycle derivation. Exact-name
@@ -324,13 +329,13 @@ route inventory or a claim that every protocol transition is covered.
   explicitly unsupported rather than inferring holder powers or publishing
   stale pre-wrap facets
   (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L154 @ ens_v1@91c966f).
-- `wrapper_turn_k::parent_burns_pcc_then_extends_existing_child_expiry`
+- `wrapper_registration::parent_burns_pcc_then_extends_existing_child_expiry`
   — creates a live wrapped child without PCC, burns the exact 0→65536
   transition through parent-authorised setChildFuses, then extends the child
   to its parent's expiry cap without rotating identity
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L517 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L475 @ ens_v1@91c966f).
-- `wrapper_turn_k::wrap_existing_registry_subname_rotates_child_only` —
+- `wrapper_registration::wrap_existing_registry_subname_rotates_child_only` —
   wraps a plain child under a registry-only parent using DNS wire bytes and
   registry operator approval; the child's registry `Transfer` (not
   `NewOwner`) rotates it to a distinct wrapper resource and publishes the
@@ -352,19 +357,19 @@ route inventory or a claim that every protocol transition is covered.
   a nonblank reverse claim that fails ENSIP-15 normalization and asserts
   `claimed_primary_name.status=invalid_name` with `raw_claim_name` preserved
   and no coerced candidate name.
-- `reverse_primary_turn_j::claim_without_name_record_keeps_candidate_absent`
+- `reverse_primary_claims::claim_without_name_record_keeps_candidate_absent`
   — calls `claim` without a name write, asserting the registry child edge and
   reverse claim derive separately, no resolver log or candidate appears, and
   the persisted/public tuple is explicitly `not_found`
   (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L64 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L84 @ ens_v1@91c966f).
-- `reverse_primary_turn_j::authorised_third_party_claim_keys_candidate_to_claimed_address`
+- `reverse_primary_claims::authorised_third_party_claim_keys_candidate_to_claimed_address`
   — registry-authorises an operator to call `setNameForAddr`, then proves the
   reverse node, candidate tuple, and primary-name route key off the claimed
   address while raw transaction provenance retains the operator sender
   (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L44 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L129 @ ens_v1@91c966f).
-- `reverse_primary_turn_j::unadmitted_reverse_resolver_keeps_candidate_absent`
+- `reverse_primary_claims::unadmitted_reverse_resolver_keeps_candidate_absent`
   — claims through a pinned, owner-written OwnedResolver whose runtime code
   hash differs from the admitted PublicResolver seed
   (upstream: .refs/ens_v1/contracts/resolvers/OwnedResolver.sol:L16 @ ens_v1@91c966f),
@@ -373,10 +378,10 @@ route inventory or a claim that every protocol transition is covered.
   `primary_claim_source`, so the persisted and public candidate stay
   `not_found`
   (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L93 @ ens_v1@91c966f).
-- `reverse_primary_turn_j::forward_mismatch_keeps_declared_candidate_but_verified_not_found`
+- `reverse_primary_claims::forward_mismatch_keeps_declared_candidate_but_verified_not_found`
   — runs with chain RPC and the local Universal Resolver, writes a forward
-  `addr:60` different from the reverse claimant, and pins the current honest
-  gap: the declared candidate succeeds, but a tuple-present claim never
+  `addr:60` different from the reverse claimant, and pins the current
+  evidence-scoped gap: the declared candidate succeeds, but a tuple-present claim never
   invokes primary verification, so verified mode is `not_found` with no
   primary execution trace or cache outcome
   (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L105 @ ens_v1@91c966f)
@@ -389,7 +394,7 @@ route inventory or a claim that every protocol transition is covered.
   transfer control vectors, then sets and clears the Base coin-type primary
   claim. Verified execution remains out of scope for this row: `mode=both`
   keeps verified primary state as `not_found`.
-- `basenames_turn_m::renew_release_and_premium_reregistration_rotate_lineage`
+- `basenames_lifecycle::renew_release_and_premium_reregistration_rotate_lineage`
   — renews through the legacy controller's three-argument `NameRenewed`,
   advances beyond expiry plus grace, emits admitted post-grace activity, and
   re-registers to a different owner. It pins release synthesis, the two
@@ -397,7 +402,7 @@ route inventory or a claim that every protocol transition is covered.
   (upstream: .refs/basenames/src/L2/RegistrarController.sol:L497 @ basenames@1809bbc)
   (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L294 @ basenames@1809bbc)
   (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L443 @ basenames@1809bbc).
-- `basenames_turn_m::upgradeable_controller_proxy_registers_and_renews` —
+- `basenames_lifecycle::upgradeable_controller_proxy_registers_and_renews` —
   deploys and initializes the upgradeable controller implementation and proxy,
   authorizes the proxy, and drives registration and renewal through it. The
   admitted events retain proxy-emitter provenance while contract-instance
@@ -405,11 +410,11 @@ route inventory or a claim that every protocol transition is covered.
   (upstream: .refs/basenames/test/Integration/SwitchToUpgradeableRegistrarController.t.sol:L45 @ basenames@1809bbc)
   (upstream: .refs/basenames/test/Integration/SwitchToUpgradeableRegistrarController.t.sol:L59 @ basenames@1809bbc)
   (upstream: .refs/basenames/test/Integration/SwitchToUpgradeableRegistrarController.t.sol:L68 @ basenames@1809bbc).
-- `basenames_turn_m::basenames_subnames_list_preimages_placeholders_and_tombstones`
+- `basenames_lifecycle::basenames_subnames_list_preimages_placeholders_and_tombstones`
   — creates a revealed child and hash-only sibling under a registered Base
   parent, pins child listing and the bracketed placeholder, then removes the
   hash-only child through a zero-owner write.
-- `basenames_turn_m::l2_resolver_records_clear_and_contenthash_gap` — writes
+- `basenames_lifecycle::l2_resolver_records_clear_and_contenthash_gap` — writes
   text, non-60 multicoin address, and name records in separate transactions,
   then clears them and pins keyed state plus the version boundary. A
   contenthash write on the same watched resolver is retained as a raw log,
@@ -418,7 +423,7 @@ route inventory or a claim that every protocol transition is covered.
   (upstream: .refs/basenames/src/L2/resolver/ResolverBase.sol:L35 @ basenames@1809bbc)
   (upstream: .refs/basenames/src/L2/resolver/ContentHashResolver.sol:L32 @ basenames@1809bbc)
   (upstream: .refs/basenames/src/L2/resolver/ContentHashResolver.sol:L34 @ basenames@1809bbc).
-- `basenames_turn_m::unadmitted_resolver_rotation_stays_profile_gated_then_clears`
+- `basenames_lifecycle::unadmitted_resolver_rotation_stays_profile_gated_then_clears`
   — rotates to an L2Resolver built against an alternate registry. An initial
   backfill discovers the resolver, then a focused watched-target backfill
   retains its raw `TextChanged` log and code hash. The persisted
@@ -427,7 +432,7 @@ route inventory or a claim that every protocol transition is covered.
   declared resolver state
   (upstream: .refs/basenames/src/L2/L2Resolver.sol:L113 @ basenames@1809bbc)
   (upstream: .refs/basenames/src/L2/L2Resolver.sol:L114 @ basenames@1809bbc).
-- `basenames_turn_m::legacy_reverse_registrar_stays_registry_and_raw_record_only`
+- `basenames_lifecycle::legacy_reverse_registrar_stays_registry_and_raw_record_only`
   — drives helper `claimForBaseAddr` and `setNameForAddr`; a claim-only ingest
   derives `NewOwner`, while the combined replay retains the latter child
   assignment and resolver discovery keeps `NewResolver` with no logical name.
@@ -436,7 +441,7 @@ route inventory or a claim that every protocol transition is covered.
   (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L158 @ basenames@1809bbc)
   (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L193 @ basenames@1809bbc)
   (upstream: .refs/basenames/src/L2/resolver/NameResolver.sol:L30 @ basenames@1809bbc).
-- `basenames_turn_m::third_party_controller_registration_degrades_without_label_events`
+- `basenames_lifecycle::third_party_controller_registration_degrades_without_label_events`
   — authorizes an EOA controller and pins direct `register` as a raw token
   mint plus one registry authority derivation without `RegistrationGranted`;
   `registerOnly` retains only the raw token mint and creates no registry node
@@ -464,7 +469,7 @@ route inventory or a claim that every protocol transition is covered.
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L206 @ ens_v2@48b3e2d)
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L637 @ ens_v2@48b3e2d)
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L647 @ ens_v2@48b3e2d).
-- `ens_v2_turn_l::renewal_preserves_promoted_coverage_and_registry_edges_follow` —
+- `ens_v2_lifecycle::renewal_preserves_promoted_coverage_and_registry_edges_follow` —
   registrar renewal after registry expiry but within the post-audit grace period
   derives both fragments and preserves the promoted
   exact-name coverage end to end; a direct
@@ -472,7 +477,7 @@ route inventory or a claim that every protocol transition is covered.
   `ExpiryChanged` and a registry-family `RegistrationRenewed`; expiry
   reduction reverts upstream
   (upstream: .refs/ens_v2/contracts/src/registrar/AbstractETHRegistrar.sol:L84 @ ens_v2@48b3e2d).
-- `ens_v2_turn_l::resolver_and_subregistry_edges_follow_set_change_zero` —
+- `ens_v2_lifecycle::resolver_and_subregistry_edges_follow_set_change_zero` —
   resolver set/change/zero and subregistry attach/detach derive NULL-edge
   detaches. The composed chain runs through normal automatic intake, proving
   normalized replay recovers exact generation-bound coverage for the
@@ -497,26 +502,26 @@ route inventory or a claim that every protocol transition is covered.
   target is generation-covered during startup, so this does not test first-ever
   live discovery catch-up; it stops at normalized and identity state without a
   worker or public API assertion.
-- `ens_v2_turn_l::expiry_passes_then_reregistration_advances_lineage` —
+- `ens_v2_lifecycle::expiry_passes_then_reregistration_advances_lineage` —
   after expiry and the post-audit grace period pass, the event-silent availability
   flip serves last-known active state with a past
   expiry; re-registration advances the on-chain counters without an unregister
   event, live intake reaches both `RegistrationGranted` resource epochs, and
   exact-name readback serves the successor owner/resource with `full` /
   `authoritative` coverage while the two binding intervals remain adjacent.
-- `ens_v2_turn_l::root_apex_attach_and_root_scope_roles` — the root
+- `ens_v2_lifecycle::root_apex_attach_and_root_scope_roles` — the root
   family's first transitions: `eth` apex registration + attach derive,
   root-scope grant/revoke read from the resulting bitmap and clear
   `permissions_current`, and registry-level setParent derives
   `ParentChanged`
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L171 @ ens_v2@48b3e2d).
-- `ens_v2_turn_l::reserved_labels_foreign_registrar_and_token_sale` —
+- `ens_v2_lifecycle::reserved_labels_foreign_registrar_and_token_sale` —
   labelhash-keyed token-less reservations promote in place preserving
   expiry; a non-admitted root-role registrar derives registry-only facts
   with gated coverage; an ERC1155 sale migrates roles (admin-half rendered
   as `admin_*` powers) with no token regeneration while the declared
   registrant and registrant collection move from seller to buyer.
-- `ens_v2_turn_l::discovered_v2_resolver_records_are_backfilled_in_session` — a
+- `ens_v2_lifecycle::discovered_v2_resolver_records_are_backfilled_in_session` — a
   VerifiableFactory-proxied writable resolver
   (upstream: .refs/ens_v2/contracts/script/setup.ts:L719 @ ens_v2@48b3e2d)
   (upstream: .refs/ens_v2/contracts/script/setup.ts:L721 @ ens_v2@48b3e2d)
@@ -541,25 +546,25 @@ route inventory or a claim that every protocol transition is covered.
   arbitrary local substitution of the execution role address.
 - `perturbations::*` — one representative, moderately rich ENSv1 chain shape
   (`perturb.eth` registration, addr/text records, and a registry-only subname)
-  run through the phase-3 multipliers: projection replay plus
+  run through the representative perturbation checks: projection replay plus
   normalized-event replay, indexer restart after the first live checkpoint,
   backfill-from-zero normalized-event digest parity, and a live same-session
   reorg that converges to the winning branch while retaining orphaned
   losing-branch audit rows.
   Backfill parity is intentionally asserted at `normalized_events`, not API
   routes, because the backfill command does not promote canonical checkpoints
-  required by snapshot-selected reads. These multipliers validate that one
-  corpus; they are not applied to every scenario or protocol.
+  required by snapshot-selected reads. These four perturbation checks validate
+  that one corpus; they are not applied to every scenario or protocol.
 - `cross_protocol::composed_mainnet_profile_serves_both_protocols_without_leakage`
   — ingests a generated structural mirror of the currently checked-in mainnet
-  families (ENSv1 ethereum + Basenames base + the ethereum-chain glue
+  families (ENSv1 ethereum + Basenames base + the L1 Basenames
   families) as one corpus over two anvils:
   per-chain checkpoints coexist, each protocol's exact-name body equals its
   single-protocol baseline after normalizing corpus-minted identifiers
   (`authority_key`'s third segment is the per-corpus contract-instance
   ordinal), the base.eth namespace boundary holds with zero cross-chain
   position leakage, per-namespace address collections and primary
-  candidates stay scoped, and the glue families' admission syncs as stored
+  candidates stay scoped, and the L1 Basenames families' admission syncs as stored
   manifest state (manifest bookkeeping events are backfill-only).
 - `cross_protocol::base_reorg_leaves_ethereum_canonicality_untouched` — a
   live mid-session reorg on the Base chain of the composed corpus converges
@@ -596,7 +601,7 @@ route inventory or a claim that every protocol transition is covered.
 
 ## Extending
 
-The scenario matrices, representative perturbation multipliers, harness
+The scenario matrices, representative perturbation checks, harness
 roadmap, and phasing live in
 [`docs/internal/e2e-testing-plan.md`](../../docs/internal/e2e-testing-plan.md)
 — that document is the scenario ledger, not an exhaustiveness guarantee;
