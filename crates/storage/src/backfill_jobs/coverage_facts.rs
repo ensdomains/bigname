@@ -53,11 +53,19 @@ pub struct BackfillCoverageFactWrite {
     pub covered_to_block: i64,
 }
 
+struct BackfillCoverageAuthority {
+    chain_id: String,
+    status: String,
+    range_start_block_number: i64,
+    range_end_block_number: i64,
+}
+
 /// Append coverage facts for a backfill job inside the caller's transaction.
 /// The fact rows' chain_id is read from the job row itself, so it can never
-/// disagree with the job the facts describe. Inserts are chunked below the
-/// PostgreSQL bind limit and idempotent via ON CONFLICT DO NOTHING against
-/// the tuple key; returns the inserted count.
+/// disagree with the job the facts describe. The job must already be completed
+/// and every fact interval must be contained by its declared range. Inserts are
+/// chunked below the PostgreSQL bind limit and idempotent via ON CONFLICT DO
+/// NOTHING against the tuple key; returns the inserted count.
 pub async fn write_backfill_coverage_facts(
     conn: &mut PgConnection,
     backfill_job_id: i64,
@@ -73,13 +81,14 @@ pub async fn write_backfill_coverage_facts(
     for fact in facts {
         validate_backfill_coverage_fact_write(fact)?;
     }
-    let chain_id = load_backfill_job_chain_id(conn, backfill_job_id).await?;
+    let authority = load_backfill_job_coverage_authority(conn, backfill_job_id).await?;
+    validate_backfill_job_coverage_authority(backfill_job_id, &authority, facts.iter())?;
     let mut inserted = 0_u64;
     for chunk in facts.chunks(COVERAGE_FACT_INSERT_CHUNK_ROWS) {
         inserted += insert_backfill_coverage_fact_chunk(
             conn,
             backfill_job_id,
-            &chain_id,
+            &authority.chain_id,
             derivation,
             chunk,
         )
@@ -99,17 +108,15 @@ pub(super) async fn write_backfill_coverage_facts_from_iter(
 ) -> Result<u64> {
     let mut inserted = 0_u64;
     let mut chunk = Vec::new();
-    let mut chain_id = None;
+    let authority = load_backfill_job_coverage_authority(conn, backfill_job_id).await?;
     for fact in facts {
         chunk.push(fact);
         if chunk.len() == COVERAGE_FACT_INSERT_CHUNK_ROWS {
-            if chain_id.is_none() {
-                chain_id = Some(load_backfill_job_chain_id(conn, backfill_job_id).await?);
-            }
+            validate_backfill_job_coverage_authority(backfill_job_id, &authority, chunk.iter())?;
             inserted += insert_backfill_coverage_fact_chunk(
                 conn,
                 backfill_job_id,
-                chain_id.as_deref().expect("chain_id loaded above"),
+                &authority.chain_id,
                 derivation,
                 &chunk,
             )
@@ -118,13 +125,11 @@ pub(super) async fn write_backfill_coverage_facts_from_iter(
         }
     }
     if !chunk.is_empty() {
-        if chain_id.is_none() {
-            chain_id = Some(load_backfill_job_chain_id(conn, backfill_job_id).await?);
-        }
+        validate_backfill_job_coverage_authority(backfill_job_id, &authority, chunk.iter())?;
         inserted += insert_backfill_coverage_fact_chunk(
             conn,
             backfill_job_id,
-            chain_id.as_deref().expect("chain_id loaded above"),
+            &authority.chain_id,
             derivation,
             &chunk,
         )
@@ -133,16 +138,65 @@ pub(super) async fn write_backfill_coverage_facts_from_iter(
     Ok(inserted)
 }
 
-async fn load_backfill_job_chain_id(
+async fn load_backfill_job_coverage_authority(
     conn: &mut PgConnection,
     backfill_job_id: i64,
-) -> Result<String> {
-    sqlx::query_scalar::<_, String>("SELECT chain_id FROM backfill_jobs WHERE backfill_job_id = $1")
-        .bind(backfill_job_id)
-        .fetch_optional(&mut *conn)
-        .await
-        .with_context(|| format!("failed to load chain for backfill job {backfill_job_id}"))?
-        .with_context(|| format!("missing backfill job {backfill_job_id} for coverage fact write"))
+) -> Result<BackfillCoverageAuthority> {
+    sqlx::query_as::<_, (String, String, i64, i64)>(
+        r#"
+        SELECT
+            chain_id,
+            status::TEXT,
+            range_start_block_number,
+            range_end_block_number
+        FROM backfill_jobs
+        WHERE backfill_job_id = $1
+        "#,
+    )
+    .bind(backfill_job_id)
+    .fetch_optional(&mut *conn)
+    .await
+    .with_context(|| {
+        format!("failed to load coverage authority for backfill job {backfill_job_id}")
+    })?
+    .map(
+        |(chain_id, status, range_start_block_number, range_end_block_number)| {
+            BackfillCoverageAuthority {
+                chain_id,
+                status,
+                range_start_block_number,
+                range_end_block_number,
+            }
+        },
+    )
+    .with_context(|| format!("missing backfill job {backfill_job_id} for coverage fact write"))
+}
+
+fn validate_backfill_job_coverage_authority<'a>(
+    backfill_job_id: i64,
+    authority: &BackfillCoverageAuthority,
+    facts: impl Iterator<Item = &'a BackfillCoverageFactWrite>,
+) -> Result<()> {
+    if authority.status != "completed" {
+        bail!(
+            "backfill job {backfill_job_id} is {}, not completed; it cannot authorize coverage facts",
+            authority.status
+        );
+    }
+    for fact in facts {
+        if fact.covered_from_block < authority.range_start_block_number
+            || fact.covered_to_block > authority.range_end_block_number
+        {
+            bail!(
+                "backfill coverage fact interval {}..={} is not contained by job range {}..={} for backfill job {backfill_job_id}",
+                fact.covered_from_block,
+                fact.covered_to_block,
+                authority.range_start_block_number,
+                authority.range_end_block_number
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Count persisted coverage facts for a backfill job (tests/ops introspection).

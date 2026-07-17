@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
@@ -10,6 +10,14 @@ use crate::support::{ActiveAddressSpec, CurrentActiveAddressRow};
 pub(crate) async fn reconcile_active_contract_instance_addresses(
     executor: &mut sqlx::postgres::PgConnection,
 ) -> Result<()> {
+    reconcile_active_contract_instance_addresses_with_mutations(executor)
+        .await
+        .map(|_| ())
+}
+
+pub(super) async fn reconcile_active_contract_instance_addresses_with_mutations(
+    executor: &mut sqlx::postgres::PgConnection,
+) -> Result<BTreeSet<String>> {
     let desired_specs = load_desired_active_address_specs(executor, false, &[]).await?;
     let existing_active = load_existing_active_address_rows(executor, false, &[]).await?;
     apply_active_address_reconciliation(executor, desired_specs, existing_active).await
@@ -27,14 +35,17 @@ pub(crate) async fn reconcile_active_contract_instance_addresses_for_ids(
     scoped_ids.sort();
     let desired_specs = load_desired_active_address_specs(executor, true, &scoped_ids).await?;
     let existing_active = load_existing_active_address_rows(executor, true, &scoped_ids).await?;
-    apply_active_address_reconciliation(executor, desired_specs, existing_active).await
+    apply_active_address_reconciliation(executor, desired_specs, existing_active)
+        .await
+        .map(|_| ())
 }
 
 async fn apply_active_address_reconciliation(
     executor: &mut sqlx::postgres::PgConnection,
     desired_specs: Vec<ActiveAddressSpec>,
     existing_active: Vec<CurrentActiveAddressRow>,
-) -> Result<()> {
+) -> Result<BTreeSet<String>> {
+    let mut mutated_chains = BTreeSet::new();
     let desired_ids = desired_specs
         .iter()
         .map(|spec| spec.contract_instance_id)
@@ -45,7 +56,7 @@ async fn apply_active_address_reconciliation(
             continue;
         }
 
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             UPDATE contract_instance_addresses
             SET deactivated_at = now()
@@ -62,6 +73,9 @@ async fn apply_active_address_reconciliation(
                 existing_row.contract_instance_id
             )
         })?;
+        if result.rows_affected() > 0 {
+            mutated_chains.insert(existing_row.chain.clone());
+        }
     }
 
     let existing_active_map = existing_active
@@ -86,7 +100,7 @@ async fn apply_active_address_reconciliation(
                 );
             }
             if let Some(active_from_block_number) = manifest_declared_active_from_block {
-                sqlx::query(
+                let result = sqlx::query(
                     r#"
                     UPDATE contract_instance_addresses
                     SET active_from_block_number = $2,
@@ -109,6 +123,9 @@ async fn apply_active_address_reconciliation(
                         desired_spec.contract_instance_id
                     )
                 })?;
+                if result.rows_affected() > 0 {
+                    mutated_chains.insert(desired_spec.chain.clone());
+                }
             }
             continue;
         }
@@ -141,9 +158,10 @@ async fn apply_active_address_reconciliation(
                 desired_spec.address, desired_spec.contract_instance_id
             )
         })?;
+        mutated_chains.insert(desired_spec.chain);
     }
 
-    Ok(())
+    Ok(mutated_chains)
 }
 
 async fn load_existing_active_address_rows(
@@ -366,23 +384,22 @@ async fn load_desired_active_address_specs(
         if let (Some(implementation_contract_instance_id), Some(implementation_address)) = (
             implementation_contract_instance_id,
             declared_implementation_address,
-        ) {
-            if !scoped || scope_ids.contains(&implementation_contract_instance_id) {
-                specs
-                    .entry(implementation_contract_instance_id)
-                    .or_insert(ActiveAddressSpec {
-                        contract_instance_id: implementation_contract_instance_id,
-                        chain: chain.clone(),
-                        address: implementation_address.clone(),
-                        source_manifest_id: Some(manifest_id),
-                        provenance_json: serde_json::json!({
-                            "source": "manifest_proxy_implementation",
-                            "proxy_contract_instance_id": contract_instance_id,
-                            "proxy_address": declared_address,
-                        })
-                        .to_string(),
-                    });
-            }
+        ) && (!scoped || scope_ids.contains(&implementation_contract_instance_id))
+        {
+            specs
+                .entry(implementation_contract_instance_id)
+                .or_insert(ActiveAddressSpec {
+                    contract_instance_id: implementation_contract_instance_id,
+                    chain: chain.clone(),
+                    address: implementation_address.clone(),
+                    source_manifest_id: Some(manifest_id),
+                    provenance_json: serde_json::json!({
+                        "source": "manifest_proxy_implementation",
+                        "proxy_contract_instance_id": contract_instance_id,
+                        "proxy_address": declared_address,
+                    })
+                    .to_string(),
+                });
         }
     }
 

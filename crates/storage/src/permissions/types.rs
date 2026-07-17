@@ -1,7 +1,15 @@
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 use sqlx::types::time::OffsetDateTime;
 use uuid::Uuid;
+
+/// Public-reader compatibility version for the atomically published permission projection.
+///
+/// This is independent of worker replay progress. Bump it when permission rows and their
+/// projection-owned companion artifacts must be republished together before API readers can
+/// safely decode them.
+pub const PERMISSIONS_CURRENT_PUBLICATION_VERSION: i32 = 2;
 
 /// Persisted current effective permission row for one resource-anchored subject and scope.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -16,6 +24,224 @@ pub struct PermissionsCurrentRow {
     pub transfer_behavior: Value,
     pub provenance: Value,
     pub coverage: Value,
+    pub chain_positions: Value,
+    pub canonicality_summary: Value,
+    pub manifest_version: i64,
+    pub last_recomputed_at: OffsetDateTime,
+}
+
+/// Projection-owned support and authority metadata for one permission resource.
+///
+/// This row exists independently of holder rows so an empty `permissions_current` collection can
+/// still report whether it is authoritative. `root_resource_id` is the optional ENSv2 registry
+/// root whose permission rows are composed by app-facing role reads. Chain-position and
+/// canonicality fields preserve the authority input evidence even when no holder row exists.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionCoverageStatus {
+    Full,
+    Partial,
+    Unsupported,
+}
+
+impl PermissionCoverageStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Partial => "partial",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionCoverageExhaustiveness {
+    Authoritative,
+    BestEffort,
+    NotApplicable,
+}
+
+impl PermissionCoverageExhaustiveness {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Authoritative => "authoritative",
+            Self::BestEffort => "best_effort",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionCoverageUnsupportedReason {
+    Ensv1WrapperHolderPermissionsNotProjected,
+    ResourcePermissionAuthorityNotProjected,
+}
+
+impl PermissionCoverageUnsupportedReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ensv1WrapperHolderPermissionsNotProjected => {
+                "ensv1_wrapper_holder_permissions_not_projected"
+            }
+            Self::ResourcePermissionAuthorityNotProjected => {
+                "resource_permission_authority_not_projected"
+            }
+        }
+    }
+}
+
+/// Typed coverage vocabulary persisted by the permission resource summary.
+///
+/// JSONB remains the storage representation, but construction and decoding are constrained to
+/// the three documented coverage states. Unknown wire strings fail decoding instead of silently
+/// downgrading a public response.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ResourcePermissionCoverage {
+    status: PermissionCoverageStatus,
+    exhaustiveness: PermissionCoverageExhaustiveness,
+    source_classes_considered: Vec<String>,
+    enumeration_basis: String,
+    unsupported_reason: Option<PermissionCoverageUnsupportedReason>,
+}
+
+impl ResourcePermissionCoverage {
+    pub fn authoritative(
+        source_classes_considered: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            status: PermissionCoverageStatus::Full,
+            exhaustiveness: PermissionCoverageExhaustiveness::Authoritative,
+            source_classes_considered: source_classes_considered
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            enumeration_basis: "resource_permissions".to_owned(),
+            unsupported_reason: None,
+        }
+    }
+
+    pub fn resource_authority_not_projected() -> Self {
+        Self {
+            status: PermissionCoverageStatus::Partial,
+            exhaustiveness: PermissionCoverageExhaustiveness::BestEffort,
+            source_classes_considered: vec!["permissions_current".to_owned()],
+            enumeration_basis: "resource_permissions".to_owned(),
+            unsupported_reason: Some(
+                PermissionCoverageUnsupportedReason::ResourcePermissionAuthorityNotProjected,
+            ),
+        }
+    }
+
+    pub fn ensv1_wrapper_holder_permissions_not_projected() -> Self {
+        Self {
+            status: PermissionCoverageStatus::Unsupported,
+            exhaustiveness: PermissionCoverageExhaustiveness::NotApplicable,
+            source_classes_considered: vec![
+                "permissions_current".to_owned(),
+                "ens_v1_wrapper_l1".to_owned(),
+            ],
+            enumeration_basis: "resource_permissions".to_owned(),
+            unsupported_reason: Some(
+                PermissionCoverageUnsupportedReason::Ensv1WrapperHolderPermissionsNotProjected,
+            ),
+        }
+    }
+
+    pub const fn status(&self) -> PermissionCoverageStatus {
+        self.status
+    }
+
+    pub const fn exhaustiveness(&self) -> PermissionCoverageExhaustiveness {
+        self.exhaustiveness
+    }
+
+    pub fn source_classes_considered(&self) -> &[String] {
+        &self.source_classes_considered
+    }
+
+    pub fn enumeration_basis(&self) -> &str {
+        &self.enumeration_basis
+    }
+
+    pub const fn unsupported_reason(&self) -> Option<PermissionCoverageUnsupportedReason> {
+        self.unsupported_reason
+    }
+
+    pub(crate) fn validate(&self) -> Result<()> {
+        let supported_combination = matches!(
+            (self.status, self.exhaustiveness, self.unsupported_reason),
+            (
+                PermissionCoverageStatus::Full,
+                PermissionCoverageExhaustiveness::Authoritative,
+                None
+            ) | (
+                PermissionCoverageStatus::Partial,
+                PermissionCoverageExhaustiveness::BestEffort,
+                Some(PermissionCoverageUnsupportedReason::ResourcePermissionAuthorityNotProjected)
+            ) | (
+                PermissionCoverageStatus::Unsupported,
+                PermissionCoverageExhaustiveness::NotApplicable,
+                Some(
+                    PermissionCoverageUnsupportedReason::Ensv1WrapperHolderPermissionsNotProjected
+                )
+            )
+        );
+        if !supported_combination {
+            bail!("permission resource coverage fields form an unsupported combination");
+        }
+        if self.source_classes_considered.is_empty()
+            || self
+                .source_classes_considered
+                .iter()
+                .any(|source_class| source_class.trim().is_empty())
+        {
+            bail!("permission resource coverage source classes must be non-empty");
+        }
+        if self.enumeration_basis != "resource_permissions" {
+            bail!("permission resource coverage enumeration basis must be resource_permissions");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResourcePermissionCoverageWire {
+    status: PermissionCoverageStatus,
+    exhaustiveness: PermissionCoverageExhaustiveness,
+    source_classes_considered: Vec<String>,
+    enumeration_basis: String,
+    unsupported_reason: Option<PermissionCoverageUnsupportedReason>,
+}
+
+impl<'de> Deserialize<'de> for ResourcePermissionCoverage {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = ResourcePermissionCoverageWire::deserialize(deserializer)?;
+        let coverage = Self {
+            status: wire.status,
+            exhaustiveness: wire.exhaustiveness,
+            source_classes_considered: wire.source_classes_considered,
+            enumeration_basis: wire.enumeration_basis,
+            unsupported_reason: wire.unsupported_reason,
+        };
+        coverage.validate().map_err(serde::de::Error::custom)?;
+        Ok(coverage)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, sqlx::FromRow)]
+pub struct PermissionsCurrentResourceSummary {
+    pub resource_id: Uuid,
+    pub authority_kind: Option<String>,
+    pub root_resource_id: Option<Uuid>,
+    #[sqlx(json)]
+    pub coverage: ResourcePermissionCoverage,
+    pub provenance: Value,
     pub chain_positions: Value,
     pub canonicality_summary: Value,
     pub manifest_version: i64,

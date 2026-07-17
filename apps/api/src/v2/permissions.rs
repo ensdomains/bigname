@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use axum::{Json, extract::State};
 use bigname_storage::{PermissionsCurrentAccountResourceCursor, PermissionsCurrentRow};
@@ -9,11 +9,14 @@ use sqlx::types::Uuid;
 use crate::{AppState, normalize_inferred_route_name};
 
 use super::cursor::{cursor_value, invalid_cursor_error};
+use super::permission_support::{
+    apply_permissions_collection_support_meta, permission_support_for_resources,
+};
 use super::{
     AddressNameGrant, CursorPayload, Envelope, Page, QueryParamAllowlist, QueryParams,
-    SnapshotReadResource, StrictQueryParams, V2Error, V2Result, decode, encode, encode_at_token,
-    permission_powers_value, permission_scope_value, resolve_v2_snapshot_for, snapshot_meta,
-    v2_exact_name_snapshot_scope,
+    SnapshotReadResource, StrictQueryParams, V2Error, V2Result, api_error_to_v2_for_resource,
+    decode, encode, encode_at_token, permission_powers_value, permission_scope_value,
+    resolve_v2_snapshot_for, snapshot_meta, v2_exact_name_snapshot_scope,
 };
 
 #[path = "permissions/lineage.rs"]
@@ -112,6 +115,9 @@ pub(crate) async fn get_permissions(
         SnapshotReadResource::Permissions,
     )
     .await?;
+    let permission_read = crate::begin_permissions_current_read(&state.pool, "/v2/permissions")
+        .await
+        .map_err(|error| api_error_to_v2_for_resource(error, SnapshotReadResource::Permissions))?;
     let resolved = resolve_permissions_filter(
         &state,
         &params,
@@ -131,7 +137,13 @@ pub(crate) async fn get_permissions(
         .transpose()?;
 
     if resolved.known_empty {
-        return empty_permissions_response(&params, &selected_snapshot);
+        let response = empty_permissions_response(&params, &selected_snapshot)?;
+        crate::finish_permissions_current_read(&state.pool, "/v2/permissions", permission_read)
+            .await
+            .map_err(|error| {
+                api_error_to_v2_for_resource(error, SnapshotReadResource::Permissions)
+            })?;
+        return Ok(response);
     }
 
     let storage_page = bigname_storage::load_permissions_current_account_resource_page(
@@ -149,6 +161,19 @@ pub(crate) async fn get_permissions(
         .iter()
         .map(|row| row.resource_id)
         .collect::<Vec<_>>();
+    let support_resource_ids = resolved
+        .resource_id
+        .into_iter()
+        .chain(resource_ids.iter().copied())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let permission_summaries = bigname_storage::load_permissions_current_resource_summaries(
+        &state.pool,
+        &support_resource_ids,
+    )
+    .await
+    .map_err(|_| V2Error::internal_error("failed to load permission support"))?;
     let current_names =
         bigname_storage::load_current_names_by_resource_ids(&state.pool, &resource_ids)
             .await
@@ -166,9 +191,16 @@ pub(crate) async fn get_permissions(
         .iter()
         .map(|row| build_permission_row(row, current_names.get(&row.resource_id), include_lineage))
         .collect::<V2Result<Vec<_>>>()?;
-    let meta = snapshot_meta(&selected_snapshot)?;
+    let mut meta = snapshot_meta(&selected_snapshot)?;
+    let permission_support =
+        permission_support_for_resources(&support_resource_ids, &permission_summaries);
+    apply_permissions_collection_support_meta(
+        &mut meta,
+        permission_support,
+        resolved.resource_id.is_some(),
+    );
 
-    Ok(Json(Envelope {
+    let response = Json(Envelope {
         data,
         page: Some(Page {
             cursor: params.cursor.clone(),
@@ -178,7 +210,11 @@ pub(crate) async fn get_permissions(
             has_more,
         }),
         meta,
-    }))
+    });
+    crate::finish_permissions_current_read(&state.pool, "/v2/permissions", permission_read)
+        .await
+        .map_err(|error| api_error_to_v2_for_resource(error, SnapshotReadResource::Permissions))?;
+    Ok(response)
 }
 
 fn empty_permissions_response(

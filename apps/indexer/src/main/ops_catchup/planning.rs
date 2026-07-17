@@ -1,11 +1,26 @@
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
+#[cfg(test)]
 use anyhow::{Context, Result};
 use bigname_manifests::WatchedContract;
 use sqlx::types::Uuid;
 
 use crate::backfill::BackfillBlockRange;
+
+#[path = "planning/recovery.rs"]
+mod recovery;
+pub(super) use recovery::merge_retained_history_recovery_targets;
+#[path = "planning/chunks.rs"]
+mod chunks;
+#[cfg(test)]
+pub(super) use chunks::plan_catchup_chunks;
+pub(super) use chunks::plan_catchup_chunks_reusing_completed;
+#[path = "planning/retries.rs"]
+mod retries;
+pub(super) use retries::{CompletedCatchupPass, retry_required_ranges};
+#[path = "planning/source_plan.rs"]
+mod source_plan;
 
 #[rustfmt::skip]
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -52,6 +67,7 @@ impl CatchupChunk {
     /// across source families are preserved exactly as the previous per-chunk
     /// target vector preserved them; the downstream watched-target-set
     /// selector sorts and dedups identities before hashing.
+    #[cfg(test)]
     pub(super) fn target_contract_instance_ids(&self) -> Vec<Uuid> {
         self.covered_targets()
             .into_iter()
@@ -118,115 +134,11 @@ pub(super) fn catchup_targets_for_chain(
     (targets.into_iter().collect(), skipped.into_iter().collect())
 }
 
-pub(super) fn plan_catchup_chunks(
-    targets: &[CatchupTarget],
-    finalized_head_block_number: i64,
-    chunk_blocks: i64,
-) -> Result<(Vec<CatchupChunk>, usize)> {
-    let mut clipped = Vec::with_capacity(targets.len());
-    let mut skipped_future_target_count = 0;
-    for target in targets {
-        let end = target
-            .to_block
-            .map(|to_block| to_block.min(finalized_head_block_number))
-            .unwrap_or(finalized_head_block_number);
-        if target.from_block > end {
-            skipped_future_target_count += 1;
-            continue;
-        }
-        clipped.push((
-            target.clone(),
-            BackfillBlockRange::new(target.from_block, end)?,
-        ));
-    }
-
-    // Build the shared covering arena: targets sorted by activation block, and
-    // the same targets ordered by clipped end block. Because every clipped end
-    // block + 1 is a segment boundary, the covering set is constant inside a
-    // segment: a target either spans the whole segment (from_block <=
-    // segment_start && segment_end <= end) or ended before it (end <
-    // segment_start). Both cursors below are monotone over the ascending
-    // boundary walk, so each chunk is described by two prefix counts.
-    clipped.sort_by(|left, right| {
-        (left.1.from_block, left.1.to_block).cmp(&(right.1.from_block, right.1.to_block))
-    });
-    let clipped_ranges = clipped.iter().map(|(_, range)| *range).collect::<Vec<_>>();
-    let starts: Arc<[CatchupTarget]> = clipped
-        .into_iter()
-        .map(|(target, _)| target)
-        .collect::<Vec<_>>()
-        .into();
-
-    let mut expiry_order = (0..u32::try_from(clipped_ranges.len())
-        .context("catch-up target count overflowed the covering-window index width")?)
-        .collect::<Vec<_>>();
-    expiry_order.sort_by_key(|&index| clipped_ranges[index as usize].to_block);
-    let expiry_order: Arc<[u32]> = expiry_order.into();
-
-    let mut boundaries = BTreeSet::new();
-    for range in &clipped_ranges {
-        boundaries.insert(range.from_block);
-        boundaries.insert(
-            range
-                .to_block
-                .checked_add(1)
-                .context("catch-up range overflow")?,
-        );
-    }
-    let boundaries = boundaries.into_iter().collect::<Vec<_>>();
-
-    let mut chunks = Vec::new();
-    let mut start_count = 0_usize;
-    let mut expired_count = 0_usize;
-    for pair in boundaries.windows(2) {
-        let segment_start = pair[0];
-        let segment_end = pair[1] - 1;
-        while start_count < clipped_ranges.len()
-            && clipped_ranges[start_count].from_block <= segment_start
-        {
-            start_count += 1;
-        }
-        while expired_count < clipped_ranges.len()
-            && clipped_ranges[expiry_order[expired_count] as usize].to_block < segment_start
-        {
-            expired_count += 1;
-        }
-        // Expired targets are always part of the activated prefix, so the
-        // covering set is empty exactly when the two prefix counts meet.
-        if start_count == expired_count {
-            continue;
-        }
-
-        let covering = CatchupTargetWindow {
-            starts: Arc::clone(&starts),
-            expiry_order: Arc::clone(&expiry_order),
-            start_count: u32::try_from(start_count)
-                .context("catch-up covering start count overflowed the window width")?,
-            expired_count: u32::try_from(expired_count)
-                .context("catch-up covering expired count overflowed the window width")?,
-        };
-        let mut chunk_start = segment_start;
-        while chunk_start <= segment_end {
-            let chunk_end = chunk_start
-                .checked_add(chunk_blocks - 1)
-                .unwrap_or(segment_end)
-                .min(segment_end);
-            chunks.push(CatchupChunk {
-                range: BackfillBlockRange::new(chunk_start, chunk_end)?,
-                covering: covering.clone(),
-            });
-            chunk_start = chunk_end
-                .checked_add(1)
-                .context("catch-up chunk start overflow")?;
-        }
-    }
-
-    Ok((chunks, skipped_future_target_count))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type CatchupChunkPlan = Vec<(BackfillBlockRange, Vec<CatchupTarget>)>;
 
     /// The pre-fix planner, kept verbatim as the semantic oracle: one deep
     /// clone of every covering target per chunk. Memory-quadratic at
@@ -235,7 +147,7 @@ mod tests {
         targets: &[CatchupTarget],
         finalized_head_block_number: i64,
         chunk_blocks: i64,
-    ) -> Result<(Vec<(BackfillBlockRange, Vec<CatchupTarget>)>, usize)> {
+    ) -> Result<(CatchupChunkPlan, usize)> {
         let mut target_ranges = Vec::<(CatchupTarget, BackfillBlockRange)>::new();
         let mut skipped_future_target_count = 0;
         for target in targets {

@@ -28,7 +28,9 @@ use crate::evm_abi::keccak_signature_hex;
 use super::constants::*;
 use super::decode::build_permissions_observation;
 use super::hints::{fallback_resource_hint, resolver_resource_hint};
-use super::normalized::permission_changed_event;
+use super::normalized::{
+    RoleVocabulary, permission_changed_event, permission_resource_id, role_bitmap_powers,
+};
 use super::types::{PermissionsObservation, PermissionsRawLogRow};
 use super::util::hex_string;
 
@@ -296,6 +298,23 @@ fn builds_permission_changed_event_payload() -> Result<()> {
 }
 
 #[test]
+fn ens_v2_registry_permission_resource_id_matches_legacy_golden() -> Result<()> {
+    let raw_log = raw_log_with_source_family(SOURCE_FAMILY_ENS_V2_REGISTRY_L1, vec![], vec![]);
+
+    assert_eq!(
+        permission_resource_id(
+            &raw_log.chain_id,
+            raw_log.emitting_contract_instance_id,
+            &topic_word(0),
+            true,
+        ),
+        Uuid::parse_str("9dc2aecc-e987-52e2-b6c7-823eb71231bc")?
+    );
+
+    Ok(())
+}
+
+#[test]
 fn registry_root_resource_builds_root_permission_changed_event_payload() -> Result<()> {
     let account = "0x1111111111111111111111111111111111111111";
     let root_resource = topic_word(0);
@@ -397,7 +416,7 @@ fn root_source_root_resource_uses_registry_role_vocabulary() -> Result<()> {
 }
 
 #[test]
-fn unknown_role_bits_fail_closed_for_registry_and_resolver_vocabularies() -> Result<()> {
+fn reserved_marker_and_unknown_role_bits_are_not_published_as_powers() -> Result<()> {
     let account = "0x1111111111111111111111111111111111111111";
     let resource = topic_word(0);
     let registry_raw_log = raw_log_with_source_family(
@@ -419,7 +438,7 @@ fn unknown_role_bits_fail_closed_for_registry_and_resolver_vocabularies() -> Res
             resource.clone(),
             address_topic(account),
         ],
-        [hex_word(0), bitmap_with_bits(&[36])]
+        [hex_word(0), bitmap_with_bits(&[40])]
             .into_iter()
             .flatten()
             .collect(),
@@ -441,7 +460,7 @@ fn unknown_role_bits_fail_closed_for_registry_and_resolver_vocabularies() -> Res
         resource_id,
         account.to_owned(),
         topic_word(0),
-        bitmap_hex_with_bits(&[36]),
+        bitmap_hex_with_bits(&[40]),
     )?;
 
     assert_eq!(registry_event.after_state["effective_powers"], json!([]));
@@ -452,14 +471,34 @@ fn unknown_role_bits_fail_closed_for_registry_and_resolver_vocabularies() -> Res
     Ok(())
 }
 
+#[test]
+fn post_audit_registry_and_resolver_roles_publish_named_powers() -> Result<()> {
+    assert_eq!(
+        role_bitmap_powers(
+            &bitmap_hex_with_bits(&[36, 120, 164, 248]),
+            RoleVocabulary::Registry,
+        )?,
+        vec!["set_uri", "can_name", "admin_set_uri", "admin_can_name"]
+    );
+    assert_eq!(
+        role_bitmap_powers(
+            &bitmap_hex_with_bits(&[36, 120, 164, 248]),
+            RoleVocabulary::Resolver,
+        )?,
+        vec!["set_data", "can_name", "admin_set_data", "admin_can_name"]
+    );
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn sync_ens_v2_permissions_consumes_registry_root_eac_roles_changed() -> Result<()> {
     let _permit = crate::acquire_test_db_permit().await;
     let database = TestDatabase::new().await?;
     let chain = "ethereum-sepolia";
     let block_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    let root_address = "0x3a3e15a5d27ff6f05c844313312f2e72096d3ed3";
-    let registry_address = "0x796fff2e907449be8d5921bcc215b1b76d89d080";
+    let root_address = "0x11b5bfbe9078d826b1edbdd1cfc12f5828d9f50c";
+    let registry_address = "0x67b728a792e789a8978b30cf1b3b641f19354b43";
     let account = "0x1111111111111111111111111111111111111111";
 
     let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
@@ -468,7 +507,7 @@ async fn sync_ens_v2_permissions_consumes_registry_root_eac_roles_changed() -> R
 
     upsert_raw_blocks(
         database.pool(),
-        &[permissions_test_raw_block(chain, block_hash, 10_462_900)],
+        &[permissions_test_raw_block(chain, block_hash, 11_163_500)],
     )
     .await?;
     upsert_raw_logs(
@@ -477,7 +516,7 @@ async fn sync_ens_v2_permissions_consumes_registry_root_eac_roles_changed() -> R
             RawLog {
                 chain_id: chain.to_owned(),
                 block_hash: block_hash.to_owned(),
-                block_number: 10_462_900,
+                block_number: 11_163_500,
                 transaction_hash: "0xtx420".to_owned(),
                 transaction_index: 0,
                 log_index: 0,
@@ -496,7 +535,7 @@ async fn sync_ens_v2_permissions_consumes_registry_root_eac_roles_changed() -> R
             RawLog {
                 chain_id: chain.to_owned(),
                 block_hash: block_hash.to_owned(),
-                block_number: 10_462_900,
+                block_number: 11_163_500,
                 transaction_hash: "0xtx420".to_owned(),
                 transaction_index: 0,
                 log_index: 1,

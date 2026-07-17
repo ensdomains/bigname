@@ -22,9 +22,12 @@ pub(super) async fn roles(
                 .to_owned(),
         });
     }
+    let permission_read = begin_permissions_current_read(&state.pool, "/v1/roles").await?;
 
     let resolved_name_row = match name_filter.as_ref() {
-        Some((namespace, name)) => Some(load_resource_lookup_row(&state.pool, namespace, name).await?),
+        Some((namespace, name)) => {
+            Some(load_resource_lookup_row(&state.pool, namespace, name).await?)
+        }
         None => None,
     };
     let resolved_resource_id = resolved_name_row
@@ -33,21 +36,25 @@ pub(super) async fn roles(
         .transpose()?;
     let ensv2_root_resource_id = match resolved_resource_id {
         Some(resource_id) => {
-            load_ensv2_root_resource_id_for_name_resource(
-                &state.pool,
-                resource_id,
-                "/v1/roles",
-            )
-            .await?
+            load_ensv2_root_resource_id_for_name_resource(&state.pool, resource_id, "/v1/roles")
+                .await?
         }
         None => None,
     };
     let effective_resource_id = requested_resource_id.or(resolved_resource_id);
-    let name_resource_mismatch = requested_resource_id
-        .zip(resolved_resource_id)
-        .is_some_and(|(requested, resolved)| {
-            requested != resolved && Some(requested) != ensv2_root_resource_id
-        });
+    let name_resource_mismatch =
+        requested_resource_id
+            .zip(resolved_resource_id)
+            .is_some_and(|(requested, resolved)| {
+                requested != resolved && Some(requested) != ensv2_root_resource_id
+            });
+    let support_resource_id = if name_resource_mismatch {
+        resolved_resource_id
+    } else {
+        effective_resource_id
+    };
+    let support =
+        compact_roles_support_for_resource(&state.pool, support_resource_id, "/v1/roles").await?;
 
     let pagination = parse_pagination(query.cursor.as_deref(), query.page_size)?;
     let cursor_spec = roles_cursor_spec(
@@ -65,15 +72,15 @@ pub(super) async fn roles(
             return Err(invalid_cursor_error());
         }
         let page = page_response_from_storage_cursor(&pagination, &cursor_spec, None);
-        return Ok(Json(build_empty_compact_roles_response(page, meta_mode)));
+        let response = build_empty_compact_roles_response(page, meta_mode, support);
+        finish_permissions_current_read(&state.pool, "/v1/roles", permission_read).await?;
+        return Ok(Json(response));
     }
     let root_composition_resource_id = if requested_resource_id.is_none() {
         ensv2_root_resource_id
     } else {
         None
     };
-
-    ensure_permissions_current_projection_available(&state.pool, "/v1/roles").await?;
 
     if let Some(cursor) = storage_cursor.as_ref() {
         ensure_composed_roles_cursor_exists(
@@ -106,13 +113,16 @@ pub(super) async fn roles(
         load_associated_role_names(&state.pool, &storage_page.rows, resolved_name_row.as_ref())
             .await?;
 
-    Ok(Json(build_compact_roles_response(
+    let response = build_compact_roles_response(
         &storage_page.rows,
         &associated_names,
         &storage_page.summary,
         page,
         meta_mode,
-    )))
+        support,
+    );
+    finish_permissions_current_read(&state.pool, "/v1/roles", permission_read).await?;
+    Ok(Json(response))
 }
 
 pub(super) async fn name_roles(
@@ -127,10 +137,21 @@ pub(super) async fn name_roles(
     )?;
     let meta_mode = parse_meta_mode(query.meta.as_deref(), MetaMode::Summary)?;
     reject_role_bitmap_filter(query.role_bitmap.as_deref())?;
+    let permission_read = begin_permissions_current_read(
+        &state.pool,
+        "/v1/names/{namespace}/{name}/roles",
+    )
+    .await?;
 
     let account = parse_roles_account(query.account.as_deref());
     let name_row = load_resource_lookup_row(&state.pool, &namespace, &name).await?;
     let resource_id = resource_id_from_name_current(&name_row)?;
+    let support = compact_roles_support_for_resource(
+        &state.pool,
+        Some(resource_id),
+        "/v1/names/{namespace}/{name}/roles",
+    )
+    .await?;
     let pagination = parse_pagination(query.cursor.as_deref(), query.page_size)?;
     let logical_name_id = format!("{namespace}:{name}");
     let cursor_spec = roles_cursor_spec(
@@ -148,12 +169,6 @@ pub(super) async fn name_roles(
         "/v1/names/{namespace}/{name}/roles",
     )
     .await?;
-    ensure_permissions_current_projection_available(
-        &state.pool,
-        "/v1/names/{namespace}/{name}/roles",
-    )
-    .await?;
-
     if let Some(cursor) = storage_cursor.as_ref() {
         ensure_composed_roles_cursor_exists(
             &state.pool,
@@ -184,13 +199,21 @@ pub(super) async fn name_roles(
     let associated_names =
         load_associated_role_names(&state.pool, &storage_page.rows, Some(&name_row)).await?;
 
-    Ok(Json(build_compact_roles_response(
+    let response = build_compact_roles_response(
         &storage_page.rows,
         &associated_names,
         &storage_page.summary,
         page,
         meta_mode,
-    )))
+        support,
+    );
+    finish_permissions_current_read(
+        &state.pool,
+        "/v1/names/{namespace}/{name}/roles",
+        permission_read,
+    )
+    .await?;
+    Ok(Json(response))
 }
 
 pub(super) async fn resource_lookup(

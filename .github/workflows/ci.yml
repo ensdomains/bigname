@@ -17,6 +17,7 @@ env:
   CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: sccache
   RUST_VERSION: 1.93.1
+  FOUNDRY_VERSION: v1.7.1
   SCCACHE_GHA_ENABLED: "true"
 
 jobs:
@@ -34,13 +35,22 @@ jobs:
           components: clippy,rustfmt
 
       - name: Set up sccache
+        id: sccache
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Fall back without sccache
+        if: steps.sccache.outcome != 'success'
+        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
       - name: cargo fmt
         run: cargo fmt --check
+
+      - name: cargo fmt (e2e workspace)
+        run: cargo fmt --manifest-path tests/e2e/Cargo.toml -- --check
 
       - name: Rust source size ratchet
         env:
@@ -61,8 +71,37 @@ jobs:
       - name: cargo check
         run: cargo check --workspace --all-targets --all-features
 
-      - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --all-features
+      - name: cargo check (e2e workspace)
+        run: cargo check --manifest-path tests/e2e/Cargo.toml --locked --all-targets
+
+      - name: cargo clippy (strict workspace packages)
+        run: cargo clippy --workspace --all-targets --all-features --exclude bigname-adapters --no-deps -- -D warnings
+
+      # The adapter crate still carries pre-existing warning classes. Deny
+      # every other warning here so new lint classes cannot silently widen the
+      # baseline while those targeted classes are paid down.
+      - name: cargo clippy (adapter warning-class baseline)
+        run: >-
+          cargo clippy -p bigname-adapters --all-targets --all-features --
+          -D warnings
+          -A clippy::unusual-byte-groupings
+          -A clippy::too-many-arguments
+          -A clippy::needless-question-mark
+          -A clippy::collapsible-if
+          -A clippy::needless-borrows-for-generic-args
+          -A clippy::explicit-auto-deref
+          -A clippy::needless-borrow
+          -A clippy::filter-map-bool-then
+          -A clippy::match-like-matches-macro
+          -A clippy::borrow-deref-ref
+          -A clippy::needless-option-as-deref
+          -A clippy::needless-return
+          -A clippy::redundant-closure
+          -A clippy::bool-assert-comparison
+          -A clippy::cloned-ref-to-slice-refs
+
+      - name: cargo clippy (e2e workspace)
+        run: cargo clippy --manifest-path tests/e2e/Cargo.toml --locked --all-targets -- -D warnings
 
   test_shard:
     name: test (${{ matrix.name }})
@@ -117,7 +156,13 @@ jobs:
           sudo apt-get install -y --no-install-recommends clang libclang-dev
 
       - name: Set up sccache
+        id: sccache
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Fall back without sccache
+        if: steps.sccache.outcome != 'success'
+        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -160,13 +205,82 @@ jobs:
           sudo apt-get install -y --no-install-recommends clang libclang-dev
 
       - name: Set up sccache
+        id: sccache
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Fall back without sccache
+        if: steps.sccache.outcome != 'success'
+        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
       - name: cargo test conformance
         run: cargo test --manifest-path tests/conformance/Cargo.toml --locked
+
+  e2e:
+    name: test (e2e)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: bigname
+          POSTGRES_USER: bigname
+          POSTGRES_PASSWORD: bigname
+          POSTGRES_INITDB_ARGS: "--set=max_connections=300"
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bigname -d bigname"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      BIGNAME_DATABASE_URL: postgres://bigname:bigname@127.0.0.1:5432/bigname
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pinned Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang libclang-dev
+
+      - name: Install foundry (anvil)
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: ${{ env.FOUNDRY_VERSION }}
+
+      - name: Set up sccache
+        id: sccache
+        continue-on-error: true
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Fall back without sccache
+        if: steps.sccache.outcome != 'success'
+        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Sync pinned upstream checkouts
+        run: |
+          scripts/sync-refs
+          scripts/sync-refs --check
+
+      - name: Prebuild pipeline binaries
+        run: cargo build --package bigname-indexer --package bigname-worker --package bigname-api
+
+      - name: cargo test e2e
+        run: cargo test --manifest-path tests/e2e/Cargo.toml --locked -- --test-threads=8
 
   test:
     name: test
@@ -175,6 +289,7 @@ jobs:
     needs:
       - test_shard
       - conformance
+      - e2e
     if: always()
     steps:
       - name: Check test shards
@@ -185,6 +300,10 @@ jobs:
           fi
           if [ "${{ needs.conformance.result }}" != "success" ]; then
             echo "conformance finished with result: ${{ needs.conformance.result }}"
+            exit 1
+          fi
+          if [ "${{ needs.e2e.result }}" != "success" ]; then
+            echo "e2e finished with result: ${{ needs.e2e.result }}"
             exit 1
           fi
 
@@ -217,7 +336,13 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
 
       - name: Set up sccache
+        id: sccache
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Fall back without sccache
+        if: steps.sccache.outcome != 'success'
+        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2

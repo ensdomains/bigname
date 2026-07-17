@@ -42,6 +42,8 @@ use crate::backfill::{
     selection::{SelectedTargetIntervalIndex, selected_target_addresses_at_block},
 };
 
+// The materialization boundary keeps payload and validation inputs explicit.
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn materialize_historical_payload_range(
     pool: &sqlx::PgPool,
     source_plan: &WatchedSourceSelectorPlan,
@@ -57,7 +59,6 @@ pub(crate) async fn materialize_historical_payload_range(
 ) -> Result<BackfillOutcome> {
     let watched_chain = &source_plan.watched_chain_plan;
     let chain = watched_chain.chain.as_str();
-
     let logs_filtered_by_selected_target_index =
         historical_payload.logs_filtered_by_selected_target_index;
     let block_hashes = resolved_blocks
@@ -97,7 +98,6 @@ pub(crate) async fn materialize_historical_payload_range(
     let mut cache_metadata = Vec::<RawPayloadCacheMetadataUpsert>::new();
     let mut raw_blocks_by_hash = BTreeMap::new();
     let mut code_observation_requests = Vec::new();
-
     for (resolved_block, block_header) in resolved_blocks.iter().zip(block_headers.iter()) {
         let canonicality_state = canonicality_states
             .get(&block_header.block_hash)

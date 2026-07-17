@@ -4,6 +4,30 @@ use anyhow::{Context, Result, bail};
 
 use crate::ens_v1_resolver::{GENERIC_SOURCE_SCOPE_ADDRESS, SOURCE_FAMILY_ENS_V1_RESOLVER_L1};
 
+pub(super) async fn load_live_adapter_target_block_number(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    block_hashes: &[String],
+) -> Result<i64> {
+    let target_block_number: Option<i64> = sqlx::query_scalar(
+        r#"
+        SELECT MAX(block_number)
+        FROM chain_lineage
+        WHERE chain_id = $1
+          AND block_hash = ANY($2::TEXT[])
+          AND canonicality_state <> 'orphaned'::canonicality_state
+        "#,
+    )
+    .bind(chain)
+    .bind(block_hashes)
+    .fetch_one(pool)
+    .await
+    .with_context(|| format!("failed to load live adapter target block for chain {chain}"))?;
+
+    target_block_number
+        .with_context(|| format!("live adapter block-hash selection is empty for chain {chain}"))
+}
+
 pub(super) async fn load_live_adapter_source_scope(
     pool: &sqlx::PgPool,
     chain: &str,
@@ -362,4 +386,73 @@ fn collapse_live_adapter_source_scope(
     }
 
     targets.into_iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+    use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+
+    use super::load_live_adapter_target_block_number;
+
+    #[tokio::test]
+    async fn live_adapter_target_ignores_orphaned_selected_blocks() -> Result<()> {
+        let database = TestDatabase::create(TestDatabaseConfig::new(
+            "indexer_live_adapter_canonical_target",
+        ))
+        .await?;
+        sqlx::raw_sql(
+            r#"
+            CREATE TYPE canonicality_state AS ENUM (
+                'observed', 'canonical', 'safe', 'finalized', 'orphaned'
+            );
+            CREATE TABLE chain_lineage (
+                chain_id TEXT NOT NULL,
+                block_hash TEXT NOT NULL,
+                block_number BIGINT NOT NULL,
+                canonicality_state canonicality_state NOT NULL,
+                PRIMARY KEY (chain_id, block_hash)
+            );
+            "#,
+        )
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO chain_lineage (
+                chain_id, block_hash, block_number, canonicality_state
+            )
+            VALUES
+                ('testnet', '0xcanonical', 10, 'canonical'),
+                ('testnet', '0xorphaned', 20, 'orphaned')
+            "#,
+        )
+        .execute(database.pool())
+        .await?;
+
+        assert_eq!(
+            load_live_adapter_target_block_number(
+                database.pool(),
+                "testnet",
+                &["0xcanonical".to_owned(), "0xorphaned".to_owned()],
+            )
+            .await?,
+            10
+        );
+        let error = load_live_adapter_target_block_number(
+            database.pool(),
+            "testnet",
+            &["0xorphaned".to_owned()],
+        )
+        .await
+        .expect_err("an orphan-only selection must not produce a live adapter target");
+        assert!(
+            error
+                .to_string()
+                .contains("live adapter block-hash selection is empty"),
+            "unexpected orphan-only target error: {error:#}"
+        );
+
+        database.cleanup().await
+    }
 }

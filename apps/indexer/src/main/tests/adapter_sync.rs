@@ -1,4 +1,79 @@
 #[tokio::test]
+async fn scoped_ens_v2_registry_sync_emits_registry_permission_events() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let registry_contract_instance_id = Uuid::from_u128(0x341);
+    let registry_address = "0x0000000000000000000000000000000000000341";
+    let account = "0x00000000000000000000000000000000000000aa";
+    let block = provider_block(
+        "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        Some("0xbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc"),
+        63,
+    );
+
+    insert_active_replay_manifest_contract(
+        database.pool(),
+        1,
+        "ens",
+        "ens_v2_registry_l1",
+        chain,
+        "ens_v2",
+        registry_contract_instance_id,
+        registry_address,
+        "registry",
+    )
+    .await?;
+    sqlx::query("UPDATE manifest_versions SET manifest_payload = $2 WHERE manifest_id = $1")
+        .bind(1_i64)
+        .bind(test_manifest_payload())
+        .execute(database.pool())
+        .await?;
+    insert_raw_resolver_log(
+        database.pool(),
+        chain,
+        &block,
+        registry_address,
+        vec![
+            ens_v2_eac_roles_changed_topic0(),
+            hex_string(&abi_word_u64(0)),
+            hex_string(&abi_word_address(account)),
+        ],
+        decode_hex_string(&encode_eac_roles_changed_log_data(
+            &hex_string(&abi_word_u64(0)),
+            &hex_string(&abi_word_u64(1)),
+        )),
+        0,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+
+    sync_adapter_state_from_scoped_persisted_raw_payloads(
+        database.pool(),
+        chain,
+        std::slice::from_ref(&block.block_hash),
+        &[(
+            "ens_v2_registry_l1".to_owned(),
+            registry_address.to_owned(),
+            block.block_number,
+            block.block_number,
+        )],
+    )
+    .await?;
+
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events WHERE derivation_kind = 'ens_v2_permissions' AND event_kind IN ('PermissionChanged', 'RootPermissionChanged')"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "a registry-scoped adapter run must not skip the permission adapter"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn sync_adapter_owned_raw_log_state_backfills_reverse_claims_from_stored_raw_logs()
 -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -247,12 +322,21 @@ async fn live_adapter_sync_continues_after_block_derived_events() -> Result<()> 
 
     let summary = sync_live_adapter_state_from_persisted_raw_payloads(
         database.pool(),
+        "test",
         "ethereum-mainnet",
         std::slice::from_ref(&stored_block.block_hash),
     )
     .await?;
 
     assert_eq!(summary.total_synced_count, 1);
+    assert_eq!(
+        summary.resolver_profile_authority_epoch_guard_count, 1,
+        "ordinary live sync must run its cheap per-chain discovery-epoch guard"
+    );
+    assert_eq!(
+        summary.resolver_profile_authority_scan_count, 0,
+        "an ordinary live block with no discovery mutation must not scan global resolver authority"
+    );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'ReverseChanged'"
@@ -261,6 +345,159 @@ async fn live_adapter_sync_continues_after_block_derived_events() -> Result<()> 
         .await?,
         1
     );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn live_adapter_retry_recovers_committed_discovery_after_post_mutation_failure() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let manifests = TestManifestDir::new()?;
+    let registry_address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+    let resolver_address = "0x0000000000000000000000000000000000000abc";
+    let registry_manifest = format!(
+        r#"
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v1_registry_l1"
+chain = "ethereum-mainnet"
+deployment_epoch = "ens_v1"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+
+[capability_flags]
+declared_children = "supported"
+
+[[roots]]
+name = "ENSRegistry"
+address = "{registry_address}"
+
+[[contracts]]
+role = "registry"
+address = "{registry_address}"
+proxy_kind = "none"
+
+[[discovery_rules]]
+edge_kind = "resolver"
+from_role = "registry"
+admission = "reachable_from_root"
+
+{}
+"#,
+        test_manifest_abi_toml()
+    );
+    manifests.write_manifest_for_source_family("ens_v1_registry_l1", &registry_manifest)?;
+    let resolver_manifest = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../manifests/mainnet/ethereum/ens/ens_v1_resolver_l1/v1.toml"),
+    )?;
+    manifests.write_manifest_for_source_family("ens_v1_resolver_l1", &resolver_manifest)?;
+    let repository = load_manifest_repository(&manifests.path)?;
+    build_manifest_runtime_state(database.pool(), &repository).await?;
+    sqlx::query(
+        r#"
+        UPDATE resolver_profile_input_changes
+        SET processed_generation = generation,
+            force_reconciliation = FALSE
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    let block = provider_block(
+        "0xabababababababababababababababababababababababababababababababab",
+        Some("0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"),
+        22_800_000,
+    );
+    upsert_raw_blocks(
+        database.pool(),
+        &[provider_block_to_raw_block(
+            "ethereum-mainnet",
+            &block,
+            CanonicalityState::Canonical,
+        )],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[RawLog {
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: block.block_hash.clone(),
+            block_number: block.block_number,
+            transaction_hash: transaction_hash_for_block(&block),
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: registry_address.to_ascii_lowercase(),
+            topics: vec![
+                registry_new_resolver_topic0(),
+                "0x0000000000000000000000000000000000000000000000000000000000000001".to_owned(),
+            ],
+            data: decode_hex_string(&encode_registry_new_resolver_log_data(resolver_address)),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+
+    let journal_before =
+        bigname_storage::load_resolver_profile_authority_journal(database.pool()).await?;
+    let _failure_hook = install_post_discovery_mutation_failure_for_test(database.pool()).await?;
+    let error = sync_live_adapter_state_from_persisted_raw_payloads(
+        database.pool(),
+        "test",
+        "ethereum-mainnet",
+        std::slice::from_ref(&block.block_hash),
+    )
+    .await
+    .expect_err("the injected post-mutation failure must escape before journaling");
+    assert!(error.to_string().contains("injected failure"));
+    assert_eq!(
+        bigname_storage::load_resolver_profile_authority_journal(database.pool())
+            .await?
+            .revision,
+        journal_before.revision,
+        "the injected crash window must leave the older durable snapshot"
+    );
+
+    let retry = sync_live_adapter_state_from_persisted_raw_payloads(
+        database.pool(),
+        "test",
+        "ethereum-mainnet",
+        std::slice::from_ref(&block.block_hash),
+    )
+    .await?;
+    assert_eq!(
+        retry.resolver_profile_authority_scan_count, 1,
+        "the no-op retry must turn prior epoch drift into one full authority diff"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (bool, bool)>(
+            r#"
+            SELECT
+                processed_generation < generation AS pending,
+                force_reconciliation
+            FROM resolver_profile_input_changes
+            WHERE chain_id = 'ethereum-mainnet'
+              AND contract_address = lower($1)
+            "#,
+        )
+        .bind(resolver_address)
+        .fetch_one(database.pool())
+        .await?,
+        (true, true),
+        "the recovered journal diff must retain the newly discovered resolver target"
+    );
+
+    let no_op = sync_live_adapter_state_from_persisted_raw_payloads(
+        database.pool(),
+        "test",
+        "ethereum-mainnet",
+        std::slice::from_ref(&block.block_hash),
+    )
+    .await?;
+    assert_eq!(no_op.resolver_profile_authority_scan_count, 0);
+    assert!(no_op.resolver_profile_authority_epoch_guard_count >= 1);
 
     database.cleanup().await?;
     Ok(())
@@ -358,9 +595,12 @@ async fn post_replay_live_adapter_backlog_latches_tail_before_live_sync_resumes(
             range_start_block_number,
             next_block_number,
             target_block_number,
-            last_completed_block_number
+            last_completed_block_number,
+            last_replayed_at,
+            raw_log_input_revision,
+            raw_log_retention_generation
         )
-        VALUES ('mainnet', $1, 'raw_fact_normalized_events', 1, 11, 10, 10)
+        VALUES ('mainnet', $1, 'raw_fact_normalized_events', 1, 11, 10, 10, now(), 5, 0)
         "#,
     )
     .bind(chain)
@@ -400,14 +640,83 @@ async fn post_replay_live_adapter_backlog_latches_tail_before_live_sync_resumes(
     )
     .await?;
 
-    let summary = sync_live_adapter_backlog_after_normalized_replay(
+    upsert_raw_staging_input_version_for_handoff_test(database.pool(), chain, 5, 0).await?;
+    upsert_raw_staging_block_revision_for_handoff_test(
         database.pool(),
-        "mainnet",
-        &[chain.to_owned()],
+        chain,
+        &replay_target_block.block_hash,
+        replay_target_block.block_number,
+        5,
     )
     .await?;
+    upsert_raw_staging_block_revision_for_handoff_test(
+        database.pool(),
+        chain,
+        &backlog_block.block_hash,
+        backlog_block.block_number,
+        5,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_replay_cursors (
+            deployment_profile, chain_id, cursor_kind,
+            range_start_block_number, next_block_number, target_block_number,
+            last_completed_block_number, last_replayed_at
+        )
+        VALUES ('mainnet', $1, 'post_replay_live_adapter_backlog', 11, 12, 11, 11, now())
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await
+    .context("failed to seed a legacy version-zero post-replay backlog cursor")?;
+
+    let publication_hook =
+        install_backlog_after_adapter_sync_test_hook(database.pool(), "mainnet", chain).await;
+    let pool = database.pool().clone();
+    let backlog = tokio::spawn(async move {
+        sync_live_adapter_backlog_after_normalized_replay(&pool, "mainnet", &[chain.to_owned()])
+            .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        publication_hook.wait_until_after_adapter_sync(),
+    )
+    .await
+    .context("post-replay backlog did not reach its page-publication barrier")?;
+    let mut replacement = database.pool().begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("raw_log_staging:{chain}"))
+        .execute(replacement.as_mut())
+        .await?;
+    sqlx::query(
+        "UPDATE raw_logs SET canonicality_state = 'safe' WHERE chain_id = $1 AND block_hash = $2",
+    )
+    .bind(chain)
+    .bind(&backlog_block.block_hash)
+    .execute(replacement.as_mut())
+    .await?;
+    sqlx::query("UPDATE raw_log_staging_input_revisions SET revision = 6 WHERE chain_id = $1")
+        .bind(chain)
+        .execute(replacement.as_mut())
+        .await?;
+    sqlx::query(
+        "UPDATE raw_log_staging_block_revisions SET revision = 6 WHERE chain_id = $1 AND block_hash = $2",
+    )
+    .bind(chain)
+    .bind(&backlog_block.block_hash)
+    .execute(replacement.as_mut())
+    .await?;
+    replacement.commit().await?;
+    publication_hook.resume();
+    let summary = tokio::time::timeout(std::time::Duration::from_secs(10), backlog)
+        .await
+        .context("post-replay backlog did not resume after page-publication barrier")?
+        .context("post-replay backlog task panicked")??;
     assert_eq!(summary.selected_block_count, 1);
     assert_eq!(summary.normalized_event_synced_count, 1);
+    assert_eq!(summary.awaiting_replay_chain_count, 0);
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'ReverseChanged'"
@@ -458,9 +767,9 @@ async fn post_replay_live_adapter_backlog_latches_tail_before_live_sync_resumes(
         2
     );
     assert_eq!(
-        sqlx::query_as::<_, (i64, i64)>(
+        sqlx::query_as::<_, (i64, i64, i64)>(
             r#"
-            SELECT next_block_number, target_block_number
+            SELECT next_block_number, target_block_number, raw_log_input_revision
             FROM normalized_replay_cursors
             WHERE deployment_profile = 'mainnet'
               AND chain_id = $1
@@ -470,11 +779,280 @@ async fn post_replay_live_adapter_backlog_latches_tail_before_live_sync_resumes(
         .bind(chain)
         .fetch_one(database.pool())
         .await?,
-        (13, 12)
+        (13, 12, 6),
+        "the legacy cursor must reset to the replay baseline, retry a raced page, and retain the accepted revision"
     );
 
     database.cleanup().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn post_replay_final_latch_rejects_raw_changes_after_backlog_completion() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_normalized_replay_cursor_table(database.pool()).await?;
+    let target = 10;
+
+    let replay_stale_chain = "replay-stale";
+    insert_ready_replay_and_backlog_cursors_for_handoff_test(
+        database.pool(),
+        replay_stale_chain,
+        target,
+        1,
+        0,
+    )
+    .await?;
+    upsert_raw_staging_input_version_for_handoff_test(database.pool(), replay_stale_chain, 2, 0)
+        .await?;
+    upsert_raw_staging_block_revision_for_handoff_test(
+        database.pool(),
+        replay_stale_chain,
+        "0xreplay-stale",
+        target,
+        2,
+    )
+    .await?;
+    let mut replay_latched = true;
+    let replay_status = latch_replay_handoff_if_stable(
+        database.pool(),
+        "mainnet",
+        &[replay_stale_chain.to_owned()],
+        &mut replay_latched,
+    )
+    .await?;
+    assert_eq!(replay_status, ReplayHandoffLatchStatus::AwaitingReplay);
+    assert!(
+        !replay_latched,
+        "a post-backlog mutation through the replay target must prevent the ownership latch"
+    );
+
+    let consumed_backlog_chain = "consumed-backlog-stale";
+    insert_ready_replay_and_backlog_cursors_for_handoff_test(
+        database.pool(),
+        consumed_backlog_chain,
+        target,
+        1,
+        0,
+    )
+    .await?;
+    upsert_raw_staging_input_version_for_handoff_test(
+        database.pool(),
+        consumed_backlog_chain,
+        2,
+        0,
+    )
+    .await?;
+    upsert_raw_staging_block_revision_for_handoff_test(
+        database.pool(),
+        consumed_backlog_chain,
+        "0xconsumed-backlog-stale",
+        target + 1,
+        2,
+    )
+    .await?;
+    let mut backlog_latched = true;
+    let backlog_status = latch_replay_handoff_if_stable(
+        database.pool(),
+        "mainnet",
+        &[consumed_backlog_chain.to_owned()],
+        &mut backlog_latched,
+    )
+    .await?;
+    assert_eq!(backlog_status, ReplayHandoffLatchStatus::AwaitingBacklog);
+    assert!(
+        !backlog_latched,
+        "a replacement in the consumed post-target range must force backlog rewind before latch"
+    );
+
+    let new_tail_chain = "new-tail";
+    insert_ready_replay_and_backlog_cursors_for_handoff_test(
+        database.pool(),
+        new_tail_chain,
+        target,
+        1,
+        0,
+    )
+    .await?;
+    let new_tail_block = provider_block(
+        "0x1717171717171717171717171717171717171717171717171717171717171717",
+        Some("0x1616161616161616161616161616161616161616161616161616161616161616"),
+        target + 2,
+    );
+    insert_chain_lineage_for_block(
+        database.pool(),
+        new_tail_chain,
+        &new_tail_block,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_reverse_claimed_log(
+        database.pool(),
+        new_tail_chain,
+        &new_tail_block,
+        "0x0000000000000000000000000000000000000017",
+        "0x1717171717171717171717171717171717171717",
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    upsert_raw_staging_input_version_for_handoff_test(database.pool(), new_tail_chain, 2, 0)
+        .await?;
+    upsert_raw_staging_block_revision_for_handoff_test(
+        database.pool(),
+        new_tail_chain,
+        &new_tail_block.block_hash,
+        new_tail_block.block_number,
+        2,
+    )
+    .await?;
+    let mut tail_latched = true;
+    let tail_status = latch_replay_handoff_if_stable(
+        database.pool(),
+        "mainnet",
+        &[new_tail_chain.to_owned()],
+        &mut tail_latched,
+    )
+    .await?;
+    assert_eq!(tail_status, ReplayHandoffLatchStatus::AwaitingBacklog);
+    assert!(
+        !tail_latched,
+        "a newly committed higher post-target block must be backlogged before latch"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn replay_handoff_multi_chain_fence_uses_one_connection_and_orders_writers_after_latch()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_normalized_replay_cursor_table(database.pool()).await?;
+    let chains = vec!["alpha-chain".to_owned(), "beta-chain".to_owned()];
+    for chain in &chains {
+        insert_ready_replay_and_backlog_cursors_for_handoff_test(database.pool(), chain, 10, 1, 0)
+            .await?;
+        upsert_raw_staging_input_version_for_handoff_test(database.pool(), chain, 1, 0).await?;
+    }
+
+    let single_connection_pool = database.additional_pool(1).await?;
+    let lock_probe_pool = database.additional_pool(3).await?;
+    let latch_hook =
+        install_replay_handoff_before_latch_test_hook(&single_connection_pool, "mainnet").await;
+    let latch_pool = single_connection_pool.clone();
+    let latch_chains = chains.clone();
+    let latch = tokio::spawn(async move {
+        let mut latched = false;
+        let status =
+            latch_replay_handoff_if_stable(&latch_pool, "mainnet", &latch_chains, &mut latched)
+                .await;
+        (status, latched)
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        latch_hook.wait_until_before_latch(),
+    )
+    .await
+    .context("multi-chain handoff did not reach its guarded latch barrier")?;
+
+    let beta_writer = tokio::spawn(commit_raw_revision_after_handoff_fence_for_test(
+        database.pool().clone(),
+        chains[1].clone(),
+        12,
+    ));
+
+    let mut alpha_lock_probe = lock_probe_pool.begin().await?;
+    assert!(
+        !sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("raw_log_staging:{}", chains[0]))
+            .fetch_one(alpha_lock_probe.as_mut())
+            .await?,
+        "the final all-chain fence must own the alpha chain mutation lock"
+    );
+    let mut beta_lock_probe = lock_probe_pool.begin().await?;
+    assert!(
+        !sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("raw_log_staging:{}", chains[1]))
+            .fetch_one(beta_lock_probe.as_mut())
+            .await?,
+        "the final all-chain fence must own the beta chain mutation lock"
+    );
+    let mut unrelated_lock_probe = lock_probe_pool.begin().await?;
+    assert!(
+        sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind("raw_log_staging:unrelated-chain")
+            .fetch_one(unrelated_lock_probe.as_mut())
+            .await?,
+        "the all-chain fence must not stop raw writers for unrelated chains"
+    );
+    alpha_lock_probe.rollback().await?;
+    beta_lock_probe.rollback().await?;
+    unrelated_lock_probe.rollback().await?;
+
+    latch_hook.resume();
+    let (status, latched) = tokio::time::timeout(std::time::Duration::from_secs(10), latch)
+        .await
+        .context("multi-chain handoff did not resume after its latch barrier")?
+        .context("multi-chain handoff task panicked")?;
+    assert_eq!(status?, ReplayHandoffLatchStatus::Latched);
+    assert!(
+        latched,
+        "the ownership flag must flip before the fence releases"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(10), beta_writer)
+        .await
+        .context("beta writer remained blocked after handoff fence release")?
+        .context("beta writer task panicked")??;
+
+    let mut next_cycle_latched = true;
+    let next_cycle_status = latch_replay_handoff_if_stable(
+        database.pool(),
+        "mainnet",
+        &[chains[1].clone()],
+        &mut next_cycle_latched,
+    )
+    .await?;
+    assert_eq!(
+        next_cycle_status,
+        ReplayHandoffLatchStatus::AwaitingBacklog,
+        "the next handoff cycle must reject a post-fence raw-only commit"
+    );
+    assert!(!next_cycle_latched);
+
+    let backlog_summary = sync_live_adapter_backlog_after_normalized_replay(
+        database.pool(),
+        "mainnet",
+        &[chains[1].clone()],
+    )
+    .await?;
+    assert_eq!(backlog_summary.selected_block_count, 1);
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64, i64)>(
+            r#"
+            SELECT next_block_number, target_block_number, raw_log_input_revision
+            FROM normalized_replay_cursors
+            WHERE deployment_profile = 'mainnet'
+              AND chain_id = $1
+              AND cursor_kind = 'post_replay_live_adapter_backlog'
+            "#,
+        )
+        .bind(&chains[1])
+        .fetch_one(database.pool())
+        .await?,
+        (13, 12, 2),
+        "the renewed cycle must consume the post-fence raw-only block"
+    );
+    let renewed_status = latch_replay_handoff_if_stable(
+        database.pool(),
+        "mainnet",
+        &[chains[1].clone()],
+        &mut next_cycle_latched,
+    )
+    .await?;
+    assert_eq!(renewed_status, ReplayHandoffLatchStatus::Latched);
+    assert!(next_cycle_latched);
+
+    lock_probe_pool.close().await;
+    single_connection_pool.close().await;
+    database.cleanup().await
 }
 
 #[tokio::test]

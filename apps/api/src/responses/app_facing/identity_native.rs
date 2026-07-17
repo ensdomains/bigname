@@ -146,6 +146,7 @@ fn native_identity_relation_facets(
         (has_effective_controller, "effective_controller"),
     ]
     .into_iter()
-    .filter_map(|(present, label)| present.then(|| label.to_owned()))
+    .filter(|(present, _)| *present)
+    .map(|(_, label)| label.to_owned())
     .collect()
 }

@@ -1,4 +1,25 @@
 #[tokio::test]
+async fn v2_permissions_require_compatible_permission_publication() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    sqlx::query("DELETE FROM permissions_current_publication")
+        .execute(&database.pool)
+        .await?;
+
+    let response = v2_permissions_response_for_database(
+        &database,
+        &format!("/v2/permissions?address={V2_PERMISSIONS_SUBJECT}"),
+    )
+    .await?;
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("stale"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_get_permissions_requires_at_least_one_filter() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
 
@@ -60,6 +81,12 @@ async fn v2_get_permissions_maps_rows_and_lineage() -> Result<()> {
             "timestamp": "2026-04-17T00:00:10Z"
         })
     );
+    assert_eq!(payload["meta"]["completeness"], json!("partial"));
+    assert_eq!(
+        payload["meta"]["unsupported_reason"],
+        json!("wrapper_holder_permissions_not_supported")
+    );
+    assert!(payload["meta"].get("unsupported_fields").is_none());
 
     let rows = payload["data"]
         .as_array()
@@ -146,7 +173,10 @@ async fn v2_get_permissions_maps_rows_and_lineage() -> Result<()> {
         })
     );
 
-    assert_eq!(stale["registration_id"], json!(stale_resource_id.to_string()));
+    assert_eq!(
+        stale["registration_id"],
+        json!(stale_resource_id.to_string())
+    );
     assert!(stale.get("name").is_none());
     assert_eq!(
         stale["grant_scope"],
@@ -189,6 +219,7 @@ async fn v2_get_permissions_filters_by_name_registration_and_address() -> Result
             .iter()
             .all(|row| row["registration_id"] == json!(current_resource_id.to_string()))
     );
+    assert!(by_name["meta"].get("completeness").is_none());
 
     let by_registration = v2_permissions_payload_for_database(
         &database,
@@ -204,6 +235,7 @@ async fn v2_get_permissions_filters_by_name_registration_and_address() -> Result
             .iter()
             .all(|row| row["registration_id"] == json!(current_resource_id.to_string()))
     );
+    assert!(by_registration["meta"].get("completeness").is_none());
 
     let by_address_and_registration = v2_permissions_payload_for_database(
         &database,
@@ -216,7 +248,18 @@ async fn v2_get_permissions_filters_by_name_registration_and_address() -> Result
         by_address_and_registration["data"][0]["address"],
         json!(V2_PERMISSIONS_OTHER_SUBJECT)
     );
-    assert_eq!(by_address_and_registration["data"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        by_address_and_registration["data"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        by_address_and_registration["meta"]
+            .get("completeness")
+            .is_none()
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -229,8 +272,8 @@ async fn v2_get_permissions_name_filter_resolves_at_selected_snapshot() -> Resul
     seed_v2_permissions_sepolia_checkpoint(&database).await?;
     let current_resource_id = v2_permissions_current_resource_id();
 
-    let no_at = v2_permissions_payload_for_database(&database, "/v2/permissions?name=Perms.eth")
-        .await?;
+    let no_at =
+        v2_permissions_payload_for_database(&database, "/v2/permissions?name=Perms.eth").await?;
     let no_at_rows = no_at["data"]
         .as_array()
         .expect("no-at name-filtered permissions data");
@@ -311,7 +354,9 @@ async fn v2_get_permissions_paginates_and_rejects_mismatched_cursor() -> Result<
 
     let second_page = v2_permissions_payload_for_database(
         &database,
-        &format!("/v2/permissions?address={V2_PERMISSIONS_SUBJECT}&page_size=1&cursor={next_cursor}"),
+        &format!(
+            "/v2/permissions?address={V2_PERMISSIONS_SUBJECT}&page_size=1&cursor={next_cursor}"
+        ),
     )
     .await?;
     assert_eq!(second_page["page"]["cursor"], json!(next_cursor));
@@ -351,7 +396,10 @@ async fn v2_get_permissions_paginates_and_rejects_mismatched_cursor() -> Result<
 #[tokio::test]
 async fn v2_get_permissions_empty_results_return_empty_page() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    database.seed_default_ens_snapshot_selector_position().await?;
+    database
+        .seed_default_ens_snapshot_selector_position()
+        .await?;
+    mark_permissions_current_projection_ready(&database).await?;
 
     let by_address = v2_permissions_payload_for_database(
         &database,
@@ -361,6 +409,11 @@ async fn v2_get_permissions_empty_results_return_empty_page() -> Result<()> {
     assert_eq!(by_address["data"], json!([]));
     assert_eq!(by_address["page"]["has_more"], json!(false));
     assert_eq!(by_address["page"]["next_cursor"], Value::Null);
+    assert_eq!(by_address["meta"]["completeness"], json!("partial"));
+    assert_eq!(
+        by_address["meta"]["unsupported_reason"],
+        json!("wrapper_holder_permissions_not_supported")
+    );
 
     let by_missing_name =
         v2_permissions_payload_for_database(&database, "/v2/permissions?name=missing.eth").await?;
@@ -370,6 +423,53 @@ async fn v2_get_permissions_empty_results_return_empty_page() -> Result<()> {
 
     database.cleanup().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn v2_permissions_empty_resource_fails_closed_from_typed_support_summary() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_default_ens_snapshot_selector_position()
+        .await?;
+    let resource_id = Uuid::from_u128(0xe400);
+    bigname_storage::upsert_resources(&database.pool, &[resource(resource_id)]).await?;
+    mark_permissions_current_projection_ready(&database).await?;
+    let uri = format!("/v2/permissions?registration_id={resource_id}");
+
+    let missing = v2_permissions_payload_for_database(&database, &uri).await?;
+    assert_eq!(missing["data"], json!([]));
+    assert_eq!(missing["meta"]["completeness"], json!("partial"));
+    assert_eq!(
+        missing["meta"]["unsupported_reason"],
+        json!("permission_support_unknown")
+    );
+
+    bigname_storage::upsert_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(resource_id, Some("registrar")),
+    )
+    .await?;
+    mark_permissions_current_projection_ready(&database).await?;
+    let full = v2_permissions_payload_for_database(&database, &uri).await?;
+    assert_eq!(full["data"], json!([]));
+    assert!(full["meta"].get("completeness").is_none());
+    assert!(full["meta"].get("unsupported_reason").is_none());
+
+    bigname_storage::upsert_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(resource_id, Some("wrapper")),
+    )
+    .await?;
+    mark_permissions_current_projection_ready(&database).await?;
+    let wrapper = v2_permissions_payload_for_database(&database, &uri).await?;
+    assert_eq!(wrapper["data"], json!([]));
+    assert_eq!(wrapper["meta"]["completeness"], json!("unsupported"));
+    assert_eq!(
+        wrapper["meta"]["unsupported_reason"],
+        json!("wrapper_holder_permissions_not_supported")
+    );
+
+    database.cleanup().await
 }
 
 const V2_PERMISSIONS_SUBJECT: &str = "0x0000000000000000000000000000000000000cc1";
@@ -388,10 +488,7 @@ async fn v2_permissions_payload(uri: &str) -> Result<(TestDatabase, Value)> {
     Ok((database, payload))
 }
 
-async fn v2_permissions_payload_for_database(
-    database: &TestDatabase,
-    uri: &str,
-) -> Result<Value> {
+async fn v2_permissions_payload_for_database(database: &TestDatabase, uri: &str) -> Result<Value> {
     let response = v2_permissions_response_for_database(database, uri).await?;
     assert_eq!(response.status(), StatusCode::OK);
     read_json(response).await
@@ -558,6 +655,14 @@ async fn seed_v2_permissions_fixture(database: &TestDatabase) -> Result<()> {
         ],
     )
     .await?;
+    for resource_id in [current_resource_id, stale_resource_id] {
+        bigname_storage::upsert_permissions_current_resource_summary(
+            &database.pool,
+            &permission_current_resource_summary(resource_id, Some("registrar")),
+        )
+        .await?;
+    }
+    mark_permissions_current_projection_ready(database).await?;
 
     Ok(())
 }
@@ -632,7 +737,11 @@ fn v2_permissions_at_token(
     Ok(crate::v2::encode_at_token(&selected))
 }
 
-fn apply_raw_log_permission_lineage(row: &mut bigname_storage::PermissionsCurrentRow, power: &str, suffix: i64) {
+fn apply_raw_log_permission_lineage(
+    row: &mut bigname_storage::PermissionsCurrentRow,
+    power: &str,
+    suffix: i64,
+) {
     row.grant_source = json!({
         "kind": "raw_log",
         "source_event": "EACRolesChanged",

@@ -2,7 +2,9 @@ use bigname_storage::sql_row;
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
-use bigname_manifests::{WatchedContractSource, load_watched_contracts};
+use bigname_manifests::{
+    WatchedContractSource, load_historical_watched_contracts_by_chain, load_watched_contracts,
+};
 use sqlx::{PgPool, types::Uuid};
 
 use crate::adapter_manifest::watched_contract_manifest_ids;
@@ -17,10 +19,17 @@ pub(super) async fn load_active_emitters(
     pool: &PgPool,
     chain: &str,
     scoped_emitter_identities: Option<&HashSet<(String, String)>>,
+    include_historical: bool,
 ) -> Result<Vec<ActiveEmitter>> {
-    let watched_contracts = load_watched_contracts(pool)
-        .await
-        .context("failed to load watched contracts for ENSv2 registry adapter")?;
+    let watched_contracts = if include_historical {
+        load_historical_watched_contracts_by_chain(pool, chain)
+            .await
+            .context("failed to load historical watched contracts for ENSv2 registry adapter")?
+    } else {
+        load_watched_contracts(pool)
+            .await
+            .context("failed to load watched contracts for ENSv2 registry adapter")?
+    };
     let watched_contracts = watched_contracts
         .into_iter()
         .filter(|contract| contract.chain == chain)

@@ -31,7 +31,8 @@ fn auto_normalized_replay_catchup_owns_live_adapter_sync() {
         BackfillAdapterSyncMode::Inline
     );
     assert!(inline.broad_runtime_refresh_enabled);
-    assert!(inline.sync_adapter_before_startup_backfill);
+    assert!(!inline.sync_adapter_before_startup_backfill);
+    assert!(inline.sync_adapter_after_startup_backfill);
 
     let raw_only = IndexerRunMode::new(BackfillAdapterSyncMode::RawOnly, false);
     assert!(!raw_only.live_poll_adapter_sync_enabled);

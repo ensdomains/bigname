@@ -1,5 +1,19 @@
 pub(crate) type CompactRolesResponse = JsonValue;
 pub(crate) type ResourceLookupResponse = JsonValue;
+pub(crate) const ENSV1_WRAPPER_PERMISSIONS_UNSUPPORTED_REASON: &str =
+    bigname_storage::PermissionCoverageUnsupportedReason::Ensv1WrapperHolderPermissionsNotProjected
+        .as_str();
+pub(crate) const RESOURCE_PERMISSION_AUTHORITY_NOT_PROJECTED_REASON: &str =
+    bigname_storage::PermissionCoverageUnsupportedReason::ResourcePermissionAuthorityNotProjected
+        .as_str();
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CompactRolesSupport {
+    Supported,
+    AccountWideWrapperCoveragePartial,
+    ResourceAuthorityPartial,
+    WrapperHolderPermissionsUnsupported,
+}
 
 pub(crate) fn build_compact_roles_response(
     rows: &[PermissionsCurrentRow],
@@ -7,6 +21,7 @@ pub(crate) fn build_compact_roles_response(
     summary: &bigname_storage::PermissionsCurrentFullFilterSummary,
     page: HistoryPageResponse,
     meta_mode: MetaMode,
+    support: CompactRolesSupport,
 ) -> CompactRolesResponse {
     build_roles_response(
         rows,
@@ -14,14 +29,16 @@ pub(crate) fn build_compact_roles_response(
         summary.row_count.max(0) as u64,
         page,
         meta_mode,
+        support,
     )
 }
 
 pub(crate) fn build_empty_compact_roles_response(
     page: HistoryPageResponse,
     meta_mode: MetaMode,
+    support: CompactRolesSupport,
 ) -> CompactRolesResponse {
-    build_roles_response(&[], &BTreeMap::new(), 0, page, meta_mode)
+    build_roles_response(&[], &BTreeMap::new(), 0, page, meta_mode, support)
 }
 
 pub(crate) fn build_resource_lookup_response(
@@ -59,6 +76,7 @@ fn build_roles_response(
     total_count: u64,
     page: HistoryPageResponse,
     meta_mode: MetaMode,
+    support: CompactRolesSupport,
 ) -> CompactRolesResponse {
     let data = rows
         .iter()
@@ -73,16 +91,86 @@ fn build_roles_response(
         serde_json::to_value(page).expect("roles page response must serialize"),
     );
     if meta_mode != MetaMode::None {
-        insert_value_field(
-            &mut response,
-            "meta",
-            compact_meta_object(
+        let (support_status, total_count, unsupported_fields, unsupported_details) = match support {
+            CompactRolesSupport::Supported => (
                 "supported",
                 Some(total_count),
-                ["resource_hex", "role_bitmap"].into_iter().map(str::to_owned),
-                std::iter::empty(),
+                vec!["resource_hex".to_owned(), "role_bitmap".to_owned()],
+                None,
             ),
+            CompactRolesSupport::AccountWideWrapperCoveragePartial => (
+                "partial",
+                None,
+                vec![
+                    "effective_powers".to_owned(),
+                    "resource_hex".to_owned(),
+                    "role_bitmap".to_owned(),
+                ],
+                Some((
+                    "best_effort",
+                    serde_json::json!(["permissions_current", "ens_v1_wrapper_l1"]),
+                    "account_roles",
+                    ENSV1_WRAPPER_PERMISSIONS_UNSUPPORTED_REASON,
+                )),
+            ),
+            CompactRolesSupport::ResourceAuthorityPartial => (
+                "partial",
+                None,
+                vec![
+                    "effective_powers".to_owned(),
+                    "resource_hex".to_owned(),
+                    "role_bitmap".to_owned(),
+                ],
+                Some((
+                    "best_effort",
+                    serde_json::json!(["permissions_current"]),
+                    "resource_roles",
+                    RESOURCE_PERMISSION_AUTHORITY_NOT_PROJECTED_REASON,
+                )),
+            ),
+            CompactRolesSupport::WrapperHolderPermissionsUnsupported => (
+                "unsupported",
+                None,
+                vec![
+                    "effective_powers".to_owned(),
+                    "resource_hex".to_owned(),
+                    "role_bitmap".to_owned(),
+                ],
+                Some((
+                    "not_applicable",
+                    serde_json::json!(["permissions_current", "ens_v1_wrapper_l1"]),
+                    "resource_roles",
+                    ENSV1_WRAPPER_PERMISSIONS_UNSUPPORTED_REASON,
+                )),
+            ),
+        };
+        let mut meta = compact_meta_object(
+            support_status,
+            total_count,
+            unsupported_fields,
+            std::iter::empty(),
         );
+        if let Some((
+            exhaustiveness,
+            source_classes_considered,
+            enumeration_basis,
+            unsupported_reason,
+        )) = unsupported_details
+        {
+            insert_string_field(&mut meta, "exhaustiveness", exhaustiveness.to_owned());
+            insert_value_field(
+                &mut meta,
+                "source_classes_considered",
+                source_classes_considered,
+            );
+            insert_string_field(&mut meta, "enumeration_basis", enumeration_basis.to_owned());
+            insert_string_field(
+                &mut meta,
+                "unsupported_reason",
+                unsupported_reason.to_owned(),
+            );
+        }
+        insert_value_field(&mut response, "meta", meta);
     }
     response
 }
@@ -92,13 +180,55 @@ fn build_role_row(row: &PermissionsCurrentRow, name: Option<&String>) -> JsonVal
     insert_string_field(&mut value, "account", row.subject.clone());
     insert_value_field(&mut value, "resource_hex", JsonValue::Null);
     insert_string_field(&mut value, "resource_id", row.resource_id.to_string());
-    insert_nullable_string_field(
-        &mut value,
-        "name",
-        name.cloned(),
-    );
+    insert_nullable_string_field(&mut value, "name", name.cloned());
     // permissions_current currently exposes post-scope powers, not a raw role bitmap.
     insert_value_field(&mut value, "role_bitmap", JsonValue::Null);
     insert_value_field(&mut value, "effective_powers", row.effective_powers.clone());
     value
+}
+
+#[cfg(test)]
+mod wrapper_roles_response_tests {
+    use super::*;
+
+    #[test]
+    fn wrapper_role_page_does_not_claim_supported_complete_results() {
+        let response = build_empty_compact_roles_response(
+            HistoryPageResponse {
+                cursor: None,
+                next_cursor: None,
+                page_size: 50,
+                sort: "account_resource_scope_asc".to_owned(),
+            },
+            MetaMode::Summary,
+            CompactRolesSupport::WrapperHolderPermissionsUnsupported,
+        );
+
+        assert_eq!(response["meta"]["support_status"], "unsupported");
+        assert_eq!(response["meta"]["total_count"], JsonValue::Null);
+        assert_eq!(
+            response["meta"]["unsupported_reason"],
+            "ensv1_wrapper_holder_permissions_not_projected"
+        );
+        assert_eq!(response["meta"]["exhaustiveness"], "not_applicable");
+    }
+
+    #[test]
+    fn account_role_page_is_partial_while_wrapper_holder_roles_are_unprojected() {
+        let response = build_empty_compact_roles_response(
+            HistoryPageResponse {
+                cursor: None,
+                next_cursor: None,
+                page_size: 50,
+                sort: "account_resource_scope_asc".to_owned(),
+            },
+            MetaMode::Summary,
+            CompactRolesSupport::AccountWideWrapperCoveragePartial,
+        );
+
+        assert_eq!(response["meta"]["support_status"], "partial");
+        assert_eq!(response["meta"]["total_count"], JsonValue::Null);
+        assert_eq!(response["meta"]["exhaustiveness"], "best_effort");
+        assert_eq!(response["meta"]["enumeration_basis"], "account_roles");
+    }
 }

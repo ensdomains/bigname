@@ -8,6 +8,8 @@ pub(super) fn supported_resolution_verified_readback_records(
     bigname_storage::supported_resolution_verified_readback_records(row, records)
 }
 
+// Successful cache hits keep the outcome inline to avoid an extra allocation.
+#[expect(clippy::large_enum_variant)]
 pub(crate) enum ResolutionVerifiedOutcomeLookup {
     Found(ExecutionOutcome),
     CacheMiss,
@@ -125,12 +127,13 @@ fn persisted_outcome_covers_records(
     records: &[ResolutionRecordKey],
 ) -> bool {
     let Ok(persisted_queries) = persisted_verified_queries_by_record_key(outcome) else {
-        return true;
+        return false;
     };
 
-    records
-        .iter()
-        .all(|record| persisted_queries.contains_key(&record.record_key))
+    persisted_queries.len() == records.len()
+        && records
+            .iter()
+            .all(|record| persisted_queries.contains_key(&record.record_key))
 }
 
 async fn load_resolution_verified_outcome_for_records(
@@ -272,13 +275,6 @@ pub(super) fn resolution_execution_cache_lookup_records(
 ) -> Vec<ResolutionRecordKey> {
     bigname_storage::resolution_execution_cache_lookup_records(row, records)
 }
-pub(super) async fn load_supported_record_inventory_current(
-    pool: &PgPool,
-    row: &NameCurrentRow,
-) -> Result<Option<RecordInventoryCurrentRow>> {
-    record_inventory::load_supported_record_inventory_current(pool, row).await
-}
-
 pub(super) async fn load_supported_record_inventory_current_for_snapshot(
     pool: &PgPool,
     row: &NameCurrentRow,
@@ -332,4 +328,66 @@ pub(super) fn resolution_verified_support_boundary(
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
 ) -> Option<bigname_storage::VerifiedResolutionSupportBoundary> {
     record_inventory::resolution_verified_support_boundary(row, record_inventory_row)
+}
+
+#[cfg(test)]
+mod tests {
+    use bigname_storage::{ExecutionCacheKey, ExecutionOutcome};
+    use serde_json::{Value as JsonValue, json};
+    use sqlx::types::{Uuid, time::OffsetDateTime};
+
+    use super::persisted_outcome_covers_records;
+    use crate::query::ResolutionRecordKey;
+
+    fn record(record_key: &str) -> ResolutionRecordKey {
+        ResolutionRecordKey {
+            record_key: record_key.to_owned(),
+            record_family: "text".to_owned(),
+            selector_key: Some(record_key.to_owned()),
+        }
+    }
+
+    fn outcome(outcome_payload: JsonValue) -> ExecutionOutcome {
+        ExecutionOutcome {
+            cache_key: ExecutionCacheKey {
+                request_key: "test".to_owned(),
+                requested_chain_positions: json!({}),
+                manifest_versions: json!([]),
+                topology_version_boundary: json!({}),
+                record_version_boundary: json!({}),
+            },
+            execution_trace_id: Uuid::nil(),
+            request_type: "verified_resolution".to_owned(),
+            namespace: "ens".to_owned(),
+            outcome_payload: Some(outcome_payload),
+            failure_payload: None,
+            finished_at: OffsetDateTime::UNIX_EPOCH,
+        }
+    }
+
+    #[test]
+    fn malformed_compact_outcome_does_not_cover_full_selector_fallback() {
+        let malformed = outcome(json!({"verified_queries": "not-an-array"}));
+
+        assert!(!persisted_outcome_covers_records(
+            &malformed,
+            &[record("avatar"), record("text:com.twitter")],
+        ));
+    }
+
+    #[test]
+    fn compact_outcome_selector_superset_does_not_cover_exact_fallback() {
+        let superset = outcome(json!({
+            "verified_queries": [
+                {"record_key": "avatar"},
+                {"record_key": "text:com.twitter"},
+                {"record_key": "text:description"},
+            ],
+        }));
+
+        assert!(!persisted_outcome_covers_records(
+            &superset,
+            &[record("avatar"), record("text:com.twitter")],
+        ));
+    }
 }

@@ -132,6 +132,13 @@ async fn rewind_to_exact_ancestor(
     )
     .await?;
     let execution_summary = invalidate_execution_outcomes_for_orphaned_blocks(pool).await?;
+    // Raw-code canonicality changes may enqueue resolver-profile repair. Do
+    // not publish the rewound checkpoint until every observed generation has
+    // completed its adapter and projection-invalidation handoff.
+    let profile_convergence =
+        crate::resolver_profile_convergence::drain_resolver_profile_input_changes(pool).await?;
+    profile_convergence
+        .ensure_chain_completion_allowed(&chain, "rewound checkpoint publication")?;
     rewind_chain_checkpoints_to_ancestor(pool, &chain, &ancestor).await?;
 
     Ok(RewindOutcome {
@@ -146,4 +153,127 @@ async fn rewind_to_exact_ancestor(
         orphaned_identity_counts,
         invalidated_execution_outcome_count: execution_summary.deleted_outcome_count,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+    use bigname_storage::{
+        ResolverProfileReconciliationTarget, enqueue_resolver_profile_reconciliations,
+        load_chain_checkpoint,
+    };
+    use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn rewind_drains_resolver_profile_work_before_checkpoint_publication() -> Result<()> {
+        let database = TestDatabase::create_migrated(
+            TestDatabaseConfig::new("indexer_rewind_resolver_profile_handoff"),
+            &bigname_storage::MIGRATOR,
+            "failed to apply migrations for rewind resolver-profile handoff test",
+        )
+        .await?;
+        let chain = "ethereum-mainnet";
+        let ancestor_hash = "0x1111111111111111111111111111111111111111111111111111111111111111";
+        let losing_hash = "0x2222222222222222222222222222222222222222222222222222222222222222";
+        sqlx::query(
+            r#"
+            INSERT INTO chain_lineage (
+                chain_id, block_hash, parent_hash, block_number,
+                block_timestamp, canonicality_state
+            ) VALUES
+                ($1, $2, NULL, 1, now(), 'canonical'),
+                ($1, $3, $2, 2, now(), 'canonical')
+            "#,
+        )
+        .bind(chain)
+        .bind(ancestor_hash)
+        .bind(losing_hash)
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO chain_checkpoints (
+                chain_id,
+                canonical_block_hash, canonical_block_number,
+                safe_block_hash, safe_block_number,
+                finalized_block_hash, finalized_block_number
+            ) VALUES ($1, $2, 2, $2, 2, $2, 2)
+            "#,
+        )
+        .bind(chain)
+        .bind(losing_hash)
+        .execute(database.pool())
+        .await?;
+        enqueue_resolver_profile_reconciliations(
+            database.pool(),
+            &[ResolverProfileReconciliationTarget {
+                chain_id: chain.to_owned(),
+                contract_address: "0x00000000000000000000000000000000000000ff".to_owned(),
+            }],
+        )
+        .await?;
+        sqlx::query(
+            r#"
+            CREATE FUNCTION require_profile_queue_drained_before_rewind_checkpoint()
+            RETURNS TRIGGER
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1
+                    FROM resolver_profile_input_changes
+                    WHERE processed_generation < generation
+                ) THEN
+                    RAISE EXCEPTION 'resolver-profile queue was pending at checkpoint rewind';
+                END IF;
+                RETURN NEW;
+            END;
+            $$;
+            "#,
+        )
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            r#"
+            CREATE TRIGGER require_profile_queue_drained_before_rewind_checkpoint
+            BEFORE UPDATE ON chain_checkpoints
+            FOR EACH ROW
+            EXECUTE FUNCTION require_profile_queue_drained_before_rewind_checkpoint();
+            "#,
+        )
+        .execute(database.pool())
+        .await?;
+
+        let outcome = rewind_to_exact_ancestor(
+            database.pool(),
+            "test".to_owned(),
+            chain.to_owned(),
+            Some(losing_hash.to_owned()),
+            CheckpointBlockRef {
+                block_hash: ancestor_hash.to_owned(),
+                block_number: 1,
+            },
+        )
+        .await?;
+        assert_eq!(outcome.ancestor_block_hash, ancestor_hash);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM resolver_profile_input_changes WHERE processed_generation < generation"
+            )
+            .fetch_one(database.pool())
+            .await?,
+            0
+        );
+        let checkpoint = load_chain_checkpoint(database.pool(), chain)
+            .await?
+            .expect("rewind checkpoint must exist");
+        assert_eq!(
+            checkpoint.canonical_block_hash.as_deref(),
+            Some(ancestor_hash)
+        );
+
+        database.cleanup().await
+    }
 }

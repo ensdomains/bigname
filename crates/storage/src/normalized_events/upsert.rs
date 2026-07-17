@@ -1,10 +1,7 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    time::Instant,
-};
+use std::{collections::HashMap, time::Instant};
 
-use anyhow::{Context, Result, bail};
-use sqlx::{PgPool, Postgres};
+use anyhow::{Context, Result};
+use sqlx::{PgPool, Postgres, Transaction};
 use tracing::info;
 
 use crate::label_preimages::upsert_label_preimages_from_normalized_events;
@@ -13,18 +10,24 @@ use super::{types::NormalizedEvent, validation::validate_normalized_event};
 
 #[path = "upsert/batch.rs"]
 mod batch;
+#[path = "upsert/identity.rs"]
+mod identity;
+#[path = "upsert/metrics.rs"]
+mod metrics;
 #[path = "upsert/repair.rs"]
 mod repair;
 #[path = "upsert/sanitize.rs"]
 mod sanitize;
 
-use batch::{
-    insert_normalized_events_do_nothing, load_normalized_events_by_identities,
-    upsert_normalized_event_batch,
+use batch::{insert_normalized_events_do_nothing, upsert_normalized_event_batch};
+pub(super) use identity::{
+    normalized_event_identity_differences, normalized_event_identity_summary,
 };
+use identity::{normalized_event_snapshots_after_upsert, validate_existing_normalized_events};
+use metrics::{count_normalized_events_by_event_kind, count_normalized_events_by_source_family};
 use repair::{
-    normalized_event_identity_repair_allowed, repair_after_state_conflicts,
-    repair_resource_id_conflicts, supersede_basenames_registry_boundary_derivation_change_events,
+    repair_after_state_conflicts, repair_resource_id_conflicts,
+    supersede_basenames_registry_boundary_derivation_change_events,
 };
 use sanitize::jsonb_safe_normalized_event;
 pub use sanitize::serialize_jsonb_value;
@@ -418,159 +421,71 @@ pub async fn upsert_normalized_events_count_only(
     Ok(inserted_count)
 }
 
-fn count_normalized_events_by_event_kind(events: &[NormalizedEvent]) -> BTreeMap<String, usize> {
-    let mut counts = BTreeMap::new();
-    for event in events {
-        *counts.entry(event.event_kind.clone()).or_insert(0) += 1;
-    }
-    counts
-}
-
-fn count_normalized_events_by_source_family(events: &[NormalizedEvent]) -> BTreeMap<String, usize> {
-    let mut counts = BTreeMap::new();
-    for event in events {
-        *counts.entry(event.source_family.clone()).or_insert(0) += 1;
-    }
-    counts
-}
-
-async fn validate_existing_normalized_events(
-    executor: &mut sqlx::Transaction<'_, Postgres>,
+/// Insert or refresh normalized events inside a caller-owned transaction.
+///
+/// This is used by absence-aware re-derivations that must publish their
+/// replacement rows and orphan rows missing from the replacement set in one
+/// atomic commit.
+pub async fn upsert_normalized_events_count_only_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
     events: &[NormalizedEvent],
-) -> Result<HashMap<String, NormalizedEvent>> {
-    let event_identities = events
-        .iter()
-        .map(|event| event.event_identity.clone())
-        .collect::<Vec<_>>();
-    let existing_events = load_normalized_events_by_identities(executor, &event_identities).await?;
-    let existing_by_identity = existing_events
-        .into_iter()
-        .map(|event| (event.event_identity.clone(), event))
-        .collect::<HashMap<_, _>>();
-
-    for event in events {
-        if let Some(existing) = existing_by_identity.get(&event.event_identity) {
-            ensure_normalized_event_identity_matches(existing, event)?;
+) -> Result<usize> {
+    let mut inserted_count = 0usize;
+    for raw_chunk in events.chunks(NORMALIZED_EVENT_FAST_INSERT_BATCH_SIZE) {
+        let mut chunk = Vec::with_capacity(raw_chunk.len());
+        for event in raw_chunk {
+            validate_normalized_event(event)?;
+            chunk.push(jsonb_safe_normalized_event(event));
         }
-    }
 
-    Ok(existing_by_identity)
-}
-
-fn normalized_event_snapshots_after_upsert(
-    events: &[NormalizedEvent],
-    existing_by_identity: &HashMap<String, NormalizedEvent>,
-) -> Vec<NormalizedEvent> {
-    events
-        .iter()
-        .map(|event| {
-            let mut snapshot = event.clone();
-            if let Some(existing) = existing_by_identity.get(&event.event_identity) {
-                snapshot.canonicality_state = existing
-                    .canonicality_state
-                    .merge_observation(event.canonicality_state);
+        let mut existing_events = validate_existing_normalized_events(transaction, &chunk).await?;
+        let mut missing_events = Vec::new();
+        let mut conflicted_events = Vec::new();
+        for event in &chunk {
+            if existing_events.contains_key(&event.event_identity) {
+                conflicted_events.push(event.clone());
+            } else {
+                missing_events.push(event.clone());
             }
-            snapshot
-        })
-        .collect()
-}
-
-fn ensure_normalized_event_identity_matches(
-    existing: &NormalizedEvent,
-    incoming: &NormalizedEvent,
-) -> Result<()> {
-    let differing_fields = normalized_event_identity_differences(existing, incoming);
-    if !differing_fields.is_empty() {
-        if normalized_event_identity_repair_allowed(existing, incoming, &differing_fields) {
-            return Ok(());
         }
 
-        bail!(
-            "normalized event identity mismatch for event {} (differing_fields={}, existing={}, incoming={})",
-            existing.event_identity,
-            differing_fields.join(","),
-            normalized_event_identity_summary(existing),
-            normalized_event_identity_summary(incoming)
-        );
-    }
+        let inserted_identities =
+            insert_normalized_events_do_nothing(transaction, &missing_events).await?;
+        inserted_count += inserted_identities.len();
+        let raced_conflicted_events = missing_events
+            .iter()
+            .filter(|event| !inserted_identities.contains(&event.event_identity))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !raced_conflicted_events.is_empty() {
+            let raced_existing =
+                validate_existing_normalized_events(transaction, &raced_conflicted_events).await?;
+            existing_events.extend(raced_existing);
+            conflicted_events.extend(raced_conflicted_events);
+        }
 
-    Ok(())
-}
-
-pub(super) fn normalized_event_identity_differences(
-    existing: &NormalizedEvent,
-    incoming: &NormalizedEvent,
-) -> Vec<&'static str> {
-    let mut fields = Vec::new();
-    if existing.namespace != incoming.namespace {
-        fields.push("namespace");
+        repair_after_state_conflicts(transaction, &conflicted_events, &existing_events).await?;
+        repair_resource_id_conflicts(transaction, &conflicted_events, &existing_events).await?;
+        let events_requiring_canonicality_refresh = conflicted_events
+            .iter()
+            .filter(|event| {
+                existing_events
+                    .get(&event.event_identity)
+                    .map(|existing| {
+                        existing
+                            .canonicality_state
+                            .merge_observation(event.canonicality_state)
+                            != existing.canonicality_state
+                    })
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for event in &events_requiring_canonicality_refresh {
+            upsert_normalized_event_batch(transaction, std::slice::from_ref(event)).await?;
+        }
+        supersede_basenames_registry_boundary_derivation_change_events(transaction, &chunk).await?;
+        upsert_label_preimages_from_normalized_events(transaction, &chunk).await?;
     }
-    if existing.logical_name_id != incoming.logical_name_id {
-        fields.push("logical_name_id");
-    }
-    if existing.resource_id != incoming.resource_id {
-        fields.push("resource_id");
-    }
-    if existing.event_kind != incoming.event_kind {
-        fields.push("event_kind");
-    }
-    if existing.source_family != incoming.source_family {
-        fields.push("source_family");
-    }
-    if existing.manifest_version != incoming.manifest_version {
-        fields.push("manifest_version");
-    }
-    if existing.source_manifest_id != incoming.source_manifest_id {
-        fields.push("source_manifest_id");
-    }
-    if existing.chain_id != incoming.chain_id {
-        fields.push("chain_id");
-    }
-    if existing.block_number != incoming.block_number {
-        fields.push("block_number");
-    }
-    if existing.block_hash != incoming.block_hash {
-        fields.push("block_hash");
-    }
-    if existing.transaction_hash != incoming.transaction_hash {
-        fields.push("transaction_hash");
-    }
-    if existing.log_index != incoming.log_index {
-        fields.push("log_index");
-    }
-    if existing.raw_fact_ref != incoming.raw_fact_ref {
-        fields.push("raw_fact_ref");
-    }
-    if existing.derivation_kind != incoming.derivation_kind {
-        fields.push("derivation_kind");
-    }
-    if existing.before_state != incoming.before_state {
-        fields.push("before_state");
-    }
-    if existing.after_state != incoming.after_state {
-        fields.push("after_state");
-    }
-    fields
-}
-
-pub(super) fn normalized_event_identity_summary(event: &NormalizedEvent) -> String {
-    format!(
-        "namespace={:?} logical_name_id={:?} resource_id={:?} event_kind={:?} source_family={:?} manifest_version={:?} source_manifest_id={:?} chain_id={:?} block_number={:?} block_hash={:?} transaction_hash={:?} log_index={:?} raw_fact_ref={} derivation_kind={:?} before_state={} after_state={}",
-        event.namespace,
-        event.logical_name_id,
-        event.resource_id,
-        event.event_kind,
-        event.source_family,
-        event.manifest_version,
-        event.source_manifest_id,
-        event.chain_id,
-        event.block_number,
-        event.block_hash,
-        event.transaction_hash,
-        event.log_index,
-        event.raw_fact_ref,
-        event.derivation_kind,
-        event.before_state,
-        event.after_state
-    )
+    Ok(inserted_count)
 }

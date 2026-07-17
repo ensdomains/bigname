@@ -63,7 +63,7 @@ pub async fn clear_permissions_current(pool: &PgPool) -> Result<u64> {
         .map(|result| result.rows_affected())
 }
 
-async fn upsert_permissions_current_row(
+pub(super) async fn upsert_permissions_current_row(
     executor: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     row: &PermissionsCurrentRow,
 ) -> Result<PermissionsCurrentRow> {

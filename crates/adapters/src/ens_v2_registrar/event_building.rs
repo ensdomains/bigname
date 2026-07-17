@@ -7,7 +7,7 @@ use sqlx::PgPool;
 use super::{
     DERIVATION_KIND_ENS_V2_REGISTRAR, EVENT_KIND_REGISTRAR_NAME_REGISTERED,
     EVENT_KIND_REGISTRATION_RENEWED,
-    decoding::{RegistrarObservation, hex_string, normalize_address},
+    decoding::{RegistrarObservation, RenewalPayment, hex_string, normalize_address},
     raw_logs::RegistrarRawLogRow,
     resource_links::load_registry_resource_link,
 };
@@ -52,28 +52,64 @@ pub(super) async fn build_registrar_event(
             new_expiry,
             payment_token,
             referrer,
-            base,
-        } => (
-            EVENT_KIND_REGISTRATION_RENEWED,
-            token_id,
-            label,
-            json!({
+            payment,
+        } => {
+            let mut after_state = json!({
                 "source_event": "NameRenewed",
                 "duration": duration,
                 "expiry": new_expiry,
                 "payment_token": payment_token,
                 "referrer": referrer,
-                "base": base,
-            }),
-        ),
+            });
+            let object = after_state
+                .as_object_mut()
+                .expect("static renewal after_state is an object");
+            match payment {
+                RenewalPayment::LegacyBase(base) => {
+                    // Preserve the exact `base`-only payload shape whenever a
+                    // two-topic log from the deprecated pre-audit manifest is
+                    // explicitly decoded.
+                    // (upstream: .refs/ens_v2_sepolia_dev/contracts/src/registrar/interfaces/IETHRegistrar.sol:L53 @ ens_v2_sepolia_dev@554c309)
+                    // (upstream: .refs/ens_v2_sepolia_dev/contracts/src/registrar/interfaces/IETHRegistrar.sol:L54 @ ens_v2_sepolia_dev@554c309)
+                    // (upstream: .refs/ens_v2_sepolia_dev/contracts/src/registrar/interfaces/IETHRegistrar.sol:L59 @ ens_v2_sepolia_dev@554c309)
+                    // (upstream: .refs/ens_v2_sepolia_dev/contracts/src/registrar/interfaces/IETHRegistrar.sol:L60 @ ens_v2_sepolia_dev@554c309)
+                    object.insert("base".to_owned(), Value::String(base));
+                }
+                RenewalPayment::PostAuditAmount(amount) => {
+                    object.insert("amount".to_owned(), Value::String(amount.clone()));
+                    // Keep the pre-audit key as a compatibility alias on new
+                    // post-audit renewal payloads.
+                    object.insert("base".to_owned(), Value::String(amount));
+                }
+            }
+            (
+                EVENT_KIND_REGISTRATION_RENEWED,
+                token_id,
+                label,
+                after_state,
+            )
+        }
     };
 
-    let link = load_registry_resource_link(pool, &raw_log.namespace, &token_id).await?;
-    let logical_name_id = link.logical_name_id.or_else(|| {
-        normalize_label_under_suffix(&label, &["eth"])
-            .ok()
-            .map(|name| format!("{}:{}", raw_log.namespace, name.normalized_name))
-    });
+    let registrar_logical_name_id = normalize_label_under_suffix(&label, &["eth"])
+        .ok()
+        .map(|name| format!("{}:{}", raw_log.namespace, name.normalized_name));
+    let link = if let Some(logical_name_id) = registrar_logical_name_id.as_deref() {
+        load_registry_resource_link(
+            pool,
+            &raw_log.chain_id,
+            &raw_log.namespace,
+            logical_name_id,
+            &token_id,
+            raw_log.block_number,
+            raw_log.transaction_index,
+            raw_log.log_index,
+        )
+        .await?
+    } else {
+        Default::default()
+    };
+    let logical_name_id = link.logical_name_id.or(registrar_logical_name_id);
     let mut after_state = after_state;
     if let Some(object) = after_state.as_object_mut() {
         object.insert("token_id".to_owned(), Value::String(token_id.clone()));

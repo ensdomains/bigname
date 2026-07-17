@@ -37,10 +37,12 @@ pub(crate) async fn load_or_execute_resolution_verified_outcome(
     .await?;
 
     match lookup {
-        ResolutionVerifiedOutcomeLookup::Found(outcome) => Ok(Some(LoadedResolutionVerifiedOutcome {
-            outcome,
-            origin: ResolutionVerifiedOutcomeOrigin::Persisted,
-        })),
+        ResolutionVerifiedOutcomeLookup::Found(outcome) => {
+            Ok(Some(LoadedResolutionVerifiedOutcome {
+                outcome,
+                origin: ResolutionVerifiedOutcomeOrigin::Persisted,
+            }))
+        }
         ResolutionVerifiedOutcomeLookup::NotSupported => Ok(None),
         ResolutionVerifiedOutcomeLookup::CacheMiss => {
             let outcome = execute_ens_verified_resolution_cache_miss(
@@ -50,8 +52,7 @@ pub(crate) async fn load_or_execute_resolution_verified_outcome(
                 records,
                 record_inventory_row,
                 selected_snapshot,
-                options.use_latest_block_tag,
-                options.persist_execution,
+                &options,
             )
             .await?;
             Ok(Some(LoadedResolutionVerifiedOutcome {
@@ -69,8 +70,7 @@ async fn execute_ens_verified_resolution_cache_miss(
     records: &[ResolutionRecordKey],
     record_inventory_row: Option<&RecordInventoryCurrentRow>,
     selected_snapshot: &SelectedSnapshot,
-    use_latest_block_tag: bool,
-    persist_execution: bool,
+    options: &VerifiedOutcomeExecutionOptions,
 ) -> std::result::Result<ExecutionOutcome, SnapshotSelectionError> {
     if row.namespace != bigname_storage::ENS_NAMESPACE {
         return Err(SnapshotSelectionError::stale(
@@ -97,8 +97,8 @@ async fn execute_ens_verified_resolution_cache_miss(
             record_inventory_row,
             chain_positions: selected_snapshot.chain_positions_value(),
             chain_rpc_urls,
-            use_latest_block_tag,
-            persist_execution,
+            use_latest_block_tag: options.use_latest_block_tag,
+            persist_execution: options.persist_execution,
         },
     )
     .await

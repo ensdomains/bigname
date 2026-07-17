@@ -1248,13 +1248,33 @@ async fn rebuild_treats_empty_addr_bytes_as_not_found() -> Result<()> {
 }
 
 #[tokio::test]
-async fn rebuild_consumes_ensv2_resolver_record_events() -> Result<()> {
+async fn rebuild_profile_gates_current_ensv2_public_resolver_values_but_retains_version_boundary()
+-> Result<()> {
     let database = TestDatabase::new().await?;
     let resource_id = Uuid::from_u128(0x9701);
-    let mut boundary =
-        record_version_changed_event("ensv2-boundary", "ens:alice.eth", resource_id, 21, 1050, 0);
-    boundary.derivation_kind = DERIVATION_KIND_ENS_V2_RESOLVER.to_owned();
-    boundary.source_family = "ens_v2_resolver_l1".to_owned();
+    let registry_address = "0x67b728a792e789a8978b30cf1b3b641f19354b43";
+    let resolver_address = "0xd25f66dd4ff61486c2c5c1e6201a23576698d3df";
+    let mut boundary = resolver_changed_event(
+        "ensv2-boundary",
+        "ens:alice.eth",
+        resource_id,
+        resolver_address,
+        1,
+        1050,
+        0,
+    );
+    boundary.derivation_kind = DERIVATION_KIND_ENS_V2_REGISTRY_RESOURCE_SURFACE.to_owned();
+    boundary.source_family = SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned();
+    boundary.source_manifest_id = None;
+    boundary.chain_id = Some("ethereum-sepolia".to_owned());
+    boundary.block_hash = Some("0xensv2-rec1050".to_owned());
+    boundary.transaction_hash = Some("0xensv2-tx1050".to_owned());
+    boundary.raw_fact_ref = json!({
+        "kind": "raw_log",
+        "chain_id": "ethereum-sepolia",
+        "block_hash": "0xensv2-rec1050",
+        "log_index": 0,
+    });
     let mut record = record_changed_event(
         "ensv2-record",
         "ens:alice.eth",
@@ -1266,18 +1286,81 @@ async fn rebuild_consumes_ensv2_resolver_record_events() -> Result<()> {
         0,
     );
     record.derivation_kind = DERIVATION_KIND_ENS_V2_RESOLVER.to_owned();
-    record.source_family = "ens_v2_resolver_l1".to_owned();
+    record.source_family = SOURCE_FAMILY_ENS_V2_RESOLVER_L1.to_owned();
+    record.chain_id = Some("ethereum-sepolia".to_owned());
+    record.block_hash = Some("0xensv2-rec1051".to_owned());
+    record.transaction_hash = Some("0xensv2-tx1051".to_owned());
+    record.raw_fact_ref = json!({
+        "kind": "raw_log",
+        "chain_id": "ethereum-sepolia",
+        "block_hash": "0xensv2-rec1051",
+        "log_index": 0,
+    });
+    let mut version =
+        record_version_changed_event("ensv2-version", "ens:alice.eth", resource_id, 21, 1052, 0);
+    version.derivation_kind = DERIVATION_KIND_ENS_V2_RESOLVER.to_owned();
+    version.source_family = SOURCE_FAMILY_ENS_V2_RESOLVER_L1.to_owned();
+    version.chain_id = Some("ethereum-sepolia".to_owned());
+    version.block_hash = Some("0xensv2-rec1052".to_owned());
+    version.transaction_hash = Some("0xensv2-tx1052".to_owned());
+    version.raw_fact_ref = json!({
+        "kind": "raw_log",
+        "chain_id": "ethereum-sepolia",
+        "block_hash": "0xensv2-rec1052",
+        "log_index": 0,
+    });
 
     seed_resources(database.pool(), &[resource_id]).await?;
     seed_raw_blocks(
         database.pool(),
         &[
-            raw_block("ethereum-mainnet", "0xrec1050", 1050, 1_776_200_050),
-            raw_block("ethereum-mainnet", "0xrec1051", 1051, 1_776_200_051),
+            raw_block("ethereum-sepolia", "0xensv2-rec1050", 1050, 1_776_200_050),
+            raw_block("ethereum-sepolia", "0xensv2-rec1051", 1051, 1_776_200_051),
+            raw_block("ethereum-sepolia", "0xensv2-rec1052", 1052, 1_776_200_052),
         ],
     )
     .await?;
-    seed_events(database.pool(), &[boundary, record]).await?;
+    seed_raw_logs(
+        database.pool(),
+        &[
+            raw_log(
+                "ethereum-sepolia",
+                "0xensv2-rec1050",
+                1050,
+                "0xensv2-tx1050",
+                0,
+                registry_address,
+            ),
+            raw_log(
+                "ethereum-sepolia",
+                "0xensv2-rec1051",
+                1051,
+                "0xensv2-tx1051",
+                0,
+                resolver_address,
+            ),
+            raw_log(
+                "ethereum-sepolia",
+                "0xensv2-rec1052",
+                1052,
+                "0xensv2-tx1052",
+                0,
+                resolver_address,
+            ),
+        ],
+    )
+    .await?;
+    seed_events(database.pool(), &[boundary, record, version]).await?;
+    let version_normalized_event_id: i64 = sqlx::query_scalar(
+        "SELECT normalized_event_id FROM normalized_events WHERE event_identity = 'ensv2-version'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    let record_normalized_event_id: i64 = sqlx::query_scalar(
+        "SELECT normalized_event_id FROM normalized_events WHERE event_identity = 'ensv2-record'",
+    )
+    .fetch_one(database.pool())
+    .await?;
 
     rebuild_record_inventory_current(database.pool(), Some(&resource_id.to_string())).await?;
 
@@ -1287,29 +1370,187 @@ async fn rebuild_consumes_ensv2_resolver_record_events() -> Result<()> {
         &record_version_boundary(
             "ens:alice.eth",
             resource_id,
-            Some(1),
+            Some(version_normalized_event_id),
             Some(EVENT_KIND_RECORD_VERSION_CHANGED),
-            1050,
-            "0xrec1050",
-            1_776_200_050,
-            "ethereum-mainnet",
+            1052,
+            "0xensv2-rec1052",
+            1_776_200_052,
+            "ethereum-sepolia",
         ),
     )
     .await?
     .context("ENSv2 resolver row must exist")?;
 
-    assert_eq!(row.selectors[0]["record_key"], json!("addr:60"));
-    assert_eq!(row.entries[0]["record_key"], json!("addr:60"));
+    assert_eq!(row.selectors, json!([]));
+    assert_eq!(row.entries, json!([]));
+    assert_eq!(
+        row.coverage["unsupported_reason"],
+        json!(RESOLVER_FAMILY_PENDING_REASON)
+    );
+    assert_eq!(
+        row.last_change.as_ref().map(|change| &change["event_kind"]),
+        Some(&json!(EVENT_KIND_RECORD_VERSION_CHANGED))
+    );
+    assert!(
+        row.provenance["normalized_event_ids"]
+            .as_array()
+            .is_some_and(|ids| {
+                ids.iter()
+                    .all(|id| id.as_i64() != Some(record_normalized_event_id))
+                    && ids
+                        .iter()
+                        .any(|id| id.as_i64() == Some(version_normalized_event_id))
+            }),
+        "the pending version boundary must remain while record values stay excluded"
+    );
     assert_eq!(
         row.chain_positions,
         json!({
-            "ethereum": {
-                "chain_id": "ethereum-mainnet",
-                "block_number": 1051,
-                "block_hash": "0xrec1051",
-                "timestamp": "2026-04-14T20:54:11Z",
+            "ethereum-sepolia": {
+                "chain_id": "ethereum-sepolia",
+                "block_number": 1052,
+                "block_hash": "0xensv2-rec1052",
+                "timestamp": "2026-04-14T20:54:12Z",
             }
         })
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rebuild_excludes_non_current_ensv2_public_resolver_records() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x9706);
+    let registry_address = "0x67b728a792e789a8978b30cf1b3b641f19354b43";
+    let current_resolver_address = "0x0000000000000000000000000000000000000201";
+    let public_resolver_address = "0xd25f66dd4ff61486c2c5c1e6201a23576698d3df";
+
+    let mut resolver = resolver_changed_event(
+        "ensv2-current-resolver",
+        "ens:alice.eth",
+        resource_id,
+        current_resolver_address,
+        1,
+        1054,
+        0,
+    );
+    resolver.source_family = "ens_v2_registry_l1".to_owned();
+    resolver.derivation_kind = "ens_v2_registry_resource_surface".to_owned();
+    resolver.source_manifest_id = None;
+    resolver.chain_id = Some("ethereum-sepolia".to_owned());
+    resolver.block_hash = Some("0xensv2-resolver-1054".to_owned());
+    resolver.transaction_hash = Some("0xensv2-resolver-tx-1054".to_owned());
+    resolver.raw_fact_ref = json!({
+        "kind": "raw_log",
+        "chain_id": "ethereum-sepolia",
+        "block_hash": "0xensv2-resolver-1054",
+        "log_index": 0,
+    });
+
+    // PublicResolverV2 authorizes writes from registry ownership and approvals rather than
+    // requiring itself to be the registry-selected resolver.
+    // (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L170 @ ens_v2@48b3e2d)
+    let mut stale_record = record_changed_event_with_value(
+        "ensv2-stale-public-resolver-record",
+        "ens:alice.eth",
+        resource_id,
+        "text:avatar",
+        "text",
+        Some("avatar"),
+        json!("https://stale.example/avatar.png"),
+        1055,
+        0,
+    );
+    stale_record.source_family = "ens_v2_resolver_l1".to_owned();
+    stale_record.derivation_kind = DERIVATION_KIND_ENS_V2_RESOLVER.to_owned();
+    stale_record.source_manifest_id = None;
+    stale_record.chain_id = Some("ethereum-sepolia".to_owned());
+    stale_record.block_hash = Some("0xensv2-record-1055".to_owned());
+    stale_record.transaction_hash = Some("0xensv2-record-tx-1055".to_owned());
+    stale_record.raw_fact_ref = json!({
+        "kind": "raw_log",
+        "chain_id": "ethereum-sepolia",
+        "block_hash": "0xensv2-record-1055",
+        "log_index": 0,
+    });
+
+    seed_resources(database.pool(), &[resource_id]).await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block(
+                "ethereum-sepolia",
+                "0xensv2-resolver-1054",
+                1054,
+                1_776_200_054,
+            ),
+            raw_block(
+                "ethereum-sepolia",
+                "0xensv2-record-1055",
+                1055,
+                1_776_200_055,
+            ),
+        ],
+    )
+    .await?;
+    seed_raw_logs(
+        database.pool(),
+        &[
+            raw_log(
+                "ethereum-sepolia",
+                "0xensv2-resolver-1054",
+                1054,
+                "0xensv2-resolver-tx-1054",
+                0,
+                registry_address,
+            ),
+            raw_log(
+                "ethereum-sepolia",
+                "0xensv2-record-1055",
+                1055,
+                "0xensv2-record-tx-1055",
+                0,
+                public_resolver_address,
+            ),
+        ],
+    )
+    .await?;
+    seed_events(database.pool(), &[resolver, stale_record]).await?;
+
+    let stale_normalized_event_id: i64 = sqlx::query_scalar(
+        "SELECT normalized_event_id FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind("ensv2-stale-public-resolver-record")
+    .fetch_one(database.pool())
+    .await?;
+
+    rebuild_record_inventory_current(database.pool(), Some(&resource_id.to_string())).await?;
+
+    let rows: Vec<(Value, Value, Value)> = sqlx::query_as(
+        "SELECT entries, coverage, provenance FROM record_inventory_current WHERE resource_id = $1",
+    )
+    .bind(resource_id)
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        rows.len(),
+        1,
+        "current resolver must retain an explicit inventory boundary"
+    );
+    assert_eq!(rows[0].0, json!([]));
+    assert_eq!(
+        rows[0].1["unsupported_reason"],
+        json!(RESOLVER_FAMILY_PENDING_REASON)
+    );
+    assert!(
+        rows[0].2["normalized_event_ids"]
+            .as_array()
+            .is_some_and(|ids| {
+                ids.iter()
+                    .all(|id| id.as_i64() != Some(stale_normalized_event_id))
+            }),
+        "the stale PublicResolver event must not enter projected provenance"
     );
 
     database.cleanup().await

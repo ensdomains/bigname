@@ -3,9 +3,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use bigname_storage::{
-    CanonicalityState, NormalizedEvent, PermissionScope, PermissionsCurrentRow, RawBlock, Resource,
-    default_database_url, load_permissions_current, upsert_normalized_events,
-    upsert_permissions_current_rows, upsert_raw_blocks, upsert_resources,
+    CanonicalityState, NormalizedEvent, PermissionScope, PermissionsCurrentResourceSummary,
+    PermissionsCurrentRow, RawBlock, Resource, ResourcePermissionCoverage, default_database_url,
+    load_permissions_current, load_permissions_current_resource_summary, upsert_normalized_events,
+    upsert_permissions_current_resource_summary, upsert_permissions_current_rows,
+    upsert_raw_blocks, upsert_resources,
 };
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -524,6 +526,389 @@ async fn ensv2_registry_and_root_permission_events_project_registry_vocabulary()
 }
 
 #[tokio::test]
+async fn full_rebuild_publishes_summary_for_ensv2_registration_without_role_events() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x73d0);
+    let registry_contract_instance_id = Uuid::from_u128(0xe201);
+    let upstream_resource = "0x00000000000000000000000000000000000000000000000000000000000073d0";
+
+    upsert_resources(
+        database.pool(),
+        &[Resource {
+            resource_id,
+            token_lineage_id: None,
+            chain_id: "ethereum-sepolia".to_owned(),
+            block_hash: "0xensv2registration0092".to_owned(),
+            block_number: 146,
+            provenance: json!({
+                "source_family": "ens_v2_registry_l1",
+                "chain_id": "ethereum-sepolia",
+                "upstream_resource": upstream_resource,
+                "registry_contract_instance_id": registry_contract_instance_id,
+            }),
+            canonicality_state: CanonicalityState::Finalized,
+        }],
+    )
+    .await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[raw_block(
+            "ethereum-sepolia",
+            "0xensv2registration0092",
+            146,
+            1_776_100_146,
+        )],
+    )
+    .await?;
+    seed_permission_events(
+        database.pool(),
+        &[NormalizedEvent {
+            event_identity: "ensv2-registration-without-role-events".to_owned(),
+            namespace: "ens".to_owned(),
+            logical_name_id: Some("ens:zero-role.eth".to_owned()),
+            resource_id: Some(resource_id),
+            event_kind: "RegistrationGranted".to_owned(),
+            source_family: "ens_v2_registry_l1".to_owned(),
+            manifest_version: 2,
+            source_manifest_id: None,
+            chain_id: Some("ethereum-sepolia".to_owned()),
+            block_number: Some(146),
+            block_hash: Some("0xensv2registration0092".to_owned()),
+            transaction_hash: Some("0xensv2registrationtx0092".to_owned()),
+            log_index: Some(0),
+            raw_fact_ref: json!({"kind": "raw_log"}),
+            derivation_kind: "ens_v2_registry_resource_surface".to_owned(),
+            canonicality_state: CanonicalityState::Finalized,
+            before_state: json!({}),
+            after_state: json!({
+                "registrant": "0x0000000000000000000000000000000000000abc",
+                "registry_contract_instance_id": registry_contract_instance_id,
+                "upstream_resource": upstream_resource,
+            }),
+        }],
+    )
+    .await?;
+
+    let rebuild = rebuild_permissions_current(database.pool(), None).await?;
+    let resource_summary =
+        load_permissions_current_resource_summary(database.pool(), resource_id).await?;
+    assert_eq!(
+        (rebuild.requested_resource_count, resource_summary.is_some()),
+        (1, true),
+        "full rebuild must select an ENSv2 registration resource and publish its zero-row permission summary"
+    );
+    let resource_summary = resource_summary.context("missing ENSv2 zero-role resource summary")?;
+    assert_eq!(resource_summary.manifest_version, 2);
+    assert_eq!(
+        resource_summary.provenance["source_families"],
+        json!(["ens_v2_registry_l1"]),
+        "summary provenance must retain the registration event's admitted source family"
+    );
+    assert_eq!(
+        resource_summary.last_recomputed_at,
+        timestamp(1_776_100_146)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn keyed_rebuild_clears_rows_after_last_event_with_binding_provenance_fallback() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x73d1);
+    let block_hash = "0xensv1bindingauthority73d1";
+    let block_number = 147;
+    let subject = "0x0000000000000000000000000000000000000abc";
+
+    upsert_resources(
+        database.pool(),
+        &[Resource {
+            resource_id,
+            token_lineage_id: None,
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: block_hash.to_owned(),
+            block_number,
+            provenance: json!({
+                "authority_kind": "registrar",
+                "binding_source_family": "ens_v1_registrar_l1",
+                "binding_manifest_version": 7,
+            }),
+            canonicality_state: CanonicalityState::Finalized,
+        }],
+    )
+    .await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[raw_block(
+            "ethereum-mainnet",
+            block_hash,
+            block_number,
+            1_776_100_147,
+        )],
+    )
+    .await?;
+    upsert_permissions_current_rows(
+        database.pool(),
+        &[PermissionsCurrentRow {
+            resource_id,
+            subject: subject.to_owned(),
+            scope: PermissionScope::Resource,
+            effective_powers: json!(["resource_control"]),
+            grant_source: json!({}),
+            revocation_source: None,
+            inheritance_path: json!([]),
+            transfer_behavior: json!({}),
+            provenance: json!({"derivation_kind": "pre_reorg_test_projection"}),
+            coverage: json!({"enumeration_basis": PERMISSIONS_ENUMERATION_BASIS}),
+            chain_positions: json!({}),
+            canonicality_summary: json!({"status": "finalized", "chains": {}}),
+            manifest_version: 7,
+            last_recomputed_at: timestamp(1_776_100_147),
+        }],
+    )
+    .await?;
+
+    let rebuild =
+        rebuild_permissions_current(database.pool(), Some(&resource_id.to_string())).await?;
+
+    assert_eq!(rebuild.deleted_row_count, 1);
+    assert!(
+        load_permissions_current(database.pool(), resource_id, None, None)
+            .await?
+            .is_empty(),
+        "rebuild after the last canonical permission event must clear the stale row"
+    );
+    let summary = load_permissions_current_resource_summary(database.pool(), resource_id)
+        .await?
+        .context("binding-authority resource must retain a zero-row support summary")?;
+    assert_eq!(summary.manifest_version, 7);
+    assert_eq!(
+        summary.provenance["source_families"],
+        json!(["ens_v1_registrar_l1"])
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn full_rebuild_matches_keyed_zero_event_resource_and_alone_publishes_compatibility()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x73d3);
+    let block_hash = "0xensv1zeroeventfull73d3";
+
+    upsert_resources(
+        database.pool(),
+        &[Resource {
+            resource_id,
+            token_lineage_id: None,
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: block_hash.to_owned(),
+            block_number: 149,
+            provenance: json!({
+                "authority_kind": "registrar",
+                "binding_source_family": "ens_v1_registrar_l1",
+                "binding_manifest_version": 7,
+            }),
+            canonicality_state: CanonicalityState::Finalized,
+        }],
+    )
+    .await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[raw_block(
+            "ethereum-mainnet",
+            block_hash,
+            149,
+            1_776_100_149,
+        )],
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO permissions_current_publication (projection, publication_version)
+        VALUES ('permissions_current', 1)
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    let keyed =
+        rebuild_permissions_current(database.pool(), Some(&resource_id.to_string())).await?;
+    assert_eq!(
+        (keyed.requested_resource_count, keyed.upserted_row_count),
+        (1, 0)
+    );
+    let keyed_summary = load_permissions_current_resource_summary(database.pool(), resource_id)
+        .await?
+        .context("keyed zero-event rebuild must publish its support summary")?;
+    let publication_after_keyed = sqlx::query_as::<_, (i32, i64)>(
+        "SELECT publication_version, data_revision FROM permissions_current_publication",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        publication_after_keyed,
+        (1, 1),
+        "a keyed rebuild must not graduate global publication compatibility"
+    );
+
+    let full = rebuild_permissions_current(database.pool(), None).await?;
+    assert_eq!(
+        (full.requested_resource_count, full.upserted_row_count),
+        (1, 0)
+    );
+    let full_summary = load_permissions_current_resource_summary(database.pool(), resource_id)
+        .await?
+        .context("full rebuild must include canonical zero-event permission resources")?;
+    assert_eq!(full_summary, keyed_summary);
+    let publication_after_full = sqlx::query_as::<_, (i32, i64)>(
+        "SELECT publication_version, data_revision FROM permissions_current_publication",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        publication_after_full,
+        (bigname_storage::PERMISSIONS_CURRENT_PUBLICATION_VERSION, 2)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn full_rebuild_covers_ensv2_root_registration_and_reserved_token_resource() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let root_registration_resource_id = Uuid::from_u128(0x73d1);
+    let reserved_resource_id = Uuid::from_u128(0x73d2);
+    let registry_contract_instance_id = Uuid::from_u128(0xe202);
+    let root_upstream_resource =
+        "0x00000000000000000000000000000000000000000000000000000000000073d1";
+    let reserved_upstream_resource =
+        "0x00000000000000000000000000000000000000000000000000000000000073d2";
+
+    upsert_resources(
+        database.pool(),
+        &[
+            Resource {
+                resource_id: root_registration_resource_id,
+                token_lineage_id: None,
+                chain_id: "ethereum-sepolia".to_owned(),
+                block_hash: "0xensv2rootregistration0093".to_owned(),
+                block_number: 147,
+                provenance: json!({
+                    "source_family": "ens_v2_root_l1",
+                    "manifest_version": 2,
+                    "chain_id": "ethereum-sepolia",
+                    "upstream_resource": root_upstream_resource,
+                    "registry_contract_instance_id": registry_contract_instance_id,
+                }),
+                canonicality_state: CanonicalityState::Finalized,
+            },
+            Resource {
+                resource_id: reserved_resource_id,
+                token_lineage_id: None,
+                chain_id: "ethereum-sepolia".to_owned(),
+                block_hash: "0xensv2reserved0094".to_owned(),
+                block_number: 148,
+                provenance: json!({
+                    "source_family": "ens_v2_registry_l1",
+                    "manifest_version": 3,
+                    "chain_id": "ethereum-sepolia",
+                    "upstream_resource": reserved_upstream_resource,
+                    "registry_contract_instance_id": registry_contract_instance_id,
+                }),
+                canonicality_state: CanonicalityState::Finalized,
+            },
+        ],
+    )
+    .await?;
+    seed_raw_blocks(
+        database.pool(),
+        &[
+            raw_block(
+                "ethereum-sepolia",
+                "0xensv2rootregistration0093",
+                147,
+                1_776_100_147,
+            ),
+            raw_block(
+                "ethereum-sepolia",
+                "0xensv2reserved0094",
+                148,
+                1_776_100_148,
+            ),
+        ],
+    )
+    .await?;
+    seed_permission_events(
+        database.pool(),
+        &[
+            ensv2_summary_evidence_event(
+                "ensv2-root-registration-without-role-events",
+                "RegistrationGranted",
+                "ens_v2_root_l1",
+                2,
+                root_registration_resource_id,
+                "ens:eth",
+                "0xensv2rootregistration0093",
+                147,
+                json!({
+                    "authority_kind": "ens_v2_registry",
+                    "registry_contract_instance_id": registry_contract_instance_id,
+                    "upstream_resource": root_upstream_resource,
+                }),
+            ),
+            ensv2_summary_evidence_event(
+                "ensv2-reserved-token-resource",
+                "TokenResourceLinked",
+                "ens_v2_registry_l1",
+                3,
+                reserved_resource_id,
+                "ens:reserved.eth",
+                "0xensv2reserved0094",
+                148,
+                json!({
+                    "registry_contract_instance_id": registry_contract_instance_id,
+                    "upstream_resource": reserved_upstream_resource,
+                }),
+            ),
+        ],
+    )
+    .await?;
+
+    let rebuild = rebuild_permissions_current(database.pool(), None).await?;
+    assert_eq!(rebuild.requested_resource_count, 2);
+
+    let root_registration_summary =
+        load_permissions_current_resource_summary(database.pool(), root_registration_resource_id)
+            .await?
+            .context("missing root-family registration permission summary")?;
+    assert_eq!(
+        root_registration_summary.provenance["source_families"],
+        json!(["ens_v2_root_l1"])
+    );
+    assert!(root_registration_summary.root_resource_id.is_some());
+
+    let reserved_summary =
+        load_permissions_current_resource_summary(database.pool(), reserved_resource_id)
+            .await?
+            .context("missing reserved token-resource permission summary")?;
+    assert_eq!(
+        reserved_summary.authority_kind.as_deref(),
+        Some("ens_v2_registry")
+    );
+    assert_eq!(reserved_summary.manifest_version, 3);
+    assert_eq!(
+        reserved_summary.provenance["source_families"],
+        json!(["ens_v2_registry_l1"])
+    );
+    assert!(reserved_summary.root_resource_id.is_some());
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn root_permission_changed_revocation_to_empty_drops_root_row() -> Result<()> {
     let database = TestDatabase::new().await?;
     let root_resource_id = Uuid::from_u128(0x73c2);
@@ -646,6 +1031,19 @@ async fn wrapper_scope_fuses_mask_resource_control_powers() -> Result<()> {
         rows.is_empty(),
         "CANNOT_SET_RESOLVER must fail closed instead of publishing resource_control"
     );
+    let resource_summary = load_permissions_current_resource_summary(database.pool(), resource_id)
+        .await?
+        .expect("zero-holder wrapper must still publish a resource summary");
+    assert_eq!(resource_summary.authority_kind.as_deref(), Some("wrapper"));
+    assert_eq!(
+        resource_summary.coverage,
+        ResourcePermissionCoverage::ensv1_wrapper_holder_permissions_not_projected()
+    );
+    assert_eq!(
+        resource_summary.chain_positions["ethereum-mainnet"]["block_number"],
+        151
+    );
+    assert_eq!(resource_summary.canonicality_summary["status"], "finalized");
 
     database.cleanup().await
 }
@@ -884,6 +1282,21 @@ async fn keyed_rebuild_keeps_visible_rows_when_projection_build_fails() -> Resul
         }],
     )
     .await?;
+    upsert_permissions_current_resource_summary(
+        database.pool(),
+        &PermissionsCurrentResourceSummary {
+            resource_id,
+            authority_kind: Some("registrar".to_owned()),
+            root_resource_id: None,
+            coverage: ResourcePermissionCoverage::authoritative(["permissions_current"]),
+            provenance: json!({"derivation_kind": "preexisting_test_projection"}),
+            chain_positions: json!({}),
+            canonicality_summary: json!({"status": "finalized", "chains": {}}),
+            manifest_version: 1,
+            last_recomputed_at: timestamp(1_776_100_001),
+        },
+    )
+    .await?;
 
     let mut malformed = permission_event(
         "malformed-scope",
@@ -924,6 +1337,13 @@ async fn keyed_rebuild_keeps_visible_rows_when_projection_build_fails() -> Resul
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].subject, subject);
     assert_eq!(rows[0].scope, PermissionScope::Resource);
+    let resource_summary = load_permissions_current_resource_summary(database.pool(), resource_id)
+        .await?
+        .expect("failed keyed rebuild must retain the visible resource summary");
+    assert_eq!(
+        resource_summary.authority_kind.as_deref(),
+        Some("registrar")
+    );
 
     database.cleanup().await
 }
@@ -954,6 +1374,21 @@ async fn full_rebuild_keeps_visible_rows_when_projection_build_fails() -> Result
             manifest_version: 1,
             last_recomputed_at: timestamp(1_776_100_001),
         }],
+    )
+    .await?;
+    upsert_permissions_current_resource_summary(
+        database.pool(),
+        &PermissionsCurrentResourceSummary {
+            resource_id: visible_resource_id,
+            authority_kind: Some("registrar".to_owned()),
+            root_resource_id: None,
+            coverage: ResourcePermissionCoverage::authoritative(["permissions_current"]),
+            provenance: json!({"derivation_kind": "preexisting_test_projection"}),
+            chain_positions: json!({}),
+            canonicality_summary: json!({"status": "finalized", "chains": {}}),
+            manifest_version: 1,
+            last_recomputed_at: timestamp(1_776_100_001),
+        },
     )
     .await?;
 
@@ -997,6 +1432,18 @@ async fn full_rebuild_keeps_visible_rows_when_projection_build_fails() -> Result
         rows.len(),
         1,
         "failed full rebuild must not publish an empty permissions_current table"
+    );
+    let resource_summary =
+        load_permissions_current_resource_summary(database.pool(), visible_resource_id)
+            .await?
+            .expect("failed full rebuild must retain the visible resource summary");
+    assert_eq!(
+        resource_summary.authority_kind.as_deref(),
+        Some("registrar")
+    );
+    assert_eq!(
+        resource_summary.provenance["derivation_kind"],
+        "preexisting_test_projection"
     );
 
     database.cleanup().await
@@ -1147,6 +1594,40 @@ fn raw_block(chain_id: &str, block_hash: &str, block_number: i64, unix_timestamp
         receipts_root: None,
         state_root: None,
         canonicality_state: CanonicalityState::Finalized,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ensv2_summary_evidence_event(
+    event_identity: &str,
+    event_kind: &str,
+    source_family: &str,
+    manifest_version: i64,
+    resource_id: Uuid,
+    logical_name_id: &str,
+    block_hash: &str,
+    block_number: i64,
+    after_state: Value,
+) -> NormalizedEvent {
+    NormalizedEvent {
+        event_identity: event_identity.to_owned(),
+        namespace: "ens".to_owned(),
+        logical_name_id: Some(logical_name_id.to_owned()),
+        resource_id: Some(resource_id),
+        event_kind: event_kind.to_owned(),
+        source_family: source_family.to_owned(),
+        manifest_version,
+        source_manifest_id: None,
+        chain_id: Some("ethereum-sepolia".to_owned()),
+        block_number: Some(block_number),
+        block_hash: Some(block_hash.to_owned()),
+        transaction_hash: Some(format!("0xsummaryevidence{block_number}")),
+        log_index: Some(0),
+        raw_fact_ref: json!({"kind": "raw_log"}),
+        derivation_kind: "ens_v2_registry_resource_surface".to_owned(),
+        canonicality_state: CanonicalityState::Finalized,
+        before_state: json!({}),
+        after_state,
     }
 }
 

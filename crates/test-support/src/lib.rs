@@ -10,6 +10,10 @@ use sqlx::{
     postgres::{PgConnectOptions, PgPoolOptions},
 };
 
+mod test_hook_registry;
+
+pub use test_hook_registry::{ScopedTestHookGuard, ScopedTestHookRegistry};
+
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Default bootstrap database URL for local development.
@@ -22,6 +26,14 @@ pub fn database_url_from_env() -> String {
     std::env::var("BIGNAME_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
         .unwrap_or_else(|_| default_database_url().to_owned())
+}
+
+/// Return the database name used to isolate a database-backed test hook.
+pub async fn current_test_database(pool: &PgPool) -> Result<String> {
+    sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(pool)
+        .await
+        .context("failed to identify the current test database")
 }
 
 pub const fn test_database_harness_hint() -> &'static str {

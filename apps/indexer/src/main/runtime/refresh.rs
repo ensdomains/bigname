@@ -50,6 +50,17 @@ pub(crate) async fn refresh_runtime_state_from_storage_discovery(
 ) -> Result<Option<(ManifestRuntimeState, Vec<IntakeChainTask>)>> {
     sync_adapter_owned_raw_log_state(pool, &manifest_runtime_state.watched_chain_plan).await?;
 
+    refresh_runtime_state_from_stored_discovery(pool, manifest_runtime_state).await
+}
+
+/// Reload the active watch plan after another owned path has already
+/// reconciled discovery. Startup bootstrap and live polling use this form so
+/// they can carry newly admitted targets into intake without running a second
+/// broad adapter sync.
+pub(crate) async fn refresh_runtime_state_from_stored_discovery(
+    pool: &sqlx::PgPool,
+    manifest_runtime_state: &ManifestRuntimeState,
+) -> Result<Option<(ManifestRuntimeState, Vec<IntakeChainTask>)>> {
     let Some(next_watched_chain_plan) =
         refresh_watched_chain_plan(pool, &manifest_runtime_state.watched_chain_plan).await?
     else {

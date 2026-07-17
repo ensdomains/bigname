@@ -1,16 +1,16 @@
 # ENSv2 sepolia-dev PermissionedResolver source-family admission for the alternate profile.
 # PermissionedResolverImpl is implementation metadata for discovered or explicitly
 # admitted resolver instances, not an initial watched root or contract address:
-# (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/PermissionedResolverImpl.json:L2 @ ens_v2@554c309)
-# (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L38 @ ens_v2@554c309)
-# (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L70 @ ens_v2@554c309)
-# (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L121 @ ens_v2@554c309).
+# (upstream: .refs/ens_v2_sepolia_dev/contracts/deployments/sepolia-dev/PermissionedResolverImpl.json:L2 @ ens_v2_sepolia_dev@554c309)
+# (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L38 @ ens_v2_sepolia_dev@554c309)
+# (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L70 @ ens_v2_sepolia_dev@554c309)
+# (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L121 @ ens_v2_sepolia_dev@554c309).
 manifest_version = 1
 namespace = "ens"
 source_family = "ens_v2_resolver_l1"
 chain = "ethereum-sepolia"
 deployment_epoch = "ens_v2_sepolia_dev"
-rollout_status = "active"
+rollout_status = "deprecated"
 normalizer_version = "ensip15@ens-normalize-0.1.1"
 roots = []
 contracts = []
@@ -20,11 +20,11 @@ discovery_rules = []
 
 # Resolver event ABI fragments consumed by ENSv2 resolver and permissions adapters.
 # PermissionedResolver imports ENS resolver profile interfaces:
-# (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L5 @ ens_v2@554c309)
-# (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L7 @ ens_v2@554c309)
-# (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L9 @ ens_v2@554c309)
-# (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L10 @ ens_v2@554c309)
-# (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L14 @ ens_v2@554c309).
+# (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L5 @ ens_v2_sepolia_dev@554c309)
+# (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L7 @ ens_v2_sepolia_dev@554c309)
+# (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L9 @ ens_v2_sepolia_dev@554c309)
+# (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L10 @ ens_v2_sepolia_dev@554c309)
+# (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L14 @ ens_v2_sepolia_dev@554c309).
 # AddressChanged: (upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddressResolver.sol:L6 @ ens_v1@91c966f).
 [[abi.events]]
 name = "AddressChanged"
@@ -55,31 +55,31 @@ name = "VersionChanged"
 fragment = "event VersionChanged(bytes32 indexed node, uint64 newVersion)"
 normalized_events = ["RecordVersionChanged"]
 
-# AliasChanged: (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L19 @ ens_v2@554c309).
+# AliasChanged: (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L19 @ ens_v2_sepolia_dev@554c309).
 [[abi.events]]
 name = "AliasChanged"
 fragment = "event AliasChanged(bytes indexed indexedFromName, bytes indexed indexedToName, bytes fromName, bytes toName)"
 normalized_events = ["AliasChanged"]
 
-# NamedResource: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L135 @ ens_v2@554c309).
+# NamedResource: (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L135 @ ens_v2_sepolia_dev@554c309).
 [[abi.events]]
 name = "NamedResource"
 fragment = "event NamedResource(uint256 indexed resource, bytes name)"
 normalized_events = ["RecordChanged", "PermissionChanged"]
 
-# NamedTextResource: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L142 @ ens_v2@554c309).
+# NamedTextResource: (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L142 @ ens_v2_sepolia_dev@554c309).
 [[abi.events]]
 name = "NamedTextResource"
 fragment = "event NamedTextResource(uint256 indexed resource, bytes name, bytes32 indexed keyHash, string key)"
 normalized_events = ["RecordChanged", "PermissionChanged"]
 
-# NamedAddrResource: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L153 @ ens_v2@554c309).
+# NamedAddrResource: (upstream: .refs/ens_v2_sepolia_dev/contracts/src/resolver/PermissionedResolver.sol:L153 @ ens_v2_sepolia_dev@554c309).
 [[abi.events]]
 name = "NamedAddrResource"
 fragment = "event NamedAddrResource(uint256 indexed resource, bytes name, uint256 indexed coinType)"
 normalized_events = ["RecordChanged", "PermissionChanged"]
 
-# EACRolesChanged: (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L24 @ ens_v2@554c309).
+# EACRolesChanged: (upstream: .refs/ens_v2_sepolia_dev/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L24 @ ens_v2_sepolia_dev@554c309).
 [[abi.events]]
 name = "EACRolesChanged"
 fragment = "event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap)"

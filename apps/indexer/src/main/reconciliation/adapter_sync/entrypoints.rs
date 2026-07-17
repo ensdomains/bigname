@@ -1,0 +1,225 @@
+use std::collections::BTreeSet;
+
+use anyhow::Result;
+use tracing::info;
+
+use crate::reconciliation::{
+    replay::{
+        NormalizedEventReplayAdapter, RawFactReplayContractPlan,
+        active_closure_or_dependency_replay_adapters,
+    },
+    types::PersistedRawPayloadAdapterSyncSummary,
+};
+
+use super::{
+    mode::PersistedRawPayloadAdapterSyncMode, scope::load_live_adapter_source_scope,
+    sync_adapter_state_from_persisted_raw_payloads_with_mode,
+};
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct FullSourceReconciliationScope {
+    adapters: BTreeSet<NormalizedEventReplayAdapter>,
+}
+
+impl FullSourceReconciliationScope {
+    fn from_active_adapters(
+        adapters: impl IntoIterator<Item = NormalizedEventReplayAdapter>,
+    ) -> Self {
+        Self {
+            adapters: adapters.into_iter().collect(),
+        }
+    }
+
+    fn includes(&self, adapter: NormalizedEventReplayAdapter) -> bool {
+        self.adapters.contains(&adapter)
+    }
+
+    pub(super) fn reconciles_legacy_registry(&self) -> bool {
+        self.includes(NormalizedEventReplayAdapter::EnsV1SubregistryDiscovery)
+    }
+
+    pub(super) fn reconciles_ens_v2_registry(&self) -> bool {
+        self.includes(NormalizedEventReplayAdapter::EnsV2RegistryResourceSurface)
+    }
+}
+
+pub(crate) async fn sync_adapter_state_from_persisted_raw_payloads(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    block_hashes: &[String],
+) -> Result<PersistedRawPayloadAdapterSyncSummary> {
+    info!(
+        service = "indexer",
+        command = "adapter-sync",
+        chain,
+        block_hash_count = block_hashes.len(),
+        adapter_sync_mode = "live_or_backfill",
+        "loading live adapter source scope"
+    );
+    let source_scope = load_live_adapter_source_scope(pool, chain, block_hashes).await?;
+    info!(
+        service = "indexer",
+        command = "adapter-sync",
+        chain,
+        block_hash_count = block_hashes.len(),
+        source_scope_target_count = source_scope.len(),
+        adapter_sync_mode = "live_or_backfill",
+        "loaded live adapter source scope"
+    );
+    sync_adapter_state_from_persisted_raw_payloads_with_mode(
+        pool,
+        None,
+        chain,
+        block_hashes,
+        Some(&source_scope),
+        PersistedRawPayloadAdapterSyncMode::LiveOrBackfill,
+        true,
+        FullSourceReconciliationScope::default(),
+    )
+    .await
+}
+
+pub(crate) async fn sync_live_adapter_state_from_persisted_raw_payloads(
+    pool: &sqlx::PgPool,
+    deployment_profile: &str,
+    chain: &str,
+    block_hashes: &[String],
+) -> Result<PersistedRawPayloadAdapterSyncSummary> {
+    sync_live_adapter_state_from_persisted_raw_payloads_with_reorg_repair(
+        pool,
+        deployment_profile,
+        chain,
+        block_hashes,
+        false,
+    )
+    .await
+}
+
+pub(crate) async fn sync_live_adapter_state_from_persisted_raw_payloads_after_reorg(
+    pool: &sqlx::PgPool,
+    deployment_profile: &str,
+    chain: &str,
+    block_hashes: &[String],
+) -> Result<PersistedRawPayloadAdapterSyncSummary> {
+    sync_live_adapter_state_from_persisted_raw_payloads_with_reorg_repair(
+        pool,
+        deployment_profile,
+        chain,
+        block_hashes,
+        true,
+    )
+    .await
+}
+
+async fn sync_live_adapter_state_from_persisted_raw_payloads_with_reorg_repair(
+    pool: &sqlx::PgPool,
+    deployment_profile: &str,
+    chain: &str,
+    block_hashes: &[String],
+    reconcile_discovery_full_sources: bool,
+) -> Result<PersistedRawPayloadAdapterSyncSummary> {
+    info!(
+        service = "indexer",
+        command = "adapter-sync",
+        chain,
+        block_hash_count = block_hashes.len(),
+        adapter_sync_mode = "live_poll",
+        "loading live adapter source scope"
+    );
+    let source_scope = load_live_adapter_source_scope(pool, chain, block_hashes).await?;
+    let full_source_reconciliation = if reconcile_discovery_full_sources {
+        FullSourceReconciliationScope::from_active_adapters(
+            active_closure_or_dependency_replay_adapters(pool, chain).await?,
+        )
+    } else {
+        FullSourceReconciliationScope::default()
+    };
+    info!(
+        service = "indexer",
+        command = "adapter-sync",
+        chain,
+        block_hash_count = block_hashes.len(),
+        source_scope_target_count = source_scope.len(),
+        adapter_sync_mode = "live_poll",
+        "loaded live adapter source scope"
+    );
+    sync_adapter_state_from_persisted_raw_payloads_with_mode(
+        pool,
+        Some(deployment_profile),
+        chain,
+        block_hashes,
+        Some(&source_scope),
+        PersistedRawPayloadAdapterSyncMode::LivePoll,
+        true,
+        full_source_reconciliation,
+    )
+    .await
+}
+
+pub(crate) async fn sync_replay_normalized_events_from_persisted_raw_payloads(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    block_hashes: &[String],
+    source_scope: Option<&[(String, String, i64, i64)]>,
+    canonical_raw_log_count: usize,
+    replay_contract_plan: RawFactReplayContractPlan,
+) -> Result<PersistedRawPayloadAdapterSyncSummary> {
+    sync_adapter_state_from_persisted_raw_payloads_with_mode(
+        pool,
+        None,
+        chain,
+        block_hashes,
+        source_scope,
+        PersistedRawPayloadAdapterSyncMode::RawFactReplay {
+            canonical_raw_log_count,
+            replay_contract_plan,
+        },
+        false,
+        FullSourceReconciliationScope::default(),
+    )
+    .await
+}
+
+pub(crate) async fn sync_adapter_state_from_scoped_persisted_raw_payloads(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    block_hashes: &[String],
+    source_scope: &[(String, String, i64, i64)],
+) -> Result<()> {
+    sync_adapter_state_from_persisted_raw_payloads_with_mode(
+        pool,
+        None,
+        chain,
+        block_hashes,
+        Some(source_scope),
+        PersistedRawPayloadAdapterSyncMode::LiveOrBackfill,
+        false,
+        FullSourceReconciliationScope::default(),
+    )
+    .await
+    .map(|_| ())?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_reorg_full_source_scope_preserves_every_active_adapter() {
+        let scope = FullSourceReconciliationScope::from_active_adapters([
+            NormalizedEventReplayAdapter::EnsV1SubregistryDiscovery,
+            NormalizedEventReplayAdapter::EnsV2RegistryResourceSurface,
+            NormalizedEventReplayAdapter::EnsV2Registrar,
+        ]);
+
+        assert_eq!(
+            scope.adapters,
+            BTreeSet::from([
+                NormalizedEventReplayAdapter::EnsV1SubregistryDiscovery,
+                NormalizedEventReplayAdapter::EnsV2RegistryResourceSurface,
+                NormalizedEventReplayAdapter::EnsV2Registrar,
+            ])
+        );
+    }
+}

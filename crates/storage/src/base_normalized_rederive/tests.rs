@@ -3862,6 +3862,27 @@ async fn seed_projection_rows(
     .await?;
     sqlx::query(
         r#"
+        INSERT INTO permissions_current_resource_summary (
+            resource_id, authority_kind, coverage, provenance,
+            chain_positions, canonicality_summary, manifest_version, last_recomputed_at
+        )
+        VALUES (
+            $1,
+            'registrant',
+            '{"status":"full","exhaustiveness":"authoritative","source_classes_considered":["permissions_current"],"enumeration_basis":"resource_permissions","unsupported_reason":null}'::jsonb,
+            '{"derivation_kind":"permissions_current_resource_summary_rebuild"}'::jsonb,
+            '{}'::jsonb,
+            '{"status":"finalized","chains":{}}'::jsonb,
+            1,
+            '2026-07-03T00:00:00Z'
+        )
+        "#,
+    )
+    .bind(resource_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
         INSERT INTO record_inventory_current (
             resource_id, record_version_boundary_key, manifest_version
         )

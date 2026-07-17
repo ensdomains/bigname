@@ -590,7 +590,10 @@ impl TestDatabase {
         self.app_state_with_chain_rpc_urls(bigname_execution::ChainRpcUrls::default())
     }
 
-    fn app_state_with_chain_rpc_urls(&self, chain_rpc_urls: bigname_execution::ChainRpcUrls) -> AppState {
+    fn app_state_with_chain_rpc_urls(
+        &self,
+        chain_rpc_urls: bigname_execution::ChainRpcUrls,
+    ) -> AppState {
         AppState {
             phase: "test",
             pool: self.pool.clone(),
@@ -2678,6 +2681,77 @@ fn permission_current_row(
     }
 }
 
+fn permission_current_resource_summary(
+    resource_id: Uuid,
+    authority_kind: Option<&str>,
+) -> bigname_storage::PermissionsCurrentResourceSummary {
+    let authority_kind = authority_kind.map(str::to_owned);
+    let coverage = match authority_kind.as_deref() {
+        Some("wrapper") => bigname_storage::ResourcePermissionCoverage::ensv1_wrapper_holder_permissions_not_projected(),
+        Some(_) => bigname_storage::ResourcePermissionCoverage::authoritative(["permissions_current"]),
+        None => bigname_storage::ResourcePermissionCoverage::resource_authority_not_projected(),
+    };
+    bigname_storage::PermissionsCurrentResourceSummary {
+        resource_id,
+        authority_kind,
+        root_resource_id: None,
+        coverage,
+        provenance: json!({
+            "derivation_kind": "permissions_current_resource_summary_rebuild",
+        }),
+        chain_positions: json!({
+            "ethereum-mainnet": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 1,
+                "block_hash": "0xpermission-summary",
+                "timestamp": "2024-05-31T01:13:20Z",
+            }
+        }),
+        canonicality_summary: json!({
+            "status": "finalized",
+            "chains": {"ethereum-mainnet": "finalized"},
+        }),
+        manifest_version: 1,
+        last_recomputed_at: timestamp(1_717_174_000),
+    }
+}
+
+async fn seed_permission_current_resource_summary(
+    database: &TestDatabase,
+    resource_id: Uuid,
+    authority_kind: &str,
+) -> Result<()> {
+    bigname_storage::upsert_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(resource_id, Some(authority_kind)),
+    )
+    .await?;
+    mark_permissions_current_projection_ready(database).await?;
+    Ok(())
+}
+
+async fn mark_permissions_current_projection_ready(database: &TestDatabase) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO permissions_current_publication (
+            projection,
+            publication_version,
+            data_revision,
+            published_at
+        )
+        VALUES ('permissions_current', $1, 1, now())
+        ON CONFLICT (projection) DO UPDATE SET
+            publication_version = EXCLUDED.publication_version,
+            data_revision = permissions_current_publication.data_revision + 1,
+            published_at = EXCLUDED.published_at
+        "#,
+    )
+    .bind(bigname_storage::PERMISSIONS_CURRENT_PUBLICATION_VERSION)
+    .execute(&database.pool)
+    .await?;
+    Ok(())
+}
+
 fn permission_subjects(payload: &ResourcePermissionsResponse) -> Vec<&str> {
     payload
         .data
@@ -3843,7 +3917,9 @@ fn collection_name_surface(
         normalized_name: display_name.to_owned(),
         dns_encoded_name: display_name.as_bytes().to_vec(),
         namehash: namehash.to_owned(),
-        labelhashes: labelhash_for_display_name(display_name).into_iter().collect(),
+        labelhashes: labelhash_for_display_name(display_name)
+            .into_iter()
+            .collect(),
         normalizer_version: "ensip15@ens-normalize-0.1.1".to_owned(),
         normalization_warnings: json!([]),
         normalization_errors: json!([]),

@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     str::FromStr,
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
@@ -26,6 +27,10 @@ struct TestDatabase {
 
 impl TestDatabase {
     async fn new() -> Result<Self> {
+        Self::new_before_migration(None).await
+    }
+
+    async fn new_before_migration(exclusive_version: Option<i64>) -> Result<Self> {
         let database_url = std::env::var("BIGNAME_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| default_database_url().to_owned());
@@ -63,10 +68,26 @@ impl TestDatabase {
             .await
             .context("failed to connect backfill job test pool")?;
 
-        crate::MIGRATOR
-            .run(&pool)
-            .await
-            .context("failed to apply migrations for backfill job tests")?;
+        if let Some(exclusive_version) = exclusive_version {
+            let migrator = sqlx::migrate::Migrator {
+                migrations: Cow::Owned(
+                    crate::MIGRATOR
+                        .iter()
+                        .filter(|migration| migration.version < exclusive_version)
+                        .cloned()
+                        .collect(),
+                ),
+                ..sqlx::migrate::Migrator::DEFAULT
+            };
+            migrator.run(&pool).await.with_context(|| {
+                format!("failed to apply backfill test migrations before {exclusive_version}")
+            })?;
+        } else {
+            crate::MIGRATOR
+                .run(&pool)
+                .await
+                .context("failed to apply migrations for backfill job tests")?;
+        }
 
         Ok(Self {
             admin_pool,
@@ -138,6 +159,26 @@ fn backfill_job_create(idempotency_key: &str) -> BackfillJobCreate {
     }
 }
 
+async fn mark_backfill_job_completed_for_coverage_fact_test(
+    pool: &PgPool,
+    backfill_job_id: i64,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE backfill_jobs
+        SET status = 'completed'::backfill_lifecycle_status,
+            completed_at = now(),
+            updated_at = now()
+        WHERE backfill_job_id = $1
+        "#,
+    )
+    .bind(backfill_job_id)
+    .execute(pool)
+    .await
+    .with_context(|| format!("failed to complete test backfill job {backfill_job_id}"))?;
+    Ok(())
+}
+
 fn lease_deadline() -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(OffsetDateTime::now_utc().unix_timestamp() + 300)
         .expect("lease deadline must be valid")
@@ -182,6 +223,214 @@ async fn backfill_job_create_is_idempotent_and_rejects_range_widening() -> Resul
             .to_string()
             .contains("does not match requested immutable job identity"),
         "unexpected error: {error:#}"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn backfill_jobs_capture_the_raw_log_retention_generation_at_creation() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let original_request = backfill_job_create("job-before-retention-generation-change");
+
+    assert_eq!(
+        ensure_and_load_raw_log_retention_generation(database.pool(), &original_request.chain_id,)
+            .await?,
+        0
+    );
+    let original = create_backfill_job(database.pool(), &original_request).await?;
+    assert_eq!(original.job.raw_log_retention_generation, 0);
+
+    let updated = sqlx::query(
+        r#"
+        UPDATE raw_log_staging_input_revisions
+        SET retention_generation = retention_generation + 1
+        WHERE chain_id = $1
+        "#,
+    )
+    .bind(&original_request.chain_id)
+    .execute(database.pool())
+    .await
+    .context("failed to advance test raw-log retention generation")?;
+    assert_eq!(updated.rows_affected(), 1);
+    assert_eq!(
+        ensure_and_load_raw_log_retention_generation(database.pool(), &original_request.chain_id,)
+            .await?,
+        1
+    );
+
+    let repeated = create_backfill_job(database.pool(), &original_request).await?;
+    assert_eq!(repeated.job.backfill_job_id, original.job.backfill_job_id);
+    assert_eq!(repeated.job.raw_log_retention_generation, 0);
+
+    let next_request = backfill_job_create("job-after-retention-generation-change");
+    let next = create_backfill_job(database.pool(), &next_request).await?;
+    assert_ne!(next.job.backfill_job_id, original.job.backfill_job_id);
+    assert_eq!(next.job.raw_log_retention_generation, 1);
+
+    let reloaded_original = load_backfill_job(database.pool(), original.job.backfill_job_id)
+        .await?
+        .context("missing original backfill job")?;
+    assert_eq!(reloaded_original.raw_log_retention_generation, 0);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn generation_scoped_creation_does_not_reuse_a_completed_pre_compaction_job() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let request = backfill_job_create("automatic-generation-scoped-job");
+
+    let original = create_generation_scoped_backfill_job(database.pool(), &request).await?;
+    assert_eq!(original.job.raw_log_retention_generation, 0);
+    assert_eq!(
+        original.job.idempotency_key,
+        "automatic-generation-scoped-job:raw_log_retention_generation=0"
+    );
+    mark_backfill_job_completed_for_coverage_fact_test(
+        database.pool(),
+        original.job.backfill_job_id,
+    )
+    .await?;
+
+    let stale_planned_generation =
+        ensure_and_load_raw_log_retention_generation(database.pool(), &request.chain_id).await?;
+    assert_eq!(stale_planned_generation, 0);
+    sqlx::query(
+        r#"
+        UPDATE raw_log_staging_input_revisions
+        SET retention_generation = retention_generation + 1
+        WHERE chain_id = $1
+        "#,
+    )
+    .bind(&request.chain_id)
+    .execute(database.pool())
+    .await
+    .context("failed to simulate raw-log compaction after automatic job planning")?;
+
+    let after_compaction = create_generation_scoped_backfill_job(database.pool(), &request).await?;
+    assert_ne!(
+        after_compaction.job.backfill_job_id,
+        original.job.backfill_job_id
+    );
+    assert_eq!(
+        after_compaction.job.status,
+        BackfillLifecycleStatus::Pending
+    );
+    assert_eq!(after_compaction.job.raw_log_retention_generation, 1);
+    assert_eq!(
+        after_compaction.job.idempotency_key,
+        "automatic-generation-scoped-job:raw_log_retention_generation=1"
+    );
+
+    let repeated = create_generation_scoped_backfill_job(database.pool(), &request).await?;
+    assert_eq!(
+        repeated.job.backfill_job_id,
+        after_compaction.job.backfill_job_id
+    );
+    assert_eq!(repeated.job.raw_log_retention_generation, 1);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn generation_scoped_creation_rejects_a_manual_key_collision_from_an_older_generation()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let logical_key = "automatic-generation-collision";
+    let manual_request =
+        backfill_job_create(&format!("{logical_key}:raw_log_retention_generation=1"));
+    let manual = create_backfill_job(database.pool(), &manual_request).await?;
+    assert_eq!(manual.job.raw_log_retention_generation, 0);
+
+    sqlx::query(
+        r#"
+        UPDATE raw_log_staging_input_revisions
+        SET retention_generation = 1
+        WHERE chain_id = $1
+        "#,
+    )
+    .bind(&manual_request.chain_id)
+    .execute(database.pool())
+    .await
+    .context("failed to advance raw-log retention generation for collision test")?;
+
+    let automatic_request = backfill_job_create(logical_key);
+    let error = create_generation_scoped_backfill_job(database.pool(), &automatic_request)
+        .await
+        .expect_err("an older-generation manual key collision must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("captured raw-log retention generation 0, expected 1"),
+        "unexpected collision error: {error:#}"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn raw_log_retention_migration_isolates_a_legacy_job_only_chain() -> Result<()> {
+    const RETENTION_MIGRATION: i64 = 20260714120000;
+    let database = TestDatabase::new_before_migration(Some(RETENTION_MIGRATION)).await?;
+    let chain = "legacy-job-only-chain";
+    sqlx::query(
+        r#"
+        INSERT INTO backfill_jobs (
+            deployment_profile,
+            chain_id,
+            source_identity,
+            scan_mode,
+            range_start_block_number,
+            range_end_block_number,
+            idempotency_key
+        )
+        VALUES ('legacy', $1, '{}'::JSONB, 'logs', 0, 10, 'legacy-job-only')
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await
+    .context("failed to insert the pre-migration job-only chain")?;
+
+    let migrator = sqlx::migrate::Migrator {
+        migrations: Cow::Owned(
+            crate::MIGRATOR
+                .iter()
+                .filter(|migration| migration.version <= RETENTION_MIGRATION)
+                .cloned()
+                .collect(),
+        ),
+        ..sqlx::migrate::Migrator::DEFAULT
+    };
+    migrator
+        .run(database.pool())
+        .await
+        .context("failed to apply the raw-log retention migration")?;
+
+    let state = sqlx::query_as::<_, (i64, bool, Option<i64>)>(
+        r#"
+        SELECT retention_generation, retained_history_complete, proven_through_block
+        FROM raw_log_staging_input_revisions
+        WHERE chain_id = $1
+        "#,
+    )
+    .bind(chain)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        state,
+        (1, false, None),
+        "a legacy job-only chain must not share generation zero with pre-migration jobs"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT raw_log_retention_generation FROM backfill_jobs WHERE chain_id = $1"
+        )
+        .bind(chain)
+        .fetch_one(database.pool())
+        .await?,
+        0
     );
 
     database.cleanup().await
@@ -836,6 +1085,11 @@ async fn coverage_fact_writes_are_idempotent_and_validated() -> Result<()> {
         &backfill_job_create("job-coverage-fact-writes"),
     )
     .await?;
+    mark_backfill_job_completed_for_coverage_fact_test(
+        database.pool(),
+        created.job.backfill_job_id,
+    )
+    .await?;
     let facts = vec![
         address_coverage_fact(
             "ens_v1_registry_l1",
@@ -897,13 +1151,13 @@ async fn coverage_fact_writes_are_idempotent_and_validated() -> Result<()> {
         ]
     );
 
-    let mut widened_interval = facts[0].clone();
-    widened_interval.covered_to_block = 130;
+    let mut distinct_interval = facts[0].clone();
+    distinct_interval.covered_to_block = 119;
     let distinct_interval_inserted = write_backfill_coverage_facts(
         &mut conn,
         created.job.backfill_job_id,
         BackfillCoverageFactDerivation::LegacyFullPayloadIdentity,
-        std::slice::from_ref(&widened_interval),
+        std::slice::from_ref(&distinct_interval),
     )
     .await?;
     assert_eq!(
@@ -943,6 +1197,78 @@ async fn coverage_fact_writes_are_idempotent_and_validated() -> Result<()> {
     assert!(
         error.to_string().contains("is after covered_to_block"),
         "unexpected error: {error:#}"
+    );
+
+    drop(conn);
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn coverage_fact_writes_require_a_completed_containing_job() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let created = create_backfill_job(
+        database.pool(),
+        &backfill_job_create("job-coverage-authority"),
+    )
+    .await?;
+    let mut conn = database.pool().acquire().await?;
+    let contained = address_coverage_fact(
+        "ens_v1_registry_l1",
+        "0x0000000000000000000000000000000000000001",
+        100,
+        120,
+    );
+
+    let error = write_backfill_coverage_facts(
+        &mut conn,
+        created.job.backfill_job_id,
+        BackfillCoverageFactDerivation::LegacyFullPayloadIdentity,
+        std::slice::from_ref(&contained),
+    )
+    .await
+    .expect_err("a pending job must not authorize coverage facts");
+    assert!(
+        error.to_string().contains("is pending, not completed"),
+        "unexpected error: {error:#}"
+    );
+
+    mark_backfill_job_completed_for_coverage_fact_test(
+        database.pool(),
+        created.job.backfill_job_id,
+    )
+    .await?;
+    for outside in [
+        address_coverage_fact(
+            "ens_v1_registry_l1",
+            "0x0000000000000000000000000000000000000001",
+            99,
+            120,
+        ),
+        address_coverage_fact(
+            "ens_v1_registry_l1",
+            "0x0000000000000000000000000000000000000001",
+            100,
+            121,
+        ),
+    ] {
+        let error = write_backfill_coverage_facts(
+            &mut conn,
+            created.job.backfill_job_id,
+            BackfillCoverageFactDerivation::LegacyFullPayloadIdentity,
+            std::slice::from_ref(&outside),
+        )
+        .await
+        .expect_err("a fact outside its job range must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("is not contained by job range 100..=120"),
+            "unexpected error: {error:#}"
+        );
+    }
+    assert_eq!(
+        load_backfill_coverage_fact_counts(database.pool(), created.job.backfill_job_id).await?,
+        0
     );
 
     drop(conn);
@@ -1132,6 +1458,11 @@ async fn deleting_a_backfill_job_cascades_its_coverage_facts() -> Result<()> {
     let created = create_backfill_job(
         database.pool(),
         &backfill_job_create("job-coverage-cascade"),
+    )
+    .await?;
+    mark_backfill_job_completed_for_coverage_fact_test(
+        database.pool(),
+        created.job.backfill_job_id,
     )
     .await?;
     let mut conn = database.pool().acquire().await?;

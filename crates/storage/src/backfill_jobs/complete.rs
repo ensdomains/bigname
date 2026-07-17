@@ -65,7 +65,6 @@ where
         .with_context(|| {
             format!("missing backfill job {backfill_job_id} for range {backfill_range_id}")
         })?;
-
     let current = load_backfill_range_for_update(&mut *transaction, backfill_range_id)
         .await?
         .with_context(|| format!("missing backfill range {backfill_range_id}"))?;

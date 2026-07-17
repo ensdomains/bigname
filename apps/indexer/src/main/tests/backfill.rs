@@ -58,6 +58,85 @@ struct MaterializedRawFactSet {
     payload_cache_metadata_count: i64,
 }
 
+#[tokio::test]
+async fn reused_completed_unscoped_job_warns_after_retention_generation_bump() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let chain = "ethereum-mainnet";
+    let idempotency_key = "stale-generation-warning-unscoped";
+    let request = BackfillJobCreate {
+        deployment_profile: "mainnet".to_owned(),
+        chain_id: chain.to_owned(),
+        source_identity: json!({
+            "selector_kind": "watched_target_set",
+            "requested_watched_targets": [],
+            "selected_targets": []
+        }),
+        scan_mode: "hash_pinned_block".to_owned(),
+        range_start_block_number: 100,
+        range_end_block_number: 100,
+        idempotency_key: idempotency_key.to_owned(),
+        ranges: Vec::new(),
+    };
+
+    let created = create_backfill_job(database.pool(), &request).await?;
+    assert_eq!(created.job.raw_log_retention_generation, 0);
+    let lease_token = "stale-generation-warning-lease";
+    let reserved = bigname_storage::reserve_backfill_range(
+        database.pool(),
+        created.job.backfill_job_id,
+        "stale-generation-warning-worker",
+        lease_token,
+        backfill_lease_deadline()?,
+    )
+    .await?
+    .context("unscoped warning test range must be reservable")?;
+    bigname_storage::advance_backfill_range(
+        database.pool(),
+        reserved.backfill_range_id,
+        lease_token,
+        100,
+    )
+    .await?;
+    bigname_storage::complete_backfill_range(
+        database.pool(),
+        reserved.backfill_range_id,
+        lease_token,
+    )
+    .await?;
+
+    let current_generation = sqlx::query_scalar::<_, i64>(
+        r#"
+        UPDATE raw_log_staging_input_revisions
+        SET retention_generation = retention_generation + 1
+        WHERE chain_id = $1
+        RETURNING retention_generation
+        "#,
+    )
+    .bind(chain)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(current_generation, 1);
+
+    let existing_job_id = backfill::load_existing_job_id(database.pool(), idempotency_key).await?;
+    let reused = create_backfill_job(database.pool(), &request).await?;
+    assert_eq!(existing_job_id, Some(reused.job.backfill_job_id));
+    assert_eq!(reused.job.backfill_job_id, created.job.backfill_job_id);
+    assert_eq!(reused.job.status, BackfillLifecycleStatus::Completed);
+    assert_eq!(reused.job.raw_log_retention_generation, 0);
+    assert!(
+        backfill::warn_if_stale_generation_backfill_job_was_reused(
+            database.pool(),
+            chain,
+            existing_job_id,
+            reused.job.backfill_job_id,
+        )
+        .await?
+    );
+
+    database.cleanup().await
+}
+
 #[test]
 fn large_source_family_backfill_source_identity_uses_compact_digest() -> Result<()> {
     let selected_targets = (0..=backfill::COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD)
@@ -645,6 +724,15 @@ fn ensv1_resolver_backfill_source_identity_uses_generic_event_topics() -> Result
             .get("source_identity_payload_format")
             .and_then(Value::as_str),
         Some("generic_resolver_event_topics_v1")
+    );
+    assert_eq!(
+        payload
+            .get("topic0s_by_source_family")
+            .and_then(|families| families.get("ens_v1_resolver_l1")),
+        Some(&json!(
+            crate::ens_v1_resolver::generic_resolver_record_topic0s()
+        )),
+        "generic resolver identity must persist the exact topic0 set used by the hash-pinned fetch"
     );
     assert!(payload.get("selected_targets").is_none());
 
@@ -4728,13 +4816,12 @@ async fn number_resolving_provider_with_fixtures_and_heads_and_delay(
         response_delay_once.map(|delay| Arc::new((AtomicBool::new(true), delay)));
 
     let (url, server) = spawn_json_rpc_server(Arc::new(move |body| {
-        if let Some(delay_once) = &response_delay_once {
-            if delay_once
+        if let Some(delay_once) = &response_delay_once
+            && delay_once
                 .0
                 .swap(false, std::sync::atomic::Ordering::Relaxed)
-            {
-                std::thread::sleep(delay_once.1);
-            }
+        {
+            std::thread::sleep(delay_once.1);
         }
 
         let method = body
@@ -6179,6 +6266,7 @@ fn backfill_job_config(
     Ok(BackfillJobRunConfig {
         deployment_profile: "mainnet".to_owned(),
         idempotency_key: idempotency_key.to_owned(),
+        scope_idempotency_to_raw_log_retention_generation: false,
         range,
         lease_owner: "indexer-backfill-test".to_owned(),
         lease_token: lease_token.to_owned(),
@@ -6216,6 +6304,7 @@ async fn create_backfill_job_tables(pool: &PgPool) -> Result<()> {
             backfill_job_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             deployment_profile TEXT NOT NULL,
             chain_id TEXT NOT NULL,
+            raw_log_retention_generation BIGINT NOT NULL DEFAULT 0,
             source_identity JSONB NOT NULL,
             scan_mode TEXT NOT NULL,
             range_start_block_number BIGINT NOT NULL CHECK (range_start_block_number >= 0),

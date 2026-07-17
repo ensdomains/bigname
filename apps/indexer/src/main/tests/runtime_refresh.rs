@@ -899,7 +899,10 @@ async fn build_manifest_runtime_state_uses_stored_manifests_while_base_rederive_
 
     let initial_repository = load_manifest_repository(&manifests.path)?;
     let initial_state = build_manifest_runtime_state(database.pool(), &initial_repository).await?;
-    assert_eq!(initial_state.sync_summary.status, ManifestSyncStatus::Synced);
+    assert_eq!(
+        initial_state.sync_summary.status,
+        ManifestSyncStatus::Synced
+    );
     assert_eq!(
         initial_state.watched_chain_plan,
         vec![WatchedChainPlan {
@@ -959,7 +962,10 @@ async fn build_manifest_runtime_state_uses_stored_manifests_while_base_rederive_
     .await?;
     let runtime_state =
         build_manifest_runtime_state(database.pool(), &refreshed_repository).await?;
-    assert_eq!(runtime_state.sync_summary.status, ManifestSyncStatus::Synced);
+    assert_eq!(
+        runtime_state.sync_summary.status,
+        ManifestSyncStatus::Synced
+    );
     assert!(!runtime_state.repository_refresh_needed(&refreshed_repository));
     assert_eq!(
         runtime_state.watched_chain_plan,
@@ -1208,8 +1214,11 @@ async fn storage_discovery_refresh_adds_ensv1_address_without_manifest_reload_an
     )
     .await?;
 
+    // Startup bootstrap and live polling already own adapter reconciliation;
+    // their follow-up must only reload the stored discovery watch plan.
+    sync_adapter_owned_raw_log_state(database.pool(), &initial_state.watched_chain_plan).await?;
     let (refreshed_state, refreshed_tasks) =
-        refresh_runtime_state_from_storage_discovery(database.pool(), &initial_state)
+        refresh_runtime_state_from_stored_discovery(database.pool(), &initial_state)
             .await?
             .expect("stored ENSv1 discovery must refresh the watched plan without manifest reload");
 
@@ -1388,7 +1397,10 @@ async fn runtime_refresh_adds_ensv1_resolver_watch_target_without_manifest_reloa
     )
     .await?;
 
-    let (refreshed_state, refreshed_tasks) = refresh_runtime_state_from_storage_discovery(database.pool(), &initial_state)
+    let (refreshed_state, refreshed_tasks) = refresh_runtime_state_from_storage_discovery(
+        database.pool(),
+        &initial_state,
+    )
     .await?
     .expect(
         "stored ENSv1 resolver discovery must refresh the watched plan without manifest reload",
@@ -1734,8 +1746,7 @@ edge_kind = "resolver"
 from_role = "registry"
 admission = "reachable_from_root"
 {abi}
-"#
-    ,
+"#,
         abi = test_manifest_abi_toml()
     )
 }
@@ -1756,8 +1767,7 @@ discovery_rules = []
 
 [capability_flags]
 {abi}
-"#
-    ,
+"#,
         abi = test_manifest_abi_toml()
     )
 }

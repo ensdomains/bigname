@@ -3,6 +3,9 @@ use sqlx::Row;
 
 use super::state::Step;
 
+mod permissions_delete_sql;
+use permissions_delete_sql::permissions_current_sql;
+
 pub(super) struct DeletedBatch {
     pub(super) row_count: i64,
     pub(super) range_start: Option<String>,
@@ -740,35 +743,6 @@ fn children_current_sql() -> &'static str {
           AND p.child_logical_name_id = c.child_logical_name_id
           AND p.surface_class = c.surface_class
         RETURNING p.parent_logical_name_id || '|' || p.child_logical_name_id || '|' || p.surface_class AS key_text
-    )
-    SELECT COUNT(*)::BIGINT AS row_count,
-           MIN(key_text)::TEXT AS range_start,
-           MAX(key_text)::TEXT AS range_end
-    FROM deleted
-    "#
-}
-
-fn permissions_current_sql() -> &'static str {
-    r#"
-    WITH candidate_rows AS (
-        SELECT ctid, resource_id, subject, scope
-        FROM base_rederive_delete_permissions_current_candidates
-        ORDER BY resource_id, subject, scope
-        LIMIT $1
-    ),
-    removed_candidates AS (
-        DELETE FROM base_rederive_delete_permissions_current_candidates candidate
-        USING candidate_rows selected
-        WHERE candidate.ctid = selected.ctid
-        RETURNING candidate.resource_id, candidate.subject, candidate.scope
-    ),
-    deleted AS (
-        DELETE FROM permissions_current p
-        USING removed_candidates c
-        WHERE p.resource_id = c.resource_id
-          AND p.subject = c.subject
-          AND p.scope = c.scope
-        RETURNING p.resource_id::TEXT || '|' || p.subject || '|' || p.scope AS key_text
     )
     SELECT COUNT(*)::BIGINT AS row_count,
            MIN(key_text)::TEXT AS range_start,

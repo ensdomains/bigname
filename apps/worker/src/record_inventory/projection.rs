@@ -122,7 +122,7 @@ async fn rebuild_all_resources(pool: &PgPool) -> Result<RecordInventoryCurrentRe
             rows.clear();
         }
 
-        if completed_resource_count % 5_000 == 0 {
+        if completed_resource_count.is_multiple_of(5_000) {
             tracing::info!(
                 projection = "record_inventory_current",
                 queued_resource_count = requested_resource_count,
@@ -281,6 +281,14 @@ async fn build_row_from_events(
         .iter()
         .rposition(|event| event.event_kind == EVENT_KIND_RESOLVER_CHANGED);
     let latest_resolver_event = latest_resolver_index.and_then(|index| events.get(index));
+    if latest_resolver_event.is_none()
+        && events.iter().any(|event| {
+            resolver_local_source_family(&event.source_family)
+                == Some(SOURCE_FAMILY_ENS_V2_RESOLVER_L1)
+        })
+    {
+        return Ok(None);
+    }
     let resolver_scope_boundary_event =
         resolver_scope_boundary_event(events, latest_resolver_index);
     let latest_resolver_record_statuses = latest_resolver_event

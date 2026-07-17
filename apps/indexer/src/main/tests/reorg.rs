@@ -1482,6 +1482,1001 @@ fn execution_trace_fixture(
     }
 }
 
+#[tokio::test]
+async fn silent_winning_reorg_removes_losing_ensv2_discovery_authority() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+
+    let chain = "ethereum-sepolia";
+    let registry_address = "0x0000000000000000000000000000000000000711";
+    let losing_child_address = "0x0000000000000000000000000000000000000712";
+    let later_child_address = "0x0000000000000000000000000000000000000713";
+    let registry_contract_instance_id = Uuid::from_u128(0x711);
+    let manifest_id = 711_i64;
+    let caught_up_block = provider_block(
+        "0x7110000000000000000000000000000000000000000000000000000000000010",
+        Some("0x7110000000000000000000000000000000000000000000000000000000000009"),
+        10,
+    );
+    let losing_block = provider_block(
+        "0x7110000000000000000000000000000000000000000000000000000000000011",
+        Some(&caught_up_block.block_hash),
+        11,
+    );
+    let winning_block = provider_block(
+        "0x7111000000000000000000000000000000000000000000000000000000000011",
+        Some(&caught_up_block.block_hash),
+        11,
+    );
+    let later_block = provider_block(
+        "0x7110000000000000000000000000000000000000000000000000000000000012",
+        Some(&winning_block.block_hash),
+        12,
+    );
+
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_versions (
+            manifest_id,
+            manifest_version,
+            namespace,
+            source_family,
+            chain,
+            deployment_epoch,
+            rollout_status,
+            normalizer_version,
+            file_path,
+            manifest_payload
+        )
+        VALUES (
+            $1,
+            1,
+            'ens',
+            'ens_v2_registry_l1',
+            $2,
+            'ens_v2',
+            'active',
+            'ensip15@ens-normalize-0.1.1',
+            'tests/ens_v2_registry_l1/v1.toml',
+            DEFAULT
+        )
+        "#,
+    )
+    .bind(manifest_id)
+    .bind(chain)
+    .execute(database.pool())
+    .await
+    .context("failed to insert the ENSv2 registry manifest for silent-reorg repair")?;
+    insert_contract_instance(
+        database.pool(),
+        registry_contract_instance_id,
+        chain,
+        "root",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        registry_contract_instance_id,
+        chain,
+        registry_address,
+        Some(manifest_id),
+    )
+    .await?;
+    insert_manifest_root_contract_instance(
+        database.pool(),
+        manifest_id,
+        registry_contract_instance_id,
+        registry_address,
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        manifest_id,
+        "registry",
+        registry_contract_instance_id,
+        registry_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+    insert_manifest_discovery_rule(
+        database.pool(),
+        manifest_id,
+        "subregistry",
+        "registry",
+        "reachable_from_root",
+    )
+    .await?;
+
+    create_complete_raw_log_staging_input_fixture(database.pool(), chain, 12).await?;
+    insert_completed_backfill_range_coverage_for_source_family(
+        database.pool(),
+        chain,
+        0,
+        12,
+        "ens_v2_registry_l1",
+        &[registry_address, losing_child_address],
+    )
+    .await?;
+
+    let watched_plan = load_watched_chain_plan(database.pool()).await?;
+    let mut tasks = sync_intake_chain_tasks(database.pool(), &watched_plan).await?;
+    let task = tasks
+        .pop()
+        .context("ENSv2 silent-reorg fixture must create one intake task")?;
+
+    let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
+        block: caught_up_block.clone(),
+        logs: vec![rpc_ens_v2_label_registered_log_payload(
+            &caught_up_block,
+            registry_address,
+            1,
+            "parent",
+            0,
+        )],
+    }])
+    .await?;
+    let (task, initial_outcome) = reconcile_fetched_heads(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: caught_up_block.clone(),
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?
+    .context("initial ENSv2 catch-up must initialize the checkpoint")?;
+    assert_eq!(
+        initial_outcome.canonical_status,
+        CanonicalReconciliationStatus::Initialized
+    );
+    server.abort();
+
+    let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
+        block: losing_block.clone(),
+        logs: vec![rpc_ens_v2_subregistry_updated_log_payload(
+            &losing_block,
+            registry_address,
+            losing_child_address,
+            1,
+            0,
+        )],
+    }])
+    .await?;
+    let (task, losing_outcome) = reconcile_fetched_heads(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: losing_block.clone(),
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?
+    .context("losing ENSv2 live block must advance the checkpoint")?;
+    assert_eq!(
+        losing_outcome.canonical_status,
+        CanonicalReconciliationStatus::Appended
+    );
+    assert!(
+        bigname_manifests::load_watched_contracts(database.pool())
+            .await?
+            .iter()
+            .any(|contract| contract.address == losing_child_address),
+        "the losing live SubregistryUpdated must initially admit its child"
+    );
+    let losing_discovery_epoch = sqlx::query_scalar::<_, i64>(
+        "SELECT epoch FROM discovery_admission_epochs WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .fetch_one(database.pool())
+    .await?;
+    server.abort();
+
+    let (provider, server) = bundle_provider_with_fixtures(vec![
+        ProviderBlockFixture {
+            block: caught_up_block.clone(),
+            logs: Vec::new(),
+        },
+        ProviderBlockFixture {
+            block: winning_block.clone(),
+            logs: Vec::new(),
+        },
+    ])
+    .await?;
+    let (task, winning_outcome) = reconcile_fetched_heads(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: winning_block.clone(),
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?
+    .context("silent winning ENSv2 block must reconcile the same-height fork")?;
+    assert_eq!(
+        winning_outcome.canonical_status,
+        CanonicalReconciliationStatus::ReorgReconciled
+    );
+    assert_eq!(
+        task.checkpoint.canonical_block_hash.as_deref(),
+        Some(winning_block.block_hash.as_str())
+    );
+    let watched_after_reorg = bigname_manifests::load_watched_contracts(database.pool()).await?;
+    assert!(
+        watched_after_reorg
+            .iter()
+            .all(|contract| contract.address != losing_child_address),
+        "losing-fork discovery authority must be removed before the winning checkpoint advances"
+    );
+    assert!(
+        watched_after_reorg
+            .iter()
+            .any(|contract| contract.address == registry_address),
+        "losing-branch cleanup must retain the manifest-declared registry root"
+    );
+    assert!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT epoch FROM discovery_admission_epochs WHERE chain_id = $1",
+        )
+        .bind(chain)
+        .fetch_one(database.pool())
+        .await?
+            > losing_discovery_epoch,
+        "removing losing-fork authority must advance the discovery-admission epoch"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM discovery_edges
+            WHERE chain_id = $1
+              AND active_from_block_hash = $2
+              AND deactivated_at IS NULL
+            "#,
+        )
+        .bind(chain)
+        .bind(&losing_block.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "no active discovery edge may retain a losing-branch admission anchor"
+    );
+    server.abort();
+
+    let refreshed_plan = load_watched_chain_plan(database.pool()).await?;
+    let refreshed_task = sync_intake_chain_tasks(database.pool(), &refreshed_plan)
+        .await?
+        .pop()
+        .context("refreshed ENSv2 watch plan must retain its registry task")?;
+    assert!(
+        refreshed_task
+            .addresses
+            .iter()
+            .all(|address| address != losing_child_address),
+        "the refreshed intake task must not retain the losing child"
+    );
+
+    let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
+        block: later_block.clone(),
+        logs: vec![rpc_ens_v2_subregistry_updated_log_payload(
+            &later_block,
+            losing_child_address,
+            later_child_address,
+            2,
+            0,
+        )],
+    }])
+    .await?;
+    reconcile_fetched_heads(
+        database.pool(),
+        &refreshed_task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: later_block,
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?
+    .context("later block must advance without selecting the losing child")?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM raw_logs WHERE chain_id = $1 AND emitting_address = $2",
+        )
+        .bind(chain)
+        .bind(losing_child_address)
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "a later log from the losing child must not be selected as ENSv2 registry input"
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[derive(Clone, Copy)]
+struct LegacyRegistrySilentReorgFixture {
+    chain: &'static str,
+    namespace: &'static str,
+    source_family: &'static str,
+    deployment_epoch: &'static str,
+    manifest_id: i64,
+    seed: u128,
+}
+
+fn rpc_legacy_registry_new_owner_log_payload(
+    block: &ProviderBlock,
+    address: &str,
+    parent_node: &str,
+    label: &str,
+    owner: &str,
+    log_index: i64,
+) -> Value {
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": format!("0x{log_index:x}"),
+        "address": address,
+        "topics": [
+            ens_v1_new_owner_topic0(),
+            parent_node,
+            labelhash_hex(label),
+        ],
+        "data": hex_string(&abi_word_address(owner)),
+    })
+}
+
+fn legacy_registry_new_owner_raw_log(
+    chain: &str,
+    block: &ProviderBlock,
+    address: &str,
+    parent_node: &str,
+    label: &str,
+    owner: &str,
+    log_index: i64,
+) -> RawLog {
+    RawLog {
+        chain_id: chain.to_owned(),
+        block_hash: block.block_hash.clone(),
+        block_number: block.block_number,
+        transaction_hash: transaction_hash_for_block(block),
+        transaction_index: 0,
+        log_index,
+        emitting_address: address.to_owned(),
+        topics: vec![
+            ens_v1_new_owner_topic0(),
+            parent_node.to_owned(),
+            labelhash_hex(label),
+        ],
+        data: abi_word_address(owner).to_vec(),
+        canonicality_state: CanonicalityState::Canonical,
+    }
+}
+
+#[tokio::test]
+async fn silent_winning_reorg_removes_losing_legacy_registry_discovery_authority() -> Result<()> {
+    for fixture in [
+        LegacyRegistrySilentReorgFixture {
+            chain: "ethereum-mainnet",
+            namespace: "ens",
+            source_family: "ens_v1_registry_l1",
+            deployment_epoch: "ens_v1",
+            manifest_id: 712,
+            seed: 0x712,
+        },
+        LegacyRegistrySilentReorgFixture {
+            chain: "base-mainnet",
+            namespace: "basenames",
+            source_family: "basenames_base_registry",
+            deployment_epoch: "basenames_v1",
+            manifest_id: 713,
+            seed: 0x713,
+        },
+    ] {
+        assert_silent_winning_reorg_removes_losing_legacy_registry_discovery_authority(fixture)
+            .await
+            .with_context(|| {
+                format!(
+                    "silent-reorg discovery repair failed for {} on {}",
+                    fixture.source_family, fixture.chain
+                )
+            })?;
+    }
+    Ok(())
+}
+
+async fn assert_silent_winning_reorg_removes_losing_legacy_registry_discovery_authority(
+    fixture: LegacyRegistrySilentReorgFixture,
+) -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+
+    let registry_address = format!("0x{:040x}", fixture.seed * 0x10 + 1);
+    let losing_child_address = format!("0x{:040x}", fixture.seed * 0x10 + 2);
+    let later_child_address = format!("0x{:040x}", fixture.seed * 0x10 + 3);
+    let canonical_subregistry_address = format!("0x{:040x}", fixture.seed * 0x10 + 4);
+    let canonical_descendant_address = format!("0x{:040x}", fixture.seed * 0x10 + 5);
+    let retained_post_target_address = format!("0x{:040x}", fixture.seed * 0x10 + 6);
+    let unprocessed_post_target_address = format!("0x{:040x}", fixture.seed * 0x10 + 7);
+    let registry_contract_instance_id = Uuid::from_u128(fixture.seed);
+    let initialized_block = provider_block(
+        &format!("0x{:064x}", fixture.seed * 0x100 + 0x08),
+        Some(&format!("0x{:064x}", fixture.seed * 0x100 + 0x07)),
+        8,
+    );
+    let canonical_subregistry_block = provider_block(
+        &format!("0x{:064x}", fixture.seed * 0x100 + 0x09),
+        Some(&initialized_block.block_hash),
+        9,
+    );
+    let caught_up_block = provider_block(
+        &format!("0x{:064x}", fixture.seed * 0x100 + 0x10),
+        Some(&canonical_subregistry_block.block_hash),
+        10,
+    );
+    let losing_block = provider_block(
+        &format!("0x{:064x}", fixture.seed * 0x100 + 0x11),
+        Some(&caught_up_block.block_hash),
+        11,
+    );
+    let winning_block = provider_block(
+        &format!("0x{:064x}", fixture.seed * 0x1000 + 0x11),
+        Some(&caught_up_block.block_hash),
+        11,
+    );
+    let later_block = provider_block(
+        &format!("0x{:064x}", fixture.seed * 0x100 + 0x12),
+        Some(&winning_block.block_hash),
+        12,
+    );
+    let post_target_block = provider_block(
+        &format!("0x{:064x}", fixture.seed * 0x100 + 0x20),
+        Some(&winning_block.block_hash),
+        20,
+    );
+
+    insert_active_replay_manifest_contract(
+        database.pool(),
+        fixture.manifest_id,
+        fixture.namespace,
+        fixture.source_family,
+        fixture.chain,
+        fixture.deployment_epoch,
+        registry_contract_instance_id,
+        &registry_address,
+        "registry",
+    )
+    .await?;
+    insert_manifest_root_contract_instance(
+        database.pool(),
+        fixture.manifest_id,
+        registry_contract_instance_id,
+        &registry_address,
+    )
+    .await?;
+    insert_manifest_discovery_rule(
+        database.pool(),
+        fixture.manifest_id,
+        "subregistry",
+        "registry",
+        "reachable_from_root",
+    )
+    .await?;
+
+    create_complete_raw_log_staging_input_fixture(database.pool(), fixture.chain, 20).await?;
+    // Model an existing populated database immediately after the retention
+    // migration: its pre-migration corpus is generation 1 and globally
+    // incomplete until family-specific current-generation evidence recovers
+    // absence authority.
+    sqlx::query(
+        r#"
+        UPDATE raw_log_staging_input_revisions
+        SET retention_generation = 1,
+            retained_history_complete = false,
+            incomplete_since = now(),
+            proven_retention_generation = NULL,
+            proven_discovery_admission_epoch = NULL,
+            proven_through_block = NULL
+        WHERE chain_id = $1
+        "#,
+    )
+    .bind(fixture.chain)
+    .execute(database.pool())
+    .await?;
+    insert_completed_backfill_range_coverage_for_source_family(
+        database.pool(),
+        fixture.chain,
+        0,
+        20,
+        fixture.source_family,
+        &[
+            &registry_address,
+            &losing_child_address,
+            &canonical_subregistry_address,
+            &canonical_descendant_address,
+            &retained_post_target_address,
+            &unprocessed_post_target_address,
+        ],
+    )
+    .await?;
+
+    // A numerically identical completed job from an older retention
+    // generation cannot authorize absence in the migrated corpus.
+    sqlx::query(
+        "UPDATE backfill_jobs SET raw_log_retention_generation = 0 WHERE chain_id = $1",
+    )
+    .bind(fixture.chain)
+    .execute(database.pool())
+    .await?;
+    let stale_generation_error =
+        ensure_legacy_registry_closure_retention_authority_for_adapters(
+            database.pool(),
+            fixture.chain,
+            &[NormalizedEventReplayAdapter::EnsV1SubregistryDiscovery],
+            20,
+        )
+        .await
+        .expect_err("older-generation legacy registry coverage must fail closed");
+    let rendered = format!("{stale_generation_error:#}");
+    assert!(
+        rendered.contains("current-generation backfill coverage is missing or stale")
+            && rendered.contains(&registry_address),
+        "stale-generation refusal must name the uncovered registry tuple: {rendered}"
+    );
+    sqlx::query(
+        "UPDATE backfill_jobs SET raw_log_retention_generation = 1 WHERE chain_id = $1",
+    )
+    .bind(fixture.chain)
+    .execute(database.pool())
+    .await?;
+
+    // The proof's discovery epoch is accepted only under the writer fence.
+    // Force epoch drift before the adapter reaches that fence and require an
+    // explicit refusal without any absence-based mutation.
+    let stale_epoch = ensure_legacy_registry_closure_retention_authority_for_adapters(
+        database.pool(),
+        fixture.chain,
+        &[NormalizedEventReplayAdapter::EnsV1SubregistryDiscovery],
+        20,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO discovery_admission_epochs (chain_id, epoch)
+        VALUES ($1, $2 + 1)
+        ON CONFLICT (chain_id) DO UPDATE SET epoch = EXCLUDED.epoch
+        "#,
+    )
+    .bind(fixture.chain)
+    .bind(stale_epoch)
+    .execute(database.pool())
+    .await?;
+    let epoch_drift_error = bigname_adapters::sync_ens_v1_subregistry_discovery_through_block_with_expected_admission_epoch(
+        database.pool(),
+        fixture.chain,
+        20,
+        stale_epoch,
+    )
+    .await
+    .expect_err("legacy registry reconciliation must reject a stale admission epoch");
+    assert!(
+        format!("{epoch_drift_error:#}").contains("discovery admission epoch changed"),
+        "epoch-drift refusal must be explicit: {epoch_drift_error:#}"
+    );
+
+    let watched_plan = load_watched_chain_plan(database.pool()).await?;
+    let mut tasks = sync_intake_chain_tasks(database.pool(), &watched_plan).await?;
+    let task = tasks.pop().with_context(|| {
+        format!(
+            "{} silent-reorg fixture must create one intake task",
+            fixture.source_family
+        )
+    })?;
+
+    let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
+        block: initialized_block.clone(),
+        logs: Vec::new(),
+    }])
+    .await?;
+    let (task, initial_outcome) = reconcile_fetched_heads(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: initialized_block.clone(),
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?
+    .context("initial legacy-registry catch-up must initialize the checkpoint")?;
+    assert_eq!(
+        initial_outcome.canonical_status,
+        CanonicalReconciliationStatus::Initialized
+    );
+    server.abort();
+
+    let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
+        block: canonical_subregistry_block.clone(),
+        logs: vec![rpc_legacy_registry_new_owner_log_payload(
+            &canonical_subregistry_block,
+            &registry_address,
+            "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "canonical",
+            &canonical_subregistry_address,
+            0,
+        )],
+    }])
+    .await?;
+    let (_, canonical_subregistry_outcome) = reconcile_fetched_heads(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: canonical_subregistry_block.clone(),
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?
+    .context("canonical legacy subregistry block must advance the checkpoint")?;
+    assert_eq!(
+        canonical_subregistry_outcome.canonical_status,
+        CanonicalReconciliationStatus::Appended
+    );
+    server.abort();
+
+    let canonical_plan = load_watched_chain_plan(database.pool()).await?;
+    let task = sync_intake_chain_tasks(database.pool(), &canonical_plan)
+        .await?
+        .pop()
+        .context("canonical subregistry must enter the refreshed intake plan")?;
+    assert!(
+        task.addresses
+            .iter()
+            .any(|address| address == &canonical_subregistry_address),
+        "canonical subregistry must be watched before its descendant emits"
+    );
+
+    let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
+        block: caught_up_block.clone(),
+        logs: vec![rpc_legacy_registry_new_owner_log_payload(
+            &caught_up_block,
+            &canonical_subregistry_address,
+            "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "descendant",
+            &canonical_descendant_address,
+            0,
+        )],
+    }])
+    .await?;
+    let (task, caught_up_outcome) = reconcile_fetched_heads(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: caught_up_block.clone(),
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?
+    .context("canonical legacy descendant block must advance the checkpoint")?;
+    assert_eq!(
+        caught_up_outcome.canonical_status,
+        CanonicalReconciliationStatus::Appended
+    );
+    let canonical_watched = bigname_manifests::load_watched_contracts(database.pool()).await?;
+    assert!(
+        canonical_watched
+            .iter()
+            .any(|contract| contract.address == canonical_subregistry_address),
+        "canonical subregistry must be watched before the losing fork"
+    );
+    assert!(
+        canonical_watched
+            .iter()
+            .any(|contract| contract.address == canonical_descendant_address),
+        "canonical descendant must be watched before the losing fork"
+    );
+    server.abort();
+
+    upsert_raw_logs(
+        database.pool(),
+        &[legacy_registry_new_owner_raw_log(
+            fixture.chain,
+            &post_target_block,
+            &registry_address,
+            "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "retained-post-target",
+            &retained_post_target_address,
+            0,
+        )],
+    )
+    .await?;
+    let post_target_scope = vec![(
+        fixture.source_family.to_owned(),
+        registry_address.clone(),
+        post_target_block.block_number,
+        post_target_block.block_number,
+    )];
+    bigname_adapters::EnsV1SubregistryDiscoverySyncSummary::sync_for_block_hashes_with_source_scope(
+        database.pool(),
+        fixture.chain,
+        std::slice::from_ref(&post_target_block.block_hash),
+        &post_target_scope,
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[legacy_registry_new_owner_raw_log(
+            fixture.chain,
+            &post_target_block,
+            &registry_address,
+            "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "unprocessed-post-target",
+            &unprocessed_post_target_address,
+            1,
+        )],
+    )
+    .await?;
+    let watched_with_post_target =
+        bigname_manifests::load_watched_contracts(database.pool()).await?;
+    assert!(
+        watched_with_post_target
+            .iter()
+            .any(|contract| contract.address == retained_post_target_address),
+        "an already-reconciled edge after the live target must be preserved"
+    );
+    assert!(
+        watched_with_post_target
+            .iter()
+            .all(|contract| contract.address != unprocessed_post_target_address),
+        "a raw-only edge after the live target must remain future work"
+    );
+
+    let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
+        block: losing_block.clone(),
+        logs: vec![rpc_legacy_registry_new_owner_log_payload(
+            &losing_block,
+            &registry_address,
+            "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "canonical",
+            &losing_child_address,
+            0,
+        )],
+    }])
+    .await?;
+    let (task, losing_outcome) = reconcile_fetched_heads(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: losing_block.clone(),
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?
+    .context("losing legacy-registry live block must advance the checkpoint")?;
+    assert_eq!(
+        losing_outcome.canonical_status,
+        CanonicalReconciliationStatus::Appended
+    );
+    assert!(
+        bigname_manifests::load_watched_contracts(database.pool())
+            .await?
+            .iter()
+            .any(|contract| contract.address == losing_child_address),
+        "the losing live NewOwner must initially admit its child for {}",
+        fixture.source_family
+    );
+    let watched_on_losing_fork =
+        bigname_manifests::load_watched_contracts(database.pool()).await?;
+    assert!(
+        watched_on_losing_fork.iter().all(|contract| {
+            contract.address != canonical_subregistry_address
+                && contract.address != canonical_descendant_address
+        }),
+        "the losing replacement must temporarily close the canonical subregistry branch"
+    );
+    let losing_discovery_epoch = sqlx::query_scalar::<_, i64>(
+        "SELECT epoch FROM discovery_admission_epochs WHERE chain_id = $1",
+    )
+    .bind(fixture.chain)
+    .fetch_one(database.pool())
+    .await?;
+    server.abort();
+
+    let (provider, server) = bundle_provider_with_fixtures(vec![
+        ProviderBlockFixture {
+            block: caught_up_block.clone(),
+            logs: Vec::new(),
+        },
+        ProviderBlockFixture {
+            block: winning_block.clone(),
+            logs: Vec::new(),
+        },
+    ])
+    .await?;
+    let (task, winning_outcome) = reconcile_fetched_heads(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: winning_block.clone(),
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?
+    .context("silent winning legacy-registry block must reconcile the same-height fork")?;
+    assert_eq!(
+        winning_outcome.canonical_status,
+        CanonicalReconciliationStatus::ReorgReconciled
+    );
+    assert_eq!(
+        task.checkpoint.canonical_block_hash.as_deref(),
+        Some(winning_block.block_hash.as_str())
+    );
+    let watched_after_reorg = bigname_manifests::load_watched_contracts(database.pool()).await?;
+    assert!(
+        watched_after_reorg
+            .iter()
+            .all(|contract| contract.address != losing_child_address),
+        "losing-fork {} discovery authority must be removed before the winning checkpoint advances",
+        fixture.source_family
+    );
+    assert!(
+        watched_after_reorg
+            .iter()
+            .any(|contract| contract.address == registry_address),
+        "losing-branch cleanup must retain the manifest-declared registry root"
+    );
+    assert!(
+        watched_after_reorg
+            .iter()
+            .any(|contract| contract.address == canonical_subregistry_address),
+        "complete repair must restore the canonical subregistry that the losing replacement closed"
+    );
+    assert!(
+        watched_after_reorg
+            .iter()
+            .any(|contract| contract.address == canonical_descendant_address),
+        "complete repair must replay the closed subregistry's canonical history and restore its descendant"
+    );
+    assert!(
+        watched_after_reorg
+            .iter()
+            .any(|contract| contract.address == retained_post_target_address),
+        "target-bounded repair must preserve an existing non-orphaned edge after the winning head"
+    );
+    assert!(
+        watched_after_reorg
+            .iter()
+            .all(|contract| contract.address != unprocessed_post_target_address),
+        "target-bounded repair must not admit a raw-only observation after the winning head"
+    );
+    assert!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT epoch FROM discovery_admission_epochs WHERE chain_id = $1",
+        )
+        .bind(fixture.chain)
+        .fetch_one(database.pool())
+        .await?
+            > losing_discovery_epoch,
+        "removing losing-fork authority must advance the discovery-admission epoch"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM discovery_edges
+            WHERE chain_id = $1
+              AND active_from_block_hash = $2
+              AND deactivated_at IS NULL
+            "#,
+        )
+        .bind(fixture.chain)
+        .bind(&losing_block.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "no active discovery edge may retain a losing-branch admission anchor"
+    );
+    server.abort();
+
+    let refreshed_plan = load_watched_chain_plan(database.pool()).await?;
+    let refreshed_task = sync_intake_chain_tasks(database.pool(), &refreshed_plan)
+        .await?
+        .pop()
+        .context("refreshed legacy-registry watch plan must retain its registry task")?;
+    assert!(
+        refreshed_task
+            .addresses
+            .iter()
+            .all(|address| address != &losing_child_address),
+        "the refreshed intake task must not retain the losing child"
+    );
+    assert!(
+        refreshed_task
+            .addresses
+            .iter()
+            .any(|address| address == &canonical_subregistry_address),
+        "the refreshed intake task must restore the canonical subregistry"
+    );
+    assert!(
+        refreshed_task
+            .addresses
+            .iter()
+            .any(|address| address == &canonical_descendant_address),
+        "the refreshed intake task must restore the canonical descendant"
+    );
+    assert!(
+        refreshed_task
+            .addresses
+            .iter()
+            .any(|address| address == &retained_post_target_address),
+        "the refreshed intake task must retain the already-reconciled post-target edge"
+    );
+    assert!(
+        refreshed_task
+            .addresses
+            .iter()
+            .all(|address| address != &unprocessed_post_target_address),
+        "the refreshed intake task must exclude post-target raw facts not yet reconciled"
+    );
+
+    let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
+        block: later_block.clone(),
+        logs: vec![rpc_legacy_registry_new_owner_log_payload(
+            &later_block,
+            &losing_child_address,
+            "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "later",
+            &later_child_address,
+            0,
+        )],
+    }])
+    .await?;
+    reconcile_fetched_heads(
+        database.pool(),
+        &refreshed_task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: later_block,
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?
+    .context("later block must advance without selecting the losing child")?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM raw_logs WHERE chain_id = $1 AND emitting_address = $2",
+        )
+        .bind(fixture.chain)
+        .bind(&losing_child_address)
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "a later log from the losing child must not be selected as legacy registry input"
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
 fn execution_outcome_fixture(
     trace: &ExecutionTrace,
     requested_block: &ProviderBlock,

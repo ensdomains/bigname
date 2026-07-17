@@ -3,7 +3,9 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use anyhow::{Context, Result, ensure};
+#[cfg(feature = "reth-db")]
+use anyhow::ensure;
+use anyhow::{Context, Result};
 use serde_json::Value;
 #[cfg(feature = "reth-db")]
 use sqlx::Row;
@@ -660,7 +662,7 @@ fn provider_registry_rejects_configured_chains_outside_admitted_set() -> Result<
     ])?;
 
     let error = registry
-        .ensure_configured_chains_admitted(["base-mainnet", "ethereum-mainnet"].into_iter())
+        .ensure_configured_chains_admitted(["base-mainnet", "ethereum-mainnet"])
         .expect_err("out-of-profile provider must be rejected");
 
     assert!(

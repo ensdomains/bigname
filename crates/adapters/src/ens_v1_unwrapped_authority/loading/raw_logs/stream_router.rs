@@ -1,6 +1,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use anyhow::Result;
+use bigname_domain::block_interval::{InclusiveBlockInterval, coalesce_inclusive_block_intervals};
 
 use super::super::super::*;
 
@@ -10,6 +11,8 @@ pub(in crate::ens_v1_unwrapped_authority) struct AuthorityRawLogStreamSourceRout
     watched_topic0s: HashSet<String>,
     generic_resolver_event_sources: &'a [GenericResolverEventSource],
     generic_topic0s: HashSet<String>,
+    generic_resolver_emitter_addresses: Option<HashSet<String>>,
+    profile_context_emitter_addresses: Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -45,6 +48,7 @@ impl<'a> AuthorityRawLogStreamSourceRouter<'a> {
         active_emitters: &'a [ActiveEmitter],
         generic_resolver_event_sources: &'a [GenericResolverEventSource],
         event_topics: &AuthorityEventTopics,
+        generic_resolver_emitter_addresses: Option<&[String]>,
     ) -> Result<Self> {
         let mut source_emitters_by_address = HashMap::<&str, Vec<&ActiveEmitter>>::new();
         for emitter in active_emitters {
@@ -87,6 +91,20 @@ impl<'a> AuthorityRawLogStreamSourceRouter<'a> {
             watched_topic0s,
             generic_resolver_event_sources,
             generic_topic0s,
+            generic_resolver_emitter_addresses: generic_resolver_emitter_addresses
+                .map(|addresses| addresses.iter().cloned().collect::<HashSet<_>>()),
+            profile_context_emitter_addresses: active_emitters
+                .iter()
+                .filter(|emitter| {
+                    !matches!(
+                        emitter.source_family.as_str(),
+                        SOURCE_FAMILY_ENS_V1_RESOLVER_L1 | SOURCE_FAMILY_BASENAMES_BASE_RESOLVER
+                    )
+                })
+                .map(|emitter| emitter.address.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
         })
     }
 
@@ -109,7 +127,12 @@ impl<'a> AuthorityRawLogStreamSourceRouter<'a> {
                 );
             }
         }
-        if self.generic_topic0s.contains(topic0) {
+        if self.generic_topic0s.contains(topic0)
+            && self
+                .generic_resolver_emitter_addresses
+                .as_ref()
+                .is_none_or(|addresses| addresses.contains(emitting_address))
+        {
             candidates.extend(
                 self.generic_resolver_event_sources
                     .iter()
@@ -139,6 +162,10 @@ impl<'a> AuthorityRawLogStreamSourceRouter<'a> {
             .into_iter()
             .collect()
     }
+
+    pub(super) fn profile_context_emitter_addresses(&self) -> &[String] {
+        &self.profile_context_emitter_addresses
+    }
 }
 
 fn append_routed_emitters_for_address(
@@ -147,7 +174,7 @@ fn append_routed_emitters_for_address(
     watched_emitters: &mut Vec<RoutedActiveEmitter>,
     watched_emitters_by_address: &mut HashMap<String, Vec<usize>>,
 ) {
-    let mut intervals_by_key = HashMap::<RoutedEmitterKey, Vec<(i64, i64)>>::new();
+    let mut intervals_by_key = HashMap::<RoutedEmitterKey, Vec<InclusiveBlockInterval>>::new();
     for emitter in emitters {
         intervals_by_key
             .entry(RoutedEmitterKey::from_emitter(emitter))
@@ -156,20 +183,8 @@ fn append_routed_emitters_for_address(
     }
 
     let mut address_indexes = Vec::new();
-    for (key, mut intervals) in intervals_by_key {
-        intervals.sort_unstable();
-        let mut merged = Vec::<(i64, i64)>::new();
-        for (from_block, to_block) in intervals {
-            if let Some((_, last_to_block)) = merged.last_mut()
-                && from_block <= last_to_block.saturating_add(1)
-            {
-                *last_to_block = (*last_to_block).max(to_block);
-                continue;
-            }
-            merged.push((from_block, to_block));
-        }
-
-        for (from_block, to_block) in merged {
+    for (key, intervals) in intervals_by_key {
+        for interval in coalesce_inclusive_block_intervals(intervals) {
             let index = watched_emitters.len();
             watched_emitters.push(RoutedActiveEmitter {
                 source_manifest_id: key.source_manifest_id,
@@ -178,8 +193,8 @@ fn append_routed_emitters_for_address(
                 manifest_version: key.manifest_version,
                 normalizer_version: key.normalizer_version.clone(),
                 contract_role: key.contract_role.clone(),
-                active_from_block_number: from_block,
-                active_to_block_number: to_block,
+                active_from_block_number: interval.from_block(),
+                active_to_block_number: interval.through_block(),
             });
             address_indexes.push(index);
         }
@@ -216,11 +231,12 @@ impl RoutedEmitterKey {
     }
 }
 
-fn emitter_interval(emitter: &ActiveEmitter) -> (i64, i64) {
-    (
+fn emitter_interval(emitter: &ActiveEmitter) -> InclusiveBlockInterval {
+    InclusiveBlockInterval::new(
         emitter.active_from_block_number.unwrap_or(0),
         emitter.active_to_block_number.unwrap_or(i64::MAX),
     )
+    .expect("watched emitter interval must not be inverted")
 }
 
 impl AuthorityRawLogStreamSource<'_> {
@@ -279,4 +295,81 @@ fn generic_source_active_at_block(source: &GenericResolverEventSource, block_num
         && source
             .effective_to_block
             .is_none_or(|to_block| block_number <= to_block)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn active_emitter(
+        source_family: &str,
+        source_manifest_id: i64,
+        from_block: i64,
+        to_block: Option<i64>,
+    ) -> ActiveEmitter {
+        ActiveEmitter {
+            address: "0x1111111111111111111111111111111111111111".to_owned(),
+            contract_instance_id: sqlx::types::Uuid::nil(),
+            source_manifest_id,
+            namespace: "ens".to_owned(),
+            source_family: source_family.to_owned(),
+            manifest_version: 7,
+            normalizer_version: "normalizer-v7".to_owned(),
+            contract_role: Some("registry".to_owned()),
+            active_from_block_number: Some(from_block),
+            active_to_block_number: to_block,
+            source_rank: 0,
+        }
+    }
+
+    #[test]
+    fn routed_emitter_intervals_coalesce_per_metadata_key_in_output_order() {
+        let emitters = [
+            active_emitter("family-b", 2, i64::MAX, None),
+            active_emitter("family-a", 1, 20, Some(20)),
+            active_emitter("family-a", 1, 13, Some(15)),
+            active_emitter("family-b", 2, i64::MAX - 1, Some(i64::MAX - 1)),
+            active_emitter("family-a", 1, 10, Some(12)),
+        ];
+        let emitter_refs = emitters.iter().collect::<Vec<_>>();
+        let mut routed = Vec::new();
+        let mut by_address = HashMap::new();
+
+        append_routed_emitters_for_address(
+            &emitters[0].address,
+            &emitter_refs,
+            &mut routed,
+            &mut by_address,
+        );
+
+        let ordered = by_address[&emitters[0].address]
+            .iter()
+            .map(|index| &routed[*index])
+            .map(|emitter| {
+                (
+                    emitter.source_family.as_str(),
+                    emitter.source_manifest_id,
+                    emitter.normalizer_version.as_str(),
+                    emitter.contract_role.as_deref(),
+                    emitter.active_from_block_number,
+                    emitter.active_to_block_number,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordered,
+            vec![
+                ("family-a", 1, "normalizer-v7", Some("registry"), 10, 15,),
+                ("family-a", 1, "normalizer-v7", Some("registry"), 20, 20,),
+                (
+                    "family-b",
+                    2,
+                    "normalizer-v7",
+                    Some("registry"),
+                    i64::MAX - 1,
+                    i64::MAX,
+                ),
+            ]
+        );
+    }
 }

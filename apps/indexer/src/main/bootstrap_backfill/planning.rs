@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, thread};
 
 use anyhow::{Context, Result, bail};
 use bigname_manifests::{
@@ -6,7 +6,15 @@ use bigname_manifests::{
     WatchedSourceSelectorPlan,
 };
 
-use crate::{backfill::BackfillBlockRange, ens_v1_resolver::SOURCE_FAMILY_ENS_V1_RESOLVER_L1};
+use crate::{
+    backfill::{BackfillAdapterSyncMode, BackfillBlockRange},
+    ens_v1_resolver::SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+    provider::ProviderHeadSnapshot,
+};
+
+use super::DEFAULT_BOOTSTRAP_BACKFILL_WORKERS;
+
+const MAX_AUTOMATIC_BOOTSTRAP_BACKFILL_WORKERS: usize = 4;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct BootstrapBackfillTargetRange {
@@ -20,14 +28,54 @@ pub(super) struct BootstrapBackfillSegment {
     pub(super) targets: Vec<ManifestBootstrapTarget>,
 }
 
+pub(crate) fn bootstrap_finalized_head_block(
+    chain: &str,
+    heads: &ProviderHeadSnapshot,
+) -> Result<i64> {
+    let finalized = heads.finalized.as_ref().with_context(|| {
+        format!(
+            "provider for chain {chain} did not return a finalized head required for automatic bootstrap"
+        )
+    })?;
+    anyhow::ensure!(
+        finalized.block_number <= heads.canonical.block_number,
+        "provider for chain {chain} returned finalized block {} above canonical block {}",
+        finalized.block_number,
+        heads.canonical.block_number
+    );
+    Ok(finalized.block_number)
+}
+
+pub(crate) fn resolve_bootstrap_backfill_worker_count(configured_worker_count: usize) -> usize {
+    if configured_worker_count != DEFAULT_BOOTSTRAP_BACKFILL_WORKERS {
+        return configured_worker_count.max(1);
+    }
+
+    thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .clamp(1, MAX_AUTOMATIC_BOOTSTRAP_BACKFILL_WORKERS)
+}
+
+pub(super) fn effective_bootstrap_backfill_worker_count(
+    requested_worker_count: usize,
+    adapter_sync_mode: BackfillAdapterSyncMode,
+) -> usize {
+    if adapter_sync_mode == BackfillAdapterSyncMode::RawOnly {
+        requested_worker_count
+    } else {
+        1
+    }
+}
+
 pub(super) fn bootstrap_target_range(
     target: &ManifestBootstrapTarget,
-    provider_head_block: i64,
+    provider_finalized_head_block: i64,
 ) -> Result<Option<BackfillBlockRange>> {
     let finite_end_block = target
         .effective_to_block
-        .map(|effective_to_block| effective_to_block.min(provider_head_block))
-        .unwrap_or(provider_head_block);
+        .map(|effective_to_block| effective_to_block.min(provider_finalized_head_block))
+        .unwrap_or(provider_finalized_head_block);
     let finite_start_block = target.effective_from_block;
     if finite_start_block > finite_end_block {
         return Ok(None);
@@ -151,8 +199,12 @@ pub(super) fn narrow_manifest_bootstrap_source_plan(
         let selected_target = source_plan.selected_targets.iter().find(|selected_target| {
             selected_target.source_family == target.source_family
                 && selected_target.contract_instance_id == target.contract_instance_id
+                && (target.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1
+                    || (selected_target.address == target.address
+                        && selected_target.effective_from_block == range.from_block
+                        && selected_target.effective_to_block == range.to_block))
         });
-        let Some(selected_target) = selected_target else {
+        let Some(_selected_target) = selected_target else {
             if target.source_family == SOURCE_FAMILY_ENS_V1_RESOLVER_L1 {
                 narrowed_targets.push(WatchedBackfillTarget {
                     source_family: target.source_family.clone(),
@@ -164,7 +216,7 @@ pub(super) fn narrow_manifest_bootstrap_source_plan(
                 continue;
             }
             bail!(
-                "bootstrap source plan for range {}..={} did not select manifest-declared contract_instance_id {}",
+                "bootstrap source plan for range {}..={} did not select authoritative contract_instance_id {} with the segmented address/range",
                 range.from_block,
                 range.to_block,
                 target.contract_instance_id
@@ -182,16 +234,6 @@ pub(super) fn narrow_manifest_bootstrap_source_plan(
             continue;
         }
 
-        if selected_target.address != target.address
-            || selected_target.effective_from_block != range.from_block
-            || selected_target.effective_to_block != range.to_block
-        {
-            bail!(
-                "bootstrap source plan for contract_instance_id {} does not match the segmented manifest-declared effective range",
-                target.contract_instance_id
-            );
-        }
-
         narrowed_targets.push(WatchedBackfillTarget {
             source_family: target.source_family.clone(),
             contract_instance_id: target.contract_instance_id,
@@ -203,16 +245,6 @@ pub(super) fn narrow_manifest_bootstrap_source_plan(
 
     narrowed_targets.sort();
     narrowed_targets.dedup();
-    if narrowed_targets.len() != targets.len() {
-        bail!(
-            "bootstrap source plan for range {}..={} produced {} unique manifest targets from {} requested targets",
-            range.from_block,
-            range.to_block,
-            narrowed_targets.len(),
-            targets.len()
-        );
-    }
-
     source_plan.selected_targets = narrowed_targets;
 
     Ok(())
@@ -266,9 +298,32 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("did not select manifest-declared contract_instance_id"),
+                .contains("did not select authoritative contract_instance_id"),
             "unexpected error: {error:#}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn bootstrap_source_plan_coalesces_overlapping_targets_for_one_contract_instance() -> Result<()>
+    {
+        let mut first = manifest_target(
+            "ens_v2_registry_l1",
+            1,
+            "0x0000000000000000000000000000000000000001",
+        );
+        first.effective_from_block = 10;
+        first.effective_to_block = Some(30);
+        let mut second = first.clone();
+        second.effective_from_block = 20;
+        second.effective_to_block = Some(40);
+        let range = BackfillBlockRange::new(20, 30)?;
+        let expected = watched_target(&first, range);
+        let mut source_plan = source_plan(vec![expected.clone()]);
+
+        narrow_manifest_bootstrap_source_plan(&mut source_plan, &[first, second], range)?;
+
+        assert_eq!(source_plan.selected_targets, vec![expected]);
         Ok(())
     }
 

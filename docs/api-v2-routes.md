@@ -301,6 +301,23 @@ Field ownership:
 - Status semantics: no matching permission rows returns `200` with empty
   `data`, including when a `name` filter has no registration anchor in the
   selected snapshot. Unsupported filter combinations return `422 unsupported`.
+  After snapshot selection, an absent or older projection-owned permission
+  publication version returns `409 stale` before permission rows are decoded.
+  A publication revision change while rows and summaries are read also returns
+  `409 stale`. The version and revision are schema/publication compatibility and
+  request-coherence guards, not freshness watermarks. When `name` or
+  `registration_id` binds the read to a registration, the projection-owned
+  per-registration permission summary classifies the result: full support adds
+  no completeness metadata, missing or partial support returns
+  `meta.completeness=partial` with
+  `unsupported_reason=permission_support_unknown`, and an ENSv1 wrapper returns
+  `meta.completeness=unsupported` with
+  `unsupported_reason=wrapper_holder_permissions_not_supported`. An
+  address-only read is always at least `partial` with the wrapper reason because
+  zero-row wrapper registrations are absent from the permission-row fan-out; a
+  missing or partial summary for a returned registration changes the reason to
+  `permission_support_unknown`. Projected rows are not suppressed by these
+  classifications.
 - Replaces (v1): `GET /v1/resources/{resource_id}/permissions`,
   `GET /v1/roles`, `GET /v1/names/{namespace}/{name}/roles`, and
   `GET /v1/resources/lookup`.
@@ -346,7 +363,21 @@ Field ownership:
   `address_names_current` projection; true as-of address-name enumeration is
   deferred to a storage follow-up.
 - Status semantics: no related names returns `200` with empty `data`.
-  Malformed addresses return `400 invalid_input`.
+  Malformed addresses return `400 invalid_input`. `include=role_summary`
+  conditionally returns `409 stale` when the compatible projection-owned
+  permission publication version is absent or old; the same address-name read
+  without that expansion remains available. The expansion also returns `409
+  stale` when the permission publication revision changes while it is assembled.
+  The expansion batch-loads projection-owned permission summaries for every
+  registration on the served page. If all are full, no completeness metadata is
+  added. A missing or partial summary returns `meta.completeness=partial`,
+  `meta.unsupported_fields=["role_summary"]`, and
+  `unsupported_reason=permission_support_unknown`. An ENSv1 wrapper summary
+  uses the same `partial` response classification and unsupported field with
+  `unsupported_reason=wrapper_holder_permissions_not_supported`. Projected
+  grants remain in `role_summary`, but the expansion is non-authoritative;
+  therefore an empty wrapper summary is not a proven empty permission set.
+  Missing summary metadata takes precedence when a page contains both cases.
 - Replaces (v1): `GET /v1/addresses/{address}/names` and address-relation
   uses of `GET /v1/names`.
 

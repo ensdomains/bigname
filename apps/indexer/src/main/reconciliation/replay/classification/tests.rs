@@ -88,6 +88,12 @@ fn full_closure_reemitted_adapters_include_base_reverse_claim_dependency() {
         NormalizedEventReplayAdapter::EnsV2Permissions,
     ]);
     assert_eq!(actual, expected);
+    for adapter in expected {
+        assert!(
+            !RawFactReplayContractPlan::full_closure().uses_restricted_sync_for(adapter),
+            "{adapter:?} must not run once through restricted sync and again through closure"
+        );
+    }
 }
 
 #[test]

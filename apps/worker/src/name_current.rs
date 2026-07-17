@@ -56,7 +56,7 @@ const ENS_V2_REGISTRAR_DERIVATION_KIND: &str = "ens_v2_registrar";
 const ENS_V2_RESOLVER_DERIVATION_KIND: &str = "ens_v2_resolver";
 const SOURCE_FAMILY_ENS_V2_REGISTRY_L1: &str = "ens_v2_registry_l1";
 const SOURCE_FAMILY_ENS_V2_REGISTRAR_L1: &str = "ens_v2_registrar_l1";
-const SELECTED_ENS_V2_EXACT_NAME_DEPLOYMENT_EPOCH: &str = "ens_v2_sepolia_dev";
+const SELECTED_ENS_V2_EXACT_NAME_DEPLOYMENT_EPOCH: &str = "ens_v2_sepolia_post_audit";
 const CAPABILITY_STATUS_SUPPORTED: &str = "supported";
 const MANIFEST_ROLLOUT_STATUS_ACTIVE: &str = "active";
 const ETHEREUM_SEPOLIA_CHAIN_ID: &str = "ethereum-sepolia";
@@ -74,6 +74,7 @@ const NAME_CURRENT_REBUILD_CONCURRENCY: usize = 32;
 const EVENT_KIND_ALIAS_CHANGED: &str = "AliasChanged";
 const EVENT_KIND_RESOLVER_CHANGED: &str = "ResolverChanged";
 const EVENT_KIND_RECORD_VERSION_CHANGED: &str = "RecordVersionChanged";
+const EVENT_KIND_REGISTRAR_NAME_REGISTERED: &str = "RegistrarNameRegistered";
 const RECORD_INVENTORY_UNSUPPORTED_REASON: &str =
     "record_inventory remains unsupported in the ENSv1 name_current rebuild";
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
@@ -84,6 +85,7 @@ const RELEVANT_EVENT_KINDS: &[&str] = &[
     EVENT_KIND_ALIAS_CHANGED,
     "ExpiryChanged",
     "RegistrationGranted",
+    EVENT_KIND_REGISTRAR_NAME_REGISTERED,
     "RegistrationReleased",
     "RegistrationRenewed",
     EVENT_KIND_RECORD_VERSION_CHANGED,
@@ -142,7 +144,7 @@ async fn rebuild_all_name_current(pool: &PgPool) -> Result<NameCurrentRebuildSum
             replacement.stage_rows(&rows).await?;
             rows.clear();
         }
-        if completed_name_count % 5_000 == 0 {
+        if completed_name_count.is_multiple_of(5_000) {
             tracing::info!(
                 projection = "name_current",
                 requested_name_count,
@@ -303,6 +305,11 @@ async fn build_name_current_row(pool: &PgPool, name: &NameSurfaceSeed) -> Result
         declared_summary: build_declared_summary(
             facts,
             supported_resolution_projection.map(|projection| projection.topology),
+            name.namespace == ENS_NAMESPACE
+                && current_binding
+                    .as_ref()
+                    .and_then(|binding| binding.resource_authority_kind.as_deref())
+                    == Some("wrapper"),
         ),
         provenance,
         coverage: build_exact_name_coverage(&name.namespace, &events),

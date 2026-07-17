@@ -1,10 +1,13 @@
 use anyhow::Result;
-use bigname_manifests::reconcile_discovery_observations;
+use bigname_manifests::{
+    DiscoveryObservation, DiscoveryReconciliationSummary, ExpectedDiscoveryAdmissionEpoch,
+    FullDiscoveryReconciliationOptions, reconcile_discovery_observations,
+};
 use sqlx::PgPool;
 
 use super::{
-    EnsV1SubregistryDiscoverySyncSummary, SUBREGISTRY_CHECKPOINT_RECONCILIATION_PAGE_LIMIT,
-    checkpoint::SubregistryReplayCheckpoint,
+    EnsV1SubregistryDiscoverySyncSummary,
+    checkpoint::{RECONCILIATION_PAGE_LIMIT, SubregistryReplayCheckpoint},
 };
 
 pub(super) async fn reconcile_subregistry_discovery_from_checkpoint(
@@ -22,7 +25,7 @@ pub(super) async fn reconcile_subregistry_discovery_from_checkpoint(
                     pool,
                     discovery_source,
                     after_key.as_deref(),
-                    SUBREGISTRY_CHECKPOINT_RECONCILIATION_PAGE_LIMIT,
+                    RECONCILIATION_PAGE_LIMIT,
                 )
                 .await?;
             let Some((last_key, _)) = page.last() else {
@@ -35,12 +38,38 @@ pub(super) async fn reconcile_subregistry_discovery_from_checkpoint(
                     .collect::<Result<Vec<_>>>()?,
             );
         }
-        let source_reconciliation =
-            reconcile_discovery_observations(pool, discovery_source, &source_observations).await?;
+        let source_reconciliation = reconcile_discovery_observations(
+            pool,
+            discovery_source,
+            &source_observations,
+            FullDiscoveryReconciliationOptions::default(),
+        )
+        .await?;
         reconciliation.active_edge_count += source_reconciliation.active_edge_count;
         reconciliation.admitted_edge_count += source_reconciliation.admitted_edge_count;
         reconciliation.inserted_edge_count += source_reconciliation.inserted_edge_count;
         reconciliation.deactivated_edge_count += source_reconciliation.deactivated_edge_count;
     }
     Ok(())
+}
+
+pub(super) async fn reconcile_subregistry_discovery_source_through_block(
+    pool: &PgPool,
+    chain: &str,
+    discovery_source: &str,
+    observations: &[DiscoveryObservation],
+    through_block: i64,
+    expected_admission_epoch: Option<i64>,
+) -> Result<DiscoveryReconciliationSummary> {
+    reconcile_discovery_observations(
+        pool,
+        discovery_source,
+        observations,
+        FullDiscoveryReconciliationOptions {
+            through_block_number: Some(through_block),
+            expected_admission_epoch: expected_admission_epoch
+                .map(|epoch| ExpectedDiscoveryAdmissionEpoch { chain, epoch }),
+        },
+    )
+    .await
 }

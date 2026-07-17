@@ -80,23 +80,41 @@ pub(in crate::identity) async fn upsert_surface_binding(
 
     #[cfg(test)]
     super::test_hooks::maybe_wait_after_reload(
+        executor,
         "surface_bindings",
         binding.surface_binding_id.to_string(),
     )
     .await;
 
     ensure_surface_binding_identity_matches(&existing, binding)?;
-    let next_active_to = merge_binding_active_to(existing.active_to, binding.active_to)?;
+    let next_active_to = merge_binding_active_to(
+        existing.canonicality_state,
+        existing.active_to,
+        binding.active_to,
+    )?;
     let next_state = existing
         .canonicality_state
         .merge_observation(binding.canonicality_state);
+    let (next_chain_id, next_block_hash, next_block_number) =
+        if existing.canonicality_state == crate::CanonicalityState::Orphaned {
+            (&binding.chain_id, &binding.block_hash, binding.block_number)
+        } else {
+            (
+                &existing.chain_id,
+                &existing.block_hash,
+                existing.block_number,
+            )
+        };
 
     let snapshot = sqlx::query(
         r#"
         UPDATE surface_bindings
         SET
             active_to = $2,
-            canonicality_state = $3::canonicality_state,
+            chain_id = $3,
+            block_hash = $4,
+            block_number = $5,
+            canonicality_state = $6::canonicality_state,
             observed_at = now()
         WHERE surface_binding_id = $1
         RETURNING
@@ -115,6 +133,9 @@ pub(in crate::identity) async fn upsert_surface_binding(
     )
     .bind(binding.surface_binding_id)
     .bind(next_active_to)
+    .bind(next_chain_id)
+    .bind(next_block_hash)
+    .bind(next_block_number)
     .bind(next_state.as_str())
     .fetch_one(&mut **executor)
     .await

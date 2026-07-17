@@ -136,6 +136,8 @@ fn raw_only_sparse_materialization_slice(
     })
 }
 
+// Sparse materialization keeps its range, payload, timing, and audit inputs explicit.
+#[expect(clippy::too_many_arguments)]
 pub(super) async fn run_split_hash_pinned_raw_only_sparse_backfill_range(
     pool: &sqlx::PgPool,
     source_plan: &WatchedSourceSelectorPlan,
@@ -204,6 +206,8 @@ pub(super) async fn run_split_hash_pinned_raw_only_sparse_backfill_range(
     Ok(merged)
 }
 
+// Sparse materialization keeps its range, payload, timing, and audit inputs explicit.
+#[expect(clippy::too_many_arguments)]
 pub(super) async fn run_hash_pinned_raw_only_sparse_backfill_range(
     pool: &sqlx::PgPool,
     source_plan: &WatchedSourceSelectorPlan,

@@ -1,14 +1,25 @@
 use anyhow::{Context, Result, bail};
-use sqlx::PgPool;
-use sqlx::{Executor, Postgres, Row, postgres::PgRow};
+use sqlx::{Executor, PgPool, Postgres, Row, postgres::PgRow};
 
 use crate::lineage::{
     CanonicalityState, chain_lineage_contains_ancestor_internal, ensure_chain_lineage_block,
     promote_chain_lineage_path,
 };
 
+mod advance;
 mod rewind;
+mod stored_lineage_fork_guard;
+pub use advance::advance_chain_checkpoints;
 pub use rewind::rewind_chain_checkpoints_to_ancestor;
+pub use stored_lineage_fork_guard::{
+    advance_chain_checkpoints_rejecting_non_orphaned_lineage_forks,
+    advance_chain_checkpoints_rejecting_non_orphaned_lineage_forks_in_transaction,
+};
+
+use stored_lineage_fork_guard::{
+    LineageForkPolicy, ensure_promoted_path_has_no_non_orphaned_same_height_forks,
+    lock_lineage_writes_for_guarded_promotion,
+};
 
 /// Persisted checkpoint row for one watched chain.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -111,24 +122,27 @@ pub async fn load_chain_checkpoint_snapshots(
     load_chain_checkpoints(pool, &chain_ids).await
 }
 
-/// Advance persisted checkpoint pointers for one chain and promote stored
-/// lineage rows along the admitted ancestry path.
-pub async fn advance_chain_checkpoints(
-    pool: &PgPool,
+pub(in crate::checkpoints) async fn advance_chain_checkpoints_in_transaction_with_lineage_fork_policy(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
     update: &ChainCheckpointUpdate,
+    lineage_fork_policy: LineageForkPolicy,
 ) -> Result<ChainCheckpoint> {
-    let mut transaction = pool
-        .begin()
-        .await
-        .context("failed to open transaction for checkpoint advancement")?;
-
-    ensure_chain_checkpoint_rows(&mut *transaction, std::slice::from_ref(&update.chain_id)).await?;
-    let current = load_chain_checkpoint_for_update(&mut transaction, &update.chain_id).await?;
+    ensure_chain_checkpoint_rows(&mut **transaction, std::slice::from_ref(&update.chain_id))
+        .await?;
+    let current = load_chain_checkpoint_for_update(transaction, &update.chain_id).await?;
     validate_checkpoint_update(&current, update)?;
+
+    if lineage_fork_policy == LineageForkPolicy::Reject {
+        // Every checkpoint writer locks this chain's checkpoint row before it
+        // reads or mutates lineage. Taking the table fence in the same order
+        // avoids a guarded promotion holding chain_lineage while waiting for a
+        // row owned by a regular checkpoint transaction.
+        lock_lineage_writes_for_guarded_promotion(transaction).await?;
+    }
 
     if let Some(canonical) = &update.canonical {
         ensure_chain_lineage_block(
-            &mut transaction,
+            transaction,
             &update.chain_id,
             &canonical.block_hash,
             canonical.block_number,
@@ -137,7 +151,7 @@ pub async fn advance_chain_checkpoints(
     }
     if let Some(safe) = &update.safe {
         ensure_chain_lineage_block(
-            &mut transaction,
+            transaction,
             &update.chain_id,
             &safe.block_hash,
             safe.block_number,
@@ -146,7 +160,7 @@ pub async fn advance_chain_checkpoints(
     }
     if let Some(finalized) = &update.finalized {
         ensure_chain_lineage_block(
-            &mut transaction,
+            transaction,
             &update.chain_id,
             &finalized.block_hash,
             finalized.block_number,
@@ -156,9 +170,9 @@ pub async fn advance_chain_checkpoints(
 
     if let Some(canonical) = &update.canonical {
         let stop_before_hash = current.canonical_block_hash.as_deref();
-        if checkpoint_target_needs_promotion(stop_before_hash, canonical) {
-            promote_chain_lineage_path(
-                &mut transaction,
+        if stop_before_hash != Some(canonical.block_hash.as_str()) {
+            let promoted_path = promote_chain_lineage_path(
+                transaction,
                 &update.chain_id,
                 &canonical.block_hash,
                 stop_before_hash,
@@ -166,6 +180,14 @@ pub async fn advance_chain_checkpoints(
                 false,
             )
             .await?;
+            if lineage_fork_policy == LineageForkPolicy::Reject {
+                ensure_promoted_path_has_no_non_orphaned_same_height_forks(
+                    transaction,
+                    &update.chain_id,
+                    &promoted_path,
+                )
+                .await?;
+            }
         }
     }
     let current_canonical = current
@@ -179,7 +201,7 @@ pub async fn advance_chain_checkpoints(
     let effective_canonical = update.canonical.as_ref().or(current_canonical.as_ref());
     if let Some(safe) = &update.safe {
         ensure_checkpoint_target_on_canonical_branch(
-            &mut transaction,
+            transaction,
             &update.chain_id,
             "safe",
             effective_canonical,
@@ -187,9 +209,9 @@ pub async fn advance_chain_checkpoints(
         )
         .await?;
         let stop_before_hash = current.safe_block_hash.as_deref();
-        if checkpoint_target_needs_promotion(stop_before_hash, safe) {
+        if stop_before_hash != Some(safe.block_hash.as_str()) {
             promote_chain_lineage_path(
-                &mut transaction,
+                transaction,
                 &update.chain_id,
                 &safe.block_hash,
                 stop_before_hash,
@@ -201,7 +223,7 @@ pub async fn advance_chain_checkpoints(
     }
     if let Some(finalized) = &update.finalized {
         ensure_checkpoint_target_on_canonical_branch(
-            &mut transaction,
+            transaction,
             &update.chain_id,
             "finalized",
             effective_canonical,
@@ -209,9 +231,9 @@ pub async fn advance_chain_checkpoints(
         )
         .await?;
         let stop_before_hash = current.finalized_block_hash.as_deref();
-        if checkpoint_target_needs_promotion(stop_before_hash, finalized) {
+        if stop_before_hash != Some(finalized.block_hash.as_str()) {
             promote_chain_lineage_path(
-                &mut transaction,
+                transaction,
                 &update.chain_id,
                 &finalized.block_hash,
                 stop_before_hash,
@@ -225,22 +247,10 @@ pub async fn advance_chain_checkpoints(
     let checkpoint = if update.is_no_op() {
         current
     } else {
-        write_chain_checkpoint_update(&mut transaction, update).await?
+        write_chain_checkpoint_update(transaction, update).await?
     };
 
-    transaction
-        .commit()
-        .await
-        .context("failed to commit checkpoint advancement")?;
-
     Ok(checkpoint)
-}
-
-fn checkpoint_target_needs_promotion(
-    current_hash: Option<&str>,
-    target: &CheckpointBlockRef,
-) -> bool {
-    current_hash != Some(target.block_hash.as_str())
 }
 
 async fn ensure_checkpoint_target_on_canonical_branch(

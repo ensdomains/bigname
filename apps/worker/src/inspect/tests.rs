@@ -560,6 +560,7 @@ fn renders_backfill_job_inspection_json() {
             backfill_job_id: 42,
             deployment_profile: "mainnet".to_owned(),
             chain_id: "eth-mainnet".to_owned(),
+            raw_log_retention_generation: 0,
             source_identity: json!({
                 "source_family": "ens_v1_registry_l1",
                 "watch_targets": ["0xregistry"]
@@ -618,6 +619,7 @@ fn renders_backfill_job_inspection_json() {
     assert_eq!(rendered["job"]["backfill_job_id"], 42);
     assert_eq!(rendered["job"]["deployment_profile"], "mainnet");
     assert_eq!(rendered["job"]["chain_id"], "eth-mainnet");
+    assert_eq!(rendered["job"]["raw_log_retention_generation"], 0);
     assert_eq!(
         rendered["job"]["source_identity"]["source_family"],
         "ens_v1_registry_l1"

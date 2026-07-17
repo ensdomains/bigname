@@ -125,18 +125,23 @@ pub(crate) fn provider_logs_to_live_selected_raw_logs(
     raw_block: &RawBlock,
     logs: &[ProviderLog],
     selected_addresses: &BTreeSet<String>,
+    generic_resolver_topic0s: &BTreeSet<String>,
 ) -> Result<Vec<RawLog>> {
     let selected_transaction_keys = logs
         .iter()
-        .filter(|log| selected_addresses.contains(&log.address.to_ascii_lowercase()))
+        .filter(|log| {
+            selected_addresses.contains(&log.address.to_ascii_lowercase())
+                || log.topics.first().is_some_and(|topic0| {
+                    generic_resolver_topic0s.contains(&topic0.to_ascii_lowercase())
+                })
+        })
         .map(|log| (log.transaction_hash.clone(), log.transaction_index))
         .collect::<BTreeSet<_>>();
 
     logs.iter()
         .filter(|log| {
-            selected_addresses.contains(&log.address.to_ascii_lowercase())
-                || selected_transaction_keys
-                    .contains(&(log.transaction_hash.clone(), log.transaction_index))
+            selected_transaction_keys
+                .contains(&(log.transaction_hash.clone(), log.transaction_index))
         })
         .map(|log| provider_log_to_raw_log(chain, raw_block, log))
         .collect()

@@ -161,6 +161,10 @@ pub(crate) struct PersistedRawPayloadAdapterSyncSummary {
     pub(crate) matched_log_count: usize,
     pub(crate) total_synced_count: usize,
     pub(crate) total_inserted_count: usize,
+    /// Cheap per-chain discovery-epoch guards performed by this sync.
+    pub(crate) resolver_profile_authority_epoch_guard_count: usize,
+    /// Whole-authority scans performed only after a discovery mutation.
+    pub(crate) resolver_profile_authority_scan_count: usize,
 }
 
 impl PersistedRawPayloadAdapterSyncSummary {

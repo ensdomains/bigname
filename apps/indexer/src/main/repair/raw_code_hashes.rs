@@ -24,9 +24,12 @@ mod args;
 #[cfg(test)]
 #[path = "raw_code_hashes/tests.rs"]
 mod tests;
+#[path = "raw_code_hashes/types.rs"]
+mod types;
 #[path = "raw_code_hashes/verification.rs"]
 mod verification;
 use args::{parse_single_chain_source, parse_timestamp_arg};
+use types::*;
 use verification::{
     PROOF_SPOT_CHECK_TIMEOUT_SECS, derive_code_hashes, verify_rpc_code_sample,
     verify_rpc_proof_spot_check,
@@ -63,37 +66,6 @@ pub(crate) struct RawCodeHashCorrectionOutcome {
     pub(crate) proof_spot_check_timed_out: bool,
     pub(crate) corrected_count: i64,
     pub(crate) already_correct_during_write_count: i64,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct AddressCorrectionCensus {
-    scanned_count: i64,
-    already_correct_count: i64,
-    to_correct_count: i64,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct DerivedCodeHash {
-    pub(super) code_hash: String,
-    pub(super) code_byte_length: i64,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct CorrectionSampleRow {
-    pub(super) raw_code_hash_id: i64,
-    pub(super) block_hash: String,
-    pub(super) block_number: i64,
-    pub(super) contract_address: String,
-    pub(super) rederived_code_hash: String,
-    pub(super) rederived_code_byte_length: i64,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct VerifiedCorrectionUpdate {
-    update: RawCodeHashCorrectionUpdate,
-    block_hash: String,
-    block_number: i64,
-    contract_address: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -398,6 +370,12 @@ async fn repair_raw_code_hashes(
     }
 
     apply_corrections(pool, &config, &classification.updates, &mut outcome).await?;
+    let profile_convergence =
+        crate::resolver_profile_convergence::drain_resolver_profile_input_changes(pool)
+            .await
+            .context("failed to converge resolver profiles after raw code-hash correction")?;
+    profile_convergence
+        .ensure_chain_completion_allowed(&config.chain, "raw code-hash correction completion")?;
     Ok(outcome)
 }
 

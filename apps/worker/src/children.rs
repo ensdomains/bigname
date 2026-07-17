@@ -82,7 +82,7 @@ async fn rebuild_all_parents(pool: &PgPool) -> Result<ChildrenCurrentRebuildSumm
             rows.clear();
         }
 
-        if completed_source_count % 5_000 == 0 {
+        if completed_source_count.is_multiple_of(5_000) {
             tracing::info!(
                 projection = "children_current",
                 queued_source_count,

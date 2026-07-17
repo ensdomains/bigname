@@ -1,15 +1,14 @@
-use std::{path::PathBuf, time::Duration};
+use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
-use crate::normalized_replay_catchup::normalized_replay_cursors_complete;
-use crate::provider::ProviderRegistry;
+use crate::provider::{ProviderBlock, ProviderRegistry};
 use crate::reconciliation::{
     ChainCoverageFrontiers, HeaderAuditMode, poll_provider_heads_with_adapter_sync,
-    sync_live_adapter_backlog_after_normalized_replay,
 };
 use crate::replay::deployment_profile_from_manifest_root;
+use crate::resolver_profile_convergence::drain_resolver_profile_input_changes;
 
 use super::adapter_sync::sync_adapter_owned_raw_log_state;
 use super::intake::{
@@ -28,9 +27,18 @@ use super::refresh::{refresh_intake_chain_tasks, refresh_manifest_normalized_eve
 
 #[path = "poll_loop/discovery_refresh.rs"]
 mod discovery_refresh;
+#[path = "poll_loop/replay_handoff.rs"]
+mod replay_handoff;
 
 use discovery_refresh::refresh_discovery_watch_state;
-
+#[cfg(test)]
+pub(crate) use replay_handoff::{
+    ReplayHandoffLatchStatus, install_replay_handoff_before_latch_test_hook,
+    latch_replay_handoff_if_stable,
+};
+use replay_handoff::{
+    manifest_refresh_adapter_sync_before_handoff_readiness, renew_live_poll_adapter_sync_permit,
+};
 #[expect(clippy::too_many_arguments)]
 pub(crate) async fn run_poll_loop(
     pool: &sqlx::PgPool,
@@ -47,6 +55,7 @@ pub(crate) async fn run_poll_loop(
     discovery_refresh_enabled: bool,
     header_audit_mode: HeaderAuditMode,
     event_silent_reverse_resolver_addresses: Vec<String>,
+    latched_bootstrap_finalized_heads: BTreeMap<String, ProviderBlock>,
     coverage_frontiers: &ChainCoverageFrontiers,
 ) -> Result<()> {
     let deployment_profile = deployment_profile_from_manifest_root(&manifests_root);
@@ -129,6 +138,19 @@ pub(crate) async fn run_poll_loop(
                                             intake_entry_count_total = current_intake_state.entry_count,
                                             "failed to sync adapter-owned raw-log state after repository manifest refresh; keeping last successful runtime state"
                                         );
+                                        continue;
+                                    }
+                                    if manifest_refresh_adapter_sync_before_handoff_readiness(
+                                        adapter_sync_on_live_poll,
+                                        adapter_sync_on_manifest_refresh,
+                                        live_poll_adapter_sync_restored_after_replay,
+                                    )
+                                        && !discovery_refresh::resolver_profile_drain_succeeded(
+                                            drain_resolver_profile_input_changes(pool).await,
+                                            "timer",
+                                            "repository_manifest_reload",
+                                        )
+                                    {
                                         continue;
                                     }
 
@@ -352,80 +374,41 @@ pub(crate) async fn run_poll_loop(
                     } else {
                         Vec::new()
                     };
-                let mut effective_adapter_sync_on_live_poll = if adapter_sync_on_live_poll {
-                    true
-                } else if adapter_sync_on_live_poll_after_normalized_replay_catchup {
-                    !provider_configured_chains.is_empty()
-                        && live_poll_adapter_sync_ready_after_replay(
-                            normalized_replay_cursors_complete(
-                                pool,
-                                &deployment_profile,
-                                &provider_configured_chains,
-                            )
-                            .await,
-                        )
-                } else {
-                    false
-                };
-                if effective_adapter_sync_on_live_poll
-                    && !adapter_sync_on_live_poll
-                    && !live_poll_adapter_sync_restored_after_replay
-                {
-                    let backlog_sync_failed = match sync_live_adapter_backlog_after_normalized_replay(
+                let replay_handoff_required =
+                    adapter_sync_on_live_poll_after_normalized_replay_catchup
+                        && !adapter_sync_on_live_poll
+                        && !provider_configured_chains.is_empty();
+                let mut effective_adapter_sync_on_live_poll = adapter_sync_on_live_poll;
+                if replay_handoff_required {
+                    effective_adapter_sync_on_live_poll = renew_live_poll_adapter_sync_permit(
                         pool,
+                        provider_registry,
+                        &mut manifest_runtime_state,
+                        &mut intake_chain_tasks,
                         &deployment_profile,
                         &provider_configured_chains,
+                        &mut live_poll_adapter_sync_restored_after_replay,
+                        header_audit_mode,
+                        &event_silent_reverse_resolver_addresses,
+                        coverage_frontiers,
+                        &latched_bootstrap_finalized_heads,
                     )
-                    .await
-                    {
-                        Ok(backlog_summary) => {
-                            info!(
-                                service = "indexer",
-                                command = "poll",
-                                deployment_profile,
-                                post_replay_backlog_chain_count = backlog_summary.chain_count,
-                                post_replay_backlog_selected_block_count =
-                                    backlog_summary.selected_block_count,
-                                post_replay_backlog_scanned_log_count =
-                                    backlog_summary.scanned_log_count,
-                                post_replay_backlog_matched_log_count =
-                                    backlog_summary.matched_log_count,
-                                post_replay_backlog_normalized_event_synced_count =
-                                    backlog_summary.normalized_event_synced_count,
-                                post_replay_backlog_normalized_event_inserted_count =
-                                    backlog_summary.normalized_event_inserted_count,
-                                "live raw payload adapter sync enabled after normalized replay catch-up completed"
-                            );
-                            live_poll_adapter_sync_restored_after_replay = true;
-                            false
-                        }
-                        Err(error) => {
-                            warn!(
-                                service = "indexer",
-                                command = "poll",
-                                deployment_profile,
-                                provider_configured_chain_count = provider_configured_chains.len(),
-                                error = ?error,
-                                "failed to sync live adapter backlog after normalized replay catch-up; live poll loop will retry"
-                            );
-                            true
-                        }
-                    };
-                    effective_adapter_sync_on_live_poll =
-                        live_poll_adapter_sync_after_backlog_attempt(
-                            effective_adapter_sync_on_live_poll,
-                            backlog_sync_failed,
-                        );
+                    .await?;
+                    if !effective_adapter_sync_on_live_poll {
+                        continue;
+                    }
                 }
 
                 poll_provider_heads_with_adapter_sync(
                     pool,
                     &mut intake_chain_tasks,
                     provider_registry,
+                    &deployment_profile,
                     effective_adapter_sync_on_live_poll,
                     header_audit_mode,
                     &event_silent_reverse_resolver_addresses,
                     coverage_frontiers,
+                    &latched_bootstrap_finalized_heads,
                 )
                 .await?;
 
@@ -480,59 +463,17 @@ pub(crate) async fn run_poll_loop(
                     }
                 }
 
-                if discovery_refresh_enabled {
+                if discovery_refresh_enabled || effective_adapter_sync_on_live_poll {
                     refresh_discovery_watch_state(
                         pool,
                         provider_registry,
                         &mut manifest_runtime_state,
                         &mut intake_chain_tasks,
+                        discovery_refresh_enabled,
                     )
                     .await?;
                 }
             }
         }
-    }
-}
-
-fn live_poll_adapter_sync_ready_after_replay(replay_cursors_complete: Result<bool>) -> bool {
-    match replay_cursors_complete {
-        Ok(complete) => complete,
-        Err(error) => {
-            warn!(
-                service = "indexer",
-                command = "poll",
-                error = ?error,
-                "failed to check normalized replay cursor completion; live adapter sync remains disabled"
-            );
-            false
-        }
-    }
-}
-
-fn live_poll_adapter_sync_after_backlog_attempt(
-    adapter_sync_enabled: bool,
-    backlog_sync_failed: bool,
-) -> bool {
-    adapter_sync_enabled && !backlog_sync_failed
-}
-
-#[cfg(test)]
-mod tests {
-    use anyhow::anyhow;
-
-    use super::{
-        live_poll_adapter_sync_after_backlog_attempt, live_poll_adapter_sync_ready_after_replay,
-    };
-
-    #[test]
-    fn live_poll_adapter_sync_waits_on_replay_cursor_load_errors() {
-        assert!(!live_poll_adapter_sync_ready_after_replay(Err(anyhow!(
-            "transient database timeout"
-        ))));
-    }
-
-    #[test]
-    fn live_poll_adapter_sync_waits_when_backlog_sync_fails() {
-        assert!(!live_poll_adapter_sync_after_backlog_attempt(true, true));
     }
 }

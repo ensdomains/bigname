@@ -419,7 +419,12 @@ mod tests {
             .expect("canonicality evidence test does not touch the lazy pool");
 
         let states = evidence
-            .states_for_blocks(&pool, "ethereum-mainnet", &provider, &[losing_40.clone()])
+            .states_for_blocks(
+                &pool,
+                "ethereum-mainnet",
+                &provider,
+                std::slice::from_ref(&losing_40),
+            )
             .await?;
 
         assert_eq!(
@@ -469,7 +474,7 @@ mod tests {
                 &pool,
                 "ethereum-mainnet",
                 &provider,
-                &[canonical_40.clone()],
+                std::slice::from_ref(&canonical_40),
             )
             .await?;
 
@@ -520,7 +525,12 @@ mod tests {
             .expect("test pool must stay lazy unless stored lineage is queried");
 
         let states = evidence
-            .states_for_blocks(&pool, "ethereum-mainnet", &provider, &[losing_40.clone()])
+            .states_for_blocks(
+                &pool,
+                "ethereum-mainnet",
+                &provider,
+                std::slice::from_ref(&losing_40),
+            )
             .await?;
 
         assert_eq!(

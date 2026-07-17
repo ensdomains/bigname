@@ -4,7 +4,9 @@ use std::sync::{
 };
 
 use anyhow::{Context, Result};
-use bigname_storage::DatabaseConfig;
+use bigname_storage::{
+    DEFERRED_NORMALIZED_EVENT_INDEXES, DatabaseConfig, count_unready_normalized_event_indexes,
+};
 use sqlx::{PgPool, Postgres, pool::PoolConnection};
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
@@ -20,16 +22,6 @@ mod primary_hydration_loop;
 const CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS: &str = "raw_fact_normalized_events";
 const ALL_CURRENT_PROJECTIONS_MIN_DATABASE_CONNECTIONS: u32 = 64;
 const ALL_CURRENT_PROJECTIONS_REPLAY_LOCK_KEY: i64 = 0x4249474e414d4501_i64;
-const DEFERRED_NORMALIZED_EVENT_INDEXES: &[&str] = &[
-    "normalized_events_namespace_idx",
-    "normalized_events_kind_idx",
-    "normalized_events_manifest_idx",
-    "normalized_events_chain_position_idx",
-    "normalized_events_name_projection_replay_idx",
-    "normalized_events_resource_projection_replay_idx",
-    "normalized_events_name_relevant_projection_idx",
-    "normalized_events_record_inventory_resource_replay_idx",
-];
 const ACTIVE_INDEX_BUILDS_QUERY: &str = r#"
     SELECT COUNT(*)::bigint
     FROM pg_stat_progress_create_index
@@ -343,40 +335,53 @@ async fn replay_all_current_projections_when_ready(
         return Ok(false);
     }
 
-    let cursor_exists = projection_apply::normalized_event_cursor_exists(pool).await?;
-    let should_seed_apply_cursor = should_seed_apply_cursor_after_bootstrap(cursor_exists);
-    let bootstrap_watermark =
-        projection_apply::load_normalized_event_change_watermark(pool).await?;
-    let chain_checkpoint_max_block =
-        projection_apply::load_chain_checkpoint_max_block(pool).await?;
-    let replay_target_block = projection_bootstrap_replay_target_block(
-        readiness.normalized_replay_max_target_block,
-        chain_checkpoint_max_block,
-    );
-    info!(
-        service = "worker",
-        replay = "all_current_projections",
-        normalized_replay_cursor_count = readiness.normalized_replay_cursor_count,
-        normalized_replay_max_target_block = readiness.normalized_replay_max_target_block,
-        chain_checkpoint_max_block,
-        projection_replay_target_block = replay_target_block,
-        bootstrap_change_watermark = bootstrap_watermark.change_id,
-        "automatic all-current projection replay started"
-    );
-    let replay_result = replay::rebuild_pending_all_current_projections(
-        pool,
-        replay_target_block,
-        text_hydration_config,
-        primary_hydration_config,
-    )
+    let replay_result: Result<_> = async {
+        let cursor_exists = projection_apply::normalized_event_cursor_exists(pool).await?;
+        let captured_watermark =
+            projection_apply::load_normalized_event_change_watermark(pool).await?;
+        let chain_checkpoint_max_block =
+            projection_apply::load_chain_checkpoint_max_block(pool).await?;
+        let replay_target_block = projection_bootstrap_replay_target_block(
+            readiness.normalized_replay_max_target_block,
+            chain_checkpoint_max_block,
+        );
+        let reusable_marker_count =
+            load_current_projection_replay_marker_count(pool, replay_target_block).await?;
+        let cursor_seed = projection_bootstrap_apply_cursor_seed(
+            cursor_exists,
+            reusable_marker_count,
+            captured_watermark,
+        );
+
+        info!(
+            service = "worker",
+            replay = "all_current_projections",
+            normalized_replay_cursor_count = readiness.normalized_replay_cursor_count,
+            normalized_replay_max_target_block = readiness.normalized_replay_max_target_block,
+            chain_checkpoint_max_block,
+            projection_replay_target_block = replay_target_block,
+            captured_change_watermark = captured_watermark.change_id,
+            reusable_marker_count,
+            cursor_seed_change_id = cursor_seed.map(|cursor| cursor.change_id),
+            "automatic all-current projection replay started"
+        );
+        let summary = replay::rebuild_pending_all_current_projections(
+            pool,
+            replay_target_block,
+            text_hydration_config,
+            primary_hydration_config,
+        )
+        .await
+        .context("failed to automatically replay all current projections")?;
+        if let Some(cursor_seed) = cursor_seed {
+            projection_apply::seed_normalized_event_cursor_if_absent(pool, cursor_seed).await?;
+        }
+        Ok(summary)
+    }
     .await;
     release_replay_lock(&mut replay_lock).await?;
 
-    let summary =
-        replay_result.context("failed to automatically replay all current projections")?;
-    if should_seed_apply_cursor {
-        projection_apply::seed_normalized_event_cursor_if_absent(pool, bootstrap_watermark).await?;
-    }
+    let summary = replay_result?;
     info!(
         service = "worker",
         replay = "all_current_projections",
@@ -404,8 +409,22 @@ async fn projection_bootstrap_already_handed_off_to_apply(pool: &PgPool) -> Resu
     ))
 }
 
-fn should_seed_apply_cursor_after_bootstrap(cursor_exists: bool) -> bool {
-    !cursor_exists
+fn projection_bootstrap_apply_cursor_seed(
+    cursor_exists: bool,
+    reusable_marker_count: i64,
+    captured_watermark: projection_apply::NormalizedEventChangeCursor,
+) -> Option<projection_apply::NormalizedEventChangeCursor> {
+    if cursor_exists {
+        return None;
+    }
+
+    if reusable_marker_count > 0 {
+        // A prior process may have committed this family before it died without
+        // recording the watermark that preceded that rebuild.
+        return Some(projection_apply::NormalizedEventChangeCursor { change_id: 0 });
+    }
+
+    Some(captured_watermark)
 }
 
 fn should_skip_bootstrap_for_existing_apply_cursor(
@@ -486,19 +505,7 @@ async fn load_projection_replay_readiness(pool: &PgPool) -> Result<ProjectionRep
 }
 
 async fn missing_projection_index_count(pool: &PgPool) -> Result<i64> {
-    let required_indexes = DEFERRED_NORMALIZED_EVENT_INDEXES
-        .iter()
-        .map(|index| format!("('{index}')"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let query = format!(
-        "SELECT COUNT(*)::bigint \
-         FROM (VALUES {required_indexes}) AS required(index_name) \
-         WHERE to_regclass(required.index_name) IS NULL"
-    );
-
-    sqlx::query_scalar::<_, i64>(&query)
-        .fetch_one(pool)
+    count_unready_normalized_event_indexes(pool, DEFERRED_NORMALIZED_EVENT_INDEXES)
         .await
         .context("failed to inspect deferred normalized-event projection indexes")
 }
@@ -507,10 +514,7 @@ async fn load_current_projection_replay_marker_count(
     pool: &PgPool,
     replay_target_block: Option<i64>,
 ) -> Result<i64> {
-    let projections = replay::ALL_CURRENT_PROJECTION_ORDER
-        .iter()
-        .copied()
-        .collect::<Vec<_>>();
+    let projections = replay::ALL_CURRENT_PROJECTION_ORDER.to_vec();
 
     sqlx::query_scalar::<_, i64>(
         r#"

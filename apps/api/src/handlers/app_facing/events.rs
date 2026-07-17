@@ -32,22 +32,22 @@ pub(super) async fn events(
         storage_page_size(&pagination),
         compact_history_summary_mode(meta),
     )
-        .await
-        .map_err(|load_error| {
-            if load_error
-                .downcast_ref::<bigname_storage::InvalidHistoryCursor>()
-                .is_some()
-            {
-                return invalid_cursor_error();
-            }
+    .await
+    .map_err(|load_error| {
+        if load_error
+            .downcast_ref::<bigname_storage::InvalidHistoryCursor>()
+            .is_some()
+        {
+            return invalid_cursor_error();
+        }
 
-            error!(
-                service = "api",
-                error = ?load_error,
-                "failed to load compact events"
-            );
-            ApiError::internal_error("failed to load compact events")
-        })?;
+        error!(
+            service = "api",
+            error = ?load_error,
+            "failed to load compact events"
+        );
+        ApiError::internal_error("failed to load compact events")
+    })?;
     let page = page_response_from_storage_cursor(
         &pagination,
         &cursor_spec,
@@ -126,7 +126,9 @@ fn parse_events_filter(query: &EventsQuery) -> ApiResult<ParsedEventsFilter> {
     }
     if let Some(relation) = relation {
         cursor_filters.insert("relation".to_owned(), relation.as_str().to_owned());
-    } else if address.is_some() && trimmed_query_value(query.relation.as_deref()).as_deref() == Some("any") {
+    } else if address.is_some()
+        && trimmed_query_value(query.relation.as_deref()).as_deref() == Some("any")
+    {
         cursor_filters.insert("relation".to_owned(), "any".to_owned());
     }
     if let Some(from_block) = from_block {
@@ -265,10 +267,7 @@ fn parse_event_type_filter(value: Option<&str>) -> ApiResult<Vec<String>> {
 }
 
 fn is_normalized_event_kind(value: &str) -> bool {
-    value
-        .as_bytes()
-        .first()
-        .is_some_and(u8::is_ascii_uppercase)
+    value.as_bytes().first().is_some_and(u8::is_ascii_uppercase)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
@@ -290,7 +289,5 @@ fn trimmed_query_value(value: Option<&str>) -> Option<String> {
 }
 
 fn exact_name_query_value(value: Option<&str>) -> Option<String> {
-    value
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
+    value.filter(|value| !value.is_empty()).map(str::to_owned)
 }

@@ -10,7 +10,8 @@ pub(super) async fn name_profile(
     Query(query): Query<NameProfileQuery>,
     State(state): State<AppState>,
 ) -> ApiResult<Json<ResolutionResponse>> {
-    let parsed = normalize_inferred_route_name(&name).map_err(route_name_normalization_api_error)?;
+    let parsed =
+        normalize_inferred_route_name(&name).map_err(route_name_normalization_api_error)?;
     let namespace = parsed.namespace;
     let normalized_name = parsed.normalized_name;
 

@@ -25,7 +25,7 @@ pub async fn load_discovery_admission_state(pool: &PgPool) -> Result<DiscoveryAd
         .acquire()
         .await
         .context("failed to acquire connection for discovery admission state loading")?;
-    load_discovery_admission_state_inner(&mut *connection, None, None).await
+    load_discovery_admission_state_inner(&mut connection, None, None).await
 }
 
 pub(super) async fn load_discovery_admission_state_with_excluded_source(
@@ -131,6 +131,10 @@ async fn load_discovery_admission_state_inner(
     .await
     .context("failed to load active manifest contracts")?;
 
+    // Scoped ordered replay may use earlier edges from the same source as
+    // ancestry, including edges inserted earlier in the current transaction.
+    // An edge whose start is already orphaned is never authority, even while
+    // its superseding assignment is still waiting to be replayed.
     let active_discovered_parent_rows = if scoped {
         sqlx::query(
             r#"
@@ -158,6 +162,13 @@ async fn load_discovery_admission_state_inner(
               AND de.admission = $1
               AND de.provenance ? $2
               AND ($3::TEXT IS NULL OR de.discovery_source <> $3)
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM chain_lineage start_block
+                  WHERE start_block.chain_id = de.chain_id
+                    AND start_block.block_hash = de.active_from_block_hash
+                    AND start_block.canonicality_state = 'orphaned'::canonicality_state
+              )
             "#,
         )
         .bind(REACHABLE_FROM_ROOT_ADMISSION)
@@ -188,6 +199,13 @@ async fn load_discovery_admission_state_inner(
               AND de.admission = $1
               AND de.provenance ? $2
               AND ($3::TEXT IS NULL OR de.discovery_source <> $3)
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM chain_lineage start_block
+                  WHERE start_block.chain_id = de.chain_id
+                    AND start_block.block_hash = de.active_from_block_hash
+                    AND start_block.canonicality_state = 'orphaned'::canonicality_state
+              )
             "#,
         )
         .bind(REACHABLE_FROM_ROOT_ADMISSION)

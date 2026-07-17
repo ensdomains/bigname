@@ -154,9 +154,9 @@
         }
 
         #[tokio::test]
-        async fn ensv2_sepolia_dev_exact_name_replay() -> Result<()> {
+        async fn ensv2_sepolia_exact_name_replay() -> Result<()> {
             let database = HarnessDatabase::new().await?;
-            let corpus = seed_ensv2_sepolia_dev_exact_name_replay_corpus(&database).await?;
+            let corpus = seed_ensv2_sepolia_exact_name_replay_corpus(&database).await?;
 
             let stale_name = request_replay_route(
                 &database,
@@ -195,7 +195,7 @@
             )
             .await?;
 
-            assert_ensv2_sepolia_dev_exact_name_replay_payloads(
+            assert_ensv2_sepolia_exact_name_replay_payloads(
                 &name_payload,
                 &coverage_payload,
                 &corpus,
@@ -531,7 +531,7 @@
             .context("failed to snapshot manifest rollout and capability policy surface")
         }
 
-        async fn seed_ensv2_sepolia_dev_exact_name_replay_corpus(
+        async fn seed_ensv2_sepolia_exact_name_replay_corpus(
             database: &HarnessDatabase,
         ) -> Result<EnsV2ExactNameReplayCorpus> {
             let registry_manifest_id = database
@@ -539,7 +539,7 @@
                     "ens",
                     "ens_v2_registry_l1",
                     "ethereum-sepolia",
-                    "ens_v2_sepolia_dev",
+                    "ens_v2_sepolia_post_audit",
                     11,
                     "active",
                     "ensip15@ens-normalize-0.1.1",
@@ -550,7 +550,7 @@
                     "ens",
                     "ens_v2_registrar_l1",
                     "ethereum-sepolia",
-                    "ens_v2_sepolia_dev",
+                    "ens_v2_sepolia_post_audit",
                     11,
                     "active",
                     "ensip15@ens-normalize-0.1.1",
@@ -566,8 +566,8 @@
                 .await?;
 
             let corpus = EnsV2ExactNameReplayCorpus {
-                logical_name_id: "ens:sepolia-dev-replay.eth",
-                route_name: "sepolia-dev-replay.eth",
+                logical_name_id: "ens:sepolia-replay.eth",
+                route_name: "sepolia-replay.eth",
                 resource_id: Uuid::from_u128(0xc9a0),
                 token_lineage_id: Uuid::from_u128(0xc9a1),
                 surface_binding_id: Uuid::from_u128(0xc9a2),
@@ -590,16 +590,16 @@
                 corpus.controller,
             )
             .await?;
-            seed_ensv2_sepolia_dev_exact_name_registrar_truth(database, &corpus).await?;
-            assign_ensv2_sepolia_dev_exact_name_manifest_links(database, &corpus).await?;
+            seed_ensv2_sepolia_exact_name_registrar_truth(database, &corpus).await?;
+            assign_ensv2_sepolia_exact_name_manifest_links(database, &corpus).await?;
             database
-                .insert_name_current_row(stale_ensv2_sepolia_dev_exact_name_row(&corpus))
+                .insert_name_current_row(stale_ensv2_sepolia_exact_name_row(&corpus))
                 .await?;
 
             Ok(corpus)
         }
 
-        async fn seed_ensv2_sepolia_dev_exact_name_registrar_truth(
+        async fn seed_ensv2_sepolia_exact_name_registrar_truth(
             database: &HarnessDatabase,
             corpus: &EnsV2ExactNameReplayCorpus,
         ) -> Result<()> {
@@ -660,7 +660,7 @@
             Ok(())
         }
 
-        async fn assign_ensv2_sepolia_dev_exact_name_manifest_links(
+        async fn assign_ensv2_sepolia_exact_name_manifest_links(
             database: &HarnessDatabase,
             corpus: &EnsV2ExactNameReplayCorpus,
         ) -> Result<()> {
@@ -686,7 +686,7 @@
             Ok(())
         }
 
-        fn stale_ensv2_sepolia_dev_exact_name_row(
+        fn stale_ensv2_sepolia_exact_name_row(
             corpus: &EnsV2ExactNameReplayCorpus,
         ) -> bigname_storage::NameCurrentRow {
             bigname_storage::NameCurrentRow {
@@ -2288,7 +2288,7 @@
             );
         }
 
-        fn assert_ensv2_sepolia_dev_exact_name_replay_payloads(
+        fn assert_ensv2_sepolia_exact_name_replay_payloads(
             name_payload: &Value,
             coverage_payload: &Value,
             corpus: &EnsV2ExactNameReplayCorpus,
@@ -2392,7 +2392,7 @@
                         payload,
                         forbidden,
                         &format!(
-                            "ENSv2 sepolia-dev replay payload should not expose stale or unsupported marker {forbidden}"
+                            "ENSv2 sepolia replay payload should not expose stale or unsupported marker {forbidden}"
                         ),
                     );
                 }

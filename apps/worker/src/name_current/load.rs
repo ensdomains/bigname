@@ -148,6 +148,7 @@ pub(super) async fn load_current_binding_context(
             rb.block_timestamp,
             sb.canonicality_state::TEXT AS surface_binding_state,
             r.canonicality_state::TEXT AS resource_state,
+            r.provenance->>'authority_kind' AS resource_authority_kind,
             tl.canonicality_state::TEXT AS token_lineage_state
         FROM surface_bindings sb
         JOIN resources r

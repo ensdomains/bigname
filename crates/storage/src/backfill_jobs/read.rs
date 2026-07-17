@@ -22,6 +22,21 @@ pub async fn load_completed_backfill_jobs_intersecting_range(
     from_block: i64,
     to_block: i64,
 ) -> Result<Vec<BackfillJob>> {
+    load_completed_backfill_jobs_intersecting_range_with_executor(
+        pool, chain_id, from_block, to_block,
+    )
+    .await
+}
+
+async fn load_completed_backfill_jobs_intersecting_range_with_executor<'e, E>(
+    executor: E,
+    chain_id: &str,
+    from_block: i64,
+    to_block: i64,
+) -> Result<Vec<BackfillJob>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     let select_sql = backfill_job_select_sql(
         r#"
         WHERE chain_id = $1
@@ -35,7 +50,7 @@ pub async fn load_completed_backfill_jobs_intersecting_range(
         .bind(chain_id)
         .bind(from_block)
         .bind(to_block)
-        .fetch_all(pool)
+        .fetch_all(executor)
         .await
         .with_context(|| {
             format!(

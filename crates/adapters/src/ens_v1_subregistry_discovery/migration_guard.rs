@@ -110,14 +110,24 @@ pub(super) fn rewrite_old_registry_assignment(
     }
 }
 
-pub(super) fn current_registry_emitter(emitters: &[ActiveEmitter]) -> Option<&ActiveEmitter> {
+pub(super) fn current_registry_emitter(
+    emitters: &[ActiveEmitter],
+    target_block_number: Option<i64>,
+) -> Option<&ActiveEmitter> {
     emitters
         .iter()
         .filter(|emitter| {
             emitter.source_family == ENS_V1_REGISTRY_SOURCE_FAMILY
                 && emitter.contract_role.as_deref() == Some(CONTRACT_ROLE_REGISTRY)
+                && target_block_number
+                    .is_none_or(|block_number| emitter_covers_block(emitter, block_number))
         })
         .min_by(|left, right| emitter_precedence(left).cmp(&emitter_precedence(right)))
+}
+
+fn emitter_covers_block(emitter: &ActiveEmitter, block_number: i64) -> bool {
+    emitter.active_from_block_number.unwrap_or(i64::MIN) <= block_number
+        && block_number <= emitter.active_to_block_number.unwrap_or(i64::MAX)
 }
 
 fn emitter_precedence(emitter: &ActiveEmitter) -> (i32, i64, sqlx::types::Uuid) {
@@ -153,4 +163,41 @@ fn indexed_node(raw_log: &RegistryRawLogRow, event_name: &str) -> Result<String>
             .get(1)
             .with_context(|| format!("{event_name} log is missing indexed node topic"))?,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::types::Uuid;
+
+    use super::*;
+
+    fn registry_emitter(
+        address: &str,
+        active_from_block_number: Option<i64>,
+        active_to_block_number: Option<i64>,
+    ) -> ActiveEmitter {
+        ActiveEmitter {
+            address: address.to_owned(),
+            contract_instance_id: Uuid::from_u128(1),
+            source_manifest_id: 1,
+            namespace: "ens".to_owned(),
+            source_family: ENS_V1_REGISTRY_SOURCE_FAMILY.to_owned(),
+            manifest_version: 1,
+            contract_role: Some(CONTRACT_ROLE_REGISTRY.to_owned()),
+            active_from_block_number,
+            active_to_block_number,
+            source_rank: 0,
+        }
+    }
+
+    #[test]
+    fn bounded_current_registry_selection_ignores_closed_historical_address() {
+        let historical = registry_emitter("0x0001", Some(0), Some(9));
+        let current = registry_emitter("0x0002", Some(10), None);
+        let emitters = [historical, current.clone()];
+
+        let selected = current_registry_emitter(&emitters, Some(11));
+
+        assert_eq!(selected, Some(&current));
+    }
 }

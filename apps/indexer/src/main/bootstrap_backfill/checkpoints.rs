@@ -14,6 +14,7 @@ pub(super) async fn load_bootstrap_segment_checkpoint(
     expected_source_identity: &Value,
     range: BackfillBlockRange,
     target_ids: &BTreeSet<String>,
+    expected_retention_generation: i64,
 ) -> Result<Option<i64>> {
     let rows = sqlx::query(
         r#"
@@ -26,14 +27,10 @@ pub(super) async fn load_bootstrap_segment_checkpoint(
         WHERE bj.deployment_profile = $1
           AND bj.chain_id = $2
           AND bj.scan_mode = 'hash_pinned_block'
-          AND bj.status <> 'pending'::backfill_lifecycle_status
-          AND br.status <> 'pending'::backfill_lifecycle_status
-          AND (
-                br.status = 'completed'::backfill_lifecycle_status
-              OR br.lease_expires_at IS NULL
-              OR br.lease_expires_at < now()
-          )
+          AND bj.status = 'completed'::backfill_lifecycle_status
+          AND br.status = 'completed'::backfill_lifecycle_status
           AND bj.idempotency_key LIKE 'indexer-bootstrap-backfill:%'
+          AND bj.raw_log_retention_generation = $5
           AND br.range_start_block_number <= $4
           AND br.range_end_block_number >= $3
           AND bj.range_end_block_number >= $3
@@ -43,6 +40,7 @@ pub(super) async fn load_bootstrap_segment_checkpoint(
     .bind(chain)
     .bind(range.from_block)
     .bind(range.to_block)
+    .bind(expected_retention_generation)
     .fetch_all(pool)
     .await
     .with_context(|| {
@@ -83,6 +81,7 @@ pub(super) async fn load_bootstrap_target_checkpoint(
     expected_source_identity: &Value,
     range: BackfillBlockRange,
     target_id: &str,
+    expected_retention_generation: i64,
 ) -> Result<Option<i64>> {
     let rows = sqlx::query(
         r#"
@@ -95,14 +94,10 @@ pub(super) async fn load_bootstrap_target_checkpoint(
         WHERE bj.deployment_profile = $1
           AND bj.chain_id = $2
           AND bj.scan_mode = 'hash_pinned_block'
-          AND bj.status <> 'pending'::backfill_lifecycle_status
-          AND br.status <> 'pending'::backfill_lifecycle_status
-          AND (
-                br.status = 'completed'::backfill_lifecycle_status
-              OR br.lease_expires_at IS NULL
-              OR br.lease_expires_at < now()
-          )
+          AND bj.status = 'completed'::backfill_lifecycle_status
+          AND br.status = 'completed'::backfill_lifecycle_status
           AND bj.idempotency_key LIKE 'indexer-bootstrap-backfill:%'
+          AND bj.raw_log_retention_generation = $5
           AND br.range_start_block_number <= $4
           AND br.range_end_block_number >= $3
           AND bj.range_end_block_number >= $3
@@ -113,6 +108,7 @@ pub(super) async fn load_bootstrap_target_checkpoint(
     .bind(chain)
     .bind(range.from_block)
     .bind(range.to_block)
+    .bind(expected_retention_generation)
     .fetch_all(pool)
     .await
     .with_context(|| {

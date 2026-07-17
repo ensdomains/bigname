@@ -81,11 +81,23 @@ pub struct DiscoveryPersistenceSummary {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DiscoveryReconciliationSummary {
+    /// Total active edges for the reconciled discovery source after this call.
+    /// A scoped call limits which assignments may change, not the reported source total.
     pub active_edge_count: usize,
     pub admitted_edge_count: usize,
+    /// Edges which became active during reconciliation, whether by inserting
+    /// a new epoch or reactivating the exact retained historical epoch.
     pub inserted_edge_count: usize,
     pub deactivated_edge_count: usize,
+    /// Exact number of admission-epoch increments committed by this call.
+    pub admission_epoch_bump_count: usize,
     pub admitted_edges: Vec<AdmittedDiscoveryEdge>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(super) struct EvmEventPosition {
+    pub(super) transaction_index: i64,
+    pub(super) log_index: i64,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -100,6 +112,7 @@ pub(super) struct ReconciledDiscoveryEdgeSpec {
     pub(super) admission: String,
     pub(super) active_from_block_number: Option<i64>,
     pub(super) active_from_block_hash: Option<String>,
+    pub(super) active_from_event_position: Option<EvmEventPosition>,
     pub(super) provenance_json: String,
 }
 
@@ -108,6 +121,7 @@ pub(super) struct ExistingReconciledDiscoveryEdge {
     pub(super) discovery_edge_id: i64,
     pub(super) spec: ReconciledDiscoveryEdgeSpec,
     pub(super) to_address: String,
+    pub(super) active_from_block_is_orphaned: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -115,4 +129,5 @@ pub(super) struct ObservationTerminalState {
     pub(super) chain: String,
     pub(super) block_number: Option<i64>,
     pub(super) block_hash: Option<String>,
+    pub(super) event_position: Option<EvmEventPosition>,
 }

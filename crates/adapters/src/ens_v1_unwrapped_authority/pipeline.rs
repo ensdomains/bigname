@@ -1,108 +1,28 @@
+use super::resolver_profile_reconciliation::ResolverProfileReplayContext;
 use super::*;
 use crate::ens_v1_subregistry_discovery::ReplayAdapterCheckpointContext;
+use anyhow::ensure;
 
 mod apply;
+mod entrypoints;
 mod finalize;
 mod flush;
 mod identity;
 mod materialize;
+mod profile_stream;
 mod summary;
 use apply::*;
+pub use entrypoints::*;
 use finalize::{FinalizeAuthoritySync, PreMaterializationTimings, finalize_authority_sync};
 use flush::*;
 use identity::*;
+use profile_stream::{ResolverProfileStreamInput, sync_resolver_profile_stream};
 use summary::empty_summary;
 
 const FULL_REPLAY_RAW_LOG_STREAM_MAX_BLOCK_SCAN_SPAN: i64 = 262_144;
 const FULL_REPLAY_RAW_LOG_STREAM_DEFAULT_MAX_LOGS_PER_PAGE: usize = 100_000;
 
-pub async fn sync_ens_v1_unwrapped_authority(
-    pool: &PgPool,
-    chain: &str,
-) -> Result<EnsV1UnwrappedAuthoritySyncSummary> {
-    sync_ens_v1_unwrapped_authority_with_scope(pool, chain, false, &[], None, None, None, None)
-        .await
-}
-
-pub async fn sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limit(
-    pool: &PgPool,
-    chain: &str,
-    checkpoint: &ReplayAdapterCheckpointContext,
-    max_raw_logs_per_page: usize,
-) -> Result<EnsV1UnwrappedAuthoritySyncSummary> {
-    sync_ens_v1_unwrapped_authority_with_scope(
-        pool,
-        chain,
-        false,
-        &[],
-        None,
-        None,
-        Some(checkpoint),
-        Some(max_raw_logs_per_page),
-    )
-    .await
-}
-
-impl EnsV1UnwrappedAuthoritySyncSummary {
-    pub async fn sync_for_block_hashes(
-        pool: &PgPool,
-        chain: &str,
-        block_hashes: &[String],
-    ) -> Result<Self> {
-        sync_ens_v1_unwrapped_authority_with_scope(
-            pool,
-            chain,
-            true,
-            block_hashes,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-    }
-
-    pub async fn sync_for_block_hashes_with_source_scope(
-        pool: &PgPool,
-        chain: &str,
-        block_hashes: &[String],
-        source_scope: &[(String, String, i64, i64)],
-    ) -> Result<Self> {
-        sync_ens_v1_unwrapped_authority_with_scope(
-            pool,
-            chain,
-            true,
-            block_hashes,
-            None,
-            Some(source_scope),
-            None,
-            None,
-        )
-        .await
-    }
-
-    pub async fn sync_for_block_hashes_with_source_scope_and_transactions(
-        pool: &PgPool,
-        chain: &str,
-        block_hashes: &[String],
-        source_scope: &[(String, String, i64, i64)],
-        transaction_hashes: &[String],
-    ) -> Result<Self> {
-        sync_ens_v1_unwrapped_authority_with_scope(
-            pool,
-            chain,
-            true,
-            block_hashes,
-            Some(transaction_hashes),
-            Some(source_scope),
-            None,
-            None,
-        )
-        .await
-    }
-}
-
-async fn sync_ens_v1_unwrapped_authority_with_scope(
+pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
     pool: &PgPool,
     chain: &str,
     restrict_to_block_hashes: bool,
@@ -111,12 +31,8 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
     source_scope: Option<&[(String, String, i64, i64)]>,
     replay_checkpoint: Option<&ReplayAdapterCheckpointContext>,
     replay_max_raw_logs_per_page: Option<usize>,
+    resolver_profile_replay: Option<&mut ResolverProfileReplayContext>,
 ) -> Result<EnsV1UnwrappedAuthoritySyncSummary> {
-    let max_raw_logs_per_page = replay_max_raw_logs_per_page
-        .unwrap_or(FULL_REPLAY_RAW_LOG_STREAM_DEFAULT_MAX_LOGS_PER_PAGE);
-    if max_raw_logs_per_page == 0 {
-        bail!("ENSv1 unwrapped-authority replay max logs per page must be positive");
-    }
     let source_scope = source_scope.map(normalized_authority_source_scope_targets);
     let total_started = Instant::now();
     if source_scope.as_ref().is_some_and(Vec::is_empty) {
@@ -145,6 +61,29 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
         &generic_resolver_event_sources,
     )
     .await?;
+    if let Some(replay) = resolver_profile_replay {
+        ensure!(
+            !restrict_to_block_hashes
+                && transaction_hashes.is_none()
+                && source_scope.is_none()
+                && replay_checkpoint.is_none(),
+            "resolver-profile replay cannot be combined with another restricted or checkpointed authority scope"
+        );
+        return sync_resolver_profile_stream(ResolverProfileStreamInput {
+            pool,
+            chain,
+            raw_log_active_emitters: &raw_log_active_emitters,
+            generic_resolver_event_sources: &generic_resolver_event_sources,
+            event_topics: &event_topics,
+            replay,
+        })
+        .await;
+    }
+    let max_raw_logs_per_page = replay_max_raw_logs_per_page
+        .unwrap_or(FULL_REPLAY_RAW_LOG_STREAM_DEFAULT_MAX_LOGS_PER_PAGE);
+    if max_raw_logs_per_page == 0 {
+        bail!("ENSv1 unwrapped-authority replay max logs per page must be positive");
+    }
     let mut histories = BTreeMap::<String, NameHistory>::new();
     let mut reverse_histories = BTreeMap::<String, ReverseClaimSourceHistory>::new();
     let mut known_names_by_namehash = HashMap::<String, NameMetadata>::new();
@@ -227,6 +166,7 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
             &raw_log_active_emitters,
             &generic_resolver_event_sources,
             &event_topics,
+            None,
         )?;
         let mut stream_conn = None;
         let mut total_scanned_log_count = active_replay_checkpoint.as_ref().map_or(
@@ -273,6 +213,7 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
                 page_from_block,
                 raw_log_scan_to_block,
                 max_raw_logs_per_page,
+                None,
             )
             .await?;
             let mut page_raw_logs = Vec::new();
@@ -283,12 +224,18 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
                 &event_topics,
                 page_from_block,
                 page_to_block,
+                None,
                 |raw_log| {
                     page_raw_logs.push(raw_log);
                     Ok(())
                 },
             )
             .await?;
+            // The checkpointed invocation already dedicates one pooled
+            // connection to the raw-log mutation fence. Release the page
+            // stream connection before auxiliary reads and checkpoint writes
+            // so a two-connection pool can still make forward progress.
+            drop(stream_conn.take());
             let page_intro_positions =
                 name_intro_positions_for_raw_logs(&page_raw_logs, &event_topics)?;
             let resolver_profile_gate_started = Instant::now();
@@ -319,7 +266,6 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
             }
             stream_page_count += 1;
             if active_replay_checkpoint.is_some() {
-                drop(stream_conn.take());
                 let flushed_event_count = flush_staged_replay_events(
                     pool,
                     &mut histories,
@@ -530,6 +476,10 @@ async fn sync_ens_v1_unwrapped_authority_with_scope(
 
     if scanned_log_count == 0 {
         return Ok(empty_summary(scanned_log_count));
+    }
+
+    if let Some(checkpoint) = active_replay_checkpoint.as_ref() {
+        checkpoint.ensure_raw_log_input_current(pool).await?;
     }
 
     finalize_authority_sync(FinalizeAuthoritySync {

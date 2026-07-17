@@ -11,6 +11,8 @@ use bigname_manifests::{
     load_watched_chain_plan, load_watched_contract_summary,
 };
 
+use crate::resolver_profile_convergence::journal_resolver_profile_authority;
+
 pub(crate) fn load_manifest_repository(manifests_root: &Path) -> Result<ManifestRepository> {
     bigname_manifests::load_repository(manifests_root).with_context(|| {
         format!(
@@ -82,6 +84,11 @@ pub(crate) async fn build_manifest_runtime_state_with_watch_scope(
     watch_scope: RuntimeWatchScope,
 ) -> Result<ManifestRuntimeState> {
     let manifest_summary = manifest_repository.summary().clone();
+    let sync_summary =
+        sync_repository_or_load_stored_for_pending_rederive(pool, manifest_repository).await?;
+    // Repository sync is the manifest-authority mutation boundary. Journal
+    // its resolver-profile effects before any later bootstrap work can fail.
+    journal_resolver_profile_authority(pool).await?;
     let (
         sync_summary,
         discovery_admission,
@@ -90,9 +97,6 @@ pub(crate) async fn build_manifest_runtime_state_with_watch_scope(
         watched_chain_plan,
     ) = match watch_scope {
         RuntimeWatchScope::ActiveWatchedChain => {
-            let sync_summary =
-                sync_repository_or_load_stored_for_pending_rederive(pool, manifest_repository)
-                    .await?;
             let admission_state = bigname_manifests::load_discovery_admission_state(pool).await?;
             verify_stored_manifest_state(&sync_summary, &admission_state)?;
             (
@@ -104,9 +108,6 @@ pub(crate) async fn build_manifest_runtime_state_with_watch_scope(
             )
         }
         RuntimeWatchScope::ManifestDeclaredOnly => {
-            let sync_summary =
-                sync_repository_or_load_stored_for_pending_rederive(pool, manifest_repository)
-                    .await?;
             let stored_active_manifest_count = load_stored_active_manifest_count(pool).await?;
             verify_stored_manifest_count(&sync_summary, stored_active_manifest_count)?;
             (

@@ -1,6 +1,75 @@
 use std::sync::Mutex;
 
 #[test]
+fn bootstrap_planning_uses_finalized_head_and_fails_closed_without_it() -> Result<()> {
+    let canonical = provider_block(
+        "0x4343434343434343434343434343434343434343434343434343434343434343",
+        Some("0x4242424242424242424242424242424242424242424242424242424242424242"),
+        43,
+    );
+    let finalized = provider_block(
+        "0x4242424242424242424242424242424242424242424242424242424242424242",
+        Some("0x4141414141414141414141414141414141414141414141414141414141414141"),
+        42,
+    );
+
+    assert_eq!(
+        bootstrap_finalized_head_block(
+            "ethereum-mainnet",
+            &ProviderHeadSnapshot {
+                canonical: canonical.clone(),
+                safe: Some(finalized.clone()),
+                finalized: Some(finalized),
+            },
+        )?,
+        42,
+        "automatic bootstrap must leave the unfinalized canonical tail to live intake"
+    );
+
+    let error = bootstrap_finalized_head_block(
+        "ethereum-mainnet",
+        &ProviderHeadSnapshot {
+            canonical,
+            safe: None,
+            finalized: None,
+        },
+    )
+    .expect_err("automatic bootstrap without provider finality must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("did not return a finalized head required for automatic bootstrap"),
+        "unexpected error: {error:#}"
+    );
+
+    let error = bootstrap_finalized_head_block(
+        "ethereum-mainnet",
+        &ProviderHeadSnapshot {
+            canonical: provider_block(
+                "0x4343434343434343434343434343434343434343434343434343434343434343",
+                None,
+                43,
+            ),
+            safe: None,
+            finalized: Some(provider_block(
+                "0x4444444444444444444444444444444444444444444444444444444444444444",
+                None,
+                44,
+            )),
+        },
+    )
+    .expect_err("provider finality above canonical must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("returned finalized block 44 above canonical block 43"),
+        "unexpected error: {error:#}"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn ensure_manifest_root_ready_accepts_loaded_root() -> Result<()> {
     ensure_manifest_root_ready(&manifest_load_summary(ManifestLoadStatus::Loaded))
 }
@@ -554,7 +623,7 @@ async fn sync_intake_chain_tasks_preserves_manifest_contract_implementation_addr
 }
 
 #[tokio::test]
-async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_checkpoints()
+async fn bootstrap_auto_backfill_clamps_numeric_coverage_to_finalized_head_and_preserves_checkpoints()
 -> Result<()> {
     let database = TestDatabase::new().await?;
     create_bootstrap_backfill_job_tables(database.pool()).await?;
@@ -759,7 +828,7 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
         43,
     );
     let requests = Arc::new(Mutex::new(Vec::<BootstrapRpcRequest>::new()));
-    let (provider, server) = bootstrap_auto_backfill_provider(
+    let (provider, server) = bootstrap_auto_backfill_provider_with_finalized_block(
         vec![
             ProviderBlockFixture {
                 block: block_42.clone(),
@@ -779,6 +848,7 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
             },
         ],
         Arc::clone(&requests),
+        42,
     )
     .await?;
     let provider_registry =
@@ -800,6 +870,11 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
     assert_eq!(outcome.active_chain_count, 2);
     assert_eq!(outcome.provider_configured_chain_count, 1);
     assert_eq!(outcome.missing_provider_chain_count, 1);
+    assert_eq!(
+        outcome.latched_finalized_heads.get("ethereum-mainnet"),
+        Some(&block_42),
+        "live reconciliation must receive the exact finalized head latched by bootstrap"
+    );
     assert_eq!(outcome.eligible_target_count, 3);
     assert_eq!(outcome.skipped_unknown_start_target_count, 1);
     assert_eq!(outcome.skipped_unknown_start_targets.len(), 1);
@@ -823,9 +898,9 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
     assert_eq!(outcome.skipped_future_target_count, 1);
     assert_eq!(outcome.reserved_range_count, 1);
     assert_eq!(outcome.completed_range_count, 1);
-    assert_eq!(outcome.resolved_block_count, 2);
-    assert_eq!(outcome.raw_log_count, 6);
-    assert_eq!(outcome.raw_code_hash_count, 4);
+    assert_eq!(outcome.resolved_block_count, 1);
+    assert_eq!(outcome.raw_log_count, 3);
+    assert_eq!(outcome.raw_code_hash_count, 2);
 
     let jobs = sqlx::query_as::<_, (i64, String, String, i64, i64, String, Value)>(
         r#"
@@ -855,12 +930,12 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
     ) = &jobs[0];
     assert_eq!(deployment_profile, "sepolia");
     assert_eq!(chain_id, "ethereum-mainnet");
-    assert_eq!((*from_block, *to_block), (42, 43));
+    assert_eq!((*from_block, *to_block), (42, 42));
     assert!(idempotency_key.starts_with("indexer-bootstrap-backfill:v3:"));
     assert!(idempotency_key.contains("deployment_profile=sepolia"));
     assert!(!idempotency_key.contains("manifest_root="));
     assert!(idempotency_key.contains("chain=ethereum-mainnet"));
-    assert!(idempotency_key.contains("from=42:to=43"));
+    assert!(idempotency_key.contains("from=42:to=42"));
     assert_eq!(
         source_identity.get("selector_kind").and_then(Value::as_str),
         Some("watched_target_set")
@@ -905,21 +980,21 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
             .bind(eligible_address)
             .fetch_one(database.pool())
             .await?,
-        2
+        1
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_logs WHERE emitting_address = $1")
             .bind(grouped_address)
             .fetch_one(database.pool())
             .await?,
-        2
+        1
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_logs WHERE emitting_address = $1")
             .bind(future_address)
             .fetch_one(database.pool())
             .await?,
-        2
+        1
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_logs WHERE emitting_address = $1")
@@ -975,12 +1050,38 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM chain_lineage")
             .fetch_one(database.pool())
             .await?,
-        2
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM chain_lineage WHERE block_number = 43")
+            .fetch_one(database.pool())
+            .await?,
+        0,
+        "the unfinalized canonical tail must not become bootstrap coverage input"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT MAX(covered_to_block) FROM backfill_coverage_facts"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        Some(42),
+        "number-keyed coverage must stop at the provider finalized head"
     );
     let initial_requests = requests
         .lock()
         .expect("request log must not be poisoned")
         .clone();
+    assert!(
+        !crate::bootstrap_backfill::load_bootstrap_retention_snapshot(
+            database.pool(),
+            "ethereum-mainnet",
+            42,
+        )
+        .await?
+        .requires_ens_v2_history_recovery,
+        "an incomplete generic raw-log row must not invent ENSv2 recovery on a non-ENSv2 chain"
+    );
 
     let rerun = run_startup_bootstrap_backfills(
         database.pool(),
@@ -1014,6 +1115,63 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
         *backfill_job_id
     );
 
+    sqlx::query(
+        r#"
+        UPDATE raw_log_staging_input_revisions
+        SET retention_generation = retention_generation + 1
+        WHERE chain_id = 'ethereum-mainnet'
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    let after_retention = run_startup_bootstrap_backfills(
+        database.pool(),
+        &manifest_root,
+        &intake_tasks,
+        &provider_registry,
+        crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
+        crate::backfill::BackfillAdapterSyncMode::Inline,
+        false,
+        HeaderAuditMode::Minimal,
+        crate::bootstrap_backfill::DEFAULT_BOOTSTRAP_BACKFILL_WORKERS,
+        crate::bootstrap_backfill::DEFAULT_BOOTSTRAP_BACKFILL_RANGE_BLOCKS,
+    )
+    .await?;
+    assert_eq!(after_retention.drained_job_count, 1);
+    assert_eq!(after_retention.reserved_range_count, 1);
+    assert_eq!(after_retention.completed_range_count, 1);
+    let generation_jobs = sqlx::query_as::<_, (i64, String)>(
+        r#"
+        SELECT raw_log_retention_generation, idempotency_key
+        FROM backfill_jobs
+        ORDER BY backfill_job_id
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(generation_jobs.len(), 2);
+    assert_eq!(generation_jobs[0].0, 0);
+    assert_eq!(generation_jobs[1].0, 1);
+    assert!(
+        generation_jobs[0]
+            .1
+            .ends_with(":raw_log_retention_generation=0")
+    );
+    assert!(
+        generation_jobs[1]
+            .1
+            .ends_with(":raw_log_retention_generation=1")
+    );
+    assert_eq!(
+        generation_jobs[0]
+            .1
+            .strip_suffix(":raw_log_retention_generation=0"),
+        generation_jobs[1]
+            .1
+            .strip_suffix(":raw_log_retention_generation=1"),
+        "retention rotation must preserve the logical bootstrap identity while creating recovery work"
+    );
+
     let requests = initial_requests;
     assert!(
         requests
@@ -1025,8 +1183,16 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
     assert!(
         requests
             .iter()
+            .any(|request| request.method == "eth_getBlockByNumber"
+                && request.params.first().and_then(Value::as_str) == Some("finalized")),
+        "automatic bootstrap must fetch provider finality before scheduling number-keyed coverage"
+    );
+    assert!(
+        requests
+            .iter()
             .filter(|request| request.method == "eth_getCode")
-            .all(|request| request.params.first().and_then(Value::as_str) == Some(eligible_address)
+            .all(|request| request.params.first().and_then(Value::as_str)
+                == Some(eligible_address)
                 || request.params.first().and_then(Value::as_str) == Some(grouped_address)),
         "unknown-start and future targets must not be code-fetched by automatic bootstrap"
     );
@@ -1034,39 +1200,43 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
         .iter()
         .filter(|request| request.method == "eth_getCode")
         .collect::<Vec<_>>();
-    assert_eq!(code_requests.len(), 4);
-    assert_eq!(code_requests[0].batch_size, 4);
+    assert_eq!(code_requests.len(), 2);
+    assert_eq!(code_requests[0].batch_size, 2);
+    assert!(
+        code_requests.iter().all(|request| request.http_request_id
+            == code_requests[0].http_request_id
+            && request.batch_size == 2),
+        "grouped bootstrap code lookups should use one JSON-RPC batch HTTP request"
+    );
+    let expected_code_block = json!({ "blockHash": block_42.block_hash.clone() });
     assert!(
         code_requests
             .iter()
-            .all(|request| request.http_request_id == code_requests[0].http_request_id
-                && request.batch_size == 4),
-        "grouped bootstrap code lookups should use one JSON-RPC batch HTTP request"
+            .all(|request| request.params.get(1) == Some(&expected_code_block)),
+        "grouped bootstrap should pin code observations directly to the finalized selected block hash"
     );
     let block_number_requests = requests
         .iter()
         .enumerate()
-        .filter(|(_, request)| request.method == "eth_getBlockByNumber"
-            && request
-                .params
-                .first()
-                .and_then(Value::as_str)
-                .is_some_and(|value| value.starts_with("0x")))
+        .filter(|(_, request)| {
+            request.method == "eth_getBlockByNumber"
+                && request
+                    .params
+                    .first()
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value.starts_with("0x"))
+        })
         .collect::<Vec<_>>();
     assert_eq!(
         block_number_requests.len(),
-        6,
-        "grouped bootstrap should resolve, revalidate, and code-pin the two selected target blocks"
+        2,
+        "grouped bootstrap should resolve and revalidate only finalized selected target blocks"
     );
-    let resolved_block_params = block_number_requests[..2]
+    let resolved_block_params = block_number_requests[..1]
         .iter()
         .map(|(_, request)| request.params.first().and_then(Value::as_str))
         .collect::<Vec<_>>();
-    let revalidated_block_params = block_number_requests[2..4]
-        .iter()
-        .map(|(_, request)| request.params.first().and_then(Value::as_str))
-        .collect::<Vec<_>>();
-    let code_observation_block_params = block_number_requests[4..]
+    let revalidated_block_params = block_number_requests[1..2]
         .iter()
         .map(|(_, request)| request.params.first().and_then(Value::as_str))
         .collect::<Vec<_>>();
@@ -1074,43 +1244,28 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
         resolved_block_params, revalidated_block_params,
         "grouped bootstrap should revalidate the same block hashes after fetching logs"
     );
-    assert_eq!(
-        resolved_block_params, code_observation_block_params,
-        "grouped bootstrap should pin code observations to the selected block hashes"
-    );
     let log_requests = requests
         .iter()
         .enumerate()
-        .filter(|(_, request)| {
-            request.method == "eth_getLogs"
-                && request
-                    .params
-                    .first()
-                    .and_then(Value::as_object)
-                    .is_some_and(|filter| filter.contains_key("fromBlock"))
-        })
+        .filter(|(_, request)| request.method == "eth_getLogs")
         .collect::<Vec<_>>();
     assert_eq!(
         log_requests.len(),
         1,
-        "grouped bootstrap should fetch one safe log range for a stable target set"
+        "single-block finalized bootstrap should fetch one hash-pinned log set"
     );
     assert!(
-        block_number_requests[1].0 < log_requests[0].0
-            && log_requests[0].0 < block_number_requests[2].0,
-        "grouped bootstrap should fetch logs between range resolution and revalidation"
+        block_number_requests[0].0 < log_requests[0].0
+            && log_requests[0].0 < block_number_requests[1].0,
+        "grouped bootstrap should fetch logs between block resolution and revalidation"
     );
-    for batch in [
-        &block_number_requests[..2],
-        &block_number_requests[2..4],
-        &block_number_requests[4..],
-    ] {
-        assert_eq!(batch[0].1.batch_size, 2);
+    for batch in [&block_number_requests[..1], &block_number_requests[1..2]] {
+        assert_eq!(batch[0].1.batch_size, 1);
         assert!(
             batch.iter().all(|(_, request)| {
-                request.http_request_id == batch[0].1.http_request_id && request.batch_size == 2
+                request.http_request_id == batch[0].1.http_request_id && request.batch_size == 1
             }),
-            "grouped bootstrap block lookups should use two-call JSON-RPC batch HTTP requests"
+            "single-block finalized bootstrap lookups should use one-call JSON-RPC HTTP requests"
         );
     }
     assert_eq!(log_requests[0].1.batch_size, 1);
@@ -1120,22 +1275,515 @@ async fn bootstrap_auto_backfill_drains_manifest_started_targets_and_preserves_c
         .first()
         .and_then(Value::as_object)
         .expect("log request must include a filter object");
-    assert_eq!(filter.get("fromBlock").and_then(Value::as_str), Some("0x2a"));
-    assert_eq!(filter.get("toBlock").and_then(Value::as_str), Some("0x2b"));
-    assert!(
-        !filter.contains_key("blockHash"),
-        "bootstrap backfill logs must use the selected target range instead of per-block blockHash filters"
-    );
     assert_eq!(
-        filter.get("address").and_then(Value::as_array),
-        Some(&vec![
-            Value::String(eligible_address.to_owned()),
-            Value::String(grouped_address.to_owned()),
-        ]),
-        "bootstrap log range must include grouped eligible addresses only"
+        filter.get("blockHash").and_then(Value::as_str),
+        Some(block_42.block_hash.as_str())
+    );
+    assert!(
+        !filter.contains_key("fromBlock") && !filter.contains_key("toBlock"),
+        "single-block bootstrap logs must remain pinned to the resolved block hash"
     );
 
     server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn bootstrap_recovery_keeps_raw_only_adapter_free_then_inline_converges_after_rotation()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_bootstrap_backfill_job_tables(database.pool()).await?;
+    let chain = "ethereum-sepolia";
+    let manifest_root = PathBuf::from("manifests/sepolia");
+    let root_manifest_id = 9_101;
+    let registry_manifest_id = 9_102;
+    let resolver_manifest_id = 9_103;
+    let root_contract_instance_id = Uuid::from_u128(91_001);
+    let registry_contract_instance_id = Uuid::from_u128(91_002);
+    let root_address = "0x0000000000000000000000000000000000009101";
+    let registry_address = "0x0000000000000000000000000000000000009102";
+    let child_address = "0x0000000000000000000000000000000000009103";
+    let resolver_address = "0x0000000000000000000000000000000000009104";
+
+    insert_bootstrap_manifest_version(
+        database.pool(),
+        root_manifest_id,
+        "ens",
+        chain,
+        "ens_v2_root_l1",
+        json!({
+            "roots": [{
+                "name": "RootRegistry",
+                "address": root_address,
+                "start_block": 1
+            }],
+            "contracts": []
+        }),
+    )
+    .await?;
+    insert_contract_instance(database.pool(), root_contract_instance_id, chain, "root").await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        root_contract_instance_id,
+        chain,
+        root_address,
+        Some(root_manifest_id),
+    )
+    .await?;
+    insert_manifest_root_contract_instance(
+        database.pool(),
+        root_manifest_id,
+        root_contract_instance_id,
+        root_address,
+    )
+    .await?;
+
+    insert_bootstrap_manifest_version(
+        database.pool(),
+        registry_manifest_id,
+        "ens",
+        chain,
+        "ens_v2_registry_l1",
+        json!({
+            "roots": [{
+                "name": "RootRegistry",
+                "address": registry_address,
+                "start_block": 1
+            }],
+            "contracts": [{
+                "role": "registry",
+                "address": registry_address,
+                "start_block": 1
+            }],
+            "discovery_rules": [{
+                "edge_kind": "subregistry",
+                "from_role": "registry",
+                "admission": "reachable_from_root"
+            }, {
+                "edge_kind": "resolver",
+                "from_role": "registry",
+                "admission": "reachable_from_root"
+            }]
+        }),
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        registry_contract_instance_id,
+        chain,
+        "contract",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        registry_contract_instance_id,
+        chain,
+        registry_address,
+        Some(registry_manifest_id),
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        registry_manifest_id,
+        "registry",
+        registry_contract_instance_id,
+        registry_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+    insert_manifest_root_contract_instance(
+        database.pool(),
+        registry_manifest_id,
+        registry_contract_instance_id,
+        registry_address,
+    )
+    .await?;
+    insert_manifest_discovery_rule(
+        database.pool(),
+        registry_manifest_id,
+        "subregistry",
+        "registry",
+        "reachable_from_root",
+    )
+    .await?;
+    insert_manifest_discovery_rule(
+        database.pool(),
+        registry_manifest_id,
+        "resolver",
+        "registry",
+        "reachable_from_root",
+    )
+    .await?;
+    insert_bootstrap_manifest_version(
+        database.pool(),
+        resolver_manifest_id,
+        "ens",
+        chain,
+        "ens_v2_resolver_l1",
+        json!({
+            "roots": [],
+            "contracts": [],
+            "discovery_rules": []
+        }),
+    )
+    .await?;
+
+    let watched_plan = load_watched_chain_plan(database.pool()).await?;
+    let intake_tasks = sync_intake_chain_tasks(database.pool(), &watched_plan).await?;
+    assert_eq!(intake_tasks.len(), 1);
+    assert!(
+        !intake_tasks[0]
+            .addresses
+            .contains(&child_address.to_owned()),
+        "the child must be discovered from the first bootstrap pass, not seeded in the current watch plan"
+    );
+
+    let block_1 = provider_block(
+        "0x1000000000000000000000000000000000000000000000000000000000000001",
+        Some("0x0000000000000000000000000000000000000000000000000000000000000000"),
+        1,
+    );
+    let block_2 = provider_block(
+        "0x2000000000000000000000000000000000000000000000000000000000000002",
+        Some(&block_1.block_hash),
+        2,
+    );
+    let block_3 = provider_block(
+        "0x3000000000000000000000000000000000000000000000000000000000000003",
+        Some(&block_2.block_hash),
+        3,
+    );
+    let block_4 = provider_block(
+        "0x4000000000000000000000000000000000000000000000000000000000000004",
+        Some(&block_3.block_hash),
+        4,
+    );
+    let requests = Arc::new(Mutex::new(Vec::<BootstrapRpcRequest>::new()));
+    let (provider, server) = bootstrap_auto_backfill_provider(
+        vec![
+            ProviderBlockFixture {
+                block: block_1.clone(),
+                logs: vec![rpc_ens_v2_label_registered_log_payload(
+                    &block_1,
+                    registry_address,
+                    1,
+                    "alice",
+                    0,
+                )],
+            },
+            ProviderBlockFixture {
+                block: block_2.clone(),
+                logs: vec![
+                    rpc_ens_v2_subregistry_updated_log_payload(
+                        &block_2,
+                        registry_address,
+                        child_address,
+                        1,
+                        0,
+                    ),
+                    rpc_ens_v2_resolver_updated_log_payload(
+                        &block_2,
+                        registry_address,
+                        resolver_address,
+                        1,
+                        1,
+                    ),
+                ],
+            },
+            ProviderBlockFixture {
+                block: block_3.clone(),
+                logs: vec![rpc_ens_v2_resolver_history_log_payload(
+                    &block_3,
+                    resolver_address,
+                    0,
+                )],
+            },
+            ProviderBlockFixture {
+                block: block_4.clone(),
+                logs: vec![
+                    rpc_ens_v2_subregistry_updated_log_payload(
+                        &block_4,
+                        registry_address,
+                        "0x0000000000000000000000000000000000000000",
+                        1,
+                        0,
+                    ),
+                    rpc_ens_v2_resolver_updated_log_payload(
+                        &block_4,
+                        registry_address,
+                        "0x0000000000000000000000000000000000000000",
+                        1,
+                        1,
+                    ),
+                ],
+            },
+        ],
+        Arc::clone(&requests),
+    )
+    .await?;
+    let provider_registry =
+        ProviderRegistry::from_chain_rpc_urls(&[format!("{chain}={provider}")])?;
+    let adapter_pool = database.additional_pool(6).await?;
+
+    let first = run_startup_bootstrap_backfills(
+        &adapter_pool,
+        &manifest_root,
+        &intake_tasks,
+        &provider_registry,
+        crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
+        crate::backfill::BackfillAdapterSyncMode::Auto,
+        false,
+        HeaderAuditMode::Minimal,
+        1,
+        crate::bootstrap_backfill::DEFAULT_BOOTSTRAP_BACKFILL_RANGE_BLOCKS,
+    )
+    .await?;
+    let after_fresh_discovery =
+        crate::bootstrap_backfill::load_bootstrap_retention_snapshot(database.pool(), chain, 4)
+            .await?;
+    assert_eq!(
+        first.drained_job_count,
+        2,
+        "bootstrap returned with retained-history snapshot {after_fresh_discovery:?} and child coverage generations {:?}",
+        address_coverage_generations(
+            database.pool(),
+            chain,
+            "ens_v2_registry_l1",
+            child_address,
+            2,
+            4,
+        )
+        .await?
+    );
+    assert_eq!(
+        address_coverage_generations(
+            database.pool(),
+            chain,
+            "ens_v2_registry_l1",
+            child_address,
+            2,
+            4,
+        )
+        .await?,
+        vec![0]
+    );
+    assert_eq!(
+        address_coverage_generations(
+            database.pool(),
+            chain,
+            "ens_v2_resolver_l1",
+            resolver_address,
+            2,
+            4,
+        )
+        .await?,
+        vec![0],
+        "fresh Auto must provider-backfill the resolver from its discovered edge start through the latched head"
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM raw_logs WHERE chain_id = $1 AND emitting_address = lower($2) AND block_number = 3)"
+        )
+        .bind(chain)
+        .bind(resolver_address)
+        .fetch_one(database.pool())
+        .await?,
+        "the resolver history log must be fetched during the same startup invocation"
+    );
+    let child_contract_instance_id = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT cia.contract_instance_id
+        FROM contract_instance_addresses cia
+        JOIN discovery_edges edge
+          ON edge.to_contract_instance_id = cia.contract_instance_id
+         AND edge.chain_id = cia.chain_id
+        WHERE cia.chain_id = $1
+          AND cia.address = lower($2)
+          AND edge.active_from_block_number = 2
+          AND edge.active_to_block_number = 4
+        "#,
+    )
+    .bind(chain)
+    .bind(child_address)
+    .fetch_one(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE raw_log_staging_input_revisions
+        SET retention_generation = 1,
+            retained_history_complete = false,
+            incomplete_since = now(),
+            proven_retention_generation = NULL,
+            proven_discovery_admission_epoch = NULL,
+            proven_through_block = NULL
+        WHERE chain_id = $1
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    let stale_error =
+        match bigname_adapters::sync_ens_v2_registry_resource_surface(&adapter_pool, chain).await {
+            Ok(_) => anyhow::bail!("generation-zero child coverage restored generation one"),
+            Err(error) => error,
+        };
+    assert_eq!(
+        bigname_adapters::ens_v2_missing_coverage(&stale_error),
+        Some(&bigname_adapters::EnsV2MissingCoverage {
+            chain: chain.to_owned(),
+            retention_generation: 1,
+            source_family: "ens_v2_registry_l1".to_owned(),
+            address: registry_address.to_owned(),
+            required_from_block: 1,
+            required_to_block: 4,
+        }),
+        "unexpected stale-generation error: {stale_error:#}",
+    );
+    let adapter_owned_counts_before_raw_only = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+        r#"
+            SELECT
+                (SELECT COUNT(*) FROM resources),
+                (SELECT COUNT(*) FROM surface_bindings),
+                (SELECT COUNT(*) FROM normalized_events),
+                (SELECT COUNT(*) FROM discovery_edges)
+            "#,
+    )
+    .fetch_one(database.pool())
+    .await?;
+
+    let _forced_rotation =
+        crate::bootstrap_backfill::install_forced_retention_rotation(database.pool(), chain)
+            .await?;
+    let second = run_startup_bootstrap_backfills(
+        &adapter_pool,
+        &manifest_root,
+        &intake_tasks,
+        &provider_registry,
+        crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
+        crate::backfill::BackfillAdapterSyncMode::RawOnly,
+        false,
+        HeaderAuditMode::Minimal,
+        1,
+        crate::bootstrap_backfill::DEFAULT_BOOTSTRAP_BACKFILL_RANGE_BLOCKS,
+    )
+    .await?;
+    assert_eq!(second.drained_job_count, 4);
+    assert_eq!(
+        address_coverage_generations(
+            database.pool(),
+            chain,
+            "ens_v2_registry_l1",
+            child_address,
+            2,
+            4,
+        )
+        .await?,
+        vec![0, 1, 2]
+    );
+    assert_eq!(
+        address_coverage_generations(
+            database.pool(),
+            chain,
+            "ens_v2_resolver_l1",
+            resolver_address,
+            2,
+            4,
+        )
+        .await?,
+        vec![0, 1, 2]
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (bool, Option<i64>, Option<i64>)>(
+            r#"
+            SELECT
+                retained_history_complete,
+                proven_retention_generation,
+                proven_through_block
+            FROM raw_log_staging_input_revisions
+            WHERE chain_id = $1
+            "#,
+        )
+        .bind(chain)
+        .fetch_one(database.pool())
+        .await?,
+        (false, None, None),
+        "raw-only bootstrap must leave retained-history reconciliation for a later adapter-enabled run"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64, i64, i64)>(
+            r#"
+            SELECT
+                (SELECT COUNT(*) FROM resources),
+                (SELECT COUNT(*) FROM surface_bindings),
+                (SELECT COUNT(*) FROM normalized_events),
+                (SELECT COUNT(*) FROM discovery_edges)
+            "#,
+        )
+        .fetch_one(database.pool())
+        .await?,
+        adapter_owned_counts_before_raw_only,
+        "raw-only bootstrap may refresh raw facts and coverage but must not write adapter-owned identity, event, or discovery rows"
+    );
+
+    let inline = run_startup_bootstrap_backfills(
+        &adapter_pool,
+        &manifest_root,
+        &intake_tasks,
+        &provider_registry,
+        crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
+        crate::backfill::BackfillAdapterSyncMode::Inline,
+        false,
+        HeaderAuditMode::Minimal,
+        1,
+        crate::bootstrap_backfill::DEFAULT_BOOTSTRAP_BACKFILL_RANGE_BLOCKS,
+    )
+    .await?;
+    assert_eq!(
+        inline.drained_job_count, 0,
+        "inline convergence must reuse current-generation raw coverage rather than inventing new provider work"
+    );
+
+    assert_eq!(
+        sqlx::query_as::<_, (bool, Option<i64>, Option<i64>)>(
+            r#"
+            SELECT
+                retained_history_complete,
+                proven_retention_generation,
+                proven_through_block
+            FROM raw_log_staging_input_revisions
+            WHERE chain_id = $1
+            "#,
+        )
+        .bind(chain)
+        .fetch_one(database.pool())
+        .await?,
+        (true, Some(2), Some(4)),
+        "inline bootstrap must publish the current-generation retained-history proof before reporting stable"
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM discovery_edges
+                WHERE chain_id = $1
+                  AND edge_kind = 'subregistry'
+                  AND to_contract_instance_id = $2
+                  AND active_from_block_number = 2
+                  AND active_to_block_number = 4
+            )
+            "#,
+        )
+        .bind(chain)
+        .bind(child_contract_instance_id)
+        .fetch_one(database.pool())
+        .await?
+    );
+
+    server.abort();
+    adapter_pool.close().await;
     database.cleanup().await
 }
 
@@ -1375,10 +2023,12 @@ async fn bootstrap_auto_backfill_scans_ensv1_resolver_events_by_source_family() 
         (resolver_b_address, 1_i64),
     ] {
         assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_logs WHERE emitting_address = $1")
-                .bind(address)
-                .fetch_one(database.pool())
-                .await?,
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM raw_logs WHERE emitting_address = $1"
+            )
+            .bind(address)
+            .fetch_one(database.pool())
+            .await?,
             expected_count
         );
     }
@@ -1472,7 +2122,7 @@ async fn bootstrap_auto_backfill_scans_ensv1_resolver_events_by_source_family() 
 }
 
 #[tokio::test]
-async fn bootstrap_auto_backfill_covers_declared_start_to_provider_head() -> Result<()> {
+async fn bootstrap_auto_backfill_covers_declared_start_to_provider_finalized_head() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_bootstrap_backfill_job_tables(database.pool()).await?;
     let manifest_root = PathBuf::from("manifests/mainnet");
@@ -1810,6 +2460,197 @@ async fn bootstrap_auto_backfill_covers_declared_start_to_provider_head() -> Res
 }
 
 #[tokio::test]
+async fn bootstrap_failed_partial_checkpoint_resumes_full_range_job_before_recording_coverage()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_bootstrap_backfill_job_tables(database.pool()).await?;
+    let manifest_root = PathBuf::from("manifests/mainnet");
+    let contract_instance_id = Uuid::from_u128(9_600);
+    let address = "0x0000000000000000000000000000000000000960";
+
+    insert_bootstrap_manifest_version(
+        database.pool(),
+        960,
+        "ens",
+        "ethereum-mainnet",
+        "ens_bootstrap_registry",
+        json!({
+            "contracts": [
+                {
+                    "role": "registry",
+                    "address": address,
+                    "start_block": 1
+                }
+            ],
+            "roots": []
+        }),
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        contract_instance_id,
+        "ethereum-mainnet",
+        "contract",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        contract_instance_id,
+        "ethereum-mainnet",
+        address,
+        Some(960),
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        960,
+        "registry",
+        contract_instance_id,
+        address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+
+    let watched_plan = load_watched_chain_plan(database.pool()).await?;
+    let intake_tasks = sync_intake_chain_tasks(database.pool(), &watched_plan).await?;
+    let block_1 = provider_block(
+        "0x1000000000000000000000000000000000000000000000000000000000000061",
+        Some("0x0000000000000000000000000000000000000000000000000000000000000000"),
+        1,
+    );
+    let block_2 = provider_block(
+        "0x2000000000000000000000000000000000000000000000000000000000000062",
+        Some(&block_1.block_hash),
+        2,
+    );
+    let block_3 = provider_block(
+        "0x3000000000000000000000000000000000000000000000000000000000000063",
+        Some(&block_2.block_hash),
+        3,
+    );
+    let block_4 = provider_block(
+        "0x4000000000000000000000000000000000000000000000000000000000000064",
+        Some(&block_3.block_hash),
+        4,
+    );
+    let fixtures = vec![block_1, block_2, block_3, block_4]
+        .into_iter()
+        .map(|block| ProviderBlockFixture {
+            logs: vec![bootstrap_rpc_log_payload_at_address(&block, address, 0)],
+            block,
+        })
+        .collect();
+    let requests = Arc::new(Mutex::new(Vec::<BootstrapRpcRequest>::new()));
+    let (provider, server) = bootstrap_auto_backfill_provider_failing_log_range_once(
+        fixtures,
+        Arc::clone(&requests),
+        BackfillBlockRange::new(3, 4)?,
+    )
+    .await?;
+    let provider_registry =
+        ProviderRegistry::from_chain_rpc_urls(&[format!("ethereum-mainnet={provider}")])?;
+
+    let first_error = run_startup_bootstrap_backfills(
+        database.pool(),
+        &manifest_root,
+        &intake_tasks,
+        &provider_registry,
+        2,
+        crate::backfill::BackfillAdapterSyncMode::RawOnly,
+        false,
+        HeaderAuditMode::Minimal,
+        crate::bootstrap_backfill::DEFAULT_BOOTSTRAP_BACKFILL_WORKERS,
+        crate::bootstrap_backfill::DEFAULT_BOOTSTRAP_BACKFILL_RANGE_BLOCKS,
+    )
+    .await
+    .expect_err("the second chunk must fail after the first checkpoint is durable");
+    assert!(
+        format!("{first_error:#}").contains("intentional bootstrap partial-checkpoint failure"),
+        "unexpected bootstrap failure: {first_error:#}"
+    );
+
+    let partial = sqlx::query_as::<_, (i64, String, String, i64, i64, i64)>(
+        r#"
+        SELECT
+            job.backfill_job_id,
+            job.status::text,
+            range.status::text,
+            range.range_start_block_number,
+            range.range_end_block_number,
+            range.checkpoint_block_number
+        FROM backfill_jobs job
+        JOIN backfill_ranges range USING (backfill_job_id)
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        (&partial.1, &partial.2, partial.3, partial.4, partial.5),
+        (&"failed".to_owned(), &"failed".to_owned(), 1, 4, 2)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM backfill_coverage_facts")
+            .fetch_one(database.pool())
+            .await?,
+        0,
+        "an incomplete parent job must not mint coverage facts"
+    );
+
+    let resumed = run_startup_bootstrap_backfills(
+        database.pool(),
+        &manifest_root,
+        &intake_tasks,
+        &provider_registry,
+        2,
+        crate::backfill::BackfillAdapterSyncMode::RawOnly,
+        false,
+        HeaderAuditMode::Minimal,
+        crate::bootstrap_backfill::DEFAULT_BOOTSTRAP_BACKFILL_WORKERS,
+        crate::bootstrap_backfill::DEFAULT_BOOTSTRAP_BACKFILL_RANGE_BLOCKS,
+    )
+    .await?;
+    assert_eq!(resumed.drained_job_count, 1);
+    assert_eq!(resumed.resolved_block_count, 2);
+
+    let coverage = sqlx::query_as::<_, (i64, i64, i64)>(
+        r#"
+        SELECT
+            fact.backfill_job_id,
+            fact.covered_from_block,
+            fact.covered_to_block
+        FROM backfill_coverage_facts fact
+        JOIN backfill_jobs job USING (backfill_job_id)
+        WHERE job.raw_log_retention_generation = 0
+          AND fact.chain_id = 'ethereum-mainnet'
+          AND fact.source_family = 'ens_bootstrap_registry'
+          AND fact.scope = 'address'
+          AND fact.address = lower($1)
+        ORDER BY fact.covered_from_block, fact.covered_to_block
+        "#,
+    )
+    .bind(address)
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        coverage,
+        vec![(partial.0, 1, 4)],
+        "a partial checkpoint may resume its original job, but must not clip replacement work into gapful suffix-only coverage"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM backfill_jobs")
+            .fetch_one(database.pool())
+            .await?,
+        1,
+        "restart must preserve the full-range job identity"
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn bootstrap_auto_backfill_partitions_ranges_for_internal_workers() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_bootstrap_backfill_job_tables(database.pool()).await?;
@@ -1985,6 +2826,59 @@ async fn bootstrap_auto_backfill_provider(
     fixtures: Vec<ProviderBlockFixture>,
     requests: Arc<Mutex<Vec<BootstrapRpcRequest>>>,
 ) -> Result<(String, JoinHandle<()>)> {
+    let finalized_block_number = fixtures
+        .iter()
+        .map(|fixture| fixture.block.block_number)
+        .max()
+        .context("bootstrap provider fixture must include a finalized block")?;
+    bootstrap_auto_backfill_provider_with_options(
+        fixtures,
+        requests,
+        Some(finalized_block_number),
+        None,
+    )
+    .await
+}
+
+async fn bootstrap_auto_backfill_provider_with_finalized_block(
+    fixtures: Vec<ProviderBlockFixture>,
+    requests: Arc<Mutex<Vec<BootstrapRpcRequest>>>,
+    finalized_block_number: i64,
+) -> Result<(String, JoinHandle<()>)> {
+    bootstrap_auto_backfill_provider_with_options(
+        fixtures,
+        requests,
+        Some(finalized_block_number),
+        None,
+    )
+    .await
+}
+
+async fn bootstrap_auto_backfill_provider_failing_log_range_once(
+    fixtures: Vec<ProviderBlockFixture>,
+    requests: Arc<Mutex<Vec<BootstrapRpcRequest>>>,
+    failing_range: BackfillBlockRange,
+) -> Result<(String, JoinHandle<()>)> {
+    let finalized_block_number = fixtures
+        .iter()
+        .map(|fixture| fixture.block.block_number)
+        .max()
+        .context("bootstrap provider fixture must include a finalized block")?;
+    bootstrap_auto_backfill_provider_with_options(
+        fixtures,
+        requests,
+        Some(finalized_block_number),
+        Some(failing_range),
+    )
+    .await
+}
+
+async fn bootstrap_auto_backfill_provider_with_options(
+    fixtures: Vec<ProviderBlockFixture>,
+    requests: Arc<Mutex<Vec<BootstrapRpcRequest>>>,
+    finalized_block_number: Option<i64>,
+    failing_range: Option<BackfillBlockRange>,
+) -> Result<(String, JoinHandle<()>)> {
     let fixtures_by_hash = Arc::new(
         fixtures
             .into_iter()
@@ -2002,6 +2896,17 @@ async fn bootstrap_auto_backfill_provider(
         .next_back()
         .map(|(_, hash)| hash.clone())
         .context("bootstrap provider fixture must include a latest block")?;
+    let finalized_hash = finalized_block_number
+        .map(|block_number| {
+            hashes_by_number
+                .get(&block_number)
+                .cloned()
+                .with_context(|| {
+                    format!("bootstrap provider fixture has no finalized block {block_number}")
+                })
+        })
+        .transpose()?;
+    let fail_log_range_once = std::sync::atomic::AtomicBool::new(failing_range.is_some());
 
     spawn_json_rpc_server(Arc::new(move |body| {
         let method = body
@@ -2023,6 +2928,32 @@ async fn bootstrap_auto_backfill_provider(
                 batch_size: json_rpc_test_batch_size(&body),
             });
 
+        if method == "eth_getLogs"
+            && failing_range.is_some_and(|failing_range| {
+                let filter = params.first().and_then(Value::as_object);
+                filter
+                    .and_then(|filter| filter.get("fromBlock"))
+                    .and_then(Value::as_str)
+                    .map(parse_bootstrap_rpc_block_number)
+                    == Some(failing_range.from_block)
+                    && filter
+                        .and_then(|filter| filter.get("toBlock"))
+                        .and_then(Value::as_str)
+                        .map(parse_bootstrap_rpc_block_number)
+                        == Some(failing_range.to_block)
+            })
+            && fail_log_range_once.swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            return json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {
+                    "code": -32000,
+                    "message": "intentional bootstrap partial-checkpoint failure"
+                }
+            });
+        }
+
         let result = match method {
             "eth_getBlockByNumber" => {
                 let selection = params
@@ -2031,7 +2962,10 @@ async fn bootstrap_auto_backfill_provider(
                     .expect("block number or tag parameter must be present");
                 match selection {
                     "latest" => json!({ "hash": latest_hash }),
-                    "safe" | "finalized" => Value::Null,
+                    "safe" | "finalized" => finalized_hash
+                        .as_ref()
+                        .map(|hash| json!({ "hash": hash }))
+                        .unwrap_or(Value::Null),
                     block_number => {
                         let block_number = parse_bootstrap_rpc_block_number(block_number);
                         let block_hash = hashes_by_number
@@ -2255,6 +3189,140 @@ fn bootstrap_rpc_log_payload_at_address(
     payload
 }
 
+fn rpc_ens_v2_subregistry_updated_log_payload(
+    block: &ProviderBlock,
+    address: &str,
+    subregistry: &str,
+    token_id: u64,
+    log_index: u64,
+) -> Value {
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": format!("0x{log_index:x}"),
+        "address": address,
+        "topics": [
+            keccak256_hex(b"SubregistryUpdated(uint256,address,address)"),
+            hex_string(&abi_word_u64(token_id)),
+            hex_string(&abi_word_address(subregistry)),
+            hex_string(&abi_word_address(
+                "0x0000000000000000000000000000000000000dad"
+            )),
+        ],
+        "data": "0x"
+    })
+}
+
+fn rpc_ens_v2_resolver_updated_log_payload(
+    block: &ProviderBlock,
+    address: &str,
+    resolver: &str,
+    token_id: u64,
+    log_index: u64,
+) -> Value {
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": format!("0x{log_index:x}"),
+        "address": address,
+        "topics": [
+            keccak256_hex(b"ResolverUpdated(uint256,address,address)"),
+            hex_string(&abi_word_u64(token_id)),
+            hex_string(&abi_word_address(resolver)),
+            hex_string(&abi_word_address(
+                "0x0000000000000000000000000000000000000dad"
+            )),
+        ],
+        "data": "0x"
+    })
+}
+
+fn rpc_ens_v2_resolver_history_log_payload(
+    block: &ProviderBlock,
+    resolver: &str,
+    log_index: u64,
+) -> Value {
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": format!("0x{log_index:x}"),
+        "address": resolver,
+        "topics": [
+            keccak256_hex(b"AddressChanged(bytes32,uint256,bytes)"),
+            format!("0x{:064x}", 1),
+        ],
+        "data": "0x"
+    })
+}
+
+fn rpc_ens_v2_label_registered_log_payload(
+    block: &ProviderBlock,
+    address: &str,
+    token_id: u64,
+    label: &str,
+    log_index: u64,
+) -> Value {
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": format!("0x{log_index:x}"),
+        "address": address,
+        "topics": [
+            keccak256_hex(b"LabelRegistered(uint256,bytes32,string,address,uint64,address)"),
+            hex_string(&abi_word_u64(token_id)),
+            keccak256_hex(label.as_bytes()),
+            hex_string(&abi_word_address(
+                "0x0000000000000000000000000000000000000dad"
+            )),
+        ],
+        "data": encode_ens_v2_label_registered_log_data(
+            label,
+            "0x0000000000000000000000000000000000000a11",
+            1_900_000_000,
+        ),
+    })
+}
+
+async fn address_coverage_generations(
+    pool: &PgPool,
+    chain: &str,
+    source_family: &str,
+    address: &str,
+    from_block: i64,
+    to_block: i64,
+) -> Result<Vec<i64>> {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT DISTINCT job.raw_log_retention_generation
+        FROM backfill_coverage_facts fact
+        JOIN backfill_jobs job ON job.backfill_job_id = fact.backfill_job_id
+        WHERE fact.chain_id = $1
+          AND fact.source_family = $2
+          AND fact.scope = 'address'
+          AND fact.address = lower($3)
+          AND fact.covered_from_block = $4
+          AND fact.covered_to_block = $5
+        ORDER BY job.raw_log_retention_generation
+        "#,
+    )
+    .bind(chain)
+    .bind(source_family)
+    .bind(address)
+    .bind(from_block)
+    .bind(to_block)
+    .fetch_all(pool)
+    .await
+    .context("failed to load closed-child automatic coverage generations")
+}
+
 fn parse_bootstrap_rpc_block_number(value: &str) -> i64 {
     i64::from_str_radix(value.trim_start_matches("0x"), 16)
         .expect("test RPC block number must be hex")
@@ -2282,6 +3350,7 @@ async fn create_bootstrap_backfill_job_tables(pool: &PgPool) -> Result<()> {
             backfill_job_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             deployment_profile TEXT NOT NULL,
             chain_id TEXT NOT NULL,
+            raw_log_retention_generation BIGINT NOT NULL DEFAULT 0,
             source_identity JSONB NOT NULL,
             scan_mode TEXT NOT NULL,
             range_start_block_number BIGINT NOT NULL CHECK (range_start_block_number >= 0),

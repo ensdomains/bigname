@@ -20,7 +20,7 @@ pub(super) fn build_name_declared_state(
     insert_value_field(
         &mut declared_state,
         "control",
-        declared_name_control_section(&row.declared_summary),
+        declared_name_control_section(row),
     );
     insert_value_field(
         &mut declared_state,
@@ -85,7 +85,7 @@ pub(crate) fn build_name_authority_control_explain_declared_state(
     insert_value_field(
         &mut declared_state,
         "control",
-        declared_name_control_section(&row.declared_summary),
+        declared_name_control_section(row),
     );
     declared_state
 }
@@ -142,7 +142,17 @@ fn declared_authority_section(row: &NameCurrentRow) -> JsonValue {
     authority
 }
 
-fn declared_name_control_section(summary: &JsonValue) -> JsonValue {
+fn declared_name_control_section(row: &NameCurrentRow) -> JsonValue {
+    if row.namespace == "ens"
+        && provenance_field(&row.declared_summary, "registration")
+            .and_then(|registration| provenance_field(registration, "authority_kind"))
+            .and_then(JsonValue::as_str)
+            == Some("wrapper")
+    {
+        return unsupported_section("ENSv1 wrapper effective control is not yet projected");
+    }
+
+    let summary = &row.declared_summary;
     let Some(section) = provenance_field(summary, "control").filter(|value| value.is_object())
     else {
         return unsupported_section("declared control summary is not yet projected");

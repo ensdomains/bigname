@@ -1,8 +1,8 @@
 use anyhow::Result;
 use bigname_storage::{
-    CanonicalityState, ChainLineageBlock, CheckpointBlockRef,
-    chain_lineage_contains_canonical_ancestor_position, load_chain_lineage_block,
-    load_chain_lineage_canonical_child_path, load_highest_canonical_chain_lineage_block,
+    CanonicalityState, ChainLineageBlock, CheckpointBlockRef, chain_lineage_contains_ancestor,
+    load_chain_lineage_block, load_chain_lineage_canonical_child_path,
+    load_highest_canonical_chain_lineage_block,
 };
 
 use crate::provider::{ChainProviderOps, ProviderBlock, ProviderHeadSnapshot};
@@ -13,11 +13,17 @@ use super::super::{
 };
 use super::MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS;
 
+#[path = "stored_lineage/admission_epoch_fence.rs"]
+mod admission_epoch_fence;
 #[path = "stored_lineage/coverage.rs"]
 mod coverage;
+#[path = "stored_lineage/topic_drift.rs"]
+mod topic_drift;
 
+use admission_epoch_fence::StoredLineageAdmissionEpochFence;
 pub(crate) use coverage::ChainCoverageFrontiers;
 use coverage::stored_path_has_required_raw_fact_coverage;
+pub(crate) use topic_drift::find_uncovered_generation_bound_coverage_with_current_topics;
 
 const MAX_STORED_ANCHOR_PARENT_FETCH_DEPTH: usize =
     (MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS as usize) * 4;
@@ -89,12 +95,14 @@ pub(super) async fn reconcile_large_checkpoint_gap_from_stored_lineage(
             current_canonical_number, stored_anchor.block_number
         )));
     }
+    let admission_epoch = StoredLineageAdmissionEpochFence::read_epoch(pool, chain).await?;
     if let Err(reason) = stored_path_has_required_raw_fact_coverage(
         pool,
         chain,
         &path,
         coverage_frontiers,
         stored_anchor.block_number,
+        admission_epoch,
     )
     .await
     {
@@ -102,26 +110,56 @@ pub(super) async fn reconcile_large_checkpoint_gap_from_stored_lineage(
             "canonical gap of {live_gap_blocks} blocks for chain {chain} exceeds live gap fill limit {MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS}; {reason}"
         )));
     }
+    // Coverage is verified optimistically so historical scans do not block
+    // discovery admission. A brief shared lock accepts the proof only if no
+    // watched-surface mutation committed during verification.
+    StoredLineageAdmissionEpochFence::acquire_for_epoch(pool, chain, admission_epoch)
+        .await?
+        .release()
+        .await?;
+    #[cfg(test)]
+    admission_epoch_fence::pause_after_admission_epoch_verification_for_tests(pool, chain).await;
 
     let target = path
         .last()
         .expect("non-empty stored lineage promotion path");
     let target_is_anchor = target.block_hash == stored_anchor.block_hash;
-    if !target_is_anchor
-        && !chain_lineage_contains_canonical_ancestor_position(
+    let target_is_stored_anchor_ancestor = target_is_anchor
+        || chain_lineage_contains_ancestor(
             pool,
             chain,
             &stored_anchor.block_hash,
-            stored_anchor.block_number,
-            target.block_number,
             &target.block_hash,
         )
-        .await?
-    {
-        return Ok(StoredLineagePromotion::Refused(format!(
-            "canonical gap of {live_gap_blocks} blocks for chain {chain} exceeds live gap fill limit {MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS}; promoted target block {} is not the unique canonical row at its height below stored safe/finalized anchor {} (provider anchor hash {provider_anchor_hash}); rerun hash-pinned backfill for the canonical range before retrying",
-            target.block_number, stored_anchor.block_number
-        )));
+        .await?;
+    if !target_is_stored_anchor_ancestor {
+        // Separately backfilled segments may not retain every intervening
+        // parent. Canonical markings alone are not proof that they share the
+        // provider's current ancestry, so verify the disconnected target.
+        let provider_targets = provider
+            .fetch_block_hashes_by_numbers(&[target.block_number])
+            .await?;
+        let Some(provider_target) = provider_targets
+            .iter()
+            .find(|block| block.block_number == target.block_number)
+        else {
+            return Ok(StoredLineagePromotion::Refused(format!(
+                "canonical gap of {live_gap_blocks} blocks for chain {chain} exceeds live gap fill limit {MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS}; provider block at the promoted height {} was unavailable below stored safe/finalized anchor {} (provider anchor hash {provider_anchor_hash}); rerun hash-pinned backfill for the canonical range before retrying",
+                target.block_number, stored_anchor.block_number
+            )));
+        };
+        if !provider_target
+            .block_hash
+            .eq_ignore_ascii_case(&target.block_hash)
+        {
+            return Ok(StoredLineagePromotion::Refused(format!(
+                "canonical gap of {live_gap_blocks} blocks for chain {chain} exceeds live gap fill limit {MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS}; stored target block {} hash {} does not match provider block at the promoted height hash {} below stored safe/finalized anchor {} (provider anchor hash {provider_anchor_hash}); rerun hash-pinned backfill for the canonical range before retrying",
+                target.block_number,
+                target.block_hash,
+                provider_target.block_hash,
+                stored_anchor.block_number
+            )));
+        }
     }
 
     let canonical = CheckpointBlockRef {
@@ -134,6 +172,7 @@ pub(super) async fn reconcile_large_checkpoint_gap_from_stored_lineage(
         .map(|block| lineage_block_to_provider(&block))
         .collect::<Vec<_>>();
 
+    coverage_frontiers.record_promotion_epoch(chain, admission_epoch);
     Ok(StoredLineagePromotion::Promoted(CanonicalReconciliation {
         status: CanonicalReconciliationStatus::StoredLineagePromoted,
         canonical: Some(canonical),

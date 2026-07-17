@@ -15,52 +15,49 @@ use sqlx::{PgConnection, PgPool, Row};
 mod staged_rebuild;
 
 use staged_rebuild::{
-    PRIMARY_NAMES_CURRENT_COLUMNS, count_rows, create_stage_table, drop_stage_table,
-    publish_stage_table, stage_primary_names_current_snapshots,
+    count_rows, create_stage_table, drop_stage_table, stage_primary_names_current_snapshots,
 };
 
 #[cfg(test)]
 pub(crate) mod test_hooks {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
-    type TargetedRebuildAfterInvalidationHook =
+    use anyhow::Result;
+    use bigname_test_support::{
+        ScopedTestHookGuard, ScopedTestHookRegistry, current_test_database,
+    };
+    use sqlx::PgPool;
+
+    pub(crate) type TargetedRebuildAfterInvalidationHook =
         Arc<dyn Fn(&str, &str, &str) + Send + Sync + 'static>;
 
-    static TARGETED_REBUILD_AFTER_INVALIDATION_HOOK: Mutex<
-        Option<TargetedRebuildAfterInvalidationHook>,
-    > = Mutex::new(None);
+    static TARGETED_REBUILD_AFTER_INVALIDATION_HOOKS: ScopedTestHookRegistry<
+        String,
+        TargetedRebuildAfterInvalidationHook,
+    > = ScopedTestHookRegistry::new();
 
-    pub(crate) struct TargetedRebuildAfterInvalidationHookGuard;
-
-    impl Drop for TargetedRebuildAfterInvalidationHookGuard {
-        fn drop(&mut self) {
-            *TARGETED_REBUILD_AFTER_INVALIDATION_HOOK
-                .lock()
-                .expect("targeted rebuild after invalidation hook mutex poisoned") = None;
-        }
-    }
-
-    pub(crate) fn install_targeted_rebuild_after_invalidation_hook(
+    pub(crate) async fn install_targeted_rebuild_after_invalidation_hook(
+        pool: &PgPool,
         hook: TargetedRebuildAfterInvalidationHook,
-    ) -> TargetedRebuildAfterInvalidationHookGuard {
-        *TARGETED_REBUILD_AFTER_INVALIDATION_HOOK
-            .lock()
-            .expect("targeted rebuild after invalidation hook mutex poisoned") = Some(hook);
-        TargetedRebuildAfterInvalidationHookGuard
+    ) -> Result<ScopedTestHookGuard<String, TargetedRebuildAfterInvalidationHook>> {
+        let database = current_database(pool).await?;
+        Ok(TARGETED_REBUILD_AFTER_INVALIDATION_HOOKS.install(database, hook))
     }
 
     pub(super) fn run_targeted_rebuild_after_invalidation_hook(
+        database: &str,
         address: &str,
         namespace: &str,
         coin_type: &str,
     ) {
-        let hook = TARGETED_REBUILD_AFTER_INVALIDATION_HOOK
-            .lock()
-            .expect("targeted rebuild after invalidation hook mutex poisoned")
-            .clone();
+        let hook = TARGETED_REBUILD_AFTER_INVALIDATION_HOOKS.get_cloned(&database.to_owned());
         if let Some(hook) = hook {
             hook(address, namespace, coin_type);
         }
+    }
+
+    pub(super) async fn current_database(pool: &PgPool) -> Result<String> {
+        current_test_database(pool).await
     }
 }
 
@@ -120,7 +117,7 @@ async fn rebuild_all_primary_names(pool: &PgPool) -> Result<PrimaryNamesCurrentR
             projections.clear();
         }
 
-        if requested_tuple_count % 5_000 == 0 {
+        if requested_tuple_count.is_multiple_of(5_000) {
             tracing::info!(
                 projection = "primary_names_current",
                 queued_tuple_count = requested_tuple_count,
@@ -164,6 +161,8 @@ async fn rebuild_one_primary_name(
     namespace: &str,
     coin_type: &str,
 ) -> Result<PrimaryNamesCurrentRebuildSummary> {
+    #[cfg(test)]
+    let test_database = test_hooks::current_database(pool).await?;
     let target = PrimaryNameTupleKey {
         address: normalize_address(address),
         namespace: namespace.to_owned(),
@@ -205,6 +204,7 @@ async fn rebuild_one_primary_name(
                 .await?;
                 #[cfg(test)]
                 test_hooks::run_targeted_rebuild_after_invalidation_hook(
+                    &test_database,
                     &target.address,
                     &target.namespace,
                     &target.coin_type,
@@ -235,6 +235,7 @@ async fn rebuild_one_primary_name(
                 .await?;
                 #[cfg(test)]
                 test_hooks::run_targeted_rebuild_after_invalidation_hook(
+                    &test_database,
                     &target.address,
                     &target.namespace,
                     &target.coin_type,

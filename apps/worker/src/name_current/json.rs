@@ -14,7 +14,11 @@ use super::{NAME_CURRENT_DERIVATION_KIND, RECORD_INVENTORY_UNSUPPORTED_REASON, Z
 
 pub(super) use crate::projection_json::{format_timestamp, json_i64, json_i64_field, json_str};
 
-pub(super) fn build_declared_summary(facts: ProjectedFacts, topology: Option<Value>) -> Value {
+pub(super) fn build_declared_summary(
+    facts: ProjectedFacts,
+    topology: Option<Value>,
+    wrapper_control_unsupported: bool,
+) -> Value {
     let surface_head = facts
         .surface_head
         .as_ref()
@@ -41,16 +45,21 @@ pub(super) fn build_declared_summary(facts: ProjectedFacts, topology: Option<Val
             "latest_event_kind": facts.latest_registration_event_kind,
         }),
     );
-    summary.insert(
-        "control".to_owned(),
+    let control = if wrapper_control_unsupported {
+        json!({
+            "status": "unsupported",
+            "unsupported_reason": "ENSv1 wrapper effective control is not yet projected",
+        })
+    } else {
         json!({
             "status": facts.control_status_substrate,
             "expiry": format_unix_timestamp_value(facts.control_expiry_substrate),
             "registrant": facts.registrant,
             "registry_owner": facts.registry_owner,
             "latest_event_kind": facts.latest_control_event_kind,
-        }),
-    );
+        })
+    };
+    summary.insert("control".to_owned(), control);
     summary.insert(
         "resolver".to_owned(),
         json!({

@@ -1,9 +1,18 @@
 use super::*;
 use crate::ens_v1_subregistry_discovery::ReplayAdapterCheckpointContext;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, ensure};
+use bigname_storage::{
+    RawLogStagingInputVersion, load_raw_log_staging_input_version,
+    raw_log_staging_block_range_changed_since,
+};
 use futures_util::TryStreamExt;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
+
+mod persistence;
+
+use crate::checkpoint_codec::JsonbCheckpointCodec;
+use persistence::{delete_checkpoint, load_checkpoint_row};
 
 const ADAPTER: &str = DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY;
 const CHECKPOINT_SCOPE: &str = "full_closure";
@@ -17,8 +26,10 @@ const ITEM_KIND_PENDING_OBSERVATIONS: &str = "pending_observations";
 const ITEM_KIND_MIGRATED_NODE: &str = "migrated_registry_node";
 const CHECKPOINT_ITEM_INSERT_BATCH_SIZE: usize = 250;
 const CHECKPOINT_ITEM_DELETE_BATCH_SIZE: usize = 1_000;
-const CHECKPOINT_ESCAPED_STRING_KEY: &str =
-    "__bigname_unwrapped_authority_checkpoint_string_v1_hex";
+const CHECKPOINT_CODEC: JsonbCheckpointCodec = JsonbCheckpointCodec::new(
+    "__bigname_unwrapped_authority_checkpoint_string_v1_hex",
+    "__bigname_unwrapped_authority_checkpoint_object_v1_hex",
+);
 
 #[derive(Default)]
 pub(super) struct UnwrappedAuthorityReplayCheckpointDelta {
@@ -107,6 +118,7 @@ pub(super) struct UnwrappedAuthorityReplayCheckpoint {
     matched_log_count: usize,
     flushed_events: UnwrappedAuthorityReplayFlushedEvents,
     state_payload: Value,
+    raw_log_input_version: RawLogStagingInputVersion,
 }
 
 pub async fn clear_replay_adapter_checkpoints(
@@ -149,20 +161,23 @@ impl UnwrappedAuthorityReplayCheckpoint {
         chain: &str,
         context: &ReplayAdapterCheckpointContext,
     ) -> Result<Self> {
+        let raw_log_input_version = load_raw_log_staging_input_version(pool, chain).await?;
         let existing = load_checkpoint_row(pool, chain, context).await?;
-        if existing.as_ref().is_some_and(|checkpoint| {
-            checkpoint.context.range_start_block_number != context.range_start_block_number
-                || !checkpoint.snapshot_version_is_current()
-        }) {
+        let reset_existing = match existing.as_ref() {
+            Some(checkpoint) => {
+                checkpoint.context.range_start_block_number != context.range_start_block_number
+                    || !checkpoint.snapshot_version_is_current()
+                    || checkpoint
+                        .raw_log_input_requires_reset(pool, raw_log_input_version)
+                        .await?
+            }
+            None => false,
+        };
+        if reset_existing {
             delete_checkpoint(pool, chain, context).await?;
         }
 
-        if existing.is_none()
-            || existing.as_ref().is_some_and(|checkpoint| {
-                checkpoint.context.range_start_block_number != context.range_start_block_number
-                    || !checkpoint.snapshot_version_is_current()
-            })
-        {
+        if existing.is_none() || reset_existing {
             sqlx::query(
                 r#"
                 INSERT INTO normalized_replay_adapter_checkpoints (
@@ -173,9 +188,11 @@ impl UnwrappedAuthorityReplayCheckpoint {
                     checkpoint_scope,
                     replay_start_block_number,
                     replay_target_block_number,
-                    state_payload
+                    state_payload,
+                    raw_log_retention_generation,
+                    raw_log_input_revision
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 "#,
             )
             .bind(&context.deployment_profile)
@@ -186,6 +203,8 @@ impl UnwrappedAuthorityReplayCheckpoint {
             .bind(context.range_start_block_number)
             .bind(context.target_block_number)
             .bind(json!({ "version": SNAPSHOT_VERSION }))
+            .bind(raw_log_input_version.retention_generation)
+            .bind(raw_log_input_version.revision)
             .execute(pool)
             .await
             .with_context(|| {
@@ -208,6 +227,8 @@ impl UnwrappedAuthorityReplayCheckpoint {
                         WHEN status = 'completed' AND replay_target_block_number < $6 THEN NULL
                         ELSE completed_at
                     END,
+                    raw_log_retention_generation = $7,
+                    raw_log_input_revision = $8,
                     updated_at = now()
                 WHERE deployment_profile = $1
                   AND chain_id = $2
@@ -222,6 +243,8 @@ impl UnwrappedAuthorityReplayCheckpoint {
             .bind(ADAPTER)
             .bind(CHECKPOINT_SCOPE)
             .bind(context.target_block_number)
+            .bind(raw_log_input_version.retention_generation)
+            .bind(raw_log_input_version.revision)
             .execute(pool)
             .await
             .with_context(|| {
@@ -235,6 +258,51 @@ impl UnwrappedAuthorityReplayCheckpoint {
         load_checkpoint_row(pool, chain, context)
             .await?
             .context("started unwrapped-authority replay checkpoint row was not found")
+    }
+
+    async fn raw_log_input_requires_reset(
+        &self,
+        pool: &PgPool,
+        current: RawLogStagingInputVersion,
+    ) -> Result<bool> {
+        if self.raw_log_input_version.retention_generation != current.retention_generation
+            || self.raw_log_input_version.revision > current.revision
+        {
+            return Ok(true);
+        }
+        if self.raw_log_input_version.revision == current.revision {
+            return Ok(false);
+        }
+        let consumed_through = if self.status == "stream_complete" || self.status == "completed" {
+            Some(self.context.target_block_number)
+        } else {
+            self.last_block_number
+        };
+        let Some(consumed_through) = consumed_through else {
+            return Ok(false);
+        };
+        raw_log_staging_block_range_changed_since(
+            pool,
+            &self.chain,
+            self.raw_log_input_version.revision,
+            self.context.range_start_block_number,
+            consumed_through,
+        )
+        .await
+    }
+
+    pub(super) async fn ensure_raw_log_input_current(&self, pool: &PgPool) -> Result<()> {
+        let observed = load_raw_log_staging_input_version(pool, &self.chain).await?;
+        ensure!(
+            observed == self.raw_log_input_version,
+            "{ADAPTER} raw-log input changed before checkpoint publication on {}: expected generation {} revision {}, observed generation {} revision {}",
+            self.chain,
+            self.raw_log_input_version.retention_generation,
+            self.raw_log_input_version.revision,
+            observed.retention_generation,
+            observed.revision
+        );
+        Ok(())
     }
 
     pub(super) fn completed_summary(&self) -> Result<Option<EnsV1UnwrappedAuthoritySyncSummary>> {
@@ -462,6 +530,8 @@ impl UnwrappedAuthorityReplayCheckpoint {
                 status = 'stream_complete',
                 scanned_log_count = $6,
                 matched_log_count = $7,
+                raw_log_retention_generation = $8,
+                raw_log_input_revision = $9,
                 updated_at = now(),
                 last_failure_reason = NULL
             WHERE deployment_profile = $1
@@ -478,6 +548,8 @@ impl UnwrappedAuthorityReplayCheckpoint {
         .bind(CHECKPOINT_SCOPE)
         .bind(i64::try_from(scanned_log_count).context("scanned log count overflowed i64")?)
         .bind(i64::try_from(matched_log_count).context("matched log count overflowed i64")?)
+        .bind(self.raw_log_input_version.retention_generation)
+        .bind(self.raw_log_input_version.revision)
         .execute(pool)
         .await
         .context("failed to mark unwrapped-authority replay checkpoint stream complete")?;
@@ -505,6 +577,8 @@ impl UnwrappedAuthorityReplayCheckpoint {
                 scanned_log_count = $6,
                 matched_log_count = $7,
                 state_payload = $8,
+                raw_log_retention_generation = $9,
+                raw_log_input_revision = $10,
                 completed_at = now(),
                 updated_at = now(),
                 last_failure_reason = NULL
@@ -523,6 +597,8 @@ impl UnwrappedAuthorityReplayCheckpoint {
         .bind(i64::try_from(summary.scanned_log_count).context("scanned log count overflowed i64")?)
         .bind(i64::try_from(summary.matched_log_count).context("matched log count overflowed i64")?)
         .bind(&state_payload)
+        .bind(self.raw_log_input_version.retention_generation)
+        .bind(self.raw_log_input_version.revision)
         .execute(pool)
         .await
         .context("failed to mark unwrapped-authority replay checkpoint completed")?;
@@ -548,99 +624,6 @@ fn is_undefined_table_error<T>(result: &std::result::Result<T, sqlx::Error>) -> 
         result,
         Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("42P01")
     )
-}
-
-async fn load_checkpoint_row(
-    pool: &PgPool,
-    chain: &str,
-    context: &ReplayAdapterCheckpointContext,
-) -> Result<Option<UnwrappedAuthorityReplayCheckpoint>> {
-    let row = sqlx::query(
-        r#"
-        SELECT
-            replay_start_block_number,
-            replay_target_block_number,
-            last_block_number,
-            scanned_log_count,
-            matched_log_count,
-            status,
-            state_payload
-        FROM normalized_replay_adapter_checkpoints
-        WHERE deployment_profile = $1
-          AND chain_id = $2
-          AND cursor_kind = $3
-          AND adapter = $4
-          AND checkpoint_scope = $5
-        "#,
-    )
-    .bind(&context.deployment_profile)
-    .bind(chain)
-    .bind(&context.cursor_kind)
-    .bind(ADAPTER)
-    .bind(CHECKPOINT_SCOPE)
-    .fetch_optional(pool)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to load {ADAPTER} replay checkpoint for {}/{}",
-            context.deployment_profile, chain
-        )
-    })?;
-
-    row.map(|row| checkpoint_from_row(chain, context, row))
-        .transpose()
-}
-
-fn checkpoint_from_row(
-    chain: &str,
-    context: &ReplayAdapterCheckpointContext,
-    row: sqlx::postgres::PgRow,
-) -> Result<UnwrappedAuthorityReplayCheckpoint> {
-    let state_payload: Value = row.try_get("state_payload")?;
-    let flushed_events = flushed_events_from_payload(&state_payload)?;
-    Ok(UnwrappedAuthorityReplayCheckpoint {
-        context: ReplayAdapterCheckpointContext {
-            deployment_profile: context.deployment_profile.clone(),
-            cursor_kind: context.cursor_kind.clone(),
-            range_start_block_number: row.try_get("replay_start_block_number")?,
-            target_block_number: row.try_get("replay_target_block_number")?,
-        },
-        chain: chain.to_owned(),
-        status: row.try_get("status")?,
-        last_block_number: row.try_get("last_block_number")?,
-        scanned_log_count: usize::try_from(row.try_get::<i64, _>("scanned_log_count")?)
-            .context("checkpoint scanned log count overflowed usize")?,
-        matched_log_count: usize::try_from(row.try_get::<i64, _>("matched_log_count")?)
-            .context("checkpoint matched log count overflowed usize")?,
-        state_payload,
-        flushed_events,
-    })
-}
-
-async fn delete_checkpoint(
-    pool: &PgPool,
-    chain: &str,
-    context: &ReplayAdapterCheckpointContext,
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        DELETE FROM normalized_replay_adapter_checkpoints
-        WHERE deployment_profile = $1
-          AND chain_id = $2
-          AND cursor_kind = $3
-          AND adapter = $4
-          AND checkpoint_scope = $5
-        "#,
-    )
-    .bind(&context.deployment_profile)
-    .bind(chain)
-    .bind(&context.cursor_kind)
-    .bind(ADAPTER)
-    .bind(CHECKPOINT_SCOPE)
-    .execute(pool)
-    .await
-    .context("failed to reset stale unwrapped-authority replay checkpoint")?;
-    Ok(())
 }
 
 fn checkpoint_item_rows(
@@ -673,7 +656,7 @@ fn checkpoint_item_rows(
             rows.push((
                 ITEM_KIND_NAMEHASH_LABELHASH,
                 key.clone(),
-                encode_checkpoint_payload(json!({ "labelhash": labelhash })),
+                CHECKPOINT_CODEC.encode(json!({ "labelhash": labelhash })),
             ));
         }
     }
@@ -694,7 +677,7 @@ fn checkpoint_item_rows(
         rows.push((
             ITEM_KIND_MIGRATED_NODE,
             node.clone(),
-            encode_checkpoint_payload(json!({ "node": node })),
+            CHECKPOINT_CODEC.encode(json!({ "node": node })),
         ));
     }
     Ok(rows)
@@ -838,6 +821,8 @@ async fn update_checkpoint_progress(
             scanned_log_count = $10,
             matched_log_count = $11,
             state_payload = $12,
+            raw_log_retention_generation = $13,
+            raw_log_input_revision = $14,
             updated_at = now(),
             last_failure_reason = NULL
         WHERE deployment_profile = $1
@@ -859,116 +844,33 @@ async fn update_checkpoint_progress(
     .bind(i64::try_from(scanned_log_count).context("scanned log count overflowed i64")?)
     .bind(i64::try_from(matched_log_count).context("matched log count overflowed i64")?)
     .bind(state_payload)
+    .bind(checkpoint.raw_log_input_version.retention_generation)
+    .bind(checkpoint.raw_log_input_version.revision)
     .execute(transaction.as_mut())
     .await
     .context("failed to update unwrapped-authority replay checkpoint progress")?;
     Ok(())
 }
 
-fn encode_item<T>(value: &T) -> Result<Value>
+pub(super) fn encode_item<T>(value: &T) -> Result<Value>
 where
     T: serde::Serialize + ?Sized,
 {
-    let value = serde_json::to_value(value)
-        .context("failed to encode unwrapped-authority checkpoint item")?;
-    Ok(encode_checkpoint_payload(value))
+    CHECKPOINT_CODEC.encode_serde(
+        value,
+        "failed to encode unwrapped-authority checkpoint item",
+    )
 }
 
-fn decode_item<T>(value: Value, item_kind: &str) -> Result<T>
+pub(super) fn decode_item<T>(value: Value, item_kind: &str) -> Result<T>
 where
     T: serde::de::DeserializeOwned,
 {
-    let value = decode_checkpoint_payload(value)?;
-    serde_json::from_value(value).with_context(|| {
-        format!("failed to decode unwrapped-authority checkpoint item {item_kind}")
-    })
-}
-
-fn encode_checkpoint_payload(value: Value) -> Value {
-    match value {
-        Value::String(value) if value.contains('\0') => {
-            let mut object = Map::new();
-            object.insert(
-                CHECKPOINT_ESCAPED_STRING_KEY.to_owned(),
-                Value::String(hex_encode_utf8(&value)),
-            );
-            Value::Object(object)
-        }
-        Value::Array(values) => {
-            Value::Array(values.into_iter().map(encode_checkpoint_payload).collect())
-        }
-        Value::Object(object) => Value::Object(
-            object
-                .into_iter()
-                .map(|(key, value)| (key, encode_checkpoint_payload(value)))
-                .collect(),
-        ),
-        value => value,
-    }
-}
-
-fn decode_checkpoint_payload(value: Value) -> Result<Value> {
-    match value {
-        Value::Object(mut object) => {
-            if object.len() == 1 {
-                match object.remove(CHECKPOINT_ESCAPED_STRING_KEY) {
-                    Some(Value::String(encoded)) => {
-                        return Ok(Value::String(hex_decode_utf8(&encoded)?));
-                    }
-                    Some(_) => bail!(
-                        "unwrapped-authority checkpoint escaped string payload is not a string"
-                    ),
-                    None => {}
-                }
-            }
-            let object = object
-                .into_iter()
-                .map(|(key, value)| Ok((key, decode_checkpoint_payload(value)?)))
-                .collect::<Result<Map<_, _>>>()?;
-            Ok(Value::Object(object))
-        }
-        Value::Array(values) => {
-            let values = values
-                .into_iter()
-                .map(decode_checkpoint_payload)
-                .collect::<Result<Vec<_>>>()?;
-            Ok(Value::Array(values))
-        }
-        value => Ok(value),
-    }
-}
-
-fn hex_encode_utf8(value: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(value.len() * 2);
-    for byte in value.as_bytes() {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    output
-}
-
-fn hex_decode_utf8(value: &str) -> Result<String> {
-    if value.len() % 2 != 0 {
-        bail!("unwrapped-authority checkpoint escaped string hex has odd length");
-    }
-    let mut bytes = Vec::with_capacity(value.len() / 2);
-    for pair in value.as_bytes().chunks_exact(2) {
-        let high = hex_nibble(pair[0])?;
-        let low = hex_nibble(pair[1])?;
-        bytes.push((high << 4) | low);
-    }
-    String::from_utf8(bytes)
-        .context("unwrapped-authority checkpoint escaped string is not valid utf-8")
-}
-
-fn hex_nibble(byte: u8) -> Result<u8> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => bail!("unwrapped-authority checkpoint escaped string hex is invalid"),
-    }
+    CHECKPOINT_CODEC.decode_serde(
+        value,
+        "failed to decode unwrapped-authority checkpoint JSONB encoding",
+        format!("failed to decode unwrapped-authority checkpoint item {item_kind}"),
+    )
 }
 
 fn summary_payload(summary: &EnsV1UnwrappedAuthoritySyncSummary) -> Value {
@@ -1034,76 +936,4 @@ fn optional_usize_field(payload: &Value, field: &str) -> Result<usize> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn checkpoint_payload_encoding_round_trips_nul_strings() -> Result<()> {
-        let payload = json!({
-            "record": "before\0after",
-            "nested": [
-                { "raw_name": "name\0with\0nuls" },
-                "plain"
-            ]
-        });
-
-        let encoded = encode_checkpoint_payload(payload.clone());
-        let encoded_json = serde_json::to_string(&encoded)?;
-
-        assert_ne!(encoded, payload);
-        assert!(!encoded_json.contains("\\u0000"));
-        assert_eq!(decode_checkpoint_payload(encoded)?, payload);
-        Ok(())
-    }
-
-    #[test]
-    fn checkpoint_payload_encoding_leaves_jsonb_safe_strings_plain() -> Result<()> {
-        let payload = json!({
-            "record": "ordinary text",
-            "nested": ["also ordinary"]
-        });
-
-        let encoded = encode_checkpoint_payload(payload.clone());
-
-        assert_eq!(encoded, payload);
-        assert_eq!(decode_checkpoint_payload(encoded)?, payload);
-        Ok(())
-    }
-
-    #[test]
-    fn checkpoint_item_rows_prune_empty_pending_observations() -> Result<()> {
-        let histories = BTreeMap::<String, NameHistory>::new();
-        let reverse_histories = BTreeMap::<String, ReverseClaimSourceHistory>::new();
-        let known_names_by_namehash = HashMap::<String, NameMetadata>::new();
-        let known_name_refs_by_namehash = HashMap::<String, ObservationRef>::new();
-        let namehash_to_labelhash = HashMap::<String, String>::new();
-        let mut pending_namehash_observations = HashMap::<String, Vec<AuthorityObservation>>::new();
-        pending_namehash_observations.insert("cleared".to_owned(), Vec::new());
-        let migrated_registry_nodes = MigratedRegistryNodes::empty();
-        let state = UnwrappedAuthorityReplayCheckpointStateRef {
-            histories: &histories,
-            reverse_histories: &reverse_histories,
-            known_names_by_namehash: &known_names_by_namehash,
-            known_name_refs_by_namehash: &known_name_refs_by_namehash,
-            namehash_to_labelhash: &namehash_to_labelhash,
-            pending_namehash_observations: &pending_namehash_observations,
-            migrated_registry_nodes: &migrated_registry_nodes,
-        };
-        let mut delta = UnwrappedAuthorityReplayCheckpointDelta::default();
-        delta.mark_pending_observations("cleared");
-        delta.mark_pending_observations("missing");
-
-        let rows = checkpoint_item_rows(&state, &delta)?;
-        let delete_keys = checkpoint_pending_observation_delete_keys(&state, &delta);
-
-        assert!(
-            rows.iter()
-                .all(|(item_kind, _, _)| *item_kind != ITEM_KIND_PENDING_OBSERVATIONS)
-        );
-        assert_eq!(
-            delete_keys,
-            vec!["cleared".to_owned(), "missing".to_owned()]
-        );
-        Ok(())
-    }
-}
+mod tests;

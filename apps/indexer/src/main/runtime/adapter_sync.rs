@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use bigname_manifests::WatchedChainPlan;
 
+use crate::resolver_profile_convergence::journal_resolver_profile_authority;
+
 use super::logging::{
     log_ens_v1_reverse_claim_sync_summary, log_ens_v1_subregistry_discovery_sync_summary,
     log_ens_v1_unwrapped_authority_sync_summary, log_ens_v2_permissions_sync_summary,
@@ -12,6 +14,9 @@ pub(crate) async fn sync_adapter_owned_raw_log_state(
     pool: &sqlx::PgPool,
     watched_chain_plan: &[WatchedChainPlan],
 ) -> Result<()> {
+    // Broad startup/timer passes also recover any prior discovery transaction
+    // that committed before its caller could journal the epoch change.
+    journal_resolver_profile_authority(pool).await?;
     for chain in watched_chain_plan {
         let summary = bigname_adapters::sync_ens_v1_reverse_claim(pool, &chain.chain)
             .await
@@ -84,5 +89,6 @@ pub(crate) async fn sync_adapter_owned_raw_log_state(
         log_ens_v2_permissions_sync_summary(&chain.chain, &summary);
     }
 
+    journal_resolver_profile_authority(pool).await?;
     Ok(())
 }

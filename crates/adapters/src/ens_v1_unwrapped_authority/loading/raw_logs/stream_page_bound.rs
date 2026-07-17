@@ -11,6 +11,7 @@ pub(in crate::ens_v1_unwrapped_authority) async fn select_authority_raw_log_stre
     from_block: i64,
     scan_to_block: i64,
     max_raw_logs_per_page: usize,
+    resolver_profile_run_id: Option<sqlx::types::Uuid>,
 ) -> Result<i64> {
     if from_block >= scan_to_block {
         return Ok(scan_to_block);
@@ -21,6 +22,7 @@ pub(in crate::ens_v1_unwrapped_authority) async fn select_authority_raw_log_stre
     }
     let max_raw_logs_per_page = i64::try_from(max_raw_logs_per_page)
         .context("authority replay max logs per page does not fit in i64")?;
+    let profile_context_emitters = source_router.profile_context_emitter_addresses();
 
     sqlx::query_scalar::<_, i64>(
         r#"
@@ -31,6 +33,16 @@ pub(in crate::ens_v1_unwrapped_authority) async fn select_authority_raw_log_stre
               AND rl.block_number BETWEEN $2::BIGINT AND $3::BIGINT
               AND rl.topics[1] IS NOT NULL
               AND LOWER(rl.topics[1]) = ANY($4::TEXT[])
+              AND (
+                  $6::UUID IS NULL
+                  OR LOWER(rl.emitting_address) = ANY($7::TEXT[])
+                  OR EXISTS (
+                      SELECT 1
+                      FROM resolver_profile_reconciliation_targets target
+                      WHERE target.run_id = $6
+                        AND target.resolver_address = LOWER(rl.emitting_address)
+                  )
+              )
               AND rl.canonicality_state IN (
                   'canonical'::canonicality_state,
                   'safe'::canonicality_state,
@@ -75,6 +87,8 @@ pub(in crate::ens_v1_unwrapped_authority) async fn select_authority_raw_log_stre
     .bind(scan_to_block)
     .bind(&topic0_filters)
     .bind(max_raw_logs_per_page)
+    .bind(resolver_profile_run_id)
+    .bind(profile_context_emitters)
     .fetch_one(&mut *conn)
     .await
     .with_context(|| {

@@ -4,7 +4,6 @@ use anyhow::{Result, bail};
 use crate::evm_abi;
 #[cfg(test)]
 pub(super) use crate::evm_abi::hex_string;
-pub(super) use crate::evm_abi::namehash_hex;
 
 use super::{SOURCE_FAMILY_BASENAMES_BASE_PRIMARY, SOURCE_FAMILY_ENS_V1_REVERSE_L1};
 
@@ -43,11 +42,9 @@ pub(super) fn reverse_label_for_address(address: &str) -> Result<String> {
 
 pub(super) fn reverse_node_for_address(address: &str) -> Result<String> {
     let reverse_label = reverse_label_for_address(address)?;
-    Ok(namehash_hex(&[
-        reverse_label.into_bytes(),
-        b"addr".to_vec(),
-        b"reverse".to_vec(),
-    ]))
+    let node =
+        bigname_storage::ens_namehash_label_bytes(&[reverse_label.as_bytes(), b"addr", b"reverse"]);
+    Ok(format!("{node:#x}"))
 }
 
 pub(super) fn basenames_base_reverse_node_for_address(address: &str) -> Result<String> {

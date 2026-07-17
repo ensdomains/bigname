@@ -18,8 +18,7 @@ use super::{path_end_number, path_start_number};
 /// bounded by the path's block hashes and the manifest topic0 sets (both
 /// small binds); watchedness is resolved server-side by narrowing the watched
 /// address table to the candidates' emitters in one pass and joining through
-/// the manifest/discovery watched selection (the same selection
-/// `find_uncovered_watched_tuples` scans), because the watched surface itself
+/// the manifest/discovery watched selection, because the watched surface itself
 /// is millions of (family, address, window) rows and must never be
 /// materialized client-side.
 pub(super) async fn ensure_selected_logs_have_raw_companions(
@@ -78,6 +77,19 @@ pub(super) async fn ensure_selected_logs_have_raw_companions(
             FROM contract_instance_addresses cia
             WHERE cia.chain_id = $1
               AND cia.deactivated_at IS NULL
+              AND LOWER(cia.address) IN (
+                  SELECT DISTINCT emitting_address FROM candidate_logs
+              )
+            UNION
+            SELECT DISTINCT
+                cia.contract_instance_id,
+                LOWER(cia.address) AS address,
+                cia.active_from_block_number,
+                cia.active_to_block_number
+            FROM contract_instance_addresses cia
+            WHERE cia.chain_id = $1
+              AND cia.deactivated_at IS NOT NULL
+              AND cia.active_to_block_number IS NOT NULL
               AND LOWER(cia.address) IN (
                   SELECT DISTINCT emitting_address FROM candidate_logs
               )
@@ -178,7 +190,10 @@ pub(super) async fn ensure_selected_logs_have_raw_companions(
                      END
                     WHERE de.chain_id = $1
                       AND de.to_contract_instance_id = cia.contract_instance_id
-                      AND de.deactivated_at IS NULL
+                      AND (
+                          de.deactivated_at IS NULL
+                          OR de.active_to_block_number IS NOT NULL
+                      )
                       AND de.edge_kind <> 'migration'
                       AND (
                           de.active_from_block_number IS NULL

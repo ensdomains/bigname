@@ -124,8 +124,8 @@ mod tests {
         // ENSv2's `type(uint64).max` permanent reverse-name value. This narrow helper cannot
         // represent that value as an `i64`, so `json_i64` treats it as absent for callers that only
         // need a finite timestamp.
-        // (upstream: .refs/ens_v2/contracts/src/reverse-registrar/StandaloneReverseRegistrar.sol:L176 @ ens_v2@554c309)
-        // (upstream: .refs/ens_v2/contracts/src/reverse-registrar/StandaloneReverseRegistrar.sol:L177 @ ens_v2@554c309)
+        // (upstream: .refs/ens_v2/contracts/src/reverse-registrar/StandaloneReverseRegistrar.sol:L175 @ ens_v2@48b3e2d)
+        // (upstream: .refs/ens_v2/contracts/src/reverse-registrar/StandaloneReverseRegistrar.sol:L176 @ ens_v2@48b3e2d)
         assert_eq!(
             json_i64(&json!({ "expiry": 1_900_000_000 }), &["expiry"]),
             Some(1_900_000_000)

@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::Result;
-use bigname_storage::{NormalizedEvent, Resource, load_resource_including_noncanonical};
+use bigname_storage::{
+    NormalizedEvent, Resource, ens_v2_registry_resource_id, load_resource_including_noncanonical,
+};
 use serde_json::{Value, json};
 use sqlx::{PgPool, types::Uuid};
 
@@ -229,7 +231,7 @@ fn raw_fact_ref(raw_log: &PermissionsRawLogRow) -> Value {
 }
 
 #[derive(Clone, Copy)]
-enum RoleVocabulary {
+pub(super) enum RoleVocabulary {
     Registry,
     Resolver,
 }
@@ -242,7 +244,7 @@ fn permission_role_vocabulary(registry_permission_source: bool) -> RoleVocabular
     }
 }
 
-fn role_bitmap_powers(bitmap: &str, vocabulary: RoleVocabulary) -> Result<Vec<String>> {
+pub(super) fn role_bitmap_powers(bitmap: &str, vocabulary: RoleVocabulary) -> Result<Vec<String>> {
     let bytes = decode_hex_32(bitmap)?;
     Ok(role_bits_for(vocabulary)
         .iter()
@@ -266,6 +268,8 @@ const REGISTRY_ROLE_BITS: &[(usize, &str)] = &[
     (16, "renew"),
     (20, "set_subregistry"),
     (24, "set_resolver"),
+    (36, "set_uri"),
+    (120, "can_name"),
     (124, "upgrade"),
     (128, "admin_registrar"),
     (132, "admin_register_reserved"),
@@ -275,6 +279,8 @@ const REGISTRY_ROLE_BITS: &[(usize, &str)] = &[
     (148, "admin_set_subregistry"),
     (152, "admin_set_resolver"),
     (156, "can_transfer_admin"),
+    (164, "admin_set_uri"),
+    (248, "admin_can_name"),
     (252, "admin_upgrade"),
 ];
 
@@ -288,6 +294,8 @@ const RESOLVER_ROLE_BITS: &[(usize, &str)] = &[
     (24, "set_name"),
     (28, "set_alias"),
     (32, "clear_records"),
+    (36, "set_data"),
+    (120, "can_name"),
     (124, "upgrade"),
     (128, "admin_set_addr"),
     (132, "admin_set_text"),
@@ -298,6 +306,8 @@ const RESOLVER_ROLE_BITS: &[(usize, &str)] = &[
     (152, "admin_set_name"),
     (156, "admin_set_alias"),
     (160, "admin_clear_records"),
+    (164, "admin_set_data"),
+    (248, "admin_can_name"),
     (252, "admin_upgrade"),
 ];
 
@@ -325,20 +335,19 @@ fn bit_is_set(bytes: &[u8; 32], bit: usize) -> bool {
     bytes[byte_index] & bit_mask != 0
 }
 
-fn permission_resource_id(
+pub(super) fn permission_resource_id(
     chain_id: &str,
     contract_instance_id: Uuid,
     upstream_resource: &str,
     registry_permission_source: bool,
 ) -> Uuid {
-    let prefix = if registry_permission_source {
-        "ens-v2-resource"
+    if registry_permission_source {
+        ens_v2_registry_resource_id(chain_id, contract_instance_id, upstream_resource)
     } else {
-        "ens-v2-resolver-resource"
-    };
-    deterministic_uuid(&format!(
-        "{prefix}:{chain_id}:{contract_instance_id}:{upstream_resource}"
-    ))
+        deterministic_uuid(&format!(
+            "ens-v2-resolver-resource:{chain_id}:{contract_instance_id}:{upstream_resource}"
+        ))
+    }
 }
 
 fn is_registry_permission_source(source_family: &str) -> bool {

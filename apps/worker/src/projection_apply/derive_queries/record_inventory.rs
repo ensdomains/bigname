@@ -10,7 +10,11 @@ WITH changed_events AS (
 record_inventory_changed_events AS (
     SELECT *
     FROM changed_events
-    WHERE derivation_kind IN ('ens_v1_unwrapped_authority', 'ens_v2_resolver')
+    WHERE derivation_kind IN (
+        'ens_v1_unwrapped_authority',
+        'ens_v2_registry_resource_surface',
+        'ens_v2_resolver'
+    )
       AND event_kind IN ('RecordChanged', 'RecordVersionChanged', 'ResolverChanged')
       AND (
           resource_id IS NOT NULL
@@ -41,7 +45,11 @@ target_resource_events AS (
           'safe'::canonicality_state,
           'finalized'::canonicality_state
       )
-    WHERE target.derivation_kind IN ('ens_v1_unwrapped_authority', 'ens_v2_resolver')
+    WHERE target.derivation_kind IN (
+        'ens_v1_unwrapped_authority',
+        'ens_v2_registry_resource_surface',
+        'ens_v2_resolver'
+    )
       AND target.event_kind IN ('RecordChanged', 'RecordVersionChanged', 'ResolverChanged')
       AND target.resource_id IS NOT NULL
       AND target.logical_name_id IS NOT NULL

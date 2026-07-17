@@ -29,6 +29,8 @@ The bigname public read contract. Wire format for the model defined in [`archite
 
 Each route documents the subset it honors. Defaults: `consistency=head`, `mode=declared`, no `at` and no `chain_positions` selects the latest stored checkpoint per required chain. On-demand verified execution targets the same selected positions, never a provider's newer head.
 
+Unknown or undocumented query parameters are ignored unless a route explicitly documents that it rejects them. This preserves forward compatibility for `v1` clients; callers must not infer that an ignored parameter affected the response.
+
 ## Snapshot selection
 
 Snapshot selection resolves caller input to one `ChainPositions` object before any route-specific read. The selected object is echoed in the response.
@@ -61,7 +63,7 @@ Cross-chain rules:
 Deployment profiles:
 
 - One runtime serves one profile at a time. Responses and explicit `chain_positions` must not mix mainnet and Sepolia chain keys.
-- The ENSv2 `sepolia-dev` profile, when selected, supports declared exact-name profile reads against the admitted `ETHRegistry` and `ETHRegistrar` deployments[^v2-deploy-ethreg][^v2-deploy-ethrc]. It does not enable mainnet, reverse/primary, wrapper authority, migration, Universal Resolver, verified resolution, or execution-explain surfaces.
+- The ENSv2 post-audit Sepolia profile, when selected, supports declared exact-name profile reads against the admitted `ETHRegistry` and `ETHRegistrar` deployments[^v2-deploy-ethreg][^v2-deploy-ethrc]. It does not enable mainnet, reverse/primary, wrapper authority, migration, Universal Resolver, verified resolution, or execution-explain surfaces.
 
 ### Exact-name snapshot
 
@@ -144,7 +146,7 @@ Rules:
 - `chain_positions` may carry multiple chains for cross-chain answers.
 - Route-level `coverage` and per-section support are independent: a read may be authoritative while one declared section returns `UnsupportedSummary`.
 - Top-level `provenance` is optional and reserved for explicit diagnostic/full metadata paths. Product routes omit it by default; mixed declared+verified routes may add section-local `provenance` where derivations differ.
-- `meta=none` omits `meta` (collection `page` stays). `meta=summary` includes route-level support, unsupported filters/fields, count metadata, and snapshot summary. `meta=full` adds the full-envelope `coverage`, `chain_positions`, `consistency`, `last_updated`, and route-level `provenance` summaries where a compact route documents those diagnostics; compact names and role collections currently keep the same compact `meta` object as `meta=summary`.
+- `meta=none` omits `meta` (collection `page` stays). `meta=summary` includes route-level support, unsupported filters/fields, count metadata, and snapshot summary. Wrapper-scoped and account-wide compact role pages also carry `exhaustiveness`, `source_classes_considered`, `enumeration_basis`, and `unsupported_reason` so an empty page cannot be mistaken for complete wrapper-holder permission coverage; account-wide role searches are `partial`/`best_effort`, while a wrapper-scoped page is `unsupported`/`not_applicable`. `meta=full` adds the full-envelope `coverage`, `chain_positions`, `consistency`, `last_updated`, and route-level `provenance` summaries where a compact route documents those diagnostics; compact names and role collections currently keep the same compact `meta` object as `meta=summary`.
 - `GET /v1/profiles/names/{name}` is the app full-profile exception to the ordinary full-envelope default: `meta=summary` and `meta=none` return compact profile `data` without internal IDs or routine `normalized_name`, omit top-level coverage/chain/provenance fields, and strip per-query execution provenance. `meta=full` is required for diagnostic exact-name data and envelope metadata.
 - `view=full` returns the full envelope only when the route documents a full view. Compact-only routes keep `view=full` as a reserved input that returns `400 invalid_input`; OpenAPI advertises only `view=compact` for those routes.
 - Compact responses never expose raw facts, full provenance, or projection internals as a substitute for `meta`. Explain detail belongs on explain/audit routes.
@@ -159,7 +161,7 @@ The identity route has three read profiles:
 - Profile/detail profile: `POST /v1/identity:lookup` with `profile=detail` returns full native `IdentityRecord` rows for profile aggregation and account switchers. It may carry larger payloads and pagination.
 - Shadow profile: `POST /v1/identity:lookup` with `profile=shadow` follows the detail response shape for deterministic migration comparison.
 
-Identity lookup normalizes names before lookup. Identity reads are projection-backed by default and do not run live verified execution. Production ENSv2/L2 manifest admission remains a separate workstream; this route does not widen the documented ENSv2 `sepolia-dev` support boundary.
+Identity lookup normalizes names before lookup. Identity reads are projection-backed by default and do not run live verified execution. Production ENSv2/L2 manifest admission remains a separate workstream; this route does not widen the documented ENSv2 post-audit Sepolia support boundary.
 
 Identity not-found behavior is adapter-compatible rather than core-route `404` behavior:
 
@@ -229,7 +231,7 @@ Used when a documented declared subdocument exists but isn't projected. The fiel
 
 ### `ExactNameControlSummary`
 
-`registrant`, `registry_owner`, `latest_event_kind`. The narrow `declared_state.control` for one resource. Not a `ControlVector` dump or a permissions ledger. Keys stay present when supported; values may be `null` when the authority epoch doesn't expose that subject or no retained pointer exists.
+`registrant`, `registry_owner`, `latest_event_kind`. The narrow `declared_state.control` for one resource. Not a `ControlVector` dump or a permissions ledger. Keys stay present when supported; values may be `null` when the authority epoch doesn't expose that subject or no retained pointer exists. A current ENSv1 wrapper resource returns `UnsupportedSummary` instead of publishing wrapper-born or stale pre-wrap owner facets as effective control.
 
 ### `ExactNameResolverSummary`
 
@@ -241,7 +243,7 @@ For Basenames, complete family coverage requires a discovered Base resolver to b
 
 ### `RoleSummary`
 
-`subjects[*]` with `subject`, `scopes[*].scope`, `scopes[*].effective_powers`. Per-resource summary view of current effective permission rows. Row-granular lineage stays on `GET /v1/resources/{resource_id}/permissions`.
+`subjects[*]` with `subject`, `scopes[*].scope`, `scopes[*].effective_powers`. Per-resource summary view of current effective permission rows, with support classification from the projection-owned per-resource permission summary. For a current ENSv1 wrapper resource, the object additionally carries `status="unsupported"` and `unsupported_reason="ensv1_wrapper_holder_permissions_not_projected"`; `subjects` contains only rows that were actually projected and is not an exhaustive holder-power answer. If the resource summary is absent or its authority classification is unrecognized, the object carries `status="partial"` and `unsupported_reason="resource_permission_authority_not_projected"`. Permission coverage uses a closed stored vocabulary; unknown stored status, exhaustiveness, or unsupported-reason values are rejected at the storage boundary. Row-granular lineage stays on `GET /v1/resources/{resource_id}/permissions`. Permission-backed routes and expansions return `409 stale` when the projection-owned permission publication version is absent or incompatible, or when its read-consistency revision changes while the request is assembled. These are wire/schema and request-coherence checks, not freshness claims.
 
 ### `HistoryPointer`
 
@@ -484,7 +486,7 @@ See [`architecture.md`](architecture.md#subgraph-compatible-graphql-surface) for
 [^v1-revreg-l129]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L129 @ ens_v1@91c966f)
 [^v1-revreg-l130]: (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L130 @ ens_v1@91c966f)
 
-[^v2-deploy-ethreg]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistry.json:L2 @ ens_v2@554c309)
-[^v2-deploy-ethrc]: (upstream: .refs/ens_v2/contracts/deployments/sepolia-dev/ETHRegistrar.json:L2 @ ens_v2@554c309)
-[^v2-eac-l56]: (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L56 @ ens_v2@554c309)
-[^v2-eac-l187]: (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L187 @ ens_v2@554c309)
+[^v2-deploy-ethreg]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L2 @ ens_v2@48b3e2d)
+[^v2-deploy-ethrc]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistrar.json:L2 @ ens_v2@48b3e2d)
+[^v2-eac-l56]: (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L54 @ ens_v2@48b3e2d)
+[^v2-eac-l187]: (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L454 @ ens_v2@48b3e2d)

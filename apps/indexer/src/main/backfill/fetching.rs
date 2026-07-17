@@ -59,6 +59,8 @@ use sparse::{
 
 const DEFAULT_RAW_ONLY_SPARSE_MAX_LOGS_PER_PUSH: usize = 10_000;
 
+// Hash-pinned backfill keeps selection, provider, evidence, and mode inputs explicit.
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn run_hash_pinned_backfill_range(
     pool: &sqlx::PgPool,
     source_plan: &WatchedSourceSelectorPlan,

@@ -70,9 +70,13 @@ pub(super) fn merge_stable_row_observation(
 }
 
 pub(super) fn merge_binding_active_to(
+    current_state: CanonicalityState,
     current: Option<OffsetDateTime>,
     incoming: Option<OffsetDateTime>,
 ) -> Result<Option<OffsetDateTime>> {
+    if current_state == CanonicalityState::Orphaned {
+        return Ok(incoming);
+    }
     match (current, incoming) {
         (Some(current), Some(incoming)) => Ok(Some(current.min(incoming))),
         (Some(current), _) => Ok(Some(current)),

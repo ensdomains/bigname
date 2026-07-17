@@ -95,6 +95,21 @@ impl SourceScope {
         }
     }
 
+    pub(crate) fn from_historical_watched_contracts_through(
+        watched_contracts: &[WatchedContract],
+        chain: &str,
+        through_block: i64,
+        include_generic_resolver_scope: bool,
+    ) -> Self {
+        Self::from_watched_contracts(
+            watched_contracts,
+            chain,
+            0,
+            through_block,
+            include_generic_resolver_scope,
+        )
+    }
+
     pub(crate) fn into_targets(self) -> Vec<SourceScopeTarget> {
         self.targets
     }
@@ -299,6 +314,73 @@ mod tests {
                     18
                 ),
                 ("ens_v1_resolver_l1".to_owned(), "*".to_owned(), 10, 30),
+            ]
+        );
+    }
+
+    #[test]
+    fn historical_watched_contract_scope_retains_emitters_closed_before_execution_range() {
+        let watched_contracts = vec![
+            WatchedContract {
+                chain: "ethereum-mainnet".to_owned(),
+                source_family: "ens_v1_wrapper_l1".to_owned(),
+                address: "0x4040404040404040404040404040404040404040".to_owned(),
+                contract_instance_id: sqlx::types::Uuid::from_u128(0x40),
+                source: WatchedContractSource::DiscoveryEdge,
+                source_manifest_id: Some(1),
+                active_from_block_number: Some(1),
+                active_to_block_number: Some(50),
+            },
+            WatchedContract {
+                chain: "ethereum-mainnet".to_owned(),
+                source_family: "ens_v1_wrapper_l1".to_owned(),
+                address: "0x6060606060606060606060606060606060606060".to_owned(),
+                contract_instance_id: sqlx::types::Uuid::from_u128(0x60),
+                source: WatchedContractSource::ManifestRoot,
+                source_manifest_id: Some(1),
+                active_from_block_number: Some(51),
+                active_to_block_number: None,
+            },
+        ];
+
+        let execution = SourceScope::from_watched_contracts(
+            &watched_contracts,
+            "ethereum-mainnet",
+            60,
+            60,
+            false,
+        );
+        let closure_validation = SourceScope::from_historical_watched_contracts_through(
+            &watched_contracts,
+            "ethereum-mainnet",
+            60,
+            false,
+        );
+
+        assert_eq!(
+            execution.adapter_sync_scope(),
+            vec![(
+                "ens_v1_wrapper_l1".to_owned(),
+                "0x6060606060606060606060606060606060606060".to_owned(),
+                60,
+                60,
+            )]
+        );
+        assert_eq!(
+            closure_validation.adapter_sync_scope(),
+            vec![
+                (
+                    "ens_v1_wrapper_l1".to_owned(),
+                    "0x4040404040404040404040404040404040404040".to_owned(),
+                    1,
+                    50,
+                ),
+                (
+                    "ens_v1_wrapper_l1".to_owned(),
+                    "0x6060606060606060606060606060606060606060".to_owned(),
+                    51,
+                    60,
+                ),
             ]
         );
     }

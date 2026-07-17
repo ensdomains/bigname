@@ -18,7 +18,7 @@ pub(super) async fn resolve_backfill_block_numbers(
     containing_range: BackfillBlockRange,
 ) -> Result<Vec<ProviderResolvedBlock>> {
     let resolved_blocks = provider
-        .fetch_block_hashes_by_numbers(&block_numbers)
+        .fetch_block_hashes_by_numbers(block_numbers)
         .await
         .with_context(|| {
             format!(

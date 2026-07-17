@@ -323,7 +323,7 @@ async fn load_resolution_record_inventory_current_for_snapshot(
     .await
 }
 
-async fn load_record_inventory_current_for_route_snapshot(
+pub(super) async fn load_record_inventory_current_for_route_snapshot(
     pool: &PgPool,
     row: &NameCurrentRow,
     includes_verified: bool,

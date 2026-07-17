@@ -316,7 +316,7 @@ pub(crate) async fn run_backfill_sources_retention_and_replay_semantics() -> Res
     let completed_jobs = seed_completed_source_family_backfill_jobs(&database).await?;
     assert_completed_source_family_backfill_jobs(&completed_jobs);
     assert_full_profile_started_history_is_covered(&completed_jobs, "mainnet");
-    assert_full_profile_started_history_is_covered(&completed_jobs, "sepolia-dev");
+    assert_full_profile_started_history_is_covered(&completed_jobs, "sepolia");
 
     let replay_probe = seed_historical_replay_retention_probe(&database).await?;
     let backfill_surface_before_replay = snapshot_backfill_lifecycle_surface(&database).await?;
@@ -2363,7 +2363,7 @@ fn assert_ensv2_shadow_exact_name_coverage_is_not_graduated(snapshots: &[(&'stat
     );
     assert_json_not_contains(
         children,
-        "ensv2 sepolia-dev exact-name profile is shadow-only",
+        "ensv2 sepolia exact-name profile is shadow-only",
         "source-family existing-response conformance must not surface exact-name shadow coverage on children responses",
     );
 }
@@ -2826,7 +2826,7 @@ fn source_family_backfill_fixtures() -> Vec<SourceFamilyBackfillFixture> {
         ),
         source_family_backfill_fixture(
             "ens",
-            "sepolia-dev",
+            "sepolia",
             "ethereum-sepolia",
             "ens_v2_root_l1",
             vec![source_family_backfill_target(
@@ -2838,7 +2838,7 @@ fn source_family_backfill_fixtures() -> Vec<SourceFamilyBackfillFixture> {
         ),
         source_family_backfill_fixture(
             "ens",
-            "sepolia-dev",
+            "sepolia",
             "ethereum-sepolia",
             "ens_v2_registry_l1",
             vec![source_family_backfill_target(
@@ -2850,7 +2850,7 @@ fn source_family_backfill_fixtures() -> Vec<SourceFamilyBackfillFixture> {
         ),
         source_family_backfill_fixture(
             "ens",
-            "sepolia-dev",
+            "sepolia",
             "ethereum-sepolia",
             "ens_v2_registrar_l1",
             vec![source_family_backfill_target(
@@ -2862,7 +2862,7 @@ fn source_family_backfill_fixtures() -> Vec<SourceFamilyBackfillFixture> {
         ),
         source_family_backfill_fixture(
             "ens",
-            "sepolia-dev",
+            "sepolia",
             "ethereum-sepolia",
             "ens_v2_resolver_l1",
             vec![source_family_backfill_target(
@@ -3306,7 +3306,7 @@ fn auto_bootstrap_manifest_started_fixtures() -> Vec<AutoBootstrapBackfillFixtur
         },
         AutoBootstrapBackfillFixture {
             namespace: "ens",
-            deployment_profile: "sepolia-dev",
+            deployment_profile: "sepolia",
             chain_id: "ethereum-sepolia",
             source_family: "ens_v2_registry_l1",
             contract_instance_id: "00000000-0000-0000-0000-00000000b201",
@@ -3320,7 +3320,7 @@ fn auto_bootstrap_manifest_started_fixtures() -> Vec<AutoBootstrapBackfillFixtur
         },
         AutoBootstrapBackfillFixture {
             namespace: "ens",
-            deployment_profile: "sepolia-dev",
+            deployment_profile: "sepolia",
             chain_id: "ethereum-sepolia",
             source_family: "ens_v2_registrar_l1",
             contract_instance_id: "00000000-0000-0000-0000-00000000b301",
@@ -3334,7 +3334,7 @@ fn auto_bootstrap_manifest_started_fixtures() -> Vec<AutoBootstrapBackfillFixtur
         },
         AutoBootstrapBackfillFixture {
             namespace: "ens",
-            deployment_profile: "sepolia-dev",
+            deployment_profile: "sepolia",
             chain_id: "ethereum-sepolia",
             source_family: "ens_v2_resolver_l1",
             contract_instance_id: "00000000-0000-0000-0000-00000000b401",

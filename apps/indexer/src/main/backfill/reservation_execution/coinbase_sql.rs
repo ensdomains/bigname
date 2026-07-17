@@ -145,6 +145,8 @@ pub(crate) async fn run_resumable_coinbase_sql_backfill_job(
     );
 }
 
+// Reserved-range execution keeps lease, source, provider, and aggregate inputs explicit.
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn run_reserved_coinbase_sql_backfill_range(
     pool: &sqlx::PgPool,
     source_plan: &WatchedSourceSelectorPlan,
@@ -259,7 +261,6 @@ pub(crate) async fn run_reserved_coinbase_sql_backfill_range(
             }
         };
         aggregate.add_range_outcome(&window_outcome);
-
         active_range = match advance_backfill_range(
             pool,
             active_range.backfill_range_id,
@@ -283,7 +284,6 @@ pub(crate) async fn run_reserved_coinbase_sql_backfill_range(
                 .await);
             }
         };
-
         if window_end == active_range.range_end_block_number {
             break;
         }
@@ -291,7 +291,6 @@ pub(crate) async fn run_reserved_coinbase_sql_backfill_range(
             .checked_add(1)
             .context("Coinbase SQL backfill block number overflowed while advancing range")?;
     }
-
     complete_reserved_range_recording_plan_coverage(
         pool,
         &active_range,
@@ -313,13 +312,14 @@ fn next_coinbase_sql_window_blocks(
         current_window_blocks
             .saturating_mul(2)
             .min(coinbase_config.max_window_blocks)
-            .min(MAX_COINBASE_SQL_PRACTICAL_WINDOW_BLOCKS)
-            .max(1)
+            .clamp(1, MAX_COINBASE_SQL_PRACTICAL_WINDOW_BLOCKS)
     } else {
         current_window_blocks
     }
 }
 
+// Window execution keeps selection, validation, evidence, and job inputs explicit.
+#[expect(clippy::too_many_arguments)]
 async fn run_coinbase_sql_backfill_window(
     pool: &sqlx::PgPool,
     source_plan: &WatchedSourceSelectorPlan,

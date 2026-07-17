@@ -388,7 +388,7 @@ fn compact_single_response_schema(data_schema: JsonValue) -> JsonValue {
 
 #[rustfmt::skip]
 fn compact_meta_schema() -> JsonValue {
-    json!({ "type": "object", "properties": { "support_status": { "type": "string" }, "unsupported_filters": { "type": "array", "items": { "type": "string" } }, "unsupported_fields": { "type": "array", "items": { "type": "string" } }, "total_count": { "type": ["integer", "null"], "minimum": 0 }, "value_source": {}, "inventory_source": {} } })
+    json!({ "type": "object", "properties": { "support_status": { "type": "string" }, "unsupported_filters": { "type": "array", "items": { "type": "string" } }, "unsupported_fields": { "type": "array", "items": { "type": "string" } }, "total_count": { "type": ["integer", "null"], "minimum": 0 }, "exhaustiveness": { "type": "string" }, "source_classes_considered": { "type": "array", "items": { "type": "string" } }, "enumeration_basis": { "type": "string" }, "unsupported_reason": { "type": ["string", "null"] }, "value_source": {}, "inventory_source": {} } })
 }
 
 #[rustfmt::skip]

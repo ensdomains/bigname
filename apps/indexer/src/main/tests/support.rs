@@ -8,15 +8,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::Context;
 use alloy_primitives::keccak256;
+use anyhow::Context;
 use bigname_manifests::load_discovery_admission_state;
 use bigname_storage::{
     ChainCheckpoint, ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, ExecutionTraceStep,
     NameSurface, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage, default_database_url,
-    load_execution_outcome, load_execution_trace, upsert_execution_outcome,
-    upsert_execution_trace, upsert_name_surfaces, upsert_resources, upsert_surface_bindings,
-    upsert_token_lineages,
+    load_execution_outcome, load_execution_trace, upsert_execution_outcome, upsert_execution_trace,
+    upsert_name_surfaces, upsert_resources, upsert_surface_bindings, upsert_token_lineages,
 };
 use serde_json::{Value, json};
 use sqlx::{
@@ -462,17 +461,17 @@ impl TestDatabase {
             .await
             .context("failed to create discovery_edges table for indexer tests")?;
 
-    sqlx::query(
-        r#"
+        sqlx::query(
+            r#"
             CREATE TABLE discovery_admission_epochs (
                 chain_id TEXT PRIMARY KEY,
                 epoch BIGINT NOT NULL
             )
             "#,
-    )
-    .execute(&pool)
-    .await
-    .context("failed to create discovery_admission_epochs table for indexer tests")?;
+        )
+        .execute(&pool)
+        .await
+        .context("failed to create discovery_admission_epochs table for indexer tests")?;
         sqlx::query(
             r#"
                 CREATE TABLE chain_lineage (
@@ -791,7 +790,9 @@ impl TestDatabase {
         )
         .execute(&pool)
         .await
-        .context("failed to create name_surface_normalization_repair_findings table for indexer tests")?;
+        .context(
+            "failed to create name_surface_normalization_repair_findings table for indexer tests",
+        )?;
         sqlx::query(
             r#"
                 CREATE INDEX name_surface_normalization_repair_findings_kind_idx
@@ -804,7 +805,9 @@ impl TestDatabase {
         )
         .execute(&pool)
         .await
-        .context("failed to create name-surface normalization repair findings index for indexer tests")?;
+        .context(
+            "failed to create name-surface normalization repair findings index for indexer tests",
+        )?;
         sqlx::query(
             r#"
                 CREATE TABLE surface_bindings (
@@ -1077,6 +1080,10 @@ impl TestDatabase {
         .await
         .context("failed to create execution_cache_outcomes table for indexer tests")?;
 
+        ensure_normalized_replay_adapter_checkpoint_tables(&pool).await?;
+        create_raw_log_staging_input_revisions_table(&pool).await?;
+        ensure_resolver_profile_convergence_tables(&pool).await?;
+
         Ok(Self {
             admin_pool,
             pool,
@@ -1086,6 +1093,25 @@ impl TestDatabase {
 
     fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    async fn additional_pool(&self, max_connections: u32) -> Result<PgPool> {
+        let database_url = std::env::var("BIGNAME_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| default_database_url().to_owned());
+        let options = PgConnectOptions::from_str(&database_url)
+            .context("failed to parse database URL for additional indexer test pool")?
+            .database(&self.database_name);
+        PgPoolOptions::new()
+            .max_connections(max_connections)
+            .connect_with(options)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to connect additional indexer test pool to {}",
+                    self.database_name
+                )
+            })
     }
 
     async fn cleanup(self) -> Result<()> {
@@ -1100,6 +1126,203 @@ impl TestDatabase {
         self.admin_pool.close().await;
         Ok(())
     }
+}
+
+#[allow(dead_code)]
+async fn create_raw_log_staging_input_revisions_table(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS raw_log_staging_input_revisions (
+            chain_id TEXT PRIMARY KEY,
+            revision BIGINT NOT NULL DEFAULT 0,
+            retention_generation BIGINT NOT NULL DEFAULT 0,
+            retained_history_complete BOOLEAN NOT NULL DEFAULT false,
+            incomplete_since TIMESTAMPTZ,
+            proven_retention_generation BIGINT,
+            proven_discovery_admission_epoch BIGINT,
+            proven_through_block BIGINT
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to create raw-log retention state for indexer tests")?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS raw_log_staging_block_revisions (
+            chain_id TEXT NOT NULL,
+            block_hash TEXT NOT NULL,
+            block_number BIGINT NOT NULL,
+            revision BIGINT NOT NULL,
+            PRIMARY KEY (chain_id, block_hash)
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to create raw-log block revision state for indexer tests")?;
+
+    // Production installs commit-ordered revision triggers. The hand-built
+    // fixture only needs their foundational invariant here: once a chain has
+    // a retained raw log, it also has a durable per-chain authority row.
+    sqlx::raw_sql(
+        r#"
+        CREATE OR REPLACE FUNCTION ensure_raw_log_staging_authority_for_indexer_test()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            INSERT INTO raw_log_staging_input_revisions (
+                chain_id,
+                revision,
+                retention_generation,
+                retained_history_complete,
+                incomplete_since,
+                proven_retention_generation,
+                proven_discovery_admission_epoch,
+                proven_through_block
+            )
+            VALUES (NEW.chain_id, 0, 0, false, clock_timestamp(), NULL, NULL, NULL)
+            ON CONFLICT (chain_id) DO NOTHING;
+            RETURN NEW;
+        END;
+        $$;
+
+        DROP TRIGGER IF EXISTS ensure_raw_log_staging_authority_for_indexer_test
+            ON raw_logs;
+        CREATE TRIGGER ensure_raw_log_staging_authority_for_indexer_test
+            BEFORE INSERT ON raw_logs
+            FOR EACH ROW
+            EXECUTE FUNCTION ensure_raw_log_staging_authority_for_indexer_test();
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to create raw-log retention authority trigger for indexer tests")?;
+
+    Ok(())
+}
+
+async fn create_normalized_replay_adapter_checkpoint_tables(pool: &PgPool) -> Result<()> {
+    ensure_normalized_replay_adapter_checkpoint_tables(pool).await?;
+    create_raw_log_staging_input_revisions_table(pool).await?;
+    Ok(())
+}
+
+async fn ensure_normalized_replay_adapter_checkpoint_tables(pool: &PgPool) -> Result<()> {
+    let checkpoint_table_exists = sqlx::query_scalar::<_, bool>(
+        "SELECT to_regclass('public.normalized_replay_adapter_checkpoints') IS NOT NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .context("failed to inspect normalized replay adapter checkpoint test fixture")?;
+    if !checkpoint_table_exists {
+        sqlx::raw_sql(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../migrations/20260509120000_normalized_replay_adapter_checkpoints.sql"
+        )))
+        .execute(pool)
+        .await
+        .context("failed to create normalized replay adapter checkpoint tables")?;
+    }
+    sqlx::query(
+        r#"
+        ALTER TABLE normalized_replay_adapter_checkpoints
+            ADD COLUMN IF NOT EXISTS raw_log_retention_generation BIGINT NOT NULL DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS raw_log_input_revision BIGINT NOT NULL DEFAULT 0
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to add raw-log versions to replay adapter checkpoints")?;
+    Ok(())
+}
+
+async fn ensure_resolver_profile_convergence_tables(pool: &PgPool) -> Result<()> {
+    if !sqlx::query_scalar::<_, bool>(
+        "SELECT to_regclass('public.resolver_profile_input_changes') IS NOT NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .context("failed to inspect resolver-profile input queue test fixture")?
+    {
+        sqlx::raw_sql(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../migrations/20260715121000_resolver_profile_input_changes.sql"
+        )))
+        .execute(pool)
+        .await
+        .context("failed to create resolver-profile input queue for indexer tests")?;
+    }
+
+    if !sqlx::query_scalar::<_, bool>(
+        "SELECT to_regclass('public.resolver_profile_reconciliation_runs') IS NOT NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .context("failed to inspect resolver-profile reconciliation test fixture")?
+    {
+        sqlx::raw_sql(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../migrations/20260715123000_resolver_profile_reconciliation_staging.sql"
+        )))
+        .execute(pool)
+        .await
+        .context("failed to create resolver-profile reconciliation state for indexer tests")?;
+    }
+
+    if !sqlx::query_scalar::<_, bool>(
+        "SELECT to_regclass('public.resolver_profile_authority_journal') IS NOT NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .context("failed to inspect resolver-profile authority journal test fixture")?
+    {
+        sqlx::raw_sql(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../migrations/20260715130000_resolver_profile_authority_journal.sql"
+        )))
+        .execute(pool)
+        .await
+        .context("failed to create resolver-profile authority journal for indexer tests")?;
+    }
+
+    Ok(())
+}
+
+async fn create_complete_raw_log_staging_input_fixture(
+    pool: &PgPool,
+    chain: &str,
+    proven_through_block: i64,
+) -> Result<()> {
+    create_raw_log_staging_input_revisions_table(pool).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO raw_log_staging_input_revisions (
+            chain_id,
+            revision,
+            retention_generation,
+            retained_history_complete,
+            incomplete_since,
+            proven_retention_generation,
+            proven_discovery_admission_epoch,
+            proven_through_block
+        )
+        VALUES ($1, 0, 0, true, NULL, 0, 0, $2)
+        "#,
+    )
+    .bind(chain)
+    .bind(proven_through_block)
+    .execute(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to seed complete raw-log retention state for {chain} through block {proven_through_block}"
+        )
+    })?;
+
+    Ok(())
 }
 
 #[allow(dead_code)]
@@ -1119,12 +1342,15 @@ async fn create_ops_catchup_backfill_job_tables(pool: &PgPool) -> Result<()> {
     .await
     .context("failed to create backfill_lifecycle_status type for ops catch-up tests")?;
 
+    create_raw_log_staging_input_revisions_table(pool).await?;
+
     sqlx::query(
         r#"
         CREATE TABLE backfill_jobs (
             backfill_job_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             deployment_profile TEXT NOT NULL,
             chain_id TEXT NOT NULL,
+            raw_log_retention_generation BIGINT NOT NULL DEFAULT 0,
             source_identity JSONB NOT NULL,
             scan_mode TEXT NOT NULL,
             range_start_block_number BIGINT NOT NULL CHECK (range_start_block_number >= 0),
@@ -1193,7 +1419,18 @@ async fn create_ops_catchup_backfill_job_tables(pool: &PgPool) -> Result<()> {
     .context("failed to create active lease token index for ops catch-up tests")?;
 
     create_backfill_coverage_facts_table(pool).await?;
+    create_stored_lineage_coverage_frontier_tables(pool).await?;
 
+    Ok(())
+}
+
+async fn create_stored_lineage_coverage_frontier_tables(pool: &PgPool) -> Result<()> {
+    sqlx::raw_sql(include_str!(
+        "../../../../../migrations/20260716122000_stored_lineage_coverage_frontiers.sql"
+    ))
+    .execute(pool)
+    .await
+    .context("failed to apply the stored-lineage coverage frontier migration for indexer tests")?;
     Ok(())
 }
 
@@ -1315,8 +1552,7 @@ edge_kind = "subregistry"
 from_role = "registry"
 admission = "reachable_from_root"
 {abi}
-"#
-    ,
+"#,
         abi = test_manifest_abi_toml()
     )
 }
@@ -1349,8 +1585,7 @@ edge_kind = "subregistry"
 from_role = "registry"
 admission = "reachable_from_root"
 {abi}
-"#
-    ,
+"#,
         abi = test_manifest_abi_toml()
     )
 }
@@ -2031,14 +2266,21 @@ async fn bundle_provider_with_fixtures(
         let result = match method {
             "eth_getBlockByNumber" => {
                 assert_eq!(params.get(1), Some(&Value::Bool(false)));
-                let block_number = params
+                let block_selector = params
                     .first()
                     .and_then(Value::as_str)
-                    .map(support_parse_rpc_block_number)
                     .expect("block number parameter must be present");
-                let block_hash = hashes_by_number
-                    .get(&block_number)
-                    .unwrap_or_else(|| panic!("unexpected block number request: {body}"));
+                let block_hash = if matches!(block_selector, "latest" | "safe" | "finalized") {
+                    hashes_by_number
+                        .last_key_value()
+                        .map(|(_, hash)| hash)
+                        .expect("head lookup requires at least one fixture block")
+                } else {
+                    let block_number = support_parse_rpc_block_number(block_selector);
+                    hashes_by_number
+                        .get(&block_number)
+                        .unwrap_or_else(|| panic!("unexpected block number request: {body}"))
+                };
                 let fixture = blocks
                     .get(block_hash)
                     .expect("number index must point at a fixture block");

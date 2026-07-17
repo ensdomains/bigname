@@ -112,6 +112,8 @@ pub(super) fn paginated_declared_response_schema(
     schema
 }
 
+// Each OpenAPI operation field stays explicit at this schema-construction boundary.
+#[expect(clippy::too_many_arguments)]
 pub(super) fn openapi_json_get_operation(
     operation_id: &'static str,
     summary: &'static str,

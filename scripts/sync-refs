@@ -2,8 +2,8 @@
 """Sync upstream reference repositories pinned in .refs/MANIFEST.toml.
 
 Usage:
-    scripts/sync-refs            # clone/fetch/checkout to pinned commits
-    scripts/sync-refs --check    # exit nonzero if any ref is missing or off-pin
+    scripts/sync-refs            # sync ref pins and required submodule pins
+    scripts/sync-refs --check    # verify ref pins and required submodule pins
 
 Refs are declared in .refs/MANIFEST.toml. Each lives under .refs/<key>/; those
 directories are gitignored. MANIFEST.toml and .refs/README.md are tracked.
@@ -11,19 +11,55 @@ directories are gitignored. MANIFEST.toml and .refs/README.md are tracked.
 from __future__ import annotations
 
 import argparse
+import ast
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - only used on Python <3.11.
+    tomllib = None
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REFS_DIR = REPO_ROOT / ".refs"
 MANIFEST = REFS_DIR / "MANIFEST.toml"
 
+# These reference trees are also executable test inputs. Their pinned
+# submodule commits are therefore part of the local reference state, not
+# optional developer conveniences.
+RECURSIVE_SUBMODULE_REFS = frozenset({"basenames"})
+
 
 def load_manifest() -> dict:
-    with MANIFEST.open("rb") as fh:
-        return tomllib.load(fh)
+    if tomllib is not None:
+        with MANIFEST.open("rb") as fh:
+            return tomllib.load(fh)
+
+    # macOS still ships Python 3.9. Keep the no-dependency script usable there
+    # by parsing only the ref table fields this script consumes.
+    refs: dict[str, dict[str, str]] = {}
+    current: dict[str, str] | None = None
+    for line in MANIFEST.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped[1:-1]
+            if section.startswith("refs."):
+                current = refs.setdefault(section.removeprefix("refs."), {})
+            else:
+                current = None
+            continue
+        if current is None or "=" not in stripped:
+            continue
+        key, raw_value = stripped.split("=", maxsplit=1)
+        if key.strip() in {"repo", "commit"}:
+            value = ast.literal_eval(raw_value.strip())
+            if not isinstance(value, str):
+                raise ValueError(f"{key.strip()} must be a string")
+            current[key.strip()] = value
+    return {"refs": refs}
 
 
 def run(cmd: list[str], cwd: Path | None = None) -> None:
@@ -65,6 +101,43 @@ def sync_ref(key: str, entry: dict) -> None:
         run(["git", "-C", str(path), "remote", "set-url", "origin", repo])
     run(["git", "fetch", "--filter=blob:none", "--depth", "1", "origin", commit], cwd=path)
     run(["git", "checkout", "--detach", commit], cwd=path)
+    if key in RECURSIVE_SUBMODULE_REFS:
+        run(["git", "submodule", "sync", "--recursive"], cwd=path)
+        run(
+            ["git", "submodule", "update", "--init", "--recursive", "--depth", "1"],
+            cwd=path,
+        )
+
+
+def check_recursive_submodules(key: str, path: Path) -> str | None:
+    result = subprocess.run(
+        ["git", "submodule", "status", "--recursive"],
+        cwd=path,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return f"unreadable submodules: .refs/{key}"
+
+    bad = [
+        line
+        for line in result.stdout.splitlines()
+        if line and not line.startswith(" ")
+    ]
+    if not bad:
+        return None
+
+    details = []
+    states = {"-": "missing", "+": "off-pin", "U": "conflicted"}
+    for line in bad[:5]:
+        fields = line[1:].split(maxsplit=1)
+        relative = (
+            fields[1].split(" ", maxsplit=1)[0] if len(fields) == 2 else line[1:]
+        )
+        details.append(f"{states.get(line[0], 'invalid')} .refs/{key}/{relative}")
+    if len(bad) > len(details):
+        details.append(f"and {len(bad) - len(details)} more")
+    return "; ".join(details)
 
 
 def check_ref(key: str, entry: dict) -> str | None:
@@ -78,6 +151,8 @@ def check_ref(key: str, entry: dict) -> str | None:
         return f"unreadable: .refs/{key}"
     if head != commit:
         return f"off-pin: .refs/{key} at {head[:12]}, expected {commit[:12]}"
+    if key in RECURSIVE_SUBMODULE_REFS:
+        return check_recursive_submodules(key, path)
     return None
 
 

@@ -1,8 +1,8 @@
 mod canonicality;
 mod json;
 mod load;
-mod persist;
 mod project;
+mod resource_summary;
 #[allow(clippy::duplicate_mod)]
 #[path = "staged_rebuild.rs"]
 mod staged_rebuild;
@@ -11,24 +11,28 @@ mod tests;
 mod types;
 
 use anyhow::{Context, Result};
-use bigname_storage::upsert_permissions_current_rows;
+use bigname_storage::replace_permissions_current_resource_projection;
 use futures_util::{TryStreamExt, pin_mut};
 use load::stream_target_resource_ids;
-use persist::delete_stale_permissions_current_rows_for_resource;
-use project::build_rows;
+use project::build_resource_projection;
 pub(crate) use project::{mask_effective_powers_for_fuse_state, scope_fuse_state_from_after_state};
 use sqlx::PgPool;
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use staged_rebuild::{
-    PERMISSIONS_CURRENT_COLUMNS, count_rows, create_stage_table, drop_stage_table,
-    publish_stage_table, stage_permissions_current_rows,
+    count_rows, create_stage_table, drop_stage_table, publish_permissions_current_stage_tables,
+    stage_permissions_current_resource_summaries, stage_permissions_current_rows,
 };
 
+const EVENT_KIND_AUTHORITY_EPOCH_CHANGED: &str = "AuthorityEpochChanged";
 const EVENT_KIND_PERMISSION_CHANGED: &str = "PermissionChanged";
 const EVENT_KIND_ROOT_PERMISSION_CHANGED: &str = "RootPermissionChanged";
 const EVENT_KIND_PERMISSION_SCOPE_CHANGED: &str = "PermissionScopeChanged";
+const EVENT_KIND_REGISTRATION_GRANTED: &str = "RegistrationGranted";
+const EVENT_KIND_TOKEN_RESOURCE_LINKED: &str = "TokenResourceLinked";
+const SOURCE_FAMILY_ENS_V2_ROOT_L1: &str = "ens_v2_root_l1";
+const SOURCE_FAMILY_ENS_V2_REGISTRY_L1: &str = "ens_v2_registry_l1";
 const PERMISSIONS_CURRENT_DERIVATION_KIND: &str = "permissions_current_rebuild";
 const PERMISSIONS_ENUMERATION_BASIS: &str = "resource_permissions";
 const PERMISSIONS_CURRENT_REBUILD_BATCH_SIZE: usize = 2_000;
@@ -64,11 +68,15 @@ async fn rebuild_all_resources(pool: &PgPool) -> Result<PermissionsCurrentRebuil
         .await
         .context("failed to acquire permissions_current staging connection")?;
     let stage_table = create_stage_table(&mut conn, "permissions_current").await?;
+    let summary_stage_table =
+        create_stage_table(&mut conn, "permissions_current_resource_summary").await?;
     let previous_row_count = count_rows(&mut conn, "permissions_current", None).await?;
     let mut rows = Vec::with_capacity(PERMISSIONS_CURRENT_REBUILD_BATCH_SIZE);
+    let mut summaries = Vec::with_capacity(PERMISSIONS_CURRENT_REBUILD_BATCH_SIZE);
     let mut requested_resource_count = 0usize;
     let mut completed_resource_count = 0usize;
     let mut upserted_row_count = 0usize;
+    let mut staged_summary_count = 0usize;
 
     let resource_ids = stream_target_resource_ids(pool);
     pin_mut!(resource_ids);
@@ -84,14 +92,27 @@ async fn rebuild_all_resources(pool: &PgPool) -> Result<PermissionsCurrentRebuil
 
     while let Some(result) = tasks.join_next().await {
         completed_resource_count += 1;
-        rows.extend(result??);
-        if rows.len() >= PERMISSIONS_CURRENT_REBUILD_BATCH_SIZE {
+        let projection = result??;
+        rows.extend(projection.rows);
+        if let Some(summary) = projection.summary {
+            summaries.push(summary);
+        }
+        if rows.len() >= PERMISSIONS_CURRENT_REBUILD_BATCH_SIZE
+            || summaries.len() >= PERMISSIONS_CURRENT_REBUILD_BATCH_SIZE
+        {
             upserted_row_count +=
                 stage_permissions_current_rows(&mut conn, &stage_table, &rows).await? as usize;
             rows.clear();
+            staged_summary_count += stage_permissions_current_resource_summaries(
+                &mut conn,
+                &summary_stage_table,
+                &summaries,
+            )
+            .await? as usize;
+            summaries.clear();
         }
 
-        if completed_resource_count % 5_000 == 0 {
+        if completed_resource_count.is_multiple_of(5_000) {
             tracing::info!(
                 projection = "permissions_current",
                 queued_resource_count = requested_resource_count,
@@ -114,16 +135,21 @@ async fn rebuild_all_resources(pool: &PgPool) -> Result<PermissionsCurrentRebuil
         upserted_row_count +=
             stage_permissions_current_rows(&mut conn, &stage_table, &rows).await? as usize;
     }
-    let (_deleted_row_count, published_row_count) = publish_stage_table(
-        &mut conn,
-        "permissions_current",
-        &stage_table,
-        PERMISSIONS_CURRENT_COLUMNS,
-        None,
-    )
-    .await?;
+    if !summaries.is_empty() {
+        staged_summary_count += stage_permissions_current_resource_summaries(
+            &mut conn,
+            &summary_stage_table,
+            &summaries,
+        )
+        .await? as usize;
+    }
+    let (_deleted_row_count, published_row_count, published_summary_count) =
+        publish_permissions_current_stage_tables(&mut conn, &stage_table, &summary_stage_table)
+            .await?;
     drop_stage_table(&mut conn, &stage_table).await?;
+    drop_stage_table(&mut conn, &summary_stage_table).await?;
     debug_assert_eq!(published_row_count as usize, upserted_row_count);
+    debug_assert_eq!(published_summary_count as usize, staged_summary_count);
 
     Ok(PermissionsCurrentRebuildSummary {
         requested_resource_count,
@@ -133,12 +159,12 @@ async fn rebuild_all_resources(pool: &PgPool) -> Result<PermissionsCurrentRebuil
 }
 
 fn spawn_permissions_rebuild_task(
-    tasks: &mut JoinSet<Result<Vec<bigname_storage::PermissionsCurrentRow>>>,
+    tasks: &mut JoinSet<Result<types::ProjectedPermissionsResource>>,
     pool: &PgPool,
     resource_id: Uuid,
 ) {
     let pool = pool.clone();
-    tasks.spawn(async move { build_rows(&pool, std::slice::from_ref(&resource_id)).await });
+    tasks.spawn(async move { build_resource_projection(&pool, resource_id).await });
 }
 
 async fn rebuild_one_resource(
@@ -147,10 +173,14 @@ async fn rebuild_one_resource(
 ) -> Result<PermissionsCurrentRebuildSummary> {
     let resource_id = Uuid::parse_str(resource_id)
         .with_context(|| format!("resource_id must be a UUID: {resource_id}"))?;
-    let rows = build_rows(pool, &[resource_id]).await?;
-    let upserted_row_count = upsert_permissions_current_rows(pool, &rows).await?.len();
-    let deleted_row_count =
-        delete_stale_permissions_current_rows_for_resource(pool, resource_id, &rows).await?;
+    let projection = build_resource_projection(pool, resource_id).await?;
+    let (upserted_row_count, deleted_row_count) = replace_permissions_current_resource_projection(
+        pool,
+        resource_id,
+        &projection.rows,
+        projection.summary.as_ref(),
+    )
+    .await?;
 
     Ok(PermissionsCurrentRebuildSummary {
         requested_resource_count: 1,

@@ -1,3 +1,33 @@
+#[test]
+fn wrapped_exact_name_control_is_explicitly_unsupported() {
+    let logical_name_id = "ens:wrapped.eth";
+    let resource_id = Uuid::from_u128(0x2200);
+    let token_lineage_id = Uuid::from_u128(0x1100);
+    let surface_binding_id = Uuid::from_u128(0x3300);
+    let mut row = exact_name_row(
+        logical_name_id,
+        surface_binding_id,
+        resource_id,
+        token_lineage_id,
+    );
+    row.declared_summary["registration"]["authority_kind"] = json!("wrapper");
+    row.declared_summary["control"] = json!({
+        "registrant": "0x0000000000000000000000000000000000000aaa",
+        "registry_owner": "0x0000000000000000000000000000000000000bbb",
+        "latest_event_kind": "AuthorityEpochChanged",
+    });
+
+    let declared_state = build_name_declared_state(&row, None);
+    let authority_control = build_name_authority_control_explain_declared_state(&row);
+    let expected = json!({
+        "status": "unsupported",
+        "unsupported_reason": "ENSv1 wrapper effective control is not yet projected",
+    });
+
+    assert_eq!(declared_state.get("control"), Some(&expected));
+    assert_eq!(authority_control.get("control"), Some(&expected));
+}
+
 #[tokio::test]
 async fn get_name_returns_current_projection_envelope() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;
@@ -835,7 +865,8 @@ async fn get_name_reads_rebuilt_basenames_exact_name_projection() -> Result<()> 
 }
 
 #[tokio::test]
-async fn get_name_reads_selected_sepolia_dev_ensv2_exact_name_profile_projection() -> Result<()> {
+async fn get_name_reads_selected_post_audit_sepolia_ensv2_exact_name_profile_projection()
+-> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = "ens:bob.alice.eth";
     let resource_id = Uuid::from_u128(0x8c10);
@@ -880,7 +911,7 @@ async fn get_name_reads_selected_sepolia_dev_ensv2_exact_name_profile_projection
                 .expect("request must build"),
         )
         .await
-        .context("ENSv2 sepolia-dev exact-name request failed")?;
+        .context("ENSv2 post-audit Sepolia exact-name request failed")?;
     let coverage_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
@@ -889,7 +920,7 @@ async fn get_name_reads_selected_sepolia_dev_ensv2_exact_name_profile_projection
                 .expect("request must build"),
         )
         .await
-        .context("ENSv2 sepolia-dev coverage request failed")?;
+        .context("ENSv2 post-audit Sepolia coverage request failed")?;
 
     assert_eq!(name_response.status(), StatusCode::OK);
     assert_eq!(coverage_response.status(), StatusCode::OK);
@@ -1296,7 +1327,7 @@ async fn seed_ensv2_exact_name_profile_manifests(database: &TestDatabase) -> Res
             "ens",
             "ens_v2_registry_l1",
             "ethereum-sepolia",
-            "ens_v2_sepolia_dev",
+            "ens_v2_sepolia_post_audit",
             11,
             "active",
             "ensip15@ens-normalize-0.1.1",
@@ -1307,7 +1338,7 @@ async fn seed_ensv2_exact_name_profile_manifests(database: &TestDatabase) -> Res
             "ens",
             "ens_v2_registrar_l1",
             "ethereum-sepolia",
-            "ens_v2_sepolia_dev",
+            "ens_v2_sepolia_post_audit",
             11,
             "active",
             "ensip15@ens-normalize-0.1.1",

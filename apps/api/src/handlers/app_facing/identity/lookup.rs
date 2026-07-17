@@ -52,13 +52,14 @@ pub(crate) async fn identity_lookup(
                 let (lookup, normalization) =
                     match parse_identity_name_lookup_with_namespace(&input_name, namespace) {
                         Ok(lookup) => {
-                            let normalization = lookup
-                                .corrected_input_normalization
-                                .then(|| NormalizationInfo {
-                                    changed: true,
-                                    input_name: input_name.clone(),
-                                    reason: "case_normalized".to_owned(),
-                                });
+                            let normalization =
+                                lookup
+                                    .corrected_input_normalization
+                                    .then(|| NormalizationInfo {
+                                        changed: true,
+                                        input_name: input_name.clone(),
+                                        reason: "case_normalized".to_owned(),
+                                    });
                             (Some(lookup), normalization)
                         }
                         Err(_) => (
@@ -207,11 +208,8 @@ async fn load_native_name_records(
 ) -> ApiResult<BTreeMap<String, bigname_storage::IdentityNameRecordRow>> {
     let records = match profile {
         IdentityLookupProfile::Feed => {
-            bigname_storage::load_identity_name_feed_records_by_names(
-                &state.pool,
-                logical_name_ids,
-            )
-            .await
+            bigname_storage::load_identity_name_feed_records_by_names(&state.pool, logical_name_ids)
+                .await
         }
         IdentityLookupProfile::Detail | IdentityLookupProfile::Shadow => {
             bigname_storage::load_identity_records_by_names(&state.pool, logical_name_ids).await
@@ -371,7 +369,10 @@ fn native_reverse_identity_page(
     roles: IdentityRoles,
     total_count: Option<u64>,
     has_more: bool,
-) -> (Vec<NativeIdentityRecordResponse>, IdentityLookupPageResponse) {
+) -> (
+    Vec<NativeIdentityRecordResponse>,
+    IdentityLookupPageResponse,
+) {
     entries.sort_by(reverse_identity_sort);
     let cursor_spec = reverse_identity_cursor_spec(address, coin_type, roles);
     let next_cursor = if has_more {

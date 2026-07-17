@@ -396,6 +396,23 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
         openapi_response_description(name_profile, "409"),
         "Snapshot conflict or stale projection"
     );
+
+    let resource_permissions =
+        openapi_operation(&document, "/v1/resources/{resource_id}/permissions");
+    assert_eq!(
+        openapi_response_description(resource_permissions, "409"),
+        "Snapshot conflict or stale projection"
+    );
+    for path in [
+        "/v1/roles",
+        "/v1/names/{namespace}/{name}/roles",
+    ] {
+        assert_eq!(
+            openapi_response_description(openapi_operation(&document, path), "409"),
+            "Snapshot conflict or stale projection",
+            "permission-backed role route must declare its publication-version conflict: {path}"
+        );
+    }
     let mode = openapi_parameter(name_profile, "mode");
     assert_eq!(
         mode.get("schema"),
@@ -580,6 +597,10 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
         resolution_execution_records.get("explode"),
         Some(&json!(false))
     );
+    assert_eq!(
+        openapi_response_description(resolution_execution, "409"),
+        "Snapshot conflict or stale projection"
+    );
 
     let primary_names = openapi_operation(&document, "/v1/primary-names/{address}");
     let primary_namespace = openapi_parameter(primary_names, "namespace");
@@ -683,6 +704,21 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
             .and_then(|data| data.get("items")),
         Some(&json!({ "$ref": "#/components/schemas/RoleRow" }))
     );
+    let compact_meta_properties = openapi_schema(&document, "CompactMeta")
+        .get("properties")
+        .and_then(Value::as_object)
+        .expect("compact meta properties must be an object");
+    for field in [
+        "enumeration_basis",
+        "exhaustiveness",
+        "source_classes_considered",
+        "unsupported_reason",
+    ] {
+        assert!(
+            compact_meta_properties.contains_key(field),
+            "CompactMeta must describe wrapper-role support field {field}"
+        );
+    }
 
     let resource_lookup = openapi_schema(&document, "ResourceLookupResponse");
     assert_eq!(required_fields(resource_lookup), vec!["data"]);
@@ -694,7 +730,11 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
         Some(&json!({ "$ref": "#/components/schemas/ResourceLookupData" }))
     );
 
-    assert_compact_schema_omits(&document, "CompactDomainSummary", &["resource_id", "provenance"]);
+    assert_compact_schema_omits(
+        &document,
+        "CompactDomainSummary",
+        &["resource_id", "provenance"],
+    );
     assert_compact_schema_omits(
         &document,
         "CompactRecordSummary",

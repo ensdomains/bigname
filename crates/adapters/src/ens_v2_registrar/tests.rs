@@ -7,6 +7,7 @@ use std::{
 use anyhow::{Context, Result};
 use bigname_storage::{
     CanonicalityState, NormalizedEvent, default_database_url, upsert_normalized_events,
+    upsert_normalized_events_with_summary,
 };
 use serde_json::{Value, json};
 use sqlx::{
@@ -16,8 +17,10 @@ use sqlx::{
 };
 
 use super::{
-    REGISTRY_DERIVATION_KIND, SOURCE_FAMILY_ENS_V2_REGISTRAR_L1, decoding::RegistrarObservation,
-    event_building::build_registrar_event, raw_logs::RegistrarRawLogRow,
+    REGISTRY_DERIVATION_KIND, SOURCE_FAMILY_ENS_V2_REGISTRAR_L1,
+    decoding::{RegistrarObservation, RenewalPayment},
+    event_building::build_registrar_event,
+    raw_logs::RegistrarRawLogRow,
 };
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -140,7 +143,7 @@ async fn ens_v2_registrar_links_pre_regeneration_token_to_registry_resource() ->
             new_expiry: 2_000_000_000,
             payment_token: ZERO_ADDRESS_FOR_TEST.to_owned(),
             referrer: format!("0x{}", "00".repeat(32)),
-            base: "0x01".to_owned(),
+            payment: RenewalPayment::PostAuditAmount("0x01".to_owned()),
         },
     )
     .await?;
@@ -155,6 +158,139 @@ async fn ens_v2_registrar_links_pre_regeneration_token_to_registry_resource() ->
         event.after_state["registry_resource_id"],
         Value::String(resource_id.to_string())
     );
+    assert_eq!(
+        event.after_state["amount"],
+        Value::String("0x01".to_owned())
+    );
+    assert_eq!(
+        event.after_state["base"], event.after_state["amount"],
+        "base compatibility alias must match the post-audit renewal amount"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn ens_v2_registrar_ignores_future_token_collision_from_another_registry() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let token_id = "0x00000000000000000000000000000000000000000000000000000000000000a1";
+    let eth_registry_resource_id = Uuid::from_u128(0xfeed);
+    let child_registry_resource_id = Uuid::from_u128(0xbad);
+
+    upsert_normalized_events(
+        database.pool(),
+        &[
+            registry_event(
+                "eth-registry-token-resource",
+                "ens:alice.eth",
+                eth_registry_resource_id,
+                "TokenResourceLinked",
+                10,
+                json!({
+                    "token_id": token_id,
+                    "registry_contract_instance_id": Uuid::from_u128(0xe7).to_string(),
+                    "upstream_resource": "0x0000000000000000000000000000000000000000000000000000000000000eac",
+                }),
+            ),
+            registry_event(
+                "child-registry-token-resource",
+                "ens:alice.eth",
+                child_registry_resource_id,
+                "TokenResourceLinked",
+                20,
+                json!({
+                    "token_id": token_id,
+                    "registry_contract_instance_id": Uuid::from_u128(0xc7).to_string(),
+                    "upstream_resource": "0x0000000000000000000000000000000000000000000000000000000000000bad",
+                }),
+            ),
+        ],
+    )
+    .await?;
+
+    let event = build_registrar_event(
+        database.pool(),
+        &raw_log(),
+        RegistrarObservation::NameRenewed {
+            token_id: token_id.to_owned(),
+            label: "alice".to_owned(),
+            duration: 31_536_000,
+            new_expiry: 2_000_000_000,
+            payment_token: ZERO_ADDRESS_FOR_TEST.to_owned(),
+            referrer: format!("0x{}", "00".repeat(32)),
+            payment: RenewalPayment::PostAuditAmount("0x01".to_owned()),
+        },
+    )
+    .await?;
+
+    assert_eq!(event.logical_name_id.as_deref(), Some("ens:alice.eth"));
+    assert_eq!(event.resource_id, Some(eth_registry_resource_id));
+    assert_eq!(
+        event.after_state["registry_resource_id"],
+        Value::String(eth_registry_resource_id.to_string())
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn legacy_renewal_payload_preserves_base_only_shape_and_upserts_idempotently() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let manifest_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO manifest_versions (
+            manifest_version,
+            namespace,
+            source_family,
+            chain,
+            deployment_epoch,
+            rollout_status,
+            normalizer_version,
+            file_path,
+            manifest_payload
+        )
+        VALUES (2, 'ens', $1, 'ethereum-sepolia', 'ens_v2_sepolia_dev',
+                'deprecated'::manifest_rollout_status, 'ensip15@ens-normalize-0.1.1',
+                'tests/ens-v2-sepolia-dev-v2.toml', '{}'::jsonb)
+        RETURNING manifest_id
+        "#,
+    )
+    .bind(SOURCE_FAMILY_ENS_V2_REGISTRAR_L1)
+    .fetch_one(database.pool())
+    .await?;
+    let mut legacy_raw_log = raw_log();
+    legacy_raw_log.source_manifest_id = manifest_id;
+    legacy_raw_log.manifest_version = 2;
+    let event = build_registrar_event(
+        database.pool(),
+        &legacy_raw_log,
+        RegistrarObservation::NameRenewed {
+            token_id: "0x00000000000000000000000000000000000000000000000000000000000000a1"
+                .to_owned(),
+            label: "legacy".to_owned(),
+            duration: 31_536_000,
+            new_expiry: 2_000_000_000,
+            payment_token: ZERO_ADDRESS_FOR_TEST.to_owned(),
+            referrer: format!("0x{}", "00".repeat(32)),
+            payment: RenewalPayment::LegacyBase("0x01".to_owned()),
+        },
+    )
+    .await?;
+
+    assert_eq!(event.after_state["base"], Value::String("0x01".to_owned()));
+    assert!(
+        event.after_state.get("amount").is_none(),
+        "legacy decoding must preserve the pre-audit base-only payload shape"
+    );
+    let first =
+        upsert_normalized_events_with_summary(database.pool(), std::slice::from_ref(&event))
+            .await?;
+    assert_eq!(first.inserted_count, 1);
+    let replay =
+        upsert_normalized_events_with_summary(database.pool(), std::slice::from_ref(&event))
+            .await?;
+    assert_eq!(replay.inserted_count, 0);
+    assert_eq!(replay.snapshots, vec![event]);
 
     database.cleanup().await
 }
@@ -207,7 +343,7 @@ async fn ens_v2_registrar_links_post_regeneration_token_to_registry_resource() -
             new_expiry: 2_000_000_000,
             payment_token: ZERO_ADDRESS_FOR_TEST.to_owned(),
             referrer: format!("0x{}", "00".repeat(32)),
-            base: "0x01".to_owned(),
+            payment: RenewalPayment::PostAuditAmount("0x01".to_owned()),
         },
     )
     .await?;

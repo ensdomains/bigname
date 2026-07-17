@@ -936,6 +936,30 @@ async fn rebuild_permissions_current(
     .await
     .context("worker permissions_current rebuild task panicked")??;
 
+    mark_permissions_current_projection_ready(database).await?;
+    Ok(())
+}
+
+async fn mark_permissions_current_projection_ready(database: &HarnessDatabase) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO permissions_current_publication (
+            projection,
+            publication_version,
+            data_revision,
+            published_at
+        )
+        VALUES ('permissions_current', $1, 1, now())
+        ON CONFLICT (projection) DO UPDATE SET
+            publication_version = EXCLUDED.publication_version,
+            data_revision = permissions_current_publication.data_revision + 1,
+            published_at = EXCLUDED.published_at
+        "#,
+    )
+    .bind(bigname_storage::PERMISSIONS_CURRENT_PUBLICATION_VERSION)
+    .execute(&database.pool)
+    .await
+    .context("failed to publish permissions_current compatibility for conformance")?;
     Ok(())
 }
 
@@ -1794,6 +1818,49 @@ fn permission_current_row(
             }
         }),
         manifest_version,
+        last_recomputed_at: timestamp(1_717_174_000 + block_number),
+    }
+}
+
+fn permission_current_resource_summary(
+    resource_id: Uuid,
+    authority_kind: &str,
+    source_classes_considered: &[&str],
+    enumeration_basis: &str,
+    chain_id: &str,
+    block_number: i64,
+) -> bigname_storage::PermissionsCurrentResourceSummary {
+    assert_eq!(enumeration_basis, "resource_permissions");
+    let chain_slot = if chain_id.starts_with("base") {
+        "base"
+    } else {
+        "ethereum"
+    };
+    bigname_storage::PermissionsCurrentResourceSummary {
+        resource_id,
+        authority_kind: Some(authority_kind.to_owned()),
+        root_resource_id: None,
+        coverage: bigname_storage::ResourcePermissionCoverage::authoritative(
+            source_classes_considered.iter().copied(),
+        ),
+        provenance: json!({
+            "derivation_kind": "permissions_current_resource_summary_rebuild",
+        }),
+        chain_positions: json!({
+            (chain_slot): {
+                "chain_id": chain_id,
+                "block_number": block_number,
+                "block_hash": format!("0xpermission-summary-{block_number:02x}"),
+                "timestamp": format!("2026-04-17T00:00:{:02}Z", block_number % 60),
+            }
+        }),
+        canonicality_summary: json!({
+            "status": "finalized",
+            "chains": {
+                (chain_id): "finalized",
+            }
+        }),
+        manifest_version: 1,
         last_recomputed_at: timestamp(1_717_174_000 + block_number),
     }
 }

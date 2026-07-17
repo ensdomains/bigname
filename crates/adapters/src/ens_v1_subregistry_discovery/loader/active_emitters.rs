@@ -14,6 +14,7 @@ pub(in crate::ens_v1_subregistry_discovery) async fn load_active_emitters(
     pool: &PgPool,
     chain: &str,
     source_scope: Option<&[RegistryRawLogSourceScopeTarget]>,
+    include_historical: bool,
 ) -> Result<Vec<ActiveEmitter>> {
     let has_source_scope = source_scope.is_some();
     let source_scope = source_scope.unwrap_or(&[]);
@@ -101,7 +102,7 @@ pub(in crate::ens_v1_subregistry_discovery) async fn load_active_emitters(
             ) manifest_contract_role ON TRUE
             JOIN contract_instance_addresses cia
               ON cia.contract_instance_id = mci.contract_instance_id
-             AND cia.deactivated_at IS NULL
+             AND ($8::BOOLEAN OR cia.deactivated_at IS NULL)
             WHERE mv.rollout_status = 'active'
               AND mv.chain = $1
               AND mv.source_family IN ($2, $3)
@@ -144,9 +145,12 @@ pub(in crate::ens_v1_subregistry_discovery) async fn load_active_emitters(
             JOIN manifest_versions mv ON mv.manifest_id = de.source_manifest_id
             JOIN contract_instance_addresses cia
               ON cia.contract_instance_id = de.to_contract_instance_id
-             AND cia.deactivated_at IS NULL
+             AND ($8::BOOLEAN OR cia.deactivated_at IS NULL)
             WHERE mv.rollout_status = 'active'
-              AND de.deactivated_at IS NULL
+              AND (
+                  de.deactivated_at IS NULL
+                  OR ($8::BOOLEAN AND de.active_to_block_number IS NOT NULL)
+              )
               AND de.chain_id = $1
               AND de.edge_kind = $4
             AND mv.source_family IN ($2, $3)
@@ -183,6 +187,7 @@ pub(in crate::ens_v1_subregistry_discovery) async fn load_active_emitters(
     .bind(has_source_scope)
     .bind(&scoped_source_families)
     .bind(&scoped_addresses)
+    .bind(include_historical)
     .fetch_all(pool)
     .await
     .with_context(|| format!("failed to load active ENSv1 registry emitters for {chain}"))?;

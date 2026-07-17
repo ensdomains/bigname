@@ -16,14 +16,19 @@ mod reservation_execution;
 mod selection;
 #[path = "backfill/source.rs"]
 mod source;
+#[path = "backfill/source_selection.rs"]
+mod source_selection;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use bigname_manifests::WatchedSourceSelectorPlan;
+use bigname_storage::{ensure_and_load_raw_log_retention_generation, load_backfill_job};
 use clap::ValueEnum;
 use sqlx::types::time::OffsetDateTime;
+use tracing::warn;
 
 use crate::reconciliation::HeaderAuditMode;
 
+pub(crate) use coinbase_sql::load_backfill_topic_plan;
 pub(crate) use coinbase_sql::{
     CoinbaseSqlSourceRegistry, DEFAULT_COINBASE_SQL_API_KEY_ID_ENV,
     DEFAULT_COINBASE_SQL_API_KEY_SECRET_ENV,
@@ -41,11 +46,11 @@ pub(crate) use fetching::{materialize_historical_payload_range, run_hash_pinned_
 pub(crate) use reservation_execution::COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD;
 #[cfg(test)]
 pub(crate) use reservation_execution::coinbase_sql_backfill_job_source_identity_payload;
-#[cfg(test)]
 pub(crate) use reservation_execution::effective_hash_pinned_adapter_sync_mode;
 pub(crate) use reservation_execution::{
     DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS, backfill_job_source_identity_payload,
-    create_hash_pinned_backfill_job, hash_pinned_backfill_range_specs,
+    create_hash_pinned_backfill_job, effective_coinbase_sql_adapter_sync_mode,
+    hash_pinned_backfill_range_specs, run_precreated_hash_pinned_backfill_job,
     run_resumable_coinbase_sql_backfill_job, run_resumable_hash_pinned_backfill_job,
 };
 #[cfg(test)]
@@ -54,6 +59,86 @@ pub(crate) use source::{
     BackfillTopicPlan, CoinbaseSqlFetchStats, HistoricalBackfillSourceOps, HistoricalLogPayload,
     HistoricalLogPayloadRequest, HistoricalLogValidationFilter,
 };
+pub(crate) use source_selection::{
+    is_base_chain, selected_backfill_source, standalone_backfill_profile_convergence_enabled,
+};
+
+pub(crate) async fn load_existing_job_id(
+    pool: &sqlx::PgPool,
+    idempotency_key: &str,
+) -> Result<Option<i64>> {
+    sqlx::query_scalar("SELECT backfill_job_id FROM backfill_jobs WHERE idempotency_key = $1")
+        .bind(idempotency_key)
+        .fetch_optional(pool)
+        .await
+        .with_context(|| {
+            format!("failed to inspect existing standalone backfill key {idempotency_key}")
+        })
+}
+
+/// Explicit operator keys intentionally remain generation-unscoped. Warn when
+/// a successful invocation reused an older-generation job so success is not
+/// mistaken for a current-generation refetch.
+pub(crate) async fn warn_if_stale_generation_backfill_job_was_reused(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    existing_backfill_job_id: Option<i64>,
+    completed_backfill_job_id: i64,
+) -> Result<bool> {
+    if existing_backfill_job_id != Some(completed_backfill_job_id) {
+        return Ok(false);
+    }
+    let job = load_backfill_job(pool, completed_backfill_job_id)
+        .await?
+        .with_context(|| {
+            format!("reused standalone backfill job {completed_backfill_job_id} disappeared")
+        })?;
+    let current_generation = ensure_and_load_raw_log_retention_generation(pool, chain).await?;
+    if !is_stale_generation_backfill_job_reuse(
+        existing_backfill_job_id,
+        completed_backfill_job_id,
+        job.raw_log_retention_generation,
+        current_generation,
+    ) {
+        return Ok(false);
+    }
+
+    warn!(
+        service = "indexer",
+        command = "backfill",
+        backfill_status = "reused_stale_retention_generation",
+        chain,
+        backfill_job_id = completed_backfill_job_id,
+        captured_raw_log_retention_generation = job.raw_log_retention_generation,
+        current_raw_log_retention_generation = current_generation,
+        idempotency_key = %job.idempotency_key,
+        "standalone backfill reused a completed operator-keyed job from an older raw-log retention generation; use a new idempotency key to refetch the current generation"
+    );
+    Ok(true)
+}
+
+fn is_stale_generation_backfill_job_reuse(
+    existing_backfill_job_id: Option<i64>,
+    completed_backfill_job_id: i64,
+    captured_generation: i64,
+    current_generation: i64,
+) -> bool {
+    existing_backfill_job_id == Some(completed_backfill_job_id)
+        && captured_generation != current_generation
+}
+
+#[cfg(test)]
+mod stale_generation_warning_tests {
+    use super::is_stale_generation_backfill_job_reuse;
+
+    #[test]
+    fn warning_requires_reuse_of_an_older_generation_job() {
+        assert!(is_stale_generation_backfill_job_reuse(Some(7), 7, 2, 3));
+        assert!(!is_stale_generation_backfill_job_reuse(None, 7, 2, 3));
+        assert!(!is_stale_generation_backfill_job_reuse(Some(8), 7, 2, 3));
+        assert!(!is_stale_generation_backfill_job_reuse(Some(7), 7, 3, 3));
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct BackfillBlockRange {
@@ -222,6 +307,9 @@ impl BackfillAdapterSyncMode {
 pub(crate) struct BackfillJobRunConfig {
     pub(crate) deployment_profile: String,
     pub(crate) idempotency_key: String,
+    /// Automatic raw-log recovery appends the generation while holding the
+    /// retention-state lock; explicit operator keys remain unchanged.
+    pub(crate) scope_idempotency_to_raw_log_retention_generation: bool,
     pub(crate) range: BackfillBlockRange,
     pub(crate) lease_owner: String,
     pub(crate) lease_token: String,

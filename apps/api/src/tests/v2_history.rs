@@ -473,6 +473,8 @@ async fn seed_v2_mixed_checkpoint_history(database: &TestDatabase) -> Result<()>
     Ok(())
 }
 
+// Each independent identity and lineage value stays explicit in this fixture helper.
+#[expect(clippy::too_many_arguments)]
 async fn seed_v2_history_name(
     database: &TestDatabase,
     logical_name_id: &str,

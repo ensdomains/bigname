@@ -17,12 +17,12 @@ use crate::{
     },
 };
 
-use super::active_addresses::reconcile_active_contract_instance_addresses;
+use super::active_addresses::reconcile_active_contract_instance_addresses_with_mutations;
 
 pub(crate) async fn reconcile_manifest_source_graph(
     executor: &mut sqlx::postgres::PgConnection,
     in_place_transitions: &[ManifestTransition],
-) -> Result<usize> {
+) -> Result<(usize, BTreeSet<String>)> {
     let desired_proxy_edges = load_desired_proxy_edges(executor).await?;
     let desired_successor_edges =
         load_desired_manifest_successor_edges(executor, in_place_transitions).await?;
@@ -46,9 +46,10 @@ pub(crate) async fn reconcile_manifest_source_graph(
         deactivate_discovery_edges_without_active_source_manifest(executor).await?;
     cleared_edge_count += stale_source_edge_count;
 
-    reconcile_active_contract_instance_addresses(executor).await?;
+    let mutated_address_chains =
+        reconcile_active_contract_instance_addresses_with_mutations(executor).await?;
 
-    Ok(cleared_edge_count)
+    Ok((cleared_edge_count, mutated_address_chains))
 }
 
 async fn load_desired_proxy_edges(

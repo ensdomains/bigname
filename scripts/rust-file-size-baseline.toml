@@ -26,29 +26,13 @@ loc = 790
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]
-path = "apps/indexer/src/main/reconciliation/adapter_sync.rs"
-loc = 708
-justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
-
-[[files]]
-path = "apps/indexer/src/main/reconciliation/canonical.rs"
-loc = 613
-justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
-
-[[files]]
-path = "crates/adapters/src/ens_v1_subregistry_discovery.rs"
-loc = 602
-justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
-
-[[files]]
 path = "crates/adapters/src/ens_v1_subregistry_discovery/checkpoint.rs"
-loc = 928
+loc = 803
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
-review_justification = "Explicit review accepted this file above 900 LOC; future changes should split or shrink it."
 
 [[files]]
 path = "crates/adapters/src/ens_v1_unwrapped_authority/checkpoint.rs"
-loc = 1109
+loc = 939
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 review_justification = "Explicit review accepted this file above 900 LOC; future changes should split or shrink it."
 
@@ -69,13 +53,13 @@ justification = "Phase 7 allowlist for an oversized production file; future chan
 
 [[files]]
 path = "crates/storage/src/base_normalized_rederive/batch/delete.rs"
-loc = 1102
+loc = 1076
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 review_justification = "Explicit review accepted this file above 900 LOC; future changes should split or shrink it."
 
 [[files]]
 path = "crates/storage/src/identity/write_fast.rs"
-loc = 808
+loc = 790
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]

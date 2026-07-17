@@ -14,12 +14,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::cursor::invalid_cursor_error;
+use super::permission_support::{
+    apply_role_summary_support_meta, permission_support_for_resources,
+};
 use super::{
     AddressNamesDedupe, AddressNamesSort, Envelope, Page, QueryParamAllowlist, RegistrationStatus,
     Relation, RelationSet, SnapshotReadResource, SortOrder, StrictQueryParams, V2Error, V2Result,
-    api_error_to_v2, decode, encode, encode_at_token, name_record::name_registration_fields,
-    permission_powers_value, permission_scope_value, resolve_v2_snapshot_for, snapshot_meta,
-    v2_exact_name_snapshot_scope,
+    api_error_to_v2, api_error_to_v2_for_resource, decode, encode, encode_at_token,
+    name_record::name_registration_fields, permission_powers_value, permission_scope_value,
+    resolve_v2_snapshot_for, snapshot_meta, v2_exact_name_snapshot_scope,
 };
 
 #[cfg(test)]
@@ -123,6 +126,20 @@ pub(crate) async fn get_address_names(
         SnapshotReadResource::AddressNames,
     )
     .await?;
+    let permission_read = if include_role_summary {
+        Some(
+            crate::begin_permissions_current_read(
+                &state.pool,
+                "/v2/addresses/{address}/names?include=role_summary",
+            )
+            .await
+            .map_err(|error| {
+                api_error_to_v2_for_resource(error, SnapshotReadResource::AddressNames)
+            })?,
+        )
+    } else {
+        None
+    };
     let snapshot_token = encode_at_token(&selected_snapshot);
     let cursor_binding = AddressNamesCursorBinding {
         address: &normalized_address,
@@ -213,6 +230,17 @@ pub(crate) async fn get_address_names(
     } else {
         std::collections::BTreeMap::new()
     };
+    let permission_summaries = if let Some(resource_ids) = role_resource_ids.as_deref() {
+        bigname_storage::load_permissions_current_resource_summaries(&state.pool, resource_ids)
+            .await
+            .map_err(|_| {
+                V2Error::internal_error(format!(
+                    "failed to load address-name role support for {normalized_address}"
+                ))
+            })?
+    } else {
+        BTreeMap::new()
+    };
     let record_counts_by_name = if include_role_summary {
         load_address_name_record_counts(&state.pool, &storage_page.entries, &name_rows)
             .await
@@ -255,9 +283,14 @@ pub(crate) async fn get_address_names(
             ))
         })
         .collect::<V2Result<Vec<_>>>()?;
-    let meta = snapshot_meta(&selected_snapshot)?;
+    let mut meta = snapshot_meta(&selected_snapshot)?;
+    if let Some(resource_ids) = role_resource_ids.as_deref() {
+        let permission_support =
+            permission_support_for_resources(resource_ids, &permission_summaries);
+        apply_role_summary_support_meta(&mut meta, permission_support);
+    }
 
-    Ok(Json(Envelope {
+    let response = Json(Envelope {
         data,
         page: Some(Page {
             cursor: params.cursor.clone(),
@@ -267,7 +300,17 @@ pub(crate) async fn get_address_names(
             has_more,
         }),
         meta,
-    }))
+    });
+    if let Some(permission_read) = permission_read {
+        crate::finish_permissions_current_read(
+            &state.pool,
+            "/v2/addresses/{address}/names?include=role_summary",
+            permission_read,
+        )
+        .await
+        .map_err(|error| api_error_to_v2_for_resource(error, SnapshotReadResource::AddressNames))?;
+    }
+    Ok(response)
 }
 
 async fn load_primary_names_by_namespace<'a>(

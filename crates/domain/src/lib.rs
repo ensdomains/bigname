@@ -1,5 +1,6 @@
-//! Narrow shared bootstrap surface for the repo.
+//! Narrow shared domain primitives for the repo.
 
+pub mod block_interval;
 pub mod normalization;
 
 /// The current repository phase.

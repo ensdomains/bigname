@@ -1,10 +1,12 @@
 use anyhow::{Context, Result};
 use std::collections::BTreeSet;
 
-use super::admission_epoch::bump_discovery_admission_epochs;
+use super::admission_epoch::{
+    bump_discovery_admission_epochs, fence_discovery_admission_epoch_writes,
+};
 use sqlx::PgPool;
 
-use super::loading::load_discovery_admission_state;
+use super::loading::load_discovery_admission_state_with_excluded_source;
 use super::provenance::{discovery_edge_provenance, is_zero_address};
 use super::types::{DiscoveryObservation, DiscoveryPersistenceSummary};
 use crate::{
@@ -24,14 +26,17 @@ pub async fn persist_discovery_observation(
         });
     }
 
-    let admission_state = load_discovery_admission_state(pool).await?;
-    let admitted_candidates = admission_state.admit_candidate(&observation.candidate());
     let mut inserted_edge_count = 0;
     let mut admitted_edges = Vec::new();
     let mut transaction = pool
         .begin()
         .await
         .context("failed to start discovery-edge persistence transaction")?;
+    let candidate_chains = BTreeSet::from([observation.chain.clone()]);
+    fence_discovery_admission_epoch_writes(transaction.as_mut(), &candidate_chains).await?;
+    let admission_state =
+        load_discovery_admission_state_with_excluded_source(transaction.as_mut(), None).await?;
+    let admitted_candidates = admission_state.admit_candidate(&observation.candidate());
 
     for mut admitted_edge in admitted_candidates {
         let to_contract_instance_id = match admitted_edge.to_contract_instance_id {
@@ -150,11 +155,7 @@ pub async fn persist_discovery_observation(
 
     if inserted_edge_count > 0 {
         reconcile_active_contract_instance_addresses(transaction.as_mut()).await?;
-        bump_discovery_admission_epochs(
-            transaction.as_mut(),
-            &BTreeSet::from([observation.chain.clone()]),
-        )
-        .await?;
+        bump_discovery_admission_epochs(transaction.as_mut(), &candidate_chains).await?;
     }
 
     transaction

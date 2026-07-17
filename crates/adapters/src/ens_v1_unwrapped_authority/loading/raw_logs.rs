@@ -53,6 +53,7 @@ pub(in crate::ens_v1_unwrapped_authority) async fn stream_authority_raw_logs(
     _event_topics: &AuthorityEventTopics,
     from_block: i64,
     to_block: i64,
+    resolver_profile_run_id: Option<Uuid>,
     mut handle_raw_log: impl FnMut(AuthorityRawLogRow) -> Result<()>,
 ) -> Result<usize> {
     if from_block > to_block {
@@ -62,6 +63,7 @@ pub(in crate::ens_v1_unwrapped_authority) async fn stream_authority_raw_logs(
     if topic0_filters.is_empty() {
         return Ok(0);
     }
+    let profile_context_emitters = source_router.profile_context_emitter_addresses();
 
     let mut rows = sqlx::query(
         r#"
@@ -86,6 +88,16 @@ pub(in crate::ens_v1_unwrapped_authority) async fn stream_authority_raw_logs(
           AND rl.block_number BETWEEN $2::BIGINT AND $3::BIGINT
           AND rl.topics[1] IS NOT NULL
           AND LOWER(rl.topics[1]) = ANY($4::TEXT[])
+          AND (
+              $5::UUID IS NULL
+              OR LOWER(rl.emitting_address) = ANY($6::TEXT[])
+              OR EXISTS (
+                  SELECT 1
+                  FROM resolver_profile_reconciliation_targets target
+                  WHERE target.run_id = $5
+                    AND target.resolver_address = LOWER(rl.emitting_address)
+              )
+          )
           AND rl.canonicality_state IN (
               'canonical'::canonicality_state,
               'safe'::canonicality_state,
@@ -104,6 +116,8 @@ pub(in crate::ens_v1_unwrapped_authority) async fn stream_authority_raw_logs(
     .bind(from_block)
     .bind(to_block)
     .bind(&topic0_filters)
+    .bind(resolver_profile_run_id)
+    .bind(profile_context_emitters)
     .fetch(&mut *conn);
 
     let mut scanned_log_count = 0usize;

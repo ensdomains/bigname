@@ -141,9 +141,9 @@ async fn coverage_contract_returns_declared_state_explain_with_shared_top_level_
 }
 
 #[tokio::test]
-async fn ensv2_sepolia_dev_exact_name_contract_returns_supported_profile_boundary() -> Result<()> {
+async fn ensv2_sepolia_exact_name_contract_returns_supported_profile_boundary() -> Result<()> {
     let database = HarnessDatabase::new().await?;
-    let logical_name_id = "ens:sepolia-dev-profile.eth";
+    let logical_name_id = "ens:sepolia-profile.eth";
     let resource_id = Uuid::from_u128(0x4400);
     let token_lineage_id = Uuid::from_u128(0x5500);
     let surface_binding_id = Uuid::from_u128(0x6600);
@@ -159,7 +159,7 @@ async fn ensv2_sepolia_dev_exact_name_contract_returns_supported_profile_boundar
     )
     .await?;
     database
-        .insert_name_current_row(ensv2_sepolia_dev_exact_name_row(
+        .insert_name_current_row(ensv2_sepolia_exact_name_row(
             logical_name_id,
             resource_id,
             token_lineage_id,
@@ -170,12 +170,12 @@ async fn ensv2_sepolia_dev_exact_name_contract_returns_supported_profile_boundar
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/names/ens/sepolia-dev-profile.eth")
+                .uri("/v1/names/ens/sepolia-profile.eth")
                 .body(Body::empty())
                 .expect("request must build"),
         )
         .await
-        .context("ENSv2 sepolia-dev exact-name request failed")?;
+        .context("ENSv2 sepolia exact-name request failed")?;
 
     assert_eq!(response.status(), StatusCode::OK);
 
@@ -189,20 +189,20 @@ async fn ensv2_sepolia_dev_exact_name_contract_returns_supported_profile_boundar
     );
     assert_eq!(
         payload.declared_state.get("authority"),
-        Some(&ensv2_sepolia_dev_authority_summary(
+        Some(&ensv2_sepolia_authority_summary(
             resource_id,
             token_lineage_id
         ))
     );
     assert_eq!(
         payload.declared_state.get("control"),
-        Some(&ensv2_sepolia_dev_control_summary())
+        Some(&ensv2_sepolia_control_summary())
     );
     assert_eq!(
         payload.declared_state.get("resolver"),
-        Some(&ensv2_sepolia_dev_resolver_summary())
+        Some(&ensv2_sepolia_resolver_summary())
     );
-    assert_eq!(payload.coverage, ensv2_sepolia_dev_exact_name_coverage());
+    assert_eq!(payload.coverage, ensv2_sepolia_exact_name_coverage());
     assert_eq!(
         payload
             .chain_positions
@@ -220,9 +220,9 @@ async fn ensv2_sepolia_dev_exact_name_contract_returns_supported_profile_boundar
 }
 
 #[tokio::test]
-async fn ensv2_sepolia_dev_coverage_contract_matches_supported_exact_name_boundary() -> Result<()> {
+async fn ensv2_sepolia_coverage_contract_matches_supported_exact_name_boundary() -> Result<()> {
     let database = HarnessDatabase::new().await?;
-    let logical_name_id = "ens:sepolia-dev-profile.eth";
+    let logical_name_id = "ens:sepolia-profile.eth";
     let resource_id = Uuid::from_u128(0x4410);
     let token_lineage_id = Uuid::from_u128(0x5510);
     let surface_binding_id = Uuid::from_u128(0x6610);
@@ -238,7 +238,7 @@ async fn ensv2_sepolia_dev_coverage_contract_matches_supported_exact_name_bounda
     )
     .await?;
     database
-        .insert_name_current_row(ensv2_sepolia_dev_exact_name_row(
+        .insert_name_current_row(ensv2_sepolia_exact_name_row(
             logical_name_id,
             resource_id,
             token_lineage_id,
@@ -249,28 +249,28 @@ async fn ensv2_sepolia_dev_coverage_contract_matches_supported_exact_name_bounda
     let coverage_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/coverage/ens/sepolia-dev-profile.eth")
+                .uri("/v1/coverage/ens/sepolia-profile.eth")
                 .body(Body::empty())
                 .expect("request must build"),
         )
         .await
-        .context("ENSv2 sepolia-dev coverage request failed")?;
+        .context("ENSv2 sepolia coverage request failed")?;
     let name_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri("/v1/names/ens/sepolia-dev-profile.eth")
+                .uri("/v1/names/ens/sepolia-profile.eth")
                 .body(Body::empty())
                 .expect("request must build"),
         )
         .await
-        .context("ENSv2 sepolia-dev exact-name request failed")?;
+        .context("ENSv2 sepolia exact-name request failed")?;
 
     assert_eq!(coverage_response.status(), StatusCode::OK);
     assert_eq!(name_response.status(), StatusCode::OK);
 
     let coverage_payload: NameResponse = read_json(coverage_response).await?;
     let name_payload: NameResponse = read_json(name_response).await?;
-    let expected_coverage = ensv2_sepolia_dev_exact_name_coverage();
+    let expected_coverage = ensv2_sepolia_exact_name_coverage();
 
     assert_eq!(coverage_payload.data, name_payload.data);
     assert_exact_name_default_provenance(&name_payload);
@@ -382,7 +382,7 @@ async fn surface_binding_explain_contract_is_declared_only_with_exact_name_cover
     Ok(())
 }
 
-fn ensv2_sepolia_dev_exact_name_row(
+fn ensv2_sepolia_exact_name_row(
     logical_name_id: &str,
     resource_id: Uuid,
     token_lineage_id: Uuid,
@@ -413,8 +413,8 @@ fn ensv2_sepolia_dev_exact_name_row(
                 "expiry": 1_931_536_000_i64,
                 "latest_event_kind": "RegistrationRenewed",
             },
-            "control": ensv2_sepolia_dev_control_summary(),
-            "resolver": ensv2_sepolia_dev_resolver_summary(),
+            "control": ensv2_sepolia_control_summary(),
+            "resolver": ensv2_sepolia_resolver_summary(),
             "history": {
                 "surface_head": null,
                 "resource_head": null,
@@ -439,21 +439,21 @@ fn ensv2_sepolia_dev_exact_name_row(
                     "manifest_version": 11,
                     "source_family": "ens_v2_registry_l1",
                     "chain": "ethereum-sepolia",
-                    "deployment_profile": "sepolia-dev",
+                    "deployment_profile": "sepolia",
                     "source_manifest_id": null,
                 },
                 {
                     "manifest_version": 11,
                     "source_family": "ens_v2_registrar_l1",
                     "chain": "ethereum-sepolia",
-                    "deployment_profile": "sepolia-dev",
+                    "deployment_profile": "sepolia",
                     "source_manifest_id": null,
                 }
             ],
             "execution_trace_id": null,
             "derivation_kind": "name_current_rebuild",
         }),
-        coverage: ensv2_sepolia_dev_exact_name_coverage(),
+        coverage: ensv2_sepolia_exact_name_coverage(),
         chain_positions: json!({
             "ethereum-sepolia": {
                 "chain_id": "ethereum-sepolia",
@@ -473,7 +473,7 @@ fn ensv2_sepolia_dev_exact_name_row(
     }
 }
 
-fn ensv2_sepolia_dev_authority_summary(resource_id: Uuid, token_lineage_id: Uuid) -> Value {
+fn ensv2_sepolia_authority_summary(resource_id: Uuid, token_lineage_id: Uuid) -> Value {
     json!({
         "resource_id": resource_id.to_string(),
         "token_lineage_id": token_lineage_id.to_string(),
@@ -481,7 +481,7 @@ fn ensv2_sepolia_dev_authority_summary(resource_id: Uuid, token_lineage_id: Uuid
     })
 }
 
-fn ensv2_sepolia_dev_control_summary() -> Value {
+fn ensv2_sepolia_control_summary() -> Value {
     json!({
         "registrant": "0x0000000000000000000000000000000000000b0b",
         "registry_owner": "0x0000000000000000000000000000000000000c0c",
@@ -489,7 +489,7 @@ fn ensv2_sepolia_dev_control_summary() -> Value {
     })
 }
 
-fn ensv2_sepolia_dev_resolver_summary() -> Value {
+fn ensv2_sepolia_resolver_summary() -> Value {
     json!({
         "chain_id": "ethereum-sepolia",
         "address": "0x0000000000000000000000000000000000000def",
@@ -497,7 +497,7 @@ fn ensv2_sepolia_dev_resolver_summary() -> Value {
     })
 }
 
-fn ensv2_sepolia_dev_exact_name_coverage() -> Value {
+fn ensv2_sepolia_exact_name_coverage() -> Value {
     json!({
         "status": "full",
         "exhaustiveness": "authoritative",

@@ -1,5 +1,6 @@
 pub(super) const SOURCE_FAMILY_ENS_V2_ROOT_L1: &str = "ens_v2_root_l1";
 pub(super) const SOURCE_FAMILY_ENS_V2_REGISTRY_L1: &str = "ens_v2_registry_l1";
+pub(super) const SOURCE_FAMILY_ENS_V2_RESOLVER_L1: &str = "ens_v2_resolver_l1";
 pub(super) const DERIVATION_KIND_ENS_V2_REGISTRY_RESOURCE_SURFACE: &str =
     "ens_v2_registry_resource_surface";
 pub(super) const RESOLVER_EDGE_KIND: &str = "resolver";
@@ -17,7 +18,9 @@ pub(super) const EVENT_KIND_SUBREGISTRY_CHANGED: &str = "SubregistryChanged";
 pub(super) const EVENT_KIND_PARENT_CHANGED: &str = "ParentChanged";
 pub(super) const EVENT_KIND_TOKEN_RESOURCE_LINKED: &str = "TokenResourceLinked";
 pub(super) const EVENT_KIND_TOKEN_REGENERATED: &str = "TokenRegenerated";
+pub(super) const EVENT_KIND_TOKEN_CONTROL_TRANSFERRED: &str = "TokenControlTransferred";
 pub(super) const EVENT_KIND_SURFACE_BOUND: &str = "SurfaceBound";
+pub(super) const EVENT_KIND_SURFACE_UNBOUND: &str = "SurfaceUnbound";
 
 pub(super) const ABI_EVENT_LABEL_REGISTERED_SIGNATURE: &str =
     "LabelRegistered(uint256,bytes32,string,address,uint64,address)";
@@ -33,8 +36,12 @@ pub(super) const ABI_EVENT_RESOLVER_UPDATED_SIGNATURE: &str =
 pub(super) const ABI_EVENT_TOKEN_REGENERATED_SIGNATURE: &str = "TokenRegenerated(uint256,uint256)";
 pub(super) const ABI_EVENT_PARENT_UPDATED_SIGNATURE: &str = "ParentUpdated(address,string,address)";
 pub(super) const ABI_EVENT_TOKEN_RESOURCE_SIGNATURE: &str = "TokenResource(uint256,uint256)";
+pub(super) const ABI_EVENT_TRANSFER_SINGLE_SIGNATURE: &str =
+    "TransferSingle(address,address,address,uint256,uint256)";
+pub(super) const ABI_EVENT_TRANSFER_BATCH_SIGNATURE: &str =
+    "TransferBatch(address,address,address,uint256[],uint256[])";
 
-pub(super) const ABI_EVENT_SIGNATURES: [&str; 9] = [
+pub(super) const ABI_EVENT_SIGNATURES: [&str; 11] = [
     ABI_EVENT_LABEL_REGISTERED_SIGNATURE,
     ABI_EVENT_LABEL_RESERVED_SIGNATURE,
     ABI_EVENT_LABEL_UNREGISTERED_SIGNATURE,
@@ -44,4 +51,6 @@ pub(super) const ABI_EVENT_SIGNATURES: [&str; 9] = [
     ABI_EVENT_TOKEN_RESOURCE_SIGNATURE,
     ABI_EVENT_TOKEN_REGENERATED_SIGNATURE,
     ABI_EVENT_PARENT_UPDATED_SIGNATURE,
+    ABI_EVENT_TRANSFER_SINGLE_SIGNATURE,
+    ABI_EVENT_TRANSFER_BATCH_SIGNATURE,
 ];

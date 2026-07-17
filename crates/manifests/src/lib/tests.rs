@@ -157,6 +157,38 @@ impl TestDatabase {
     }
 }
 
+async fn reconcile_discovery_observations(
+    pool: &PgPool,
+    discovery_source: &str,
+    observations: &[DiscoveryObservation],
+) -> Result<DiscoveryReconciliationSummary> {
+    super::reconcile_discovery_observations(
+        pool,
+        discovery_source,
+        observations,
+        FullDiscoveryReconciliationOptions::default(),
+    )
+    .await
+}
+
+async fn reconcile_discovery_observations_through_block(
+    pool: &PgPool,
+    discovery_source: &str,
+    observations: &[DiscoveryObservation],
+    through_block_number: i64,
+) -> Result<DiscoveryReconciliationSummary> {
+    super::reconcile_discovery_observations(
+        pool,
+        discovery_source,
+        observations,
+        FullDiscoveryReconciliationOptions {
+            through_block_number: Some(through_block_number),
+            expected_admission_epoch: None,
+        },
+    )
+    .await
+}
+
 fn manifest_contents(
     rollout_status: &str,
     root_address: &str,
@@ -193,6 +225,7 @@ proxy_kind = "erc1967"
 edge_kind = "subregistry"
 from_role = "registry"
 admission = "reachable_from_root"
+
 "#
     )
 }
@@ -241,6 +274,7 @@ proxy_kind = "none"
 edge_kind = "subregistry"
 from_role = "registry"
 admission = "reachable_from_root"
+
 "#
     )
 }
@@ -602,6 +636,114 @@ async fn insert_raw_code_hash_observation(
         )
     })?;
 
+    Ok(())
+}
+
+async fn insert_test_chain_lineage_state(
+    pool: &PgPool,
+    chain: &str,
+    block_hash: &str,
+    block_number: i64,
+    canonicality_state: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO chain_lineage (
+            chain_id,
+            block_hash,
+            block_number,
+            block_timestamp,
+            canonicality_state
+        )
+        VALUES ($1, $2, $3, to_timestamp($3), $4::canonicality_state)
+        "#,
+    )
+    .bind(chain)
+    .bind(block_hash)
+    .bind(block_number)
+    .bind(canonicality_state)
+    .execute(pool)
+    .await
+    .with_context(|| {
+        format!("failed to insert test lineage block {block_number} ({block_hash}) on {chain}")
+    })?;
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "coverage trust fixtures keep job bounds and fact bounds explicit at each call site"
+)]
+async fn insert_untrusted_backfill_coverage_fact(
+    pool: &PgPool,
+    chain: &str,
+    job_status: &str,
+    job_from_block: i64,
+    job_to_block: i64,
+    source_family: &str,
+    address: &str,
+    fact_from_block: i64,
+    fact_to_block: i64,
+) -> Result<()> {
+    let idempotency_key =
+        format!("untrusted-coverage-{job_status}-{job_from_block}-{job_to_block}-{address}");
+    let backfill_job_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO backfill_jobs (
+            deployment_profile,
+            chain_id,
+            source_identity,
+            scan_mode,
+            range_start_block_number,
+            range_end_block_number,
+            idempotency_key,
+            status,
+            completed_at
+        )
+        VALUES (
+            'test',
+            $1,
+            '{}'::jsonb,
+            'logs',
+            $2,
+            $3,
+            $4,
+            $5::backfill_lifecycle_status,
+            CASE WHEN $5 = 'completed' THEN now() ELSE NULL END
+        )
+        RETURNING backfill_job_id
+        "#,
+    )
+    .bind(chain)
+    .bind(job_from_block)
+    .bind(job_to_block)
+    .bind(idempotency_key)
+    .bind(job_status)
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO backfill_coverage_facts (
+            backfill_job_id,
+            chain_id,
+            source_family,
+            scope,
+            address,
+            covered_from_block,
+            covered_to_block,
+            derivation
+        )
+        VALUES ($1, $2, $3, 'address', lower($4), $5, $6, 'job_completion')
+        "#,
+    )
+    .bind(backfill_job_id)
+    .bind(chain)
+    .bind(source_family)
+    .bind(address)
+    .bind(fact_from_block)
+    .bind(fact_to_block)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -1667,7 +1809,7 @@ fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
     );
     assert_eq!(sepolia_repository.summary().namespace_count, 1);
     assert_eq!(sepolia_repository.summary().source_family_count, 4);
-    assert_eq!(sepolia_repository.summary().manifest_count, 5);
+    assert_eq!(sepolia_repository.summary().manifest_count, 9);
 
     let sepolia_source_versions = sepolia_repository
         .manifests()
@@ -1685,9 +1827,13 @@ fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
         vec![
             ("ens_v2_registrar_l1", "v1", 1),
             ("ens_v2_registrar_l1", "v2", 2),
+            ("ens_v2_registrar_l1", "v3", 3),
             ("ens_v2_registry_l1", "v1", 1),
+            ("ens_v2_registry_l1", "v2", 2),
             ("ens_v2_resolver_l1", "v1", 1),
+            ("ens_v2_resolver_l1", "v2", 2),
             ("ens_v2_root_l1", "v1", 1),
+            ("ens_v2_root_l1", "v2", 2),
         ]
     );
     assert!(!main_repository.manifests().iter().any(|loaded_manifest| {
@@ -1709,18 +1855,16 @@ fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
     for loaded_manifest in sepolia_repository.manifests() {
         assert_eq!(loaded_manifest.manifest.namespace, "ens");
         assert_eq!(loaded_manifest.manifest.chain, "ethereum-sepolia");
-        assert_eq!(
-            loaded_manifest.manifest.deployment_epoch,
-            "ens_v2_sepolia_dev"
-        );
-        if loaded_manifest.manifest.source_family == "ens_v2_registrar_l1"
-            && loaded_manifest.manifest.manifest_version == 1
-        {
+        if loaded_manifest.manifest.deployment_epoch == "ens_v2_sepolia_dev" {
             assert_eq!(
                 loaded_manifest.manifest.rollout_status,
                 RolloutStatus::Deprecated
             );
         } else {
+            assert_eq!(
+                loaded_manifest.manifest.deployment_epoch,
+                "ens_v2_sepolia_post_audit"
+            );
             assert_eq!(
                 loaded_manifest.manifest.rollout_status,
                 RolloutStatus::Active
@@ -1742,32 +1886,54 @@ fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
         })
         .collect::<BTreeMap<_, _>>();
 
-    let root_manifest = manifests_by_source_family_version[&("ens_v2_root_l1", 1)];
+    let root_manifest = manifests_by_source_family_version[&("ens_v2_root_l1", 2)];
     assert_eq!(root_manifest.roots.len(), 1);
     assert_eq!(root_manifest.roots[0].name, "RootRegistry");
     assert_eq!(
         normalize_address(&root_manifest.roots[0].address),
-        "0x3a3e15a5d27ff6f05c844313312f2e72096d3ed3"
+        "0x11b5bfbe9078d826b1edbdd1cfc12f5828d9f50c"
     );
     assert_eq!(root_manifest.contracts.len(), 1);
     assert_eq!(root_manifest.contracts[0].role, "root_registry");
     assert_eq!(
         normalize_address(&root_manifest.contracts[0].address),
-        "0x3a3e15a5d27ff6f05c844313312f2e72096d3ed3"
+        "0x11b5bfbe9078d826b1edbdd1cfc12f5828d9f50c"
+    );
+    assert_eq!(
+        root_manifest
+            .abi
+            .events
+            .iter()
+            .map(|event| event.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "LabelRegistered",
+            "LabelReserved",
+            "LabelUnregistered",
+            "ExpiryUpdated",
+            "SubregistryUpdated",
+            "ResolverUpdated",
+            "TokenResource",
+            "TransferSingle",
+            "TransferBatch",
+            "EACRolesChanged",
+            "TokenRegenerated",
+            "ParentUpdated",
+        ]
     );
 
-    let registry_manifest = manifests_by_source_family_version[&("ens_v2_registry_l1", 1)];
+    let registry_manifest = manifests_by_source_family_version[&("ens_v2_registry_l1", 2)];
     assert_eq!(registry_manifest.roots.len(), 1);
     assert_eq!(registry_manifest.roots[0].name, "ETHRegistry");
     assert_eq!(
         normalize_address(&registry_manifest.roots[0].address),
-        "0x796fff2e907449be8d5921bcc215b1b76d89d080"
+        "0x67b728a792e789a8978b30cf1b3b641f19354b43"
     );
     assert_eq!(registry_manifest.contracts.len(), 1);
     assert_eq!(registry_manifest.contracts[0].role, "registry");
     assert_eq!(
         normalize_address(&registry_manifest.contracts[0].address),
-        "0x796fff2e907449be8d5921bcc215b1b76d89d080"
+        "0x67b728a792e789a8978b30cf1b3b641f19354b43"
     );
     assert_eq!(
         registry_manifest
@@ -1784,6 +1950,8 @@ fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
             "SubregistryUpdated",
             "ResolverUpdated",
             "TokenResource",
+            "TransferSingle",
+            "TransferBatch",
             "EACRolesChanged",
             "TokenRegenerated",
             "ParentUpdated",
@@ -1800,18 +1968,24 @@ fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
         CapabilitySupportStatus::Shadow
     );
 
-    let registrar_manifest = manifests_by_source_family_version[&("ens_v2_registrar_l1", 2)];
+    let registrar_manifest_v2 = manifests_by_source_family_version[&("ens_v2_registrar_l1", 2)];
+    assert_eq!(
+        registrar_manifest_v2.rollout_status,
+        RolloutStatus::Deprecated
+    );
+
+    let registrar_manifest = manifests_by_source_family_version[&("ens_v2_registrar_l1", 3)];
     assert_eq!(registrar_manifest.roots.len(), 1);
     assert_eq!(registrar_manifest.roots[0].name, "ETHRegistrar");
     assert_eq!(
         normalize_address(&registrar_manifest.roots[0].address),
-        "0x68586418353b771cf2425ed14a07512aa880c532"
+        "0xa4449a0dd2b83007553d9b1d28b583a46a805a30"
     );
     assert_eq!(registrar_manifest.contracts.len(), 1);
     assert_eq!(registrar_manifest.contracts[0].role, "registrar");
     assert_eq!(
         normalize_address(&registrar_manifest.contracts[0].address),
-        "0x68586418353b771cf2425ed14a07512aa880c532"
+        "0xa4449a0dd2b83007553d9b1d28b583a46a805a30"
     );
     assert_eq!(
         registrar_manifest.capability_flags["exact_name_profile"].status,
@@ -1826,8 +2000,40 @@ fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
             .collect::<Vec<_>>(),
         vec!["NameRegistered", "NameRenewed"]
     );
+    let name_registered = registrar_manifest
+        .abi
+        .events
+        .iter()
+        .find(|event| event.name == "NameRegistered")
+        .expect("post-audit registrar manifest must declare NameRegistered")
+        .parsed_event()?;
+    assert!(
+        name_registered
+            .inputs
+            .iter()
+            .any(|input| input.name == "referrer" && input.indexed),
+        "post-audit NameRegistered referrer must be indexed"
+    );
+    let name_renewed = registrar_manifest
+        .abi
+        .events
+        .iter()
+        .find(|event| event.name == "NameRenewed")
+        .expect("post-audit registrar manifest must declare NameRenewed")
+        .parsed_event()?;
+    assert!(
+        name_renewed
+            .inputs
+            .iter()
+            .any(|input| input.name == "referrer" && input.indexed),
+        "post-audit NameRenewed referrer must be indexed"
+    );
+    assert_eq!(
+        name_renewed.inputs.last().map(|input| input.name.as_str()),
+        Some("amount")
+    );
 
-    let resolver_manifest = manifests_by_source_family_version[&("ens_v2_resolver_l1", 1)];
+    let resolver_manifest = manifests_by_source_family_version[&("ens_v2_resolver_l1", 2)];
     assert!(resolver_manifest.roots.is_empty());
     assert!(resolver_manifest.contracts.is_empty());
     assert!(resolver_manifest.discovery_rules.is_empty());
@@ -1872,7 +2078,119 @@ fn checked_in_sepolia_manifests_load_as_alternate_profile() -> Result<()> {
         .map(normalize_address)
         .collect::<Vec<_>>();
     assert!(!admitted_addresses.contains(&"0xe566a1fbaf30ff7c39828fe99f955fc55544cb9c".to_owned()));
+    assert!(!admitted_addresses.contains(&"0xd25f66dd4ff61486c2c5c1e6201a23576698d3df".to_owned()));
 
+    Ok(())
+}
+
+#[test]
+fn checked_in_ens_v2_public_resolver_boundary_separates_watch_from_profile_admission() -> Result<()>
+{
+    let manifests_doc = fs::read_to_string(checked_in_manifest_root("docs/manifests.md"))?;
+    assert!(
+        manifests_doc.contains(
+            "Resolver observations can discovery-admit `PublicResolverV2` as a watch-only contract instance and retain configured normalized facts, but they publish no selectors, cache values, or authoritative record coverage without explicit ENSv2 resolver-profile admission. A current-emitter `RecordVersionChanged` may remain only as an explicit `resolver_family_pending` boundary; non-current resolver emitters are always excluded."
+        ),
+        "ENSv2 docs must distinguish generic resolver watching from resolver-profile admission"
+    );
+
+    let resolver_manifest = fs::read_to_string(checked_in_manifest_root(
+        "manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v2.toml",
+    ))?;
+    assert!(
+        resolver_manifest.contains(
+            "PublicResolverV2 can be discovery-watched for configured generic record events but is not an admitted resolver profile; projection publishes no record values, retains only a current-emitter pending version boundary, and excludes non-current emitters."
+        ),
+        "the active ENSv2 resolver manifest must state the watch-only PublicResolverV2 boundary"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn ens_v2_public_resolver_discovery_is_watch_only_without_profile_capabilities() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+
+    let registry_address = "0x67b728a792e789a8978b30cf1b3b641f19354b43";
+    let public_resolver_address = "0xd25f66dd4ff61486c2c5c1e6201a23576698d3df";
+    let permissioned_resolver_address = "0x0000000000000000000000000000000000000201";
+    for (address, block_number, block_hash) in [
+        (
+            public_resolver_address,
+            100_i64,
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ),
+        (
+            permissioned_resolver_address,
+            110_i64,
+            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ),
+    ] {
+        let summary = persist_discovery_observation(
+            database.pool(),
+            &DiscoveryObservation {
+                chain: "ethereum-sepolia".to_owned(),
+                from_address: registry_address.to_owned(),
+                to_address: address.to_owned(),
+                edge_kind: "resolver".to_owned(),
+                discovery_source: "ens_v2_registry_resolver:ethereum-sepolia".to_owned(),
+                active_from_block_number: Some(block_number),
+                active_from_block_hash: Some(block_hash.to_owned()),
+                active_to_block_number: None,
+                active_to_block_hash: None,
+                provenance: serde_json::json!({
+                    "provider": "unit-test",
+                    "kind": "resolver",
+                    "observation_key": format!("registry:{registry_address}:resolver:{address}"),
+                }),
+            },
+        )
+        .await?;
+        assert_eq!(summary.admitted_edge_count, 1);
+        assert_eq!(summary.inserted_edge_count, 1);
+    }
+
+    let resolver_manifest_id =
+        active_manifest_id_for_source_family(database.pool(), "ens", "ens_v2_resolver_l1").await?;
+    let watched_contracts = load_watched_contracts(database.pool()).await?;
+    for address in [public_resolver_address, permissioned_resolver_address] {
+        let address = normalize_address(address);
+        assert!(watched_contracts.iter().any(|contract| {
+            contract.chain == "ethereum-sepolia"
+                && contract.source_family == "ens_v2_resolver_l1"
+                && contract.address == address
+                && contract.source == WatchedContractSource::DiscoveryEdge
+                && contract.source_manifest_id == Some(resolver_manifest_id)
+        }));
+    }
+
+    let public_resolver_direct_declaration_count = query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM manifest_contract_instances mci
+        JOIN manifest_versions mv ON mv.manifest_id = mci.manifest_id
+        JOIN contract_instance_addresses cia
+          ON cia.contract_instance_id = mci.contract_instance_id
+        WHERE mv.rollout_status = 'active'
+          AND cia.chain_id = 'ethereum-sepolia'
+          AND cia.address = $1
+        "#,
+    )
+    .bind(normalize_address(public_resolver_address))
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(public_resolver_direct_declaration_count, 0);
+    assert!(
+        load_capability_flags_for_source_family(database.pool(), "ens", "ens_v2_resolver_l1",)
+            .await?
+            .is_empty(),
+        "resolver-edge watching must not promote ENSv2 resolver-profile capabilities"
+    );
+
+    database.cleanup().await?;
     Ok(())
 }
 
@@ -1891,12 +2209,12 @@ async fn syncing_sepolia_profile_replaces_main_profile_without_mixing() -> Resul
 
     let summary = sync_repository(database.pool(), &sepolia_repository).await?;
     assert_eq!(summary.status, ManifestSyncStatus::Synced);
-    assert_eq!(summary.synced_manifest_count, 5);
+    assert_eq!(summary.synced_manifest_count, 9);
     assert_eq!(summary.active_manifest_count, 4);
-    assert_eq!(summary.root_count, 4);
-    assert_eq!(summary.contract_count, 4);
-    assert_eq!(summary.capability_count, 5);
-    assert_eq!(summary.discovery_rule_count, 3);
+    assert_eq!(summary.root_count, 7);
+    assert_eq!(summary.contract_count, 7);
+    assert_eq!(summary.capability_count, 8);
+    assert_eq!(summary.discovery_rule_count, 6);
     assert_eq!(
         summary.removed_manifest_count,
         main_repository.manifests().len()
@@ -1906,21 +2224,30 @@ async fn syncing_sepolia_profile_replaces_main_profile_without_mixing() -> Resul
         load_manifest_rollout_statuses(database.pool(), "ens").await?,
         vec![
             ("ens_v2_registrar_l1".to_owned(), "deprecated".to_owned()),
+            ("ens_v2_registrar_l1".to_owned(), "deprecated".to_owned()),
             ("ens_v2_registrar_l1".to_owned(), "active".to_owned()),
+            ("ens_v2_registry_l1".to_owned(), "deprecated".to_owned()),
             ("ens_v2_registry_l1".to_owned(), "active".to_owned()),
+            ("ens_v2_resolver_l1".to_owned(), "deprecated".to_owned()),
             ("ens_v2_resolver_l1".to_owned(), "active".to_owned()),
+            ("ens_v2_root_l1".to_owned(), "deprecated".to_owned()),
             ("ens_v2_root_l1".to_owned(), "active".to_owned()),
         ]
     );
     assert_eq!(
-        load_capability_flags_for_source_family(database.pool(), "ens", "ens_v2_registry_l1")
-            .await?,
+        load_capability_flags_for_source_family_version(
+            database.pool(),
+            "ens",
+            "ens_v2_registry_l1",
+            2,
+        )
+        .await?,
         BTreeMap::from([(
             "declared_children".to_owned(),
             CapabilityFlag {
                 status: CapabilitySupportStatus::Supported,
                 notes: Some(
-                    "sepolia-dev registry and discovered user registries are authoritative declared child inputs within the selected profile"
+                    "post-audit Sepolia ETHRegistry and discovered user registries are authoritative declared child inputs within the selected profile"
                         .to_owned(),
                 ),
             },
@@ -1950,6 +2277,36 @@ async fn syncing_sepolia_profile_replaces_main_profile_without_mixing() -> Resul
                 CapabilityFlag {
                     status: CapabilitySupportStatus::Shadow,
                     notes: Some("sepolia-dev registrar history remains downstream work".to_owned()),
+                },
+            ),
+        ])
+    );
+    assert_eq!(
+        load_capability_flags_for_source_family_version(
+            database.pool(),
+            "ens",
+            "ens_v2_registrar_l1",
+            3
+        )
+        .await?,
+        BTreeMap::from([
+            (
+                "exact_name_profile".to_owned(),
+                CapabilityFlag {
+                    status: CapabilitySupportStatus::Supported,
+                    notes: Some(
+                        "selected post-audit Sepolia exact-name profile reads are supported from admitted ETHRegistry and ETHRegistrar sources only"
+                            .to_owned(),
+                    ),
+                },
+            ),
+            (
+                "name_history".to_owned(),
+                CapabilityFlag {
+                    status: CapabilitySupportStatus::Shadow,
+                    notes: Some(
+                        "post-audit Sepolia registrar history remains downstream work".to_owned(),
+                    ),
                 },
             ),
         ])
@@ -2007,7 +2364,7 @@ async fn syncing_sepolia_profile_replaces_main_profile_without_mixing() -> Resul
     assert!(
         active_manifests
             .iter()
-            .all(|manifest| manifest.deployment_epoch == "ens_v2_sepolia_dev")
+            .all(|manifest| manifest.deployment_epoch == "ens_v2_sepolia_post_audit")
     );
     assert!(
         !active_manifests
@@ -2016,7 +2373,7 @@ async fn syncing_sepolia_profile_replaces_main_profile_without_mixing() -> Resul
     );
     assert!(active_manifests.iter().any(|manifest| {
         manifest.source_family == "ens_v2_registrar_l1"
-            && manifest.manifest_version == 2
+            && manifest.manifest_version == 3
             && manifest.capability_flags["exact_name_profile"].status
                 == CapabilitySupportStatus::Supported
     }));
@@ -2028,25 +2385,196 @@ async fn syncing_sepolia_profile_replaces_main_profile_without_mixing() -> Resul
             .all(|contract| contract.chain == "ethereum-sepolia")
     );
     assert!(!watched_contracts.iter().any(|contract| {
-        contract.address == normalize_address("0xe566a1fbaf30ff7c39828fe99f955fc55544cb9c")
+        contract.address == normalize_address("0x7e4b2d59938930168024201752ee5503df402303")
     }));
     assert!(!watched_contracts.iter().any(|contract| {
         contract.address == normalize_address("0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E")
     }));
+
+    // Simulate a database that observed resolver discovery while the old
+    // sepolia-dev registry profile was selected. The retained edge remains
+    // useful replay history, but the now-deprecated source and target
+    // manifests must not make it coverage-authoritative in the post-audit
+    // profile.
+    let (deprecated_registry_manifest_id, deprecated_epoch) = sqlx::query_as::<_, (i64, String)>(
+        r#"
+            SELECT manifest_id, deployment_epoch
+            FROM manifest_versions
+            WHERE chain = 'ethereum-sepolia'
+              AND source_family = 'ens_v2_registry_l1'
+              AND rollout_status = 'deprecated'
+            ORDER BY manifest_version DESC
+            LIMIT 1
+            "#,
+    )
+    .fetch_one(database.pool())
+    .await?;
+    let deprecated_registry_instance_id = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT contract_instance_id
+        FROM manifest_contract_instances
+        WHERE manifest_id = $1
+        ORDER BY contract_instance_id
+        LIMIT 1
+        "#,
+    )
+    .bind(deprecated_registry_manifest_id)
+    .fetch_one(database.pool())
+    .await?;
+    let deprecated_resolver_manifest_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT manifest_id
+        FROM manifest_versions
+        WHERE chain = 'ethereum-sepolia'
+          AND deployment_epoch = $1
+          AND source_family = 'ens_v2_resolver_l1'
+          AND rollout_status = 'deprecated'
+        ORDER BY manifest_version DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(&deprecated_epoch)
+    .fetch_one(database.pool())
+    .await?;
+    let deprecated_discovered_instance_id = Uuid::new_v4();
+    let deprecated_discovered_address = "0x0000000000000000000000000000000000000d3a";
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instances (
+            contract_instance_id,
+            chain_id,
+            contract_kind,
+            provenance
+        )
+        VALUES ($1, 'ethereum-sepolia', 'resolver', '{}'::jsonb)
+        "#,
+    )
+    .bind(deprecated_discovered_instance_id)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instance_addresses (
+            contract_instance_id,
+            chain_id,
+            address,
+            deactivated_at,
+            active_from_block_number,
+            active_to_block_number,
+            source_manifest_id,
+            provenance
+        )
+        VALUES ($1, 'ethereum-sepolia', lower($2), now(), 11163403, 11164000, $3, '{}'::jsonb)
+        "#,
+    )
+    .bind(deprecated_discovered_instance_id)
+    .bind(deprecated_discovered_address)
+    .bind(deprecated_resolver_manifest_id)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO discovery_edges (
+            chain_id,
+            edge_kind,
+            from_contract_instance_id,
+            to_contract_instance_id,
+            discovery_source,
+            source_manifest_id,
+            admission,
+            deactivated_at,
+            active_from_block_number,
+            active_to_block_number,
+            provenance
+        )
+        VALUES (
+            'ethereum-sepolia',
+            'resolver',
+            $1,
+            $2,
+            'legacy-sepolia-dev-test',
+            $3,
+            'reachable_from_root',
+            now(),
+            11163403,
+            11164000,
+            '{}'::jsonb
+        )
+        "#,
+    )
+    .bind(deprecated_registry_instance_id)
+    .bind(deprecated_discovered_instance_id)
+    .bind(deprecated_registry_manifest_id)
+    .execute(database.pool())
+    .await?;
 
     assert_eq!(
         load_watched_chain_plan(database.pool()).await?,
         vec![WatchedChainPlan {
             chain: "ethereum-sepolia".to_owned(),
             addresses: vec![
-                "0x3a3e15a5d27ff6f05c844313312f2e72096d3ed3".to_owned(),
-                "0x68586418353b771cf2425ed14a07512aa880c532".to_owned(),
-                "0x796fff2e907449be8d5921bcc215b1b76d89d080".to_owned(),
+                "0x11b5bfbe9078d826b1edbdd1cfc12f5828d9f50c".to_owned(),
+                "0x67b728a792e789a8978b30cf1b3b641f19354b43".to_owned(),
+                "0xa4449a0dd2b83007553d9b1d28b583a46a805a30".to_owned(),
             ],
             manifest_root_entry_count: 3,
             manifest_contract_entry_count: 3,
             discovery_edge_entry_count: 0,
         }]
+    );
+
+    assert_eq!(
+        load_required_watched_tuples(
+            database.pool(),
+            "ethereum-sepolia",
+            11_163_403,
+            11_164_000,
+            &[
+                "ens_v2_registrar_l1".to_owned(),
+                "ens_v2_registry_l1".to_owned(),
+                "ens_v2_resolver_l1".to_owned(),
+                "ens_v2_root_l1".to_owned(),
+            ],
+        )
+        .await?,
+        vec![
+            RequiredWatchedTuple {
+                source_family: "ens_v2_registrar_l1".to_owned(),
+                address: "0xa4449a0dd2b83007553d9b1d28b583a46a805a30".to_owned(),
+                required_from_block: 11_163_403,
+                required_to_block: 11_164_000,
+            },
+            RequiredWatchedTuple {
+                source_family: "ens_v2_registry_l1".to_owned(),
+                address: "0x67b728a792e789a8978b30cf1b3b641f19354b43".to_owned(),
+                required_from_block: 11_163_403,
+                required_to_block: 11_164_000,
+            },
+            RequiredWatchedTuple {
+                source_family: "ens_v2_root_l1".to_owned(),
+                address: "0x11b5bfbe9078d826b1edbdd1cfc12f5828d9f50c".to_owned(),
+                required_from_block: 11_163_403,
+                required_to_block: 11_164_000,
+            },
+        ],
+        "deprecated sepolia-dev declarations and discovery intervals must not create coverage requirements"
+    );
+    let deprecated_address = normalize_address(deprecated_discovered_address);
+    assert!(
+        load_historical_watched_contracts_by_chain(database.pool(), "ethereum-sepolia")
+            .await?
+            .iter()
+            .all(|contract| contract.address != deprecated_address),
+        "deprecated-profile discovery intervals are audit evidence, not historical replay authority"
+    );
+    assert!(
+        load_watched_contracts_by_addresses(
+            database.pool(),
+            &[("ethereum-sepolia".to_owned(), deprecated_address.clone())],
+        )
+        .await?
+        .is_empty(),
+        "deprecated-profile intervals must not enter scoped current watch reads"
     );
 
     let watched_summary = load_watched_contract_summary(database.pool()).await?;
@@ -2063,19 +2591,19 @@ async fn syncing_sepolia_profile_replaces_main_profile_without_mixing() -> Resul
     assert_eq!(admission_state.active_rule_count, 3);
     assert!(admission_state.has_authoritative_address(
         "ethereum-sepolia",
-        "0x3a3e15a5d27ff6f05c844313312f2e72096d3ed3"
+        "0x11b5bfbe9078d826b1edbdd1cfc12f5828d9f50c"
     ));
     assert!(admission_state.has_authoritative_address(
         "ethereum-sepolia",
-        "0x796fff2e907449be8d5921bcc215b1b76d89d080"
+        "0x67b728a792e789a8978b30cf1b3b641f19354b43"
     ));
     assert!(admission_state.has_authoritative_address(
         "ethereum-sepolia",
-        "0x68586418353b771cf2425ed14a07512aa880c532"
+        "0xa4449a0dd2b83007553d9b1d28b583a46a805a30"
     ));
     assert!(!admission_state.has_authoritative_address(
         "ethereum-sepolia",
-        "0xe566a1fbaf30ff7c39828fe99f955fc55544cb9c"
+        "0x7e4b2d59938930168024201752ee5503df402303"
     ));
 
     database.cleanup().await?;
@@ -2092,7 +2620,7 @@ async fn active_manifest_abi_events_derive_topics_from_payload() -> Result<()> {
         active_manifest_id_for_source_family(database.pool(), "ens", "ens_v2_registry_l1").await?;
     let events = load_active_manifest_abi_events(database.pool(), &[registry_manifest_id]).await?;
 
-    assert_eq!(events.len(), 10);
+    assert_eq!(events.len(), 12);
     let label_registered = events
         .iter()
         .find(|event| event.name == "LabelRegistered")
@@ -2111,6 +2639,25 @@ async fn active_manifest_abi_events_derive_topics_from_payload() -> Result<()> {
     );
     assert_eq!(label_registered.emitter_roles, ["registry"]);
     assert_eq!(label_registered.normalized_events, ["RegistrationGranted"]);
+
+    for (name, signature) in [
+        (
+            "TransferSingle",
+            "TransferSingle(address,address,address,uint256,uint256)",
+        ),
+        (
+            "TransferBatch",
+            "TransferBatch(address,address,address,uint256[],uint256[])",
+        ),
+    ] {
+        let transfer = events
+            .iter()
+            .find(|event| event.name == name)
+            .unwrap_or_else(|| panic!("registry manifest must declare {name} ABI"));
+        assert_eq!(transfer.canonical_signature, signature);
+        assert_eq!(transfer.emitter_roles, ["registry"]);
+        assert_eq!(transfer.normalized_events, ["TokenControlTransferred"]);
+    }
 
     database.cleanup().await?;
     Ok(())
@@ -4168,6 +4715,1527 @@ async fn scoped_discovery_reconciliation_keeps_unrelated_active_addresses() -> R
 }
 
 #[tokio::test]
+async fn scoped_discovery_transition_summary_accumulates_before_an_empty_final_transition()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+
+    let discovery_source = "unit-test-batched-summary";
+    let observation = DiscoveryObservation {
+        chain: "ethereum-sepolia".to_owned(),
+        from_address: "0x67b728a792e789a8978b30cf1b3b641f19354b43".to_owned(),
+        to_address: "0x0000000000000000000000000000000000000ba1".to_owned(),
+        edge_kind: "subregistry".to_owned(),
+        discovery_source: discovery_source.to_owned(),
+        active_from_block_number: Some(10),
+        active_from_block_hash: Some(format!("0x{:064x}", 10)),
+        active_to_block_number: None,
+        active_to_block_hash: None,
+        provenance: serde_json::json!({
+            "provider": "unit-test",
+            "observation_key": "batched-summary-edge",
+        }),
+    };
+    let transitions = [vec![observation], Vec::new()];
+
+    let summary = reconcile_scoped_discovery_observation_transitions(
+        database.pool(),
+        discovery_source,
+        &transitions,
+    )
+    .await?;
+
+    assert_eq!(summary.active_edge_count, 1);
+    assert_eq!(summary.admitted_edge_count, 1);
+    assert_eq!(summary.admitted_edges.len(), 1);
+    assert_eq!(summary.inserted_edge_count, 1);
+    assert_eq!(summary.deactivated_edge_count, 0);
+    assert_eq!(summary.admission_epoch_bump_count, 1);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn scoped_discovery_reconciliation_keeps_newer_assignment_current() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+
+    let discovery_source = "ens_v2_registry_subregistry:ethereum-sepolia";
+    let registry_address = "0x67b728a792e789a8978b30cf1b3b641f19354b43";
+    let older_address = "0x0000000000000000000000000000000000000a11";
+    let newer_address = "0x0000000000000000000000000000000000000b12";
+    let observation = |to_address: &str, block_number: i64| DiscoveryObservation {
+        chain: "ethereum-sepolia".to_owned(),
+        from_address: registry_address.to_owned(),
+        to_address: to_address.to_owned(),
+        edge_kind: "subregistry".to_owned(),
+        discovery_source: discovery_source.to_owned(),
+        active_from_block_number: Some(block_number),
+        active_from_block_hash: Some(format!("0x{block_number:064x}")),
+        active_to_block_number: None,
+        active_to_block_hash: None,
+        provenance: serde_json::json!({
+            "provider": "unit-test",
+            "observation_key": "registry-resource-7-subregistry",
+        }),
+    };
+
+    reconcile_scoped_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[observation(newer_address, 12)],
+    )
+    .await?;
+    reconcile_scoped_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[observation(older_address, 11)],
+    )
+    .await?;
+
+    let older_contract_instance_id = load_single_contract_instance_for_address(
+        database.pool(),
+        "ethereum-sepolia",
+        older_address,
+    )
+    .await?;
+    let newer_contract_instance_id = load_single_contract_instance_for_address(
+        database.pool(),
+        "ethereum-sepolia",
+        newer_address,
+    )
+    .await?;
+    let older_row = sqlx::query(
+        r#"
+        SELECT active_from_block_number, active_to_block_number, deactivated_at IS NULL AS active
+        FROM discovery_edges
+        WHERE discovery_source = $1
+          AND to_contract_instance_id = $2
+        "#,
+    )
+    .bind(discovery_source)
+    .bind(older_contract_instance_id)
+    .fetch_one(database.pool())
+    .await?;
+    let newer_row = sqlx::query(
+        r#"
+        SELECT active_from_block_number, active_to_block_number, deactivated_at IS NULL AS active
+        FROM discovery_edges
+        WHERE discovery_source = $1
+          AND to_contract_instance_id = $2
+        "#,
+    )
+    .bind(discovery_source)
+    .bind(newer_contract_instance_id)
+    .fetch_one(database.pool())
+    .await?;
+
+    assert_eq!(
+        older_row.try_get::<Option<i64>, _>("active_from_block_number")?,
+        Some(11)
+    );
+    assert_eq!(
+        older_row.try_get::<Option<i64>, _>("active_to_block_number")?,
+        Some(12)
+    );
+    assert!(!older_row.try_get::<bool, _>("active")?);
+    assert_eq!(
+        newer_row.try_get::<Option<i64>, _>("active_from_block_number")?,
+        Some(12)
+    );
+    assert_eq!(
+        newer_row.try_get::<Option<i64>, _>("active_to_block_number")?,
+        None
+    );
+    assert!(newer_row.try_get::<bool, _>("active")?);
+    assert_eq!(
+        query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM discovery_edges
+            WHERE active_from_block_number IS NOT NULL
+              AND active_to_block_number IS NOT NULL
+              AND active_to_block_number < active_from_block_number
+            "#,
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "discovery reconciliation must never create a negative block interval"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn scoped_discovery_reconciliation_keeps_later_same_block_assignment_current() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+
+    let discovery_source = "ens_v2_registry_subregistry:ethereum-sepolia";
+    let registry_address = "0x67b728a792e789a8978b30cf1b3b641f19354b43";
+    let earlier_address = "0x0000000000000000000000000000000000000c13";
+    let later_address = "0x0000000000000000000000000000000000000d14";
+    let block_number = 10;
+    let block_hash = format!("0x{block_number:064x}");
+    let observation = |to_address: &str, log_index: i64| DiscoveryObservation {
+        chain: "ethereum-sepolia".to_owned(),
+        from_address: registry_address.to_owned(),
+        to_address: to_address.to_owned(),
+        edge_kind: "subregistry".to_owned(),
+        discovery_source: discovery_source.to_owned(),
+        active_from_block_number: Some(block_number),
+        active_from_block_hash: Some(block_hash.clone()),
+        active_to_block_number: None,
+        active_to_block_hash: None,
+        provenance: serde_json::json!({
+            "provider": "unit-test",
+            "observation_key": "registry-resource-same-block-chronology-subregistry",
+            "transaction_index": 0,
+            "log_index": log_index,
+        }),
+    };
+
+    reconcile_scoped_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[observation(later_address, 2)],
+    )
+    .await?;
+    reconcile_scoped_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[observation(earlier_address, 1)],
+    )
+    .await?;
+
+    let intervals = sqlx::query_as::<_, (String, i64, Option<i64>, bool)>(
+        r#"
+        SELECT cia.address,
+               de.active_from_block_number,
+               de.active_to_block_number,
+               de.deactivated_at IS NULL
+        FROM discovery_edges de
+        JOIN contract_instance_addresses cia
+          ON cia.contract_instance_id = de.to_contract_instance_id
+        WHERE de.discovery_source = $1
+        ORDER BY de.provenance ->> 'log_index'
+        "#,
+    )
+    .bind(discovery_source)
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        intervals,
+        vec![
+            (earlier_address.to_owned(), 10, Some(10), false),
+            (later_address.to_owned(), 10, None, true),
+        ],
+        "same-block replay must order assignments by transaction and log position"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn scoped_discovery_reconciliation_orders_same_block_tombstones() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+
+    let discovery_source = "ens_v2_registry_subregistry:ethereum-sepolia";
+    let registry_address = "0x67b728a792e789a8978b30cf1b3b641f19354b43";
+    let child_address = "0x0000000000000000000000000000000000000e15";
+    let block_number = 10;
+    let block_hash = format!("0x{block_number:064x}");
+    let observation = |to_address: &str, log_index: i64| DiscoveryObservation {
+        chain: "ethereum-sepolia".to_owned(),
+        from_address: registry_address.to_owned(),
+        to_address: to_address.to_owned(),
+        edge_kind: "subregistry".to_owned(),
+        discovery_source: discovery_source.to_owned(),
+        active_from_block_number: Some(block_number),
+        active_from_block_hash: Some(block_hash.clone()),
+        active_to_block_number: None,
+        active_to_block_hash: None,
+        provenance: serde_json::json!({
+            "provider": "unit-test",
+            "observation_key": "registry-resource-same-block-tombstone-subregistry",
+            "transaction_index": 0,
+            "log_index": log_index,
+        }),
+    };
+
+    reconcile_scoped_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[observation(child_address, 2)],
+    )
+    .await?;
+    let earlier_tombstone = reconcile_scoped_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[observation(ZERO_ADDRESS, 1)],
+    )
+    .await?;
+    assert_eq!(earlier_tombstone.deactivated_edge_count, 0);
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE discovery_source = $1 AND deactivated_at IS NULL"
+        )
+        .bind(discovery_source)
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "an earlier same-block tombstone must not close a later assignment"
+    );
+
+    let later_tombstone = reconcile_scoped_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[observation(ZERO_ADDRESS, 3)],
+    )
+    .await?;
+    assert_eq!(later_tombstone.deactivated_edge_count, 1);
+    assert_eq!(
+        sqlx::query_as::<_, (i64, Option<i64>, bool)>(
+            r#"
+            SELECT active_from_block_number, active_to_block_number, deactivated_at IS NULL
+            FROM discovery_edges
+            WHERE discovery_source = $1
+            "#,
+        )
+        .bind(discovery_source)
+        .fetch_one(database.pool())
+        .await?,
+        (10, Some(10), false),
+        "a later same-block tombstone must close the assignment"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn scoped_discovery_reconciliation_rejects_incomplete_event_position() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+
+    let discovery_source = "ens_v2_registry_subregistry:ethereum-sepolia";
+    let observation = DiscoveryObservation {
+        chain: "ethereum-sepolia".to_owned(),
+        from_address: "0x67b728a792e789a8978b30cf1b3b641f19354b43".to_owned(),
+        to_address: "0x0000000000000000000000000000000000000f16".to_owned(),
+        edge_kind: "subregistry".to_owned(),
+        discovery_source: discovery_source.to_owned(),
+        active_from_block_number: Some(10),
+        active_from_block_hash: Some(format!("0x{:064x}", 10)),
+        active_to_block_number: None,
+        active_to_block_hash: None,
+        provenance: serde_json::json!({
+            "provider": "unit-test",
+            "observation_key": "incomplete-event-position",
+            "transaction_index": 0,
+        }),
+    };
+
+    let error =
+        reconcile_scoped_discovery_observations(database.pool(), discovery_source, &[observation])
+            .await
+            .expect_err("partial transaction/log provenance must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("must carry both transaction_index and log_index"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE discovery_source = $1"
+        )
+        .bind(discovery_source)
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "invalid chronology metadata must not mutate discovery state"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn scoped_discovery_reconciliation_inserts_middle_assignment_without_overlap() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+
+    let discovery_source = "ens_v2_registry_subregistry:ethereum-sepolia";
+    let registry_address = "0x67b728a792e789a8978b30cf1b3b641f19354b43";
+    let observation = |to_address: &str, block_number: i64| DiscoveryObservation {
+        chain: "ethereum-sepolia".to_owned(),
+        from_address: registry_address.to_owned(),
+        to_address: to_address.to_owned(),
+        edge_kind: "subregistry".to_owned(),
+        discovery_source: discovery_source.to_owned(),
+        active_from_block_number: Some(block_number),
+        active_from_block_hash: Some(format!("0x{block_number:064x}")),
+        active_to_block_number: None,
+        active_to_block_hash: None,
+        provenance: serde_json::json!({
+            "provider": "unit-test",
+            "observation_key": "registry-resource-chronology-subregistry",
+        }),
+    };
+
+    for (address, block_number) in [
+        ("0x00000000000000000000000000000000000000c3", 30),
+        ("0x00000000000000000000000000000000000000a1", 10),
+        ("0x00000000000000000000000000000000000000b2", 20),
+    ] {
+        reconcile_scoped_discovery_observations(
+            database.pool(),
+            discovery_source,
+            &[observation(address, block_number)],
+        )
+        .await?;
+    }
+
+    let intervals = sqlx::query_as::<_, (i64, Option<i64>, bool)>(
+        r#"
+        SELECT active_from_block_number, active_to_block_number, deactivated_at IS NULL
+        FROM discovery_edges
+        WHERE discovery_source = $1
+        ORDER BY active_from_block_number
+        "#,
+    )
+    .bind(discovery_source)
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        intervals,
+        vec![
+            (10, Some(20), false),
+            (20, Some(30), false),
+            (30, None, true)
+        ],
+        "out-of-order discovery replay must form adjacent non-overlapping intervals"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn scoped_discovery_reconciliation_inserts_middle_same_block_assignment_without_overlap()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+
+    let discovery_source = "ens_v2_registry_subregistry:ethereum-sepolia";
+    let registry_address = "0x67b728a792e789a8978b30cf1b3b641f19354b43";
+    let block_number = 10;
+    let block_hash = format!("0x{block_number:064x}");
+    let observation = |to_address: &str, log_index: i64| DiscoveryObservation {
+        chain: "ethereum-sepolia".to_owned(),
+        from_address: registry_address.to_owned(),
+        to_address: to_address.to_owned(),
+        edge_kind: "subregistry".to_owned(),
+        discovery_source: discovery_source.to_owned(),
+        active_from_block_number: Some(block_number),
+        active_from_block_hash: Some(block_hash.clone()),
+        active_to_block_number: None,
+        active_to_block_hash: None,
+        provenance: serde_json::json!({
+            "provider": "unit-test",
+            "observation_key": "registry-resource-same-block-chronology-subregistry",
+            "transaction_index": 0,
+            "log_index": log_index,
+        }),
+    };
+
+    for (address, log_index) in [
+        ("0x00000000000000000000000000000000000000c3", 30),
+        ("0x00000000000000000000000000000000000000a1", 10),
+        ("0x00000000000000000000000000000000000000b2", 20),
+    ] {
+        reconcile_scoped_discovery_observations(
+            database.pool(),
+            discovery_source,
+            &[observation(address, log_index)],
+        )
+        .await?;
+    }
+
+    let intervals = sqlx::query_as::<_, (i64, Option<i64>, bool)>(
+        r#"
+        SELECT (provenance ->> 'log_index')::BIGINT,
+               (provenance ->> 'active_to_log_index')::BIGINT,
+               deactivated_at IS NULL
+        FROM discovery_edges
+        WHERE discovery_source = $1
+        ORDER BY (provenance ->> 'log_index')::BIGINT
+        "#,
+    )
+    .bind(discovery_source)
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        intervals,
+        vec![
+            (10, Some(20), false),
+            (20, Some(30), false),
+            (30, None, true)
+        ],
+        "out-of-order same-block replay must form adjacent non-overlapping event intervals"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn scoped_discovery_reconciliation_ignores_older_tombstone_but_closes_same_block()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+
+    let chain = "ethereum-sepolia";
+    let discovery_source = "ens_v2_registry_subregistry:ethereum-sepolia";
+    let registry_address = "0x67b728a792e789a8978b30cf1b3b641f19354b43";
+    let child_address = "0x0000000000000000000000000000000000000c21";
+    let observation = |to_address: &str, block_number: i64| DiscoveryObservation {
+        chain: chain.to_owned(),
+        from_address: registry_address.to_owned(),
+        to_address: to_address.to_owned(),
+        edge_kind: "subregistry".to_owned(),
+        discovery_source: discovery_source.to_owned(),
+        active_from_block_number: Some(block_number),
+        active_from_block_hash: Some(format!("0x{block_number:064x}")),
+        active_to_block_number: None,
+        active_to_block_hash: None,
+        provenance: serde_json::json!({
+            "provider": "unit-test",
+            "observation_key": "out-of-order-tombstone",
+        }),
+    };
+
+    reconcile_scoped_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[observation(child_address, 20)],
+    )
+    .await?;
+    let epoch_after_insert = load_discovery_admission_epoch(database.pool(), chain).await?;
+    let older_tombstone = reconcile_scoped_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[observation(ZERO_ADDRESS, 10)],
+    )
+    .await?;
+    assert_eq!(older_tombstone.deactivated_edge_count, 0);
+    assert_eq!(
+        load_discovery_admission_epoch(database.pool(), chain).await?,
+        epoch_after_insert,
+        "a chronology no-op must not invalidate the coverage frontier"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, Option<i64>, bool)>(
+            r#"
+            SELECT active_from_block_number, active_to_block_number, deactivated_at IS NULL
+            FROM discovery_edges
+            WHERE discovery_source = $1
+            "#,
+        )
+        .bind(discovery_source)
+        .fetch_one(database.pool())
+        .await?,
+        (20, None, true)
+    );
+
+    let same_block_tombstone = reconcile_scoped_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[observation(ZERO_ADDRESS, 20)],
+    )
+    .await?;
+    assert_eq!(same_block_tombstone.deactivated_edge_count, 1);
+    assert_eq!(
+        sqlx::query_as::<_, (i64, Option<i64>, bool)>(
+            r#"
+            SELECT active_from_block_number, active_to_block_number, deactivated_at IS NULL
+            FROM discovery_edges
+            WHERE discovery_source = $1
+            "#,
+        )
+        .bind(discovery_source)
+        .fetch_one(database.pool())
+        .await?,
+        (20, Some(20), false),
+        "block-inclusive discovery intervals may start and end in the same block"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn scoped_discovery_same_address_reset_does_not_create_a_second_epoch() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+
+    let chain = "ethereum-sepolia";
+    let discovery_source = "ens_v2_registry_subregistry:ethereum-sepolia";
+    let registry_address = "0x67b728a792e789a8978b30cf1b3b641f19354b43";
+    let child_address = "0x0000000000000000000000000000000000000c31";
+    let observation = |to_address: &str, block_number: i64| DiscoveryObservation {
+        chain: chain.to_owned(),
+        from_address: registry_address.to_owned(),
+        to_address: to_address.to_owned(),
+        edge_kind: "subregistry".to_owned(),
+        discovery_source: discovery_source.to_owned(),
+        active_from_block_number: Some(block_number),
+        active_from_block_hash: Some(format!("0x{block_number:064x}")),
+        active_to_block_number: None,
+        active_to_block_hash: None,
+        provenance: serde_json::json!({
+            "provider": "unit-test",
+            "observation_key": "same-address-reset",
+        }),
+    };
+
+    reconcile_scoped_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[observation(child_address, 10)],
+    )
+    .await?;
+    let epoch_after_insert = load_discovery_admission_epoch(database.pool(), chain).await?;
+    let reset = reconcile_scoped_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[observation(child_address, 20)],
+    )
+    .await?;
+    assert_eq!(reset.inserted_edge_count, 0);
+    assert_eq!(reset.deactivated_edge_count, 0);
+    assert_eq!(
+        load_discovery_admission_epoch(database.pool(), chain).await?,
+        epoch_after_insert,
+        "same-assignment reset must not force historical coverage re-verification"
+    );
+    let full_reset = reconcile_discovery_observations_through_block(
+        database.pool(),
+        discovery_source,
+        &[observation(child_address, 20)],
+        20,
+    )
+    .await?;
+    assert_eq!(full_reset.inserted_edge_count, 0);
+    assert_eq!(full_reset.deactivated_edge_count, 0);
+    assert_eq!(
+        load_discovery_admission_epoch(database.pool(), chain).await?,
+        epoch_after_insert,
+        "a full-source restart must preserve the continuous same-address assignment"
+    );
+
+    reconcile_scoped_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[observation(ZERO_ADDRESS, 30)],
+    )
+    .await?;
+    assert_eq!(
+        sqlx::query_as::<_, (i64, Option<i64>, bool)>(
+            r#"
+            SELECT active_from_block_number, active_to_block_number, deactivated_at IS NULL
+            FROM discovery_edges
+            WHERE discovery_source = $1
+            "#,
+        )
+        .bind(discovery_source)
+        .fetch_all(database.pool())
+        .await?,
+        vec![(10, Some(30), false)],
+        "the eventual tombstone must close the one continuous assignment"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn discovery_edge_reactivation_matches_the_complete_identity() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+
+    let chain = "ethereum-sepolia";
+    let discovery_source = "ens_v2_registry_subregistry:ethereum-sepolia";
+    let registry_address = "0x67b728a792e789a8978b30cf1b3b641f19354b43";
+    let child_address = "0x0000000000000000000000000000000000000c41";
+    let observation = DiscoveryObservation {
+        chain: chain.to_owned(),
+        from_address: registry_address.to_owned(),
+        to_address: child_address.to_owned(),
+        edge_kind: "subregistry".to_owned(),
+        discovery_source: discovery_source.to_owned(),
+        active_from_block_number: Some(10),
+        active_from_block_hash: Some(format!("0x{:064x}", 10)),
+        active_to_block_number: None,
+        active_to_block_hash: None,
+        provenance: serde_json::json!({
+            "provider": "unit-test",
+            "observation_key": "complete-edge-identity",
+        }),
+    };
+
+    reconcile_discovery_observations(
+        database.pool(),
+        discovery_source,
+        std::slice::from_ref(&observation),
+    )
+    .await?;
+    let exact_edge_id = sqlx::query_scalar::<_, i64>(
+        "SELECT discovery_edge_id FROM discovery_edges WHERE discovery_source = $1",
+    )
+    .bind(discovery_source)
+    .fetch_one(database.pool())
+    .await?;
+    let terminal_hash = format!("0x{:064x}", 20);
+    let near_collision_edge_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO discovery_edges (
+            chain_id,
+            edge_kind,
+            from_contract_instance_id,
+            to_contract_instance_id,
+            discovery_source,
+            source_manifest_id,
+            admission,
+            active_from_block_number,
+            active_from_block_hash,
+            active_to_block_number,
+            active_to_block_hash,
+            admitted_at,
+            deactivated_at,
+            provenance
+        )
+        SELECT
+            chain_id,
+            edge_kind,
+            from_contract_instance_id,
+            to_contract_instance_id,
+            discovery_source,
+            source_manifest_id,
+            admission,
+            active_from_block_number,
+            active_from_block_hash,
+            20,
+            $2,
+            admitted_at,
+            now(),
+            provenance || '{"near_collision": true}'::JSONB
+        FROM discovery_edges
+        WHERE discovery_edge_id = $1
+        RETURNING discovery_edge_id
+        "#,
+    )
+    .bind(exact_edge_id)
+    .bind(&terminal_hash)
+    .fetch_one(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE discovery_edges
+        SET active_to_block_number = 20,
+            active_to_block_hash = $2,
+            deactivated_at = now()
+        WHERE discovery_edge_id = $1
+        "#,
+    )
+    .bind(exact_edge_id)
+    .bind(&terminal_hash)
+    .execute(database.pool())
+    .await?;
+
+    let summary = reconcile_discovery_observations(
+        database.pool(),
+        discovery_source,
+        std::slice::from_ref(&observation),
+    )
+    .await?;
+    assert_eq!(
+        summary.inserted_edge_count, 1,
+        "reactivating an exact retained epoch counts as graph growth"
+    );
+    assert_eq!(summary.active_edge_count, 1);
+    assert_eq!(
+        sqlx::query_as::<_, (i64, Option<i64>, Option<String>, bool)>(
+            r#"
+            SELECT
+                discovery_edge_id,
+                active_to_block_number,
+                active_to_block_hash,
+                deactivated_at IS NULL
+            FROM discovery_edges
+            WHERE discovery_edge_id IN ($1, $2)
+            ORDER BY discovery_edge_id
+            "#,
+        )
+        .bind(exact_edge_id)
+        .bind(near_collision_edge_id)
+        .fetch_all(database.pool())
+        .await?,
+        vec![
+            (exact_edge_id, None, None, true),
+            (near_collision_edge_id, Some(20), Some(terminal_hash), false,),
+        ],
+        "reactivation must clear only the row matching all ten identity fields"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn discovery_edge_reactivation_batches_across_the_statement_boundary() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+
+    let discovery_source = "unit-test-bulk-reactivation";
+    let registry_address = "0x67b728a792e789a8978b30cf1b3b641f19354b43";
+    let observations = (1..=1001)
+        .map(|index| DiscoveryObservation {
+            chain: "ethereum-sepolia".to_owned(),
+            from_address: registry_address.to_owned(),
+            to_address: format!("0x{index:040x}"),
+            edge_kind: "subregistry".to_owned(),
+            discovery_source: discovery_source.to_owned(),
+            active_from_block_number: Some(10),
+            active_from_block_hash: Some(format!("0x{:064x}", 10)),
+            active_to_block_number: None,
+            active_to_block_hash: None,
+            provenance: serde_json::json!({
+                "provider": "unit-test",
+                "observation_key": format!("bulk-reactivation-{index}"),
+            }),
+        })
+        .collect::<Vec<_>>();
+
+    let initial =
+        reconcile_discovery_observations(database.pool(), discovery_source, &observations).await?;
+    assert_eq!(initial.inserted_edge_count, observations.len());
+
+    sqlx::query(
+        r#"
+        UPDATE discovery_edges
+        SET active_to_block_number = 20,
+            active_to_block_hash = $2,
+            deactivated_at = now(),
+            provenance = provenance || jsonb_build_object(
+                'active_to_transaction_index', 0,
+                'active_to_log_index', 1
+            )
+        WHERE discovery_source = $1
+        "#,
+    )
+    .bind(discovery_source)
+    .bind(format!("0x{:064x}", 20))
+    .execute(database.pool())
+    .await?;
+
+    let reactivated =
+        reconcile_discovery_observations(database.pool(), discovery_source, &observations).await?;
+    assert_eq!(reactivated.inserted_edge_count, observations.len());
+    assert_eq!(reactivated.active_edge_count, observations.len());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM discovery_edges
+            WHERE discovery_source = $1
+              AND deactivated_at IS NULL
+              AND active_to_block_number IS NULL
+              AND NOT (provenance ? 'active_to_transaction_index')
+              AND NOT (provenance ? 'active_to_log_index')
+            "#,
+        )
+        .bind(discovery_source)
+        .fetch_one(database.pool())
+        .await?,
+        observations.len() as i64,
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn full_discovery_reconciliation_through_older_boundary_preserves_newer_live_epoch()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+
+    let chain = "ethereum-sepolia";
+    let discovery_source = "ens_v2_registry_subregistry:ethereum-sepolia";
+    let registry_address = "0x67b728a792e789a8978b30cf1b3b641f19354b43";
+    let older_address = "0x0000000000000000000000000000000000000d10";
+    let newer_address = "0x0000000000000000000000000000000000000d20";
+    let older_hash = format!("0x{:064x}", 10);
+    let newer_hash = format!("0x{:064x}", 20);
+    insert_test_chain_lineage_state(database.pool(), chain, &older_hash, 10, "canonical").await?;
+    insert_test_chain_lineage_state(database.pool(), chain, &newer_hash, 20, "canonical").await?;
+    let observation =
+        |to_address: &str, block_number: i64, block_hash: &str| DiscoveryObservation {
+            chain: chain.to_owned(),
+            from_address: registry_address.to_owned(),
+            to_address: to_address.to_owned(),
+            edge_kind: "subregistry".to_owned(),
+            discovery_source: discovery_source.to_owned(),
+            active_from_block_number: Some(block_number),
+            active_from_block_hash: Some(block_hash.to_owned()),
+            active_to_block_number: None,
+            active_to_block_hash: None,
+            provenance: serde_json::json!({
+                "provider": "unit-test",
+                "observation_key": "bounded-full-reconciliation",
+            }),
+        };
+
+    reconcile_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[observation(newer_address, 20, &newer_hash)],
+    )
+    .await?;
+    reconcile_discovery_observations_through_block(
+        database.pool(),
+        discovery_source,
+        &[observation(older_address, 10, &older_hash)],
+        10,
+    )
+    .await?;
+
+    let older_id =
+        load_single_contract_instance_for_address(database.pool(), chain, older_address).await?;
+    let newer_id =
+        load_single_contract_instance_for_address(database.pool(), chain, newer_address).await?;
+    assert_eq!(
+        sqlx::query_as::<_, (i64, Option<i64>, bool)>(
+            r#"
+            SELECT active_from_block_number, active_to_block_number, deactivated_at IS NULL
+            FROM discovery_edges
+            WHERE discovery_source = $1
+              AND to_contract_instance_id = $2
+            "#,
+        )
+        .bind(discovery_source)
+        .bind(older_id)
+        .fetch_one(database.pool())
+        .await?,
+        (10, Some(20), false),
+        "the older selected state must be retained as closed history"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, Option<i64>, bool)>(
+            r#"
+            SELECT active_from_block_number, active_to_block_number, deactivated_at IS NULL
+            FROM discovery_edges
+            WHERE discovery_source = $1
+              AND to_contract_instance_id = $2
+            "#,
+        )
+        .bind(discovery_source)
+        .bind(newer_id)
+        .fetch_one(database.pool())
+        .await?,
+        (20, None, true),
+        "a bounded full reconciliation must preserve a newer non-orphaned assignment"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn full_discovery_reconciliation_preserves_newer_same_address_epoch() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+
+    let chain = "ethereum-sepolia";
+    let discovery_source = "ens_v2_registry_subregistry:ethereum-sepolia";
+    let registry_address = "0x67b728a792e789a8978b30cf1b3b641f19354b43";
+    let child_address = "0x0000000000000000000000000000000000000d30";
+    let older_hash = format!("0x{:064x}", 30);
+    let newer_hash = format!("0x{:064x}", 40);
+    insert_test_chain_lineage_state(database.pool(), chain, &older_hash, 30, "canonical").await?;
+    insert_test_chain_lineage_state(database.pool(), chain, &newer_hash, 40, "canonical").await?;
+    let observation = |block_number: i64, block_hash: &str| DiscoveryObservation {
+        chain: chain.to_owned(),
+        from_address: registry_address.to_owned(),
+        to_address: child_address.to_owned(),
+        edge_kind: "subregistry".to_owned(),
+        discovery_source: discovery_source.to_owned(),
+        active_from_block_number: Some(block_number),
+        active_from_block_hash: Some(block_hash.to_owned()),
+        active_to_block_number: None,
+        active_to_block_hash: None,
+        provenance: serde_json::json!({
+            "provider": "unit-test",
+            "observation_key": "bounded-same-address-reconciliation",
+        }),
+    };
+
+    reconcile_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[observation(40, &newer_hash)],
+    )
+    .await?;
+    reconcile_discovery_observations_through_block(
+        database.pool(),
+        discovery_source,
+        &[observation(30, &older_hash)],
+        30,
+    )
+    .await?;
+
+    assert_eq!(
+        sqlx::query_as::<_, (i64, Option<i64>, bool)>(
+            r#"
+            SELECT active_from_block_number, active_to_block_number, deactivated_at IS NULL
+            FROM discovery_edges
+            WHERE discovery_source = $1
+            ORDER BY active_from_block_number
+            "#,
+        )
+        .bind(discovery_source)
+        .fetch_all(database.pool())
+        .await?,
+        vec![(30, Some(40), false), (40, None, true)],
+        "same-address epochs must remain chronological across a bounded full replay"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn scoped_discovery_reconciliation_rejects_orphaned_same_source_ancestry() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+
+    let chain = "ethereum-sepolia";
+    let discovery_source = "ens_v2_registry_subregistry:ethereum-sepolia";
+    let registry_address = "0x67b728a792e789a8978b30cf1b3b641f19354b43";
+    let losing_child = "0x0000000000000000000000000000000000000e40";
+    let inadmissible_grandchild = "0x0000000000000000000000000000000000000e41";
+    let losing_hash = format!("0x{:064x}", 140);
+    let later_hash = format!("0x{:064x}", 141);
+    insert_test_chain_lineage_state(database.pool(), chain, &losing_hash, 140, "canonical").await?;
+    insert_test_chain_lineage_state(database.pool(), chain, &later_hash, 141, "canonical").await?;
+    let observation =
+        |key: &str, from_address: &str, to_address: &str, block_number: i64, block_hash: &str| {
+            DiscoveryObservation {
+                chain: chain.to_owned(),
+                from_address: from_address.to_owned(),
+                to_address: to_address.to_owned(),
+                edge_kind: "subregistry".to_owned(),
+                discovery_source: discovery_source.to_owned(),
+                active_from_block_number: Some(block_number),
+                active_from_block_hash: Some(block_hash.to_owned()),
+                active_to_block_number: None,
+                active_to_block_hash: None,
+                provenance: serde_json::json!({
+                    "provider": "unit-test",
+                    "observation_key": key,
+                }),
+            }
+        };
+
+    let initial = reconcile_scoped_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[observation(
+            "orphaned-ancestry-parent",
+            registry_address,
+            losing_child,
+            140,
+            &losing_hash,
+        )],
+    )
+    .await?;
+    assert_eq!(initial.inserted_edge_count, 1);
+    sqlx::query(
+        r#"
+        UPDATE chain_lineage
+        SET canonicality_state = 'orphaned'::canonicality_state
+        WHERE chain_id = $1
+          AND block_hash = $2
+        "#,
+    )
+    .bind(chain)
+    .bind(&losing_hash)
+    .execute(database.pool())
+    .await?;
+    let epoch_before_descendant = load_discovery_admission_epoch(database.pool(), chain).await?;
+
+    let descendant = reconcile_scoped_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[observation(
+            "orphaned-ancestry-descendant",
+            losing_child,
+            inadmissible_grandchild,
+            141,
+            &later_hash,
+        )],
+    )
+    .await?;
+
+    assert_eq!(descendant.active_edge_count, 1);
+    assert_eq!(descendant.admitted_edge_count, 0);
+    assert_eq!(descendant.inserted_edge_count, 0);
+    assert_eq!(descendant.admission_epoch_bump_count, 0);
+    assert_eq!(
+        load_discovery_admission_epoch(database.pool(), chain).await?,
+        epoch_before_descendant,
+        "an orphaned same-source edge must not authorize a descendant or bump the admission epoch"
+    );
+    assert_eq!(
+        query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM discovery_edges edge
+            JOIN contract_instance_addresses address
+              ON address.contract_instance_id = edge.to_contract_instance_id
+            WHERE edge.discovery_source = $1
+              AND address.address = $2
+            "#,
+        )
+        .bind(discovery_source)
+        .bind(inadmissible_grandchild)
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "the orphaned ancestry window must not materialize a descendant edge"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn scoped_discovery_reconciliation_removes_orphaned_newer_parent_and_descendant() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+
+    let chain = "ethereum-sepolia";
+    let discovery_source = "ens_v2_registry_subregistry:ethereum-sepolia";
+    let registry_address = "0x67b728a792e789a8978b30cf1b3b641f19354b43";
+    let losing_child = "0x0000000000000000000000000000000000000e20";
+    let losing_grandchild = "0x0000000000000000000000000000000000000e21";
+    let winning_child = "0x0000000000000000000000000000000000000e10";
+    let losing_hash = format!("0x{:064x}", 120);
+    let winning_hash = format!("0x{:064x}", 110);
+    insert_test_chain_lineage_state(database.pool(), chain, &losing_hash, 120, "canonical").await?;
+    insert_test_chain_lineage_state(database.pool(), chain, &winning_hash, 110, "canonical")
+        .await?;
+    let observation =
+        |key: &str, from_address: &str, to_address: &str, block_number: i64, block_hash: &str| {
+            DiscoveryObservation {
+                chain: chain.to_owned(),
+                from_address: from_address.to_owned(),
+                to_address: to_address.to_owned(),
+                edge_kind: "subregistry".to_owned(),
+                discovery_source: discovery_source.to_owned(),
+                active_from_block_number: Some(block_number),
+                active_from_block_hash: Some(block_hash.to_owned()),
+                active_to_block_number: None,
+                active_to_block_hash: None,
+                provenance: serde_json::json!({
+                    "provider": "unit-test",
+                    "observation_key": key,
+                }),
+            }
+        };
+
+    let initial = reconcile_scoped_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[
+            observation(
+                "orphaned-parent",
+                registry_address,
+                losing_child,
+                120,
+                &losing_hash,
+            ),
+            observation(
+                "orphaned-descendant",
+                losing_child,
+                losing_grandchild,
+                120,
+                &losing_hash,
+            ),
+        ],
+    )
+    .await?;
+    assert_eq!(initial.inserted_edge_count, 2);
+    sqlx::query(
+        r#"
+        UPDATE chain_lineage
+        SET canonicality_state = 'orphaned'::canonicality_state
+        WHERE chain_id = $1
+          AND block_hash = $2
+        "#,
+    )
+    .bind(chain)
+    .bind(&losing_hash)
+    .execute(database.pool())
+    .await?;
+
+    let rebuilt = reconcile_scoped_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[observation(
+            "orphaned-parent",
+            registry_address,
+            winning_child,
+            110,
+            &winning_hash,
+        )],
+    )
+    .await?;
+    assert_eq!(rebuilt.inserted_edge_count, 1);
+    assert_eq!(rebuilt.deactivated_edge_count, 2);
+    assert_eq!(
+        sqlx::query_as::<_, (i64, Option<i64>, bool)>(
+            r#"
+            SELECT active_from_block_number, active_to_block_number, deactivated_at IS NULL
+            FROM discovery_edges
+            WHERE discovery_source = $1
+            ORDER BY active_from_block_number, discovery_edge_id
+            "#,
+        )
+        .bind(discovery_source)
+        .fetch_all(database.pool())
+        .await?,
+        vec![(110, None, true), (120, None, false), (120, None, false)],
+        "orphaned starts must close without manufacturing an inverted canonical interval"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn scoped_discovery_reconciliation_does_not_bound_orphan_before_same_block_start()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+
+    let chain = "ethereum-sepolia";
+    let discovery_source = "ens_v2_registry_subregistry:ethereum-sepolia";
+    let registry_address = "0x67b728a792e789a8978b30cf1b3b641f19354b43";
+    let losing_child = "0x0000000000000000000000000000000000000e31";
+    let winning_child = "0x0000000000000000000000000000000000000e30";
+    let block_number = 120;
+    let losing_hash = format!("0x{:064x}", 1201);
+    let winning_hash = format!("0x{:064x}", 1200);
+    let observation =
+        |to_address: &str, block_hash: &str, transaction_index: i64, log_index: i64| {
+            DiscoveryObservation {
+                chain: chain.to_owned(),
+                from_address: registry_address.to_owned(),
+                to_address: to_address.to_owned(),
+                edge_kind: "subregistry".to_owned(),
+                discovery_source: discovery_source.to_owned(),
+                active_from_block_number: Some(block_number),
+                active_from_block_hash: Some(block_hash.to_owned()),
+                active_to_block_number: None,
+                active_to_block_hash: None,
+                provenance: serde_json::json!({
+                    "provider": "unit-test",
+                    "observation_key": "same-block-orphan-chronology",
+                    "transaction_index": transaction_index,
+                    "log_index": log_index,
+                }),
+            }
+        };
+
+    insert_test_chain_lineage_state(
+        database.pool(),
+        chain,
+        &losing_hash,
+        block_number,
+        "canonical",
+    )
+    .await?;
+    reconcile_scoped_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[observation(losing_child, &losing_hash, 2, 3)],
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE chain_lineage
+        SET canonicality_state = 'orphaned'::canonicality_state
+        WHERE chain_id = $1
+          AND block_hash = $2
+        "#,
+    )
+    .bind(chain)
+    .bind(&losing_hash)
+    .execute(database.pool())
+    .await?;
+    insert_test_chain_lineage_state(
+        database.pool(),
+        chain,
+        &winning_hash,
+        block_number,
+        "canonical",
+    )
+    .await?;
+
+    let rebuilt = reconcile_scoped_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[observation(winning_child, &winning_hash, 1, 9)],
+    )
+    .await?;
+    assert_eq!(rebuilt.inserted_edge_count, 1);
+    assert_eq!(rebuilt.deactivated_edge_count, 1);
+    assert_eq!(
+        sqlx::query_as::<
+            _,
+            (
+                String,
+                i64,
+                i64,
+                i64,
+                Option<i64>,
+                Option<i64>,
+                Option<i64>,
+                bool,
+            ),
+        >(
+            r#"
+            SELECT cia.address,
+                   de.active_from_block_number,
+                   (de.provenance ->> 'transaction_index')::BIGINT,
+                   (de.provenance ->> 'log_index')::BIGINT,
+                   de.active_to_block_number,
+                   (de.provenance ->> 'active_to_transaction_index')::BIGINT,
+                   (de.provenance ->> 'active_to_log_index')::BIGINT,
+                   de.deactivated_at IS NULL
+            FROM discovery_edges de
+            JOIN contract_instance_addresses cia
+              ON cia.contract_instance_id = de.to_contract_instance_id
+            WHERE de.discovery_source = $1
+            ORDER BY de.deactivated_at IS NULL DESC
+            "#,
+        )
+        .bind(discovery_source)
+        .fetch_all(database.pool())
+        .await?,
+        vec![
+            (winning_child.to_owned(), 120, 1, 9, None, None, None, true,),
+            (losing_child.to_owned(), 120, 2, 3, None, None, None, false,),
+        ],
+        "orphan removal must not materialize a terminal event position before its start"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn scoped_discovery_reconciliation_preserves_descendants_with_an_alternate_incoming_path()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+
+    let chain = "ethereum-sepolia";
+    let discovery_source = "ens_v2_registry_subregistry:ethereum-sepolia";
+    let registry_address = "0x67b728a792e789a8978b30cf1b3b641f19354b43";
+    let alternate_parent = "0x0000000000000000000000000000000000000f10";
+    let shared_registry = "0x0000000000000000000000000000000000000f20";
+    let descendant = "0x0000000000000000000000000000000000000f30";
+    let observation =
+        |key: &str, from_address: &str, to_address: &str, block_number: i64| DiscoveryObservation {
+            chain: chain.to_owned(),
+            from_address: from_address.to_owned(),
+            to_address: to_address.to_owned(),
+            edge_kind: "subregistry".to_owned(),
+            discovery_source: discovery_source.to_owned(),
+            active_from_block_number: Some(block_number),
+            active_from_block_hash: Some(format!("0x{block_number:064x}")),
+            active_to_block_number: None,
+            active_to_block_hash: None,
+            provenance: serde_json::json!({
+                "provider": "unit-test",
+                "observation_key": key,
+            }),
+        };
+
+    let initial = reconcile_scoped_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[
+            observation("alternate-parent", registry_address, alternate_parent, 10),
+            observation("direct-parent", registry_address, shared_registry, 10),
+            observation("alternate-incoming", alternate_parent, shared_registry, 11),
+            observation("descendant", shared_registry, descendant, 12),
+        ],
+    )
+    .await?;
+    assert_eq!(initial.inserted_edge_count, 4);
+
+    let removal = reconcile_scoped_discovery_observations(
+        database.pool(),
+        discovery_source,
+        &[observation(
+            "direct-parent",
+            registry_address,
+            ZERO_ADDRESS,
+            20,
+        )],
+    )
+    .await?;
+    assert_eq!(removal.deactivated_edge_count, 1);
+    assert_eq!(
+        query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM discovery_edges
+            WHERE discovery_source = $1
+              AND deactivated_at IS NULL
+              AND provenance ->> 'observation_key' IN ('alternate-incoming', 'descendant')
+            "#,
+        )
+        .bind(discovery_source)
+        .fetch_one(database.pool())
+        .await?,
+        2,
+        "removing one incoming edge must preserve the descendant branch while the target registry remains reachable through another active subregistry edge"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn discovery_writers_fence_the_admission_epoch_before_mutating_the_watched_set() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+
+    let chain = "ethereum-sepolia";
+    let discovery_source = "epoch-fence-order-test";
+    let registry_address = "0x67b728a792e789a8978b30cf1b3b641f19354b43";
+    sqlx::query(
+        r#"
+        CREATE FUNCTION assert_epoch_fenced_before_discovery_edge_write()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $function$
+        BEGIN
+            PERFORM epoch
+            FROM discovery_admission_epochs
+            WHERE chain_id = NEW.chain_id
+            FOR UPDATE NOWAIT;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'missing admission-epoch fence row for %', NEW.chain_id;
+            END IF;
+            RETURN NEW;
+        EXCEPTION
+            WHEN lock_not_available THEN
+                RAISE EXCEPTION 'discovery edge mutation reached the database before the admission-epoch writer fence';
+        END
+        $function$
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE TRIGGER assert_epoch_fenced_before_discovery_edge_write
+        BEFORE INSERT OR UPDATE ON discovery_edges
+        FOR EACH ROW
+        EXECUTE FUNCTION assert_epoch_fenced_before_discovery_edge_write()
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    let mut promotion_fence = database.pool().begin().await?;
+    sqlx::query("SELECT epoch FROM discovery_admission_epochs WHERE chain_id = $1 FOR SHARE")
+        .bind(chain)
+        .execute(&mut *promotion_fence)
+        .await?;
+
+    let writer_pool = database.pool().clone();
+    let writer = tokio::spawn(async move {
+        reconcile_scoped_discovery_observations(
+            &writer_pool,
+            discovery_source,
+            &[DiscoveryObservation {
+                chain: chain.to_owned(),
+                from_address: registry_address.to_owned(),
+                to_address: "0x0000000000000000000000000000000000000fa1".to_owned(),
+                edge_kind: "subregistry".to_owned(),
+                discovery_source: discovery_source.to_owned(),
+                active_from_block_number: Some(10),
+                active_from_block_hash: Some(format!("0x{:064x}", 10)),
+                active_to_block_number: None,
+                active_to_block_hash: None,
+                provenance: serde_json::json!({
+                    "provider": "unit-test",
+                    "observation_key": "epoch-fence-order",
+                }),
+            }],
+        )
+        .await
+    });
+
+    let mut writer_waited_on_epoch = false;
+    for _ in 0..200 {
+        writer_waited_on_epoch = query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_stat_activity
+                WHERE datname = current_database()
+                  AND pid <> pg_backend_pid()
+                  AND wait_event_type = 'Lock'
+                  AND query ILIKE '%discovery_admission_epochs%'
+            )
+            "#,
+        )
+        .fetch_one(database.pool())
+        .await?;
+        if writer_waited_on_epoch || writer.is_finished() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    promotion_fence.rollback().await?;
+    assert!(
+        writer_waited_on_epoch,
+        "the discovery writer must wait on the admission epoch before any watched-set write"
+    );
+    writer.await.context("discovery writer task failed")??;
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn reuses_contract_instance_ids_across_inactive_gaps() -> Result<()> {
     let test_dir = TestDir::new()?;
     let database = TestDatabase::new().await?;
@@ -5715,6 +7783,183 @@ async fn rebuilds_watched_plan_from_active_contract_instance_address_ranges() ->
 }
 
 #[tokio::test]
+async fn byte_identical_manifest_sync_preserves_discovery_admission_epoch() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    test_dir.write_manifest(
+        "ens",
+        "ens_v2_registry_l1",
+        "v1",
+        &manifest_contents(
+            "active",
+            "0x0000000000000000000000000000000000000001",
+            "0x00000000000000000000000000000000000000AA",
+            Some("0x00000000000000000000000000000000000000DD"),
+        ),
+    )?;
+    let repository = load_repository(&test_dir.path)?;
+
+    sync_repository(database.pool(), &repository).await?;
+    let epoch_after_initial_sync = load_discovery_admission_epoch(database.pool(), chain).await?;
+
+    sync_repository(database.pool(), &repository).await?;
+    assert_eq!(
+        load_discovery_admission_epoch(database.pool(), chain).await?,
+        epoch_after_initial_sync,
+        "reloading the same repository must not invalidate retained-history authority"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn manifest_sync_bumps_epoch_for_authority_mutations_and_repairs() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let source_family = "ens_v2_registry_l1";
+    let registry_address = "0x0000000000000000000000000000000000000002";
+    let write_repository = |contract_start_block| -> Result<ManifestRepository> {
+        test_dir.write_manifest(
+            "ens",
+            source_family,
+            "v1",
+            &start_block_manifest_contents(
+                Some(100),
+                Some(contract_start_block),
+                "0x0000000000000000000000000000000000000003",
+            ),
+        )?;
+        load_repository(&test_dir.path)
+    };
+    let repository = write_repository(200)?;
+    sync_repository(database.pool(), &repository).await?;
+
+    let epoch_before_capability_repair =
+        load_discovery_admission_epoch(database.pool(), chain).await?;
+    sqlx::query(
+        r#"
+        DELETE FROM manifest_capability_flags
+        WHERE manifest_id = (
+            SELECT manifest_id
+            FROM manifest_versions
+            WHERE chain = $1 AND source_family = $2
+        )
+        "#,
+    )
+    .bind(chain)
+    .bind(source_family)
+    .execute(database.pool())
+    .await?;
+    sync_repository(database.pool(), &repository).await?;
+    let epoch_after_capability_repair =
+        load_discovery_admission_epoch(database.pool(), chain).await?;
+    assert!(
+        epoch_after_capability_repair > epoch_before_capability_repair,
+        "repairing persisted capability authority must invalidate retained coverage"
+    );
+
+    sqlx::query(
+        r#"
+        DELETE FROM manifest_discovery_rules
+        WHERE manifest_id = (
+            SELECT manifest_id
+            FROM manifest_versions
+            WHERE chain = $1 AND source_family = $2
+        )
+        "#,
+    )
+    .bind(chain)
+    .bind(source_family)
+    .execute(database.pool())
+    .await?;
+    sync_repository(database.pool(), &repository).await?;
+    let epoch_after_rule_repair = load_discovery_admission_epoch(database.pool(), chain).await?;
+    assert!(
+        epoch_after_rule_repair > epoch_after_capability_repair,
+        "repairing persisted discovery-rule authority must invalidate retained coverage"
+    );
+
+    sqlx::query(
+        r#"
+        UPDATE manifest_contract_instances
+        SET abi_ref = 'stale-test-abi'
+        WHERE manifest_id = (
+            SELECT manifest_id
+            FROM manifest_versions
+            WHERE chain = $1 AND source_family = $2
+        )
+          AND declaration_kind = 'root'
+        "#,
+    )
+    .bind(chain)
+    .bind(source_family)
+    .execute(database.pool())
+    .await?;
+    sync_repository(database.pool(), &repository).await?;
+    let epoch_after_entry_repair = load_discovery_admission_epoch(database.pool(), chain).await?;
+    assert!(
+        epoch_after_entry_repair > epoch_after_rule_repair,
+        "repairing a persisted manifest entry must invalidate retained coverage"
+    );
+
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET active_from_block_number = 1
+        WHERE chain_id = $1
+          AND address = lower($2)
+          AND deactivated_at IS NULL
+        "#,
+    )
+    .bind(chain)
+    .bind(registry_address)
+    .execute(database.pool())
+    .await?;
+    sync_repository(database.pool(), &repository).await?;
+    let epoch_after_range_repair = load_discovery_admission_epoch(database.pool(), chain).await?;
+    assert!(
+        epoch_after_range_repair > epoch_after_entry_repair,
+        "repairing a manifest-declared active range must invalidate retained coverage"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<i64>>(
+            r#"
+            SELECT active_from_block_number
+            FROM contract_instance_addresses
+            WHERE chain_id = $1
+              AND address = lower($2)
+              AND deactivated_at IS NULL
+            "#,
+        )
+        .bind(chain)
+        .bind(registry_address)
+        .fetch_one(database.pool())
+        .await?,
+        Some(200)
+    );
+
+    let changed_repository = write_repository(201)?;
+    sync_repository(database.pool(), &changed_repository).await?;
+    let epoch_after_manifest_change =
+        load_discovery_admission_epoch(database.pool(), chain).await?;
+    assert!(
+        epoch_after_manifest_change > epoch_after_range_repair,
+        "a real repository manifest mutation must invalidate retained coverage"
+    );
+
+    let empty_dir = TestDir::new()?;
+    sync_repository(database.pool(), &load_repository(&empty_dir.path)?).await?;
+    assert!(
+        load_discovery_admission_epoch(database.pool(), chain).await? > epoch_after_manifest_change,
+        "removing a stored manifest must invalidate retained coverage"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn discovery_admission_epoch_bumps_on_every_edge_mutation() -> Result<()> {
     let test_dir = TestDir::new()?;
     let database = TestDatabase::new().await?;
@@ -5783,6 +8028,533 @@ async fn discovery_admission_epoch_bumps_on_every_edge_mutation() -> Result<()> 
     assert!(
         epoch_after_deactivation > epoch_after_observation_insert,
         "edge deactivation must bump the epoch ({epoch_after_observation_insert} -> {epoch_after_deactivation})"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn coverage_reads_ignore_facts_without_completed_containing_jobs() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let source_family = "ens_v1_registry_l1";
+    let pending_address = "0x0000000000000000000000000000000000000d01";
+    let outside_job_address = "0x0000000000000000000000000000000000000d02";
+    insert_untrusted_backfill_coverage_fact(
+        database.pool(),
+        chain,
+        "pending",
+        100,
+        120,
+        source_family,
+        pending_address,
+        100,
+        120,
+    )
+    .await?;
+    insert_untrusted_backfill_coverage_fact(
+        database.pool(),
+        chain,
+        "completed",
+        105,
+        115,
+        source_family,
+        outside_job_address,
+        100,
+        120,
+    )
+    .await?;
+
+    let requirements = vec![
+        RequiredWatchedTuple {
+            source_family: source_family.to_owned(),
+            address: normalize_address(pending_address),
+            required_from_block: 100,
+            required_to_block: 120,
+        },
+        RequiredWatchedTuple {
+            source_family: source_family.to_owned(),
+            address: normalize_address(outside_job_address),
+            required_from_block: 100,
+            required_to_block: 120,
+        },
+    ];
+    assert_eq!(
+        find_uncovered_required_watched_tuples(database.pool(), chain, &requirements, 10,).await?,
+        requirements
+            .iter()
+            .map(|requirement| UncoveredWatchedTuple {
+                source_family: requirement.source_family.clone(),
+                address: requirement.address.clone(),
+                required_from_block: requirement.required_from_block,
+                required_to_block: requirement.required_to_block,
+            })
+            .collect::<Vec<_>>(),
+        "pending jobs and facts outside their completed job range are not promotion authority"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn closed_historical_discovery_interval_remains_required_for_coverage() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let registry_address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+    let resolver_address = "0x0000000000000000000000000000000000000c01";
+    let unbounded_resolver_address = "0x0000000000000000000000000000000000000c02";
+    let registry_source_family = "ens_v1_registry_l1";
+    let resolver_source_family = "ens_v1_resolver_l1";
+
+    test_dir.write_manifest(
+        "ens",
+        registry_source_family,
+        "v3",
+        &checked_in_manifest_contents("ens", registry_source_family, "v3")?,
+    )?;
+    test_dir.write_manifest(
+        "ens",
+        resolver_source_family,
+        "v1",
+        &checked_in_manifest_contents("ens", resolver_source_family, "v1")?,
+    )?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+    let summary = persist_discovery_observation(
+        database.pool(),
+        &DiscoveryObservation {
+            chain: chain.to_owned(),
+            from_address: registry_address.to_owned(),
+            to_address: resolver_address.to_owned(),
+            edge_kind: "resolver".to_owned(),
+            discovery_source: "historical-coverage-test".to_owned(),
+            active_from_block_number: Some(100),
+            active_from_block_hash: Some(format!("0x{:064x}", 100)),
+            active_to_block_number: Some(160),
+            active_to_block_hash: Some(format!("0x{:064x}", 160)),
+            provenance: serde_json::json!({
+                "provider": "unit-test",
+                "observation_key": "historical-resolver",
+            }),
+        },
+    )
+    .await?;
+    let resolver_contract_instance_id = summary.admitted_edges[0]
+        .to_contract_instance_id
+        .expect("resolver discovery must admit a target contract instance");
+    let unbounded_summary = persist_discovery_observation(
+        database.pool(),
+        &DiscoveryObservation {
+            chain: chain.to_owned(),
+            from_address: registry_address.to_owned(),
+            to_address: unbounded_resolver_address.to_owned(),
+            edge_kind: "resolver".to_owned(),
+            discovery_source: "unbounded-historical-coverage-test".to_owned(),
+            active_from_block_number: Some(110),
+            active_from_block_hash: Some(format!("0x{:064x}", 110)),
+            active_to_block_number: None,
+            active_to_block_hash: None,
+            provenance: serde_json::json!({
+                "provider": "unit-test",
+                "observation_key": "unbounded-historical-resolver",
+            }),
+        },
+    )
+    .await?;
+    let unbounded_resolver_contract_instance_id = unbounded_summary.admitted_edges[0]
+        .to_contract_instance_id
+        .expect("unbounded resolver discovery must admit a target contract instance");
+
+    let scoped_targets = vec![
+        (chain.to_owned(), normalize_address(resolver_address)),
+        (
+            chain.to_owned(),
+            normalize_address(unbounded_resolver_address),
+        ),
+    ];
+    let current_resolvers = load_watched_contracts_by_source_family_and_addresses(
+        database.pool(),
+        resolver_source_family,
+        &scoped_targets,
+    )
+    .await?;
+    assert_eq!(current_resolvers.len(), 2);
+    assert!(current_resolvers.iter().all(|contract| {
+        contract.source == WatchedContractSource::DiscoveryEdge
+            && contract.source_family == resolver_source_family
+    }));
+    assert!(current_resolvers.iter().any(|contract| {
+        contract.contract_instance_id == resolver_contract_instance_id
+            && contract.address == normalize_address(resolver_address)
+    }));
+    assert!(current_resolvers.iter().any(|contract| {
+        contract.contract_instance_id == unbounded_resolver_contract_instance_id
+            && contract.address == normalize_address(unbounded_resolver_address)
+    }));
+
+    sqlx::query(
+        r#"
+        UPDATE discovery_edges
+        SET deactivated_at = now()
+        WHERE to_contract_instance_id = $1
+          AND edge_kind = 'resolver'
+        "#,
+    )
+    .bind(resolver_contract_instance_id)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE discovery_edges
+        SET deactivated_at = now()
+        WHERE to_contract_instance_id = $1
+          AND edge_kind = 'resolver'
+        "#,
+    )
+    .bind(unbounded_resolver_contract_instance_id)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET deactivated_at = now()
+        WHERE contract_instance_id = $1
+        "#,
+    )
+    .bind(unbounded_resolver_contract_instance_id)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET deactivated_at = now()
+        WHERE contract_instance_id = $1
+        "#,
+    )
+    .bind(resolver_contract_instance_id)
+    .execute(database.pool())
+    .await?;
+    let current_after_close = load_watched_contracts_by_chain(database.pool(), chain).await?;
+    assert!(current_after_close.iter().all(|contract| {
+        contract.address != normalize_address(resolver_address)
+            && contract.address != normalize_address(unbounded_resolver_address)
+    }));
+    assert!(
+        load_watched_contracts_by_addresses(database.pool(), &scoped_targets)
+            .await?
+            .is_empty(),
+        "scoped current reads must exclude both bounded and unbounded deactivated intervals"
+    );
+
+    let historical_after_close =
+        load_historical_watched_contracts_by_chain(database.pool(), chain).await?;
+    assert!(historical_after_close.iter().any(|contract| {
+        contract.contract_instance_id == resolver_contract_instance_id
+            && contract.address == normalize_address(resolver_address)
+            && contract.source == WatchedContractSource::DiscoveryEdge
+            && contract.source_family == resolver_source_family
+            && contract.active_from_block_number == Some(100)
+            && contract.active_to_block_number == Some(160)
+    }));
+    assert!(historical_after_close.iter().all(|contract| {
+        contract.contract_instance_id != unbounded_resolver_contract_instance_id
+            && contract.address != normalize_address(unbounded_resolver_address)
+    }));
+    let required = load_required_watched_tuples(
+        database.pool(),
+        chain,
+        120,
+        180,
+        &[resolver_source_family.to_owned()],
+    )
+    .await?;
+    assert_eq!(
+        required,
+        vec![RequiredWatchedTuple {
+            source_family: resolver_source_family.to_owned(),
+            address: normalize_address(resolver_address),
+            required_from_block: 120,
+            required_to_block: 160,
+        }],
+        "the public required-tuple loader must retain the closed historical interval"
+    );
+
+    let uncovered = find_uncovered_watched_tuples(
+        database.pool(),
+        chain,
+        120,
+        180,
+        &[resolver_source_family.to_owned()],
+        10,
+    )
+    .await?;
+    assert_eq!(
+        uncovered,
+        vec![UncoveredWatchedTuple {
+            source_family: resolver_source_family.to_owned(),
+            address: normalize_address(resolver_address),
+            required_from_block: 120,
+            required_to_block: 160,
+        }],
+        "a later deactivation must not erase a historically authoritative interval that intersects the promoted range"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn ens_v2_recovery_targets_keep_closed_discovery_identity_and_exact_interval() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let registry_address = "0x00000000000000000000000000000000000000aa";
+    let child_address = "0x00000000000000000000000000000000000000cc";
+    test_dir.write_manifest(
+        "ens",
+        "ens_v2_registry_l1",
+        "v1",
+        &format!(
+            r#"
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v2_registry_l1"
+chain = "{chain}"
+deployment_epoch = "ens_v2"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+
+[capability_flags]
+declared_children = "supported"
+
+[[roots]]
+name = "RootRegistry"
+address = "0x0000000000000000000000000000000000000001"
+start_block = 90
+
+[[contracts]]
+role = "registry"
+address = "{registry_address}"
+proxy_kind = "none"
+start_block = 100
+
+[[discovery_rules]]
+edge_kind = "subregistry"
+from_role = "registry"
+admission = "reachable_from_root"
+
+[[abi.events]]
+name = "SubregistryUpdated"
+fragment = "event SubregistryUpdated(uint256 indexed tokenId, address indexed subregistry, address indexed sender)"
+"#
+        ),
+    )?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+    let summary = persist_discovery_observation(
+        database.pool(),
+        &DiscoveryObservation {
+            chain: chain.to_owned(),
+            from_address: registry_address.to_owned(),
+            to_address: child_address.to_owned(),
+            edge_kind: "subregistry".to_owned(),
+            discovery_source: "recovery-target-test".to_owned(),
+            active_from_block_number: Some(120),
+            active_from_block_hash: Some(format!("0x{:064x}", 120)),
+            active_to_block_number: Some(160),
+            active_to_block_hash: Some(format!("0x{:064x}", 160)),
+            provenance: serde_json::json!({
+                "provider": "unit-test",
+                "observation_key": "closed-child",
+            }),
+        },
+    )
+    .await?;
+    let child_contract_instance_id = summary.admitted_edges[0]
+        .to_contract_instance_id
+        .expect("child discovery must admit a contract identity");
+    sqlx::query(
+        r#"
+        UPDATE discovery_edges
+        SET deactivated_at = now()
+        WHERE to_contract_instance_id = $1
+          AND edge_kind = 'subregistry'
+        "#,
+    )
+    .bind(child_contract_instance_id)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET deactivated_at = now()
+        WHERE contract_instance_id = $1
+        "#,
+    )
+    .bind(child_contract_instance_id)
+    .execute(database.pool())
+    .await?;
+
+    let targets =
+        load_ens_v2_retained_history_recovery_targets(database.pool(), chain, 200).await?;
+    assert!(targets.contains(&ManifestBootstrapTarget {
+        source_family: "ens_v2_registry_l1".to_owned(),
+        contract_instance_id: child_contract_instance_id,
+        address: normalize_address(child_address),
+        effective_from_block: 120,
+        effective_to_block: Some(160),
+    }));
+    let automatic_targets =
+        load_ens_v2_authoritative_discovery_bootstrap_targets(database.pool(), chain, 200).await?;
+    assert!(automatic_targets.contains(&ManifestBootstrapTarget {
+        source_family: "ens_v2_registry_l1".to_owned(),
+        contract_instance_id: child_contract_instance_id,
+        address: normalize_address(child_address),
+        effective_from_block: 120,
+        effective_to_block: Some(160),
+    }));
+
+    let mut child_plan = load_historical_watched_source_selector_plan(
+        database.pool(),
+        chain,
+        WatchedSourceSelector::WatchedTargetSet(vec![child_contract_instance_id.into()]),
+        120,
+        160,
+    )
+    .await?;
+    child_plan.selected_targets.retain(|target| {
+        target.source_family == "ens_v2_registry_l1"
+            && target.contract_instance_id == child_contract_instance_id
+    });
+    assert_eq!(
+        child_plan.selected_targets,
+        vec![WatchedBackfillTarget {
+            source_family: "ens_v2_registry_l1".to_owned(),
+            contract_instance_id: child_contract_instance_id,
+            address: normalize_address(child_address),
+            effective_from_block: 120,
+            effective_to_block: 160,
+        }]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn bounded_and_unbounded_deactivated_manifest_addresses_match_historical_coverage()
+-> Result<()> {
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let source_family = "ens_v2_registry_l1";
+    let replaced_address = "0x00000000000000000000000000000000000000AA";
+    test_dir.write_manifest(
+        "ens",
+        source_family,
+        "v1",
+        &manifest_contents(
+            "active",
+            "0x0000000000000000000000000000000000000001",
+            replaced_address,
+            Some("0x00000000000000000000000000000000000000DD"),
+        ),
+    )?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET deactivated_at = now(),
+            active_to_block_number = 150,
+            active_to_block_hash = $3
+        WHERE chain_id = $1
+          AND address = lower($2)
+        "#,
+    )
+    .bind(chain)
+    .bind(replaced_address)
+    .bind(format!("0x{:064x}", 150))
+    .execute(database.pool())
+    .await?;
+
+    let normalized_replaced_address = normalize_address(replaced_address);
+    assert!(
+        load_watched_contracts_by_chain(database.pool(), chain)
+            .await?
+            .iter()
+            .all(|contract| contract.address != normalized_replaced_address),
+        "a bounded deactivated declaration is no longer a current watch target"
+    );
+    assert!(
+        load_watched_contracts_by_addresses(
+            database.pool(),
+            &[(chain.to_owned(), normalized_replaced_address.clone())],
+        )
+        .await?
+        .is_empty(),
+        "scoped current reads must use the same deactivation filter"
+    );
+    assert!(
+        load_historical_watched_contracts_by_chain(database.pool(), chain)
+            .await?
+            .iter()
+            .any(|contract| {
+                contract.address == normalized_replaced_address
+                    && contract.source == WatchedContractSource::ManifestContract
+                    && contract.active_to_block_number == Some(150)
+            }),
+        "a bounded deactivated declaration remains historical replay authority"
+    );
+    assert!(
+        load_required_watched_tuples(
+            database.pool(),
+            chain,
+            100,
+            200,
+            &[source_family.to_owned()],
+        )
+        .await?
+        .iter()
+        .any(|tuple| {
+            tuple.address == normalized_replaced_address && tuple.required_to_block == 150
+        }),
+        "coverage must retain the same bounded declaration interval as the historical view"
+    );
+
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET active_to_block_number = NULL,
+            active_to_block_hash = NULL
+        WHERE chain_id = $1
+          AND address = lower($2)
+        "#,
+    )
+    .bind(chain)
+    .bind(replaced_address)
+    .execute(database.pool())
+    .await?;
+
+    let required = load_required_watched_tuples(
+        database.pool(),
+        chain,
+        100,
+        200,
+        &[source_family.to_owned()],
+    )
+    .await?;
+    assert!(
+        required
+            .iter()
+            .all(|tuple| tuple.address != normalized_replaced_address),
+        "a deactivated declaration without a terminal block cannot become an unbounded historical coverage requirement"
+    );
+    assert!(
+        load_historical_watched_contracts_by_chain(database.pool(), chain)
+            .await?
+            .iter()
+            .all(|contract| contract.address != normalized_replaced_address),
+        "historical replay and coverage must both reject an unbounded deactivated declaration"
     );
 
     database.cleanup().await

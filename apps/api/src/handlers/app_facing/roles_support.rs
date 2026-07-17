@@ -14,18 +14,12 @@ fn reject_role_bitmap_filter(role_bitmap: Option<&str>) -> ApiResult<()> {
     Ok(())
 }
 
-// Keep in sync with apps/worker replay::CURRENT_PROJECTION_REPLAY_VERSION.
-const CURRENT_PROJECTION_REPLAY_VERSION: i32 = 6;
-
 fn parse_roles_account(account: Option<&str>) -> Option<String> {
     parse_permissions_subject(account).map(|account| account.to_ascii_lowercase())
 }
 
 fn parse_optional_roles_resource_id(resource_id: Option<&str>) -> ApiResult<Option<Uuid>> {
-    let Some(resource_id) = resource_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
+    let Some(resource_id) = resource_id.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(None);
     };
 
@@ -88,44 +82,6 @@ fn parse_optional_exact_name_query_value(name: Option<&str>) -> Option<&str> {
     name.filter(|value| !value.is_empty())
 }
 
-async fn ensure_permissions_current_projection_available(
-    pool: &PgPool,
-    route: &'static str,
-) -> ApiResult<()> {
-    let available = sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM current_projection_replay_status
-            WHERE projection = 'permissions_current'
-              AND replay_version = $1
-        )
-        "#,
-    )
-    .bind(CURRENT_PROJECTION_REPLAY_VERSION)
-    .fetch_one(pool)
-    .await
-    .map_err(|load_error| {
-        error!(
-            service = "api",
-            route = route,
-            error = ?load_error,
-            "failed to check permissions_current projection readiness for roles route"
-        );
-        ApiError::internal_error("failed to check roles projection readiness")
-    })?;
-
-    if available {
-        Ok(())
-    } else {
-        Err(ApiError {
-            status: StatusCode::CONFLICT,
-            code: "stale",
-            message: "permissions_current projection is not yet available for roles".to_owned(),
-        })
-    }
-}
-
 async fn load_resource_lookup_row(
     pool: &PgPool,
     namespace: &str,
@@ -161,6 +117,8 @@ fn resource_id_from_name_current(row: &NameCurrentRow) -> ApiResult<Uuid> {
         ),
     })
 }
+
+include!("roles_support_authority.rs");
 
 fn roles_cursor_spec(
     route: &'static str,
@@ -233,18 +191,12 @@ async fn ensure_roles_cursor_exists(
         SELECT EXISTS (
             SELECT 1
             FROM permissions_current pc
-            JOIN resources resource
-              ON resource.resource_id = pc.resource_id
             WHERE ($1::TEXT IS NULL OR pc.subject = $1)
               AND ($2::UUID IS NULL OR pc.resource_id = $2)
               AND pc.subject = $3
               AND pc.resource_id = $4
               AND pc.scope = $5
-              AND resource.canonicality_state IN (
-                    'canonical'::canonicality_state,
-                    'safe'::canonicality_state,
-                    'finalized'::canonicality_state
-              )
+              AND pc.canonicality_summary ->> 'status' IN ('canonical', 'safe', 'finalized')
         )
         "#,
     )
@@ -326,8 +278,7 @@ async fn load_roles_page(
         }
     };
 
-    page
-    .map_err(|load_error| {
+    page.map_err(|load_error| {
         error!(
             service = "api",
             route = route,
@@ -356,8 +307,16 @@ async fn load_composed_roles_page(
     route: &'static str,
 ) -> ApiResult<bigname_storage::PermissionsCurrentAccountResourcePage> {
     let Some(resource_id) = resource_id else {
-        return load_roles_page(pool, account, None, cursor, page_size, route, RolesSummaryMode::Full)
-            .await;
+        return load_roles_page(
+            pool,
+            account,
+            None,
+            cursor,
+            page_size,
+            route,
+            RolesSummaryMode::Full,
+        )
+        .await;
     };
     let Some(root_resource_id) = root_resource_id.filter(|root| *root != resource_id) else {
         return load_roles_page(
@@ -373,17 +332,16 @@ async fn load_composed_roles_page(
     };
 
     let fetch_size = page_size.saturating_add(1);
-    let resource_page =
-        load_roles_page(
-            pool,
-            account,
-            Some(resource_id),
-            cursor,
-            fetch_size,
-            route,
-            RolesSummaryMode::Full,
-        )
-        .await?;
+    let resource_page = load_roles_page(
+        pool,
+        account,
+        Some(resource_id),
+        cursor,
+        fetch_size,
+        route,
+        RolesSummaryMode::Full,
+    )
+    .await?;
     let root_page = load_roles_page(
         pool,
         account,
@@ -456,17 +414,17 @@ fn merge_role_summaries(
     resource_summary
         .canonicality_summaries
         .extend(root_summary.canonicality_summaries);
-    resource_summary.last_recomputed_at =
-        match (resource_summary.last_recomputed_at, root_summary.last_recomputed_at) {
-            (Some(resource), Some(root)) => Some(resource.max(root)),
-            (Some(resource), None) => Some(resource),
-            (None, Some(root)) => Some(root),
-            (None, None) => None,
-        };
+    resource_summary.last_recomputed_at = match (
+        resource_summary.last_recomputed_at,
+        root_summary.last_recomputed_at,
+    ) {
+        (Some(resource), Some(root)) => Some(resource.max(root)),
+        (Some(resource), None) => Some(resource),
+        (None, Some(root)) => Some(root),
+        (None, None) => None,
+    };
     resource_summary
 }
-
-include!("roles_ensv2_root.rs");
 
 async fn load_associated_role_names(
     pool: &PgPool,
@@ -497,44 +455,8 @@ async fn load_associated_role_names(
             nc.resource_id,
             nc.canonical_display_name
         FROM name_current nc
-        JOIN name_surfaces surface
-          ON surface.logical_name_id = nc.logical_name_id
-        LEFT JOIN resources resource
-          ON resource.resource_id = nc.resource_id
-        LEFT JOIN surface_bindings binding
-          ON binding.surface_binding_id = nc.surface_binding_id
-        LEFT JOIN token_lineages token_lineage
-          ON token_lineage.token_lineage_id = nc.token_lineage_id
         WHERE nc.resource_id = ANY($1::UUID[])
-          AND surface.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-          AND (
-              nc.surface_binding_id IS NULL
-              OR (
-                  resource.canonicality_state IN (
-                      'canonical'::canonicality_state,
-                      'safe'::canonicality_state,
-                      'finalized'::canonicality_state
-                  )
-                  AND binding.canonicality_state IN (
-                      'canonical'::canonicality_state,
-                      'safe'::canonicality_state,
-                      'finalized'::canonicality_state
-                  )
-                  AND binding.active_to IS NULL
-                  AND (
-                      nc.token_lineage_id IS NULL
-                      OR token_lineage.canonicality_state IN (
-                          'canonical'::canonicality_state,
-                          'safe'::canonicality_state,
-                          'finalized'::canonicality_state
-                      )
-                  )
-              )
-          )
+          AND nc.canonicality_summary ->> 'status' IN ('canonical', 'safe', 'finalized')
         ORDER BY nc.resource_id ASC, nc.namespace ASC, nc.canonical_display_name ASC, nc.logical_name_id ASC
         "#,
     )
@@ -561,16 +483,19 @@ async fn load_associated_role_names(
             ApiError::internal_error("failed to load associated names for app-facing roles")
         })?;
         let canonical_display_name: String =
-            row.try_get("canonical_display_name").map_err(|load_error| {
-                error!(
-                    service = "api",
-                    error = ?load_error,
-                    "failed to decode associated role name"
-                );
-                ApiError::internal_error("failed to load associated names for app-facing roles")
-            })?;
+            row.try_get("canonical_display_name")
+                .map_err(|load_error| {
+                    error!(
+                        service = "api",
+                        error = ?load_error,
+                        "failed to decode associated role name"
+                    );
+                    ApiError::internal_error("failed to load associated names for app-facing roles")
+                })?;
         associated_names.insert(resource_id, canonical_display_name);
     }
 
     Ok(associated_names)
 }
+
+include!("roles_ensv2_root.rs");

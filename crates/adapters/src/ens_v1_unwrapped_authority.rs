@@ -8,7 +8,7 @@ use crate::registry_migration_cache::MigratedRegistryNodes;
 use anyhow::{Context, Result, bail};
 use bigname_storage::{
     CanonicalityState, NameSurface, NormalizedEvent, Resource, SurfaceBinding, SurfaceBindingKind,
-    TokenLineage, upsert_name_surfaces_without_snapshots, upsert_normalized_events_count_only,
+    TokenLineage, acquire_raw_log_staging_read_guard, upsert_name_surfaces_without_snapshots,
     upsert_resources_without_snapshots, upsert_surface_bindings_without_snapshots,
     upsert_token_lineages_without_snapshots,
 };
@@ -127,6 +127,8 @@ struct RawLogPosition {
     block_hash: String,
     transaction_hash: String,
     log_index: i64,
+    #[serde(default)]
+    is_registration_granted: bool,
     #[serde(default)]
     is_wrapper_name_wrapped: bool,
 }
@@ -452,6 +454,7 @@ mod apply_wrapper;
 mod checkpoint;
 mod constants;
 mod event_builders;
+mod event_persistence;
 mod event_state;
 mod event_topics;
 mod finalization;
@@ -466,6 +469,7 @@ mod preload;
 mod profiles;
 mod release_events;
 mod resolver_gate;
+mod resolver_profile_reconciliation;
 mod reverse_claims;
 mod scope;
 mod transition;
@@ -475,6 +479,9 @@ pub use self::pipeline::{
     sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limit,
 };
 pub use checkpoint::clear_replay_adapter_checkpoints;
+pub use resolver_profile_reconciliation::{
+    ResolverProfileEventReconciliationSummary, reconcile_resolver_profile_events,
+};
 
 use self::{
     abi::*, apply::*, apply_registrar::*, apply_registry::*, apply_resolver::*, apply_wrapper::*,

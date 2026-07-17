@@ -58,8 +58,6 @@ pub async fn load_permissions_current_page(
                 pc.manifest_version,
                 pc.last_recomputed_at
             FROM permissions_current pc
-            JOIN resources resource
-              ON resource.resource_id = pc.resource_id
             WHERE "#,
         );
         push_permissions_current_filters(
@@ -188,8 +186,6 @@ async fn load_permissions_current_account_resource_page_with_summary(
                 pc.manifest_version,
                 pc.last_recomputed_at
             FROM permissions_current pc
-            JOIN resources resource
-              ON resource.resource_id = pc.resource_id
             WHERE TRUE
             "#,
         );
@@ -248,8 +244,6 @@ async fn load_permissions_current_full_filter_summary(
             COALESCE(jsonb_agg(pc.canonicality_summary ORDER BY pc.subject ASC, pc.scope ASC), '[]'::jsonb) AS canonicality_summaries,
             MAX(pc.last_recomputed_at) AS last_recomputed_at
         FROM permissions_current pc
-        JOIN resources resource
-          ON resource.resource_id = pc.resource_id
         WHERE "#,
     );
     push_permissions_current_filters(&mut builder, resource_id, subject, scope_storage_key);
@@ -276,8 +270,6 @@ async fn load_permissions_current_account_resource_summary(
             COALESCE(jsonb_agg(pc.canonicality_summary ORDER BY pc.subject COLLATE "C" ASC, pc.resource_id ASC, pc.scope COLLATE "C" ASC), '[]'::jsonb) AS canonicality_summaries,
             MAX(pc.last_recomputed_at) AS last_recomputed_at
         FROM permissions_current pc
-        JOIN resources resource
-          ON resource.resource_id = pc.resource_id
         WHERE TRUE
         "#,
     );
@@ -307,8 +299,6 @@ async fn load_permissions_current_account_resource_count_summary(
             '[]'::jsonb AS canonicality_summaries,
             NULL::TIMESTAMPTZ AS last_recomputed_at
         FROM permissions_current pc
-        JOIN resources resource
-          ON resource.resource_id = pc.resource_id
         WHERE TRUE
         "#,
     );

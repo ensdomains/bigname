@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 
 use crate::discovery::{
-    provenance::observation_key,
+    provenance::{evm_event_position, observation_key},
     types::{DiscoveryObservation, ObservationTerminalState},
 };
 
@@ -34,6 +34,7 @@ pub(super) fn observation_terminal_states(
                     chain: observation.chain.clone(),
                     block_number: observation.active_from_block_number,
                     block_hash: observation.active_from_block_hash.clone(),
+                    event_position: evm_event_position(&observation.provenance)?,
                 },
             ))
         })

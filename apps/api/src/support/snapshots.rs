@@ -40,7 +40,7 @@ impl<'a> ExactNameReadRequest<'a> {
         self
     }
 
-    fn with_projection_kind(mut self, projection_kind: &'a str) -> Self {
+    pub(super) fn with_projection_kind(mut self, projection_kind: &'a str) -> Self {
         self.projection_kind = Some(projection_kind);
         self
     }

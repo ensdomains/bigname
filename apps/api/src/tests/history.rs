@@ -1,3 +1,53 @@
+#[test]
+fn wrapper_permission_coverage_is_explicitly_unsupported_without_rows() {
+    let summary = permission_current_resource_summary(Uuid::nil(), Some("wrapper"));
+    let coverage = build_permissions_coverage_from_resource_summary(Some(&summary));
+
+    assert_eq!(coverage.status, "unsupported");
+    assert_eq!(coverage.exhaustiveness, "not_applicable");
+    assert_eq!(
+        coverage.source_classes_considered,
+        vec![
+            "permissions_current".to_owned(),
+            "ens_v1_wrapper_l1".to_owned()
+        ]
+    );
+    assert_eq!(coverage.enumeration_basis, "resource_permissions");
+    assert_eq!(
+        coverage.unsupported_reason.as_deref(),
+        Some("ensv1_wrapper_holder_permissions_not_projected")
+    );
+}
+
+#[test]
+fn supported_non_wrapper_permission_coverage_stays_authoritative_without_rows() {
+    let summary = permission_current_resource_summary(Uuid::nil(), Some("registrar"));
+    let coverage = build_permissions_coverage_from_resource_summary(Some(&summary));
+
+    assert_eq!(coverage.status, "full");
+    assert_eq!(coverage.exhaustiveness, "authoritative");
+    assert_eq!(
+        coverage.source_classes_considered,
+        vec!["permissions_current".to_owned()]
+    );
+    assert_eq!(coverage.enumeration_basis, "resource_permissions");
+    assert_eq!(coverage.unsupported_reason, None);
+}
+
+#[test]
+fn unrecognized_permission_summary_coverage_fails_closed() {
+    let summary = permission_current_resource_summary(Uuid::nil(), None);
+
+    let coverage = build_permissions_coverage_from_resource_summary(Some(&summary));
+
+    assert_eq!(coverage.status, "partial");
+    assert_eq!(coverage.exhaustiveness, "best_effort");
+    assert_eq!(
+        coverage.unsupported_reason.as_deref(),
+        Some("resource_permission_authority_not_projected")
+    );
+}
+
 #[tokio::test]
 async fn get_name_history_returns_canonical_only_rows_with_provenance_and_coverage() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -267,7 +317,7 @@ async fn get_name_history_returns_canonical_only_rows_with_provenance_and_covera
         compact_payload
             .get("meta")
             .and_then(|meta| meta.get("support_status"))
-        .and_then(Value::as_str),
+            .and_then(Value::as_str),
         Some("supported")
     );
     let compact_row = compact_payload
@@ -847,7 +897,9 @@ async fn get_resource_history_returns_chain_position_desc_ordering() -> Result<(
     let first_page_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/history/resources/{resource_id}?page_size=1&view=full"))
+                .uri(format!(
+                    "/v1/history/resources/{resource_id}?page_size=1&view=full"
+                ))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1020,7 +1072,9 @@ async fn get_resource_history_honors_scope_query_parameter() -> Result<()> {
     let surface_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/history/resources/{resource_id}?scope=surface&view=full"))
+                .uri(format!(
+                    "/v1/history/resources/{resource_id}?scope=surface&view=full"
+                ))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1052,7 +1106,9 @@ async fn get_resource_history_honors_scope_query_parameter() -> Result<()> {
     let both_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/history/resources/{resource_id}?scope=both&view=full"))
+                .uri(format!(
+                    "/v1/history/resources/{resource_id}?scope=both&view=full"
+                ))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1174,7 +1230,9 @@ async fn get_resource_history_surface_scope_preserves_multiple_bound_surfaces() 
     let surface_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/history/resources/{resource_id}?scope=surface&view=full"))
+                .uri(format!(
+                    "/v1/history/resources/{resource_id}?scope=surface&view=full"
+                ))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -1189,7 +1247,9 @@ async fn get_resource_history_surface_scope_preserves_multiple_bound_surfaces() 
     let both_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/history/resources/{resource_id}?scope=both&view=full"))
+                .uri(format!(
+                    "/v1/history/resources/{resource_id}?scope=both&view=full"
+                ))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2106,7 +2166,9 @@ async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters()
     let resource_both_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/history/resources/{current_resource_id}?view=full"))
+                .uri(format!(
+                    "/v1/history/resources/{current_resource_id}?view=full"
+                ))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2340,7 +2402,9 @@ async fn get_ensv2_history_routes_read_back_canonical_rows_and_address_filters()
     let missing_resource_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/history/resources/{missing_resource_id}?view=full"))
+                .uri(format!(
+                    "/v1/history/resources/{missing_resource_id}?view=full"
+                ))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2608,7 +2672,9 @@ async fn get_basenames_history_routes_read_back_canonical_rows() -> Result<()> {
     let resource_response = app_router(database.app_state())
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/history/resources/{current_resource_id}?view=full"))
+                .uri(format!(
+                    "/v1/history/resources/{current_resource_id}?view=full"
+                ))
                 .body(Body::empty())
                 .expect("request must build"),
         )
@@ -2974,6 +3040,7 @@ async fn get_resource_permissions_returns_declared_state_collection() -> Result<
         ],
     )
     .await?;
+    seed_permission_current_resource_summary(&database, resource_id, "ens_v2_registry").await?;
 
     let response = app_router(database.app_state())
         .oneshot(
@@ -3094,14 +3161,8 @@ async fn get_resource_permissions_returns_declared_state_collection() -> Result<
             "registry_contract_instance_id": "00000000-0000-0000-0000-00000000c001",
         }))
     );
-    assert_eq!(
-        resolver_row.get("inheritance_path"),
-        Some(&json!([]))
-    );
-    assert_eq!(
-        resolver_row.get("transfer_behavior"),
-        Some(&json!({}))
-    );
+    assert_eq!(resolver_row.get("inheritance_path"), Some(&json!([])));
+    assert_eq!(resolver_row.get("transfer_behavior"), Some(&json!({})));
 
     let first_page_response = app_router(database.app_state())
         .oneshot(
@@ -3236,6 +3297,7 @@ async fn get_resource_permissions_honors_subject_and_scope_filters() -> Result<(
         ],
     )
     .await?;
+    seed_permission_current_resource_summary(&database, resource_id, "ens_v2_registry").await?;
 
     let subject_response = app_router(database.app_state())
         .oneshot(

@@ -8,6 +8,7 @@ pub(super) fn decode_backfill_job(row: PgRow) -> Result<BackfillJob> {
         backfill_job_id: crate::sql_row::get(&row, "backfill_job_id")?,
         deployment_profile: crate::sql_row::get(&row, "deployment_profile")?,
         chain_id: crate::sql_row::get(&row, "chain_id")?,
+        raw_log_retention_generation: crate::sql_row::get(&row, "raw_log_retention_generation")?,
         source_identity: crate::sql_row::get(&row, "source_identity")?,
         scan_mode: crate::sql_row::get(&row, "scan_mode")?,
         range_start_block_number: crate::sql_row::get(&row, "range_start_block_number")?,

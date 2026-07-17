@@ -3,99 +3,115 @@ use std::sync::Mutex;
 
 use anyhow::Result;
 use bigname_manifests::{
-    UncoveredWatchedTuple, find_uncovered_watched_tuples,
-    load_active_manifest_abi_events_by_chain_and_source_families, load_discovery_admission_epoch,
-    load_log_producing_source_families,
+    RequiredWatchedTuple, UncoveredWatchedTuple,
+    find_uncovered_required_watched_tuples_in_transaction,
+    load_active_manifest_abi_events_by_chain_and_source_families,
+    load_earliest_known_watched_block, load_log_producing_source_families,
+    load_stored_lineage_coverage_candidate_delta_page,
+    materialize_stored_lineage_coverage_candidate,
 };
-use bigname_storage::ChainLineageBlock;
-use sqlx::Row;
-
+use bigname_storage::{
+    ChainLineageBlock, StoredLineageCoverageFrontierPublication,
+    StoredLineageCoveragePublicationOutcome, begin_stored_lineage_coverage_frontier_publication,
+    load_stored_lineage_coverage_frontier_header,
+    stored_lineage_coverage_frontier_requirements_are_valid,
+};
 #[path = "coverage/companions.rs"]
 mod companions;
-#[path = "coverage/topic_drift.rs"]
-mod topic_drift;
+#[path = "coverage/frontier.rs"]
+mod frontier;
+#[path = "coverage/lineage_forks.rs"]
+mod lineage_forks;
 
-use companions::ensure_selected_logs_have_raw_companions;
-use topic_drift::ensure_family_topic_sets_undrifted;
+use frontier::Topic0sByFamily;
 
 /// Frontier extensions verify coverage in chunks of this many blocks, so a
-/// deep gap costs a handful of anti-join queries once and every promotion
-/// cycle afterwards is an O(1) in-memory comparison.
+/// deep gap costs a handful of coverage queries once and every promotion
+/// cycle afterwards reuses a durable snapshot.
 pub(crate) const COVERAGE_FRONTIER_VERIFICATION_CHUNK_BLOCKS: i64 = 131_072;
 const MAX_REPORTED_UNCOVERED_TUPLES: i64 = 20;
+const COVERAGE_DELTA_PAGE_SIZE: i64 = 256;
+const MAX_CAS_CONFLICT_RETRIES: usize = 2;
+const MAX_PUBLICATIONS_PER_PROMOTION: usize = 10_000;
 
-/// Process-lifetime, per-chain memo of the block interval whose watched-tuple
-/// coverage has been proven against `backfill_coverage_facts`. Deliberately
-/// not persisted: a restart re-verifies in a handful of chunked queries.
-/// Interior mutability lets verification progress survive refusal and error
-/// paths within a poll cycle.
-#[derive(Debug, Default)]
+/// Process-local bookkeeping around the durable frontier. The revision cache
+/// only avoids rescanning child-row shape on every poll; it is never coverage
+/// authority and a new process validates the saved revision before reuse.
+#[derive(Default)]
 pub(crate) struct ChainCoverageFrontiers {
-    verified: Mutex<BTreeMap<String, VerifiedCoverageInterval>>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct VerifiedCoverageInterval {
-    from_block: i64,
-    through_block: i64,
-    /// Fingerprint of the manifest topic0 sets the interval was verified
-    /// under; an ABI reload mid-process invalidates the memo.
-    topic_set_fingerprint: String,
-    /// Discovery admission epoch the interval was verified under. Every
-    /// discovery_edges mutation and manifest-sync watched-surface change
-    /// bumps the chain's epoch in the same transaction (in this or any other
-    /// process), so watch-set growth always forces re-verification.
-    discovery_admission_epoch: i64,
+    validated_snapshot_revisions: Mutex<BTreeMap<String, i64>>,
+    promotion_epochs: Mutex<BTreeMap<String, i64>>,
+    #[cfg(test)]
+    required_tuple_range_scans: Mutex<BTreeMap<String, Vec<(i64, i64)>>>,
 }
 
 impl ChainCoverageFrontiers {
-    fn verified_interval(&self, chain: &str) -> Option<VerifiedCoverageInterval> {
-        self.verified
+    fn snapshot_revision_is_validated(&self, chain: &str, revision: i64) -> bool {
+        self.validated_snapshot_revisions
             .lock()
-            .expect("coverage frontier lock must not be poisoned")
+            .expect("coverage revision lock must not be poisoned")
             .get(chain)
-            .cloned()
+            .is_some_and(|validated| *validated == revision)
     }
 
-    fn record(&self, chain: &str, interval: VerifiedCoverageInterval) {
-        self.verified
+    fn record_validated_snapshot_revision(&self, chain: &str, revision: i64) {
+        self.validated_snapshot_revisions
             .lock()
-            .expect("coverage frontier lock must not be poisoned")
-            .insert(chain.to_owned(), interval);
+            .expect("coverage revision lock must not be poisoned")
+            .insert(chain.to_owned(), revision);
     }
 
-    fn reset(&self, chain: &str) {
-        self.verified
+    pub(super) fn record_promotion_epoch(&self, chain: &str, epoch: i64) {
+        self.promotion_epochs
             .lock()
-            .expect("coverage frontier lock must not be poisoned")
+            .expect("promotion epoch lock must not be poisoned")
+            .insert(chain.to_owned(), epoch);
+    }
+
+    pub(crate) fn take_promotion_epoch(&self, chain: &str, required: bool) -> Result<Option<i64>> {
+        let epoch = self
+            .promotion_epochs
+            .lock()
+            .expect("promotion epoch lock must not be poisoned")
             .remove(chain);
+        if required && epoch.is_none() {
+            anyhow::bail!(
+                "stored-lineage promotion for chain {chain} is missing its verified discovery admission epoch"
+            );
+        }
+        Ok(epoch)
+    }
+
+    fn record_required_tuple_range_scan(&self, chain: &str, from_block: i64, through_block: i64) {
+        #[cfg(test)]
+        self.required_tuple_range_scans
+            .lock()
+            .expect("required tuple range scan lock must not be poisoned")
+            .entry(chain.to_owned())
+            .or_default()
+            .push((from_block, through_block));
+
+        #[cfg(not(test))]
+        let _ = (chain, from_block, through_block);
     }
 }
 
 #[cfg(test)]
 impl ChainCoverageFrontiers {
-    pub(crate) fn record_verified_for_tests(
-        &self,
+    pub(crate) async fn install_admission_epoch_verification_test_hook(
+        pool: &sqlx::PgPool,
         chain: &str,
-        from_block: i64,
-        through_block: i64,
-        topic_set_fingerprint: &str,
-        discovery_admission_epoch: i64,
-    ) {
-        self.record(
-            chain,
-            VerifiedCoverageInterval {
-                from_block,
-                through_block,
-                topic_set_fingerprint: topic_set_fingerprint.to_owned(),
-                discovery_admission_epoch,
-            },
-        );
+    ) -> super::admission_epoch_fence::AdmissionEpochFenceTestHook {
+        super::admission_epoch_fence::install_admission_epoch_verification_test_hook(pool, chain)
+            .await
     }
 
-    pub(crate) fn verified_through_for_tests(&self, chain: &str) -> Option<i64> {
-        self.verified_interval(chain)
-            .map(|interval| interval.through_block)
+    pub(crate) fn take_required_tuple_range_scans_for_tests(&self, chain: &str) -> Vec<(i64, i64)> {
+        self.required_tuple_range_scans
+            .lock()
+            .expect("required tuple range scan lock must not be poisoned")
+            .remove(chain)
+            .unwrap_or_default()
     }
 }
 
@@ -111,6 +127,7 @@ pub(super) async fn stored_path_has_required_raw_fact_coverage(
     path: &[ChainLineageBlock],
     coverage_frontiers: &ChainCoverageFrontiers,
     verify_ahead_through_block: i64,
+    discovery_admission_epoch: i64,
 ) -> std::result::Result<(), String> {
     if path.is_empty() {
         return Ok(());
@@ -118,9 +135,10 @@ pub(super) async fn stored_path_has_required_raw_fact_coverage(
     let path_from = path_start_number(path);
     let path_through = path_end_number(path);
 
-    let same_height_fork_numbers = same_height_fork_lineage_numbers(pool, chain, path)
-        .await
-        .map_err(|error| error.to_string())?;
+    let same_height_fork_numbers =
+        lineage_forks::same_height_fork_lineage_numbers(pool, chain, path)
+            .await
+            .map_err(|error| error.to_string())?;
     if let Some(fork_block) = path
         .iter()
         .find(|block| same_height_fork_numbers.contains(&block.block_number))
@@ -146,10 +164,17 @@ pub(super) async fn stored_path_has_required_raw_fact_coverage(
         path_from,
         path_through,
         verify_ahead_through_block,
+        discovery_admission_epoch,
     )
     .await?;
 
-    ensure_selected_logs_have_raw_companions(pool, chain, path, &current_topic0s_by_family).await
+    companions::ensure_selected_logs_have_raw_companions(
+        pool,
+        chain,
+        path,
+        &current_topic0s_by_family,
+    )
+    .await
 }
 
 /// Extend the chain's verified coverage frontier until it contains
@@ -159,142 +184,247 @@ pub(super) async fn stored_path_has_required_raw_fact_coverage(
 /// anchor) so subsequent cycles are O(1). A violation in the look-ahead beyond
 /// the required target falls back to verifying exactly up to the target, so an
 /// uncovered stretch above the target never blocks promoting a covered prefix.
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the coverage proof boundary keeps manifest, range, and admission inputs explicit"
+)]
 async fn ensure_verified_coverage_frontier(
     pool: &sqlx::PgPool,
     chain: &str,
     coverage_frontiers: &ChainCoverageFrontiers,
     log_producing_source_families: &[String],
-    current_topic0s_by_family: &BTreeMap<String, BTreeSet<String>>,
+    current_topic0s_by_family: &Topic0sByFamily,
     required_from: i64,
     required_through: i64,
     verify_ahead_through_block: i64,
+    discovery_admission_epoch: i64,
 ) -> std::result::Result<(), String> {
-    let topic_set_fingerprint = topic_set_fingerprint(current_topic0s_by_family);
-    let discovery_admission_epoch = load_discovery_admission_epoch(pool, chain)
-        .await
-        .map_err(|error| error.to_string())?;
-
-    let mut interval = coverage_frontiers.verified_interval(chain);
-    if let Some(existing) = &interval
-        && (required_from < existing.from_block
-            || existing.topic_set_fingerprint != topic_set_fingerprint
-            || existing.discovery_admission_epoch != discovery_admission_epoch)
-    {
-        // The checkpoint regressed below the verified interval (deep reorg),
-        // the manifest ABI event sets changed, or the discovery graph mutated
-        // since verification (any process); start over rather than trusting a
-        // stale memo.
-        coverage_frontiers.reset(chain);
-        interval = None;
-    }
-    if let Some(existing) = &interval
-        && required_through <= existing.through_block
-    {
-        return Ok(());
-    }
-
-    let mut verify_ahead_through_block = verify_ahead_through_block.max(required_through);
-    let extension_from = interval
-        .as_ref()
-        .map_or(required_from, |existing| existing.through_block + 1);
-    if let Err(_look_ahead_drift) = ensure_family_topic_sets_undrifted(
+    let verify_ahead_through_block = verify_ahead_through_block.max(required_through);
+    let optimistic = ensure_verified_coverage_frontier_through(
         pool,
         chain,
+        coverage_frontiers,
+        log_producing_source_families,
         current_topic0s_by_family,
-        extension_from,
+        required_from,
+        required_through,
         verify_ahead_through_block,
+        discovery_admission_epoch,
     )
-    .await
-    {
-        // A drifted job intersecting only blocks above the promotion target
-        // must not block promoting the covered prefix: recheck scoped to the
-        // target, and if that passes, cap the look-ahead so the memo never
-        // covers a span the drift guard did not clear.
-        ensure_family_topic_sets_undrifted(
-            pool,
-            chain,
-            current_topic0s_by_family,
-            extension_from,
-            required_through,
-        )
-        .await?;
-        verify_ahead_through_block = required_through;
+    .await;
+    match optimistic {
+        Ok(()) => Ok(()),
+        Err(_look_ahead_error) if verify_ahead_through_block > required_through => {
+            ensure_verified_coverage_frontier_through(
+                pool,
+                chain,
+                coverage_frontiers,
+                log_producing_source_families,
+                current_topic0s_by_family,
+                required_from,
+                required_through,
+                required_through,
+                discovery_admission_epoch,
+            )
+            .await
+        }
+        Err(error) => Err(error),
     }
+}
 
-    let from_block = interval
-        .as_ref()
-        .map_or(required_from, |existing| existing.from_block);
-    let mut through_block = interval
-        .as_ref()
-        .map_or(required_from - 1, |existing| existing.through_block);
-    while through_block < required_through {
-        let chunk_from = through_block + 1;
-        let chunk_through = chunk_from
-            .saturating_add(COVERAGE_FRONTIER_VERIFICATION_CHUNK_BLOCKS - 1)
-            .min(verify_ahead_through_block);
-        let violations = find_uncovered_watched_tuples(
+#[expect(clippy::too_many_arguments, reason = "proof inputs stay explicit")]
+async fn ensure_verified_coverage_frontier_through(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    coverage_frontiers: &ChainCoverageFrontiers,
+    log_producing_source_families: &[String],
+    current_topic0s_by_family: &Topic0sByFamily,
+    required_from: i64,
+    required_through: i64,
+    verify_ahead_through_block: i64,
+    discovery_admission_epoch: i64,
+) -> std::result::Result<(), String> {
+    let current_topics = frontier::canonical_topic_sets(current_topic0s_by_family);
+    let mut cas_conflicts = 0;
+
+    for _ in 0..MAX_PUBLICATIONS_PER_PROMOTION {
+        let header = load_stored_lineage_coverage_frontier_header(pool, chain)
+            .await
+            .map_err(|error| error.to_string())?;
+        let persisted_requirements_valid = match &header {
+            Some(header)
+                if header.is_well_formed
+                    && coverage_frontiers
+                        .snapshot_revision_is_validated(chain, header.snapshot_revision) =>
+            {
+                true
+            }
+            Some(header) => stored_lineage_coverage_frontier_requirements_are_valid(pool, header)
+                .await
+                .map_err(|error| error.to_string())?,
+            None => true,
+        };
+        let earliest_known_watched_block = load_earliest_known_watched_block(
             pool,
             chain,
-            chunk_from,
-            chunk_through,
+            verify_ahead_through_block,
             log_producing_source_families,
-            MAX_REPORTED_UNCOVERED_TUPLES,
         )
         .await
         .map_err(|error| error.to_string())?;
-        if violations.is_empty() {
-            through_block = chunk_through;
-            coverage_frontiers.record(
+        let Some(plan) = frontier::plan_publication(
+            header.as_ref(),
+            persisted_requirements_valid,
+            &current_topics,
+            discovery_admission_epoch,
+            earliest_known_watched_block,
+            required_from,
+            required_through,
+            verify_ahead_through_block,
+            COVERAGE_FRONTIER_VERIFICATION_CHUNK_BLOCKS,
+        )?
+        else {
+            if let Some(header) = header {
+                coverage_frontiers
+                    .record_validated_snapshot_revision(chain, header.snapshot_revision);
+            }
+            return Ok(());
+        };
+
+        if let Some(header) = &header
+            && plan.verified_through_block > header.verified_through_block
+        {
+            coverage_frontiers.record_required_tuple_range_scan(
                 chain,
-                VerifiedCoverageInterval {
-                    from_block,
-                    through_block,
-                    topic_set_fingerprint: topic_set_fingerprint.clone(),
-                    discovery_admission_epoch,
-                },
+                header.verified_through_block.saturating_add(1),
+                plan.verified_through_block,
             );
-            continue;
+        } else if header.is_none() {
+            coverage_frontiers.record_required_tuple_range_scan(
+                chain,
+                plan.verified_from_block,
+                plan.verified_through_block,
+            );
         }
 
-        if chunk_through > required_through {
-            let exact_violations = find_uncovered_watched_tuples(
-                pool,
+        let mut guard = begin_stored_lineage_coverage_frontier_publication(
+            pool,
+            chain,
+            plan.expected_snapshot_revision,
+            discovery_admission_epoch,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        materialize_stored_lineage_coverage_candidate(
+            guard.connection_mut(),
+            chain,
+            plan.verified_from_block,
+            plan.verified_through_block,
+            log_producing_source_families,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        super::topic_drift::materialize_topic_evidence_in_transaction(
+            guard.connection_mut(),
+            chain,
+            current_topic0s_by_family,
+            plan.verified_from_block,
+            plan.verified_through_block,
+            None,
+        )
+        .await?;
+
+        let mut cursor = None;
+        loop {
+            let page = load_stored_lineage_coverage_candidate_delta_page(
+                guard.connection_mut(),
                 chain,
-                chunk_from,
-                required_through,
-                log_producing_source_families,
-                MAX_REPORTED_UNCOVERED_TUPLES,
+                &plan.topic_changed_source_families,
+                plan.reverify_all,
+                cursor.as_ref(),
+                COVERAGE_DELTA_PAGE_SIZE,
             )
             .await
             .map_err(|error| error.to_string())?;
-            if exact_violations.is_empty() {
-                through_block = required_through;
-                coverage_frontiers.record(
-                    chain,
-                    VerifiedCoverageInterval {
-                        from_block,
-                        through_block,
-                        topic_set_fingerprint: topic_set_fingerprint.clone(),
-                        discovery_admission_epoch,
-                    },
-                );
-                continue;
+            verify_requirements(guard.connection_mut(), chain, &page.requirements).await?;
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
             }
-            return Err(uncovered_tuples_refusal(
-                chunk_from,
-                required_through,
-                &exact_violations,
-            ));
         }
-        return Err(uncovered_tuples_refusal(
-            chunk_from,
-            chunk_through,
-            &violations,
-        ));
+
+        let publication = StoredLineageCoverageFrontierPublication {
+            discovery_admission_epoch,
+            verified_from_block: plan.verified_from_block,
+            verified_through_block: plan.verified_through_block,
+            topic0s_by_family: current_topics.clone(),
+        };
+        match guard
+            .publish(&publication)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            StoredLineageCoveragePublicationOutcome::Published { snapshot_revision } => {
+                cas_conflicts = 0;
+                coverage_frontiers.record_validated_snapshot_revision(chain, snapshot_revision);
+            }
+            StoredLineageCoveragePublicationOutcome::Conflict => {
+                cas_conflicts += 1;
+                if cas_conflicts > MAX_CAS_CONFLICT_RETRIES {
+                    return Err(format!(
+                        "stored-lineage coverage frontier for chain {chain} changed during {} consecutive compare-and-set publication attempts; refusing this promotion until a fresh candidate is reverified",
+                        cas_conflicts
+                    ));
+                }
+            }
+        }
     }
 
-    Ok(())
+    Err(format!(
+        "stored-lineage coverage frontier for chain {chain} could not reach required block {required_through} within {MAX_PUBLICATIONS_PER_PROMOTION} bounded publications"
+    ))
+}
+
+async fn verify_requirements(
+    connection: &mut sqlx::PgConnection,
+    chain: &str,
+    requirements: &[RequiredWatchedTuple],
+) -> std::result::Result<(), String> {
+    if requirements.is_empty() {
+        return Ok(());
+    }
+    super::topic_drift::ensure_required_topic_sets_undrifted_in_transaction(
+        connection,
+        chain,
+        requirements,
+    )
+    .await?;
+    let violations = find_uncovered_required_watched_tuples_in_transaction(
+        connection,
+        chain,
+        requirements,
+        MAX_REPORTED_UNCOVERED_TUPLES,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    if violations.is_empty() {
+        return Ok(());
+    }
+    let from_block = requirements
+        .iter()
+        .map(|requirement| requirement.required_from_block)
+        .min()
+        .expect("non-empty requirements must have a lower bound");
+    let through_block = requirements
+        .iter()
+        .map(|requirement| requirement.required_to_block)
+        .max()
+        .expect("non-empty requirements must have an upper bound");
+    Err(uncovered_tuples_refusal(
+        from_block,
+        through_block,
+        &violations,
+    ))
 }
 
 fn uncovered_tuples_refusal(
@@ -321,12 +451,13 @@ fn uncovered_tuples_refusal(
         ""
     };
     format!(
-        "watched tuples over blocks {from_block}..={through_block} have no single backfill_coverage_facts row containing their required interval: {listed}{suffix}; run hash-pinned or Coinbase SQL backfill for those tuples (or repair derive-backfill-coverage-facts for legacy full-payload jobs) and retry"
+        "watched tuples over blocks {from_block}..={through_block} do not form gap-free coverage from exact address- or family-scoped backfill_coverage_facts: {listed}{suffix}; run hash-pinned or Coinbase SQL backfill for the missing tuple intervals (or repair derive-backfill-coverage-facts for legacy full-payload jobs) and retry"
     )
 }
 
-/// Current manifest topic0 sets per log-producing family; also the input to
-/// the frontier memo's ABI fingerprint.
+/// Current manifest topic selectors per log-producing family. The frontier
+/// stores them per family so a semantic change invalidates only that family's
+/// tuple proofs.
 async fn load_current_topic0s_by_family(
     pool: &sqlx::PgPool,
     chain: &str,
@@ -353,60 +484,6 @@ async fn load_current_topic0s_by_family(
             .insert(topic0.to_ascii_lowercase());
     }
     Ok(current_topic0s_by_family)
-}
-
-fn topic_set_fingerprint(current_topic0s_by_family: &BTreeMap<String, BTreeSet<String>>) -> String {
-    let mut fingerprint = String::new();
-    for (source_family, topic0s) in current_topic0s_by_family {
-        fingerprint.push_str(source_family);
-        fingerprint.push('=');
-        for topic0 in topic0s {
-            fingerprint.push_str(topic0);
-            fingerprint.push(',');
-        }
-        fingerprint.push(';');
-    }
-    fingerprint
-}
-
-async fn same_height_fork_lineage_numbers(
-    pool: &sqlx::PgPool,
-    chain: &str,
-    path: &[ChainLineageBlock],
-) -> Result<BTreeSet<i64>> {
-    if path.is_empty() {
-        return Ok(BTreeSet::new());
-    }
-
-    let block_numbers = path
-        .iter()
-        .map(|block| block.block_number)
-        .collect::<Vec<_>>();
-    let block_hashes = path
-        .iter()
-        .map(|block| block.block_hash.clone())
-        .collect::<Vec<_>>();
-    let rows = sqlx::query(
-        r#"
-        SELECT DISTINCT block_number
-        FROM chain_lineage
-        WHERE chain_id = $1
-          AND block_number = ANY($2::BIGINT[])
-          AND NOT (block_hash = ANY($3::TEXT[]))
-          AND canonicality_state <> 'orphaned'::canonicality_state
-        "#,
-    )
-    .bind(chain)
-    .bind(&block_numbers)
-    .bind(&block_hashes)
-    .fetch_all(pool)
-    .await?;
-
-    let mut numbers = BTreeSet::new();
-    for row in rows {
-        numbers.insert(row.try_get("block_number")?);
-    }
-    Ok(numbers)
 }
 
 fn path_start_number(path: &[ChainLineageBlock]) -> i64 {

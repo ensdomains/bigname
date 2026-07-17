@@ -1,17 +1,18 @@
 use anyhow::{Result, bail};
 use bigname_storage::{
-    CanonicalityState, ChainCheckpoint, ChainCheckpointUpdate, advance_chain_checkpoints,
-    chain_lineage_contains_ancestor, load_chain_lineage_block, mark_chain_lineage_range_orphaned,
+    CanonicalityState, ChainCheckpoint, chain_lineage_contains_ancestor, load_chain_lineage_block,
+    mark_chain_lineage_range_orphaned,
     upsert_chain_lineage_blocks_recanonicalizing_orphaned as upsert_recanonicalized_lineage_blocks,
     upsert_chain_lineage_blocks_without_snapshots,
     upsert_chain_lineage_blocks_without_snapshots_recanonicalizing_orphaned as upsert_recanonicalized_lineage_blocks_without_snapshots,
 };
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::{
     backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
-    provider::{ChainProviderOps, ProviderBlock, ProviderHeadSnapshot, ProviderRegistry},
-    runtime::{IntakeChainTask, checkpoint_mode},
+    provider::{ChainProviderOps, ProviderBlock, ProviderHeadSnapshot},
+    resolver_profile_convergence::drain_resolver_profile_input_changes,
+    runtime::IntakeChainTask,
 };
 
 use super::{
@@ -19,7 +20,6 @@ use super::{
         head_change_set, lineage_block_to_provider, provider_block_to_checkpoint_ref,
         provider_block_to_lineage_with_header_audit_mode,
     },
-    logging::log_chain_reconciliation_outcome,
     persistence::persist_reconciled_raw_state,
     types::{
         CanonicalReconciliation, CanonicalReconciliationStatus, ChainReconciliationOutcome,
@@ -29,16 +29,27 @@ use super::{
 
 #[path = "canonical/checkpoints.rs"]
 mod checkpoints;
+#[path = "canonical/cold_start.rs"]
+mod cold_start;
 #[path = "canonical/contiguous_gap.rs"]
 mod contiguous_gap;
+#[path = "canonical/ens_v2_coverage_recovery.rs"]
+mod ens_v2_coverage_recovery;
 #[path = "canonical/orphaning.rs"]
 mod orphaning;
+#[path = "canonical/poll.rs"]
+mod poll;
 #[path = "canonical/stored_lineage.rs"]
-mod stored_lineage;
+pub(crate) mod stored_lineage;
 
 use checkpoints::{checkpoint_update_for_head, fill_checkpoint_ancestor_path};
+use cold_start::ColdStartCheckpoint;
 use contiguous_gap::reconcile_contiguous_checkpoint_gap;
+pub(crate) use ens_v2_coverage_recovery::{
+    EnsV2LiveCoverageRecoveryStatus, recover_ens_v2_live_coverage_requirement,
+};
 use orphaning::orphan_reorg_losing_branch_payloads;
+pub(crate) use poll::{poll_provider_heads, poll_provider_heads_with_adapter_sync};
 pub(crate) use stored_lineage::ChainCoverageFrontiers;
 use stored_lineage::{
     StoredLineagePromotion, reconcile_large_checkpoint_gap_from_stored_lineage,
@@ -46,82 +57,8 @@ use stored_lineage::{
 };
 
 const MAX_PARENT_FETCH_DEPTH: usize = 131_072;
-// Live polling fails closed before it tries to ingest a large catch-up range.
-// Hash-pinned backfill owns larger bounded gaps.
+// Live polling fails closed before a large catch-up; hash-pinned backfill owns larger gaps.
 const MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS: i64 = DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS;
-
-#[allow(dead_code)]
-pub(crate) async fn poll_provider_heads(
-    pool: &sqlx::PgPool,
-    tasks: &mut Vec<IntakeChainTask>,
-    provider_registry: &ProviderRegistry,
-) -> Result<()> {
-    poll_provider_heads_with_adapter_sync(
-        pool,
-        tasks,
-        provider_registry,
-        true,
-        HeaderAuditMode::Minimal,
-        &[],
-        &ChainCoverageFrontiers::default(),
-    )
-    .await
-}
-
-#[expect(clippy::too_many_arguments)]
-pub(crate) async fn poll_provider_heads_with_adapter_sync(
-    pool: &sqlx::PgPool,
-    tasks: &mut Vec<IntakeChainTask>,
-    provider_registry: &ProviderRegistry,
-    adapter_sync_enabled: bool,
-    header_audit_mode: HeaderAuditMode,
-    event_silent_reverse_resolver_addresses: &[String],
-    coverage_frontiers: &ChainCoverageFrontiers,
-) -> Result<()> {
-    let mut next_tasks = tasks.clone();
-    let mut any_change = false;
-
-    for (index, task) in tasks.iter().enumerate() {
-        let Some(provider) = provider_registry.provider_for(&task.chain) else {
-            continue;
-        };
-
-        match reconcile_intake_chain_task_with_adapter_sync(
-            pool,
-            task,
-            provider,
-            adapter_sync_enabled,
-            header_audit_mode,
-            event_silent_reverse_resolver_addresses,
-            coverage_frontiers,
-        )
-        .await
-        {
-            Ok(Some((next_task, outcome))) => {
-                log_chain_reconciliation_outcome(&outcome);
-                next_tasks[index] = next_task;
-                any_change = true;
-            }
-            Ok(None) => {}
-            Err(error) => {
-                warn!(
-                    service = "indexer",
-                    chain = %task.chain,
-                    error = ?error,
-                    intake_checkpoint_mode = checkpoint_mode(&task.checkpoint),
-                    "failed to fetch and reconcile provider heads for intake chain"
-                );
-            }
-        }
-    }
-
-    if any_change {
-        *tasks = next_tasks;
-    }
-
-    Ok(())
-}
-
 #[allow(dead_code)]
 pub(crate) async fn reconcile_intake_chain_task(
     pool: &sqlx::PgPool,
@@ -130,12 +67,14 @@ pub(crate) async fn reconcile_intake_chain_task(
 ) -> Result<Option<(IntakeChainTask, ChainReconciliationOutcome)>> {
     reconcile_intake_chain_task_with_adapter_sync(
         pool,
+        "test",
         task,
         provider,
         true,
         HeaderAuditMode::Minimal,
         &[],
         &ChainCoverageFrontiers::default(),
+        None,
     )
     .await
 }
@@ -143,16 +82,19 @@ pub(crate) async fn reconcile_intake_chain_task(
 #[expect(clippy::too_many_arguments)]
 pub(crate) async fn reconcile_intake_chain_task_with_adapter_sync(
     pool: &sqlx::PgPool,
+    deployment_profile: &str,
     task: &IntakeChainTask,
     provider: &(impl ChainProviderOps + ?Sized),
     adapter_sync_enabled: bool,
     header_audit_mode: HeaderAuditMode,
     event_silent_reverse_resolver_addresses: &[String],
     coverage_frontiers: &ChainCoverageFrontiers,
+    latched_bootstrap_finalized_head: Option<&ProviderBlock>,
 ) -> Result<Option<(IntakeChainTask, ChainReconciliationOutcome)>> {
     let heads = provider.fetch_chain_heads().await?;
     reconcile_fetched_heads_with_gap_policy(
         pool,
+        deployment_profile,
         task,
         provider,
         &heads,
@@ -160,6 +102,7 @@ pub(crate) async fn reconcile_intake_chain_task_with_adapter_sync(
         header_audit_mode,
         event_silent_reverse_resolver_addresses,
         coverage_frontiers,
+        latched_bootstrap_finalized_head,
     )
     .await
 }
@@ -173,6 +116,7 @@ pub(crate) async fn reconcile_fetched_heads(
 ) -> Result<Option<(IntakeChainTask, ChainReconciliationOutcome)>> {
     reconcile_fetched_heads_with_gap_policy(
         pool,
+        "test",
         task,
         provider,
         heads,
@@ -180,11 +124,13 @@ pub(crate) async fn reconcile_fetched_heads(
         HeaderAuditMode::Minimal,
         &[],
         &ChainCoverageFrontiers::default(),
+        None,
     )
     .await
 }
 
 #[expect(clippy::too_many_arguments)]
+#[allow(dead_code)]
 pub(crate) async fn reconcile_fetched_heads_with_adapter_sync(
     pool: &sqlx::PgPool,
     task: &IntakeChainTask,
@@ -197,6 +143,7 @@ pub(crate) async fn reconcile_fetched_heads_with_adapter_sync(
 ) -> Result<Option<(IntakeChainTask, ChainReconciliationOutcome)>> {
     reconcile_fetched_heads_with_gap_policy(
         pool,
+        "test",
         task,
         provider,
         heads,
@@ -204,6 +151,7 @@ pub(crate) async fn reconcile_fetched_heads_with_adapter_sync(
         header_audit_mode,
         event_silent_reverse_resolver_addresses,
         coverage_frontiers,
+        None,
     )
     .await
 }
@@ -211,6 +159,7 @@ pub(crate) async fn reconcile_fetched_heads_with_adapter_sync(
 #[expect(clippy::too_many_arguments)]
 async fn reconcile_fetched_heads_with_gap_policy(
     pool: &sqlx::PgPool,
+    deployment_profile: &str,
     task: &IntakeChainTask,
     provider: &(impl ChainProviderOps + ?Sized),
     heads: &ProviderHeadSnapshot,
@@ -218,8 +167,16 @@ async fn reconcile_fetched_heads_with_gap_policy(
     header_audit_mode: HeaderAuditMode,
     event_silent_reverse_resolver_addresses: &[String],
     coverage_frontiers: &ChainCoverageFrontiers,
+    latched_bootstrap_finalized_head: Option<&ProviderBlock>,
 ) -> Result<Option<(IntakeChainTask, ChainReconciliationOutcome)>> {
-    let stored_promotion_anchors = stored_lineage_promotion_anchors(heads);
+    let mut stored_promotion_anchors = stored_lineage_promotion_anchors(heads);
+    if let Some(latched_head) = latched_bootstrap_finalized_head
+        && !stored_promotion_anchors
+            .iter()
+            .any(|anchor| anchor.block_hash == latched_head.block_hash)
+    {
+        stored_promotion_anchors.push(latched_head.clone());
+    }
     let canonical = reconcile_canonical_head(
         pool,
         provider,
@@ -231,8 +188,11 @@ async fn reconcile_fetched_heads_with_gap_policy(
         coverage_frontiers,
     )
     .await?;
+    let promotion_epoch = coverage_frontiers.take_promotion_epoch(
+        &task.chain,
+        canonical.status == CanonicalReconciliationStatus::StoredLineagePromoted,
+    )?;
     let provider_head_change_set = head_change_set(task, heads, &canonical);
-
     if canonical.status == CanonicalReconciliationStatus::ReorgReconciled {
         orphan_reorg_losing_branch_payloads(
             pool,
@@ -301,6 +261,7 @@ async fn reconcile_fetched_heads_with_gap_policy(
 
     persist_reconciled_raw_state(
         pool,
+        deployment_profile,
         task,
         provider,
         &accepted_heads,
@@ -311,18 +272,20 @@ async fn reconcile_fetched_heads_with_gap_policy(
         event_silent_reverse_resolver_addresses,
     )
     .await?;
-
-    let next_checkpoint = advance_chain_checkpoints(
+    if adapter_sync_enabled {
+        let profile_convergence = drain_resolver_profile_input_changes(pool).await?;
+        profile_convergence
+            .ensure_chain_completion_allowed(&task.chain, "chain checkpoint advancement")?;
+    }
+    let next_checkpoint = ChainCoverageFrontiers::advance_checkpoint_with_promotion_epoch(
         pool,
-        &ChainCheckpointUpdate {
-            chain_id: task.chain.clone(),
-            canonical: canonical_update,
-            safe: safe_update,
-            finalized: finalized_update,
-        },
+        &task.chain,
+        promotion_epoch,
+        canonical_update,
+        safe_update,
+        finalized_update,
     )
     .await?;
-
     if !head_change_set.canonical_head_changed
         && !head_change_set.safe_head_changed
         && !head_change_set.finalized_head_changed
@@ -363,28 +326,24 @@ pub(crate) async fn reconcile_canonical_head(
     coverage_frontiers: &ChainCoverageFrontiers,
 ) -> Result<CanonicalReconciliation> {
     let latest_hash = latest_head.block_hash.as_str();
-    let current_canonical_hash = checkpoint.canonical_block_hash.as_deref();
-    let current_canonical_number = checkpoint.canonical_block_number;
-
-    if current_canonical_hash.is_none() {
-        upsert_recanonicalized_lineage_blocks(
-            pool,
-            &[provider_block_to_lineage_with_header_audit_mode(
-                chain,
-                latest_head,
-                CanonicalityState::Canonical,
-                header_audit_mode,
-            )],
-        )
-        .await?;
-        return Ok(CanonicalReconciliation {
-            status: CanonicalReconciliationStatus::Initialized,
-            canonical: Some(provider_block_to_checkpoint_ref(latest_head)),
-            fetched_parent_count: 0,
-            orphaned_block_count: 0,
-            reconciled_blocks: vec![latest_head.clone()],
-            raw_orphan_stop_before_hash: None,
-        });
+    let cold_start =
+        ColdStartCheckpoint::resolve(checkpoint, latest_head, stored_lineage_promotion_anchors);
+    let current_canonical_hash = cold_start.canonical_hash;
+    let current_canonical_number = cold_start.canonical_number;
+    if cold_start.is_cold_start() {
+        info!(
+            service = "indexer",
+            chain,
+            cold_start_anchor_block_number = current_canonical_number,
+            latest_block_number = latest_head.block_number,
+            "reconciling live canonical tail above the latched bootstrap boundary"
+        );
+    }
+    if let Some(initialized) = cold_start
+        .initialize_unanchored_latest(pool, chain, latest_head, header_audit_mode)
+        .await?
+    {
+        return Ok(initialized);
     }
 
     if current_canonical_hash == Some(latest_hash) {
@@ -411,7 +370,7 @@ pub(crate) async fn reconcile_canonical_head(
     if let (Some(current_canonical_hash), Some(current_canonical_number)) =
         (current_canonical_hash, current_canonical_number)
     {
-        if let Some(reconciliation) = reconcile_contiguous_checkpoint_gap(
+        if let Some(mut reconciliation) = reconcile_contiguous_checkpoint_gap(
             pool,
             provider,
             chain,
@@ -422,6 +381,7 @@ pub(crate) async fn reconcile_canonical_head(
         )
         .await?
         {
+            reconciliation.status = cold_start.reconciliation_status(reconciliation.status);
             return Ok(reconciliation);
         }
         match reconcile_large_checkpoint_gap_from_stored_lineage(
@@ -547,7 +507,9 @@ pub(crate) async fn reconcile_canonical_head(
 
     let common_ancestor_hash = common_ancestor_hash.expect("checked above");
     let mut orphaned_block_count = 0usize;
-    let status = if Some(common_ancestor_hash.as_str()) == current_canonical_hash {
+    let status = if cold_start.is_cold_start() {
+        CanonicalReconciliationStatus::Initialized
+    } else if Some(common_ancestor_hash.as_str()) == current_canonical_hash {
         if path.len() == 1 {
             CanonicalReconciliationStatus::Appended
         } else {

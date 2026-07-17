@@ -3,6 +3,7 @@ use std::{
     io::Write,
     path::Path,
     process::Command,
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -14,6 +15,8 @@ use crate::backfill::{BackfillBlockRange, BackfillJobRunConfig};
 use super::config::CapacityGuardConfig;
 
 pub(super) const CAPACITY_FAILURE_REASON: &str = "ops catch-up capacity guard breached";
+
+static NEXT_CAPACITY_PROBE_ID: AtomicU64 = AtomicU64::new(0);
 
 #[rustfmt::skip]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -74,8 +77,9 @@ fn ensure_path_is_writable(path: &Path) -> Result<()> {
         .duration_since(UNIX_EPOCH)
         .context("system clock is before unix epoch")?
         .as_nanos();
+    let sequence = NEXT_CAPACITY_PROBE_ID.fetch_add(1, Ordering::Relaxed);
     let probe = directory.join(format!(
-        ".bigname-catchup-capacity-probe-{}-{unique}",
+        ".bigname-catchup-capacity-probe-{}-{unique}-{sequence}",
         std::process::id()
     ));
     OpenOptions::new()
@@ -113,8 +117,7 @@ fn writable_free_disk_bytes(path: &Path) -> Result<u64> {
     let stdout = String::from_utf8(output.stdout).context("df output was not UTF-8")?;
     let line = stdout
         .lines()
-        .filter(|line| !line.trim().is_empty())
-        .last()
+        .rfind(|line| !line.trim().is_empty())
         .context("df output did not include a data row")?;
     let available_kib = line
         .split_whitespace()
@@ -127,6 +130,8 @@ fn writable_free_disk_bytes(path: &Path) -> Result<u64> {
         .context("df available bytes overflowed u64")
 }
 
+// Capacity metadata keeps each range, finalized head, limit, snapshot, and error explicit.
+#[expect(clippy::too_many_arguments)]
 pub(super) fn capacity_metadata(
     status: &str,
     config: &BackfillJobRunConfig,
@@ -156,4 +161,77 @@ pub(super) fn capacity_metadata(
         "object_cache_budget_checked": false,
         "error": error.map(|error| format!("{error:#}")),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{Arc, Barrier},
+        thread,
+    };
+
+    use super::*;
+
+    #[test]
+    fn concurrent_writable_capacity_probes_use_distinct_files() -> Result<()> {
+        const WORKER_COUNT: usize = 32;
+        const PROBES_PER_WORKER: usize = 8;
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("system clock is before unix epoch")?
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "bigname-capacity-probe-test-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).with_context(|| {
+            format!(
+                "failed to create capacity probe test directory {}",
+                directory.display()
+            )
+        })?;
+
+        let barrier = Arc::new(Barrier::new(WORKER_COUNT));
+        let results = thread::scope(|scope| {
+            let handles = (0..WORKER_COUNT)
+                .map(|_| {
+                    let barrier = Arc::clone(&barrier);
+                    let directory = &directory;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        for _ in 0..PROBES_PER_WORKER {
+                            ensure_path_is_writable(directory)?;
+                        }
+                        Result::<()>::Ok(())
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| handle.join())
+                .collect::<Vec<_>>()
+        });
+
+        let residual_files = fs::read_dir(&directory)
+            .with_context(|| {
+                format!(
+                    "failed to inspect capacity probe test directory {}",
+                    directory.display()
+                )
+            })?
+            .count();
+        fs::remove_dir(&directory).with_context(|| {
+            format!(
+                "failed to remove capacity probe test directory {}",
+                directory.display()
+            )
+        })?;
+
+        for result in results {
+            result.expect("capacity probe worker panicked")?;
+        }
+        assert_eq!(residual_files, 0, "capacity probes must remove their files");
+        Ok(())
+    }
 }

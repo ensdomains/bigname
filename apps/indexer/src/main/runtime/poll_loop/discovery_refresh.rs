@@ -2,6 +2,9 @@ use anyhow::{Context, Result};
 use tracing::{info, warn};
 
 use crate::provider::ProviderRegistry;
+use crate::resolver_profile_convergence::{
+    ResolverProfileConvergenceSummary, drain_resolver_profile_input_changes,
+};
 
 use super::super::intake::{
     IntakeChainTask, intake_runtime_state, validate_provider_registry_for_intake_tasks,
@@ -12,19 +15,37 @@ use super::super::logging::{
     log_watched_contract_summary,
 };
 use super::super::manifest::ManifestRuntimeState;
-use super::super::refresh::refresh_runtime_state_from_storage_discovery;
+use super::super::refresh::{
+    refresh_runtime_state_from_storage_discovery, refresh_runtime_state_from_stored_discovery,
+};
 
 /// Timer-driven stored-discovery refresh of the runtime watch state. A
 /// successful refresh replaces the manifest runtime state and intake tasks in
-/// place; refresh failures only warn and keep the last successful state, while
-/// a provider-registry mismatch aborts the poll loop.
+/// place. Storage refresh failures warn, keep the last successful state, and
+/// return `false` so callers that must not poll with stale tasks can retry on a
+/// later tick. A provider-registry mismatch aborts the poll loop.
 pub(super) async fn refresh_discovery_watch_state(
     pool: &sqlx::PgPool,
     provider_registry: &ProviderRegistry,
     manifest_runtime_state: &mut ManifestRuntimeState,
     intake_chain_tasks: &mut Vec<IntakeChainTask>,
-) -> Result<()> {
-    match refresh_runtime_state_from_storage_discovery(pool, manifest_runtime_state).await {
+    sync_adapter_state_before_refresh: bool,
+) -> Result<bool> {
+    let refreshed_state = if sync_adapter_state_before_refresh {
+        refresh_runtime_state_from_storage_discovery(pool, manifest_runtime_state).await
+    } else {
+        refresh_runtime_state_from_stored_discovery(pool, manifest_runtime_state).await
+    };
+    if refreshed_state.is_ok()
+        && !resolver_profile_drain_succeeded(
+            drain_resolver_profile_input_changes(pool).await,
+            "timer",
+            "stored_discovery_state",
+        )
+    {
+        return Ok(false);
+    }
+    match refreshed_state {
         Ok(Some((next_manifest_runtime_state, next_tasks))) => {
             validate_provider_registry_for_intake_tasks(&next_tasks, provider_registry).context(
                 "refreshed stored discovery state no longer matches configured provider sources",
@@ -70,8 +91,9 @@ pub(super) async fn refresh_discovery_watch_state(
             log_provider_registry("discovery-refresh", &next_tasks, provider_registry);
             *manifest_runtime_state = next_manifest_runtime_state;
             *intake_chain_tasks = next_tasks;
+            Ok(true)
         }
-        Ok(None) => {}
+        Ok(None) => Ok(true),
         Err(error) => {
             let current_watch_state =
                 watched_chain_plan_state(&manifest_runtime_state.watched_chain_plan);
@@ -89,8 +111,54 @@ pub(super) async fn refresh_discovery_watch_state(
                 intake_entry_count_total = current_intake_state.entry_count,
                 "failed to refresh runtime watch state from stored discovery edges; keeping last successful state"
             );
+            Ok(false)
         }
     }
+}
 
-    Ok(())
+pub(super) fn resolver_profile_drain_succeeded(
+    result: Result<ResolverProfileConvergenceSummary>,
+    refresh_reason: &'static str,
+    plan_source: &'static str,
+) -> bool {
+    match result {
+        Ok(_) => true,
+        Err(error) => {
+            warn!(
+                service = "indexer",
+                command = "resolver-profile-convergence",
+                refresh_reason,
+                plan_source,
+                error = ?error,
+                "failed to drain resolver-profile input changes; durable pending work will be retried on a later poll tick"
+            );
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::anyhow;
+
+    use super::resolver_profile_drain_succeeded;
+    use crate::resolver_profile_convergence::ResolverProfileConvergenceSummary;
+
+    #[test]
+    fn poll_loop_retries_transient_resolver_profile_drain_errors() {
+        assert!(!resolver_profile_drain_succeeded(
+            Err(anyhow!("transient database timeout")),
+            "timer",
+            "test",
+        ));
+    }
+
+    #[test]
+    fn poll_loop_accepts_successful_resolver_profile_drain() {
+        assert!(resolver_profile_drain_succeeded(
+            Ok(ResolverProfileConvergenceSummary::default()),
+            "timer",
+            "test",
+        ));
+    }
 }
