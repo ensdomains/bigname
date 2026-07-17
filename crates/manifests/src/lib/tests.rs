@@ -8559,3 +8559,816 @@ async fn bounded_and_unbounded_deactivated_manifest_addresses_match_historical_c
 
     database.cleanup().await
 }
+
+// ---------------------------------------------------------------------------
+// Streamed full-source reconciliation parity (#168)
+//
+// Each scenario builds two identically seeded databases, reconciles one with
+// the in-memory `reconcile_discovery_observations` and the other with the
+// streamed temp-table variant over the identical observation set, and
+// asserts identical summaries and byte-identical canonicalized
+// `discovery_edges` outcomes (contract-instance UUIDs differ across
+// databases, so edges are canonicalized onto their addresses).
+// ---------------------------------------------------------------------------
+
+const STREAMED_PARITY_SOURCE: &str = "streamed-parity-observations";
+const STREAMED_PARITY_CHAIN: &str = "ethereum-mainnet";
+const STREAMED_PARITY_REGISTRY: &str = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+const STREAMED_PARITY_OWNER_A: &str = "0x00000000000000000000000000000000000000Aa";
+const STREAMED_PARITY_OWNER_B: &str = "0x00000000000000000000000000000000000000Bb";
+const STREAMED_PARITY_OWNER_C: &str = "0x00000000000000000000000000000000000000Cc";
+const STREAMED_PARITY_RESOLVER: &str = "0x0000000000000000000000000000000000000011";
+const STREAMED_PARITY_STRANGER: &str = "0x0000000000000000000000000000000000000099";
+const STREAMED_PARITY_ZERO: &str = "0x0000000000000000000000000000000000000000";
+
+fn streamed_parity_manifest_contents() -> String {
+    format!(
+        r#"
+manifest_version = 1
+namespace = "ens"
+source_family = "ens_v1_registry_l1"
+chain = "{STREAMED_PARITY_CHAIN}"
+deployment_epoch = "ens_v1"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+
+[capability_flags]
+declared_children = "supported"
+
+[[roots]]
+name = "ENSRegistry"
+address = "{STREAMED_PARITY_REGISTRY}"
+
+[[contracts]]
+role = "registry"
+address = "{STREAMED_PARITY_REGISTRY}"
+proxy_kind = "none"
+
+[[discovery_rules]]
+edge_kind = "subregistry"
+from_role = "registry"
+admission = "reachable_from_root"
+
+[[discovery_rules]]
+edge_kind = "resolver"
+from_role = "registry"
+admission = "reachable_from_root"
+"#
+    )
+}
+
+fn streamed_parity_observation(
+    key: &str,
+    from_address: &str,
+    to_address: &str,
+    edge_kind: &str,
+    block_number: i64,
+    transaction_index: i64,
+    log_index: i64,
+) -> DiscoveryObservation {
+    DiscoveryObservation {
+        chain: STREAMED_PARITY_CHAIN.to_owned(),
+        from_address: from_address.to_owned(),
+        to_address: to_address.to_owned(),
+        edge_kind: edge_kind.to_owned(),
+        discovery_source: STREAMED_PARITY_SOURCE.to_owned(),
+        active_from_block_number: Some(block_number),
+        active_from_block_hash: Some(format!("0x{block_number:064x}")),
+        active_to_block_number: None,
+        active_to_block_hash: None,
+        provenance: serde_json::json!({
+            "provider": "streamed-parity-test",
+            "observation_key": key,
+            "transaction_index": transaction_index,
+            "log_index": log_index,
+        }),
+    }
+}
+
+struct VecDiscoveryObservationPageSource {
+    items: Vec<(String, DiscoveryObservation)>,
+    page_limit: usize,
+}
+
+impl VecDiscoveryObservationPageSource {
+    fn new(observations: &[DiscoveryObservation], page_limit: usize) -> Self {
+        let mut items = observations
+            .iter()
+            .map(|observation| {
+                let key = observation
+                    .provenance
+                    .get("observation_key")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("parity observations carry observation keys")
+                    .to_owned();
+                (key, observation.clone())
+            })
+            .collect::<Vec<_>>();
+        items.sort_by(|(left, _), (right, _)| left.cmp(right));
+        Self { items, page_limit }
+    }
+}
+
+impl DiscoveryObservationPageSource for VecDiscoveryObservationPageSource {
+    async fn load_page(
+        &self,
+        after_key: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<(String, DiscoveryObservation)>> {
+        let limit = usize::try_from(limit.max(0))?.min(self.page_limit.max(1));
+        Ok(self
+            .items
+            .iter()
+            .filter(|(key, _)| after_key.is_none_or(|after_key| key.as_str() > after_key))
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+}
+
+/// One `discovery_edges` row canonicalized onto addresses instead of the
+/// per-database contract-instance UUIDs, with timestamps reduced to the
+/// active/deactivated state (wall-clock `deactivated_at`/`admitted_at`
+/// values cannot match across runs).
+type CanonicalDiscoveryEdgeRow = (
+    String,         // chain_id
+    String,         // edge_kind
+    Option<String>, // from address
+    Option<String>, // to address
+    Option<i64>,    // source_manifest_id
+    String,         // admission
+    Option<i64>,    // active_from_block_number
+    Option<String>, // active_from_block_hash
+    Option<i64>,    // active_to_block_number
+    Option<String>, // active_to_block_hash
+    bool,           // is_active
+    String,         // provenance (jsonb text, includes terminal positions)
+);
+
+async fn load_canonical_discovery_edges(
+    pool: &PgPool,
+    discovery_source: &str,
+) -> Result<Vec<CanonicalDiscoveryEdgeRow>> {
+    sqlx::query_as::<_, CanonicalDiscoveryEdgeRow>(
+        r#"
+        SELECT
+            de.chain_id,
+            de.edge_kind,
+            (
+                SELECT cia.address
+                FROM contract_instance_addresses cia
+                WHERE cia.contract_instance_id = de.from_contract_instance_id
+                ORDER BY (cia.deactivated_at IS NULL) DESC, cia.admitted_at DESC
+                LIMIT 1
+            ) AS from_address,
+            (
+                SELECT cia.address
+                FROM contract_instance_addresses cia
+                WHERE cia.contract_instance_id = de.to_contract_instance_id
+                ORDER BY (cia.deactivated_at IS NULL) DESC, cia.admitted_at DESC
+                LIMIT 1
+            ) AS to_address,
+            de.source_manifest_id,
+            de.admission,
+            de.active_from_block_number,
+            de.active_from_block_hash,
+            de.active_to_block_number,
+            de.active_to_block_hash,
+            (de.deactivated_at IS NULL) AS is_active,
+            de.provenance::TEXT AS provenance
+        FROM discovery_edges de
+        WHERE de.discovery_source = $1
+        ORDER BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12
+        "#,
+    )
+    .bind(discovery_source)
+    .fetch_all(pool)
+    .await
+    .context("failed to load canonical discovery edges for parity comparison")
+}
+
+struct StreamedParityFixture {
+    seed_observation_sets: Vec<Vec<DiscoveryObservation>>,
+    observations: Vec<DiscoveryObservation>,
+}
+
+async fn setup_streamed_parity_database(fixture: &StreamedParityFixture) -> Result<TestDatabase> {
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+    test_dir.write_manifest(
+        "ens",
+        "ens_v1_registry_l1",
+        "v1",
+        &streamed_parity_manifest_contents(),
+    )?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+    for seed_observations in &fixture.seed_observation_sets {
+        reconcile_discovery_observations(
+            database.pool(),
+            STREAMED_PARITY_SOURCE,
+            seed_observations,
+        )
+        .await?;
+    }
+    Ok(database)
+}
+
+async fn assert_streamed_reconciliation_parity(
+    fixture: StreamedParityFixture,
+) -> Result<(
+    DiscoveryReconciliationSummary,
+    Vec<CanonicalDiscoveryEdgeRow>,
+)> {
+    let in_memory_database = setup_streamed_parity_database(&fixture).await?;
+    let streamed_database = setup_streamed_parity_database(&fixture).await?;
+
+    let in_memory_summary = reconcile_discovery_observations(
+        in_memory_database.pool(),
+        STREAMED_PARITY_SOURCE,
+        &fixture.observations,
+    )
+    .await?;
+    // Tiny pages and batches exercise every internal paging loop.
+    let page_source = VecDiscoveryObservationPageSource::new(&fixture.observations, 2);
+    let streamed_summary = reconcile_discovery_observations_streamed_with_options(
+        streamed_database.pool(),
+        STREAMED_PARITY_SOURCE,
+        &page_source,
+        StreamedDiscoveryReconciliationOptions {
+            max_deactivations_override: None,
+            observation_page_limit: 2,
+            mutation_batch_size: 2,
+        },
+    )
+    .await?;
+
+    assert!(
+        streamed_summary.admitted_edges.is_empty(),
+        "the streamed summary intentionally returns no admitted edges"
+    );
+    assert_eq!(
+        streamed_summary.active_edge_count, in_memory_summary.active_edge_count,
+        "active edge counts must match"
+    );
+    assert_eq!(
+        streamed_summary.admitted_edge_count, in_memory_summary.admitted_edge_count,
+        "admitted edge counts must match"
+    );
+    assert_eq!(
+        streamed_summary.inserted_edge_count, in_memory_summary.inserted_edge_count,
+        "inserted edge counts must match"
+    );
+    assert_eq!(
+        streamed_summary.deactivated_edge_count, in_memory_summary.deactivated_edge_count,
+        "deactivated edge counts must match"
+    );
+    assert_eq!(
+        streamed_summary.admission_epoch_bump_count, in_memory_summary.admission_epoch_bump_count,
+        "admission epoch bump counts must match"
+    );
+
+    let in_memory_edges =
+        load_canonical_discovery_edges(in_memory_database.pool(), STREAMED_PARITY_SOURCE).await?;
+    let streamed_edges =
+        load_canonical_discovery_edges(streamed_database.pool(), STREAMED_PARITY_SOURCE).await?;
+    assert_eq!(
+        streamed_edges, in_memory_edges,
+        "streamed reconciliation must produce identical discovery_edges outcomes"
+    );
+    assert_eq!(
+        load_discovery_admission_epoch(streamed_database.pool(), STREAMED_PARITY_CHAIN).await?,
+        load_discovery_admission_epoch(in_memory_database.pool(), STREAMED_PARITY_CHAIN).await?,
+        "admission epochs must match"
+    );
+
+    in_memory_database.cleanup().await?;
+    streamed_database.cleanup().await?;
+    Ok((in_memory_summary, streamed_edges))
+}
+
+#[tokio::test]
+async fn streamed_reconciliation_parity_fresh_inserts() -> Result<()> {
+    let (summary, edges) = assert_streamed_reconciliation_parity(StreamedParityFixture {
+        seed_observation_sets: Vec::new(),
+        observations: vec![
+            streamed_parity_observation(
+                "k-eth",
+                STREAMED_PARITY_REGISTRY,
+                STREAMED_PARITY_OWNER_A,
+                "subregistry",
+                10,
+                0,
+                1,
+            ),
+            streamed_parity_observation(
+                "k-sub",
+                STREAMED_PARITY_OWNER_A,
+                STREAMED_PARITY_OWNER_B,
+                "subregistry",
+                11,
+                0,
+                1,
+            ),
+            streamed_parity_observation(
+                "k-res",
+                STREAMED_PARITY_REGISTRY,
+                STREAMED_PARITY_RESOLVER,
+                "resolver",
+                12,
+                0,
+                2,
+            ),
+        ],
+    })
+    .await?;
+
+    assert_eq!(summary.inserted_edge_count, 3);
+    assert_eq!(summary.deactivated_edge_count, 0);
+    assert_eq!(summary.active_edge_count, 3);
+    assert_eq!(edges.len(), 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn streamed_reconciliation_parity_steady_state_no_op() -> Result<()> {
+    let observations = vec![
+        streamed_parity_observation(
+            "k-eth",
+            STREAMED_PARITY_REGISTRY,
+            STREAMED_PARITY_OWNER_A,
+            "subregistry",
+            10,
+            0,
+            1,
+        ),
+        streamed_parity_observation(
+            "k-sub",
+            STREAMED_PARITY_OWNER_A,
+            STREAMED_PARITY_OWNER_B,
+            "subregistry",
+            11,
+            0,
+            1,
+        ),
+        streamed_parity_observation(
+            "k-res",
+            STREAMED_PARITY_REGISTRY,
+            STREAMED_PARITY_RESOLVER,
+            "resolver",
+            12,
+            0,
+            2,
+        ),
+    ];
+    let (summary, edges) = assert_streamed_reconciliation_parity(StreamedParityFixture {
+        seed_observation_sets: vec![observations.clone()],
+        observations,
+    })
+    .await?;
+
+    assert_eq!(summary.inserted_edge_count, 0);
+    assert_eq!(summary.deactivated_edge_count, 0);
+    assert_eq!(summary.active_edge_count, 3);
+    assert!(edges.iter().all(|edge| edge.10), "every edge stays active");
+    Ok(())
+}
+
+#[tokio::test]
+async fn streamed_reconciliation_parity_to_address_change() -> Result<()> {
+    let (summary, edges) = assert_streamed_reconciliation_parity(StreamedParityFixture {
+        seed_observation_sets: vec![vec![streamed_parity_observation(
+            "k-eth",
+            STREAMED_PARITY_REGISTRY,
+            STREAMED_PARITY_OWNER_A,
+            "subregistry",
+            10,
+            0,
+            1,
+        )]],
+        observations: vec![streamed_parity_observation(
+            "k-eth",
+            STREAMED_PARITY_REGISTRY,
+            STREAMED_PARITY_OWNER_C,
+            "subregistry",
+            12,
+            0,
+            1,
+        )],
+    })
+    .await?;
+
+    assert_eq!(summary.inserted_edge_count, 1);
+    assert_eq!(summary.deactivated_edge_count, 1);
+    assert_eq!(summary.active_edge_count, 1);
+    let replaced = edges
+        .iter()
+        .find(|edge| edge.3.as_deref() == Some("0x00000000000000000000000000000000000000aa"))
+        .expect("the replaced edge is retained as history");
+    assert!(!replaced.10, "the replaced edge is deactivated");
+    assert_eq!(replaced.8, Some(12), "terminal anchors at the new epoch");
+    Ok(())
+}
+
+#[tokio::test]
+async fn streamed_reconciliation_parity_zero_address_terminal() -> Result<()> {
+    let (summary, edges) = assert_streamed_reconciliation_parity(StreamedParityFixture {
+        seed_observation_sets: vec![vec![streamed_parity_observation(
+            "k-eth",
+            STREAMED_PARITY_REGISTRY,
+            STREAMED_PARITY_OWNER_A,
+            "subregistry",
+            10,
+            0,
+            1,
+        )]],
+        observations: vec![streamed_parity_observation(
+            "k-eth",
+            STREAMED_PARITY_REGISTRY,
+            STREAMED_PARITY_ZERO,
+            "subregistry",
+            12,
+            0,
+            3,
+        )],
+    })
+    .await?;
+
+    assert_eq!(summary.inserted_edge_count, 0);
+    assert_eq!(summary.deactivated_edge_count, 1);
+    assert_eq!(summary.active_edge_count, 0);
+    let tombstoned = &edges[0];
+    assert!(!tombstoned.10);
+    assert_eq!(
+        tombstoned.8,
+        Some(12),
+        "the direct tombstone terminal anchors the closed window"
+    );
+    let provenance: serde_json::Value = serde_json::from_str(&tombstoned.11)?;
+    assert_eq!(provenance["active_to_transaction_index"].as_i64(), Some(0));
+    assert_eq!(provenance["active_to_log_index"].as_i64(), Some(3));
+    Ok(())
+}
+
+#[tokio::test]
+async fn streamed_reconciliation_parity_orphan_edge_without_observation() -> Result<()> {
+    let (summary, edges) = assert_streamed_reconciliation_parity(StreamedParityFixture {
+        seed_observation_sets: vec![vec![
+            streamed_parity_observation(
+                "k-eth",
+                STREAMED_PARITY_REGISTRY,
+                STREAMED_PARITY_OWNER_A,
+                "subregistry",
+                10,
+                0,
+                1,
+            ),
+            streamed_parity_observation(
+                "k-com",
+                STREAMED_PARITY_REGISTRY,
+                STREAMED_PARITY_OWNER_B,
+                "subregistry",
+                11,
+                0,
+                2,
+            ),
+        ]],
+        observations: vec![streamed_parity_observation(
+            "k-eth",
+            STREAMED_PARITY_REGISTRY,
+            STREAMED_PARITY_OWNER_A,
+            "subregistry",
+            10,
+            0,
+            1,
+        )],
+    })
+    .await?;
+
+    assert_eq!(summary.inserted_edge_count, 0);
+    assert_eq!(summary.deactivated_edge_count, 1);
+    assert_eq!(summary.active_edge_count, 1);
+    let orphaned = edges
+        .iter()
+        .find(|edge| edge.3.as_deref() == Some("0x00000000000000000000000000000000000000bb"))
+        .expect("the observation-less edge exists");
+    assert!(!orphaned.10, "the observation-less edge is deactivated");
+    assert_eq!(orphaned.8, None, "no observation means no terminal anchor");
+    assert_eq!(orphaned.9, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn streamed_reconciliation_parity_cascade_chain_inherits_terminal() -> Result<()> {
+    let (summary, edges) = assert_streamed_reconciliation_parity(StreamedParityFixture {
+        seed_observation_sets: vec![vec![
+            streamed_parity_observation(
+                "k-eth",
+                STREAMED_PARITY_REGISTRY,
+                STREAMED_PARITY_OWNER_A,
+                "subregistry",
+                10,
+                0,
+                1,
+            ),
+            streamed_parity_observation(
+                "k-sub",
+                STREAMED_PARITY_OWNER_A,
+                STREAMED_PARITY_OWNER_B,
+                "subregistry",
+                11,
+                0,
+                1,
+            ),
+        ]],
+        observations: vec![
+            streamed_parity_observation(
+                "k-eth",
+                STREAMED_PARITY_REGISTRY,
+                STREAMED_PARITY_ZERO,
+                "subregistry",
+                20,
+                0,
+                5,
+            ),
+            streamed_parity_observation(
+                "k-sub",
+                STREAMED_PARITY_OWNER_A,
+                STREAMED_PARITY_OWNER_B,
+                "subregistry",
+                11,
+                0,
+                1,
+            ),
+        ],
+    })
+    .await?;
+
+    assert_eq!(summary.inserted_edge_count, 0);
+    assert_eq!(summary.deactivated_edge_count, 2);
+    assert_eq!(summary.active_edge_count, 0);
+    for edge in &edges {
+        assert!(!edge.10, "the whole chain is deactivated");
+        assert_eq!(
+            edge.8,
+            Some(20),
+            "the child inherits the removed parent's terminal state"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn streamed_reconciliation_parity_derived_contract_recursion() -> Result<()> {
+    // The child observation's key sorts before the parent's, so the child
+    // pages through the walk before its from-address becomes an active
+    // contract: only the derived-contract revisit pass can admit it.
+    let (summary, edges) = assert_streamed_reconciliation_parity(StreamedParityFixture {
+        seed_observation_sets: Vec::new(),
+        observations: vec![
+            streamed_parity_observation(
+                "k-0-child",
+                STREAMED_PARITY_OWNER_A,
+                STREAMED_PARITY_OWNER_B,
+                "subregistry",
+                11,
+                0,
+                2,
+            ),
+            streamed_parity_observation(
+                "k-1-parent",
+                STREAMED_PARITY_REGISTRY,
+                STREAMED_PARITY_OWNER_A,
+                "subregistry",
+                10,
+                0,
+                1,
+            ),
+        ],
+    })
+    .await?;
+
+    assert_eq!(summary.inserted_edge_count, 2);
+    assert_eq!(summary.active_edge_count, 2);
+    assert_eq!(edges.len(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn streamed_reconciliation_parity_ignores_never_admitted_addresses() -> Result<()> {
+    let (summary, edges) = assert_streamed_reconciliation_parity(StreamedParityFixture {
+        seed_observation_sets: Vec::new(),
+        observations: vec![streamed_parity_observation(
+            "k-stranger",
+            STREAMED_PARITY_STRANGER,
+            STREAMED_PARITY_OWNER_B,
+            "subregistry",
+            10,
+            0,
+            1,
+        )],
+    })
+    .await?;
+
+    assert_eq!(summary.admitted_edge_count, 0);
+    assert_eq!(summary.inserted_edge_count, 0);
+    assert_eq!(summary.deactivated_edge_count, 0);
+    assert_eq!(summary.active_edge_count, 0);
+    assert!(edges.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn streamed_reconciliation_parity_retains_newer_successor_epoch() -> Result<()> {
+    // The retained set already holds a newer epoch for the observation key:
+    // the older desired assignment materializes as a closed historical
+    // epoch and the newer edge stays active, in both variants.
+    let (summary, edges) = assert_streamed_reconciliation_parity(StreamedParityFixture {
+        seed_observation_sets: vec![vec![streamed_parity_observation(
+            "k-eth",
+            STREAMED_PARITY_REGISTRY,
+            STREAMED_PARITY_OWNER_A,
+            "subregistry",
+            20,
+            0,
+            1,
+        )]],
+        observations: vec![streamed_parity_observation(
+            "k-eth",
+            STREAMED_PARITY_REGISTRY,
+            STREAMED_PARITY_OWNER_B,
+            "subregistry",
+            10,
+            0,
+            1,
+        )],
+    })
+    .await?;
+
+    assert_eq!(summary.inserted_edge_count, 1);
+    assert_eq!(summary.deactivated_edge_count, 0);
+    assert_eq!(summary.active_edge_count, 1);
+    let historical = edges
+        .iter()
+        .find(|edge| edge.3.as_deref() == Some("0x00000000000000000000000000000000000000bb"))
+        .expect("the older epoch is materialized");
+    assert!(!historical.10, "the older epoch closes at the successor");
+    assert_eq!(historical.8, Some(20));
+    let retained = edges
+        .iter()
+        .find(|edge| edge.3.as_deref() == Some("0x00000000000000000000000000000000000000aa"))
+        .expect("the newer epoch is retained");
+    assert!(retained.10, "the newer epoch stays active");
+    Ok(())
+}
+
+#[tokio::test]
+async fn streamed_reconcile_diffs_stored_edges_equal_to_their_specs() -> Result<()> {
+    // Spec-equality proof: an edge inserted by `insert_reconciled_discovery_
+    // edges` must diff as EQUAL to the spec that produced it, so re-running
+    // the identical observation set through the streamed reconcile on the
+    // same database is a byte-level no-op.
+    let observations = vec![
+        streamed_parity_observation(
+            "k-eth",
+            STREAMED_PARITY_REGISTRY,
+            STREAMED_PARITY_OWNER_A,
+            "subregistry",
+            10,
+            0,
+            1,
+        ),
+        streamed_parity_observation(
+            "k-sub",
+            STREAMED_PARITY_OWNER_A,
+            STREAMED_PARITY_OWNER_B,
+            "subregistry",
+            11,
+            0,
+            1,
+        ),
+        streamed_parity_observation(
+            "k-res",
+            STREAMED_PARITY_REGISTRY,
+            STREAMED_PARITY_RESOLVER,
+            "resolver",
+            12,
+            0,
+            2,
+        ),
+    ];
+    let fixture = StreamedParityFixture {
+        seed_observation_sets: vec![observations.clone()],
+        observations: observations.clone(),
+    };
+    let database = setup_streamed_parity_database(&fixture).await?;
+    let seeded_edges =
+        load_canonical_discovery_edges(database.pool(), STREAMED_PARITY_SOURCE).await?;
+    assert_eq!(seeded_edges.len(), 3);
+
+    let page_source = VecDiscoveryObservationPageSource::new(&observations, 2);
+    let summary = reconcile_discovery_observations_streamed(
+        database.pool(),
+        STREAMED_PARITY_SOURCE,
+        &page_source,
+    )
+    .await?;
+    assert_eq!(
+        summary.inserted_edge_count, 0,
+        "stored edges must diff as equal to their producing specs"
+    );
+    assert_eq!(summary.deactivated_edge_count, 0);
+    assert_eq!(summary.active_edge_count, 3);
+    assert_eq!(summary.admission_epoch_bump_count, 0);
+    assert_eq!(
+        load_canonical_discovery_edges(database.pool(), STREAMED_PARITY_SOURCE).await?,
+        seeded_edges,
+        "a no-op streamed reconcile must leave every stored edge untouched"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn streamed_reconcile_guard_aborts_deactivation_floods_unless_overridden() -> Result<()> {
+    let seed_observations = vec![
+        streamed_parity_observation(
+            "k-eth",
+            STREAMED_PARITY_REGISTRY,
+            STREAMED_PARITY_OWNER_A,
+            "subregistry",
+            10,
+            0,
+            1,
+        ),
+        streamed_parity_observation(
+            "k-com",
+            STREAMED_PARITY_REGISTRY,
+            STREAMED_PARITY_OWNER_B,
+            "subregistry",
+            11,
+            0,
+            1,
+        ),
+        streamed_parity_observation(
+            "k-org",
+            STREAMED_PARITY_REGISTRY,
+            STREAMED_PARITY_OWNER_C,
+            "subregistry",
+            12,
+            0,
+            1,
+        ),
+    ];
+    let fixture = StreamedParityFixture {
+        seed_observation_sets: vec![seed_observations],
+        observations: Vec::new(),
+    };
+    let database = setup_streamed_parity_database(&fixture).await?;
+
+    // An empty retained set would deactivate every active edge: over the
+    // guard bound the reconcile must abort before mutating anything.
+    let empty_source = VecDiscoveryObservationPageSource::new(&[], 2);
+    let guard_error = reconcile_discovery_observations_streamed_with_options(
+        database.pool(),
+        STREAMED_PARITY_SOURCE,
+        &empty_source,
+        StreamedDiscoveryReconciliationOptions {
+            max_deactivations_override: Some(2),
+            observation_page_limit: 2,
+            mutation_batch_size: 2,
+        },
+    )
+    .await
+    .expect_err("a deactivation flood over the guard bound must abort");
+    assert!(
+        guard_error.to_string().contains("would deactivate 3"),
+        "unexpected guard error: {guard_error:#}"
+    );
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE discovery_source = $1 AND deactivated_at IS NULL"
+        )
+        .bind(STREAMED_PARITY_SOURCE)
+        .fetch_one(database.pool())
+        .await?,
+        3,
+        "an aborted reconcile must roll back without mutating edges"
+    );
+
+    // Raising the override past the diff permits the same reconcile.
+    let summary = reconcile_discovery_observations_streamed_with_options(
+        database.pool(),
+        STREAMED_PARITY_SOURCE,
+        &empty_source,
+        StreamedDiscoveryReconciliationOptions {
+            max_deactivations_override: Some(3),
+            observation_page_limit: 2,
+            mutation_batch_size: 2,
+        },
+    )
+    .await?;
+    assert_eq!(summary.deactivated_edge_count, 3);
+    assert_eq!(summary.active_edge_count, 0);
+
+    database.cleanup().await
+}
