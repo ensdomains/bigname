@@ -9437,6 +9437,87 @@ async fn streamed_reconcile_guard_ignores_chronology_retained_candidates() -> Re
 }
 
 #[tokio::test]
+async fn streamed_reconcile_guard_ignores_cascade_protected_descendants() -> Result<()> {
+    // An ancestor tombstone earlier than the retained parent epoch: the
+    // parent edge is chronology-retained (it starts after the terminal
+    // event) and the descendant is skipped by the cascade-terminal
+    // protection (it also starts after the inherited terminal). Neither is
+    // an actual deactivation, so even a zero-deactivation precise guard
+    // must pass.
+    let fixture = StreamedParityFixture {
+        seed_observation_sets: vec![vec![
+            streamed_parity_observation(
+                "k-parent",
+                STREAMED_PARITY_REGISTRY,
+                STREAMED_PARITY_OWNER_A,
+                "subregistry",
+                25,
+                0,
+                1,
+            ),
+            streamed_parity_observation(
+                "k-child",
+                STREAMED_PARITY_OWNER_A,
+                STREAMED_PARITY_OWNER_B,
+                "subregistry",
+                30,
+                0,
+                1,
+            ),
+        ]],
+        observations: vec![
+            streamed_parity_observation(
+                "k-parent",
+                STREAMED_PARITY_REGISTRY,
+                STREAMED_PARITY_ZERO,
+                "subregistry",
+                20,
+                0,
+                5,
+            ),
+            streamed_parity_observation(
+                "k-child",
+                STREAMED_PARITY_OWNER_A,
+                STREAMED_PARITY_OWNER_B,
+                "subregistry",
+                30,
+                0,
+                1,
+            ),
+        ],
+    };
+    let database = setup_streamed_parity_database(&fixture).await?;
+
+    let page_source = VecDiscoveryObservationPageSource::new(&fixture.observations, 2);
+    let summary = reconcile_discovery_observations_streamed_with_options(
+        database.pool(),
+        STREAMED_PARITY_SOURCE,
+        &page_source,
+        StreamedDiscoveryReconciliationOptions {
+            max_deactivations_override: Some(0),
+            coarse_deactivation_cap_override: None,
+            observation_page_limit: 2,
+            mutation_batch_size: 2,
+        },
+    )
+    .await?;
+    assert_eq!(summary.deactivated_edge_count, 0);
+    assert_eq!(summary.inserted_edge_count, 0);
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE discovery_source = $1 AND deactivated_at IS NULL"
+        )
+        .bind(STREAMED_PARITY_SOURCE)
+        .fetch_one(database.pool())
+        .await?,
+        2,
+        "the retained parent and the cascade-protected descendant both stay active"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn streamed_reconcile_coarse_cap_aborts_before_loading_candidates() -> Result<()> {
     let seed_observations = vec![
         streamed_parity_observation(

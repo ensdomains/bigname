@@ -294,13 +294,24 @@ pub(crate) async fn reconcile_discovery_observations_streamed_with_options(
         &direct_terminal_states_by_key,
     )?;
 
-    // Precise fail-closed guard on the post-chronology deactivation set:
-    // candidates the chronology rules retain are not deactivations and must
-    // not trip it. A verified full-closure replay finalize is a near-no-op,
-    // so a mass deactivation here indicates spec drift.
+    // Precise fail-closed guard on the exact planned deactivation set:
+    // candidates the chronology rules retain or the cascade-terminal
+    // protection skips (e.g. many descendants starting after an ancestor
+    // tombstone's terminal event) are not deactivations and must not trip
+    // it. The filter below evaluates the same skip predicates as the
+    // mutation loop, so the count is exact. A verified full-closure replay
+    // finalize is a near-no-op, so a mass deactivation here indicates spec
+    // drift.
     let planned_deactivation_count = deactivation_candidates
         .iter()
-        .filter(|candidate| !retained_newer_edge_ids.contains(&candidate.discovery_edge_id))
+        .filter(|candidate| {
+            !retained_newer_edge_ids.contains(&candidate.discovery_edge_id)
+                && !protects_non_orphaned_newer_edge(
+                    candidate,
+                    deactivation_terminal_states_by_key.get(&candidate.spec.observation_key),
+                    None,
+                )
+        })
         .count();
     let max_deactivations = options
         .max_deactivations_override
