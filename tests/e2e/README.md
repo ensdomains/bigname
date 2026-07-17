@@ -312,8 +312,10 @@ route inventory or a claim that every protocol transition is covered.
   commit/reveal ABI and NameWrapper's registerAndWrapETH2LD entrypoint
   (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289 @ ens_v1@91c966f),
-  and pins the current mixed result: one transient wrapper resource, a final
-  registrar binding, and registry-only exact-name authority fields.
+  and pins the born-wrapped outcome: the same-transaction wrapper introduction
+  remains authoritative — the wrapper resource stays active, exact-name
+  resolution serves the wrapper resource, and the authority fields report the
+  wrapper (`authority_kind = "wrapper"`, `wrapper:`-prefixed authority key).
 - `wrapper_renewal_and_transfers::wrapped_renewal_tracks_registrar_expiry_without_wrapper_event`
   — renews a wrapped 2LD through the current controller, proving the wrapper
   emits no expiry event and its onchain expiry stays stale while exact-name

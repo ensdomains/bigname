@@ -107,7 +107,7 @@ Legend:
 - `blocked(reason)` — no scenario backed by genuine evidence reaches the
   required evidence layer.
 - **REVIEW POINT** — a reproduced defect or surprising behavior pinned by a
-  test, awaiting a product decision; green does not mean endorsed.
+  test, awaiting a fix or a product decision; green does not mean endorsed.
 
 There are no `planned` rows. `covered_e2e` never means every route, query
 mode, failure class, or protocol path is exhaustive.
