@@ -8,7 +8,7 @@ Date: 2026-05-06
 
 The codebase has accumulated parallel ways to describe the same domain ideas. Some of
 that complexity is necessary because bigname serves ENS, ENSv2, and Basenames across
-declared projection reads, verified execution, historical replay, and app-facing
+declared [projection](../glossary.md) reads, verified execution, historical replay, and app-facing
 compact routes. Some of it is accidental.
 
 The accidental complexity shows up as duplicated vocabulary and duplicated ownership:
@@ -24,7 +24,7 @@ The accidental complexity shows up as duplicated vocabulary and duplicated owner
 - adapter scoped replay and raw-log loading repeat source-selection, block loading,
   ordering, and summary construction across adapter files
 - public API and operational/audit concerns are too easy to blur, especially around raw
-  facts, provenance, execution traces, and normalized events
+  facts, provenance, execution traces, and [normalized events](../glossary.md)
 
 This plan keeps the broad product scope. It does not delete history, record inventory,
 typed unsupported objects, multi-chain snapshots, live verified execution, CCIP support,
@@ -90,13 +90,13 @@ Rules:
 
 The review question for every slice is: "Can a maintainer understand this capability
 with fewer concepts and fewer files open than before?" If the answer is no, the slice is
-not de-slopping even if the code looks more organized.
+not de-slopping (removing duplicated concepts) even if the code looks more organized.
 
 ADR 0004 adds a retroactive completion gate for this plan. A slice does not count as
 completed ADR 0003 work merely because it introduces a shared helper, central table, or
 compatibility scaffold. It must delete or collapse the duplicated subsystem concept
 that made the capability hard to understand, or explicitly name the remaining
-scaffolding as debt with a paired deletion target.
+scaffolding (temporary throwaway structure) as debt with a paired deletion target.
 
 ### Public route families
 
@@ -455,7 +455,7 @@ Plan:
 3. Keep parser compatibility by continuing to reject reserved invalid values with the
    existing error shape until a deprecation decision says otherwise.
 4. Reclassify `/v1/names?name=...` as a compatibility exact filter, not the conceptual
-   exact-profile API.
+   exact-name-profile API.
 5. Decide the `/v1/names` no-namespace bridge before changing behavior. Preserve the
    current cross-namespace default until one of the bridges in "Namespace rules" ships.
 6. Make omitted namespace default to `ens` only for routes whose current contract allows
@@ -569,7 +569,7 @@ Plan:
 3. Keep `record_inventory` public on canonical/full routes.
 4. Keep compact records free of irrelevant inventory/cache metadata.
 5. Keep typed unsupported selectors and gaps explicit.
-6. Keep text-value hydration as a worker/projection concern, not a compact route sidecar.
+6. Keep text-value [hydration](../glossary.md) as a worker/projection concern, not a compact route [sidecar](../glossary.md).
 
 Deletion targets:
 

@@ -6,7 +6,7 @@ the configured PostgreSQL database, local pinned upstream refs, generated OpenAP
 artifact consistency, and the conformance ownership table for published OpenAPI
 paths, runs focused reorg chaos, capability, and resolver-profile conformance
 guards, runs the live manifest-drift audit with worker-owned alert observation
-persistence, inspects the runtime watch plan, and checks the API process
+persistence, inspects the runtime [watch plan](../glossary.md), and checks the API process
 readiness endpoint from a prebuilt local binary. It does not deploy, contact
 external RPC providers, contact GitHub or Fly, or validate a remote production
 target.
@@ -128,8 +128,8 @@ Manifest-drift audit and inspection behavior:
 - `inspect manifest-drift --json` is read-only and renders the same durable
   observation shape from the same worker-owned storage.
 - Neither command fixes drift or mutates manifest truth, discovery edges,
-  source-family admission, watch plans, or normalized events. Remediation
-  remains explicit manifest, discovery, or source-family work.
+  [source-family](../glossary.md) [admission](../glossary.md), watch plans, or [normalized events](../glossary.md).
+  Remediation remains explicit manifest, discovery, or source-family work.
 
 ## Pass Criteria
 
