@@ -21,6 +21,7 @@ Review priorities:
 - drift from source-of-truth docs
 - boundary violations from `AGENTS.md`
 - missing docs for semantic/shared-interface changes
+- communication-rule violations in changed docs, comments, or writeups (AGENTS.md § Communication: a bigname-specific term with neither a `docs/glossary.md` link nor a first-use definition, a new coinage without a glossary entry in the same change, or bare "promotion"/"profile" in prose — wire field names and enum values are contract, not prose)
 - missing or unsupported upstream citations
 - replay, manifest, migration, fixture, and `crates/domain` risks
 - missing tests or weak validation

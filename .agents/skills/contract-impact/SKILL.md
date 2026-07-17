@@ -26,7 +26,7 @@ Produce a short note:
 2. `docs_or_artifacts`: exact docs, OpenAPI, fixtures, manifests, or migrations that must move with the change
 3. `owner`: owning boundary or directory
 4. `blockers`: unresolved semantic questions or required upstream citations
-5. `communication`: confirm changed docs, comments, and writeups introduce no undefined project-specific term — necessary new coinages get a `docs/glossary.md` entry in the same change, and "promotion"/"profile" are always qualified (AGENTS.md § Communication)
+5. `communication`: confirm changed docs, comments, and writeups introduce no undefined project-specific term — link `docs/glossary.md` on first use instead of re-defining, add necessary new coinages there in the same change, and qualify bare "promotion"/"profile" in prose; wire field names and enum values are contract, not prose (AGENTS.md § Communication)
 
 ## Rules
 
