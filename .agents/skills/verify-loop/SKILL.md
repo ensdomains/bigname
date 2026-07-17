@@ -22,6 +22,7 @@ Run an explicit reviewer/fix loop over the current worktree. This skill is comma
    - Decide whether the issue is real by reading the cited files, relevant docs, tests, and changed paths.
    - For every real code or behavior issue, write the smallest focused failing test first.
    - For docs, citations, staging, or other non-code findings, create the smallest meaningful validation check when a normal test is not applicable.
+   - Treat communication-rule violations in changed docs or comments as findings: an undefined project-specific term (no `docs/glossary.md` entry or first-use definition) or an unqualified "promotion"/"profile" fails AGENTS.md § Communication.
    - Run the test or check and confirm it fails for the reported issue before fixing. If it does not fail, refine the test once; otherwise classify the finding as unconfirmed unless direct evidence proves it.
    - Fix only confirmed real issues, keeping the change scoped to the current work.
    - Re-run the confirming tests/checks and any narrow regression checks needed for the fix.
