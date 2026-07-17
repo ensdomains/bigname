@@ -1,0 +1,247 @@
+# Glossary
+
+Plain-language definitions for bigname-specific terms. Standard ENS, Ethereum,
+and indexing vocabulary is used unmodified and is not defined here. Wire field
+names and enum values are contract, not prose; this glossary explains concepts,
+it does not rename fields. Docs should link here on a term's first use instead
+of re-defining or assuming it.
+
+Two terms are overloaded enough that bare use is discouraged: **promotion**
+(always qualify: checkpoint promotion vs. capability promotion) and **profile**
+(always qualify: deployment profile, resolver profile, exact-name profile, the
+identity route's `profile=` parameter, or the `/v1/profiles/...` route).
+
+---
+
+**Absence-aware replay** — a replay of one source's complete retained history
+that is allowed to treat "not re-derived this pass" as "no longer true" and
+deactivate stale state. Scoped (block- or target-limited) replays are never
+absence-aware: they update only what they touch and never infer deletion from
+omission.
+
+**Admission** — the act of authorizing an input. A contract, event, or data
+source is *admitted* when a manifest declares it or a discovery rule reaches it
+from a declared root; only admitted inputs can produce normalized events or
+public coverage. Cross-reference: allowlisting.
+
+**Admission epoch** (discovery-admission epoch) — a per-chain counter bumped
+every time the watched contract set changes. Long-running work records the
+epoch it started under and fails closed if the epoch moved, instead of acting
+on stale authority. Cross-reference: optimistic concurrency, fencing token.
+
+**Anchor** — the concrete object a stable identity is pinned to. An *authority
+anchor* is the registry entry, registrar lease, wrapper position, or ENSv2
+resource behind a `resource_id`; the id survives changes within one anchor and
+rotates when authority moves to a different anchor. An *observation anchor* is
+the exact chain/block identity a stored row was observed at.
+
+**Authority epoch** (`authority_epoch`) — which protocol era (ENSv1 or ENSv2)
+is authoritative for a given name at a given time.
+
+**Backfill coverage fact** — a durable record that one completed backfill job
+fetched all matching logs for one (source family, address) pair over one block
+interval. Checkpoint promotion composes these facts into gap-free proof instead
+of re-deriving coverage from job definitions.
+
+**Canonicality** — whether a stored fact belongs to the chain branch currently
+accepted as real, and how final that acceptance is. States: `observed` (seen,
+unproven), `canonical`, `safe`, `finalized` (standard Ethereum finality tags),
+and `orphaned` (on a losing branch; kept for audit, excluded from reads).
+
+**Capability promotion** ("graduation") — the deliberate, doc-first act of
+moving a capability from `shadow`/`unsupported` to publicly `supported`.
+Nothing else promotes a capability: backfill completion, conformance passes,
+and manifest presence are necessary evidence, never the promotion itself.
+
+**Checkpoint promotion** — advancing a chain's stored canonical/safe/finalized
+markers after proving block lineage and fetch coverage. Distinct from
+capability promotion above; avoid bare "promotion" where the two could be
+confused.
+
+**Claim anchor** — the `primary_names_current` row for an exact
+(address, coin type, namespace) tuple. It is the only key primary-name claim
+lookups and cache invalidation may use; presence of the row never widens what
+claim sources are trusted.
+
+**Closure** — everything an adapter's internal state depends on. A *closure
+boundary* is the earliest block from which replaying a stateful adapter is
+deterministic; *full-closure replay* replays all participating source families
+together from that boundary. Batching and paging are physical I/O details and
+never create closure boundaries.
+
+**Companion rows** — the same-transaction context retained alongside a selected
+log: sibling logs, the transaction, its receipt, and the emitter's code
+observation. Replay must see the same companions live intake saw, so checkpoint
+promotion verifies them ("companion checks").
+
+**Consumer-replacement claim** — the assertion that bigname can replace a
+specific consumer's existing indexer for a capability. It requires documented
+routes, fixtures, and conformance evidence, and is never implied by coverage,
+backfill, or manifest state.
+
+**Contract instance** (`contract_instance_id`) — the stable identity of a
+watched contract. Addresses are time-ranged attributes of an instance, a proxy
+keeps its instance across implementation changes, and re-admitting an old
+address reuses its prior instance with a new active range.
+
+**Coverage frontier** (stored-lineage coverage frontier) — a saved,
+revision-checked proof of which watched block intervals already have complete
+log-fetch coverage, so checkpoint promotion re-verifies only new or changed
+intervals instead of all history. It proves fetch coverage only; lineage and
+fork checks still run per promotion.
+
+**Declared vs verified** — *declared* state is what indexed onchain events say;
+*verified* state is what actually executing resolution (e.g. through the ENS
+Universal Resolver) returns, persisted with a full execution trace. The two are
+never merged; `mode`/`source` selects which a route returns.
+
+**Deployment epoch** (`deployment_epoch`) — the manifest label naming which
+protocol deployment generation a source family belongs to (for example
+`ens_v2_sepolia_post_audit`), so facts from different deployments of the same
+protocol never mix silently.
+
+**Deployment profile** — the single manifest tree a runtime loads
+(`manifests/mainnet/` or `manifests/sepolia/`), which fixes its chains and
+admitted contracts. One runtime, one profile. "Profile" has four other meanings
+in this repo — see Resolver profile, Exact-name profile, the identity route's
+`profile=` parameter, and the `/v1/profiles/names/{name}` route; always qualify
+which one is meant.
+
+**Derivation kind** — the persisted string naming which adapter pipeline
+produced a normalized event (for example `ens_v1_unwrapped_authority`,
+`ens_v2_registry_resource_surface`, `raw_log_preimage_observation`). These are
+stored identifiers: define, never rename. "Unwrapped authority" is the ENSv1
+pipeline deriving ownership and control for names held directly in the registry
+or registrar — i.e. not held by the NameWrapper.
+
+**Discovery graph / discovery edge** — the time-versioned reachability graph
+(resolver, subregistry, parent, alias, proxy/implementation, migration,
+transport edges) that extends authority beyond directly declared contracts. A
+discovered contract is authoritative only while reachable from an active root.
+
+**Event-silent** — a contract that changes relevant state without emitting a
+usable event (for example a legacy reverse resolver whose `name` value changes
+with no log). Event-silent state must be observed by pinned calls or retained
+direct-call observations; it cannot be replayed from logs.
+
+**Exact-name profile** (`exact_name_profile`) — the ENSv2 capability flag that,
+when `supported` on the active Sepolia registrar manifest, makes declared
+exact-name reads authoritative for that deployment profile. It promotes nothing
+else.
+
+**Generation** (raw-log retention generation) — a per-chain counter incremented
+whenever raw-log staging rows are deleted or truncated. *Generation zero* means
+never destroyed: the only state in which "no stored row" proves "never
+happened". After any destructive change, absence claims require fresh
+generation-scoped backfill coverage.
+
+**Hash-pinned** — anchored to an exact block hash rather than a block number or
+`latest` tag, so a chain reorganization cannot silently change what was read.
+
+**Hydration** — a projection-owned repair pass that fills current-state values
+by making hash-pinned RPC calls (for example legacy reverse-resolver names or
+missing text values). Hydration writes only projection rows: no normalized
+events, no verified output, no execution traces.
+
+**Input revision** — a per-chain counter advanced by every semantic raw-log
+change (insert, payload/identity change, canonicality change). Caches record
+the revision they saw; a later revision touching consumed history invalidates
+them. Commit order, not timestamps or row ids, is the authority.
+
+**Latest-only** — semantics where only the current value is observable and
+history cannot be reconstructed reliably (for example event-silent reverse
+resolver state).
+
+**Lease** — (1) an ENS registrar registration with an expiry (standard ENS
+usage); (2) a worker's time-limited, reclaimable claim on a unit of work such
+as a backfill range or projection invalidation (standard distributed-systems
+usage). Context disambiguates; both senses are intentional.
+
+**Normalized event** — the append-only, adapter-produced record of one semantic
+protocol transition, carrying identity, provenance, chain position, and
+before/after state. The event stream, not raw logs, is what projections
+consume. Cross-reference: event sourcing.
+
+**Path class / support class** — the closed taxonomy of resolution shapes
+(direct, alias-only, wildcard-derived, transport-assisted) that decides which
+verified answers are publicly supported. A class is "frozen": fixed at
+admission and re-derived from stored inputs before any outcome persists as
+supported.
+
+**Preimage observation / label preimage** — learning the human-readable string
+behind a name or label hash, from an event, a retained name surface, or a
+rainbow-table import. Every preimage is proof-checked (normalize, re-hash,
+compare) and improves display only; it never creates ownership, resolver,
+record, or primary-name truth.
+
+**Projection** — a disposable read-model table rebuilt deterministically from
+canonical normalized events (standard event-sourcing usage). Only projection
+workers write projections, with the documented sidecar exception.
+
+**Raw facts** — the immutable stored record of what was observed on chain:
+selected logs, the minimal transaction/receipt fields needed to decode them,
+code-hash observations, and pinned call snapshots. Raw facts are never edited
+except by explicit, documented corrections.
+
+**Readable / read-safe** — a row whose canonicality is `canonical`, `safe`, or
+`finalized`. `observed` and `orphaned` rows are audit input only.
+
+**Resolver profile** — an explicit admission that a resolver implementation
+behaves like a known family (an ENS Labs PublicResolver generation, or the
+Basenames `L2Resolver`). Profile admission gates complete record coverage and
+event-to-call parity; unknown resolvers stay `pending` and expose only observed
+facts.
+
+**Resource** (backing resource, `resource_id`) — the authority object behind a
+name: a registry entry, registrar lease, wrapper position, or ENSv2 EAC
+resource. Permissions and control history key to the resource, never to the
+name string or token id.
+
+**Retained-history proof** — the ENSv2 tuple (retention generation,
+discovery-admission epoch, proven-through block) that authorizes treating
+stored root/registry history as complete for closure replay. Destroying raw
+logs clears it; recovery requires generation-scoped backfill coverage.
+
+**Rewind horizon** — the earliest chain position reorg repair might need to
+rewind to. Compaction and pruning must never delete data needed at or behind
+it.
+
+**Shadow** — (1) manifest rollout/capability value: facts and traces are
+written but general public reads are not enabled; (2) *shadow comparison*:
+running a new read surface in parallel with an existing one and diffing
+responses during a migration (the identity route's `profile=shadow`).
+
+**Sidecar** — a small companion table maintained by database triggers (the
+reverse-identity count and feed rows) that precomputes hot-path answers. A
+bounded, documented exception to the projection-worker-only write rule; never
+protocol truth. See ADR 0005.
+
+**Source family** — a named group of contracts on one chain that owns one slice
+of protocol authority (for example `ens_v1_registrar_l1`). The unit of manifest
+admission, capability ownership, replay coverage, and provenance attribution.
+
+**Surface (name surface)** — the public name string as an identity
+(`logical_name_id = namespace:normalized_name`), distinct from whatever
+authority currently backs it. A **surface binding** is the time-ranged record
+of which resource backed a surface when. Surfaces survive re-registration;
+resources rotate.
+
+**Token lineage** (`token_lineage_id`) — the continuity of tokenized ownership
+across token-id changes (for example ENSv2 token regeneration). It rotates only
+when authority moves to a different tokenized anchor, and a returning prior
+anchor reactivates its prior lineage.
+
+**Verified execution / execution trace** — running actual resolution calls and
+persisting a durable step-by-step audit record (entrypoint, calls, CCIP steps,
+proofs, result). Traces are permanent; only cache reusability is invalidated by
+reorgs or topology changes.
+
+**Walking skeleton** — the standard XP term for a minimal end-to-end path
+proving all layers connect. In this repo it names the first e2e scenario
+(`register_eth_name`); prefer "the first end-to-end scenario" in prose.
+
+**Watch plan / watched tuple** — the materialized set of
+(source family, address, active block range) targets derived from manifest
+roots plus active discovery edges. A *watched tuple* is one such entry; its
+*watched window* is the active block range. Addresses are derived watch
+targets, never the durable identity.

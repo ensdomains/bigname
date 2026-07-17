@@ -12,6 +12,7 @@ bigname is a versioned indexing and read API for ENS, ENSv2, and Basenames. The 
 
 - In docs, code comments, reviews, task writeups, plans, and agent output, describe the system in language that an engineer familiar with ENS and the project's stated scope can understand without first learning bigname-specific terminology.
 - Prefer standard ENS, Ethereum, and indexing terms over project-specific jargon. When a bigname-specific term is necessary, define it in plain language on first use and explain the behavior it represents.
+- `docs/glossary.md` is the canonical definition for each necessary bigname-specific term: link it on first use instead of re-defining or assuming the term, and add new coinages there in the same change that introduces them. Qualify the overloaded terms it flags (bare "promotion" and "profile" are ambiguous).
 
 ## Boundaries
 
