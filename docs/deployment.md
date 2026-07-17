@@ -1,5 +1,10 @@
 # Deployment
 
+Project-specific terms used below (checkpoint promotion, coverage frontier,
+watched tuple, companion checks, retention generation, admission epoch) are
+defined in the [glossary](glossary.md); "promotion" in this document always
+means checkpoint promotion, the chain-safety sense.
+
 The production container image contains the three runnable bigname binaries:
 
 - `bigname-api`
@@ -113,7 +118,8 @@ all replay markers and pending invalidations before undraining traffic.
 ### Stored-lineage coverage frontier upgrade
 
 Migration `20260716122000_stored_lineage_coverage_frontiers.sql` creates the
-durable stored-lineage coverage header and normalized requirement tables. It is
+durable stored-lineage [coverage frontier](glossary.md) header and normalized
+requirement tables. It is
 schema-only: it does not seed proof from a chain checkpoint, stored lineage,
 projection state, prior process memory, backfill job identity, or migration-time
 scan. Each upgraded chain therefore starts cold and publishes proof format
@@ -830,7 +836,8 @@ held advisory lock connection cannot starve the writer work.
    the `ratified_dropped_orphan_emitters` line, which must report
    exactly 3,939,502 legacy Basenames `ReverseRegistrar`
    `0x79ea96012eea67a83431f1701b3dff7e37f9e282` rows under
-   `2026-07-05 option A` for `ens_v1_reverse_claim` /
+   the 2026-07-05 ratified deliberate drop (recorded as `2026-07-05 option A`; see
+   storage.md § corrections) for `ens_v1_reverse_claim` /
    `basenames_base_primary` with `ReverseChanged` / `BaseReverseClaimed`,
    coin type `60`, and blocks `17575714..46903158`
    (upstream: .refs/basenames/src/L2/ReverseRegistrar.sol:L12 @ basenames@1809bbc)
@@ -975,7 +982,8 @@ held advisory lock connection cannot starve the writer work.
    normal cursor refresh cannot widen this correction replay below the delete
    boundary on the reviewed deployment. The command also clears any stale
    `post_replay_live_adapter_backlog` cursor for the same Base deployment. The
-   2026-07-05 option A dropped legacy Basenames reverse-registrar rows are not
+   legacy Basenames reverse-registrar rows dropped under the 2026-07-05
+ratification ("option A") are not
    expected to return during this replay; after the following projection rebuild,
    `primary_names_current` should reflect only the ENS Base `L2ReverseRegistrar`
    declared primary-name authority for Base
