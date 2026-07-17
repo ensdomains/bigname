@@ -17,8 +17,10 @@ identity route's `profile=` parameter, or the `/v1/profiles/...` route).
 this pass" as "no longer true" and deactivate stale state. The license is
 scope-relative: a replay may infer absence only where it saw complete retained
 history for the scope it covers — the whole source, or a bounded target such as
-one resolver's addresses. Without that completeness (a block-limited pass, or
-any pass over destructively rotated history), a replay updates only what it
+one resolver's addresses. Destructive retention rotation revokes the license
+until gap-free, generation-current backfill coverage re-establishes
+completeness over the scope. Without completeness — a block-limited pass, or a
+pass over rotated history before that recovery — a replay updates only what it
 touches and never infers deletion from omission.
 
 **Admission** — the act of authorizing an input. A contract, event, or data
@@ -35,25 +37,25 @@ and fails closed if the epoch moved, instead of acting on stale authority.
 Cross-reference: optimistic concurrency, fencing token.
 
 **Anchor** — the concrete object a stable identity is pinned to. An *authority
-anchor* is the registry entry, registrar lease (upstream:
-.refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L10 @
-ens_v1@91c966f), wrapper position (upstream:
-.refs/ens_v1/contracts/wrapper/INameWrapper.sol:L27 @ ens_v1@91c966f), or ENSv2
-resource (upstream:
-.refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L38 @
-ens_v2@48b3e2d) behind a `resource_id`; the id survives changes within one
-anchor and rotates when authority moves to a different anchor. An *observation
-anchor* is the exact chain/block identity a stored row was observed at.
+anchor* is the registry entry, registrar lease
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L10 @ ens_v1@91c966f),
+wrapper position
+(upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L27 @ ens_v1@91c966f),
+or ENSv2 resource
+(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L38 @ ens_v2@48b3e2d)
+behind a `resource_id`; the id survives changes within one anchor and rotates
+when authority moves to a different anchor. An *observation anchor* is the
+exact chain/block identity a stored row was observed at.
 
 **Authority epoch** (`authority_epoch`) — which protocol authority regime
 backs a name at a given time, scoped per namespace: for `ens` names the value
 is `ens_v1` or `ens_v2` per name and time, while `basenames` authority lives in
-the registry/registrar/resolver system on Base (upstream:
-.refs/basenames/README.md:L70 @ basenames@1809bbc) and has no ENSv1/ENSv2 era
-split. The related `AuthorityEpochChanged` normalized event is broader than an
-era flip: it records every move of a name's authority anchor (registry-,
-registrar-, or wrapper-held), so most such rows — millions on Basenames alone —
-mark within-era anchor transitions.
+the registry/registrar/resolver system on Base
+(upstream: .refs/basenames/README.md:L70 @ basenames@1809bbc)
+and has no ENSv1/ENSv2 era split. The related `AuthorityEpochChanged`
+normalized event is broader than an era flip: it records every move of a
+name's authority anchor (registry-, registrar-, or wrapper-held), so most such
+rows — millions on Basenames alone — mark within-era anchor transitions.
 
 **Backfill coverage fact** — a durable record that one completed backfill job
 fetched all matching logs over one block interval, at one of two scopes: one
@@ -148,11 +150,13 @@ active root.
 
 **Event-silent** — a contract that changes relevant state without emitting a
 usable event (for example a legacy reverse resolver whose `name` value changes
-with no log (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L311 @
-ensnode@2017ae6) (upstream:
-.refs/ensnode/packages/datasources/src/mainnet.ts:L316 @ ensnode@2017ae6)).
-Event-silent state must be observed by pinned calls or retained direct-call
-observations; it cannot be replayed from logs.
+with no log
+(upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L311 @ ensnode@2017ae6)
+(upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L316 @ ensnode@2017ae6)).
+Event-silent state must be observed by pinned calls; it cannot be replayed
+from logs. Retained direct-call observations do not carry the changed state —
+the stored transaction shape does not decode which node was touched — they
+only trigger hydration to recheck.
 
 **Exact-name profile** (`exact_name_profile`) — the per-manifest capability
 flag that, when `supported`, makes declared exact-name reads authoritative for
@@ -173,7 +177,10 @@ absence claims require fresh generation-scoped backfill coverage.
 **Hydration** — a projection-owned repair pass that fills current-state values
 by making hash-pinned RPC calls (for example legacy reverse-resolver names or
 missing text values). Hydration writes only projection rows: no normalized
-events, no verified output, no execution traces.
+events, no verified output, no execution traces. A hydration write or delete
+that changes a primary-name claim also invalidates the matching persisted
+verified answer, so verified readback re-verifies instead of serving a stale
+outcome.
 
 **Input revision** — a per-chain counter advanced by every semantic raw-log
 change (insert, payload/identity change, canonicality change, delete,
@@ -186,12 +193,11 @@ history cannot be reconstructed reliably (for example event-silent reverse
 resolver state).
 
 **Lease** — (1) an ENS registrar registration with an expiry (standard ENS
-usage) (upstream:
-.refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L10 @
-ens_v1@91c966f); (2) a worker's time-limited, reclaimable claim on a unit of
-work such as a backfill range or projection invalidation (standard
-distributed-systems usage). Context disambiguates; both senses are
-intentional.
+usage)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L10 @ ens_v1@91c966f);
+(2) a worker's time-limited, reclaimable claim on a unit of work such as a
+backfill range or projection invalidation (standard distributed-systems
+usage). Context disambiguates; both senses are intentional.
 
 **Normalized event** — the append-only, adapter-produced record of one semantic
 protocol transition, carrying identity, provenance, chain position, and
@@ -218,10 +224,12 @@ resource-keyed rows additionally require the event's resource to resolve to a
 canonical identity row at rebuild time. Only projection workers write
 projections, with the documented sidecar exception.
 
-**Raw facts** — the immutable stored record of what was observed on chain:
-selected logs, the minimal transaction/receipt fields needed to decode them,
-code-hash observations, and pinned call snapshots. Raw facts are never edited
-except by explicit, documented corrections.
+**Raw facts** — the stored record of what was observed on chain: selected
+logs, the minimal transaction/receipt fields needed to decode them, code-hash
+observations, and pinned call snapshots. Their content is append-only, edited
+only by explicit, documented corrections; `canonicality_state` is mutable
+operational state — ordinary reorg repair reclassifies a losing branch's rows
+as `orphaned` without touching content.
 
 **Readable / read-safe** — a row whose canonicality is `canonical`, `safe`, or
 `finalized`. `observed` and `orphaned` rows are excluded from public reads and
@@ -236,10 +244,10 @@ facts.
 
 **Resource** (backing resource, `resource_id`) — the authority object behind a
 name: a registry entry, registrar lease, wrapper position, or ENSv2 EAC
-resource (upstream:
-.refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L38 @
-ens_v2@48b3e2d). Permissions and control history key to the resource, never to
-the name string or token id.
+resource
+(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L38 @ ens_v2@48b3e2d).
+Permissions and control history key to the resource, never to the name string
+or token id.
 
 **Retained-history proof** — the ENSv2 tuple (retention generation,
 discovery-admission epoch, proven-through block) that authorizes treating
@@ -273,16 +281,21 @@ resources rotate.
 **Token lineage** (`token_lineage_id`) — the continuity of tokenized ownership
 across token-id changes (for example ENSv2 token regeneration, where a role
 change burns and mints a replacement token while leaving the resource unchanged
-(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L82
-@ ens_v2@48b3e2d) (upstream:
-.refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L528 @
-ens_v2@48b3e2d)). It rotates only when authority moves to a different tokenized
-anchor, and a returning prior anchor reactivates its prior lineage.
+(upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L82 @ ens_v2@48b3e2d)
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L528 @ ens_v2@48b3e2d)).
+It rotates only when authority moves to a different tokenized anchor. A return
+to the exact prior tokenized anchor — for example unwrapping back to a
+still-live lease — resumes that anchor's prior lineage, but not after release
+or across mismatched holder/controller authority: a name that fully lapses and
+is re-registered mints a new lineage.
 
 **Verified execution / execution trace** — running actual resolution calls and
 persisting a durable step-by-step audit record (entrypoint, calls, CCIP steps,
-proofs, result). Traces are permanent; only cache reusability is invalidated by
-reorgs or topology changes.
+proofs, result). Traces are permanent; only cache reusability expires. A
+persisted outcome is reused only while its request tuple, selected chain
+positions, manifest versions, topology boundary, and record boundary still
+match; reorgs and manifest, resolver, topology, record, or primary-claim
+changes evict affected entries.
 
 **Walking skeleton** — the standard XP term for a minimal end-to-end path
 proving all layers connect. In this repo it names the first e2e scenario
