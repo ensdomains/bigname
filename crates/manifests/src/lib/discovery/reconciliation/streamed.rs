@@ -460,19 +460,30 @@ fn default_max_deactivation_candidates(active_edge_count: usize) -> usize {
     CANDIDATE_LOAD_CAP_FLOOR.max(active_edge_count / 10)
 }
 
+/// Thin, untested-by-design environment read; every sibling test that
+/// exercises guard behavior goes through the explicit options override, so
+/// nothing in this binary mutates the process-global variable. The parsing
+/// itself is the pure function below.
 fn max_deactivations_override_from_env() -> Result<Option<usize>> {
     match std::env::var(DISCOVERY_FULL_RECONCILE_MAX_DEACTIVATIONS_ENV) {
-        Ok(value) => value
+        Ok(value) => parse_max_deactivations_override(Some(&value)),
+        Err(std::env::VarError::NotPresent) => parse_max_deactivations_override(None),
+        Err(error) => Err(error).context(format!(
+            "failed to read {DISCOVERY_FULL_RECONCILE_MAX_DEACTIVATIONS_ENV}"
+        )),
+    }
+}
+
+fn parse_max_deactivations_override(value: Option<&str>) -> Result<Option<usize>> {
+    match value {
+        None => Ok(None),
+        Some(value) => value
             .trim()
             .parse::<usize>()
             .map(Some)
             .with_context(|| format!(
                 "failed to parse {DISCOVERY_FULL_RECONCILE_MAX_DEACTIVATIONS_ENV} as a deactivation count: {value:?}"
             )),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(error) => Err(error).context(format!(
-            "failed to read {DISCOVERY_FULL_RECONCILE_MAX_DEACTIVATIONS_ENV}"
-        )),
     }
 }
 
@@ -495,27 +506,20 @@ mod tests {
     }
 
     #[test]
-    fn deactivation_guard_env_override_parses_or_rejects() {
-        // One test drives every state of the process-global variable so
-        // parallel test threads never race on it.
+    fn deactivation_guard_override_parses_or_rejects() {
         assert_eq!(
-            max_deactivations_override_from_env().expect("unset env must read as no override"),
+            parse_max_deactivations_override(None).expect("no value must read as no override"),
             None
         );
-        // SAFETY: this test is the only reader/writer of the variable, and
-        // it exercises all transitions itself.
-        unsafe { std::env::set_var(DISCOVERY_FULL_RECONCILE_MAX_DEACTIVATIONS_ENV, "123456") };
         assert_eq!(
-            max_deactivations_override_from_env().expect("numeric override must parse"),
+            parse_max_deactivations_override(Some("123456")).expect("numeric override must parse"),
             Some(123_456)
         );
-        unsafe {
-            std::env::set_var(
-                DISCOVERY_FULL_RECONCILE_MAX_DEACTIVATIONS_ENV,
-                "not-a-count",
-            )
-        };
-        assert!(max_deactivations_override_from_env().is_err());
-        unsafe { std::env::remove_var(DISCOVERY_FULL_RECONCILE_MAX_DEACTIVATIONS_ENV) };
+        assert_eq!(
+            parse_max_deactivations_override(Some(" 42 "))
+                .expect("surrounding whitespace is trimmed"),
+            Some(42)
+        );
+        assert!(parse_max_deactivations_override(Some("not-a-count")).is_err());
     }
 }
