@@ -1423,6 +1423,33 @@ async fn checkpointed_subregistry_resume_restores_migrated_nodes_without_staged_
 }
 
 #[tokio::test]
+async fn checkpointed_replay_rejects_undersized_connection_pools() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new_with_max_connections(2).await?;
+
+    let checkpoint = ReplayAdapterCheckpointContext {
+        deployment_profile: "test".to_owned(),
+        cursor_kind: "checkpointed_subregistry_undersized_pool".to_owned(),
+        range_start_block_number: 1,
+        target_block_number: 42,
+    };
+    let error = sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit(
+        database.pool(),
+        "ethereum-mainnet",
+        &checkpoint,
+        1,
+    )
+    .await
+    .expect_err("a two-connection pool must fail fast instead of deadlocking");
+    assert!(
+        error.to_string().contains("pooled connections"),
+        "unexpected error: {error:#}"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn checkpointed_replay_with_incomplete_stream_refuses_to_reconcile() -> Result<()> {
     let _permit = crate::acquire_test_db_permit().await;
     let test_dir = TestDir::new()?;
