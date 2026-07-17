@@ -264,6 +264,7 @@ pub(crate) async fn reconcile_discovery_observations_streamed_with_options(
         transaction.as_mut(),
         discovery_source,
         &deactivation_candidates,
+        options.mutation_batch_size,
         &mut retained_newer_edge_ids,
     )
     .await?;

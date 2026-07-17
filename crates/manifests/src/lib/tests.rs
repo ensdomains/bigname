@@ -9223,6 +9223,87 @@ async fn streamed_reconciliation_parity_retains_newer_successor_epoch() -> Resul
 }
 
 #[tokio::test]
+async fn streamed_reconciliation_parity_same_assignment_retention_across_batches() -> Result<()> {
+    // Three retained same-assignment epochs: the new observations repeat
+    // each assignment at later anchors, so every seeded edge is a
+    // deactivation candidate that chronology rule 3 must retain (and every
+    // desired edge is excluded from insertion by the same rule). With the
+    // harness's batch size of 2 the batched retention lookups span more
+    // than one chunk in both passes.
+    let seed_observations = vec![
+        streamed_parity_observation(
+            "k-eth",
+            STREAMED_PARITY_REGISTRY,
+            STREAMED_PARITY_OWNER_A,
+            "subregistry",
+            10,
+            0,
+            1,
+        ),
+        streamed_parity_observation(
+            "k-com",
+            STREAMED_PARITY_REGISTRY,
+            STREAMED_PARITY_OWNER_B,
+            "subregistry",
+            11,
+            0,
+            1,
+        ),
+        streamed_parity_observation(
+            "k-org",
+            STREAMED_PARITY_REGISTRY,
+            STREAMED_PARITY_OWNER_C,
+            "subregistry",
+            12,
+            0,
+            1,
+        ),
+    ];
+    let (summary, edges) = assert_streamed_reconciliation_parity(StreamedParityFixture {
+        seed_observation_sets: vec![seed_observations],
+        observations: vec![
+            streamed_parity_observation(
+                "k-eth",
+                STREAMED_PARITY_REGISTRY,
+                STREAMED_PARITY_OWNER_A,
+                "subregistry",
+                20,
+                0,
+                1,
+            ),
+            streamed_parity_observation(
+                "k-com",
+                STREAMED_PARITY_REGISTRY,
+                STREAMED_PARITY_OWNER_B,
+                "subregistry",
+                21,
+                0,
+                1,
+            ),
+            streamed_parity_observation(
+                "k-org",
+                STREAMED_PARITY_REGISTRY,
+                STREAMED_PARITY_OWNER_C,
+                "subregistry",
+                22,
+                0,
+                1,
+            ),
+        ],
+    })
+    .await?;
+
+    assert_eq!(summary.inserted_edge_count, 0);
+    assert_eq!(summary.deactivated_edge_count, 0);
+    assert_eq!(summary.active_edge_count, 3);
+    assert!(
+        edges.iter().all(|edge| edge.10 && edge.6 <= Some(12)),
+        "every retained earliest epoch stays active at its seeded anchor"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn streamed_reconcile_diffs_stored_edges_equal_to_their_specs() -> Result<()> {
     // Spec-equality proof: an edge inserted by `insert_reconciled_discovery_
     // edges` must diff as EQUAL to the spec that produced it, so re-running
