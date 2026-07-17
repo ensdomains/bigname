@@ -257,6 +257,16 @@ pub(super) async fn sync_ens_v1_subregistry_discovery_with_scope(
     let finalize_from_checkpoint = active_checkpoint
         .as_ref()
         .is_some_and(SubregistryReplayCheckpoint::stream_complete);
+    // An incomplete checkpoint stream must never feed any reconcile: falling
+    // through to the full-source in-memory path with an empty or partial
+    // assignment map would treat every unseen assignment as absent and
+    // deactivate the source's edges wholesale (e.g. when the registry
+    // manifest was superseded mid-replay and no active emitters remain).
+    ensure!(
+        active_checkpoint.is_none() || finalize_from_checkpoint,
+        "checkpointed ENSv1 registry replay for {chain} has an incomplete stream (no active \
+         registry emitters?); refusing to reconcile from a partial staged assignment set"
+    );
     if finalize_from_checkpoint {
         // Checkpoint mode never populates `latest_assignments`; release the
         // restored migrated-node guard state before the paged finalize.

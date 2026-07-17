@@ -1423,6 +1423,97 @@ async fn checkpointed_subregistry_resume_restores_migrated_nodes_without_staged_
 }
 
 #[tokio::test]
+async fn checkpointed_replay_with_incomplete_stream_refuses_to_reconcile() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+
+    let registry_address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+    test_dir.write_manifest("ens", "ens_v1_registry_l1", "v1", &manifest_contents(true))?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+    insert_raw_new_owner_log(
+        database.pool(),
+        "ethereum-mainnet",
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        42,
+        registry_address,
+        "0x00000000000000000000000000000000000000CC",
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    let seeded = sync_ens_v1_subregistry_discovery(database.pool(), "ethereum-mainnet").await?;
+    assert_eq!(seeded.active_edge_count, 1);
+
+    // The registry manifest is deprecated mid-replay: the checkpoint stream
+    // can no longer progress because no active emitters remain.
+    sqlx::query("UPDATE manifest_versions SET rollout_status = 'deprecated'")
+        .execute(database.pool())
+        .await?;
+    let checkpoint = ReplayAdapterCheckpointContext {
+        deployment_profile: "test".to_owned(),
+        cursor_kind: "checkpointed_subregistry_incomplete_stream".to_owned(),
+        range_start_block_number: 1,
+        target_block_number: 42,
+    };
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_replay_adapter_checkpoints (
+            deployment_profile,
+            chain_id,
+            cursor_kind,
+            adapter,
+            checkpoint_scope,
+            replay_start_block_number,
+            replay_target_block_number,
+            status,
+            state_payload
+        )
+        VALUES ($1, $2, $3, 'ens_v1_subregistry_discovery', 'full_closure', 1, 42, 'running', '{}'::JSONB)
+        "#,
+    )
+    .bind(&checkpoint.deployment_profile)
+    .bind("ethereum-mainnet")
+    .bind(&checkpoint.cursor_kind)
+    .execute(database.pool())
+    .await?;
+
+    let error = sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit(
+        database.pool(),
+        "ethereum-mainnet",
+        &checkpoint,
+        1,
+    )
+    .await
+    .expect_err("an incomplete checkpoint stream must never feed a reconcile");
+    assert!(
+        error.to_string().contains("incomplete stream"),
+        "unexpected error: {error:#}"
+    );
+
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE deactivated_at IS NULL"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "a refused reconcile must not mutate any discovery edge"
+    );
+    assert_eq!(
+        query_scalar::<_, String>(
+            "SELECT status FROM normalized_replay_adapter_checkpoints WHERE cursor_kind = $1"
+        )
+        .bind(&checkpoint.cursor_kind)
+        .fetch_one(database.pool())
+        .await?,
+        "running",
+        "the incomplete checkpoint row must survive for a later resume"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn basenames_finalized_new_owner_log_emits_basenames_subregistry_event_idempotently()
 -> Result<()> {
     let _permit = crate::acquire_test_db_permit().await;
