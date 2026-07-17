@@ -62,6 +62,7 @@ pub const DISCOVERY_FULL_RECONCILE_MAX_DEACTIVATIONS_ENV: &str =
     "BIGNAME_INDEXER_DISCOVERY_FULL_RECONCILE_MAX_DEACTIVATIONS";
 
 const DEACTIVATION_GUARD_FLOOR: usize = 10_000;
+const CANDIDATE_LOAD_CAP_FLOOR: usize = 100_000;
 const DEFAULT_OBSERVATION_PAGE_LIMIT: i64 = 10_000;
 const DEFAULT_MUTATION_BATCH_SIZE: usize = 1_000;
 
@@ -85,9 +86,16 @@ pub trait DiscoveryObservationPageSource {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct StreamedDiscoveryReconciliationOptions {
-    /// Replaces the default `max(10_000, 1% of active edges)` deactivation
-    /// guard bound when set.
+    /// Replaces the default `max(10_000, 1% of active edges)` precise
+    /// deactivation guard bound when set, and raises the coarse candidate
+    /// load cap to at least the same value so an operator override stays
+    /// effective end to end.
     pub(crate) max_deactivations_override: Option<usize>,
+    /// Replaces the default `max(100_000, 10% of active edges)` coarse cap
+    /// on how many deactivation candidates may be materialized in memory.
+    /// Test hook; production overrides go through the env-driven precise
+    /// bound, which raises this cap alongside it.
+    pub(crate) coarse_deactivation_cap_override: Option<usize>,
     pub(crate) observation_page_limit: i64,
     pub(crate) mutation_batch_size: usize,
 }
@@ -96,6 +104,7 @@ impl Default for StreamedDiscoveryReconciliationOptions {
     fn default() -> Self {
         Self {
             max_deactivations_override: None,
+            coarse_deactivation_cap_override: None,
             observation_page_limit: DEFAULT_OBSERVATION_PAGE_LIMIT,
             mutation_batch_size: DEFAULT_MUTATION_BATCH_SIZE,
         }
@@ -113,11 +122,14 @@ impl Default for StreamedDiscoveryReconciliationOptions {
 ///   caller (the full-closure replay finalize) ignores it, and returning it
 ///   would reintroduce an observation-scale allocation.
 ///   `admitted_edge_count` is still exact.
-/// - A deliberate safety guard aborts before mutating when the computed
-///   deactivation diff exceeds `max(10_000, 1%)` of the source's active
-///   edges (override via `BIGNAME_INDEXER_DISCOVERY_FULL_RECONCILE_MAX_
-///   DEACTIVATIONS`): a full-closure finalize after a verified rederive
-///   must be a near-no-op, and a mass deactivation indicates spec drift.
+/// - A deliberate two-level safety guard aborts before mutating: a coarse
+///   candidate load cap of `max(100_000, 10%)` of the source's active edges
+///   bounds the in-memory diff materialization, and the precise threshold
+///   of `max(10_000, 1%)` applies to the post-chronology deactivation set
+///   (override via `BIGNAME_INDEXER_DISCOVERY_FULL_RECONCILE_MAX_
+///   DEACTIVATIONS`, which raises both): a full-closure finalize after a
+///   verified rederive must be a near-no-op, and a mass deactivation
+///   indicates spec drift.
 pub async fn reconcile_discovery_observations_streamed(
     pool: &PgPool,
     discovery_source: &str,
@@ -172,7 +184,7 @@ pub(crate) async fn reconcile_discovery_observations_streamed_with_options(
         load_active_reconciled_discovery_edge_count(transaction.as_mut(), discovery_source).await?;
     let desired_edge_count =
         count_temp_rows(transaction.as_mut(), "reconcile_desired_edges").await?;
-    tracing::warn!(
+    tracing::info!(
         discovery_source,
         staged_observation_count = staged.staged_observation_count,
         desired_edge_count,
@@ -181,16 +193,24 @@ pub(crate) async fn reconcile_discovery_observations_streamed_with_options(
         insert_candidate_count,
         "streamed discovery reconciliation diff computed"
     );
-    let max_deactivations = options
-        .max_deactivations_override
-        .unwrap_or_else(|| default_max_deactivations(active_edge_count_before));
-    if deactivation_candidate_count > max_deactivations {
+    // Coarse memory cap: candidates are materialized in memory below, so a
+    // spec-drift flood must abort on the SQL count before anything is
+    // loaded. Chronology-retained candidates are excluded from deactivation
+    // only after loading, so the precise fail-closed threshold is applied
+    // separately, right before mutating.
+    let max_deactivation_candidates =
+        options.coarse_deactivation_cap_override.unwrap_or_else(|| {
+            default_max_deactivation_candidates(active_edge_count_before)
+                .max(options.max_deactivations_override.unwrap_or(0))
+        });
+    if deactivation_candidate_count > max_deactivation_candidates {
         bail!(
-            "streamed discovery reconciliation for {discovery_source} would deactivate \
-             {deactivation_candidate_count} of {active_edge_count_before} active edges, over the \
-             {max_deactivations} guard; a verified full-closure replay must be a near-no-op, so \
-             this indicates spec drift — override via {DISCOVERY_FULL_RECONCILE_MAX_DEACTIVATIONS_ENV} \
-             only after confirming the diff is intended"
+            "streamed discovery reconciliation for {discovery_source} computed \
+             {deactivation_candidate_count} deactivation candidates against \
+             {active_edge_count_before} active edges, over the {max_deactivation_candidates} \
+             candidate load cap; refusing to materialize the diff — this indicates spec drift, \
+             raise {DISCOVERY_FULL_RECONCILE_MAX_DEACTIVATIONS_ENV} only after confirming the \
+             diff is intended"
         );
     }
 
@@ -258,6 +278,43 @@ pub(crate) async fn reconcile_discovery_observations_streamed_with_options(
         &observations_by_key,
         &direct_terminal_states_by_key,
     )?;
+
+    // Precise fail-closed guard on the post-chronology deactivation set:
+    // candidates the chronology rules retain are not deactivations and must
+    // not trip it. A verified full-closure replay finalize is a near-no-op,
+    // so a mass deactivation here indicates spec drift.
+    let planned_deactivation_count = deactivation_candidates
+        .iter()
+        .filter(|candidate| !retained_newer_edge_ids.contains(&candidate.discovery_edge_id))
+        .count();
+    let max_deactivations = options
+        .max_deactivations_override
+        .unwrap_or_else(|| default_max_deactivations(active_edge_count_before));
+    if planned_deactivation_count > max_deactivations {
+        tracing::warn!(
+            discovery_source,
+            planned_deactivation_count,
+            active_edge_count = active_edge_count_before,
+            max_deactivations,
+            "streamed discovery reconciliation aborting on the deactivation guard"
+        );
+        bail!(
+            "streamed discovery reconciliation for {discovery_source} would deactivate \
+             {planned_deactivation_count} of {active_edge_count_before} active edges, over the \
+             {max_deactivations} guard; a verified full-closure replay must be a near-no-op, so \
+             this indicates spec drift — override via {DISCOVERY_FULL_RECONCILE_MAX_DEACTIVATIONS_ENV} \
+             only after confirming the diff is intended"
+        );
+    }
+    if planned_deactivation_count > 0 && planned_deactivation_count * 2 >= max_deactivations {
+        tracing::warn!(
+            discovery_source,
+            planned_deactivation_count,
+            active_edge_count = active_edge_count_before,
+            max_deactivations,
+            "streamed discovery reconciliation deactivation diff is approaching the guard"
+        );
+    }
 
     let mut deactivated_edge_count = 0;
     let mut mutated_chains = BTreeSet::new();
@@ -361,11 +418,20 @@ pub(crate) async fn reconcile_discovery_observations_streamed_with_options(
     })
 }
 
-/// Default deactivation guard bound: a verified full-closure finalize must
-/// be a near-no-op, so anything beyond `max(10_000, 1%)` of the source's
-/// active edges aborts instead of silently rewriting the source.
+/// Default precise deactivation guard bound: a verified full-closure
+/// finalize must be a near-no-op, so anything beyond `max(10_000, 1%)` of
+/// the source's active edges aborts instead of silently rewriting the
+/// source.
 fn default_max_deactivations(active_edge_count: usize) -> usize {
     DEACTIVATION_GUARD_FLOOR.max(active_edge_count / 100)
+}
+
+/// Default coarse cap on how many deactivation candidates may be loaded
+/// into memory for chronology and cascade resolution: `max(100_000, 10%)`
+/// of the source's active edges bounds the only diff-sized allocation the
+/// streamed reconcile makes.
+fn default_max_deactivation_candidates(active_edge_count: usize) -> usize {
+    CANDIDATE_LOAD_CAP_FLOOR.max(active_edge_count / 10)
 }
 
 fn max_deactivations_override_from_env() -> Result<Option<usize>> {
@@ -393,6 +459,13 @@ mod tests {
         assert_eq!(default_max_deactivations(0), 10_000);
         assert_eq!(default_max_deactivations(500_000), 10_000);
         assert_eq!(default_max_deactivations(7_620_084), 76_200);
+    }
+
+    #[test]
+    fn default_candidate_load_cap_uses_floor_and_percentage() {
+        assert_eq!(default_max_deactivation_candidates(0), 100_000);
+        assert_eq!(default_max_deactivation_candidates(500_000), 100_000);
+        assert_eq!(default_max_deactivation_candidates(7_620_084), 762_008);
     }
 
     #[test]

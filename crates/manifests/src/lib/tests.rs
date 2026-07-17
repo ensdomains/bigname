@@ -8796,6 +8796,7 @@ async fn assert_streamed_reconciliation_parity(
         &page_source,
         StreamedDiscoveryReconciliationOptions {
             max_deactivations_override: None,
+            coarse_deactivation_cap_override: None,
             observation_page_limit: 2,
             mutation_batch_size: 2,
         },
@@ -9334,6 +9335,7 @@ async fn streamed_reconcile_guard_aborts_deactivation_floods_unless_overridden()
         &empty_source,
         StreamedDiscoveryReconciliationOptions {
             max_deactivations_override: Some(2),
+            coarse_deactivation_cap_override: None,
             observation_page_limit: 2,
             mutation_batch_size: 2,
         },
@@ -9362,6 +9364,7 @@ async fn streamed_reconcile_guard_aborts_deactivation_floods_unless_overridden()
         &empty_source,
         StreamedDiscoveryReconciliationOptions {
             max_deactivations_override: Some(3),
+            coarse_deactivation_cap_override: None,
             observation_page_limit: 2,
             mutation_batch_size: 2,
         },
@@ -9369,6 +9372,135 @@ async fn streamed_reconcile_guard_aborts_deactivation_floods_unless_overridden()
     .await?;
     assert_eq!(summary.deactivated_edge_count, 3);
     assert_eq!(summary.active_edge_count, 0);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn streamed_reconcile_guard_ignores_chronology_retained_candidates() -> Result<()> {
+    // The retained set holds a newer epoch for the observation key: the
+    // older desired assignment closes as history and the newer edge stays
+    // active. That candidate is chronology-retained, not a deactivation, so
+    // even a zero-deactivation precise guard must pass.
+    let fixture = StreamedParityFixture {
+        seed_observation_sets: vec![vec![streamed_parity_observation(
+            "k-eth",
+            STREAMED_PARITY_REGISTRY,
+            STREAMED_PARITY_OWNER_A,
+            "subregistry",
+            20,
+            0,
+            1,
+        )]],
+        observations: vec![streamed_parity_observation(
+            "k-eth",
+            STREAMED_PARITY_REGISTRY,
+            STREAMED_PARITY_OWNER_B,
+            "subregistry",
+            10,
+            0,
+            1,
+        )],
+    };
+    let database = setup_streamed_parity_database(&fixture).await?;
+
+    let page_source = VecDiscoveryObservationPageSource::new(&fixture.observations, 2);
+    let summary = reconcile_discovery_observations_streamed_with_options(
+        database.pool(),
+        STREAMED_PARITY_SOURCE,
+        &page_source,
+        StreamedDiscoveryReconciliationOptions {
+            max_deactivations_override: Some(0),
+            coarse_deactivation_cap_override: None,
+            observation_page_limit: 2,
+            mutation_batch_size: 2,
+        },
+    )
+    .await?;
+    assert_eq!(summary.deactivated_edge_count, 0);
+    assert_eq!(
+        summary.inserted_edge_count, 1,
+        "the older epoch still materializes as a closed historical edge"
+    );
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE discovery_source = $1 AND deactivated_at IS NULL"
+        )
+        .bind(STREAMED_PARITY_SOURCE)
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "the chronology-retained newer epoch stays active"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn streamed_reconcile_coarse_cap_aborts_before_loading_candidates() -> Result<()> {
+    let seed_observations = vec![
+        streamed_parity_observation(
+            "k-eth",
+            STREAMED_PARITY_REGISTRY,
+            STREAMED_PARITY_OWNER_A,
+            "subregistry",
+            10,
+            0,
+            1,
+        ),
+        streamed_parity_observation(
+            "k-com",
+            STREAMED_PARITY_REGISTRY,
+            STREAMED_PARITY_OWNER_B,
+            "subregistry",
+            11,
+            0,
+            1,
+        ),
+        streamed_parity_observation(
+            "k-org",
+            STREAMED_PARITY_REGISTRY,
+            STREAMED_PARITY_OWNER_C,
+            "subregistry",
+            12,
+            0,
+            1,
+        ),
+    ];
+    let fixture = StreamedParityFixture {
+        seed_observation_sets: vec![seed_observations],
+        observations: Vec::new(),
+    };
+    let database = setup_streamed_parity_database(&fixture).await?;
+
+    let empty_source = VecDiscoveryObservationPageSource::new(&[], 2);
+    let coarse_error = reconcile_discovery_observations_streamed_with_options(
+        database.pool(),
+        STREAMED_PARITY_SOURCE,
+        &empty_source,
+        StreamedDiscoveryReconciliationOptions {
+            max_deactivations_override: None,
+            coarse_deactivation_cap_override: Some(2),
+            observation_page_limit: 2,
+            mutation_batch_size: 2,
+        },
+    )
+    .await
+    .expect_err("a candidate flood over the coarse cap must abort before loading");
+    assert!(
+        coarse_error.to_string().contains("candidate load cap"),
+        "unexpected coarse cap error: {coarse_error:#}"
+    );
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE discovery_source = $1 AND deactivated_at IS NULL"
+        )
+        .bind(STREAMED_PARITY_SOURCE)
+        .fetch_one(database.pool())
+        .await?,
+        3,
+        "an aborted reconcile must roll back without mutating edges"
+    );
 
     database.cleanup().await
 }
