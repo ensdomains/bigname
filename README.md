@@ -54,7 +54,7 @@ See [`docs/deployment.md`](docs/deployment.md) and [`docs/production.md`](docs/p
 
 ## Reading the docs
 
-Start with [`docs/architecture.md`](docs/architecture.md) for the model, then dive into the area you care about:
+Start with [`docs/architecture.md`](docs/architecture.md) for the model — with [`docs/glossary.md`](docs/glossary.md) beside it for any project-specific term — then dive into the area you care about:
 
 - [`docs/api-v1.md`](docs/api-v1.md) — the public read contract; per-route reference in [`docs/api-v1-routes.md`](docs/api-v1-routes.md)
 - [`docs/storage.md`](docs/storage.md) — schema and write ownership
