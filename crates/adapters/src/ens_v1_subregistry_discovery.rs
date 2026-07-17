@@ -151,9 +151,13 @@ pub(super) async fn sync_ens_v1_subregistry_discovery_with_scope(
             return Ok((summary, false));
         }
         if !active_checkpoint.stream_complete() {
-            let staged = active_checkpoint.load_staged_state(pool).await?;
-            latest_assignments = staged.latest_assignments;
-            migrated_registry_nodes = staged.migrated_registry_nodes;
+            // Staged assignments stay in the database: the checkpointed
+            // stream only appends page-local changes and the finalize path
+            // reads them back in pages. Only the migrated-node guard state
+            // must be resident while streaming (#168).
+            migrated_registry_nodes = active_checkpoint
+                .load_staged_migrated_registry_nodes(pool)
+                .await?;
         }
         scanned_log_count = active_checkpoint.scanned_log_count();
         matched_log_count = active_checkpoint.matched_log_count();
@@ -171,7 +175,6 @@ pub(super) async fn sync_ens_v1_subregistry_discovery_with_scope(
                     current_registry.as_ref(),
                     checkpoint,
                     checkpoint_page_limit,
-                    &mut latest_assignments,
                     &mut migrated_registry_nodes,
                 )
                 .await?;
@@ -258,7 +261,8 @@ pub(super) async fn sync_ens_v1_subregistry_discovery_with_scope(
         .as_ref()
         .is_some_and(SubregistryReplayCheckpoint::stream_complete);
     if finalize_from_checkpoint {
-        drop(std::mem::take(&mut latest_assignments));
+        // Checkpoint mode never populates `latest_assignments`; release the
+        // restored migrated-node guard state before the paged finalize.
         drop(std::mem::replace(
             &mut migrated_registry_nodes,
             MigratedRegistryNodes::empty(),
@@ -453,7 +457,6 @@ async fn sync_checkpointed_registry_raw_logs(
     current_registry: Option<&loader::ActiveEmitter>,
     checkpoint: &mut SubregistryReplayCheckpoint,
     checkpoint_page_limit: i64,
-    latest_assignments: &mut BTreeMap<String, assignment::ObservedRegistryAssignment>,
     migrated_registry_nodes: &mut MigratedRegistryNodes,
 ) -> Result<(usize, usize)> {
     if checkpoint.stream_complete() {
@@ -484,22 +487,25 @@ async fn sync_checkpointed_registry_raw_logs(
             break;
         };
 
-        let mut changed_assignment_keys = Vec::<String>::new();
+        // Page-local latest assignments: pages are processed in stream order
+        // and `save_progress` upserts each page's changed keys, so
+        // last-write-wins across pages is preserved in the staged rows while
+        // resident memory stays bounded by one page (#168). Only the
+        // migrated-node guard state accumulates across pages.
+        let mut page_assignments =
+            BTreeMap::<String, assignment::ObservedRegistryAssignment>::new();
         let mut migrated_nodes = Vec::<String>::new();
         for raw_log in &page.raw_logs {
             let applied = apply_registry_raw_log(
                 raw_log,
                 chain,
                 current_registry,
-                latest_assignments,
+                &mut page_assignments,
                 migrated_registry_nodes,
             )?;
             scanned_log_count += 1;
             if applied.matched {
                 matched_log_count += 1;
-            }
-            if let Some(assignment_key) = applied.assignment_key {
-                changed_assignment_keys.push(assignment_key);
             }
             if let Some(migrated_node) = applied.migrated_node {
                 migrated_nodes.push(migrated_node);
@@ -512,8 +518,7 @@ async fn sync_checkpointed_registry_raw_logs(
                 &last_position,
                 scanned_log_count,
                 matched_log_count,
-                latest_assignments,
-                &changed_assignment_keys,
+                &page_assignments,
                 &migrated_nodes,
                 migrated_registry_nodes.delta_nodes().count(),
             )
@@ -551,7 +556,6 @@ fn apply_registry_raw_logs(
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct AppliedRegistryRawLog {
     matched: bool,
-    assignment_key: Option<String>,
     migrated_node: Option<String>,
 }
 
@@ -583,7 +587,7 @@ fn apply_registry_raw_log(
         "{}:{}",
         assignment.discovery_source, assignment.observation_key
     );
-    latest_assignments.insert(assignment_key.clone(), assignment);
+    latest_assignments.insert(assignment_key, assignment);
     let migrated_node = migration_guard.mark_migrated_node().and_then(|node| {
         migrated_registry_nodes
             .insert(node.to_owned())
@@ -591,7 +595,6 @@ fn apply_registry_raw_log(
     });
     Ok(AppliedRegistryRawLog {
         matched: true,
-        assignment_key: Some(assignment_key),
         migrated_node,
     })
 }
