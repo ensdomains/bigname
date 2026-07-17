@@ -836,7 +836,7 @@ held advisory lock connection cannot starve the writer work.
    the `ratified_dropped_orphan_emitters` line, which must report
    exactly 3,939,502 legacy Basenames `ReverseRegistrar`
    `0x79ea96012eea67a83431f1701b3dff7e37f9e282` rows under
-   the 2026-07-05 ratified deliberate drop (recorded as `option A`; see
+   the 2026-07-05 ratified deliberate drop (recorded as `2026-07-05 option A`; see
    storage.md § corrections) for `ens_v1_reverse_claim` /
    `basenames_base_primary` with `ReverseChanged` / `BaseReverseClaimed`,
    coin type `60`, and blocks `17575714..46903158`

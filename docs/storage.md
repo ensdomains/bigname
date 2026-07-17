@@ -174,8 +174,8 @@ The normalized-event scope is:
   - `ens_v1_registry_resolver_changed` or `ens_v1_subregistry_changed`:
     `source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')`
   - `ens_v1_unwrapped_authority` (the ENSv1 pipeline deriving ownership and
-    control for names held directly in the registry or registrar rather than
-    by the NameWrapper — see [glossary](glossary.md)): `source_family IN
+    control for names — registry-, registrar-, and NameWrapper-held alike —
+    see [glossary](glossary.md)): `source_family IN
     ('ens_v1_registrar_l1',
     'ens_v1_registry_l1', 'ens_v1_resolver_l1', 'ens_v1_wrapper_l1',
     'basenames_base_registrar', 'basenames_base_registry',
@@ -321,7 +321,7 @@ tool-reachable states a matching row was written by the reviewed replay) — bot
 digest comparisons are skipped: the replay's own closure adapters legitimately
 correct discovery edges and discovered contract-instance addresses, which both
 reviewed digests cover, so re-comparing live state against the pre-replay pins
-would hang every session resume after the first discovery commit. A leftover
+would fail every session resume after the first discovery commit. A leftover
 checkpoint pinned to a different replay target fails closed and re-engages the
 strict pre-replay comparison. Repository manifest sync is
 skipped while the reviewed completed run's reset cursor is still pending, so
@@ -865,7 +865,8 @@ Normalized events are adapter-owned semantic transition rows, not guaranteed-sta
 Where a stateful adapter's replay may start depends on whether raw-log history
 was ever destroyed — the retention [generation](glossary.md):
 
-- At generation zero (raw-log staging rows never deleted or truncated), the
+- At generation zero (raw-log staging history never destroyed — no delete,
+  truncate, or destructive identity/payload update), the
   current valid [closure](glossary.md) boundary is the earliest retained
   canonical raw fact for that adapter/source graph. If the required source
   graph has no retained canonical raw fact at all, a generation-zero replay
