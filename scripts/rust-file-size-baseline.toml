@@ -27,7 +27,7 @@ justification = "Phase 7 allowlist for an oversized production file; future chan
 
 [[files]]
 path = "crates/adapters/src/ens_v1_subregistry_discovery/checkpoint.rs"
-loc = 803
+loc = 739
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]

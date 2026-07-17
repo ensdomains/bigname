@@ -23,10 +23,7 @@ use assignment::{
     ens_v1_subregistry_discovery_source,
 };
 use checkpoint::SubregistryReplayCheckpoint;
-use emitter::{
-    RegistryChangedEventEmitSummary, emit_registry_changed_event_chunk,
-    emit_registry_changed_events, flush_registry_changed_events,
-};
+use emitter::{emit_registry_changed_events, emit_registry_changed_events_from_checkpoint};
 use hex_topic::{ZERO_ADDRESS, normalize_address};
 use loader::{
     load_active_emitters, load_registry_raw_log_checkpoint_page, load_registry_raw_logs,
@@ -414,40 +411,6 @@ fn empty_sync_summary() -> EnsV1SubregistryDiscoverySyncSummary {
         total_normalized_event_count: 0,
         total_normalized_event_inserted_count: 0,
     }
-}
-
-async fn emit_registry_changed_events_from_checkpoint(
-    pool: &PgPool,
-    checkpoint: &SubregistryReplayCheckpoint,
-    discovery_sources: &[String],
-) -> Result<RegistryChangedEventEmitSummary> {
-    let mut events = Vec::with_capacity(usize::try_from(checkpoint::EVENT_PAGE_LIMIT)?);
-    let mut summary = RegistryChangedEventEmitSummary::default();
-    for discovery_source in discovery_sources {
-        let mut after_key = None::<String>;
-        loop {
-            let page = checkpoint
-                .load_assignment_page(
-                    pool,
-                    discovery_source,
-                    after_key.as_deref(),
-                    checkpoint::EVENT_PAGE_LIMIT,
-                )
-                .await?;
-            let Some((last_key, _)) = page.last() else {
-                break;
-            };
-            after_key = Some(last_key.clone());
-            let assignments = page
-                .iter()
-                .map(|(_, assignment)| assignment)
-                .collect::<Vec<_>>();
-            emit_registry_changed_event_chunk(pool, &assignments, &mut events, &mut summary)
-                .await?;
-        }
-    }
-    flush_registry_changed_events(pool, &mut events, &mut summary).await?;
-    Ok(summary)
 }
 
 async fn sync_checkpointed_registry_raw_logs(
