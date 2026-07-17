@@ -783,6 +783,27 @@ Use `RUST_LOG=info,sqlx::query=error` for these runs; otherwise SQLx slow-query
 warnings can print huge generated INSERT statements for dense chunks and waste
 time on logging instead of ingest.
 
+### Streamed full-closure discovery finalize
+
+The ENSv1/Basenames registry full-closure replay finalizes its discovery-edge
+reconciliation as a streamed temp-table set-diff instead of an in-memory
+reconcile, so memory stays bounded by pages rather than the staged observation
+count (#168). Two operational consequences:
+
+- **Two-level deactivation guard.** The finalize must be a near-no-op after a
+  verified rederive. A coarse cap (`max(100_000, 10%)` of the source's active
+  edges) aborts before the deactivation diff is even materialized, and a
+  precise fail-closed threshold (`max(10_000, 1%)`) applies to the actual
+  post-chronology deactivation set right before mutating. A mass deactivation
+  indicates spec drift; after confirming an intended large diff, raise both
+  bounds with `BIGNAME_INDEXER_DISCOVERY_FULL_RECONCILE_MAX_DEACTIVATIONS`
+  (the value is the permitted deactivation count). An aborted finalize rolls
+  back cleanly and keeps the replay checkpoint resumable.
+- **Connection minimum.** The checkpointed replay concurrently holds the
+  raw-log staging guard, the streamed reconcile transaction, and a third
+  pooled connection for staged assignment page reads. The replay entry point
+  refuses pools with `max_connections < 3` up front instead of deadlocking.
+
 The 2026-07-03 ratified Base normalized-event corpus correction is supervised
 and off by default. It exists only for the comprehensive Basenames Base
 drop-and-full-closure-rederive window documented in [`storage.md`](storage.md).

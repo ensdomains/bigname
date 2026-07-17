@@ -26,6 +26,15 @@ use crate::normalize_address;
 /// addresses whose active-contract set grew (matching the in-memory walk's
 /// requeue of a derived contract's address key). Memory stays bounded by the
 /// derived-contract closure plus pending seeds for genuinely new addresses.
+///
+/// Deliberate divergence from the in-memory walk's mechanics: whenever a NEW
+/// derived contract lands at an address — including one whose observations
+/// were already admitted — the streamed walk unconditionally revisits that
+/// address in the next pass, making the maximal admission fixed point
+/// deterministic regardless of page order. The in-memory queue converges on
+/// the same closure but schedules address visits in nondeterministic
+/// hash-set order; the streamed behavior is intentionally the more-defined
+/// of the two.
 pub(super) async fn run_streamed_admission_walk(
     executor: &mut PgConnection,
     admission_state: &DiscoveryAdmissionState,

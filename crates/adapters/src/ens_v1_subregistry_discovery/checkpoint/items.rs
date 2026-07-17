@@ -9,6 +9,17 @@ const CHECKPOINT_ITEM_INSERT_BATCH_SIZE: usize = 500;
 /// Upsert checkpoint items, returning how many `latest_assignment` items were
 /// newly inserted (as opposed to updating an already-staged key). The caller
 /// adds this to the checkpoint's running `staged_item_count`.
+///
+/// The insert-vs-update distinction reads `(xmax = 0)` from the upsert's
+/// RETURNING clause: a freshly inserted row has no updater xid, while a row
+/// taken through `ON CONFLICT DO UPDATE` carries this transaction's xid as
+/// `xmax`. That is only sound because `item_rows` holds each
+/// `(item_kind, item_key)` at most once per call — `save_progress` builds
+/// the rows from a page-local `BTreeMap`/`BTreeSet` — and because this
+/// transaction performs no other write to the same rows (a duplicate key in
+/// one statement would error under `ON CONFLICT DO UPDATE`, and a row both
+/// inserted and updated in the same transaction would report `xmax != 0`
+/// and undercount).
 pub(super) async fn insert_checkpoint_items(
     transaction: &mut sqlx::Transaction<'_, Postgres>,
     checkpoint: &SubregistryReplayCheckpoint,
