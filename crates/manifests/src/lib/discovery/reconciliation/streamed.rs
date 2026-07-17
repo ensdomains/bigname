@@ -153,6 +153,19 @@ pub(crate) async fn reconcile_discovery_observations_streamed_with_options(
         .begin()
         .await
         .context("failed to start streamed discovery-edge reconciliation transaction")?;
+    // One snapshot for the whole reconcile: the in-memory variant reads its
+    // entire plan from single loads, and the streamed variant's per-page
+    // known-address resolution and set-diff queries must see the same frozen
+    // state rather than statement-level READ COMMITTED snapshots. Any
+    // concurrent discovery mutation must bump the fenced admission-epoch
+    // rows (#125), so an interleaving writer surfaces as a clean
+    // serialization failure at the FOR UPDATE fence below instead of a
+    // silently stale diff; the failure aborts the transaction and the
+    // caller's replay loop retries.
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(transaction.as_mut())
+        .await
+        .context("failed to pin the streamed reconcile transaction snapshot")?;
     lock_discovery_reconciliation(transaction.as_mut(), discovery_source).await?;
     create_streamed_reconcile_temp_tables(transaction.as_mut()).await?;
 
