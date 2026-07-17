@@ -160,8 +160,10 @@ pub(crate) async fn reconcile_discovery_observations_streamed_with_options(
     // concurrent discovery mutation must bump the fenced admission-epoch
     // rows (#125), so an interleaving writer surfaces as a clean
     // serialization failure at the FOR UPDATE fence below instead of a
-    // silently stale diff; the failure aborts the transaction and the
-    // caller's replay loop retries.
+    // silently stale diff. Such a failure is fail-loud: the Err propagates
+    // out of the replay run (the in-process loop repeats only on the
+    // repeat_checkpoint_replay flag, never on errors) and the checkpoint
+    // stays resumable, so the operator simply reruns the replay.
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
         .execute(transaction.as_mut())
         .await

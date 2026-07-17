@@ -10,7 +10,10 @@ use super::{
 /// The checkpointed replay holds the raw-log staging guard and the streamed
 /// reconcile transaction while paging staged assignments over a third pooled
 /// connection; a smaller pool deadlocks on connection acquisition instead of
-/// failing fast.
+/// failing fast. The minimum assumes one checkpointed replay per process
+/// sharing the pool (the deployment model — the replay runner is a single
+/// supervised task); concurrent replays on one pool would each need their
+/// own three connections.
 const MIN_REPLAY_POOL_CONNECTIONS: u32 = 3;
 
 pub async fn sync_ens_v1_subregistry_discovery_with_replay_checkpoint(
