@@ -8,6 +8,7 @@ use super::{
     ProviderHeadHashSnapshot, ProviderHeadSnapshot, ProviderResolvedBlock,
     RAW_PAYLOAD_KIND_FULL_BLOCK,
     decode::{block_hash_from_value, normalize_hash},
+    error::format_provider_error,
     logs_receipts::ProviderBlockLogFetch,
     provider_batch_item_limit,
     request::{JsonRpcBatchCall, is_retryable_provider_error},
@@ -138,7 +139,7 @@ impl JsonRpcProvider {
                     service = "indexer",
                     component = "provider",
                     tag,
-                    error = %format!("{error:#}"),
+                    error = %format_provider_error(&error),
                     "provider checkpoint tag is unavailable; degrading to absent optional head"
                 );
                 Ok(None)

@@ -14,6 +14,7 @@ use decode::parse_hex_i64;
 mod block_transaction;
 mod code;
 mod decode;
+mod error;
 mod http_client;
 mod logs_receipts;
 mod ops;
