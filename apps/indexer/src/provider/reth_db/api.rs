@@ -156,6 +156,7 @@ impl RethDbProvider {
         .await
     }
 
+    #[allow(dead_code, reason = "retained for provider parity with JSON-RPC")]
     pub async fn fetch_code_observations_at_block(
         &self,
         addresses: &[String],
