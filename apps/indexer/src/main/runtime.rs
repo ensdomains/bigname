@@ -14,7 +14,9 @@ mod refresh;
 mod tracing_init;
 
 #[allow(unused_imports)]
-pub(crate) use adapter_sync::sync_adapter_owned_raw_log_state;
+pub(crate) use adapter_sync::{
+    sync_adapter_owned_raw_log_state, sync_discovery_adapter_owned_raw_log_state,
+};
 #[allow(unused_imports)]
 pub(crate) use intake::{
     IntakeChainTask, IntakeRuntimeState, WatchedChainPlanState, checkpoint_mode,
@@ -35,16 +37,17 @@ pub(crate) use logging::{
 #[allow(unused_imports)]
 pub(crate) use manifest::{
     DiscoveryAdmissionSnapshot, ManifestRuntimeState, RuntimeWatchScope,
-    build_manifest_runtime_state, build_manifest_runtime_state_with_watch_scope,
-    discovery_admission_snapshot, ensure_manifest_root_ready, load_manifest_repository,
-    manifest_normalized_event_kind_count, verify_stored_manifest_state,
+    build_manifest_runtime_state, build_manifest_runtime_state_for_repository_refresh,
+    build_manifest_runtime_state_with_watch_scope, discovery_admission_snapshot,
+    ensure_manifest_root_ready, load_manifest_repository, manifest_normalized_event_kind_count,
+    verify_stored_manifest_state,
 };
 #[allow(unused_imports)]
 pub(crate) use poll_loop::run_poll_loop;
 #[cfg(test)]
 pub(crate) use poll_loop::{
     ReplayHandoffLatchStatus, install_replay_handoff_before_latch_test_hook,
-    latch_replay_handoff_if_stable,
+    latch_replay_handoff_if_stable, refresh_discovery_watch_state,
 };
 #[allow(unused_imports)]
 pub(crate) use refresh::{
@@ -52,6 +55,7 @@ pub(crate) use refresh::{
     refresh_runtime_state_from_storage_discovery, refresh_runtime_state_from_stored_discovery,
     refresh_runtime_state_from_stored_discovery_when_epochs_move, refresh_watched_chain_plan,
     widen_runtime_state_to_live_watch_scope,
+    widen_runtime_state_to_live_watch_scope_with_admission_epochs,
 };
 #[allow(unused_imports)]
 pub(crate) use tracing_init::init_tracing;

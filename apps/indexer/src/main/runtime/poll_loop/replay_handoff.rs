@@ -12,9 +12,8 @@ use crate::reconciliation::{
     validate_chain_handoff_while_guarded,
 };
 
-use super::super::intake::{IntakeChainTask, validate_provider_registry_for_intake_tasks};
+use super::super::intake::IntakeChainTask;
 use super::super::manifest::ManifestRuntimeState;
-use super::super::refresh::refresh_runtime_state_from_stored_discovery;
 use super::discovery_refresh::refresh_discovery_watch_state;
 
 #[cfg(test)]
@@ -115,6 +114,8 @@ pub(super) async fn poll_replay_ready_chains_raw_only(
     intake_chain_tasks: &mut Vec<IntakeChainTask>,
     deployment_profile: &str,
     raw_poll_chains: &BTreeSet<String>,
+    resolver_profile_convergence_enabled: bool,
+    watched_plan_admission_epochs: &mut Option<BTreeMap<String, i64>>,
     header_audit_mode: HeaderAuditMode,
     event_silent_reverse_resolver_addresses: &[String],
     coverage_frontiers: &ChainCoverageFrontiers,
@@ -124,25 +125,18 @@ pub(super) async fn poll_replay_ready_chains_raw_only(
         return Ok(());
     }
 
-    match refresh_runtime_state_from_stored_discovery(pool, manifest_runtime_state).await {
-        Ok(Some((next_manifest_runtime_state, next_tasks))) => {
-            validate_provider_registry_for_intake_tasks(&next_tasks, provider_registry).context(
-                "replay-ready stored discovery state no longer matches configured provider sources",
-            )?;
-            *manifest_runtime_state = next_manifest_runtime_state;
-            *intake_chain_tasks = next_tasks;
-        }
-        Ok(None) => {}
-        Err(error) => {
-            warn!(
-                service = "indexer",
-                command = "poll",
-                error = ?error,
-                replay_ready_chain_count = raw_poll_chains.len(),
-                "failed to refresh stored discovery before replay-ready raw-only provider polling; retrying on a later poll tick"
-            );
-            return Ok(());
-        }
+    if !refresh_discovery_watch_state(
+        pool,
+        provider_registry,
+        manifest_runtime_state,
+        intake_chain_tasks,
+        false,
+        resolver_profile_convergence_enabled,
+        watched_plan_admission_epochs,
+    )
+    .await?
+    {
+        return Ok(());
     }
 
     let mut scoped_tasks = intake_chain_tasks
@@ -150,11 +144,15 @@ pub(super) async fn poll_replay_ready_chains_raw_only(
         .filter(|task| raw_poll_chains.contains(&task.chain))
         .cloned()
         .collect::<Vec<_>>();
+    let loaded_plan_admission_epochs = watched_plan_admission_epochs
+        .as_ref()
+        .context("replay-ready watch plan is missing its loaded admission-epoch snapshot")?;
     poll_provider_heads_with_adapter_sync(
         pool,
         &mut scoped_tasks,
         provider_registry,
         deployment_profile,
+        loaded_plan_admission_epochs,
         false,
         header_audit_mode,
         event_silent_reverse_resolver_addresses,
@@ -184,14 +182,14 @@ pub(super) async fn renew_live_poll_adapter_sync_permit(
     deployment_profile: &str,
     provider_configured_chains: &[String],
     live_adapter_sync_latched: &mut bool,
+    forced_handoff_plan_reload_complete: &mut bool,
+    resolver_profile_convergence_enabled: bool,
+    watched_plan_admission_epochs: &mut Option<BTreeMap<String, i64>>,
     header_audit_mode: HeaderAuditMode,
     event_silent_reverse_resolver_addresses: &[String],
     coverage_frontiers: &ChainCoverageFrontiers,
     latched_bootstrap_finalized_heads: &BTreeMap<String, ProviderBlock>,
 ) -> Result<bool> {
-    // The replay handoff is a one-poll permit, not permanent ownership. A
-    // raw-only writer queued behind the previous final fence may commit after
-    // it releases, so every later poll renews the full proof before adapters run.
     let handoff_was_previously_latched = *live_adapter_sync_latched;
     *live_adapter_sync_latched = false;
     if let ReplayHandoffReadiness::AwaitingChains { raw_poll_chains } =
@@ -204,6 +202,8 @@ pub(super) async fn renew_live_poll_adapter_sync_permit(
             intake_chain_tasks,
             deployment_profile,
             &raw_poll_chains,
+            resolver_profile_convergence_enabled,
+            watched_plan_admission_epochs,
             header_audit_mode,
             event_silent_reverse_resolver_addresses,
             coverage_frontiers,
@@ -244,21 +244,25 @@ pub(super) async fn renew_live_poll_adapter_sync_permit(
         }
     };
 
-    // The handoff refresh is a one-shot transition that must observe the
-    // freshest stored plan, so it carries no admission-epoch sentinel state:
-    // a `None` sentinel always reloads.
+    // Force one reload at the catch-up-to-live transition, then retain the epoch gate.
+    prepare_handoff_plan_reload(
+        *forced_handoff_plan_reload_complete,
+        watched_plan_admission_epochs,
+    );
     if !refresh_discovery_watch_state(
         pool,
         provider_registry,
         manifest_runtime_state,
         intake_chain_tasks,
         false,
-        &mut None,
+        resolver_profile_convergence_enabled,
+        watched_plan_admission_epochs,
     )
     .await?
     {
         return Ok(false);
     }
+    *forced_handoff_plan_reload_complete = true;
     let refreshed_provider_configured_chains = intake_chain_tasks
         .iter()
         .filter(|task| provider_registry.provider_for(&task.chain).is_some())
@@ -372,6 +376,15 @@ fn finish_replay_handoff_latch(
     crate::reconciliation::guard_release::prioritize_operation_error(validation, release)
 }
 
+fn prepare_handoff_plan_reload(
+    forced_handoff_plan_reload_complete: bool,
+    watched_plan_admission_epochs: &mut Option<BTreeMap<String, i64>>,
+) {
+    if !forced_handoff_plan_reload_complete {
+        *watched_plan_admission_epochs = None;
+    }
+}
+
 #[cfg(test)]
 pub(super) fn live_poll_adapter_sync_after_handoff_attempt(
     adapter_sync_enabled: bool,
@@ -393,14 +406,14 @@ pub(super) fn manifest_refresh_adapter_sync_before_handoff_readiness(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use anyhow::anyhow;
 
     use super::{
         ReplayHandoffLatchStatus, ReplayHandoffReadiness, classify_replay_handoff_readiness,
         finish_replay_handoff_latch, live_poll_adapter_sync_after_handoff_attempt,
-        manifest_refresh_adapter_sync_before_handoff_readiness,
+        manifest_refresh_adapter_sync_before_handoff_readiness, prepare_handoff_plan_reload,
     };
 
     #[test]
@@ -454,6 +467,21 @@ mod tests {
         assert!(manifest_refresh_adapter_sync_before_handoff_readiness(
             false, true, false,
         ));
+    }
+
+    #[test]
+    fn handoff_forces_one_plan_reload_then_preserves_the_epoch_gate() {
+        let epochs = BTreeMap::from([("base-mainnet".to_owned(), 7)]);
+        let mut sentinel = Some(epochs.clone());
+        prepare_handoff_plan_reload(false, &mut sentinel);
+        assert!(sentinel.is_none(), "the transition must force one reload");
+        sentinel = Some(epochs.clone());
+        prepare_handoff_plan_reload(true, &mut sentinel);
+        assert_eq!(
+            sentinel,
+            Some(epochs),
+            "steady-state permit renewal must retain the shared epoch gate"
+        );
     }
 
     #[test]

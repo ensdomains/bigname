@@ -4,6 +4,7 @@ fn auto_normalized_replay_catchup_owns_live_adapter_sync() {
     assert!(!auto_with_catchup.live_poll_adapter_sync_enabled);
     assert!(auto_with_catchup.live_poll_adapter_sync_after_normalized_replay_catchup);
     assert!(auto_with_catchup.normalized_replay_catchup_enabled);
+    assert!(auto_with_catchup.resolver_profile_convergence_enabled);
     assert_eq!(
         auto_with_catchup.bootstrap_watch_scope,
         RuntimeWatchScope::ManifestDeclaredOnly
@@ -41,6 +42,7 @@ fn auto_normalized_replay_catchup_owns_live_adapter_sync() {
         raw_only.bootstrap_watch_scope,
         RuntimeWatchScope::ManifestDeclaredOnly
     );
+    assert!(!raw_only.resolver_profile_convergence_enabled);
 }
 
 #[test]
@@ -79,16 +81,18 @@ fn bootstrap_watch_scope_stays_narrow_while_the_live_tailer_stays_wide() {
 
 #[test]
 fn adapter_owned_state_syncs_after_bootstrap_when_it_seeds_or_completes_discovery() {
-    // `auto` + catch-up: bootstrap is raw-only and live-poll adapter sync is deferred to catch-up,
-    // so the one-shot post-bootstrap sync is what materializes discovery edges before the widen.
+    // `auto` + catch-up: bounded asynchronous replay owns historical discovery materialization;
+    // startup must not duplicate it with a blocking whole-corpus adapter pass.
     let auto_with_catchup = IndexerRunMode::new(BackfillAdapterSyncMode::Auto, true);
-    assert!(auto_with_catchup.sync_adapter_after_startup_backfill);
+    assert!(!auto_with_catchup.sync_adapter_after_startup_backfill);
+    assert!(auto_with_catchup.sync_discovery_adapters_after_startup_backfill);
     assert!(!auto_with_catchup.sync_adapter_before_startup_backfill);
 
-    // `auto` without catch-up: live-poll adapter sync stays on and re-derives edges each poll, so
-    // no separate post-bootstrap sync is needed.
+    // `auto` without catch-up needs the same focused seed because live-poll
+    // adapter sync is block-scoped and cannot derive retained bootstrap edges.
     let auto_without_catchup = IndexerRunMode::new(BackfillAdapterSyncMode::Auto, false);
     assert!(!auto_without_catchup.sync_adapter_after_startup_backfill);
+    assert!(auto_without_catchup.sync_discovery_adapters_after_startup_backfill);
 
     // `inline`: a fresh chain has no retained-history proof until bootstrap facts commit, so the
     // broad absence-based sync runs once bootstrap drains, never before it.
@@ -99,6 +103,7 @@ fn adapter_owned_state_syncs_after_bootstrap_when_it_seeds_or_completes_discover
         );
         assert!(!inline.sync_adapter_before_startup_backfill);
         assert!(inline.sync_adapter_after_startup_backfill);
+        assert!(!inline.sync_discovery_adapters_after_startup_backfill);
     }
 
     // `raw-only`: adapter-owned state is intentionally never written at startup.
@@ -109,6 +114,7 @@ fn adapter_owned_state_syncs_after_bootstrap_when_it_seeds_or_completes_discover
         );
         assert!(!raw_only.sync_adapter_before_startup_backfill);
         assert!(!raw_only.sync_adapter_after_startup_backfill);
+        assert!(!raw_only.sync_discovery_adapters_after_startup_backfill);
     }
 }
 
@@ -121,4 +127,8 @@ fn only_broad_runtime_refresh_resyncs_adapter_owned_state_on_discovery_refresh()
     let inline = IndexerRunMode::new(BackfillAdapterSyncMode::Inline, false);
     assert!(inline.discovery_refresh_enabled);
     assert!(inline.broad_runtime_refresh_enabled);
+
+    let raw_only = IndexerRunMode::new(BackfillAdapterSyncMode::RawOnly, false);
+    assert!(raw_only.discovery_refresh_enabled);
+    assert!(!raw_only.resolver_profile_convergence_enabled);
 }

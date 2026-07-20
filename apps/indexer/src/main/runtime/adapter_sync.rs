@@ -92,3 +92,36 @@ pub(crate) async fn sync_adapter_owned_raw_log_state(
     journal_resolver_profile_authority(pool).await?;
     Ok(())
 }
+
+/// Materialize only the discovery edges needed by the post-bootstrap live-plan
+/// widen. Auto bootstrap stores raw facts without adapter work; replay catch-up
+/// owns the remaining historical adapter families.
+pub(crate) async fn sync_discovery_adapter_owned_raw_log_state(
+    pool: &sqlx::PgPool,
+    watched_chain_plan: &[WatchedChainPlan],
+) -> Result<()> {
+    journal_resolver_profile_authority(pool).await?;
+    for chain in watched_chain_plan {
+        let summary = bigname_adapters::sync_ens_v1_subregistry_discovery(pool, &chain.chain)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to sync ENSv1 registry discovery from stored raw logs for chain {}",
+                    chain.chain
+                )
+            })?;
+        log_ens_v1_subregistry_discovery_sync_summary(&chain.chain, &summary);
+
+        let summary = bigname_adapters::sync_ens_v2_registry_resource_surface(pool, &chain.chain)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to sync ENSv2 registry discovery from stored raw logs for chain {}",
+                    chain.chain
+                )
+            })?;
+        log_ens_v2_registry_resource_surface_sync_summary(&chain.chain, &summary);
+    }
+    journal_resolver_profile_authority(pool).await?;
+    Ok(())
+}

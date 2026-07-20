@@ -96,6 +96,7 @@ pub(crate) async fn persist_reconciled_raw_state(
     heads: &ProviderHeadSnapshot,
     canonical: &CanonicalReconciliation,
     head_change_set: HeadChangeSet,
+    loaded_plan_admission_epoch: i64,
     adapter_sync_enabled: bool,
     header_audit_mode: HeaderAuditMode,
     event_silent_resolver_addresses: &[String],
@@ -124,6 +125,7 @@ pub(crate) async fn persist_reconciled_raw_state(
         heads,
         canonical,
         head_change_set,
+        loaded_plan_admission_epoch,
         coverage_frontiers,
     )
     .await

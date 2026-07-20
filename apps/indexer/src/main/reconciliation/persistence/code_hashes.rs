@@ -1,7 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::OnceLock,
+};
 
 use anyhow::{Context, Result, bail};
-use bigname_manifests::load_discovery_admission_epoch;
 use bigname_storage::{RawBlock, RawCodeHash, load_raw_blocks_by_hashes, upsert_raw_code_hashes};
 use sqlx::Row;
 
@@ -27,13 +29,16 @@ use super::load_live_generic_resolver_topic0s;
 const DEFAULT_RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK: usize = 2_048;
 const RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK_ENV: &str =
     "BIGNAME_INDEXER_RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK";
+static RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK: OnceLock<usize> = OnceLock::new();
 
 fn raw_code_baseline_max_addresses_per_tick() -> usize {
-    parse_raw_code_baseline_max_addresses_per_tick(
-        std::env::var(RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK_ENV)
-            .ok()
-            .as_deref(),
-    )
+    *RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK.get_or_init(|| {
+        parse_raw_code_baseline_max_addresses_per_tick(
+            std::env::var(RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK_ENV)
+                .ok()
+                .as_deref(),
+        )
+    })
 }
 
 fn parse_raw_code_baseline_max_addresses_per_tick(value: Option<&str>) -> usize {
@@ -43,10 +48,10 @@ fn parse_raw_code_baseline_max_addresses_per_tick(value: Option<&str>) -> usize 
         .unwrap_or(DEFAULT_RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK)
 }
 
-/// Addresses fetched and upserted per provider round within a tick's baseline
-/// batch, so a mid-batch failure loses at most one chunk of progress.
+/// Provider-fetch chunk size; successful rounds persist before the sweep advances.
 const RAW_CODE_BASELINE_FETCH_CHUNK_ADDRESSES: usize = 256;
 
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn persist_reconciled_raw_code_hashes(
     pool: &sqlx::PgPool,
     task: &IntakeChainTask,
@@ -54,6 +59,7 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
     heads: &ProviderHeadSnapshot,
     canonical: &CanonicalReconciliation,
     head_change_set: HeadChangeSet,
+    loaded_plan_admission_epoch: i64,
     coverage_frontiers: &ChainCoverageFrontiers,
 ) -> Result<()> {
     if canonical.status == CanonicalReconciliationStatus::StoredLineagePromoted {
@@ -141,29 +147,49 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
         })
         .collect::<Vec<_>>();
 
-    let mut code_hashes = Vec::<RawCodeHash>::new();
-    for (raw_block, addresses) in &emitter_raw_blocks {
-        let observations = provider
-            .fetch_code_observations_at_block_hashes(&[ProviderBlockCodeObservationRequest {
+    let emitter_raw_blocks_by_hash = emitter_raw_blocks
+        .iter()
+        .map(|(raw_block, _)| (raw_block.block_hash.to_ascii_lowercase(), *raw_block))
+        .collect::<BTreeMap<_, _>>();
+    let code_observation_requests = emitter_raw_blocks
+        .iter()
+        .map(
+            |(raw_block, addresses)| ProviderBlockCodeObservationRequest {
                 block_hash: raw_block.block_hash.clone(),
                 addresses: addresses.clone(),
-            }])
-            .await?;
-        for block_observations in &observations {
-            code_hashes.extend(
-                block_observations
-                    .observations
-                    .iter()
-                    .map(|observation| {
-                        provider_code_observation_to_raw_code_hash(
-                            &task.chain,
-                            raw_block,
-                            observation,
-                        )
-                    })
-                    .collect::<Result<Vec<_>>>()?,
-            );
-        }
+            },
+        )
+        .collect::<Vec<_>>();
+    let fetched_observations = provider
+        .fetch_code_observations_at_block_hashes(&code_observation_requests)
+        .await?;
+    if fetched_observations.len() != code_observation_requests.len() {
+        bail!(
+            "provider returned {} code-observation block groups for {} requested blocks on chain {}",
+            fetched_observations.len(),
+            code_observation_requests.len(),
+            task.chain
+        );
+    }
+    let mut code_hashes = Vec::<RawCodeHash>::new();
+    for block_observations in &fetched_observations {
+        let raw_block = emitter_raw_blocks_by_hash
+            .get(&block_observations.block_hash.to_ascii_lowercase())
+            .with_context(|| {
+                format!(
+                    "provider returned code observations for unrequested block {} on chain {}",
+                    block_observations.block_hash, task.chain
+                )
+            })?;
+        code_hashes.extend(
+            block_observations
+                .observations
+                .iter()
+                .map(|observation| {
+                    provider_code_observation_to_raw_code_hash(&task.chain, raw_block, observation)
+                })
+                .collect::<Result<Vec<_>>>()?,
+        );
     }
     if !code_hashes.is_empty() {
         upsert_raw_code_hashes(pool, &code_hashes).await?;
@@ -181,6 +207,7 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
             provider,
             baseline_raw_block,
             watched_addresses,
+            loaded_plan_admission_epoch,
             coverage_frontiers,
         )
         .await?;
@@ -192,21 +219,21 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
 /// One capped step of the per-chain raw-code baseline sweep.
 ///
 /// The sweep walks the sorted watched surface behind a process-lifetime
-/// cursor: each tick verifies at most
-/// [`DEFAULT_RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK`] addresses, fetches code only
+/// cursor: each tick verifies a capped address batch and fetches code only
 /// for those with no stored non-orphaned observation, and upserts per
 /// [`RAW_CODE_BASELINE_FETCH_CHUNK_ADDRESSES`]-sized provider round so
 /// progress persists across failures and restarts. A finished sweep records
-/// the discovery admission epoch it started under; when the epoch moves, a
-/// fresh sweep re-verifies the surface (cheap membership probes; only
-/// genuinely missing addresses are fetched) so newly watched addresses are
-/// eventually baselined too.
+/// the admission epoch under which its in-memory plan was loaded; when a plan
+/// with a newer epoch is applied, a fresh sweep re-verifies the surface (cheap
+/// membership probes; only genuinely missing addresses are fetched) so newly
+/// watched addresses are eventually baselined too.
 async fn sweep_raw_code_baseline_chunk(
     pool: &sqlx::PgPool,
     task: &IntakeChainTask,
     provider: &(impl ChainProviderOps + ?Sized),
     baseline_raw_block: &RawBlock,
     watched_addresses: SelectedAddressSet<'_>,
+    loaded_plan_admission_epoch: i64,
     coverage_frontiers: &ChainCoverageFrontiers,
 ) -> Result<()> {
     let sorted_watched_addresses = watched_addresses.as_sorted_slice();
@@ -214,17 +241,16 @@ async fn sweep_raw_code_baseline_chunk(
         return Ok(());
     }
 
-    let current_admission_epoch = load_discovery_admission_epoch(pool, &task.chain).await?;
     let mut frontier = coverage_frontiers.raw_code_baseline_frontier(&task.chain);
-    if frontier.completed_admission_epoch == Some(current_admission_epoch) {
+    if frontier.completed_admission_epoch == Some(loaded_plan_admission_epoch) {
         return Ok(());
     }
     let sweep_admission_epoch = match frontier.sweep_admission_epoch {
         Some(epoch) => epoch,
         None => {
-            frontier.sweep_admission_epoch = Some(current_admission_epoch);
+            frontier.sweep_admission_epoch = Some(loaded_plan_admission_epoch);
             frontier.verified_through_address = None;
-            current_admission_epoch
+            loaded_plan_admission_epoch
         }
     };
 

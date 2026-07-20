@@ -15,10 +15,12 @@ pub(crate) struct IndexerRunMode {
     pub(crate) startup_backfill_adapter_sync_mode: BackfillAdapterSyncMode,
     pub(crate) sync_adapter_before_startup_backfill: bool,
     pub(crate) sync_adapter_after_startup_backfill: bool,
+    pub(crate) sync_discovery_adapters_after_startup_backfill: bool,
     pub(crate) normalized_replay_catchup_enabled: bool,
     pub(crate) live_poll_adapter_sync_enabled: bool,
     pub(crate) live_poll_adapter_sync_after_normalized_replay_catchup: bool,
     pub(crate) discovery_refresh_enabled: bool,
+    pub(crate) resolver_profile_convergence_enabled: bool,
     pub(crate) broad_runtime_refresh_enabled: bool,
 }
 
@@ -52,18 +54,20 @@ impl IndexerRunMode {
             // Inline mode therefore performs its broad absence-based sync
             // only after bootstrap drains.
             sync_adapter_before_startup_backfill: false,
-            // `inline` runs its broad absence-based sync once bootstrap drains (see above).
-            // `auto` bootstrap is raw-only, so discovery edges only exist after this sync; run it
-            // before the widen reloads the plan, else bootstrap-discovered targets stay unwatched
-            // until replay catch-up materializes their edges. `raw-only` never touches
+            // Preserve inline's broad post-bootstrap pass. Auto uses the
+            // focused discovery-family pass below instead of synchronously
+            // deriving all seven adapter families. Raw-only never touches
             // adapter-owned state.
             sync_adapter_after_startup_backfill: adapter_sync_mode
-                == BackfillAdapterSyncMode::Inline
-                || normalized_replay_catchup_enabled,
+                == BackfillAdapterSyncMode::Inline,
+            sync_discovery_adapters_after_startup_backfill: adapter_sync_mode
+                == BackfillAdapterSyncMode::Auto,
             normalized_replay_catchup_enabled,
             live_poll_adapter_sync_enabled,
             live_poll_adapter_sync_after_normalized_replay_catchup,
             discovery_refresh_enabled: true,
+            resolver_profile_convergence_enabled: adapter_sync_mode
+                != BackfillAdapterSyncMode::RawOnly,
             broad_runtime_refresh_enabled: adapter_sync_mode == BackfillAdapterSyncMode::Inline,
         }
     }

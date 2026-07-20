@@ -34,9 +34,10 @@ pub(crate) use adapter_sync::{
 #[allow(unused_imports)]
 pub(crate) use canonical::{
     ChainCoverageFrontiers, EnsV2LiveCoverageRecoveryStatus, RawCodeBaselineFrontier,
-    orphan_canonical_branch, poll_provider_heads, poll_provider_heads_with_adapter_sync,
-    reconcile_canonical_head, reconcile_fetched_heads, reconcile_fetched_heads_with_adapter_sync,
-    reconcile_intake_chain_task, recover_ens_v2_live_coverage_requirement,
+    orphan_canonical_branch, orphan_reorg_losing_branch_payloads, poll_provider_heads,
+    poll_provider_heads_with_adapter_sync, reconcile_canonical_head, reconcile_fetched_heads,
+    reconcile_fetched_heads_with_adapter_sync, reconcile_intake_chain_task,
+    recover_ens_v2_live_coverage_requirement,
 };
 #[allow(unused_imports)]
 pub(crate) use lineage::{

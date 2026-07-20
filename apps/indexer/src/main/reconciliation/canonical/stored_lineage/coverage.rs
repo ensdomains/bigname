@@ -49,10 +49,10 @@ pub(crate) struct ChainCoverageFrontiers {
 /// Process-lifetime progress of the per-chain raw-code baseline sweep: the
 /// watched surface is verified in sorted-address chunks, at most a capped
 /// number of addresses per poll tick, with each chunk's observations upserted
-/// before the cursor advances. `completed_admission_epoch` records the
-/// discovery admission epoch a finished sweep ran under; a later epoch starts
-/// a fresh sweep so newly watched addresses are eventually baselined without
-/// ever re-arming a whole-surface fetch inside one tick.
+/// before the cursor advances. `completed_admission_epoch` records the epoch
+/// under which the swept plan was loaded; applying a plan with a later epoch
+/// starts a fresh sweep so newly watched addresses are eventually baselined
+/// without ever re-arming a whole-surface fetch inside one tick.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct RawCodeBaselineFrontier {
     /// Discovery admission epoch the in-progress sweep started under.
@@ -119,6 +119,13 @@ impl ChainCoverageFrontiers {
             .lock()
             .expect("raw code baseline frontier lock must not be poisoned")
             .insert(chain.to_owned(), frontier);
+    }
+
+    pub(crate) fn invalidate_raw_code_baseline_frontier(&self, chain: &str) {
+        self.raw_code_baseline_frontiers
+            .lock()
+            .expect("raw code baseline frontier lock must not be poisoned")
+            .remove(chain);
     }
 
     fn record_required_tuple_range_scan(&self, chain: &str, from_block: i64, through_block: i64) {

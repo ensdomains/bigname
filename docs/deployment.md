@@ -445,10 +445,15 @@ small ranges and enable broad runtime refreshes.
 `BIGNAME_INDEXER_HASH_PINNED_BACKFILL_ADAPTER_SYNC` scopes bootstrap backfill,
 but do not read it as bootstrap-only: on the live path it also controls
 adapter-owned normalized sync. `raw-only` runs the tailer with no live adapter
-sync (a manual deferral); `auto` with normalized-replay catch-up first runs one
-adapter-owned sync after bootstrap drains, so bootstrap discoveries enter the
-live plan before polling, then defers live adapter sync until the catch-up
-cursors reach the raw-log head and resumes it; and
+sync (a manual deferral); `auto` runs a focused post-bootstrap pass for only the
+ENSv1/Basenames subregistry-discovery and ENSv2 registry families before it
+widens the live plan. It does not synchronously derive the other five adapter
+families. With normalized replay catch-up enabled, bounded asynchronous replay
+then owns the remaining historical normalized events, live adapter sync stays
+deferred until the cursors reach the raw-log head, and admission-epoch refreshes
+add replay discoveries to the live plan as replay advances. Live discovery
+writes remain deferred during that catch-up window, so a newly discovered
+emitter is not watched until replay materializes its edge; and
 only `inline` runs adapter sync inline per block and additionally re-derives
 discovery edges from the whole stored raw-log corpus on each refresh tick. The
 non-`inline` modes reload the live plan from edges already in storage rather than

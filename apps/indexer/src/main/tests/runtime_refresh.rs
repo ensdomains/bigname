@@ -1154,7 +1154,7 @@ async fn reconcile_fetched_heads_backfills_code_hashes_for_new_watched_addresses
 }
 
 #[tokio::test]
-async fn adapter_sync_before_widen_admits_bootstrap_discovered_edges_into_the_live_plan()
+async fn focused_discovery_sync_before_widen_admits_bootstrap_edges_into_the_live_plan()
 -> Result<()> {
     let database = TestDatabase::new().await?;
     let manifests = TestManifestDir::new()?;
@@ -1211,9 +1211,13 @@ async fn adapter_sync_before_widen_admits_bootstrap_discovered_edges_into_the_li
         0
     );
 
-    // Syncing adapter-owned state before the widen (run_mode.sync_adapter_after_startup_backfill)
-    // materializes the edge, so the live plan admits the bootstrap-discovered target.
-    sync_adapter_owned_raw_log_state(database.pool(), &bootstrap_state.watched_chain_plan).await?;
+    // Auto's focused post-bootstrap pass runs only the discovery-materializing families before the
+    // widen, so the live plan admits the target without deriving all seven adapter families.
+    sync_discovery_adapter_owned_raw_log_state(
+        database.pool(),
+        &bootstrap_state.watched_chain_plan,
+    )
+    .await?;
     let widened_state =
         widen_runtime_state_to_live_watch_scope(database.pool(), &bootstrap_state).await?;
     assert_eq!(
@@ -1260,15 +1264,20 @@ async fn stored_discovery_refresh_reloads_only_when_admission_epochs_move() -> R
         vec![registry_address.to_owned()]
     );
 
-    // First pass seeds the sentinel. Nothing has moved, so no reload result.
+    // First pass produces a sentinel candidate. Nothing has moved, so the
+    // plan itself is equal; the caller commits the candidate only after its
+    // convergence/apply work succeeds.
     let mut admission_epochs = None;
     let seeded = refresh_runtime_state_from_stored_discovery_when_epochs_move(
         database.pool(),
         &initial_state,
-        &mut admission_epochs,
+        admission_epochs.as_ref(),
     )
-    .await?;
-    assert!(seeded.is_none());
+    .await?
+    .expect("a missing sentinel must check the stored plan");
+    assert!(seeded.refreshed_state.is_none());
+    assert!(admission_epochs.is_none(), "the loader must not commit its sentinel");
+    admission_epochs = Some(seeded.admission_epochs);
     let seeded_epochs = admission_epochs
         .clone()
         .expect("first refresh must seed the admission-epoch sentinel");
@@ -1311,7 +1320,7 @@ async fn stored_discovery_refresh_reloads_only_when_admission_epochs_move() -> R
     let skipped = refresh_runtime_state_from_stored_discovery_when_epochs_move(
         database.pool(),
         &initial_state,
-        &mut admission_epochs,
+        admission_epochs.as_ref(),
     )
     .await?;
     assert!(
@@ -1325,14 +1334,17 @@ async fn stored_discovery_refresh_reloads_only_when_admission_epochs_move() -> R
         .bind(bumped_epoch)
         .execute(database.pool())
         .await?;
-    let (refreshed_state, refreshed_tasks) =
-        refresh_runtime_state_from_stored_discovery_when_epochs_move(
-            database.pool(),
-            &initial_state,
-            &mut admission_epochs,
-        )
-        .await?
-        .expect("a moved admission epoch must reload the stored plan");
+    let refreshed = refresh_runtime_state_from_stored_discovery_when_epochs_move(
+        database.pool(),
+        &initial_state,
+        admission_epochs.as_ref(),
+    )
+    .await?
+    .expect("a moved admission epoch must reload the stored plan");
+    let refreshed_epochs = refreshed.admission_epochs;
+    let (refreshed_state, refreshed_tasks) = refreshed
+        .refreshed_state
+        .expect("a moved discovery edge must change the stored plan");
     assert_eq!(
         refreshed_state.watched_chain_plan[0].addresses,
         vec![
@@ -1344,18 +1356,141 @@ async fn stored_discovery_refresh_reloads_only_when_admission_epochs_move() -> R
         refreshed_tasks[0].addresses,
         refreshed_state.watched_chain_plan[0].addresses
     );
+    admission_epochs = Some(refreshed_epochs);
 
     // The successful reload re-seeds the sentinel, so the next tick skips.
     let settled = refresh_runtime_state_from_stored_discovery_when_epochs_move(
         database.pool(),
         &refreshed_state,
-        &mut admission_epochs,
+        admission_epochs.as_ref(),
     )
     .await?;
     assert!(settled.is_none());
 
     database.cleanup().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn discovery_refresh_does_not_advance_epoch_when_convergence_fails() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let manifests = TestManifestDir::new()?;
+    manifests.write_manifest_for_source_family("ens_v1_registry_l1", &ens_v1_manifest_contents())?;
+    let repository = load_manifest_repository(&manifests.path)?;
+    let mut state = build_manifest_runtime_state(database.pool(), &repository).await?;
+    let mut tasks = sync_intake_chain_tasks(database.pool(), &state.watched_chain_plan).await?;
+    let original_addresses = tasks[0].addresses.clone();
+    let mut admission_epochs = Some(
+        bigname_manifests::load_discovery_admission_epochs(database.pool()).await?,
+    );
+    let loaded_epochs = admission_epochs.clone();
+
+    let canonical_head = provider_block(
+        "0xcacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacaca",
+        None,
+        7,
+    );
+    insert_raw_new_owner_log(
+        database.pool(),
+        "ethereum-mainnet",
+        &canonical_head,
+        "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
+        "0x0000000000000000000000000000000000000002",
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    sync_discovery_adapter_owned_raw_log_state(database.pool(), &state.watched_chain_plan).await?;
+    sqlx::query("DROP TABLE resolver_profile_input_changes CASCADE")
+        .execute(database.pool())
+        .await?;
+
+    let provider_registry = ProviderRegistry::from_chain_rpc_urls(&[])?;
+    assert!(
+        !refresh_discovery_watch_state(
+            database.pool(),
+            &provider_registry,
+            &mut state,
+            &mut tasks,
+            false,
+            true,
+            &mut admission_epochs,
+        )
+        .await?
+    );
+    assert_eq!(
+        admission_epochs, loaded_epochs,
+        "a failed convergence drain must leave the loaded-plan sentinel unchanged"
+    );
+    assert_eq!(tasks[0].addresses, original_addresses);
+
+    assert!(
+        refresh_discovery_watch_state(
+            database.pool(),
+            &provider_registry,
+            &mut state,
+            &mut tasks,
+            false,
+            false,
+            &mut admission_epochs,
+        )
+        .await?,
+        "raw-only refresh must apply the stored plan without draining resolver-profile work"
+    );
+    assert_ne!(admission_epochs, loaded_epochs);
+    assert_eq!(tasks[0].addresses.len(), original_addresses.len() + 1);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn stored_discovery_refresh_updates_summary_when_plan_is_equal() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let manifests = TestManifestDir::new()?;
+    manifests.write_manifest_for_source_family("ens_v1_registry_l1", &ens_v1_manifest_contents())?;
+    let repository = load_manifest_repository(&manifests.path)?;
+    let current = build_manifest_runtime_state(database.pool(), &repository).await?;
+    let expected_summary = current.watched_contract_summary.clone();
+    let mut stale = current.clone();
+    stale.watched_contract_summary.source_entry_count += 1;
+
+    let (refreshed, tasks) =
+        refresh_runtime_state_from_stored_discovery(database.pool(), &stale)
+            .await?
+            .expect("a changed watched-contract summary must refresh runtime metrics");
+
+    assert_eq!(refreshed.watched_chain_plan, current.watched_chain_plan);
+    assert_eq!(refreshed.watched_contract_summary, expected_summary);
+    assert_eq!(tasks[0].addresses, refreshed.watched_chain_plan[0].addresses);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn non_broad_repository_refresh_widens_plan_without_manifest_event_writes() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let manifests = TestManifestDir::new()?;
+    manifests.write_manifest_for_source_family("ens_v1_registry_l1", &ens_v1_manifest_contents())?;
+    let repository = load_manifest_repository(&manifests.path)?;
+
+    let state = build_manifest_runtime_state_for_repository_refresh(
+        database.pool(),
+        &repository,
+        RuntimeWatchScope::ActiveWatchedChain,
+        false,
+    )
+    .await?;
+
+    assert_eq!(state.watched_chain_plan.len(), 1);
+    assert_eq!(state.manifest_normalized_event_summary.total_synced_count, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM normalized_events")
+            .fetch_one(database.pool())
+            .await?,
+        0,
+        "non-inline repository refresh must not emit manifest-derived normalized events"
+    );
+
+    database.cleanup().await
 }
 
 #[tokio::test]

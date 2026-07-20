@@ -35,12 +35,17 @@ use super::super::refresh::refresh_runtime_state_from_stored_discovery_when_epoc
 /// the plan reload only runs when a chain's discovery admission epoch has
 /// moved since the last successful reload, so a quiet watched surface costs
 /// one tiny sentinel read per tick instead of a full plan scan.
-pub(super) async fn refresh_discovery_watch_state(
+///
+/// `resolver_profile_convergence_enabled` is false for raw-only operation, so
+/// reloading a stored plan cannot drain adapter-owned resolver-profile work in
+/// a mode that explicitly defers those writes.
+pub(crate) async fn refresh_discovery_watch_state(
     pool: &sqlx::PgPool,
     provider_registry: &ProviderRegistry,
     manifest_runtime_state: &mut ManifestRuntimeState,
     intake_chain_tasks: &mut Vec<IntakeChainTask>,
     sync_adapter_state_before_refresh: bool,
+    resolver_profile_convergence_enabled: bool,
     last_admission_epochs: &mut Option<BTreeMap<String, i64>>,
 ) -> Result<bool> {
     // The whole-corpus re-derivation must run before the sentinel read: it is
@@ -55,13 +60,14 @@ pub(super) async fn refresh_discovery_watch_state(
             refresh_runtime_state_from_stored_discovery_when_epochs_move(
                 pool,
                 manifest_runtime_state,
-                last_admission_epochs,
+                last_admission_epochs.as_ref(),
             )
             .await
         }
         Err(error) => Err(error),
     };
     if refreshed_state.is_ok()
+        && resolver_profile_convergence_enabled
         && !resolver_profile_drain_succeeded(
             drain_resolver_profile_input_changes(pool).await,
             "timer",
@@ -71,7 +77,11 @@ pub(super) async fn refresh_discovery_watch_state(
         return Ok(false);
     }
     match refreshed_state {
-        Ok(Some((next_manifest_runtime_state, next_tasks))) => {
+        Ok(Some(refresh)) => {
+            let Some((next_manifest_runtime_state, next_tasks)) = refresh.refreshed_state else {
+                *last_admission_epochs = Some(refresh.admission_epochs);
+                return Ok(true);
+            };
             validate_provider_registry_for_intake_tasks(&next_tasks, provider_registry).context(
                 "refreshed stored discovery state no longer matches configured provider sources",
             )?;
@@ -79,13 +89,15 @@ pub(super) async fn refresh_discovery_watch_state(
                 watched_chain_plan_state(&manifest_runtime_state.watched_chain_plan);
             let next_watch_state =
                 watched_chain_plan_state(&next_manifest_runtime_state.watched_chain_plan);
+            let watched_plan_changed = manifest_runtime_state.watched_chain_plan
+                != next_manifest_runtime_state.watched_chain_plan;
             let previous_intake_state = intake_runtime_state(intake_chain_tasks);
             let next_intake_state = intake_runtime_state(&next_tasks);
 
             info!(
                 service = "indexer",
                 refresh_reason = "timer",
-                watched_plan_changed = true,
+                watched_plan_changed,
                 checkpoint_state_changed = false,
                 plan_source = "stored_discovery_state",
                 previous_watched_chain_count = previous_watch_state.chain_count,
@@ -105,7 +117,7 @@ pub(super) async fn refresh_discovery_watch_state(
                 intake_safe_checkpoint_chain_count = next_intake_state.safe_checkpoint_chain_count,
                 intake_finalized_checkpoint_chain_count =
                     next_intake_state.finalized_checkpoint_chain_count,
-                "runtime watched chain plan changed after stored discovery sync"
+                "runtime watched state changed after stored discovery sync"
             );
             log_watched_contract_summary(&next_manifest_runtime_state.watched_contract_summary);
             log_watched_chain_plan(
@@ -116,6 +128,7 @@ pub(super) async fn refresh_discovery_watch_state(
             log_provider_registry("discovery-refresh", &next_tasks, provider_registry);
             *manifest_runtime_state = next_manifest_runtime_state;
             *intake_chain_tasks = next_tasks;
+            *last_admission_epochs = Some(refresh.admission_epochs);
             Ok(true)
         }
         Ok(None) => Ok(true),
