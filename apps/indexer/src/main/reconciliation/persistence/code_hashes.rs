@@ -22,8 +22,8 @@ use super::super::{
 };
 use super::load_live_generic_resolver_topic0s;
 
-/// Upper bound on watched addresses the baseline sweep verifies in one poll
-/// tick. The sweep walks the sorted watch surface behind a process-lifetime
+/// Per-chain watched-address cap for one baseline poll tick. The sweep walks
+/// the sorted watch surface behind a process-lifetime
 /// cursor, so a multi-million-address surface is baselined across ticks
 /// instead of arming one whole-surface `eth_getCode` storm inside a tick.
 const DEFAULT_RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK: usize = 2_048;
@@ -216,7 +216,7 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
     Ok(())
 }
 
-/// One capped step of the per-chain raw-code baseline sweep.
+/// One capped step of the per-chain code-observation sweep.
 ///
 /// The sweep walks the sorted watched surface behind a process-lifetime
 /// cursor: each tick verifies a capped address batch and fetches code only

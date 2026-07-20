@@ -8,9 +8,9 @@ pub(crate) struct IndexerRunMode {
     pub(crate) bootstrap_watch_scope: RuntimeWatchScope,
     /// Target scope for the live tailer. Live intake fetches every log in a block by block hash and
     /// filters client-side, so a wide scope costs no extra *log* fetches — narrowing it only drops
-    /// discovered emitters on the floor. It is not free of all provider calls: the capped raw-code
-    /// baseline sweep issues an `eth_getCode` per watched address that still lacks a baseline
-    /// observation, so that cost does scale with the scope.
+    /// discovered emitters on the floor. It is not free of all provider calls: the capped
+    /// code-observation sweep issues an `eth_getCode` per watched address that still lacks a
+    /// baseline observation, so that cost does scale with the scope.
     pub(crate) live_watch_scope: RuntimeWatchScope,
     pub(crate) startup_backfill_adapter_sync_mode: BackfillAdapterSyncMode,
     pub(crate) sync_adapter_before_startup_backfill: bool,

@@ -224,6 +224,12 @@ resource-keyed rows additionally require the event's resource to resolve to a
 canonical identity row at rebuild time. Only projection workers write
 projections, with the documented sidecar exception.
 
+**Raw-code baseline** — the capped per-chain sweep that records at least one
+non-orphaned code observation for each address in the active watch plan. Each
+chain receives the configured address budget per poll tick. Observations are
+durable; the process-local cursor may safely restart by rechecking the stored
+prefix without repeating provider calls for observations already present.
+
 **Raw facts** — the stored record of what was observed on chain: selected
 logs, the minimal transaction/receipt fields needed to decode them, code-hash
 observations, and pinned call snapshots. Their content is append-only, edited

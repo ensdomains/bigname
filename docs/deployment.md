@@ -464,11 +464,12 @@ watches. Bootstrap turns each selected target into an address-filtered range
 scan, so a manifest-declared bootstrap scope bounds provider cost on chains with
 a large discovered-target set. Live intake instead fetches every log in a block
 by block hash and filters client-side, so watching discovered targets costs no
-additional log fetches — though the code-hash baseline pass still issues one
+additional log fetches — though the
+[raw-code baseline](glossary.md#raw-code-baseline) still issues one
 `eth_getCode` per watched address that lacks a baseline observation, a cost that
 scales with the watched set. That baseline runs as a capped cursor sweep
-(`BIGNAME_INDEXER_RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK` addresses per poll
-tick, default 2048, fetched in batched provider rounds and upserted per round),
+(`BIGNAME_INDEXER_RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK` addresses per chain
+per poll tick, default 2048, fetched in batched provider rounds and upserted per round),
 so a large discovered-target set is baselined across ticks instead of inside
 one. The live tailer therefore always watches the active watched chain —
 manifest-declared and discovery-admitted targets alike — in every adapter-sync
