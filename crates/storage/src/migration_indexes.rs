@@ -12,6 +12,8 @@ pub const RECORD_INVENTORY_REPLAY_INDEX: &str =
 const ACTIVE_CONTRACT_ADDRESS_INDEX: &str = "contract_instance_addresses_active_lower_address_idx";
 const HISTORICAL_CONTRACT_ADDRESS_INDEX: &str =
     "contract_instance_addresses_historical_lower_address_idx";
+const NON_ORPHANED_RAW_CODE_LOWER_ADDRESS_INDEX: &str =
+    "raw_code_hashes_non_orphaned_lower_address_idx";
 
 #[derive(Clone, Copy)]
 struct RequiredIndexDescriptor {
@@ -54,7 +56,7 @@ const RECORD_INVENTORY_REPLAY_INDEX_DESCRIPTOR: RequiredIndexDescriptor = Requir
         "#,
 };
 
-const REQUIRED_CONTRACT_ADDRESS_INDEXES: &[RequiredIndexDescriptor] = &[
+const REQUIRED_WATCH_LOOKUP_INDEXES: &[RequiredIndexDescriptor] = &[
     RequiredIndexDescriptor {
         name: ACTIVE_CONTRACT_ADDRESS_INDEX,
         table: "public.contract_instance_addresses",
@@ -72,6 +74,15 @@ const REQUIRED_CONTRACT_ADDRESS_INDEXES: &[RequiredIndexDescriptor] = &[
             ON public.contract_instance_addresses (chain_id, LOWER(address))
             WHERE deactivated_at IS NOT NULL
               AND active_to_block_number IS NOT NULL
+        "#,
+    },
+    RequiredIndexDescriptor {
+        name: NON_ORPHANED_RAW_CODE_LOWER_ADDRESS_INDEX,
+        table: "public.raw_code_hashes",
+        create_concurrently_sql: r#"
+            CREATE INDEX CONCURRENTLY raw_code_hashes_non_orphaned_lower_address_idx
+            ON public.raw_code_hashes (chain_id, LOWER(contract_address))
+            WHERE canonicality_state <> 'orphaned'::public.canonicality_state
         "#,
     },
 ];
@@ -387,7 +398,7 @@ pub(super) async fn run_migrations_and_ensure_required_indexes_ready(
         {
             guard.ensure_record_inventory_replay_index_ready().await?;
         }
-        ensure_required_contract_address_indexes_ready(guard.connection_mut()).await?;
+        ensure_required_watch_lookup_indexes_ready(guard.connection_mut()).await?;
         Ok(())
     }
     .await;
@@ -427,10 +438,8 @@ async fn record_inventory_replay_index_ready(connection: &mut PgConnection) -> R
     .await
 }
 
-async fn ensure_required_contract_address_indexes_ready(
-    connection: &mut PgConnection,
-) -> Result<()> {
-    for index in REQUIRED_CONTRACT_ADDRESS_INDEXES {
+async fn ensure_required_watch_lookup_indexes_ready(connection: &mut PgConnection) -> Result<()> {
+    for index in REQUIRED_WATCH_LOOKUP_INDEXES {
         ensure_required_index_ready(connection, index).await?;
     }
     Ok(())
