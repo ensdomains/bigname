@@ -16,6 +16,10 @@ use super::super::intake::IntakeChainTask;
 use super::super::manifest::ManifestRuntimeState;
 use super::discovery_refresh::refresh_discovery_watch_state;
 
+fn resolver_profile_convergence_before_handoff() -> bool {
+    false
+}
+
 #[cfg(test)]
 #[path = "replay_handoff/test_hook.rs"]
 mod test_hook;
@@ -55,8 +59,7 @@ pub(super) async fn replay_handoff_readiness(
         return readiness;
     }
 
-    // The per-chain checks select independent raw-poll work, but a final
-    // all-chain snapshot remains the authority for switching adapter ownership.
+    // A final all-chain snapshot remains the authority for switching adapter ownership.
     match normalized_replay_cursors_complete(pool, deployment_profile, provider_configured_chains)
         .await
     {
@@ -114,7 +117,6 @@ pub(super) async fn poll_replay_ready_chains_raw_only(
     intake_chain_tasks: &mut Vec<IntakeChainTask>,
     deployment_profile: &str,
     raw_poll_chains: &BTreeSet<String>,
-    resolver_profile_convergence_enabled: bool,
     watched_plan_admission_epochs: &mut Option<BTreeMap<String, i64>>,
     header_audit_mode: HeaderAuditMode,
     event_silent_reverse_resolver_addresses: &[String],
@@ -131,7 +133,7 @@ pub(super) async fn poll_replay_ready_chains_raw_only(
         manifest_runtime_state,
         intake_chain_tasks,
         false,
-        resolver_profile_convergence_enabled,
+        resolver_profile_convergence_before_handoff(),
         watched_plan_admission_epochs,
     )
     .await?
@@ -183,7 +185,6 @@ pub(super) async fn renew_live_poll_adapter_sync_permit(
     provider_configured_chains: &[String],
     live_adapter_sync_latched: &mut bool,
     forced_handoff_plan_reload_complete: &mut bool,
-    resolver_profile_convergence_enabled: bool,
     watched_plan_admission_epochs: &mut Option<BTreeMap<String, i64>>,
     header_audit_mode: HeaderAuditMode,
     event_silent_reverse_resolver_addresses: &[String],
@@ -202,7 +203,6 @@ pub(super) async fn renew_live_poll_adapter_sync_permit(
             intake_chain_tasks,
             deployment_profile,
             &raw_poll_chains,
-            resolver_profile_convergence_enabled,
             watched_plan_admission_epochs,
             header_audit_mode,
             event_silent_reverse_resolver_addresses,
@@ -255,7 +255,7 @@ pub(super) async fn renew_live_poll_adapter_sync_permit(
         manifest_runtime_state,
         intake_chain_tasks,
         false,
-        resolver_profile_convergence_enabled,
+        resolver_profile_convergence_before_handoff(),
         watched_plan_admission_epochs,
     )
     .await?
@@ -399,8 +399,6 @@ pub(super) fn manifest_refresh_adapter_sync_before_handoff_readiness(
     adapter_sync_on_manifest_refresh: bool,
     _previous_replay_handoff_permit: bool,
 ) -> bool {
-    // The previous poll's replay handoff permit cannot authorize adapter work
-    // before this poll has renewed replay and backlog readiness.
     adapter_sync_on_live_poll || adapter_sync_on_manifest_refresh
 }
 
@@ -414,6 +412,7 @@ mod tests {
         ReplayHandoffLatchStatus, ReplayHandoffReadiness, classify_replay_handoff_readiness,
         finish_replay_handoff_latch, live_poll_adapter_sync_after_handoff_attempt,
         manifest_refresh_adapter_sync_before_handoff_readiness, prepare_handoff_plan_reload,
+        resolver_profile_convergence_before_handoff,
     };
 
     #[test]
@@ -470,7 +469,8 @@ mod tests {
     }
 
     #[test]
-    fn handoff_forces_one_plan_reload_then_preserves_the_epoch_gate() {
+    fn handoff_forces_one_plan_reload_preserves_epoch_gate_and_defers_convergence() {
+        assert!(!resolver_profile_convergence_before_handoff());
         let epochs = BTreeMap::from([("base-mainnet".to_owned(), 7)]);
         let mut sentinel = Some(epochs.clone());
         prepare_handoff_plan_reload(false, &mut sentinel);

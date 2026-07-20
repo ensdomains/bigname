@@ -400,7 +400,6 @@ pub(crate) async fn run_poll_loop(
                         &provider_configured_chains,
                         &mut live_poll_adapter_sync_restored_after_replay,
                         &mut forced_handoff_plan_reload_complete,
-                        resolver_profile_convergence_enabled,
                         &mut watched_plan_admission_epochs,
                         header_audit_mode,
                         &event_silent_reverse_resolver_addresses,

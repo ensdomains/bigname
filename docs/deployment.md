@@ -481,7 +481,7 @@ scan.
 Widening the live watch plan writes more `raw_logs` rows per block, because a
 block is retained whenever any watched target emits in it and same-transaction
 sibling logs are retained with it. It does not widen public API routes,
-route-level coverage, manifest capability flags, ENSv2 profile support, or
+route-level coverage, manifest capability flags, ENSv2 resolver profile support, or
 consumer-replacement meaning.
 
 ```sh

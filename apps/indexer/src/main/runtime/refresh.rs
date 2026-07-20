@@ -97,8 +97,8 @@ pub(crate) async fn refresh_runtime_state_from_stored_discovery(
 /// scans the whole watched surface (tens of millions of discovery edges at
 /// Base scale, minutes per pass), so the live tailer must not run it on every
 /// poll tick. Every transaction that mutates the watched surface bumps the
-/// owning chain's `discovery_admission_epochs` row (the ratified promotion
-/// invariant), so an unchanged epoch map proves the stored plan has not moved
+/// owning chain's `discovery_admission_epochs` row (the ratified watched-surface
+/// admission invariant), so an unchanged epoch map proves the stored plan has not moved
 /// and the reload is skipped for the price of one read of a tiny table.
 ///
 /// The caller owns the loaded-plan sentinel and commits the returned epoch map

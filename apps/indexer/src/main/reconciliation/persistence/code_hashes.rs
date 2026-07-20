@@ -222,7 +222,7 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
 /// cursor: each tick verifies a capped address batch and fetches code only
 /// for those with no stored non-orphaned observation, and upserts per
 /// [`RAW_CODE_BASELINE_FETCH_CHUNK_ADDRESSES`]-sized provider round so
-/// progress persists across failures and restarts. A finished sweep records
+/// stored observations survive failures and restarts. A finished sweep records
 /// the admission epoch under which its in-memory plan was loaded; when a plan
 /// with a newer epoch is applied, a fresh sweep re-verifies the surface (cheap
 /// membership probes; only genuinely missing addresses are fetched) so newly
