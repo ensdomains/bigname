@@ -833,7 +833,11 @@ migrations can include replay-adjacent data repairs. If a crash occurs before
 the abort-status migration is installed, resume/complete the run or restore the
 database to a consistent pre-run snapshot before running migrations or writers.
 Guarded writer processes require at least two database pool connections so the
-held advisory lock connection cannot starve the writer work.
+held advisory lock connection cannot starve ordinary writer work. The indexer
+requires at least three: resolver-profile authority journaling shares its
+transaction with the bounded target cursor and keeps one connection available
+for bounded admission reads; it rejects a smaller pool before starting the
+journal transaction.
 
 1. Stop the indexer and worker services, leaving PostgreSQL and the API online
    for dry-run review if desired.

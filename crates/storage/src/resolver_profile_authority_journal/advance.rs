@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
-use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
+use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder, Transaction};
 
 use crate::resolver_profile_input_changes::enqueue_resolver_profile_reconciliations_with_executor;
 
@@ -111,6 +111,17 @@ impl ResolverProfileAuthorityJournalAdvance {
                 self.summary.max_staged_entry_batch_size.max(chunk.len());
         }
         Ok(())
+    }
+
+    /// Borrow the journal transaction while constructing the bounded AFTER
+    /// set. Callers may stream authority inputs through this connection before
+    /// asking the advance to materialize its diff.
+    pub fn connection_mut(&mut self) -> Result<&mut PgConnection> {
+        ensure!(
+            self.changed_entry_count.is_none(),
+            "cannot read resolver-profile authority inputs after preparing the diff"
+        );
+        Ok(self.transaction.as_mut())
     }
 
     pub async fn staged_entry_diff_count(&mut self) -> Result<i64> {

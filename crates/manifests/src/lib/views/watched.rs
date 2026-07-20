@@ -12,7 +12,7 @@ mod scoped;
 mod selection;
 
 use anyhow::{Context, Result, ensure};
-use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
+use sqlx::{PgConnection, PgPool, Row, postgres::PgRow};
 
 use crate::{WatchedContract, WatchedContractSource, normalize_address};
 
@@ -117,44 +117,40 @@ ORDER BY watched.chain, watched.address
 
 /// One server-side cursor over the distinct current addresses which can
 /// contribute ENSv1 or Basenames resolver-profile authority entries.
-pub struct ResolverProfileAuthorityTargetPages {
-    transaction: Transaction<'static, Postgres>,
-}
+pub struct ResolverProfileAuthorityTargetPages;
 
 impl ResolverProfileAuthorityTargetPages {
-    pub async fn begin(pool: &PgPool) -> Result<Self> {
-        let mut transaction = pool
-            .begin()
-            .await
-            .context("failed to begin resolver-profile authority target stream")?;
-        sqlx::query("SET TRANSACTION READ ONLY")
-            .execute(&mut *transaction)
-            .await
-            .context("failed to make resolver-profile authority target stream read-only")?;
+    /// Declare the cursor on a caller-owned open transaction.
+    pub async fn begin(connection: &mut PgConnection) -> Result<Self> {
         sqlx::query(&resolver_profile_authority_target_cursor_sql())
-            .execute(&mut *transaction)
+            .execute(connection)
             .await
             .context("failed to declare resolver-profile authority target cursor")?;
-        Ok(Self { transaction })
+        Ok(Self)
     }
 
-    pub async fn next_page(&mut self, limit: usize) -> Result<Vec<(String, String)>> {
+    pub async fn next_page(
+        &mut self,
+        connection: &mut PgConnection,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>> {
         ensure!(
             limit > 0,
             "resolver-profile authority target page limit must be positive"
         );
         let sql = format!("FETCH FORWARD {limit} FROM resolver_profile_authority_targets");
         sqlx::query_as::<_, (String, String)>(&sql)
-            .fetch_all(&mut *self.transaction)
+            .fetch_all(connection)
             .await
             .context("failed to fetch resolver-profile authority target page")
     }
 
-    pub async fn finish(self) -> Result<()> {
-        self.transaction
-            .commit()
+    pub async fn finish(self, connection: &mut PgConnection) -> Result<()> {
+        sqlx::query("CLOSE resolver_profile_authority_targets")
+            .execute(connection)
             .await
             .context("failed to finish resolver-profile authority target stream")
+            .map(|_| ())
     }
 }
 

@@ -16,6 +16,7 @@ use bigname_storage::ResolverProfileAuthorityJournal;
 
 const MAX_AUTHORITY_JOURNAL_ATTEMPTS: usize = 32;
 const AUTHORITY_TARGET_PAGE_SIZE: usize = 250;
+const MIN_AUTHORITY_JOURNAL_POOL_CONNECTIONS: u32 = 3;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ResolverProfileAuthorityJournalSummary {
@@ -35,6 +36,14 @@ pub(crate) struct ResolverProfileAuthorityJournalSummary {
 pub(crate) async fn journal_resolver_profile_authority(
     pool: &sqlx::PgPool,
 ) -> Result<ResolverProfileAuthorityJournalSummary> {
+    ensure!(
+        pool.options().get_max_connections() >= MIN_AUTHORITY_JOURNAL_POOL_CONNECTIONS,
+        "resolver-profile authority journal requires at least \
+         {MIN_AUTHORITY_JOURNAL_POOL_CONNECTIONS} database connections (runtime writer guard, \
+         journal transaction, and one available for bounded authority admission reads), but the \
+         pool allows only {}",
+        pool.options().get_max_connections()
+    );
     let mut summary = ResolverProfileAuthorityJournalSummary::default();
 
     for _ in 0..MAX_AUTHORITY_JOURNAL_ATTEMPTS {
@@ -93,9 +102,11 @@ async fn stage_current_authority(
     pool: &sqlx::PgPool,
     advance: &mut ResolverProfileAuthorityJournalAdvance,
 ) -> Result<()> {
-    let mut targets = ResolverProfileAuthorityTargetPages::begin(pool).await?;
+    let mut targets = ResolverProfileAuthorityTargetPages::begin(advance.connection_mut()?).await?;
     loop {
-        let page = targets.next_page(AUTHORITY_TARGET_PAGE_SIZE).await?;
+        let page = targets
+            .next_page(advance.connection_mut()?, AUTHORITY_TARGET_PAGE_SIZE)
+            .await?;
         if page.is_empty() {
             break;
         }
@@ -110,7 +121,7 @@ async fn stage_current_authority(
             .collect::<Result<Vec<_>>>()?;
         advance.stage_entries(&entries).await?;
     }
-    targets.finish().await
+    targets.finish(advance.connection_mut()?).await
 }
 
 /// Cheap ordinary-live guard. A chain epoch match performs no resolver-profile

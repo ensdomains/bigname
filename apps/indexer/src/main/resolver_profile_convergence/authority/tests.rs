@@ -66,6 +66,161 @@ fn authority_entry_key_changes_only_with_natural_identity() -> Result<()> {
 }
 
 #[tokio::test]
+async fn authority_journal_rejects_pool_that_runtime_guard_would_starve() -> Result<()> {
+    let database = TestDatabase::create_migrated(
+        TestDatabaseConfig::new("indexer_resolver_profile_authority_pool_capacity")
+            .pool_max_connections(2),
+        &bigname_storage::MIGRATOR,
+        "failed to apply migrations for resolver-profile pool-capacity test",
+    )
+    .await?;
+    let runtime_guard = bigname_storage::hold_base_normalized_rederive_runtime_shared_lock(
+        database.pool(),
+        "bigname-indexer",
+    )
+    .await?;
+
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        journal_resolver_profile_authority(database.pool()),
+    )
+    .await
+    .expect("authority journal must reject an undersized pool instead of waiting forever")
+    .expect_err("authority journal must reject a pool with only one usable connection");
+    assert!(
+        format!("{error:?}").contains("requires at least 3 database connections"),
+        "{error:?}"
+    );
+
+    drop(runtime_guard);
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn authority_journal_pages_targets_with_runtime_guard_on_three_connections() -> Result<()> {
+    let database = TestDatabase::create_migrated(
+        TestDatabaseConfig::new("indexer_resolver_profile_authority_three_connections")
+            .pool_max_connections(3),
+        &bigname_storage::MIGRATOR,
+        "failed to apply migrations for resolver-profile connection-topology test",
+    )
+    .await?;
+    let manifest_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO manifest_versions (
+            manifest_version,
+            namespace,
+            source_family,
+            chain,
+            deployment_epoch,
+            rollout_status,
+            normalizer_version,
+            file_path,
+            manifest_payload
+        )
+        VALUES (
+            1,
+            'ens',
+            'ens_v1_resolver_l1',
+            'ethereum-mainnet',
+            'authority-journal-test',
+            'active',
+            'test',
+            'authority-journal-test.toml',
+            '{"roots": [], "contracts": []}'::JSONB
+        )
+        RETURNING manifest_id
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+        SELECT
+            md5('authority-target-' || target::TEXT)::UUID,
+            'ethereum-mainnet',
+            'resolver'
+        FROM generate_series(1, 251) AS target
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_contract_instances (
+            manifest_id,
+            declaration_kind,
+            declaration_name,
+            contract_instance_id,
+            declared_address,
+            role
+        )
+        SELECT
+            $1,
+            'contract',
+            'target-' || target::TEXT,
+            md5('authority-target-' || target::TEXT)::UUID,
+            '0x' || LPAD(TO_HEX(target), 40, '0'),
+            'test_resolver'
+        FROM generate_series(1, 251) AS target
+        "#,
+    )
+    .bind(manifest_id)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instance_addresses (
+            contract_instance_id,
+            chain_id,
+            address,
+            active_from_block_number,
+            source_manifest_id
+        )
+        SELECT
+            md5('authority-target-' || target::TEXT)::UUID,
+            'ethereum-mainnet',
+            '0x' || LPAD(TO_HEX(target), 40, '0'),
+            1,
+            $1
+        FROM generate_series(1, 251) AS target
+        "#,
+    )
+    .bind(manifest_id)
+    .execute(database.pool())
+    .await?;
+
+    let runtime_guard = bigname_storage::hold_base_normalized_rederive_runtime_shared_lock(
+        database.pool(),
+        "bigname-indexer",
+    )
+    .await?;
+    let summary = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        journal_resolver_profile_authority(database.pool()),
+    )
+    .await
+    .expect("three-connection authority journal must not starve admission reads")?;
+    drop(runtime_guard);
+
+    assert!(summary.journal_advanced);
+    assert_eq!(summary.authority_scan_count, 1);
+    assert_eq!(summary.enqueued_target_count, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM resolver_profile_authority_journal_entries"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        251,
+        "the cursor must consume the page after the first 250 targets"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn unchanged_epoch_guard_does_not_load_authority_entries() -> Result<()> {
     let database = TestDatabase::create_migrated(
         TestDatabaseConfig::new("indexer_resolver_profile_epoch_only_guard"),
