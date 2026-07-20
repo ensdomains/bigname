@@ -61,6 +61,9 @@ pub(crate) async fn run_poll_loop(
 ) -> Result<()> {
     let deployment_profile = deployment_profile_from_manifest_root(&manifests_root);
     let mut live_poll_adapter_sync_restored_after_replay = false;
+    // Change-detection sentinel for the per-tick stored watch-plan reload:
+    // holds the discovery admission epochs the current plan was loaded under.
+    let mut watched_plan_admission_epochs: Option<std::collections::BTreeMap<String, i64>> = None;
     let mut interval = tokio::time::interval(Duration::from_secs(poll_interval_secs));
     interval.tick().await;
 
@@ -471,6 +474,7 @@ pub(crate) async fn run_poll_loop(
                         &mut manifest_runtime_state,
                         &mut intake_chain_tasks,
                         resync_adapter_owned_state_on_discovery_refresh,
+                        &mut watched_plan_admission_epochs,
                     )
                     .await?;
                 }

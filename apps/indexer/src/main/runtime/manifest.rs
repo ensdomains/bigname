@@ -8,7 +8,7 @@ use bigname_manifests::{
     DiscoveryAdmissionState, ManifestLoadStatus, ManifestLoadSummary, ManifestRepository,
     ManifestSyncStatus, ManifestSyncSummary, WatchedChainPlan, WatchedContractSummary,
     load_manifest_declared_watched_chain_plan, load_manifest_declared_watched_contract_summary,
-    load_watched_chain_plan, load_watched_contract_summary,
+    load_watched_contract_summary_and_chain_plan,
 };
 
 use crate::resolver_profile_convergence::journal_resolver_profile_authority;
@@ -99,12 +99,14 @@ pub(crate) async fn build_manifest_runtime_state_with_watch_scope(
         RuntimeWatchScope::ActiveWatchedChain => {
             let admission_state = bigname_manifests::load_discovery_admission_state(pool).await?;
             verify_stored_manifest_state(&sync_summary, &admission_state)?;
+            let (watched_contract_summary, watched_chain_plan) =
+                load_watched_contract_summary_and_chain_plan(pool).await?;
             (
                 sync_summary,
                 discovery_admission_snapshot(&admission_state),
                 bigname_adapters::sync_manifest_normalized_events(pool).await?,
-                load_watched_contract_summary(pool).await?,
-                load_watched_chain_plan(pool).await?,
+                watched_contract_summary,
+                watched_chain_plan,
             )
         }
         RuntimeWatchScope::ManifestDeclaredOnly => {

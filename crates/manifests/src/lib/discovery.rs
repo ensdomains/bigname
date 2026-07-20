@@ -14,10 +14,10 @@ mod reconciliation;
 mod types;
 
 pub use admission::DiscoveryAdmissionState;
-pub use admission_epoch::load_discovery_admission_epoch;
 pub(crate) use admission_epoch::{
     bump_discovery_admission_epochs, fence_discovery_admission_epoch_writes,
 };
+pub use admission_epoch::{load_discovery_admission_epoch, load_discovery_admission_epochs};
 pub use loading::load_discovery_admission_state;
 pub use persistence::persist_discovery_observation;
 pub use provenance::discovery_observation_evm_event_position;

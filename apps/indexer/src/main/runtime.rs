@@ -50,7 +50,8 @@ pub(crate) use poll_loop::{
 pub(crate) use refresh::{
     refresh_intake_chain_tasks, refresh_manifest_normalized_events_from_storage,
     refresh_runtime_state_from_storage_discovery, refresh_runtime_state_from_stored_discovery,
-    refresh_watched_chain_plan, widen_runtime_state_to_live_watch_scope,
+    refresh_runtime_state_from_stored_discovery_when_epochs_move, refresh_watched_chain_plan,
+    widen_runtime_state_to_live_watch_scope,
 };
 #[allow(unused_imports)]
 pub(crate) use tracing_init::init_tracing;

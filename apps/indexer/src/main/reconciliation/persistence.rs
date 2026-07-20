@@ -20,14 +20,15 @@ use super::{
         sync_live_adapter_state_from_persisted_raw_payloads,
         sync_live_adapter_state_from_persisted_raw_payloads_after_reorg,
     },
+    canonical::ChainCoverageFrontiers,
     payload::{
-        EventSilentResolverCallObservation, canonical_raw_state,
+        EventSilentResolverCallObservation, SelectedAddressSet, canonical_raw_state,
         ensure_provider_bundle_matches_raw_block, event_silent_direct_call_address_set,
         event_silent_resolver_call_observations_from_live_payload, insert_raw_block_candidate,
         provider_logs_to_live_selected_raw_logs, provider_raw_payload_cache_metadata_to_upserts,
         provider_receipts_to_selected_raw_receipts,
         provider_transactions_to_selected_raw_transactions, raw_payload_candidate_hashes,
-        retained_transaction_keys_from_live_payload, selected_address_set,
+        retained_transaction_keys_from_live_payload,
     },
     types::{
         CanonicalReconciliation, CanonicalReconciliationStatus, HeadChangeSet, HeaderAuditMode,
@@ -98,6 +99,7 @@ pub(crate) async fn persist_reconciled_raw_state(
     adapter_sync_enabled: bool,
     header_audit_mode: HeaderAuditMode,
     event_silent_resolver_addresses: &[String],
+    coverage_frontiers: &ChainCoverageFrontiers,
 ) -> Result<()> {
     persist_reconciled_raw_blocks(pool, &task.chain, heads, canonical, header_audit_mode).await?;
     if head_change_set.requires_raw_payload_refresh(canonical.status) {
@@ -115,8 +117,16 @@ pub(crate) async fn persist_reconciled_raw_state(
         )
         .await?;
     }
-    persist_reconciled_raw_code_hashes(pool, task, provider, heads, canonical, head_change_set)
-        .await
+    persist_reconciled_raw_code_hashes(
+        pool,
+        task,
+        provider,
+        heads,
+        canonical,
+        head_change_set,
+        coverage_frontiers,
+    )
+    .await
 }
 
 // Raw-payload persistence keeps selection, heads, canonicality, and adapter inputs explicit.
@@ -153,7 +163,7 @@ pub(crate) async fn persist_reconciled_raw_payloads(
     let mut logs = Vec::<RawLog>::new();
     let mut cache_metadata = Vec::<RawPayloadCacheMetadataUpsert>::new();
     let mut event_silent_resolver_calls = Vec::<EventSilentResolverCallObservation>::new();
-    let selected_address_filter = selected_address_set(selected_addresses);
+    let selected_address_filter = SelectedAddressSet::from_plan_addresses(selected_addresses);
     let generic_resolver_topic0s = load_live_generic_resolver_topic0s(pool, chain).await?;
     let event_silent_direct_call_addresses =
         event_silent_direct_call_address_set(chain, event_silent_resolver_addresses);
@@ -173,7 +183,7 @@ pub(crate) async fn persist_reconciled_raw_payloads(
             chain,
             raw_block,
             &bundle.logs,
-            &selected_address_filter,
+            selected_address_filter,
             &generic_resolver_topic0s,
         )?;
         let retained_transaction_keys = retained_transaction_keys_from_live_payload(

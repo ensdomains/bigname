@@ -1242,6 +1242,123 @@ async fn adapter_sync_before_widen_admits_bootstrap_discovered_edges_into_the_li
 }
 
 #[tokio::test]
+async fn stored_discovery_refresh_reloads_only_when_admission_epochs_move() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let manifests = TestManifestDir::new()?;
+    manifests.write_manifest_for_source_family("ens_v1_registry_l1", &ens_v1_manifest_contents())?;
+    let manifest_repository = load_manifest_repository(&manifests.path)?;
+    let initial_state = build_manifest_runtime_state_with_watch_scope(
+        database.pool(),
+        &manifest_repository,
+        RuntimeWatchScope::ActiveWatchedChain,
+    )
+    .await?;
+    let registry_address = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
+    let discovered_owner_address = "0x0000000000000000000000000000000000000002";
+    assert_eq!(
+        initial_state.watched_chain_plan[0].addresses,
+        vec![registry_address.to_owned()]
+    );
+
+    // First pass seeds the sentinel. Nothing has moved, so no reload result.
+    let mut admission_epochs = None;
+    let seeded = refresh_runtime_state_from_stored_discovery_when_epochs_move(
+        database.pool(),
+        &initial_state,
+        &mut admission_epochs,
+    )
+    .await?;
+    assert!(seeded.is_none());
+    let seeded_epochs = admission_epochs
+        .clone()
+        .expect("first refresh must seed the admission-epoch sentinel");
+
+    // A stored NewOwner log whose adapter sync materializes a discovery edge
+    // and, per the ratified invariant, bumps the chain's admission epoch.
+    let canonical_head = provider_block(
+        "0xcafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe",
+        Some("0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddead"),
+        7,
+    );
+    insert_raw_new_owner_log(
+        database.pool(),
+        "ethereum-mainnet",
+        &canonical_head,
+        "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
+        discovered_owner_address,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    sync_adapter_owned_raw_log_state(database.pool(), &initial_state.watched_chain_plan).await?;
+    let bumped_epoch = sqlx::query_scalar::<_, i64>(
+        "SELECT epoch FROM discovery_admission_epochs WHERE chain_id = 'ethereum-mainnet'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert!(
+        bumped_epoch > seeded_epochs.get("ethereum-mainnet").copied().unwrap_or(0),
+        "adapter-owned discovery sync must bump the admission epoch"
+    );
+
+    // Roll the epoch row back to the sentinel's value: the plan tables now
+    // hold a new edge, but with an unmoved epoch the refresh must skip the
+    // full plan reload — reloads are keyed to the epoch invariant, never to
+    // per-tick scans of the multi-million-row watched surface.
+    sqlx::query("UPDATE discovery_admission_epochs SET epoch = $1 WHERE chain_id = 'ethereum-mainnet'")
+        .bind(seeded_epochs.get("ethereum-mainnet").copied().unwrap_or(0))
+        .execute(database.pool())
+        .await?;
+    let skipped = refresh_runtime_state_from_stored_discovery_when_epochs_move(
+        database.pool(),
+        &initial_state,
+        &mut admission_epochs,
+    )
+    .await?;
+    assert!(
+        skipped.is_none(),
+        "an unmoved admission epoch must skip the stored plan reload"
+    );
+
+    // Restoring the bumped epoch makes the sentinel observe the move and
+    // reload the plan, admitting the discovered target.
+    sqlx::query("UPDATE discovery_admission_epochs SET epoch = $1 WHERE chain_id = 'ethereum-mainnet'")
+        .bind(bumped_epoch)
+        .execute(database.pool())
+        .await?;
+    let (refreshed_state, refreshed_tasks) =
+        refresh_runtime_state_from_stored_discovery_when_epochs_move(
+            database.pool(),
+            &initial_state,
+            &mut admission_epochs,
+        )
+        .await?
+        .expect("a moved admission epoch must reload the stored plan");
+    assert_eq!(
+        refreshed_state.watched_chain_plan[0].addresses,
+        vec![
+            discovered_owner_address.to_owned(),
+            registry_address.to_owned(),
+        ]
+    );
+    assert_eq!(
+        refreshed_tasks[0].addresses,
+        refreshed_state.watched_chain_plan[0].addresses
+    );
+
+    // The successful reload re-seeds the sentinel, so the next tick skips.
+    let settled = refresh_runtime_state_from_stored_discovery_when_epochs_move(
+        database.pool(),
+        &refreshed_state,
+        &mut admission_epochs,
+    )
+    .await?;
+    assert!(settled.is_none());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn storage_discovery_refresh_adds_ensv1_address_without_manifest_reload_and_next_poll_backfills_code_hash()
 -> Result<()> {
     let database = TestDatabase::new().await?;

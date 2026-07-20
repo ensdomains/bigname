@@ -1,22 +1,51 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
-use bigname_storage::{RawCodeHash, load_raw_blocks_by_hashes, upsert_raw_code_hashes};
+use bigname_manifests::load_discovery_admission_epoch;
+use bigname_storage::{RawBlock, RawCodeHash, load_raw_blocks_by_hashes, upsert_raw_code_hashes};
 use sqlx::Row;
 
 use crate::{
-    provider::{ChainProviderOps, ProviderBlockSelection, ProviderHeadSnapshot},
+    provider::{ChainProviderOps, ProviderBlockCodeObservationRequest, ProviderHeadSnapshot},
     runtime::IntakeChainTask,
 };
 
 use super::super::{
+    canonical::ChainCoverageFrontiers,
     payload::{
-        provider_code_observation_to_raw_code_hash, raw_code_hash_candidate_hashes,
-        raw_payload_candidate_hashes, selected_address_set,
+        SelectedAddressSet, provider_code_observation_to_raw_code_hash,
+        raw_code_hash_candidate_hashes, raw_payload_candidate_hashes,
     },
     types::{CanonicalReconciliation, CanonicalReconciliationStatus, HeadChangeSet},
 };
 use super::load_live_generic_resolver_topic0s;
+
+/// Upper bound on watched addresses the baseline sweep verifies in one poll
+/// tick. The sweep walks the sorted watch surface behind a process-lifetime
+/// cursor, so a multi-million-address surface is baselined across ticks
+/// instead of arming one whole-surface `eth_getCode` storm inside a tick.
+const DEFAULT_RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK: usize = 2_048;
+const RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK_ENV: &str =
+    "BIGNAME_INDEXER_RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK";
+
+fn raw_code_baseline_max_addresses_per_tick() -> usize {
+    parse_raw_code_baseline_max_addresses_per_tick(
+        std::env::var(RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn parse_raw_code_baseline_max_addresses_per_tick(value: Option<&str>) -> usize {
+    value
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK)
+}
+
+/// Addresses fetched and upserted per provider round within a tick's baseline
+/// batch, so a mid-batch failure loses at most one chunk of progress.
+const RAW_CODE_BASELINE_FETCH_CHUNK_ADDRESSES: usize = 256;
 
 pub(crate) async fn persist_reconciled_raw_code_hashes(
     pool: &sqlx::PgPool,
@@ -25,6 +54,7 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
     heads: &ProviderHeadSnapshot,
     canonical: &CanonicalReconciliation,
     head_change_set: HeadChangeSet,
+    coverage_frontiers: &ChainCoverageFrontiers,
 ) -> Result<()> {
     if canonical.status == CanonicalReconciliationStatus::StoredLineagePromoted {
         return Ok(());
@@ -48,35 +78,41 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
         );
     }
 
-    let watched_addresses = selected_address_set(&task.addresses)
-        .into_iter()
-        .collect::<Vec<_>>();
+    let watched_addresses = SelectedAddressSet::from_plan_addresses(&task.addresses);
     let generic_resolver_topic0s = load_live_generic_resolver_topic0s(pool, &task.chain)
         .await?
         .into_iter()
         .collect::<Vec<_>>();
+    // Candidate blocks hold a bounded number of distinct emitters, so the
+    // watched-membership filter runs client-side against the already-sorted
+    // plan surface instead of binding the multi-million-address watch set
+    // back into Postgres on every head-changed tick.
     let emitter_addresses_by_block_hash = load_raw_log_emitter_addresses_by_block_hashes(
         pool,
         &task.chain,
         &candidate_hashes,
-        &watched_addresses,
         &generic_resolver_topic0s,
     )
-    .await?;
-    let code_observation_addresses = watched_addresses
-        .iter()
-        .cloned()
-        .chain(
-            emitter_addresses_by_block_hash
-                .values()
-                .flat_map(|addresses| addresses.iter().cloned()),
-        )
+    .await?
+    .into_iter()
+    .map(|(block_hash, emitters)| {
+        let selected = emitters
+            .into_iter()
+            .filter(|(address, topic0_selected)| {
+                *topic0_selected || watched_addresses.contains(address)
+            })
+            .map(|(address, _)| address)
+            .collect::<BTreeSet<_>>();
+        (block_hash, selected)
+    })
+    .filter(|(_, emitters)| !emitters.is_empty())
+    .collect::<BTreeMap<String, BTreeSet<String>>>();
+    let code_observation_addresses = emitter_addresses_by_block_hash
+        .values()
+        .flat_map(|addresses| addresses.iter().cloned())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    if code_observation_addresses.is_empty() {
-        return Ok(());
-    }
     let stored_code_addresses_by_block_hash = load_raw_code_addresses_by_block_hashes(
         pool,
         &task.chain,
@@ -84,61 +120,171 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
         &code_observation_addresses,
     )
     .await?;
-    let baseline_addresses =
-        load_missing_raw_code_baseline_addresses(pool, &task.chain, &watched_addresses).await?;
-    let canonical_baseline_hash = canonical
-        .canonical
-        .as_ref()
-        .map(|canonical| canonical.block_hash.as_str());
-    let raw_blocks = raw_blocks
-        .into_iter()
+    let emitter_raw_blocks = raw_blocks
+        .iter()
         .filter_map(|raw_block| {
-            let mut addresses = BTreeSet::<String>::new();
+            let emitter_addresses = emitter_addresses_by_block_hash.get(&raw_block.block_hash)?;
             let stored_code_addresses = stored_code_addresses_by_block_hash
                 .get(&raw_block.block_hash)
                 .cloned()
                 .unwrap_or_default();
             let block_refreshed = refreshed_block_hashes.contains(&raw_block.block_hash);
-            if let Some(emitter_addresses) =
-                emitter_addresses_by_block_hash.get(&raw_block.block_hash)
-            {
-                addresses.extend(emitter_addresses.iter().filter_map(|address| {
-                    (block_refreshed || !stored_code_addresses.contains(address))
-                        .then_some(address.clone())
-                }));
-            }
-            if canonical_baseline_hash == Some(raw_block.block_hash.as_str()) {
-                addresses.extend(baseline_addresses.iter().cloned());
-            }
+            let addresses = emitter_addresses
+                .iter()
+                .filter(|address| block_refreshed || !stored_code_addresses.contains(*address))
+                .cloned()
+                .collect::<Vec<_>>();
             if addresses.is_empty() {
                 return None;
             }
-            Some((raw_block, addresses.into_iter().collect::<Vec<_>>()))
+            Some((raw_block, addresses))
         })
         .collect::<Vec<_>>();
-    if raw_blocks.is_empty() {
+
+    let mut code_hashes = Vec::<RawCodeHash>::new();
+    for (raw_block, addresses) in &emitter_raw_blocks {
+        let observations = provider
+            .fetch_code_observations_at_block_hashes(&[ProviderBlockCodeObservationRequest {
+                block_hash: raw_block.block_hash.clone(),
+                addresses: addresses.clone(),
+            }])
+            .await?;
+        for block_observations in &observations {
+            code_hashes.extend(
+                block_observations
+                    .observations
+                    .iter()
+                    .map(|observation| {
+                        provider_code_observation_to_raw_code_hash(
+                            &task.chain,
+                            raw_block,
+                            observation,
+                        )
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            );
+        }
+    }
+    if !code_hashes.is_empty() {
+        upsert_raw_code_hashes(pool, &code_hashes).await?;
+    }
+
+    let canonical_baseline_block = canonical.canonical.as_ref().and_then(|canonical_head| {
+        raw_blocks
+            .iter()
+            .find(|raw_block| raw_block.block_hash == canonical_head.block_hash)
+    });
+    if let Some(baseline_raw_block) = canonical_baseline_block {
+        sweep_raw_code_baseline_chunk(
+            pool,
+            task,
+            provider,
+            baseline_raw_block,
+            watched_addresses,
+            coverage_frontiers,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+/// One capped step of the per-chain raw-code baseline sweep.
+///
+/// The sweep walks the sorted watched surface behind a process-lifetime
+/// cursor: each tick verifies at most
+/// [`DEFAULT_RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK`] addresses, fetches code only
+/// for those with no stored non-orphaned observation, and upserts per
+/// [`RAW_CODE_BASELINE_FETCH_CHUNK_ADDRESSES`]-sized provider round so
+/// progress persists across failures and restarts. A finished sweep records
+/// the discovery admission epoch it started under; when the epoch moves, a
+/// fresh sweep re-verifies the surface (cheap membership probes; only
+/// genuinely missing addresses are fetched) so newly watched addresses are
+/// eventually baselined too.
+async fn sweep_raw_code_baseline_chunk(
+    pool: &sqlx::PgPool,
+    task: &IntakeChainTask,
+    provider: &(impl ChainProviderOps + ?Sized),
+    baseline_raw_block: &RawBlock,
+    watched_addresses: SelectedAddressSet<'_>,
+    coverage_frontiers: &ChainCoverageFrontiers,
+) -> Result<()> {
+    let sorted_watched_addresses = watched_addresses.as_sorted_slice();
+    if sorted_watched_addresses.is_empty() {
         return Ok(());
     }
 
-    let mut code_hashes = Vec::<RawCodeHash>::new();
-    for (raw_block, addresses) in &raw_blocks {
-        let observations = provider
-            .fetch_code_observations_at_block(
-                addresses,
-                ProviderBlockSelection::Hash(raw_block.block_hash.clone()),
-            )
-            .await?;
-        code_hashes.extend(
-            observations
-                .iter()
-                .map(|observation| {
-                    provider_code_observation_to_raw_code_hash(&task.chain, raw_block, observation)
-                })
-                .collect::<Result<Vec<_>>>()?,
-        );
+    let current_admission_epoch = load_discovery_admission_epoch(pool, &task.chain).await?;
+    let mut frontier = coverage_frontiers.raw_code_baseline_frontier(&task.chain);
+    if frontier.completed_admission_epoch == Some(current_admission_epoch) {
+        return Ok(());
+    }
+    let sweep_admission_epoch = match frontier.sweep_admission_epoch {
+        Some(epoch) => epoch,
+        None => {
+            frontier.sweep_admission_epoch = Some(current_admission_epoch);
+            frontier.verified_through_address = None;
+            current_admission_epoch
+        }
+    };
+
+    let start_index = match &frontier.verified_through_address {
+        Some(verified_through) => {
+            sorted_watched_addresses.partition_point(|address| address <= verified_through)
+        }
+        None => 0,
+    };
+    let batch_end_index = (start_index + raw_code_baseline_max_addresses_per_tick())
+        .min(sorted_watched_addresses.len());
+    let batch = &sorted_watched_addresses[start_index..batch_end_index];
+    if batch.is_empty() {
+        frontier.completed_admission_epoch = Some(sweep_admission_epoch);
+        frontier.sweep_admission_epoch = None;
+        frontier.verified_through_address = None;
+        coverage_frontiers.store_raw_code_baseline_frontier(&task.chain, frontier);
+        return Ok(());
     }
 
-    upsert_raw_code_hashes(pool, &code_hashes).await?;
+    let missing_addresses =
+        load_raw_code_baseline_addresses_missing_observations(pool, &task.chain, batch).await?;
+    for chunk in missing_addresses.chunks(RAW_CODE_BASELINE_FETCH_CHUNK_ADDRESSES) {
+        let observations = provider
+            .fetch_code_observations_at_block_hashes(&[ProviderBlockCodeObservationRequest {
+                block_hash: baseline_raw_block.block_hash.clone(),
+                addresses: chunk.to_vec(),
+            }])
+            .await?;
+        let mut chunk_code_hashes = Vec::<RawCodeHash>::new();
+        for block_observations in &observations {
+            chunk_code_hashes.extend(
+                block_observations
+                    .observations
+                    .iter()
+                    .map(|observation| {
+                        provider_code_observation_to_raw_code_hash(
+                            &task.chain,
+                            baseline_raw_block,
+                            observation,
+                        )
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            );
+        }
+        upsert_raw_code_hashes(pool, &chunk_code_hashes).await?;
+        // Every batch address at or below the chunk's last address is now
+        // either stored-verified or freshly upserted, so the cursor may
+        // advance past a failure boundary without losing that progress.
+        frontier.verified_through_address = chunk.last().cloned();
+        coverage_frontiers.store_raw_code_baseline_frontier(&task.chain, frontier.clone());
+    }
+
+    frontier.verified_through_address = batch.last().cloned();
+    if batch_end_index == sorted_watched_addresses.len() {
+        frontier.completed_admission_epoch = Some(sweep_admission_epoch);
+        frontier.sweep_admission_epoch = None;
+        frontier.verified_through_address = None;
+    }
+    coverage_frontiers.store_raw_code_baseline_frontier(&task.chain, frontier);
     Ok(())
 }
 
@@ -146,12 +292,9 @@ async fn load_raw_log_emitter_addresses_by_block_hashes(
     pool: &sqlx::PgPool,
     chain: &str,
     block_hashes: &[String],
-    watched_addresses: &[String],
     generic_resolver_topic0s: &[String],
-) -> Result<BTreeMap<String, BTreeSet<String>>> {
-    if block_hashes.is_empty()
-        || (watched_addresses.is_empty() && generic_resolver_topic0s.is_empty())
-    {
+) -> Result<BTreeMap<String, BTreeMap<String, bool>>> {
+    if block_hashes.is_empty() {
         return Ok(BTreeMap::new());
     }
 
@@ -159,21 +302,17 @@ async fn load_raw_log_emitter_addresses_by_block_hashes(
         r#"
         SELECT
             block_hash,
-            LOWER(emitting_address) AS emitting_address
+            LOWER(emitting_address) AS emitting_address,
+            BOOL_OR(LOWER(topics[1]) = ANY($3::TEXT[])) AS topic0_selected
         FROM raw_logs
         WHERE chain_id = $1
           AND block_hash = ANY($2::TEXT[])
-          AND (
-              LOWER(emitting_address) = ANY($3::TEXT[])
-              OR LOWER(topics[1]) = ANY($4::TEXT[])
-          )
         GROUP BY block_hash, LOWER(emitting_address)
         ORDER BY block_hash, LOWER(emitting_address)
         "#,
     )
     .bind(chain)
     .bind(block_hashes)
-    .bind(watched_addresses)
     .bind(generic_resolver_topic0s)
     .fetch_all(pool)
     .await
@@ -184,7 +323,7 @@ async fn load_raw_log_emitter_addresses_by_block_hashes(
         )
     })?;
 
-    let mut addresses_by_block_hash = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut addresses_by_block_hash = BTreeMap::<String, BTreeMap<String, bool>>::new();
     for row in rows {
         let block_hash = row
             .try_get::<String, _>("block_hash")
@@ -192,10 +331,14 @@ async fn load_raw_log_emitter_addresses_by_block_hashes(
         let emitting_address = row
             .try_get::<String, _>("emitting_address")
             .context("missing emitting_address from raw-log emitter row")?;
+        let topic0_selected = row
+            .try_get::<Option<bool>, _>("topic0_selected")
+            .context("missing topic0_selected from raw-log emitter row")?
+            .unwrap_or(false);
         addresses_by_block_hash
             .entry(block_hash)
             .or_default()
-            .insert(emitting_address);
+            .insert(emitting_address, topic0_selected);
     }
 
     Ok(addresses_by_block_hash)
@@ -254,13 +397,18 @@ async fn load_raw_code_addresses_by_block_hashes(
     Ok(addresses_by_block_hash)
 }
 
-async fn load_missing_raw_code_baseline_addresses(
+/// Which of the (capped) baseline batch addresses still lack any stored
+/// non-orphaned code observation. The bind is at most
+/// [`DEFAULT_RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK`] addresses, never the whole
+/// watch surface. Returned in the batch's sorted order so the sweep cursor
+/// can advance chunk-by-chunk.
+async fn load_raw_code_baseline_addresses_missing_observations(
     pool: &sqlx::PgPool,
     chain: &str,
-    watched_addresses: &[String],
-) -> Result<BTreeSet<String>> {
-    if watched_addresses.is_empty() {
-        return Ok(BTreeSet::new());
+    batch_addresses: &[String],
+) -> Result<Vec<String>> {
+    if batch_addresses.is_empty() {
+        return Ok(Vec::new());
     }
 
     let rows = sqlx::query(
@@ -278,7 +426,7 @@ async fn load_missing_raw_code_baseline_addresses(
         "#,
     )
     .bind(chain)
-    .bind(watched_addresses)
+    .bind(batch_addresses)
     .fetch_all(pool)
     .await
     .with_context(|| {
@@ -291,4 +439,36 @@ async fn load_missing_raw_code_baseline_addresses(
                 .context("missing contract_address from baseline address row")
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DEFAULT_RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK,
+        parse_raw_code_baseline_max_addresses_per_tick,
+    };
+
+    #[test]
+    fn baseline_per_tick_cap_parses_overrides_and_rejects_nonsense() {
+        assert_eq!(
+            parse_raw_code_baseline_max_addresses_per_tick(None),
+            DEFAULT_RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK
+        );
+        assert_eq!(
+            parse_raw_code_baseline_max_addresses_per_tick(Some("512")),
+            512
+        );
+        assert_eq!(
+            parse_raw_code_baseline_max_addresses_per_tick(Some(" 3 ")),
+            3
+        );
+        assert_eq!(
+            parse_raw_code_baseline_max_addresses_per_tick(Some("0")),
+            DEFAULT_RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK
+        );
+        assert_eq!(
+            parse_raw_code_baseline_max_addresses_per_tick(Some("not-a-number")),
+            DEFAULT_RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK
+        );
+    }
 }

@@ -235,6 +235,9 @@ pub(crate) trait ChainProviderOps {
         requests: &[ProviderTransactionReceiptRequest],
     ) -> Result<Vec<ProviderTransactionReceiptBundle>>;
 
+    // Sequential per-address variant retained for provider parity tests; the
+    // live and baseline paths use the batched `_at_block_hashes` form.
+    #[allow(dead_code)]
     async fn fetch_code_observations_at_block(
         &self,
         addresses: &[String],

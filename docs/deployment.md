@@ -461,10 +461,17 @@ a large discovered-target set. Live intake instead fetches every log in a block
 by block hash and filters client-side, so watching discovered targets costs no
 additional log fetches — though the code-hash baseline pass still issues one
 `eth_getCode` per watched address that lacks a baseline observation, a cost that
-scales with the watched set. The live tailer therefore always watches the active
-watched chain — manifest-declared and discovery-admitted targets alike — in
-every adapter-sync mode, and always refreshes that plan from stored discovery
-edges so targets admitted after startup enter the watch set without a restart.
+scales with the watched set. That baseline runs as a capped cursor sweep
+(`BIGNAME_INDEXER_RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK` addresses per poll
+tick, default 2048, fetched in batched provider rounds and upserted per round),
+so a large discovered-target set is baselined across ticks instead of inside
+one. The live tailer therefore always watches the active watched chain —
+manifest-declared and discovery-admitted targets alike — in every adapter-sync
+mode, and always refreshes that plan from stored discovery edges so targets
+admitted after startup enter the watch set without a restart. The plan reload
+itself is gated on the per-chain `discovery_admission_epochs` sentinel, so a
+quiet watched surface costs one tiny read per tick rather than a full plan
+scan.
 
 Widening the live watch plan writes more `raw_logs` rows per block, because a
 block is retained whenever any watched target emits in it and same-transaction

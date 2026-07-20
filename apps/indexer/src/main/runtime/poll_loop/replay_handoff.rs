@@ -244,12 +244,16 @@ pub(super) async fn renew_live_poll_adapter_sync_permit(
         }
     };
 
+    // The handoff refresh is a one-shot transition that must observe the
+    // freshest stored plan, so it carries no admission-epoch sentinel state:
+    // a `None` sentinel always reloads.
     if !refresh_discovery_watch_state(
         pool,
         provider_registry,
         manifest_runtime_state,
         intake_chain_tasks,
         false,
+        &mut None,
     )
     .await?
     {

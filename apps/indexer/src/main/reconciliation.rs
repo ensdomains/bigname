@@ -33,9 +33,9 @@ pub(crate) use adapter_sync::{
 };
 #[allow(unused_imports)]
 pub(crate) use canonical::{
-    ChainCoverageFrontiers, EnsV2LiveCoverageRecoveryStatus, orphan_canonical_branch,
-    poll_provider_heads, poll_provider_heads_with_adapter_sync, reconcile_canonical_head,
-    reconcile_fetched_heads, reconcile_fetched_heads_with_adapter_sync,
+    ChainCoverageFrontiers, EnsV2LiveCoverageRecoveryStatus, RawCodeBaselineFrontier,
+    orphan_canonical_branch, poll_provider_heads, poll_provider_heads_with_adapter_sync,
+    reconcile_canonical_head, reconcile_fetched_heads, reconcile_fetched_heads_with_adapter_sync,
     reconcile_intake_chain_task, recover_ens_v2_live_coverage_requirement,
 };
 #[allow(unused_imports)]
@@ -48,6 +48,8 @@ pub(crate) use lineage::{
 pub(crate) use logging::{
     log_chain_reconciliation_outcome, log_raw_fact_normalized_event_replay_outcome,
 };
+#[allow(unused_imports)]
+pub(crate) use payload::SelectedAddressSet;
 #[allow(unused_imports)]
 pub(crate) use payload::{
     canonical_raw_state, ensure_block_scoped_identity, ensure_provider_bundle_matches_raw_block,

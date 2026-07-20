@@ -21,8 +21,8 @@ mod coverage;
 mod topic_drift;
 
 use admission_epoch_fence::StoredLineageAdmissionEpochFence;
-pub(crate) use coverage::ChainCoverageFrontiers;
 use coverage::stored_path_has_required_raw_fact_coverage;
+pub(crate) use coverage::{ChainCoverageFrontiers, RawCodeBaselineFrontier};
 pub(crate) use topic_drift::find_uncovered_generation_bound_coverage_with_current_topics;
 
 const MAX_STORED_ANCHOR_PARENT_FETCH_DEPTH: usize =

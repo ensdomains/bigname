@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
@@ -6,6 +8,7 @@ use crate::resolver_profile_convergence::{
     ResolverProfileConvergenceSummary, drain_resolver_profile_input_changes,
 };
 
+use super::super::adapter_sync::sync_adapter_owned_raw_log_state;
 use super::super::intake::{
     IntakeChainTask, intake_runtime_state, validate_provider_registry_for_intake_tasks,
     watched_chain_plan_state,
@@ -15,9 +18,7 @@ use super::super::logging::{
     log_watched_contract_summary,
 };
 use super::super::manifest::ManifestRuntimeState;
-use super::super::refresh::{
-    refresh_runtime_state_from_storage_discovery, refresh_runtime_state_from_stored_discovery,
-};
+use super::super::refresh::refresh_runtime_state_from_stored_discovery_when_epochs_move;
 
 /// Timer-driven stored-discovery refresh of the runtime watch state. A
 /// successful refresh replaces the manifest runtime state and intake tasks in
@@ -29,17 +30,36 @@ use super::super::refresh::{
 /// whole stored raw-log corpus before reloading the plan. Live poll writes
 /// discovery edges per block, so the tailer only needs the reload; the full
 /// re-derivation stays opt-in for broad runtime refresh.
+///
+/// `last_admission_epochs` is the change-detection sentinel held across ticks:
+/// the plan reload only runs when a chain's discovery admission epoch has
+/// moved since the last successful reload, so a quiet watched surface costs
+/// one tiny sentinel read per tick instead of a full plan scan.
 pub(super) async fn refresh_discovery_watch_state(
     pool: &sqlx::PgPool,
     provider_registry: &ProviderRegistry,
     manifest_runtime_state: &mut ManifestRuntimeState,
     intake_chain_tasks: &mut Vec<IntakeChainTask>,
     sync_adapter_state_before_refresh: bool,
+    last_admission_epochs: &mut Option<BTreeMap<String, i64>>,
 ) -> Result<bool> {
-    let refreshed_state = if sync_adapter_state_before_refresh {
-        refresh_runtime_state_from_storage_discovery(pool, manifest_runtime_state).await
+    // The whole-corpus re-derivation must run before the sentinel read: it is
+    // what materializes new edges (and bumps epochs) on the broad-refresh path.
+    let adapter_sync_result: Result<()> = if sync_adapter_state_before_refresh {
+        sync_adapter_owned_raw_log_state(pool, &manifest_runtime_state.watched_chain_plan).await
     } else {
-        refresh_runtime_state_from_stored_discovery(pool, manifest_runtime_state).await
+        Ok(())
+    };
+    let refreshed_state = match adapter_sync_result {
+        Ok(()) => {
+            refresh_runtime_state_from_stored_discovery_when_epochs_move(
+                pool,
+                manifest_runtime_state,
+                last_admission_epochs,
+            )
+            .await
+        }
+        Err(error) => Err(error),
     };
     if refreshed_state.is_ok()
         && !resolver_profile_drain_succeeded(

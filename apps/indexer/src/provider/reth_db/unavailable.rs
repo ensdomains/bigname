@@ -96,6 +96,7 @@ impl RethDbProvider {
         unavailable()
     }
 
+    #[allow(dead_code)]
     pub async fn fetch_code_observations_at_block(
         &self,
         _addresses: &[String],

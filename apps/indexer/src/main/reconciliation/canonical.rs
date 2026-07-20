@@ -50,7 +50,7 @@ pub(crate) use ens_v2_coverage_recovery::{
 };
 use orphaning::orphan_reorg_losing_branch_payloads;
 pub(crate) use poll::{poll_provider_heads, poll_provider_heads_with_adapter_sync};
-pub(crate) use stored_lineage::ChainCoverageFrontiers;
+pub(crate) use stored_lineage::{ChainCoverageFrontiers, RawCodeBaselineFrontier};
 use stored_lineage::{
     StoredLineagePromotion, reconcile_large_checkpoint_gap_from_stored_lineage,
     stored_lineage_promotion_anchors,
@@ -270,6 +270,7 @@ async fn reconcile_fetched_heads_with_gap_policy(
         adapter_sync_enabled,
         header_audit_mode,
         event_silent_reverse_resolver_addresses,
+        coverage_frontiers,
     )
     .await?;
     if adapter_sync_enabled {
