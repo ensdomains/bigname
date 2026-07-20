@@ -15,9 +15,13 @@ use tracing::warn;
 
 use super::{
     JsonRpcProvider,
+    http_client::JSON_RPC_POOL_RESET_TIMEOUT_THRESHOLD,
     payload_cache::{JsonRpcPayloadFingerprint, JsonRpcResultPayload},
 };
 
+/// Retry each single or batch request at most five times. Transport timeouts
+/// rebuild the shared HTTP client after the first timeout, before the second
+/// attempt uses this budget.
 const MAX_JSON_RPC_ATTEMPTS: usize = 5;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -270,19 +274,31 @@ impl JsonRpcProvider {
         let payload = payload
             .serialize()
             .context("failed to encode JSON-RPC request payload")?;
-        let response = self
-            .client
+        let (client, client_generation) = self.client.snapshot();
+        let response = match client
             .post(endpoint.clone())
             .header("content-type", "application/json")
             .body(payload.get().to_owned())
             .send()
             .await
-            .with_context(|| format!("failed to send JSON-RPC request for {request_context}"))?;
+        {
+            Ok(response) => response,
+            Err(error) => {
+                self.record_json_rpc_transport_error(client_generation, request_context, &error);
+                return Err(error).with_context(|| {
+                    format!("failed to send JSON-RPC request for {request_context}")
+                });
+            }
+        };
         let status = response.status();
-        let body = response
-            .bytes()
-            .await
-            .context("failed to read JSON-RPC response body")?;
+        let body = match response.bytes().await {
+            Ok(body) => body,
+            Err(error) => {
+                self.record_json_rpc_transport_error(client_generation, request_context, &error);
+                return Err(error).context("failed to read JSON-RPC response body");
+            }
+        };
+        self.client.record_transport_success(client_generation);
 
         if !status.is_success() {
             let response_body = String::from_utf8_lossy(&body);
@@ -304,6 +320,36 @@ impl JsonRpcProvider {
         }
 
         Ok(body)
+    }
+
+    fn record_json_rpc_transport_error(
+        &self,
+        client_generation: u64,
+        request_context: &str,
+        error: &reqwest::Error,
+    ) {
+        match self.client.record_transport_error(client_generation, error) {
+            Ok(Some(reset)) => warn!(
+                service = "indexer",
+                component = "provider",
+                request_context,
+                timeout_threshold = JSON_RPC_POOL_RESET_TIMEOUT_THRESHOLD,
+                previous_client_generation = reset.previous_generation,
+                new_client_generation = reset.new_generation,
+                error = %error,
+                "rebuilt JSON-RPC HTTP client after a transport timeout"
+            ),
+            Ok(None) => {}
+            Err(reset_error) => warn!(
+                service = "indexer",
+                component = "provider",
+                request_context,
+                client_generation,
+                error = %error,
+                reset_error = %format!("{reset_error:#}"),
+                "failed to rebuild JSON-RPC HTTP client after a transport timeout"
+            ),
+        }
     }
 }
 
@@ -361,6 +407,9 @@ pub(super) fn is_retryable_provider_error(error: &anyhow::Error) -> bool {
         || message.contains("connection closed")
 }
 
+/// Wait 250, 500, 1000, then 2000 milliseconds between the five attempts.
+/// The shift is capped so increasing the attempt budget cannot create an
+/// unbounded delay.
 async fn sleep_json_rpc_backoff(attempt: usize) {
     let millis = 250_u64.saturating_mul(1_u64 << attempt.min(4));
     tokio::time::sleep(Duration::from_millis(millis)).await;

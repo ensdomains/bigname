@@ -14,9 +14,12 @@ use decode::parse_hex_i64;
 mod block_transaction;
 mod code;
 mod decode;
+mod http_client;
 mod logs_receipts;
 mod ops;
 mod payload_cache;
+#[cfg(test)]
+mod pool_recovery_tests;
 mod proof;
 mod request;
 mod reth_db;
@@ -247,7 +250,7 @@ pub(crate) trait ChainProviderOps {
 #[derive(Clone)]
 pub struct JsonRpcProvider {
     endpoint: Url,
-    client: reqwest::Client,
+    client: http_client::RecoveringHttpClient,
     receipt_fallback_endpoint: Option<Url>,
 }
 
@@ -293,11 +296,10 @@ impl JsonRpcProvider {
             bail!("unsupported RPC endpoint scheme for {endpoint}; expected http:// or https://");
         }
 
-        let client = reqwest::Client::builder()
-            .connect_timeout(JSON_RPC_PROVIDER_CONNECT_TIMEOUT)
-            .timeout(request_timeout)
-            .build()
-            .context("failed to build JSON-RPC HTTP client")?;
+        let client = http_client::RecoveringHttpClient::new(
+            JSON_RPC_PROVIDER_CONNECT_TIMEOUT,
+            request_timeout,
+        )?;
 
         Ok(Self {
             endpoint,
