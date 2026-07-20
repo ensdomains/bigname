@@ -191,10 +191,10 @@ async fn stage_invalidation_cursor_pages(
     }
 }
 
-/// Publish and remove each staged key page atomically only after the adapter's
-/// matching chain-context reconciliation is durable.
+/// Publish and remove staged key pages in the same transaction that commits
+/// the adapter's matching chain-context reconciliation.
 pub(super) async fn publish_resolver_profile_projection_invalidations(
-    pool: &sqlx::PgPool,
+    connection: &mut PgConnection,
     chain: &str,
 ) -> Result<u64> {
     let mut published_count = 0u64;
@@ -245,7 +245,7 @@ pub(super) async fn publish_resolver_profile_projection_invalidations(
         )
         .bind(chain)
         .bind(i64::try_from(INVALIDATION_PAGE_SIZE)?)
-        .fetch_one(pool)
+        .fetch_one(&mut *connection)
         .await
         .context("failed to publish staged resolver-profile projection invalidation page")?;
         ensure!(

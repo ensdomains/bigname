@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use alloy_primitives::Keccak256;
 use anyhow::{Context, Result, bail, ensure};
 use bigname_storage::{RawLogStagingReadGuard, acquire_raw_log_staging_read_guard};
-use sqlx::{PgPool, Postgres, QueryBuilder, types::Uuid};
+use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder, types::Uuid};
 
 use super::{ResolverEmitterReplayRange, ResolverProfileEventReconciliationSummary};
 
@@ -188,6 +188,12 @@ impl ResolverProfileEventReconciliationPublication {
 
     pub const fn run_id(&self) -> Uuid {
         self.run_id
+    }
+
+    /// Borrow the fenced publication connection so indexer-owned projection
+    /// invalidations commit atomically with the normalized-event repair.
+    pub fn connection_mut(&mut self) -> &mut PgConnection {
+        self.raw_log_guard.connection_mut()
     }
 
     pub async fn finish(self) -> Result<ResolverProfileEventReconciliationSummary> {

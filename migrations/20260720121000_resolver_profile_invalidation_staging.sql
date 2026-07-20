@@ -14,4 +14,4 @@ CREATE TABLE public.resolver_profile_reconciliation_invalidation_keys (
 );
 
 COMMENT ON TABLE public.resolver_profile_reconciliation_invalidation_keys IS
-    'Indexer-owned crash-safe projection invalidation keys streamed before one chain-context resolver-profile replay and published in bounded pages only after that replay is durable.';
+    'Indexer-owned crash-safe projection invalidation keys streamed before one chain-context resolver-profile replay, then published in bounded statements by the transaction that commits that replay.';

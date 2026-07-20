@@ -503,7 +503,7 @@ async fn same_chain_reconciliation_lock_covers_invalidation_publication() -> any
         chain,
     )
     .await?;
-    let publication = reconciliation.reconcile().await?;
+    let mut publication = reconciliation.reconcile().await?;
 
     let same_chain_lock_was_available =
         sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
@@ -511,15 +511,35 @@ async fn same_chain_reconciliation_lock_covers_invalidation_publication() -> any
             .fetch_one(database.pool())
             .await?;
 
-    super::invalidations::publish_resolver_profile_projection_invalidations(database.pool(), chain)
-        .await?;
+    super::invalidations::publish_resolver_profile_projection_invalidations(
+        publication.connection_mut(),
+        chain,
+    )
+    .await?;
+    let visible_invalidation_count_before_finish = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM projection_invalidations \
+         WHERE projection = 'resolver_current' AND claim_token IS NULL",
+    )
+    .fetch_one(database.pool())
+    .await?;
     publication.finish().await?;
+    let visible_invalidation_count_after_finish = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM projection_invalidations \
+         WHERE projection = 'resolver_current' AND claim_token IS NULL",
+    )
+    .fetch_one(database.pool())
+    .await?;
     database.cleanup().await?;
 
     assert!(
         !same_chain_lock_was_available,
         "same-chain reconciliation must remain serialized until its staged invalidations publish"
     );
+    assert_eq!(
+        visible_invalidation_count_before_finish, 0,
+        "a projection worker must not see invalidations before event repair commits"
+    );
+    assert_eq!(visible_invalidation_count_after_finish, 1);
     Ok(())
 }
 

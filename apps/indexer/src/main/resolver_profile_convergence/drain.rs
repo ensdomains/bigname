@@ -255,12 +255,13 @@ async fn reconcile_target_chains(
         {
             aggregate.adapter_reconciliation_call_count += 1;
         }
-        let publication = reconciliation
+        let mut publication = reconciliation
             .reconcile()
             .await
             .with_context(|| format!("failed to reconcile resolver-profile events on {chain}"))?;
         aggregate.invalidated_projection_key_count +=
-            publish_resolver_profile_projection_invalidations(pool, &chain).await?;
+            publish_resolver_profile_projection_invalidations(publication.connection_mut(), &chain)
+                .await?;
         let summary = publication.finish().await?;
         info!(
             service = "indexer",
