@@ -116,7 +116,8 @@ ORDER BY watched.chain, watched.address
 }
 
 /// One server-side cursor over the distinct current addresses which can
-/// contribute ENSv1 or Basenames resolver-profile authority entries.
+/// contribute ENSv1 or Basenames
+/// [resolver-profile](../../../../../docs/glossary.md) authority entries.
 pub struct ResolverProfileAuthorityTargetPages;
 
 impl ResolverProfileAuthorityTargetPages {

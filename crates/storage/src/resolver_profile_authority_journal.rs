@@ -37,7 +37,8 @@ pub struct ResolverProfileAuthorityJournal {
     pub discovery_epoch_snapshot: Value,
 }
 
-/// One normalized entry in the resolver-profile authority journal.
+/// One normalized entry in the
+/// [resolver-profile](../../../docs/glossary.md) authority journal.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolverProfileAuthorityJournalEntry {
     pub entry_key: String,

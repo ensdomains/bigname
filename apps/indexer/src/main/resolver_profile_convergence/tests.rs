@@ -8,10 +8,6 @@ use super::{
     authority::{ResolverProfileAdmissionSemantics, ResolverProfileAuthorityEntry},
     drain_resolver_profile_input_changes, expanded_reconciliation_targets,
     expanded_reconciliation_targets_with_family_count, input_requires_reconciliation,
-    invalidations::{
-        enqueue_resolver_profile_projection_invalidations,
-        load_resolver_profile_projection_invalidation_plan,
-    },
 };
 
 #[test]
@@ -357,7 +353,7 @@ async fn seed_change_reconciles_journal_family_in_bounded_pages() -> anyhow::Res
     )
     .await?;
     let mut entries = Vec::new();
-    for address_number in 1..=251 {
+    for address_number in 1..=2_501 {
         entries.push(
             bigname_storage::ResolverProfileAuthorityJournalEntry::from_payload(
                 serde_json::to_value(entry(
@@ -398,7 +394,7 @@ async fn seed_change_reconciles_journal_family_in_bounded_pages() -> anyhow::Res
     )
     .await?;
     let summary = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(30),
         drain_resolver_profile_input_changes(database.pool()),
     )
     .await
@@ -407,9 +403,14 @@ async fn seed_change_reconciles_journal_family_in_bounded_pages() -> anyhow::Res
     assert_eq!(summary.loaded_input_count, 1);
     assert_eq!(summary.authority_target_read_statement_count, 1);
     assert_eq!(summary.max_authority_target_read_batch_size, 1);
-    assert_eq!(summary.family_target_read_statement_count, 3);
+    assert_eq!(summary.family_target_read_statement_count, 12);
     assert_eq!(summary.max_family_target_page_size, 250);
-    assert_eq!(summary.reconciled_target_count, 251);
+    assert_eq!(
+        summary.adapter_reconciliation_call_count, 1,
+        "one chain-context reconciliation must consume every bounded target page"
+    );
+    assert_eq!(summary.reconciled_target_count, 2_501);
+    assert_eq!(summary.invalidated_projection_key_count, 2_501);
     assert_eq!(summary.acknowledged_input_count, 1);
 
     database.cleanup().await
@@ -750,7 +751,7 @@ async fn unavailable_chain_does_not_block_eligible_chain_convergence() -> anyhow
 }
 
 #[tokio::test]
-async fn invalidation_plan_includes_readable_history_but_excludes_orphaned_fork_rows()
+async fn staged_invalidations_include_readable_history_but_exclude_orphaned_fork_rows()
 -> anyhow::Result<()> {
     let database = TestDatabase::create_migrated(
         TestDatabaseConfig::new("indexer_resolver_profile_invalidation_scope"),
@@ -858,13 +859,17 @@ async fn invalidation_plan_includes_readable_history_but_excludes_orphaned_fork_
     .execute(database.pool())
     .await?;
 
-    let targets = std::collections::BTreeMap::from([(
-        "ethereum-mainnet".to_owned(),
-        std::collections::BTreeSet::from([resolver.to_owned()]),
-    )]);
-    let plan =
-        load_resolver_profile_projection_invalidation_plan(database.pool(), &targets).await?;
-    enqueue_resolver_profile_projection_invalidations(database.pool(), &plan).await?;
+    bigname_storage::enqueue_resolver_profile_reconciliations(
+        database.pool(),
+        &[bigname_storage::ResolverProfileReconciliationTarget {
+            chain_id: "ethereum-mainnet".to_owned(),
+            contract_address: resolver.to_owned(),
+        }],
+    )
+    .await?;
+    let summary = drain_resolver_profile_input_changes(database.pool()).await?;
+    assert_eq!(summary.reconciled_target_count, 1);
+    assert_eq!(summary.acknowledged_input_count, 1);
     let inventory_keys = sqlx::query_scalar::<_, String>(
         r#"
         SELECT projection_key
@@ -876,6 +881,16 @@ async fn invalidation_plan_includes_readable_history_but_excludes_orphaned_fork_
     .fetch_all(database.pool())
     .await?;
     assert_eq!(inventory_keys, vec![readable_resource.to_string()]);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT \
+             FROM resolver_profile_reconciliation_invalidation_keys"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "successful reconciliation must cascade-delete staged invalidation keys"
+    );
 
     database.cleanup().await
 }

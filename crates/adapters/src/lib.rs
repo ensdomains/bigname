@@ -41,8 +41,9 @@ pub use ens_v1_subregistry_discovery::{
     sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit,
 };
 pub use ens_v1_unwrapped_authority::{
-    EnsV1TextRecordChange, EnsV1UnwrappedAuthoritySyncSummary,
-    ResolverProfileEventReconciliationSummary, decode_ens_v1_text_record_change,
+    EnsV1TextRecordChange, EnsV1UnwrappedAuthoritySyncSummary, ResolverProfileEventReconciliation,
+    ResolverProfileEventReconciliationPublication, ResolverProfileEventReconciliationSummary,
+    begin_resolver_profile_event_reconciliation, decode_ens_v1_text_record_change,
     reconcile_resolver_profile_events, sync_ens_v1_unwrapped_authority,
     sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limit,
 };

@@ -480,7 +480,9 @@ pub use self::pipeline::{
 };
 pub use checkpoint::clear_replay_adapter_checkpoints;
 pub use resolver_profile_reconciliation::{
-    ResolverProfileEventReconciliationSummary, reconcile_resolver_profile_events,
+    ResolverProfileEventReconciliation, ResolverProfileEventReconciliationPublication,
+    ResolverProfileEventReconciliationSummary, begin_resolver_profile_event_reconciliation,
+    reconcile_resolver_profile_events,
 };
 
 use self::{

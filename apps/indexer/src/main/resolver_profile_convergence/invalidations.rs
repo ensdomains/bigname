@@ -1,38 +1,32 @@
-use std::collections::{BTreeMap, BTreeSet};
-
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use uuid::Uuid;
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(super) struct ResolverProfileProjectionInvalidationPlan {
-    chains: Vec<String>,
-    addresses: Vec<String>,
-    resource_ids: Vec<Uuid>,
-}
+const INVALIDATION_PAGE_SIZE: i64 = 1_000;
 
-/// Capture readable current and historical binding keys before the adapter may
-/// orphan events that cease to be admitted under the new profile.
-pub(super) async fn load_resolver_profile_projection_invalidation_plan(
+/// Persist one bounded page of projection keys before adapter publication can
+/// orphan normalized events used to derive the affected record inventories.
+pub(super) async fn stage_resolver_profile_projection_invalidations(
     pool: &sqlx::PgPool,
-    targets_by_chain: &BTreeMap<String, BTreeSet<String>>,
-) -> Result<ResolverProfileProjectionInvalidationPlan> {
-    let mut plan = ResolverProfileProjectionInvalidationPlan::default();
-    for (chain, chain_addresses) in targets_by_chain {
-        for address in chain_addresses {
-            plan.chains.push(chain.clone());
-            plan.addresses.push(address.clone());
-        }
-    }
-    if plan.chains.is_empty() {
-        return Ok(plan);
+    run_id: Uuid,
+    chain: &str,
+    addresses: &[String],
+) -> Result<()> {
+    if addresses.is_empty() {
+        return Ok(());
     }
 
-    plan.resource_ids = sqlx::query_scalar::<_, Uuid>(
+    sqlx::query(
         r#"
-        WITH targets AS (
-            SELECT DISTINCT chain_id, lower(contract_address) AS contract_address
-            FROM unnest($1::TEXT[], $2::TEXT[])
-                AS input(chain_id, contract_address)
+        WITH input_addresses AS (
+            SELECT DISTINCT lower(address) AS resolver_address
+            FROM unnest($3::TEXT[]) AS input(address)
+        ),
+        targets AS (
+            SELECT $2::TEXT AS chain_id, target.resolver_address AS contract_address
+            FROM resolver_profile_reconciliation_targets target
+            JOIN input_addresses input
+              ON input.resolver_address = target.resolver_address
+            WHERE target.run_id = $1
         ),
         bound_names AS (
             SELECT DISTINCT event.logical_name_id
@@ -90,42 +84,6 @@ pub(super) async fn load_resolver_profile_projection_invalidation_plan(
                   'safe'::canonicality_state,
                   'finalized'::canonicality_state
               )
-        )
-        SELECT resource_id
-        FROM inventory_resources
-        ORDER BY resource_id
-        "#,
-    )
-    .bind(&plan.chains)
-    .bind(&plan.addresses)
-    .fetch_all(pool)
-    .await
-    .context("failed to capture resolver-profile projection invalidation keys")?;
-
-    Ok(plan)
-}
-
-/// Enqueue the pre-adapter key plan only after normalized-event convergence is
-/// durable. Profile-only changes do not necessarily create event changes from
-/// which the worker could derive these keys.
-pub(super) async fn enqueue_resolver_profile_projection_invalidations(
-    pool: &sqlx::PgPool,
-    plan: &ResolverProfileProjectionInvalidationPlan,
-) -> Result<u64> {
-    if plan.chains.is_empty() {
-        return Ok(0);
-    }
-
-    sqlx::query(
-        r#"
-        WITH targets AS (
-            SELECT DISTINCT chain_id, lower(contract_address) AS contract_address
-            FROM unnest($1::TEXT[], $2::TEXT[])
-                AS input(chain_id, contract_address)
-        ),
-        inventory_resources AS (
-            SELECT DISTINCT resource_id
-            FROM unnest($3::UUID[]) AS input(resource_id)
         ),
         candidate_keys AS (
             SELECT
@@ -145,32 +103,125 @@ pub(super) async fn enqueue_resolver_profile_projection_invalidations(
                 jsonb_build_object('resource_id', resource_id::TEXT) AS key_payload
             FROM inventory_resources
         )
-        INSERT INTO projection_invalidations (
+        INSERT INTO resolver_profile_reconciliation_invalidation_keys (
+            run_id,
             projection,
             projection_key,
-            key_payload,
-            invalidated_at,
-            last_changed_at
+            key_payload
         )
-        SELECT projection, projection_key, key_payload, now(), now()
+        SELECT $1, projection, projection_key, key_payload
         FROM candidate_keys
-        ON CONFLICT (projection, projection_key)
-        DO UPDATE SET
-            key_payload = EXCLUDED.key_payload,
-            generation = projection_invalidations.generation + 1,
-            invalidated_at = EXCLUDED.invalidated_at,
-            last_changed_at = EXCLUDED.last_changed_at,
-            claim_token = NULL,
-            claimed_at = NULL,
-            last_failure_reason = NULL,
-            last_failure_at = NULL
+        ON CONFLICT (run_id, projection, projection_key) DO NOTHING
         "#,
     )
-    .bind(&plan.chains)
-    .bind(&plan.addresses)
-    .bind(&plan.resource_ids)
+    .bind(run_id)
+    .bind(chain)
+    .bind(addresses)
     .execute(pool)
     .await
-    .context("failed to enqueue resolver-profile projection invalidations")
-    .map(|result| result.rows_affected())
+    .with_context(|| {
+        format!(
+            "failed to stage resolver-profile projection invalidations for {} targets on {chain}",
+            addresses.len()
+        )
+    })?;
+    Ok(())
+}
+
+/// Publish staged projection keys only after the adapter has durably completed
+/// the matching chain-context reconciliation.
+pub(super) async fn publish_resolver_profile_projection_invalidations(
+    pool: &sqlx::PgPool,
+    run_id: Uuid,
+) -> Result<u64> {
+    let mut after_projection = None::<String>;
+    let mut after_projection_key = None::<String>;
+    let mut published_count = 0u64;
+    loop {
+        let (next_projection, next_projection_key, page_count) =
+            sqlx::query_as::<_, (Option<String>, Option<String>, i64)>(
+                r#"
+                WITH candidate_page AS MATERIALIZED (
+                    SELECT projection, projection_key, key_payload
+                    FROM resolver_profile_reconciliation_invalidation_keys
+                    WHERE run_id = $1
+                      AND (
+                          $2::TEXT IS NULL
+                          OR (projection, projection_key) > ($2::TEXT, $3::TEXT)
+                      )
+                    ORDER BY projection, projection_key
+                    LIMIT $4
+                ),
+                upserted AS (
+                    INSERT INTO projection_invalidations (
+                        projection,
+                        projection_key,
+                        key_payload,
+                        invalidated_at,
+                        last_changed_at
+                    )
+                    SELECT projection, projection_key, key_payload, now(), now()
+                    FROM candidate_page
+                    ON CONFLICT (projection, projection_key)
+                    DO UPDATE SET
+                        key_payload = EXCLUDED.key_payload,
+                        generation = projection_invalidations.generation + 1,
+                        invalidated_at = EXCLUDED.invalidated_at,
+                        last_changed_at = EXCLUDED.last_changed_at,
+                        claim_token = NULL,
+                        claimed_at = NULL,
+                        last_failure_reason = NULL,
+                        last_failure_at = NULL
+                    RETURNING 1
+                )
+                SELECT
+                    (
+                        SELECT projection
+                        FROM candidate_page
+                        ORDER BY projection DESC, projection_key DESC
+                        LIMIT 1
+                    ),
+                    (
+                        SELECT projection_key
+                        FROM candidate_page
+                        ORDER BY projection DESC, projection_key DESC
+                        LIMIT 1
+                    ),
+                    (SELECT COUNT(*)::BIGINT FROM upserted)
+                "#,
+            )
+            .bind(run_id)
+            .bind(after_projection.as_deref())
+            .bind(after_projection_key.as_deref())
+            .bind(INVALIDATION_PAGE_SIZE)
+            .fetch_one(pool)
+            .await
+            .context("failed to publish staged resolver-profile projection invalidation page")?;
+
+        match (next_projection, next_projection_key) {
+            (None, None) => {
+                ensure!(
+                    page_count == 0,
+                    "empty resolver-profile invalidation page unexpectedly published rows"
+                );
+                return Ok(published_count);
+            }
+            (Some(projection), Some(projection_key)) => {
+                ensure!(
+                    page_count > 0,
+                    "non-empty resolver-profile invalidation page published no rows"
+                );
+                published_count = published_count
+                    .checked_add(u64::try_from(page_count)?)
+                    .context("resolver-profile invalidation count overflowed u64")?;
+                after_projection = Some(projection);
+                after_projection_key = Some(projection_key);
+            }
+            _ => {
+                anyhow::bail!(
+                    "resolver-profile invalidation page returned an incomplete key cursor"
+                );
+            }
+        }
+    }
 }

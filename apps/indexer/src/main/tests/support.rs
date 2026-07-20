@@ -1307,6 +1307,24 @@ async fn ensure_resolver_profile_convergence_tables(pool: &PgPool) -> Result<()>
         .context("failed to normalize resolver-profile authority journal for indexer tests")?;
     }
 
+    if !sqlx::query_scalar::<_, bool>(
+        "SELECT to_regclass(\
+             'public.resolver_profile_reconciliation_invalidation_keys'\
+         ) IS NOT NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .context("failed to inspect resolver-profile invalidation staging test fixture")?
+    {
+        sqlx::raw_sql(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../migrations/20260720121000_resolver_profile_invalidation_staging.sql"
+        )))
+        .execute(pool)
+        .await
+        .context("failed to create resolver-profile invalidation staging for indexer tests")?;
+    }
+
     Ok(())
 }
 

@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail, ensure};
+use bigname_adapters::begin_resolver_profile_event_reconciliation;
 use bigname_storage::{
     RESOLVER_PROFILE_AUTHORITY_JOURNAL_ENTRY_BATCH_SIZE, ResolverProfileInputChange,
     ResolverProfileReconciliationTarget, acknowledge_resolver_profile_input_changes,
@@ -15,8 +16,8 @@ use super::{
     ResolverProfileAuthorityIndex, ResolverProfileConvergenceSummary,
     input_requires_reconciliation,
     invalidations::{
-        enqueue_resolver_profile_projection_invalidations,
-        load_resolver_profile_projection_invalidation_plan,
+        publish_resolver_profile_projection_invalidations,
+        stage_resolver_profile_projection_invalidations,
     },
     reconciliation_scope,
 };
@@ -27,7 +28,8 @@ const MAX_DRAIN_INPUTS: usize = 128 * 1_024;
 const RECONCILIATION_TARGET_PAGE_SIZE: usize = 250;
 const MIN_CONVERGENCE_POOL_CONNECTIONS: u32 = 3;
 
-/// Converge every currently eligible durable resolver-profile input change.
+/// Converge every currently eligible durable
+/// [resolver-profile](../../../../../docs/glossary.md) input change.
 /// A crash or error before the final generation CAS leaves the input dirty, so
 /// every page is safe to retry. Exact generations whose retained corpus cannot
 /// authorize absence replay remain durably pending.
@@ -70,17 +72,15 @@ pub(crate) async fn drain_resolver_profile_input_changes(
             .into_iter()
             .filter(|(chain, _)| !deferred_chains.contains_key(chain))
             .collect::<BTreeMap<_, _>>();
-        reconcile_direct_target_pages(pool, &eligible_direct_targets, &mut aggregate).await?;
-
         let eligible_seed_families = scope
             .seed_families
             .into_iter()
             .filter(|(chain, _)| !deferred_chains.contains_key(chain))
             .collect::<Vec<_>>();
-        reconcile_seed_family_target_pages(
+        reconcile_target_chains(
             pool,
-            &eligible_seed_families,
             &eligible_direct_targets,
+            &eligible_seed_families,
             &mut aggregate,
         )
         .await?;
@@ -168,87 +168,108 @@ async fn classify_deferred_chains(
     Ok(())
 }
 
-async fn reconcile_direct_target_pages(
+async fn reconcile_target_chains(
     pool: &sqlx::PgPool,
-    targets_by_chain: &BTreeMap<String, BTreeSet<String>>,
-    aggregate: &mut ResolverProfileConvergenceSummary,
-) -> Result<()> {
-    for (chain, addresses) in targets_by_chain {
-        let addresses = addresses.iter().cloned().collect::<Vec<_>>();
-        for page in addresses.chunks(RECONCILIATION_TARGET_PAGE_SIZE) {
-            reconcile_target_page(
-                pool,
-                &BTreeMap::from([(chain.clone(), page.iter().cloned().collect())]),
-                aggregate,
-            )
-            .await?;
-        }
-    }
-    Ok(())
-}
-
-async fn reconcile_seed_family_target_pages(
-    pool: &sqlx::PgPool,
-    seed_families: &[(String, String)],
     direct_targets_by_chain: &BTreeMap<String, BTreeSet<String>>,
+    seed_families: &[(String, String)],
     aggregate: &mut ResolverProfileConvergenceSummary,
 ) -> Result<()> {
-    if seed_families.is_empty() {
-        return Ok(());
+    let mut families_by_chain = BTreeMap::<String, BTreeSet<String>>::new();
+    for (chain, source_family) in seed_families {
+        families_by_chain
+            .entry(chain.clone())
+            .or_default()
+            .insert(source_family.clone());
     }
-    let mut after = None::<ResolverProfileReconciliationTarget>;
-    loop {
-        let page = load_resolver_profile_authority_family_target_page(
-            pool,
-            seed_families,
-            after.as_ref(),
-            RECONCILIATION_TARGET_PAGE_SIZE,
-        )
-        .await?;
-        aggregate.family_target_read_statement_count += 1;
-        aggregate.max_family_target_page_size =
-            aggregate.max_family_target_page_size.max(page.len());
-        let Some(last) = page.last() else {
-            return Ok(());
-        };
-        after = Some(last.clone());
-        let mut targets_by_chain = BTreeMap::<String, BTreeSet<String>>::new();
-        for target in page {
-            if direct_targets_by_chain
-                .get(&target.chain_id)
-                .is_some_and(|addresses| addresses.contains(&target.contract_address))
-            {
-                continue;
-            }
-            targets_by_chain
-                .entry(target.chain_id)
-                .or_default()
-                .insert(target.contract_address);
-        }
-        reconcile_target_page(pool, &targets_by_chain, aggregate).await?;
-    }
-}
 
-async fn reconcile_target_page(
-    pool: &sqlx::PgPool,
-    targets_by_chain: &BTreeMap<String, BTreeSet<String>>,
-    aggregate: &mut ResolverProfileConvergenceSummary,
-) -> Result<()> {
-    if targets_by_chain.is_empty() {
-        return Ok(());
-    }
-    let invalidation_plan =
-        load_resolver_profile_projection_invalidation_plan(pool, targets_by_chain).await?;
-    for (chain, addresses) in targets_by_chain {
-        let addresses = addresses.iter().cloned().collect::<Vec<_>>();
-        let summary = bigname_adapters::reconcile_resolver_profile_events(pool, chain, &addresses)
+    let chains = direct_targets_by_chain
+        .keys()
+        .chain(families_by_chain.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for chain in chains {
+        let direct_targets = direct_targets_by_chain.get(&chain);
+        let mut reconciliation = begin_resolver_profile_event_reconciliation(pool, &chain)
             .await
             .with_context(|| {
-                format!(
-                    "failed to reconcile resolver-profile events for {} targets on {chain}",
-                    addresses.len()
-                )
+                format!("failed to begin resolver-profile reconciliation on {chain}")
             })?;
+
+        if let Some(direct_targets) = direct_targets {
+            let addresses = direct_targets.iter().cloned().collect::<Vec<_>>();
+            for page in addresses.chunks(RECONCILIATION_TARGET_PAGE_SIZE) {
+                reconciliation.stage_addresses(page).await?;
+                stage_resolver_profile_projection_invalidations(
+                    pool,
+                    reconciliation.run_id(),
+                    &chain,
+                    page,
+                )
+                .await?;
+            }
+        }
+
+        if let Some(source_families) = families_by_chain.get(&chain) {
+            let family_targets = source_families
+                .iter()
+                .map(|source_family| (chain.clone(), source_family.clone()))
+                .collect::<Vec<_>>();
+            let mut after = None::<ResolverProfileReconciliationTarget>;
+            loop {
+                let page = load_resolver_profile_authority_family_target_page(
+                    pool,
+                    &family_targets,
+                    after.as_ref(),
+                    RECONCILIATION_TARGET_PAGE_SIZE,
+                )
+                .await?;
+                aggregate.family_target_read_statement_count += 1;
+                aggregate.max_family_target_page_size =
+                    aggregate.max_family_target_page_size.max(page.len());
+                let Some(last) = page.last() else {
+                    break;
+                };
+                after = Some(last.clone());
+                let addresses = page
+                    .into_iter()
+                    .map(|target| {
+                        ensure!(
+                            target.chain_id == chain,
+                            "resolver-profile family page crossed its requested chain boundary"
+                        );
+                        Ok(target.contract_address)
+                    })
+                    .collect::<Result<BTreeSet<_>>>()?
+                    .into_iter()
+                    .filter(|address| {
+                        !direct_targets.is_some_and(|targets| targets.contains(address))
+                    })
+                    .collect::<Vec<_>>();
+                if addresses.is_empty() {
+                    continue;
+                }
+                reconciliation.stage_addresses(&addresses).await?;
+                stage_resolver_profile_projection_invalidations(
+                    pool,
+                    reconciliation.run_id(),
+                    &chain,
+                    &addresses,
+                )
+                .await?;
+            }
+        }
+
+        #[cfg(test)]
+        {
+            aggregate.adapter_reconciliation_call_count += 1;
+        }
+        let publication = reconciliation
+            .reconcile()
+            .await
+            .with_context(|| format!("failed to reconcile resolver-profile events on {chain}"))?;
+        aggregate.invalidated_projection_key_count +=
+            publish_resolver_profile_projection_invalidations(pool, publication.run_id()).await?;
+        let summary = publication.finish().await?;
         info!(
             service = "indexer",
             command = "resolver-profile-convergence",
@@ -262,11 +283,8 @@ async fn reconcile_target_page(
             orphaned_normalized_event_count = summary.orphaned_normalized_event_count,
             "resolver-profile event reconciliation completed"
         );
+        aggregate.reconciled_target_count += summary.resolver_address_count;
     }
-    aggregate.reconciled_target_count +=
-        targets_by_chain.values().map(BTreeSet::len).sum::<usize>();
-    aggregate.invalidated_projection_key_count +=
-        enqueue_resolver_profile_projection_invalidations(pool, &invalidation_plan).await?;
     Ok(())
 }
 
