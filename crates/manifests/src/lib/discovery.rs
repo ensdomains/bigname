@@ -22,9 +22,14 @@ pub use loading::load_discovery_admission_state;
 pub use persistence::persist_discovery_observation;
 pub use provenance::discovery_observation_evm_event_position;
 pub use reconciliation::{
-    ExpectedDiscoveryAdmissionEpoch, FullDiscoveryReconciliationOptions,
-    reconcile_discovery_observations, reconcile_scoped_discovery_observation_transitions,
+    DiscoveryObservationPageSource, ExpectedDiscoveryAdmissionEpoch,
+    FullDiscoveryReconciliationOptions, reconcile_discovery_observations,
+    reconcile_discovery_observations_streamed, reconcile_scoped_discovery_observation_transitions,
     reconcile_scoped_discovery_observations,
+};
+#[cfg(test)]
+pub(crate) use reconciliation::{
+    StreamedDiscoveryReconciliationOptions, reconcile_discovery_observations_streamed_with_options,
 };
 pub use types::{
     AdmittedDiscoveryEdge, DiscoveryCandidate, DiscoveryObservation, DiscoveryPersistenceSummary,

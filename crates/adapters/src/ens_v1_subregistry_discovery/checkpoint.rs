@@ -6,7 +6,7 @@ use bigname_storage::{
     raw_log_staging_block_range_changed_since,
 };
 use serde_json::{Value, json};
-use sqlx::{PgPool, Postgres, QueryBuilder, Row};
+use sqlx::{PgPool, Postgres, Row};
 
 use crate::registry_migration_cache::MigratedRegistryNodes;
 
@@ -15,15 +15,16 @@ use super::{
     loader::RegistryRawLogPosition,
 };
 
+mod items;
 mod payload;
 
+use items::insert_checkpoint_items;
 use payload::{assignment_from_payload, assignment_payload, summary_from_payload, summary_payload};
 
 const ADAPTER: &str = "ens_v1_subregistry_discovery";
 const CHECKPOINT_SCOPE: &str = "full_closure";
 const ITEM_KIND_LATEST_ASSIGNMENT: &str = "latest_assignment";
 const ITEM_KIND_MIGRATED_NODE: &str = "migrated_registry_node";
-const CHECKPOINT_ITEM_INSERT_BATCH_SIZE: usize = 500;
 pub(super) const EVENT_PAGE_LIMIT: i64 = 20_000;
 pub(super) const PAGE_LIMIT: i64 = 10_000;
 pub(super) const RECONCILIATION_PAGE_LIMIT: i64 = 50_000;
@@ -37,12 +38,6 @@ pub struct ReplayAdapterCheckpointContext {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct StagedSubregistryState {
-    pub(super) latest_assignments: BTreeMap<String, ObservedRegistryAssignment>,
-    pub(super) migrated_registry_nodes: MigratedRegistryNodes,
-}
-
-#[derive(Clone, Debug)]
 pub(super) struct SubregistryReplayCheckpoint {
     pub(super) context: ReplayAdapterCheckpointContext,
     pub(super) chain: String,
@@ -50,6 +45,7 @@ pub(super) struct SubregistryReplayCheckpoint {
     last_position: Option<RegistryRawLogPosition>,
     scanned_log_count: usize,
     matched_log_count: usize,
+    staged_item_count: usize,
     state_payload: Value,
     raw_log_input_version: RawLogStagingInputVersion,
 }
@@ -214,17 +210,26 @@ impl SubregistryReplayCheckpoint {
         Ok(Some(summary_from_payload(summary)?))
     }
 
-    pub(super) async fn load_staged_state(&self, pool: &PgPool) -> Result<StagedSubregistryState> {
-        let rows = sqlx::query(
+    /// Restore only the staged migrated-registry nodes for a resumed stream.
+    /// Staged assignments are intentionally never reloaded: in checkpoint mode
+    /// the stream stages each page's changed assignments to the database and
+    /// nothing reads them back until the paged finalize, so the full map must
+    /// not be rebuilt in memory (#168).
+    pub(super) async fn load_staged_migrated_registry_nodes(
+        &self,
+        pool: &PgPool,
+    ) -> Result<MigratedRegistryNodes> {
+        let nodes = sqlx::query_scalar::<_, String>(
             r#"
-            SELECT item_kind, item_key, item_payload
+            SELECT item_key
             FROM normalized_replay_adapter_checkpoint_items
             WHERE deployment_profile = $1
               AND chain_id = $2
               AND cursor_kind = $3
               AND adapter = $4
               AND checkpoint_scope = $5
-            ORDER BY item_kind, item_key
+              AND item_kind = $6
+            ORDER BY item_key
             "#,
         )
         .bind(&self.context.deployment_profile)
@@ -232,36 +237,19 @@ impl SubregistryReplayCheckpoint {
         .bind(&self.context.cursor_kind)
         .bind(ADAPTER)
         .bind(CHECKPOINT_SCOPE)
+        .bind(ITEM_KIND_MIGRATED_NODE)
         .fetch_all(pool)
         .await
         .with_context(|| {
             format!(
-                "failed to load staged {ADAPTER} replay checkpoint items for {}/{}",
+                "failed to load staged {ADAPTER} migrated registry nodes for {}/{}",
                 self.context.deployment_profile, self.chain
             )
         })?;
 
-        let mut latest_assignments = BTreeMap::new();
-        let mut migrated_nodes = HashSet::new();
-        for row in rows {
-            let item_kind: String = row.try_get("item_kind")?;
-            let item_key: String = row.try_get("item_key")?;
-            let item_payload: Value = row.try_get("item_payload")?;
-            match item_kind.as_str() {
-                ITEM_KIND_LATEST_ASSIGNMENT => {
-                    latest_assignments.insert(item_key, assignment_from_payload(&item_payload)?);
-                }
-                ITEM_KIND_MIGRATED_NODE => {
-                    migrated_nodes.insert(item_key);
-                }
-                _ => {}
-            }
-        }
-
-        Ok(StagedSubregistryState {
-            latest_assignments,
-            migrated_registry_nodes: MigratedRegistryNodes::from_delta(migrated_nodes),
-        })
+        Ok(MigratedRegistryNodes::from_delta(
+            nodes.into_iter().collect::<HashSet<_>>(),
+        ))
     }
 
     pub(super) async fn active_assignment_count(
@@ -366,31 +354,30 @@ impl SubregistryReplayCheckpoint {
         self.context.target_block_number
     }
 
+    /// Persist one stream page. `page_assignments` holds only the page's
+    /// latest assignment per changed key; earlier pages' assignments live in
+    /// the database and are upserted over by later pages in stream order.
+    /// `staged_item_count` is maintained incrementally from the number of
+    /// newly inserted (vs updated) assignment items so the bookkeeping column
+    /// stays exact without an in-memory copy of the staged map.
     pub(super) async fn save_progress(
         &mut self,
         pool: &PgPool,
         last_position: &RegistryRawLogPosition,
         scanned_log_count: usize,
         matched_log_count: usize,
-        latest_assignments: &BTreeMap<String, ObservedRegistryAssignment>,
-        changed_assignment_keys: &[String],
+        page_assignments: &BTreeMap<String, ObservedRegistryAssignment>,
         migrated_nodes: &[String],
         staged_aux_item_count: usize,
     ) -> Result<()> {
-        let assignment_keys = changed_assignment_keys
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>();
         let migrated_nodes = migrated_nodes.iter().cloned().collect::<BTreeSet<_>>();
         let mut item_rows = Vec::<(&'static str, String, Value)>::new();
-        for assignment_key in assignment_keys {
-            if let Some(assignment) = latest_assignments.get(&assignment_key) {
-                item_rows.push((
-                    ITEM_KIND_LATEST_ASSIGNMENT,
-                    assignment_key,
-                    assignment_payload(assignment),
-                ));
-            }
+        for (assignment_key, assignment) in page_assignments {
+            item_rows.push((
+                ITEM_KIND_LATEST_ASSIGNMENT,
+                assignment_key.clone(),
+                assignment_payload(assignment),
+            ));
         }
         for node in migrated_nodes {
             item_rows.push((
@@ -404,7 +391,12 @@ impl SubregistryReplayCheckpoint {
             .begin()
             .await
             .context("failed to start subregistry replay checkpoint transaction")?;
-        insert_checkpoint_items(&mut transaction, self, &item_rows).await?;
+        let newly_staged_assignment_count =
+            insert_checkpoint_items(&mut transaction, self, &item_rows).await?;
+        let staged_item_count = self
+            .staged_item_count
+            .checked_add(newly_staged_assignment_count)
+            .context("staged assignment item count overflowed usize")?;
         update_checkpoint_progress(
             &mut transaction,
             self,
@@ -412,7 +404,7 @@ impl SubregistryReplayCheckpoint {
             Some(last_position),
             scanned_log_count,
             matched_log_count,
-            latest_assignments.len(),
+            staged_item_count,
             staged_aux_item_count,
             self.state_payload.clone(),
         )
@@ -425,6 +417,7 @@ impl SubregistryReplayCheckpoint {
         self.last_position = Some(last_position.clone());
         self.scanned_log_count = scanned_log_count;
         self.matched_log_count = matched_log_count;
+        self.staged_item_count = staged_item_count;
         self.status = "running".to_owned();
         Ok(())
     }
@@ -577,6 +570,7 @@ async fn load_checkpoint_row(
             last_emitting_address,
             scanned_log_count,
             matched_log_count,
+            staged_item_count,
             status,
             state_payload,
             raw_log_retention_generation,
@@ -649,6 +643,8 @@ fn checkpoint_from_row(
             .context("checkpoint scanned log count overflowed usize")?,
         matched_log_count: usize::try_from(row.try_get::<i64, _>("matched_log_count")?)
             .context("checkpoint matched log count overflowed usize")?,
+        staged_item_count: usize::try_from(row.try_get::<i64, _>("staged_item_count")?)
+            .context("checkpoint staged item count overflowed usize")?,
         state_payload: row.try_get("state_payload")?,
         raw_log_input_version: RawLogStagingInputVersion {
             retention_generation: row.try_get("raw_log_retention_generation")?,
@@ -680,66 +676,6 @@ pub(super) async fn delete_checkpoint(
     .execute(pool)
     .await
     .context("failed to reset stale subregistry replay checkpoint")?;
-    Ok(())
-}
-
-async fn insert_checkpoint_items(
-    transaction: &mut sqlx::Transaction<'_, Postgres>,
-    checkpoint: &SubregistryReplayCheckpoint,
-    item_rows: &[(&'static str, String, Value)],
-) -> Result<()> {
-    for chunk in item_rows.chunks(CHECKPOINT_ITEM_INSERT_BATCH_SIZE) {
-        if chunk.is_empty() {
-            continue;
-        }
-        let mut builder = QueryBuilder::<Postgres>::new(
-            r#"
-            INSERT INTO normalized_replay_adapter_checkpoint_items (
-                deployment_profile,
-                chain_id,
-                cursor_kind,
-                adapter,
-                checkpoint_scope,
-                item_kind,
-                item_key,
-                item_payload
-            )
-            "#,
-        );
-        builder.push_values(
-            chunk.iter(),
-            |mut row, (item_kind, item_key, item_payload)| {
-                row.push_bind(&checkpoint.context.deployment_profile)
-                    .push_bind(&checkpoint.chain)
-                    .push_bind(&checkpoint.context.cursor_kind)
-                    .push_bind(ADAPTER)
-                    .push_bind(CHECKPOINT_SCOPE)
-                    .push_bind(*item_kind)
-                    .push_bind(item_key)
-                    .push_bind(item_payload);
-            },
-        );
-        builder.push(
-            r#"
-            ON CONFLICT (
-                deployment_profile,
-                chain_id,
-                cursor_kind,
-                adapter,
-                checkpoint_scope,
-                item_kind,
-                item_key
-            ) DO UPDATE
-            SET item_payload = EXCLUDED.item_payload,
-                updated_at = now()
-            "#,
-        );
-        builder
-            .build()
-            .execute(transaction.as_mut())
-            .await
-            .context("failed to upsert replay adapter checkpoint items")?;
-    }
     Ok(())
 }
 

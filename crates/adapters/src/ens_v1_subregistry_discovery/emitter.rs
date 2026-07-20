@@ -6,6 +6,7 @@ use sqlx::PgPool;
 
 use super::{
     assignment::ObservedRegistryAssignment,
+    checkpoint::{EVENT_PAGE_LIMIT, SubregistryReplayCheckpoint},
     event::build_registry_changed_event,
     hex_topic::ZERO_ADDRESS,
     loader::{ActiveRegistryEdge, load_registry_edges_by_observation_point},
@@ -43,6 +44,43 @@ pub(super) async fn emit_registry_changed_events(
         }
     }
     emit_registry_changed_event_chunk(pool, &assignments, &mut events, &mut summary).await?;
+    flush_registry_changed_events(pool, &mut events, &mut summary).await?;
+    Ok(summary)
+}
+
+/// Emit registry-changed events for a finalizing checkpointed replay by
+/// paging the staged latest-per-key assignments per discovery source, so the
+/// emit phase never materializes a source's assignments in memory (#168).
+pub(super) async fn emit_registry_changed_events_from_checkpoint(
+    pool: &PgPool,
+    checkpoint: &SubregistryReplayCheckpoint,
+    discovery_sources: &[String],
+) -> Result<RegistryChangedEventEmitSummary> {
+    let mut events = Vec::with_capacity(usize::try_from(EVENT_PAGE_LIMIT)?);
+    let mut summary = RegistryChangedEventEmitSummary::default();
+    for discovery_source in discovery_sources {
+        let mut after_key = None::<String>;
+        loop {
+            let page = checkpoint
+                .load_assignment_page(
+                    pool,
+                    discovery_source,
+                    after_key.as_deref(),
+                    EVENT_PAGE_LIMIT,
+                )
+                .await?;
+            let Some((last_key, _)) = page.last() else {
+                break;
+            };
+            after_key = Some(last_key.clone());
+            let assignments = page
+                .iter()
+                .map(|(_, assignment)| assignment)
+                .collect::<Vec<_>>();
+            emit_registry_changed_event_chunk(pool, &assignments, &mut events, &mut summary)
+                .await?;
+        }
+    }
     flush_registry_changed_events(pool, &mut events, &mut summary).await?;
     Ok(summary)
 }

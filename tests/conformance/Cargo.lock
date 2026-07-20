@@ -744,6 +744,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "toml",
+ "tracing",
  "uuid",
 ]
 

@@ -1067,7 +1067,11 @@ async fn checkpointed_subregistry_replay_resets_for_late_lower_position_in_consu
 -> Result<()> {
     let _permit = crate::acquire_test_db_permit().await;
     let test_dir = TestDir::new()?;
-    let database = TestDatabase::new_with_max_connections(2).await?;
+    // The streamed finalize reconcile pages staged assignments over a second
+    // pooled connection while its reconciliation transaction is open, so a
+    // checkpointed replay needs three connections: the raw-log staging
+    // guard, the reconcile transaction, and the page reads.
+    let database = TestDatabase::new_with_max_connections(3).await?;
 
     let chain = "ethereum-mainnet";
     let registry_address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
@@ -1168,6 +1172,369 @@ async fn checkpointed_subregistry_replay_resets_for_late_lower_position_in_consu
         .fetch_one(database.pool())
         .await?,
         2
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn checkpointed_subregistry_stream_maintains_staged_item_count_across_repeated_keys()
+-> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+
+    let registry_address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+    test_dir.write_manifest("ens", "ens_v1_registry_l1", "v1", &manifest_contents(true))?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+    insert_raw_new_owner_log_with_key(
+        database.pool(),
+        RawNewOwnerLog {
+            chain_id: "ethereum-mainnet",
+            block_hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            block_number: 42,
+            emitting_address: registry_address,
+            owner: "0x00000000000000000000000000000000000000CC",
+            parent_node: ZERO_NODE,
+            label: "eth",
+            canonicality_state: CanonicalityState::Canonical,
+        },
+    )
+    .await?;
+    insert_raw_new_owner_log_with_key(
+        database.pool(),
+        RawNewOwnerLog {
+            chain_id: "ethereum-mainnet",
+            block_hash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            block_number: 43,
+            emitting_address: registry_address,
+            owner: "0x00000000000000000000000000000000000000DD",
+            parent_node: ZERO_NODE,
+            label: "eth",
+            canonicality_state: CanonicalityState::Canonical,
+        },
+    )
+    .await?;
+    insert_raw_new_owner_log_with_key(
+        database.pool(),
+        RawNewOwnerLog {
+            chain_id: "ethereum-mainnet",
+            block_hash: "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            block_number: 44,
+            emitting_address: registry_address,
+            owner: "0x00000000000000000000000000000000000000EE",
+            parent_node: ZERO_NODE,
+            label: "com",
+            canonicality_state: CanonicalityState::Canonical,
+        },
+    )
+    .await?;
+
+    let checkpoint = ReplayAdapterCheckpointContext {
+        deployment_profile: "test".to_owned(),
+        cursor_kind: "checkpointed_subregistry_staged_item_count".to_owned(),
+        range_start_block_number: 1,
+        target_block_number: 44,
+    };
+    // One raw log per page: the repeated "eth" key crosses page boundaries.
+    let replay = sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit(
+        database.pool(),
+        "ethereum-mainnet",
+        &checkpoint,
+        1,
+    )
+    .await?;
+    assert_eq!(replay.scanned_log_count, 3);
+    assert_eq!(replay.matched_log_count, 3);
+    assert_eq!(replay.active_observation_count, 2);
+    assert_eq!(replay.active_edge_count, 2);
+
+    let staged_item_count = query_scalar::<_, i64>(
+        "SELECT staged_item_count FROM normalized_replay_adapter_checkpoints WHERE cursor_kind = $1",
+    )
+    .bind(&checkpoint.cursor_kind)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        staged_item_count, 2,
+        "repeated keys across pages must stage one item per distinct key"
+    );
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoint_items
+             WHERE cursor_kind = $1 AND item_kind = 'latest_assignment'",
+        )
+        .bind(&checkpoint.cursor_kind)
+        .fetch_one(database.pool())
+        .await?,
+        staged_item_count,
+        "staged_item_count bookkeeping must match the staged assignment rows"
+    );
+    let eth_key = format!(
+        "{}:{}",
+        ens_v1_subregistry_discovery_source("ethereum-mainnet"),
+        child_node(ZERO_NODE, &labelhash_hex("eth"))?
+    );
+    assert_eq!(
+        query_scalar::<_, String>(
+            "SELECT item_payload ->> 'to_address' FROM normalized_replay_adapter_checkpoint_items
+             WHERE cursor_kind = $1 AND item_kind = 'latest_assignment' AND item_key = $2",
+        )
+        .bind(&checkpoint.cursor_kind)
+        .bind(&eth_key)
+        .fetch_one(database.pool())
+        .await?,
+        "0x00000000000000000000000000000000000000dd",
+        "later pages must overwrite the staged assignment for a repeated key"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn checkpointed_subregistry_resume_restores_migrated_nodes_without_staged_assignments()
+-> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+    let current_registry = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+    let old_registry = "0x314159265dd8dbb310642f98f50c066173c1259b";
+
+    test_dir.write_manifest(
+        "ens",
+        "ens_v1_registry_l1",
+        "v3",
+        &manifest_contents_with_old_registry(current_registry, old_registry, 10, 1),
+    )?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+    // Phase 1: the current registry claims "eth", marking the node migrated.
+    insert_raw_new_owner_log_with_key(
+        database.pool(),
+        RawNewOwnerLog {
+            chain_id: "ethereum-mainnet",
+            block_hash: "0x0101010101010101010101010101010101010101010101010101010101010101",
+            block_number: 10,
+            emitting_address: current_registry,
+            owner: "0x00000000000000000000000000000000000000CC",
+            parent_node: ZERO_NODE,
+            label: "eth",
+            canonicality_state: CanonicalityState::Canonical,
+        },
+    )
+    .await?;
+    let checkpoint = ReplayAdapterCheckpointContext {
+        deployment_profile: "test".to_owned(),
+        cursor_kind: "checkpointed_subregistry_resume_migrated_nodes".to_owned(),
+        range_start_block_number: 1,
+        target_block_number: 10,
+    };
+    let first = sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit(
+        database.pool(),
+        "ethereum-mainnet",
+        &checkpoint,
+        1,
+    )
+    .await?;
+    assert_eq!(first.scanned_log_count, 1);
+    assert_eq!(first.matched_log_count, 1);
+
+    // Phase 2 resumes the checkpoint: the migration guard must suppress the
+    // old registry's resolver update for the migrated node, which requires
+    // the staged migrated-node state to be restored without rebuilding the
+    // staged assignment map.
+    let eth_node = child_node(ZERO_NODE, &labelhash_hex("eth"))?;
+    insert_raw_new_resolver_log(
+        database.pool(),
+        RawNewResolverLog {
+            chain_id: "ethereum-mainnet",
+            block_hash: "0x0202020202020202020202020202020202020202020202020202020202020202",
+            block_number: 11,
+            emitting_address: old_registry,
+            resolver: "0x00000000000000000000000000000000000000DD",
+            node: &eth_node,
+            canonicality_state: CanonicalityState::Canonical,
+        },
+    )
+    .await?;
+    insert_raw_new_owner_log_with_key(
+        database.pool(),
+        RawNewOwnerLog {
+            chain_id: "ethereum-mainnet",
+            block_hash: "0x0303030303030303030303030303030303030303030303030303030303030303",
+            block_number: 12,
+            emitting_address: current_registry,
+            owner: "0x00000000000000000000000000000000000000FF",
+            parent_node: ZERO_NODE,
+            label: "eth",
+            canonicality_state: CanonicalityState::Canonical,
+        },
+    )
+    .await?;
+
+    let extended_checkpoint = ReplayAdapterCheckpointContext {
+        target_block_number: 12,
+        ..checkpoint
+    };
+    let resumed = sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit(
+        database.pool(),
+        "ethereum-mainnet",
+        &extended_checkpoint,
+        1,
+    )
+    .await?;
+    assert_eq!(resumed.scanned_log_count, 3);
+    assert_eq!(
+        resumed.matched_log_count, 2,
+        "the old registry's post-migration resolver update must stay suppressed on resume"
+    );
+    assert_eq!(resumed.active_observation_count, 1);
+    assert_eq!(resumed.active_edge_count, 1);
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE edge_kind = 'resolver' AND deactivated_at IS NULL"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT staged_item_count FROM normalized_replay_adapter_checkpoints WHERE cursor_kind = $1",
+        )
+        .bind(&extended_checkpoint.cursor_kind)
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "re-assigning an already-staged key on resume must not grow staged_item_count"
+    );
+    assert_eq!(
+        query_scalar::<_, String>(
+            "SELECT item_payload ->> 'to_address' FROM normalized_replay_adapter_checkpoint_items
+             WHERE cursor_kind = $1 AND item_kind = 'latest_assignment'",
+        )
+        .bind(&extended_checkpoint.cursor_kind)
+        .fetch_one(database.pool())
+        .await?,
+        "0x00000000000000000000000000000000000000ff"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn checkpointed_replay_rejects_undersized_connection_pools() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new_with_max_connections(2).await?;
+
+    let checkpoint = ReplayAdapterCheckpointContext {
+        deployment_profile: "test".to_owned(),
+        cursor_kind: "checkpointed_subregistry_undersized_pool".to_owned(),
+        range_start_block_number: 1,
+        target_block_number: 42,
+    };
+    let error = sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit(
+        database.pool(),
+        "ethereum-mainnet",
+        &checkpoint,
+        1,
+    )
+    .await
+    .expect_err("a two-connection pool must fail fast instead of deadlocking");
+    assert!(
+        error.to_string().contains("pooled connections"),
+        "unexpected error: {error:#}"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn checkpointed_replay_with_incomplete_stream_refuses_to_reconcile() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+
+    let registry_address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+    test_dir.write_manifest("ens", "ens_v1_registry_l1", "v1", &manifest_contents(true))?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+    insert_raw_new_owner_log(
+        database.pool(),
+        "ethereum-mainnet",
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        42,
+        registry_address,
+        "0x00000000000000000000000000000000000000CC",
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    let seeded = sync_ens_v1_subregistry_discovery(database.pool(), "ethereum-mainnet").await?;
+    assert_eq!(seeded.active_edge_count, 1);
+
+    // The registry manifest is deprecated mid-replay: the checkpoint stream
+    // can no longer progress because no active emitters remain.
+    sqlx::query("UPDATE manifest_versions SET rollout_status = 'deprecated'")
+        .execute(database.pool())
+        .await?;
+    let checkpoint = ReplayAdapterCheckpointContext {
+        deployment_profile: "test".to_owned(),
+        cursor_kind: "checkpointed_subregistry_incomplete_stream".to_owned(),
+        range_start_block_number: 1,
+        target_block_number: 42,
+    };
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_replay_adapter_checkpoints (
+            deployment_profile,
+            chain_id,
+            cursor_kind,
+            adapter,
+            checkpoint_scope,
+            replay_start_block_number,
+            replay_target_block_number,
+            status,
+            state_payload
+        )
+        VALUES ($1, $2, $3, 'ens_v1_subregistry_discovery', 'full_closure', 1, 42, 'running', '{}'::JSONB)
+        "#,
+    )
+    .bind(&checkpoint.deployment_profile)
+    .bind("ethereum-mainnet")
+    .bind(&checkpoint.cursor_kind)
+    .execute(database.pool())
+    .await?;
+
+    let error = sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit(
+        database.pool(),
+        "ethereum-mainnet",
+        &checkpoint,
+        1,
+    )
+    .await
+    .expect_err("an incomplete checkpoint stream must never feed a reconcile");
+    assert!(
+        error.to_string().contains("incomplete stream"),
+        "unexpected error: {error:#}"
+    );
+
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE deactivated_at IS NULL"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "a refused reconcile must not mutate any discovery edge"
+    );
+    assert_eq!(
+        query_scalar::<_, String>(
+            "SELECT status FROM normalized_replay_adapter_checkpoints WHERE cursor_kind = $1"
+        )
+        .bind(&checkpoint.cursor_kind)
+        .fetch_one(database.pool())
+        .await?,
+        "running",
+        "the incomplete checkpoint row must survive for a later resume"
     );
 
     database.cleanup().await

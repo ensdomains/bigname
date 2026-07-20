@@ -232,8 +232,11 @@ impl TestDatabase {
             .await
             .with_context(|| format!("failed to create test database {database_name}"))?;
 
+        // The full-closure replay holds the raw-log staging guard and the
+        // streamed reconcile transaction while paging staged checkpoint
+        // assignments over a third pooled connection.
         let pool = PgPoolOptions::new()
-            .max_connections(2)
+            .max_connections(3)
             .connect_with(base_options.database(&database_name))
             .await
             .context("failed to connect indexer test pool")?;

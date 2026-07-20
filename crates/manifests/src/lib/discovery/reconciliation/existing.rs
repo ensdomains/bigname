@@ -265,7 +265,7 @@ pub(super) async fn load_unreachable_reconciled_discovery_descendant_edges(
     existing_rows.into_iter().map(edge_from_row).collect()
 }
 
-fn edge_from_row(row: sqlx::postgres::PgRow) -> Result<ExistingReconciledDiscoveryEdge> {
+pub(super) fn edge_from_row(row: sqlx::postgres::PgRow) -> Result<ExistingReconciledDiscoveryEdge> {
     let observation_key = row
         .try_get::<Option<String>, _>("observation_key")
         .context("failed to read observation_key")?

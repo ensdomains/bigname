@@ -1,7 +1,8 @@
 use anyhow::Result;
 use bigname_manifests::{
-    DiscoveryObservation, DiscoveryReconciliationSummary, ExpectedDiscoveryAdmissionEpoch,
-    FullDiscoveryReconciliationOptions, reconcile_discovery_observations,
+    DiscoveryObservation, DiscoveryObservationPageSource, DiscoveryReconciliationSummary,
+    ExpectedDiscoveryAdmissionEpoch, FullDiscoveryReconciliationOptions,
+    reconcile_discovery_observations, reconcile_discovery_observations_streamed,
 };
 use sqlx::PgPool;
 
@@ -10,6 +11,31 @@ use super::{
     checkpoint::{RECONCILIATION_PAGE_LIMIT, SubregistryReplayCheckpoint},
 };
 
+/// Pages one discovery source's staged latest-per-key assignments straight
+/// from the checkpoint items, so the finalize reconcile never materializes a
+/// source's observations in memory (#168).
+struct CheckpointAssignmentPageSource<'a> {
+    pool: &'a PgPool,
+    checkpoint: &'a SubregistryReplayCheckpoint,
+    discovery_source: &'a str,
+}
+
+impl DiscoveryObservationPageSource for CheckpointAssignmentPageSource<'_> {
+    async fn load_page(
+        &self,
+        after_key: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<(String, DiscoveryObservation)>> {
+        let limit = limit.min(RECONCILIATION_PAGE_LIMIT);
+        self.checkpoint
+            .load_assignment_page(self.pool, self.discovery_source, after_key, limit)
+            .await?
+            .into_iter()
+            .map(|(item_key, assignment)| Ok((item_key, assignment.discovery_observation()?)))
+            .collect()
+    }
+}
+
 pub(super) async fn reconcile_subregistry_discovery_from_checkpoint(
     pool: &PgPool,
     checkpoint: &SubregistryReplayCheckpoint,
@@ -17,34 +43,13 @@ pub(super) async fn reconcile_subregistry_discovery_from_checkpoint(
     reconciliation: &mut EnsV1SubregistryDiscoverySyncSummary,
 ) -> Result<()> {
     for discovery_source in discovery_sources {
-        let mut source_observations = Vec::new();
-        let mut after_key = None::<String>;
-        loop {
-            let page = checkpoint
-                .load_assignment_page(
-                    pool,
-                    discovery_source,
-                    after_key.as_deref(),
-                    RECONCILIATION_PAGE_LIMIT,
-                )
-                .await?;
-            let Some((last_key, _)) = page.last() else {
-                break;
-            };
-            after_key = Some(last_key.clone());
-            source_observations.extend(
-                page.iter()
-                    .map(|(_, assignment)| assignment.discovery_observation())
-                    .collect::<Result<Vec<_>>>()?,
-            );
-        }
-        let source_reconciliation = reconcile_discovery_observations(
+        let page_source = CheckpointAssignmentPageSource {
             pool,
+            checkpoint,
             discovery_source,
-            &source_observations,
-            FullDiscoveryReconciliationOptions::default(),
-        )
-        .await?;
+        };
+        let source_reconciliation =
+            reconcile_discovery_observations_streamed(pool, discovery_source, &page_source).await?;
         reconciliation.active_edge_count += source_reconciliation.active_edge_count;
         reconciliation.admitted_edge_count += source_reconciliation.admitted_edge_count;
         reconciliation.inserted_edge_count += source_reconciliation.inserted_edge_count;

@@ -195,7 +195,7 @@ pub async fn reconcile_discovery_observations(
     })
 }
 
-fn protects_non_orphaned_newer_edge(
+pub(super) fn protects_non_orphaned_newer_edge(
     edge: &ExistingReconciledDiscoveryEdge,
     terminal_state: Option<&ObservationTerminalState>,
     through_block_number: Option<i64>,
