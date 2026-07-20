@@ -199,13 +199,6 @@ async fn reconcile_target_chains(
             let addresses = direct_targets.iter().cloned().collect::<Vec<_>>();
             for page in addresses.chunks(RECONCILIATION_TARGET_PAGE_SIZE) {
                 reconciliation.stage_addresses(page).await?;
-                stage_resolver_profile_projection_invalidations(
-                    pool,
-                    reconciliation.run_id(),
-                    &chain,
-                    page,
-                )
-                .await?;
             }
         }
 
@@ -249,16 +242,15 @@ async fn reconcile_target_chains(
                     continue;
                 }
                 reconciliation.stage_addresses(&addresses).await?;
-                stage_resolver_profile_projection_invalidations(
-                    pool,
-                    reconciliation.run_id(),
-                    &chain,
-                    &addresses,
-                )
-                .await?;
             }
         }
 
+        #[cfg(test)]
+        {
+            aggregate.invalidation_capture_pass_count += 1;
+        }
+        stage_resolver_profile_projection_invalidations(pool, reconciliation.run_id(), &chain)
+            .await?;
         #[cfg(test)]
         {
             aggregate.adapter_reconciliation_call_count += 1;
@@ -268,7 +260,7 @@ async fn reconcile_target_chains(
             .await
             .with_context(|| format!("failed to reconcile resolver-profile events on {chain}"))?;
         aggregate.invalidated_projection_key_count +=
-            publish_resolver_profile_projection_invalidations(pool, publication.run_id()).await?;
+            publish_resolver_profile_projection_invalidations(pool, &chain).await?;
         let summary = publication.finish().await?;
         info!(
             service = "indexer",

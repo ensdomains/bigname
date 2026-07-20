@@ -409,9 +409,73 @@ async fn seed_change_reconciles_journal_family_in_bounded_pages() -> anyhow::Res
         summary.adapter_reconciliation_call_count, 1,
         "one chain-context reconciliation must consume every bounded target page"
     );
+    assert_eq!(
+        summary.invalidation_capture_pass_count, 1,
+        "one streamed invalidation capture must consume every staged chain target"
+    );
     assert_eq!(summary.reconciled_target_count, 2_501);
     assert_eq!(summary.invalidated_projection_key_count, 2_501);
     assert_eq!(summary.acknowledged_input_count, 1);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn completed_reconciliation_crash_preserves_precaptured_invalidations() -> anyhow::Result<()>
+{
+    let database = TestDatabase::create_migrated(
+        TestDatabaseConfig::new("indexer_resolver_profile_crash_invalidation_staging"),
+        &bigname_storage::MIGRATOR,
+        "failed to apply migrations for resolver-profile invalidation crash test",
+    )
+    .await?;
+    let chain = "ethereum-mainnet";
+    let resolver = "0x00000000000000000000000000000000000000aa".to_owned();
+
+    let mut first =
+        bigname_adapters::begin_resolver_profile_event_reconciliation(database.pool(), chain)
+            .await?;
+    first
+        .stage_addresses(std::slice::from_ref(&resolver))
+        .await?;
+    super::invalidations::stage_resolver_profile_projection_invalidations(
+        database.pool(),
+        first.run_id(),
+        chain,
+    )
+    .await?;
+    let abandoned_publication = first.reconcile().await?;
+    drop(abandoned_publication);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT \
+             FROM resolver_profile_reconciliation_invalidation_keys"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+
+    let mut retry =
+        bigname_adapters::begin_resolver_profile_event_reconciliation(database.pool(), chain)
+            .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT \
+             FROM resolver_profile_reconciliation_invalidation_keys"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "starting a retry must preserve the prior pre-repair invalidation keys"
+    );
+    retry
+        .stage_addresses(std::slice::from_ref(&resolver))
+        .await?;
+    retry.reconcile().await?.finish().await?;
+    sqlx::query("DELETE FROM resolver_profile_reconciliation_invalidation_keys")
+        .execute(database.pool())
+        .await?;
 
     database.cleanup().await
 }

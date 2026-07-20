@@ -27,6 +27,8 @@ pub(crate) struct ResolverProfileConvergenceSummary {
     pub(crate) max_family_target_page_size: usize,
     #[cfg(test)]
     pub(crate) adapter_reconciliation_call_count: usize,
+    #[cfg(test)]
+    pub(crate) invalidation_capture_pass_count: usize,
     pub(crate) reconciled_target_count: usize,
     pub(crate) invalidated_projection_key_count: u64,
     pub(crate) acknowledged_input_count: usize,
