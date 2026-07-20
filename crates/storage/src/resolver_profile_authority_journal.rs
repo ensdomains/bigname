@@ -4,9 +4,15 @@ use sqlx::{PgPool, Row};
 
 #[path = "resolver_profile_authority_journal/advance.rs"]
 mod advance;
+#[path = "resolver_profile_authority_journal/reads.rs"]
+mod reads;
 
 pub use advance::{
     ResolverProfileAuthorityJournalAdvance, ResolverProfileAuthorityJournalAdvanceSummary,
+};
+pub use reads::{
+    load_resolver_profile_authority_entries_for_targets,
+    load_resolver_profile_authority_family_target_page,
 };
 
 pub const RESOLVER_PROFILE_AUTHORITY_JOURNAL_ENTRY_BATCH_SIZE: usize = 1_000;

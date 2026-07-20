@@ -312,6 +312,110 @@ fn indexed_authority_matches_full_scans_for_load_shaped_inputs() {
 }
 
 #[tokio::test]
+async fn pending_input_drain_never_loads_the_full_authority_snapshot() -> anyhow::Result<()> {
+    let database = TestDatabase::create_migrated(
+        TestDatabaseConfig::new("indexer_resolver_profile_scoped_authority_drain"),
+        &bigname_storage::MIGRATOR,
+        "failed to apply migrations for scoped resolver-profile drain test",
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO resolver_profile_input_changes (
+            chain_id,
+            contract_address,
+            previous_code_hash,
+            current_code_hash
+        ) VALUES (
+            'ethereum-mainnet',
+            '0x0000000000000000000000000000000000000099',
+            NULL,
+            '0x01'
+        )
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    let summary = drain_resolver_profile_input_changes(database.pool()).await?;
+    assert_eq!(summary.loaded_input_count, 1);
+    assert_eq!(summary.authority_target_read_statement_count, 1);
+    assert_eq!(summary.max_authority_target_read_batch_size, 1);
+    assert_eq!(summary.family_target_read_statement_count, 0);
+    assert_eq!(summary.reconciled_target_count, 0);
+    assert_eq!(summary.acknowledged_input_count, 1);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn seed_change_reconciles_journal_family_in_bounded_pages() -> anyhow::Result<()> {
+    let database = TestDatabase::create_migrated(
+        TestDatabaseConfig::new("indexer_resolver_profile_seed_family_pages")
+            .pool_max_connections(3),
+        &bigname_storage::MIGRATOR,
+        "failed to apply migrations for resolver-profile seed-family paging test",
+    )
+    .await?;
+    let mut entries = Vec::new();
+    for address_number in 1..=251 {
+        entries.push(
+            bigname_storage::ResolverProfileAuthorityJournalEntry::from_payload(
+                serde_json::to_value(entry(
+                    "ethereum-mainnet",
+                    "ens_v1_resolver_l1",
+                    &format!("0x{address_number:040x}"),
+                    address_number == 1,
+                ))?,
+            )?,
+        );
+    }
+    let mut baseline =
+        bigname_storage::begin_resolver_profile_authority_journal_advance(database.pool(), 0)
+            .await?;
+    baseline.stage_entries(&entries).await?;
+    baseline.publish(&serde_json::json!({})).await?.unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO resolver_profile_input_changes (
+            chain_id,
+            contract_address,
+            previous_code_hash,
+            current_code_hash
+        ) VALUES (
+            'ethereum-mainnet',
+            '0x0000000000000000000000000000000000000001',
+            '0x01',
+            '0x02'
+        )
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    let runtime_guard = bigname_storage::hold_base_normalized_rederive_runtime_shared_lock(
+        database.pool(),
+        "bigname-indexer",
+    )
+    .await?;
+    let summary = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        drain_resolver_profile_input_changes(database.pool()),
+    )
+    .await
+    .expect("three-connection seed-family drain must not starve bounded journal/event reads")?;
+    drop(runtime_guard);
+    assert_eq!(summary.loaded_input_count, 1);
+    assert_eq!(summary.authority_target_read_statement_count, 1);
+    assert_eq!(summary.max_authority_target_read_batch_size, 1);
+    assert_eq!(summary.family_target_read_statement_count, 3);
+    assert_eq!(summary.max_family_target_page_size, 250);
+    assert_eq!(summary.reconciled_target_count, 251);
+    assert_eq!(summary.acknowledged_input_count, 1);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn ordinary_non_resolver_raw_code_change_is_acknowledged_without_invalidations()
 -> anyhow::Result<()> {
     let database = TestDatabase::create_migrated(

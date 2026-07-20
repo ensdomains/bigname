@@ -15,8 +15,16 @@ CREATE TABLE public.resolver_profile_authority_journal_entries (
 CREATE INDEX resolver_profile_authority_journal_entries_family_idx
     ON public.resolver_profile_authority_journal_entries (
         journal_key,
-        (entry_payload ->> 'chain'),
-        (entry_payload ->> 'source_family')
+        ((entry_payload ->> 'chain') COLLATE "C"),
+        ((entry_payload ->> 'source_family') COLLATE "C"),
+        ((entry_payload ->> 'address') COLLATE "C")
+    );
+
+CREATE INDEX resolver_profile_authority_journal_entries_target_idx
+    ON public.resolver_profile_authority_journal_entries (
+        journal_key,
+        ((entry_payload ->> 'chain') COLLATE "C"),
+        ((entry_payload ->> 'address') COLLATE "C")
     );
 
 INSERT INTO public.resolver_profile_authority_journal_entries (

@@ -2,9 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
 use bigname_manifests::{
-    ResolverProfileAdmission, WatchedContractSource, load_basenames_l2_resolver_profile_admissions,
+    ResolverProfileAdmission, WatchedContractSource,
     load_basenames_l2_resolver_profile_admissions_for_targets,
-    load_ens_v1_public_resolver_profile_admissions,
     load_ens_v1_public_resolver_profile_admissions_for_targets,
 };
 use serde::{Deserialize, Serialize};
@@ -43,22 +42,10 @@ pub(crate) struct ResolverProfileAdmissionSemantics {
     pub(crate) matched_contract_instance_id: Option<Uuid>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct ResolverProfileAuthoritySnapshot {
     pub(crate) entries: BTreeSet<ResolverProfileAuthorityEntry>,
-}
-
-pub(crate) async fn capture_resolver_profile_authority(
-    pool: &sqlx::PgPool,
-) -> Result<ResolverProfileAuthoritySnapshot> {
-    let (ens_v1, basenames) = tokio::try_join!(
-        load_ens_v1_public_resolver_profile_admissions(pool),
-        load_basenames_l2_resolver_profile_admissions(pool),
-    )?;
-
-    Ok(ResolverProfileAuthoritySnapshot {
-        entries: authority_entries_from_admissions(ens_v1.into_iter().chain(basenames)),
-    })
 }
 
 pub(super) async fn capture_resolver_profile_authority_for_targets(

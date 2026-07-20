@@ -306,7 +306,9 @@ pub use resolver_profile_authority_journal::{
     RESOLVER_PROFILE_AUTHORITY_JOURNAL_ENTRY_BATCH_SIZE, ResolverProfileAuthorityJournal,
     ResolverProfileAuthorityJournalAdvance, ResolverProfileAuthorityJournalAdvanceSummary,
     ResolverProfileAuthorityJournalEntry, begin_resolver_profile_authority_journal_advance,
-    load_resolver_profile_authority_journal, resolver_profile_authority_entry_key,
+    load_resolver_profile_authority_entries_for_targets,
+    load_resolver_profile_authority_family_target_page, load_resolver_profile_authority_journal,
+    resolver_profile_authority_entry_key,
 };
 pub use resolver_profile_input_changes::{
     ResolverProfileInputChange, ResolverProfileReconciliationTarget,
