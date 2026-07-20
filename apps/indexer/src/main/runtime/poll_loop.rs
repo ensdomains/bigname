@@ -53,6 +53,7 @@ pub(crate) async fn run_poll_loop(
     adapter_sync_on_live_poll_after_normalized_replay_catchup: bool,
     manifest_observation_refresh_enabled: bool,
     discovery_refresh_enabled: bool,
+    resync_adapter_owned_state_on_discovery_refresh: bool,
     header_audit_mode: HeaderAuditMode,
     event_silent_reverse_resolver_addresses: Vec<String>,
     latched_bootstrap_finalized_heads: BTreeMap<String, ProviderBlock>,
@@ -469,7 +470,7 @@ pub(crate) async fn run_poll_loop(
                         provider_registry,
                         &mut manifest_runtime_state,
                         &mut intake_chain_tasks,
-                        discovery_refresh_enabled,
+                        resync_adapter_owned_state_on_discovery_refresh,
                     )
                     .await?;
                 }

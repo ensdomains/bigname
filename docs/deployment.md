@@ -437,10 +437,40 @@ hash-pinned backfill chunks use the manifest-declared/raw catch-up scope while
 the indexer is catching up, live polling keeps new block-derived events current,
 and the indexer also runs automatic bounded raw-fact normalized-event replay
 from its `normalized_replay_*` cursor until historical normalized events reach
-the persisted raw-log head. Broad manifest-observation, discovery-refresh, and
-discovery-emitter adapter sync stay outside the live tailer. Operators may set
-`raw-only` to defer live normalized sync manually, or `inline` to replay each
-chunk immediately for small ranges and enable broad runtime refreshes.
+the persisted raw-log head. Broad manifest-observation and discovery-emitter
+adapter sync stay outside the live tailer. Operators may set `raw-only` to defer
+live normalized sync manually, or `inline` to replay each chunk immediately for
+small ranges and enable broad runtime refreshes.
+
+`BIGNAME_INDEXER_HASH_PINNED_BACKFILL_ADAPTER_SYNC` scopes bootstrap backfill,
+but do not read it as bootstrap-only: on the live path it also controls
+adapter-owned normalized sync. `raw-only` runs the tailer with no live adapter
+sync (a manual deferral); `auto` with normalized-replay catch-up first runs one
+adapter-owned sync after bootstrap drains, so bootstrap discoveries enter the
+live plan before polling, then defers live adapter sync until the catch-up
+cursors reach the raw-log head and resumes it; and
+only `inline` runs adapter sync inline per block and additionally re-derives
+discovery edges from the whole stored raw-log corpus on each refresh tick. The
+non-`inline` modes reload the live plan from edges already in storage rather than
+re-deriving them.
+
+What the mode does not change is the live watch set — which targets the tailer
+watches. Bootstrap turns each selected target into an address-filtered range
+scan, so a manifest-declared bootstrap scope bounds provider cost on chains with
+a large discovered-target set. Live intake instead fetches every log in a block
+by block hash and filters client-side, so watching discovered targets costs no
+additional log fetches — though the code-hash baseline pass still issues one
+`eth_getCode` per watched address that lacks a baseline observation, a cost that
+scales with the watched set. The live tailer therefore always watches the active
+watched chain — manifest-declared and discovery-admitted targets alike — in
+every adapter-sync mode, and always refreshes that plan from stored discovery
+edges so targets admitted after startup enter the watch set without a restart.
+
+Widening the live watch plan writes more `raw_logs` rows per block, because a
+block is retained whenever any watched target emits in it and same-transaction
+sibling logs are retained with it. It does not widen public API routes,
+route-level coverage, manifest capability flags, ENSv2 profile support, or
+consumer-replacement meaning.
 
 ```sh
 BIGNAME_INDEXER_RETH_DATADIR_HOST=/home/ubuntu/eth-archive-node/data/reth \

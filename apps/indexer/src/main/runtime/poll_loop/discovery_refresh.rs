@@ -24,6 +24,11 @@ use super::super::refresh::{
 /// place. Storage refresh failures warn, keep the last successful state, and
 /// return `false` so callers that must not poll with stale tasks can retry on a
 /// later tick. A provider-registry mismatch aborts the poll loop.
+///
+/// `sync_adapter_state_before_refresh` re-derives discovery edges from the
+/// whole stored raw-log corpus before reloading the plan. Live poll writes
+/// discovery edges per block, so the tailer only needs the reload; the full
+/// re-derivation stays opt-in for broad runtime refresh.
 pub(super) async fn refresh_discovery_watch_state(
     pool: &sqlx::PgPool,
     provider_registry: &ProviderRegistry,

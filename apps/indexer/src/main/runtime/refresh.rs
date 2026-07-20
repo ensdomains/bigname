@@ -44,6 +44,10 @@ pub(crate) async fn refresh_intake_chain_tasks(
     }
 }
 
+/// Re-derives discovery edges from the whole stored raw-log corpus before the plan reload. Live
+/// poll already writes discovery edges per block, so the tailer only needs
+/// [`refresh_runtime_state_from_stored_discovery`]; the full re-derivation stays opt-in for broad
+/// runtime refresh.
 pub(crate) async fn refresh_runtime_state_from_storage_discovery(
     pool: &sqlx::PgPool,
     manifest_runtime_state: &ManifestRuntimeState,
@@ -73,4 +77,19 @@ pub(crate) async fn refresh_runtime_state_from_stored_discovery(
     next_manifest_runtime_state.watched_chain_plan = next_watched_chain_plan;
 
     Ok(Some((next_manifest_runtime_state, next_intake_chain_tasks)))
+}
+
+/// Widens a bootstrap-scoped runtime state to the live watch scope by reloading the stored plan.
+/// This deliberately avoids `build_manifest_runtime_state_with_watch_scope`: the widen needs no
+/// manifest re-sync, and re-running one here would race the normalized-replay catch-up task, which
+/// reconciles the same `contract_instance_addresses` rows as it admits discovery edges.
+pub(crate) async fn widen_runtime_state_to_live_watch_scope(
+    pool: &sqlx::PgPool,
+    manifest_runtime_state: &ManifestRuntimeState,
+) -> Result<ManifestRuntimeState> {
+    let mut live_manifest_runtime_state = manifest_runtime_state.clone();
+    live_manifest_runtime_state.watched_contract_summary =
+        load_watched_contract_summary(pool).await?;
+    live_manifest_runtime_state.watched_chain_plan = load_watched_chain_plan(pool).await?;
+    Ok(live_manifest_runtime_state)
 }
