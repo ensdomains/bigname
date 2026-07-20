@@ -1291,6 +1291,22 @@ async fn ensure_resolver_profile_convergence_tables(pool: &PgPool) -> Result<()>
         .context("failed to create resolver-profile authority journal for indexer tests")?;
     }
 
+    if !sqlx::query_scalar::<_, bool>(
+        "SELECT to_regclass('public.resolver_profile_authority_journal_entries') IS NOT NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .context("failed to inspect resolver-profile authority journal entries test fixture")?
+    {
+        sqlx::raw_sql(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../migrations/20260720120000_normalize_resolver_profile_authority_journal.sql"
+        )))
+        .execute(pool)
+        .await
+        .context("failed to normalize resolver-profile authority journal for indexer tests")?;
+    }
+
     Ok(())
 }
 
