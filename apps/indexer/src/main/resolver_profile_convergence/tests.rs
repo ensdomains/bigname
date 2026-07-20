@@ -481,6 +481,49 @@ async fn completed_reconciliation_crash_preserves_precaptured_invalidations() ->
 }
 
 #[tokio::test]
+async fn same_chain_reconciliation_lock_covers_invalidation_publication() -> anyhow::Result<()> {
+    let database = TestDatabase::create_migrated(
+        TestDatabaseConfig::new("indexer_resolver_profile_invalidation_serialization"),
+        &bigname_storage::MIGRATOR,
+        "failed to apply migrations for resolver-profile invalidation serialization test",
+    )
+    .await?;
+    let chain = "ethereum-mainnet";
+    let resolver = "0x00000000000000000000000000000000000000aa".to_owned();
+
+    let mut reconciliation =
+        bigname_adapters::begin_resolver_profile_event_reconciliation(database.pool(), chain)
+            .await?;
+    reconciliation
+        .stage_addresses(std::slice::from_ref(&resolver))
+        .await?;
+    super::invalidations::stage_resolver_profile_projection_invalidations(
+        database.pool(),
+        reconciliation.run_id(),
+        chain,
+    )
+    .await?;
+    let publication = reconciliation.reconcile().await?;
+
+    let same_chain_lock_was_available =
+        sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("resolver_profile_reconciliation:{chain}"))
+            .fetch_one(database.pool())
+            .await?;
+
+    super::invalidations::publish_resolver_profile_projection_invalidations(database.pool(), chain)
+        .await?;
+    publication.finish().await?;
+    database.cleanup().await?;
+
+    assert!(
+        !same_chain_lock_was_available,
+        "same-chain reconciliation must remain serialized until its staged invalidations publish"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn ordinary_non_resolver_raw_code_change_is_acknowledged_without_invalidations()
 -> anyhow::Result<()> {
     let database = TestDatabase::create_migrated(

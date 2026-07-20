@@ -47,7 +47,7 @@ pub struct ResolverProfileAuthorityJournalAdvanceSummary {
 }
 
 /// Transaction-scoped staging and compare-and-set publication for one
-/// resolver-profile authority capture.
+/// [resolver-profile](../../../../docs/glossary.md) authority capture.
 pub struct ResolverProfileAuthorityJournalAdvance {
     transaction: Transaction<'static, Postgres>,
     expected_revision: i64,

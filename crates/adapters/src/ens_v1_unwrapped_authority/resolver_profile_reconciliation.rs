@@ -140,9 +140,11 @@ impl ResolverProfileEventReconciliation {
             ..ResolverProfileEventReconciliationSummary::default()
         };
         let Some(replay_range) = replay_range else {
-            raw_log_guard.release().await?;
             return Ok(ResolverProfileEventReconciliationPublication::new(
-                pool, chain, run_id, summary,
+                chain,
+                run_id,
+                raw_log_guard,
+                summary,
             ));
         };
         let mut replay_context = ResolverProfileReplayContext {
@@ -193,9 +195,11 @@ impl ResolverProfileEventReconciliation {
         summary.normalized_event_inserted_count = inserted_count;
         summary.orphaned_normalized_event_count = usize::try_from(orphaned_count)
             .context("orphaned resolver-profile normalized-event count does not fit usize")?;
-        raw_log_guard.release().await?;
         Ok(ResolverProfileEventReconciliationPublication::new(
-            pool, chain, run_id, summary,
+            chain,
+            run_id,
+            raw_log_guard,
+            summary,
         ))
     }
 }

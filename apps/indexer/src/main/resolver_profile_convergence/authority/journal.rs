@@ -124,8 +124,9 @@ async fn stage_current_authority(
     targets.finish(advance.connection_mut()?).await
 }
 
-/// Cheap ordinary-live guard. A chain epoch match performs no resolver-profile
-/// authority scan; drift falls through to the full revision-fenced journal.
+/// Cheap ordinary-live guard. A chain epoch match performs no
+/// [resolver-profile](../../../../../../docs/glossary.md) authority scan; drift
+/// falls through to the full revision-fenced journal.
 pub(crate) async fn journal_resolver_profile_authority_if_epoch_changed(
     pool: &sqlx::PgPool,
     chain: &str,

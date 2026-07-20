@@ -17,9 +17,9 @@ pub struct ResolverProfileEventReconciliation {
 }
 
 pub struct ResolverProfileEventReconciliationPublication {
-    pool: PgPool,
     chain: String,
     run_id: Uuid,
+    raw_log_guard: RawLogStagingReadGuard,
     summary: ResolverProfileEventReconciliationSummary,
 }
 
@@ -173,15 +173,15 @@ impl ResolverProfileEventReconciliation {
 
 impl ResolverProfileEventReconciliationPublication {
     pub(super) fn new(
-        pool: PgPool,
         chain: String,
         run_id: Uuid,
+        raw_log_guard: RawLogStagingReadGuard,
         summary: ResolverProfileEventReconciliationSummary,
     ) -> Self {
         Self {
-            pool,
             chain,
             run_id,
+            raw_log_guard,
             summary,
         }
     }
@@ -191,21 +191,27 @@ impl ResolverProfileEventReconciliationPublication {
     }
 
     pub async fn finish(self) -> Result<ResolverProfileEventReconciliationSummary> {
+        let Self {
+            chain,
+            run_id,
+            mut raw_log_guard,
+            summary,
+        } = self;
         let result = sqlx::query(
             "DELETE FROM resolver_profile_reconciliation_runs \
              WHERE run_id = $1 AND chain_id = $2",
         )
-        .bind(self.run_id)
-        .bind(&self.chain)
-        .execute(&self.pool)
+        .bind(run_id)
+        .bind(&chain)
+        .execute(raw_log_guard.connection_mut())
         .await
-        .with_context(|| format!("failed to clean resolver-profile run for {}", self.chain))?;
+        .with_context(|| format!("failed to clean resolver-profile run for {chain}"))?;
         ensure!(
             result.rows_affected() == 1,
-            "resolver-profile run disappeared before cleanup for {}",
-            self.chain
+            "resolver-profile run disappeared before cleanup for {chain}"
         );
-        Ok(self.summary)
+        raw_log_guard.release().await?;
+        Ok(summary)
     }
 }
 
