@@ -11,8 +11,8 @@ mod scoped;
 #[path = "watched/selection.rs"]
 mod selection;
 
-use anyhow::{Context, Result};
-use sqlx::{PgPool, Row, postgres::PgRow};
+use anyhow::{Context, Result, ensure};
+use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
 
 use crate::{WatchedContract, WatchedContractSource, normalize_address};
 
@@ -96,6 +96,66 @@ ORDER BY 1, 2, 3, 5, 6, 4
 "#,
         current_predicate = intervals::CURRENT_WATCHED_INTERVAL_PREDICATE,
     ))
+}
+
+fn resolver_profile_authority_target_cursor_sql() -> String {
+    let targets = intervals::with_watched_intervals(&format!(
+        r#"
+SELECT DISTINCT watched.chain, watched.address
+FROM watched_intervals watched
+WHERE {current_predicate}
+  AND watched.source_family IN (
+      'ens_v1_resolver_l1',
+      'basenames_base_resolver'
+  )
+ORDER BY watched.chain, watched.address
+"#,
+        current_predicate = intervals::CURRENT_WATCHED_INTERVAL_PREDICATE,
+    ));
+    format!("DECLARE resolver_profile_authority_targets NO SCROLL CURSOR FOR\n{targets}")
+}
+
+/// One server-side cursor over the distinct current addresses which can
+/// contribute ENSv1 or Basenames resolver-profile authority entries.
+pub struct ResolverProfileAuthorityTargetPages {
+    transaction: Transaction<'static, Postgres>,
+}
+
+impl ResolverProfileAuthorityTargetPages {
+    pub async fn begin(pool: &PgPool) -> Result<Self> {
+        let mut transaction = pool
+            .begin()
+            .await
+            .context("failed to begin resolver-profile authority target stream")?;
+        sqlx::query("SET TRANSACTION READ ONLY")
+            .execute(&mut *transaction)
+            .await
+            .context("failed to make resolver-profile authority target stream read-only")?;
+        sqlx::query(&resolver_profile_authority_target_cursor_sql())
+            .execute(&mut *transaction)
+            .await
+            .context("failed to declare resolver-profile authority target cursor")?;
+        Ok(Self { transaction })
+    }
+
+    pub async fn next_page(&mut self, limit: usize) -> Result<Vec<(String, String)>> {
+        ensure!(
+            limit > 0,
+            "resolver-profile authority target page limit must be positive"
+        );
+        let sql = format!("FETCH FORWARD {limit} FROM resolver_profile_authority_targets");
+        sqlx::query_as::<_, (String, String)>(&sql)
+            .fetch_all(&mut *self.transaction)
+            .await
+            .context("failed to fetch resolver-profile authority target page")
+    }
+
+    pub async fn finish(self) -> Result<()> {
+        self.transaction
+            .commit()
+            .await
+            .context("failed to finish resolver-profile authority target stream")
+    }
 }
 
 pub async fn load_watched_contracts(pool: &PgPool) -> Result<Vec<WatchedContract>> {
@@ -223,7 +283,8 @@ fn sort_and_dedup_watched_contracts(watched_contracts: &mut Vec<WatchedContract>
 #[cfg(test)]
 mod query_tests {
     use super::{
-        WatchedContractsFilter, manifest_declared_watched_contracts_sql, watched_contracts_sql,
+        WatchedContractsFilter, manifest_declared_watched_contracts_sql,
+        resolver_profile_authority_target_cursor_sql, watched_contracts_sql,
     };
 
     #[test]
@@ -242,5 +303,11 @@ mod query_tests {
         let manifest_declared = manifest_declared_watched_contracts_sql();
         assert!(!manifest_declared.contains("$1"));
         assert!(manifest_declared.contains("watched.source <> 'discovery_edge'"));
+
+        let resolver_targets = resolver_profile_authority_target_cursor_sql();
+        assert!(resolver_targets.contains("DECLARE resolver_profile_authority_targets"));
+        assert!(resolver_targets.contains("'ens_v1_resolver_l1'"));
+        assert!(resolver_targets.contains("'basenames_base_resolver'"));
+        assert!(resolver_targets.contains("SELECT DISTINCT watched.chain, watched.address"));
     }
 }
