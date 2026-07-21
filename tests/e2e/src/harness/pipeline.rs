@@ -902,6 +902,10 @@ impl IndexerRunSession {
         stop_supervised_child(self.child, "indexer run", &self.log_path).await
     }
 
+    pub fn assert_running(&mut self) -> Result<()> {
+        self.bail_if_exited()
+    }
+
     fn bail_if_exited(&mut self) -> Result<()> {
         if let Some(status) = self.child.try_wait()? {
             bail!(
@@ -978,6 +982,27 @@ pub async fn indexer_backfill_with_chain_rpc_urls(
         manifests_root,
         target,
         &[],
+        &[],
+    )
+    .await
+}
+
+/// Run bounded backfill with a per-chain historical-code fallback while all
+/// bulk block, log, and receipt reads continue through the primary RPC URLs.
+pub async fn indexer_backfill_with_chain_rpc_urls_and_code_fallbacks(
+    repo_root: &Path,
+    database_url: &str,
+    manifests_root: &Path,
+    target: ChainBackfillTarget<'_>,
+    chain_rpc_code_fallback_urls: &[ChainRpcUrl<'_>],
+) -> Result<String> {
+    indexer_backfill_with_chain_rpc_urls_and_watch_targets(
+        repo_root,
+        database_url,
+        manifests_root,
+        target,
+        &[],
+        chain_rpc_code_fallback_urls,
     )
     .await
 }
@@ -995,6 +1020,7 @@ pub async fn indexer_backfill_watched_target_with_chain_rpc_urls(
         manifests_root,
         target,
         &[watch_target],
+        &[],
     )
     .await
 }
@@ -1005,6 +1031,7 @@ async fn indexer_backfill_with_chain_rpc_urls_and_watch_targets(
     manifests_root: &Path,
     target: ChainBackfillTarget<'_>,
     watch_targets: &[sqlx::types::Uuid],
+    chain_rpc_code_fallback_urls: &[ChainRpcUrl<'_>],
 ) -> Result<String> {
     let indexer = &pipeline_binaries(repo_root).await?.indexer;
     let chain_rpc_urls = format_chain_rpc_urls(target.chain_rpc_urls);
@@ -1033,6 +1060,12 @@ async fn indexer_backfill_with_chain_rpc_urls_and_watch_targets(
         ]);
     for watch_target in watch_targets {
         command.arg("--watch-target").arg(watch_target.to_string());
+    }
+    if !chain_rpc_code_fallback_urls.is_empty() {
+        command.args([
+            "--chain-rpc-code-fallback-url",
+            &format_chain_rpc_urls(chain_rpc_code_fallback_urls),
+        ]);
     }
     run_to_completion(command, "indexer backfill").await
 }

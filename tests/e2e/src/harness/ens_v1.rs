@@ -780,7 +780,20 @@ pub async fn set_text_record(
     key: &str,
     value: &str,
 ) -> Result<()> {
-    send_checked(
+    set_text_record_with_receipt(rpc, resolver, from, name, key, value)
+        .await
+        .map(|_| ())
+}
+
+pub async fn set_text_record_with_receipt(
+    rpc: &RpcClient,
+    resolver: Address,
+    from: Address,
+    name: &str,
+    key: &str,
+    value: &str,
+) -> Result<TxReceipt> {
+    send_checked_receipt(
         rpc,
         from,
         resolver,

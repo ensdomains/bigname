@@ -8,6 +8,7 @@ mod ens_v2_live_poll;
 mod lifecycle;
 mod lifecycle_divergence;
 mod perturbations;
+mod provider_faults;
 mod record_families;
 mod register_eth_name;
 mod registration_burst;
