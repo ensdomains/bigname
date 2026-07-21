@@ -153,6 +153,17 @@ async fn raw_log_count(pool: &sqlx::PgPool, transaction_hash: &str) -> Result<i6
     .context("count transaction raw logs")
 }
 
+async fn raw_receipt_count(pool: &sqlx::PgPool, transaction_hash: &str) -> Result<i64> {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM raw_receipts WHERE chain_id = $1 AND transaction_hash = $2",
+    )
+    .bind(CHAIN)
+    .bind(transaction_hash.to_ascii_lowercase())
+    .fetch_one(pool)
+    .await
+    .context("count transaction raw receipts")
+}
+
 async fn resolver_coverage_covers(
     pool: &sqlx::PgPool,
     resolver: Address,
@@ -629,6 +640,10 @@ async fn transient_provider_faults_and_partial_receipts_recover_to_control() -> 
     ensure!(
         raw_log_count(&db.pool, &text_receipt.tx_hash).await? > 0,
         "recovered live poll did not retain the target log"
+    );
+    ensure!(
+        raw_receipt_count(&db.pool, &text_receipt.tx_hash).await? > 0,
+        "recovered live poll did not retain the target receipt"
     );
     pipeline::worker_replay_all_current_projections(&repo_root(), &db.url).await?;
     let faulted = support::serve_existing_db(db, scratch).await?;
