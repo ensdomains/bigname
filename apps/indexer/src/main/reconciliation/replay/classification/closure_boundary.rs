@@ -15,7 +15,8 @@ use crate::ens_v1_resolver::{
 use crate::reconciliation::canonical::stored_lineage::find_uncovered_generation_bound_coverage_with_current_topics;
 
 use super::{
-    SOURCE_FAMILY_BASENAMES_BASE_REGISTRY, SOURCE_FAMILY_ENS_V1_REGISTRY_L1, source_family_in,
+    SOURCE_FAMILY_BASENAMES_BASE_REGISTRY, SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+    SOURCE_FAMILY_ENS_V2_RESOLVER_L1, source_family_in,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -175,6 +176,21 @@ pub(super) async fn ensure_full_closure_retention_authority(
             generation_covered_families.join(", ")
         );
         if !proof.uncovered.is_empty() {
+            if let Some(uncovered) = proof
+                .uncovered
+                .iter()
+                .find(|tuple| tuple.source_family == SOURCE_FAMILY_ENS_V2_RESOLVER_L1)
+            {
+                return Err(bigname_adapters::EnsV2MissingCoverage {
+                    chain: chain.to_owned(),
+                    retention_generation,
+                    source_family: uncovered.source_family.clone(),
+                    address: uncovered.address.clone(),
+                    required_from_block: uncovered.required_from_block,
+                    required_to_block: uncovered.required_to_block,
+                }
+                .into());
+            }
             let listed = render_uncovered_tuples(&proof.uncovered);
             let suffix = elided_gap_suffix(&proof.uncovered);
             anyhow::bail!(
@@ -428,65 +444,5 @@ pub(super) async fn earliest_required_raw_fact_block(
 }
 
 #[cfg(test)]
-mod tests {
-    use bigname_test_support::{TestDatabase, TestDatabaseConfig};
-
-    use super::*;
-    use crate::reconciliation::replay::classification::SOURCE_FAMILY_ENS_V2_REGISTRY_L1;
-
-    #[test]
-    fn legacy_registry_closure_has_generation_bound_coverage_strategy() {
-        assert_eq!(
-            retention_closure_authority_kind(ENS_V2_RETAINED_HISTORY_SOURCE_FAMILIES),
-            RetentionClosureAuthorityKind::EnsV2Proof
-        );
-        for source_families in [
-            &[SOURCE_FAMILY_ENS_V1_REGISTRY_L1][..],
-            &[SOURCE_FAMILY_BASENAMES_BASE_REGISTRY][..],
-            &[
-                SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
-                SOURCE_FAMILY_BASENAMES_BASE_REGISTRY,
-            ][..],
-        ] {
-            assert_eq!(
-                retention_closure_authority_kind(source_families),
-                RetentionClosureAuthorityKind::LegacyRegistryCoverage
-            );
-        }
-        assert_eq!(
-            retention_closure_authority_kind(&[
-                SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
-                SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
-            ]),
-            RetentionClosureAuthorityKind::Unsupported
-        );
-    }
-
-    #[tokio::test]
-    async fn full_closure_fails_closed_without_retention_authority_state() -> Result<()> {
-        let database = TestDatabase::create_migrated(
-            TestDatabaseConfig::new("indexer_closure_boundary_missing_authority"),
-            &bigname_storage::MIGRATOR,
-            "failed to apply migrations for closure-boundary test",
-        )
-        .await?;
-
-        let error = ensure_full_closure_retention_authority(
-            database.pool(),
-            "unconfigured-testnet",
-            &[SOURCE_FAMILY_ENS_V2_REGISTRY_L1],
-            1,
-        )
-        .await
-        .expect_err("full closure without durable retention authority must fail closed");
-
-        assert!(
-            error
-                .to_string()
-                .contains("has no raw-log retention authority state"),
-            "unexpected missing-authority error: {error:#}"
-        );
-
-        database.cleanup().await
-    }
-}
+#[path = "closure_boundary/tests.rs"]
+mod tests;

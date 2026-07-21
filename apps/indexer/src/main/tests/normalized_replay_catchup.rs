@@ -1632,6 +1632,12 @@ async fn normalized_replay_catchup_recovers_multiple_new_ensv2_emitters_with_sco
     .with_defer_projection_indexes(false);
     let stateless_pages =
         install_stateless_page_observer(database.pool(), "sepolia", chain).await?;
+    let recovery_hook = normalized_replay_catchup::install_after_coverage_recovery_test_hook(
+        database.pool(),
+        "sepolia",
+        chain,
+    )
+    .await;
     let (provider, server) = bundle_provider_with_fixtures(vec![
         ProviderBlockFixture {
             block: block_1.clone(),
@@ -1655,15 +1661,106 @@ async fn normalized_replay_catchup_recovers_multiple_new_ensv2_emitters_with_sco
         },
     ])
     .await?;
-    assert_eq!(
+    let pool = database.pool().clone();
+    let task_config = config.clone();
+    let task_provider = provider.clone();
+    let replay = tokio::spawn(async move {
         normalized_replay_catchup::run_normalized_replay_catchup_iteration_with_provider_for_test(
-            database.pool(),
-            &config,
+            &pool,
+            &task_config,
             chain,
-            &provider,
+            &task_provider,
             HeaderAuditMode::Minimal,
         )
-        .await?,
+        .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        recovery_hook.wait_until_after_coverage_recovery(),
+    )
+    .await
+    .context("normalized replay did not reach its post-coverage-recovery barrier")?;
+    let version_before_concurrent =
+        bigname_storage::load_raw_log_staging_input_version(database.pool(), chain).await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[RawLog {
+            chain_id: chain.to_owned(),
+            block_hash: block_2.block_hash.clone(),
+            block_number: block_2.block_number,
+            transaction_hash: transaction_hash_for_block(&block_2),
+            transaction_index: 0,
+            log_index: 9,
+            emitting_address: registry_address.to_owned(),
+            topics: vec![
+                ens_v2_label_registered_topic0(),
+                hex_string(&abi_word_u64(1)),
+                labelhash_hex("concurrent"),
+                hex_string(&abi_word_address(
+                    "0x0000000000000000000000000000000000000dad",
+                )),
+            ],
+            data: decode_hex_string(&encode_ens_v2_label_registered_log_data(
+                "concurrent",
+                "0x0000000000000000000000000000000000000aaa",
+                block_2.block_timestamp_unix_secs + 31_536_000,
+            )),
+            canonicality_state: CanonicalityState::Finalized,
+        }],
+    )
+    .await?;
+    let concurrent_revision = sqlx::query_scalar::<_, i64>(
+        "UPDATE raw_log_staging_input_revisions \
+         SET revision = revision + 1 \
+         WHERE chain_id = $1 \
+         RETURNING revision",
+    )
+    .bind(chain)
+    .fetch_one(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO raw_log_staging_block_revisions (
+            chain_id, block_hash, block_number, revision
+        )
+        VALUES ($1, $2, $3, $4)
+        "#,
+    )
+    .bind(chain)
+    .bind(&block_2.block_hash)
+    .bind(block_2.block_number)
+    .bind(concurrent_revision)
+    .execute(database.pool())
+    .await?;
+    let version_after_concurrent =
+        bigname_storage::load_raw_log_staging_input_version(database.pool(), chain).await?;
+    assert!(
+        version_after_concurrent.revision > version_before_concurrent.revision,
+        "concurrent insertion did not advance revision: before={version_before_concurrent:?}, after={version_after_concurrent:?}, row_count={}",
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM raw_logs WHERE chain_id = $1 AND block_hash = $2 AND log_index = 9"
+        )
+        .bind(chain)
+        .bind(&block_2.block_hash)
+        .fetch_one(database.pool())
+        .await?
+    );
+    assert!(
+        bigname_storage::raw_log_staging_block_range_changed_since(
+            database.pool(),
+            chain,
+            version_before_concurrent.revision,
+            2,
+            2,
+        )
+        .await?
+    );
+    recovery_hook.resume();
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(10), replay)
+            .await
+            .context("normalized replay did not resume after coverage recovery")?
+            .context("normalized replay task panicked")??,
         normalized_replay_catchup::CatchupIterationStatus::Progressed
     );
     assert_eq!(
@@ -1714,8 +1811,8 @@ async fn normalized_replay_catchup_recovers_multiple_new_ensv2_emitters_with_sco
     );
     assert_eq!(
         stateless_pages.page_ranges(),
-        vec![(1, 3), (1, 1), (3, 3)],
-        "coverage recovery must retain every exact recovered span until phase one can run"
+        vec![(1, 3), (1, 3)],
+        "coverage recovery must widen phase one when another raw-log writer changes the saved span"
     );
     assert_eq!(
         sqlx::query_as::<_, (bool, Option<i64>, Option<i64>, Option<i64>, i64)>(
@@ -1781,6 +1878,20 @@ async fn normalized_replay_catchup_recovers_multiple_new_ensv2_emitters_with_sco
         .await?,
         1,
         "phase one must not drop a prior recovered span while validation finds the next gap"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events \
+             WHERE event_kind = 'PreimageObserved' \
+               AND derivation_kind = 'raw_log_preimage_observation' \
+               AND block_hash = $1 \
+               AND log_index = 9"
+        )
+        .bind(&block_2.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "a concurrent in-span raw-log write must be included before its revision is acknowledged"
     );
 
     server.abort();
@@ -2090,6 +2201,118 @@ async fn normalized_replay_recovery_preserves_full_stateless_span_after_prefligh
     );
 
     server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_replay_retention_authority_keeps_durable_ensv2_resolver_gap_retryable()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let chain = "ethereum-sepolia";
+    let root_address = "0x0000000000000000000000000000000000005330";
+    let registry_address = "0x0000000000000000000000000000000000005331";
+    let resolver_address = "0x0000000000000000000000000000000000005332";
+    insert_normalized_replay_ens_v2_registry_manifests(
+        database.pool(),
+        chain,
+        53_300,
+        53_301,
+        Uuid::from_u128(53_300),
+        Uuid::from_u128(53_301),
+        root_address,
+        registry_address,
+    )
+    .await?;
+    insert_normalized_replay_ens_v2_resolver_manifest(
+        database.pool(),
+        chain,
+        53_302,
+        Uuid::from_u128(53_302),
+        resolver_address,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO discovery_admission_epochs (chain_id, epoch) VALUES ($1, 0)",
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO raw_log_staging_input_revisions (
+            chain_id, revision, retention_generation,
+            retained_history_complete, incomplete_since,
+            proven_retention_generation, proven_discovery_admission_epoch,
+            proven_through_block
+        )
+        VALUES ($1, 0, 1, true, NULL, 1, 0, 3)
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    insert_completed_backfill_range_coverage_for_source_family(
+        database.pool(),
+        chain,
+        1,
+        3,
+        "ens_v2_root_l1",
+        &[root_address],
+    )
+    .await?;
+    insert_completed_backfill_range_coverage_for_source_family(
+        database.pool(),
+        chain,
+        1,
+        3,
+        "ens_v2_registry_l1",
+        &[registry_address],
+    )
+    .await?;
+
+    let adapters = [
+        NormalizedEventReplayAdapter::EnsV2RegistryResourceSurface,
+        NormalizedEventReplayAdapter::EnsV2Resolver,
+    ];
+    let error = ensure_full_closure_retention_authority_for_adapters(
+        database.pool(),
+        chain,
+        &adapters,
+        3,
+    )
+    .await
+    .expect_err("durable resolver coverage gap must remain provider-retryable");
+    assert_eq!(
+        bigname_adapters::ens_v2_missing_coverage(&error),
+        Some(&bigname_adapters::EnsV2MissingCoverage {
+            chain: chain.to_owned(),
+            retention_generation: 1,
+            source_family: "ens_v2_resolver_l1".to_owned(),
+            address: resolver_address.to_owned(),
+            required_from_block: 1,
+            required_to_block: 3,
+        }),
+        "a restarted catch-up iteration must still recognize the durable resolver gap"
+    );
+
+    insert_completed_backfill_range_coverage_for_source_family(
+        database.pool(),
+        chain,
+        1,
+        3,
+        "ens_v2_resolver_l1",
+        &[resolver_address],
+    )
+    .await?;
+    ensure_full_closure_retention_authority_for_adapters(
+        database.pool(),
+        chain,
+        &adapters,
+        3,
+    )
+    .await?;
+
     database.cleanup().await
 }
 

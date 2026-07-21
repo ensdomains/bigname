@@ -847,8 +847,9 @@ the image change determines the upgrade procedure:
 
 - A cursor that completed under a pre-two-phase image has
   `next_block_number > target_block_number`. The upgraded catch-up loop reports
-  `Idle`; it does not run phase 1 retroactively, so any stateless label-preimage
-  omission persists across that cursor's completed span. For each affected
+  `Idle`; it does not run phase 1 retroactively, so any stateless
+  [label-preimage](glossary.md) omission persists across that cursor's completed
+  span. For each affected
   chain, use the manual stateless replay stopgap over the cursor's exact saved
   range (with the normal database environment configured):
 

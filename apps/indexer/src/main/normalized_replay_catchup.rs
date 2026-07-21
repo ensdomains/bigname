@@ -36,7 +36,10 @@ mod sources;
 mod test_hook;
 
 #[cfg(test)]
-pub(crate) use test_hook::install_after_rewind as install_after_rewind_test_hook;
+pub(crate) use test_hook::{
+    install_after_coverage_recovery as install_after_coverage_recovery_test_hook,
+    install_after_rewind as install_after_rewind_test_hook,
+};
 
 use coverage_recovery::replay_full_closure_with_coverage_recovery;
 use cursors::{
