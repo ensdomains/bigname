@@ -85,6 +85,12 @@ pub(crate) struct RunArgs {
     )]
     pub(crate) chain_reth_db_sources: Vec<String>,
     #[arg(
+        long = "chain-rpc-code-fallback-url",
+        env = "BIGNAME_INDEXER_CHAIN_RPC_CODE_FALLBACK_URLS",
+        value_delimiter = ','
+    )]
+    pub(crate) chain_rpc_code_fallback_urls: Vec<String>,
+    #[arg(
         long = "event-silent-reverse-resolver-address",
         env = "BIGNAME_INDEXER_EVENT_SILENT_REVERSE_RESOLVER_ADDRESSES",
         value_delimiter = ','
@@ -186,6 +192,12 @@ pub(crate) struct BackfillArgs {
         value_delimiter = ','
     )]
     pub(crate) chain_reth_db_sources: Vec<String>,
+    #[arg(
+        long = "chain-rpc-code-fallback-url",
+        env = "BIGNAME_INDEXER_CHAIN_RPC_CODE_FALLBACK_URLS",
+        value_delimiter = ','
+    )]
+    pub(crate) chain_rpc_code_fallback_urls: Vec<String>,
     #[arg(
         long = "backfill-source",
         env = "BIGNAME_INDEXER_BACKFILL_SOURCE",
@@ -332,6 +344,12 @@ pub(crate) struct OpsCatchupArgs {
         value_delimiter = ','
     )]
     pub(crate) chain_reth_db_sources: Vec<String>,
+    #[arg(
+        long = "chain-rpc-code-fallback-url",
+        env = "BIGNAME_INDEXER_CHAIN_RPC_CODE_FALLBACK_URLS",
+        value_delimiter = ','
+    )]
+    pub(crate) chain_rpc_code_fallback_urls: Vec<String>,
     #[arg(long, env = "BIGNAME_INDEXER_DEPLOYMENT_PROFILE")]
     pub(crate) deployment_profile: Option<String>,
     #[arg(
@@ -473,6 +491,12 @@ pub(crate) struct RepairEnsV1TextRecordsArgs {
         value_delimiter = ','
     )]
     pub(crate) chain_reth_db_sources: Vec<String>,
+    #[arg(
+        long = "chain-rpc-code-fallback-url",
+        env = "BIGNAME_INDEXER_CHAIN_RPC_CODE_FALLBACK_URLS",
+        value_delimiter = ','
+    )]
+    pub(crate) chain_rpc_code_fallback_urls: Vec<String>,
     #[arg(long)]
     pub(crate) chain: String,
     #[arg(long, requires = "to_block")]

@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    fmt,
     time::{Duration, Instant},
 };
 
@@ -32,6 +33,25 @@ pub(super) struct JsonRpcBatchCall {
     pub(super) method: &'static str,
     pub(super) params: Vec<Value>,
 }
+
+#[derive(Debug)]
+struct ProviderJsonRpcError {
+    method: String,
+    code: i64,
+    message: String,
+}
+
+impl fmt::Display for ProviderJsonRpcError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "provider returned JSON-RPC error for {}: {}: {}",
+            self.method, self.code, self.message
+        )
+    }
+}
+
+impl std::error::Error for ProviderJsonRpcError {}
 
 impl JsonRpcProvider {
     pub(super) async fn fetch_json_rpc_result(
@@ -136,6 +156,29 @@ impl JsonRpcProvider {
         endpoint: &Url,
         calls: Vec<JsonRpcBatchCall>,
     ) -> Result<Vec<Option<Value>>> {
+        self.fetch_json_rpc_batch_results_at_endpoint_with_pruned_code_passthrough(
+            endpoint, calls, false,
+        )
+        .await
+    }
+
+    pub(super) async fn fetch_json_rpc_batch_results_at_endpoint_preserving_pruned_code_error(
+        &self,
+        endpoint: &Url,
+        calls: Vec<JsonRpcBatchCall>,
+    ) -> Result<Vec<Option<Value>>> {
+        self.fetch_json_rpc_batch_results_at_endpoint_with_pruned_code_passthrough(
+            endpoint, calls, true,
+        )
+        .await
+    }
+
+    async fn fetch_json_rpc_batch_results_at_endpoint_with_pruned_code_passthrough(
+        &self,
+        endpoint: &Url,
+        calls: Vec<JsonRpcBatchCall>,
+        preserve_pruned_code_error: bool,
+    ) -> Result<Vec<Option<Value>>> {
         if calls.is_empty() {
             return Ok(Vec::new());
         }
@@ -146,6 +189,12 @@ impl JsonRpcProvider {
         {
             Ok(results) => Ok(results),
             Err(batch_error) => {
+                if preserve_pruned_code_error
+                    && requested_block_number_from_json_rpc_pruned_state_error(&batch_error)
+                        .is_some()
+                {
+                    return Err(batch_error);
+                }
                 if is_retryable_provider_error(&batch_error) {
                     return Err(batch_error).context(
                         "provider JSON-RPC batch exhausted retryable attempts; refusing immediate sequential fallback",
@@ -370,13 +419,11 @@ fn json_rpc_response_result(response: Response, method: &str) -> Result<Option<V
             let value = raw_value_to_json(result.as_ref())?;
             Ok((!value.is_null()).then_some(value))
         }
-        ResponsePayload::Failure(error) => {
-            bail!(
-                "provider returned JSON-RPC error for {method}: {}: {}",
-                error.code,
-                error.message
-            )
-        }
+        ResponsePayload::Failure(error) => Err(anyhow::Error::new(ProviderJsonRpcError {
+            method: method.to_owned(),
+            code: error.code,
+            message: error.message.to_string(),
+        })),
     }
 }
 
@@ -410,6 +457,39 @@ pub(super) fn is_retryable_provider_error(error: &anyhow::Error) -> bool {
         || message.contains("timeout")
         || message.contains("connection reset")
         || message.contains("connection closed")
+}
+
+pub(super) fn requested_block_number_from_json_rpc_pruned_state_error(
+    error: &anyhow::Error,
+) -> Option<i64> {
+    error.chain().find_map(|cause| {
+        let error = cause.downcast_ref::<ProviderJsonRpcError>()?;
+        if error.code != -32603 || error.method != "eth_getCode" {
+            return None;
+        }
+        let block_number = error
+            .message
+            .strip_prefix("state at block #")?
+            .strip_suffix(" is pruned")?;
+        if block_number.is_empty() || !block_number.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        let state_boundary = block_number.parse::<i64>().ok()?;
+        // Reth reconstructs state at B from changeset boundary B + 1, and its
+        // typed pruning error is rendered verbatim, converted to an internal
+        // Eth API error, and emitted as the JSON-RPC internal error.
+        // (upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L937 @ reth@88505c7)
+        // (upstream: .refs/reth/crates/storage/errors/src/provider.rs:L105 @ reth@88505c7)
+        // (upstream: .refs/reth/crates/storage/errors/src/provider.rs:L106 @ reth@88505c7)
+        // (upstream: .refs/reth/crates/storage/provider/src/providers/state/historical.rs:L190 @ reth@88505c7)
+        // (upstream: .refs/reth/crates/rpc/rpc-eth-types/src/error/mod.rs:L506 @ reth@88505c7)
+        // (upstream: .refs/reth/crates/rpc/rpc-eth-types/src/error/mod.rs:L519 @ reth@88505c7)
+        // (upstream: .refs/reth/crates/rpc/rpc-eth-types/src/error/mod.rs:L279 @ reth@88505c7)
+        // (upstream: .refs/reth/crates/rpc/rpc-eth-types/src/error/mod.rs:L301 @ reth@88505c7)
+        // (upstream: .refs/reth/crates/rpc/rpc-server-types/src/result.rs:L119 @ reth@88505c7)
+        // (upstream: .refs/reth/crates/rpc/rpc-server-types/src/result.rs:L120 @ reth@88505c7)
+        state_boundary.checked_sub(1)
+    })
 }
 
 /// Wait 250, 500, 1000, then 2000 milliseconds between the five attempts.

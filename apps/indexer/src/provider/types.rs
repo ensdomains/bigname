@@ -21,6 +21,7 @@ pub struct ProviderResolvedBlock {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderBlockCodeObservationRequest {
+    pub block_number: i64,
     pub block_hash: String,
     pub addresses: Vec<String>,
 }
