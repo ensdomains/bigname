@@ -15,6 +15,9 @@ use tracing::warn;
 
 use super::{
     JsonRpcProvider,
+    error::{
+        format_provider_error, format_provider_transport_error, redact_provider_transport_error_url,
+    },
     http_client::JSON_RPC_POOL_RESET_TIMEOUT_THRESHOLD,
     payload_cache::{JsonRpcPayloadFingerprint, JsonRpcResultPayload},
 };
@@ -87,7 +90,7 @@ impl JsonRpcProvider {
                         method,
                         attempt = attempt + 1,
                         max_attempts = MAX_JSON_RPC_ATTEMPTS,
-                        error = %format!("{error:#}"),
+                        error = %format_provider_error(&error),
                         "retrying transient JSON-RPC provider request"
                     );
                     sleep_json_rpc_backoff(attempt).await;
@@ -189,7 +192,7 @@ impl JsonRpcProvider {
                         request_context = "batch",
                         attempt = attempt + 1,
                         max_attempts = MAX_JSON_RPC_ATTEMPTS,
-                        error = %format!("{error:#}"),
+                        error = %format_provider_error(&error),
                         "retrying transient JSON-RPC provider batch"
                     );
                     sleep_json_rpc_backoff(attempt).await;
@@ -283,7 +286,8 @@ impl JsonRpcProvider {
             .await
         {
             Ok(response) => response,
-            Err(error) => {
+            Err(mut error) => {
+                redact_provider_transport_error_url(&mut error);
                 self.record_json_rpc_transport_error(client_generation, request_context, &error);
                 return Err(error).with_context(|| {
                     format!("failed to send JSON-RPC request for {request_context}")
@@ -293,7 +297,8 @@ impl JsonRpcProvider {
         let status = response.status();
         let body = match response.bytes().await {
             Ok(body) => body,
-            Err(error) => {
+            Err(mut error) => {
+                redact_provider_transport_error_url(&mut error);
                 self.record_json_rpc_transport_error(client_generation, request_context, &error);
                 return Err(error).context("failed to read JSON-RPC response body");
             }
@@ -336,7 +341,7 @@ impl JsonRpcProvider {
                 timeout_threshold = JSON_RPC_POOL_RESET_TIMEOUT_THRESHOLD,
                 previous_client_generation = reset.previous_generation,
                 new_client_generation = reset.new_generation,
-                error = %error,
+                error = %format_provider_transport_error(error),
                 "rebuilt JSON-RPC HTTP client after a transport timeout"
             ),
             Ok(None) => {}
@@ -345,8 +350,8 @@ impl JsonRpcProvider {
                 component = "provider",
                 request_context,
                 client_generation,
-                error = %error,
-                reset_error = %format!("{reset_error:#}"),
+                error = %format_provider_transport_error(error),
+                reset_error = %format_provider_error(&reset_error),
                 "failed to rebuild JSON-RPC HTTP client after a transport timeout"
             ),
         }

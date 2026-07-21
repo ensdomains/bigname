@@ -9,7 +9,8 @@ use tracing::warn;
 use super::{
     JsonRpcProvider, ProviderBlockBundle, ProviderReceipt, ProviderResolvedBlock,
     ProviderTransaction, ProviderTransactionReceiptBundle, ProviderTransactionReceiptRequest,
-    provider_batch_item_limit, provider_batch_request_concurrency, request::JsonRpcBatchCall,
+    error::format_provider_error, provider_batch_item_limit, provider_batch_request_concurrency,
+    request::JsonRpcBatchCall,
 };
 use validation::{fallback_receipts_by_key, fallback_transactions_by_key};
 
@@ -139,7 +140,7 @@ impl JsonRpcProvider {
             Ok(block_payloads) => block_payloads,
             Err(error) => {
                 warn!(
-                    error = %format!("{error:#}"),
+                    error = %format_provider_error(&error),
                     selected_transaction_receipt_fallback_count = requests.len(),
                     "block-scoped selected transaction/receipt fallback failed; retrying direct lookup"
                 );
@@ -374,7 +375,7 @@ impl JsonRpcProvider {
             Ok(fallback_bundles) => fallback_bundles,
             Err(error) => {
                 warn!(
-                    error = %format!("{error:#}"),
+                    error = %format_provider_error(&error),
                     "fallback JSON-RPC provider failed selected transaction/receipt lookup"
                 );
                 return bundles;
