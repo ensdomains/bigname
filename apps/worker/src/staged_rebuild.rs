@@ -66,6 +66,7 @@ pub(crate) const PRIMARY_NAMES_CURRENT_COLUMNS: &[&str] = &[
     "claim_status",
     "raw_claim_name",
     "normalized_claim_name",
+    "claim_name_is_normalized",
     "claim_provenance",
 ];
 pub(crate) const RECORD_INVENTORY_CURRENT_COLUMNS: &[&str] = &[
@@ -328,6 +329,7 @@ pub(crate) async fn stage_primary_names_current_snapshots(
         values.push_bind(snapshot.row.claim_status.as_str());
         values.push_bind(&snapshot.row.raw_claim_name);
         values.push_bind(&snapshot.normalized_claim_name);
+        values.push_bind(snapshot.claim_name_is_normalized);
         values.push_bind(snapshot.row.claim_provenance.clone());
     });
     execute_stage_insert(conn, builder, "primary_names_current").await

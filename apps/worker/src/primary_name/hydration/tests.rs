@@ -241,6 +241,7 @@ async fn upserts_hydration_snapshots_in_bounded_batches() -> Result<()> {
                 }),
             },
             normalized_claim_name: Some(format!("batch-{index}.eth")),
+            claim_name_is_normalized: true,
         })
         .collect::<Vec<_>>();
 
@@ -289,6 +290,7 @@ async fn rerun_repairs_partial_hydration_snapshot_publish() -> Result<()> {
                 }),
             },
             normalized_claim_name: Some(format!("repair-{index}.eth")),
+            claim_name_is_normalized: true,
         })
         .collect::<Vec<_>>();
 
@@ -378,6 +380,7 @@ async fn hydrates_current_legacy_reverse_resolver_primary_name() -> Result<()> {
             success_row_count: 1,
             not_found_row_count: 0,
             invalid_name_row_count: 0,
+            claim_not_normalized_count: 0,
             failed_lookup_count: 0,
         }
     );
@@ -387,6 +390,7 @@ async fn hydrates_current_legacy_reverse_resolver_primary_name() -> Result<()> {
             .await?
             .expect("hydration should preserve primary_names_current row");
     assert_eq!(hydrated.row.claim_status, PrimaryNameClaimStatus::Success);
+    assert!(!hydrated.claim_name_is_normalized);
     assert_eq!(
         hydrated.normalized_claim_name.as_deref(),
         Some("vitalik.eth")
@@ -519,7 +523,7 @@ async fn hydrates_resolver_edge_only_legacy_reverse_resolver_primary_name() -> R
     let client = ForwardCheckingHydrationClient {
         outcomes_by_node: BTreeMap::from([(
             reverse_node.clone(),
-            ReverseNameHydrationOutcome::Success("Vitalik.eth".to_owned()),
+            ReverseNameHydrationOutcome::Success("vitalik.eth".to_owned()),
         )]),
         forward_addresses_by_name: BTreeMap::from([(
             "vitalik.eth".to_owned(),
@@ -543,6 +547,7 @@ async fn hydrates_resolver_edge_only_legacy_reverse_resolver_primary_name() -> R
             success_row_count: 1,
             not_found_row_count: 0,
             invalid_name_row_count: 0,
+            claim_not_normalized_count: 0,
             failed_lookup_count: 0,
         }
     );
@@ -556,6 +561,7 @@ async fn hydrates_resolver_edge_only_legacy_reverse_resolver_primary_name() -> R
     .await?
     .expect("resolver-edge hydration should create primary_names_current row");
     assert_eq!(hydrated.row.claim_status, PrimaryNameClaimStatus::Success);
+    assert!(hydrated.claim_name_is_normalized);
     assert_eq!(
         hydrated.normalized_claim_name.as_deref(),
         Some("vitalik.eth")
@@ -576,6 +582,70 @@ async fn hydrates_resolver_edge_only_legacy_reverse_resolver_primary_name() -> R
         hydrated.row.claim_provenance["verified_primary_name_invalidation"]["primary_claim_source"]
             ["tuple_source"],
         json!(TUPLE_SOURCE_RESOLVER_EDGE_FORWARD_CONFIRMED)
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejects_non_normalized_resolver_edge_primary_name_before_forward_confirmation()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045";
+    let normalized_address = bigname_storage::normalize_evm_address(address);
+    let reverse_node = reverse_node_for_address(address)?;
+
+    insert_chain_checkpoint(database.pool(), 300).await?;
+    upsert_normalized_events(
+        database.pool(),
+        &[generic_reverse_resolver_changed_event(
+            "resolver-edge-non-normalized",
+            &reverse_node,
+            LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS,
+            120,
+            0,
+        )],
+    )
+    .await?;
+
+    let client = ForwardCheckingHydrationClient {
+        outcomes_by_node: BTreeMap::from([(
+            reverse_node,
+            ReverseNameHydrationOutcome::Success("Vitalik.eth".to_owned()),
+        )]),
+        ..Default::default()
+    };
+    let summary = hydrate_legacy_reverse_resolver_primary_names_with_client(
+        database.pool(),
+        &[LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS.to_owned()],
+        &client,
+    )
+    .await?;
+
+    assert_eq!(
+        summary,
+        PrimaryNameLegacyReverseHydrationSummary {
+            candidate_tuple_count: 1,
+            queried_tuple_count: 1,
+            upserted_row_count: 0,
+            deleted_row_count: 0,
+            success_row_count: 0,
+            not_found_row_count: 0,
+            invalid_name_row_count: 0,
+            claim_not_normalized_count: 1,
+            failed_lookup_count: 0,
+        }
+    );
+    assert_eq!(
+        load_primary_name_current_snapshot(
+            database.pool(),
+            &normalized_address,
+            ENS_NAMESPACE,
+            "60",
+        )
+        .await?,
+        None
     );
 
     database.cleanup().await?;
@@ -606,7 +676,7 @@ async fn resolver_edge_delete_and_recreate_invalidates_verified_primary_outcome(
     let initial_client = ForwardCheckingHydrationClient {
         outcomes_by_node: BTreeMap::from([(
             reverse_node.clone(),
-            ReverseNameHydrationOutcome::Success("Vitalik.eth".to_owned()),
+            ReverseNameHydrationOutcome::Success("vitalik.eth".to_owned()),
         )]),
         forward_addresses_by_name: BTreeMap::from([(
             "vitalik.eth".to_owned(),
@@ -657,7 +727,7 @@ async fn resolver_edge_delete_and_recreate_invalidates_verified_primary_outcome(
     let recreating_client = ForwardCheckingHydrationClient {
         outcomes_by_node: BTreeMap::from([(
             reverse_node,
-            ReverseNameHydrationOutcome::Success("Vitalik.eth".to_owned()),
+            ReverseNameHydrationOutcome::Success("vitalik.eth".to_owned()),
         )]),
         forward_addresses_by_name: BTreeMap::from([(
             "vitalik.eth".to_owned(),
@@ -706,7 +776,7 @@ async fn deletes_resolver_edge_row_when_forward_confirmation_stops_matching() ->
     let first_client = ForwardCheckingHydrationClient {
         outcomes_by_node: BTreeMap::from([(
             reverse_node.clone(),
-            ReverseNameHydrationOutcome::Success("Vitalik.eth".to_owned()),
+            ReverseNameHydrationOutcome::Success("vitalik.eth".to_owned()),
         )]),
         forward_addresses_by_name: BTreeMap::from([(
             "vitalik.eth".to_owned(),
@@ -782,7 +852,7 @@ async fn keeps_resolver_edge_row_when_forward_confirmation_errors() -> Result<()
     let first_client = ForwardCheckingHydrationClient {
         outcomes_by_node: BTreeMap::from([(
             reverse_node.clone(),
-            ReverseNameHydrationOutcome::Success("Vitalik.eth".to_owned()),
+            ReverseNameHydrationOutcome::Success("vitalik.eth".to_owned()),
         )]),
         forward_addresses_by_name: BTreeMap::from([(
             "vitalik.eth".to_owned(),
@@ -925,7 +995,7 @@ async fn keeps_resolver_edge_row_when_forward_confirmation_requires_offchain_loo
     let first_client = ForwardCheckingHydrationClient {
         outcomes_by_node: BTreeMap::from([(
             reverse_node.clone(),
-            ReverseNameHydrationOutcome::Success("Vitalik.eth".to_owned()),
+            ReverseNameHydrationOutcome::Success("vitalik.eth".to_owned()),
         )]),
         forward_addresses_by_name: BTreeMap::from([(
             "vitalik.eth".to_owned(),
@@ -1078,7 +1148,7 @@ async fn keeps_resolver_edge_row_when_checkpoint_is_missing() -> Result<()> {
     let first_client = ForwardCheckingHydrationClient {
         outcomes_by_node: BTreeMap::from([(
             reverse_node,
-            ReverseNameHydrationOutcome::Success("Vitalik.eth".to_owned()),
+            ReverseNameHydrationOutcome::Success("vitalik.eth".to_owned()),
         )]),
         forward_addresses_by_name: BTreeMap::from([(
             "vitalik.eth".to_owned(),
@@ -1613,6 +1683,7 @@ async fn restores_event_replayed_row_when_resolver_changes_away_from_configured_
             success_row_count: 0,
             not_found_row_count: 1,
             invalid_name_row_count: 0,
+            claim_not_normalized_count: 0,
             failed_lookup_count: 0,
         }
     );
@@ -1796,6 +1867,7 @@ async fn failed_rehydration_after_previous_success_restores_event_replayed_row()
             success_row_count: 0,
             not_found_row_count: 1,
             invalid_name_row_count: 0,
+            claim_not_normalized_count: 0,
             failed_lookup_count: 1,
         }
     );

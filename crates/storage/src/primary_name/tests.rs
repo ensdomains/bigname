@@ -242,6 +242,7 @@ async fn round_trips_primary_name_snapshots_with_normalized_claim_name() -> Resu
             }),
         },
         normalized_claim_name: Some("alice.eth".to_owned()),
+        claim_name_is_normalized: true,
     };
 
     let inserted =
@@ -277,6 +278,7 @@ async fn batch_upsert_preserves_input_order_after_sorted_locking() -> Result<()>
             claim_provenance: serde_json::json!({"source": "primary_name_order_test"}),
         },
         normalized_claim_name: Some("zeta.eth".to_owned()),
+        claim_name_is_normalized: true,
     };
     let first_address_snapshot = PrimaryNameCurrentSnapshot {
         row: PrimaryNameCurrentRow {
@@ -288,6 +290,7 @@ async fn batch_upsert_preserves_input_order_after_sorted_locking() -> Result<()>
             claim_provenance: serde_json::json!({"source": "primary_name_order_test"}),
         },
         normalized_claim_name: Some("alpha.eth".to_owned()),
+        claim_name_is_normalized: true,
     };
 
     let input = vec![
@@ -316,6 +319,7 @@ async fn rejects_non_normalized_claim_name_sources() -> Result<()> {
                 claim_provenance: serde_json::json!({}),
             },
             normalized_claim_name: Some("Alice.eth".to_owned()),
+            claim_name_is_normalized: false,
         }],
     )
     .await

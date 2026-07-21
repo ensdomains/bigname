@@ -43,7 +43,7 @@ use bigname_storage::{
     SupportedVerifiedResolutionRecordKey as SupportedVerifiedRecordKey, SurfaceBinding,
     SurfaceBindingKind, TokenLineage, default_database_url, upsert_chain_lineage_blocks,
     upsert_execution_outcome, upsert_execution_trace, upsert_name_current_rows,
-    upsert_name_surfaces, upsert_primary_name_current_rows, upsert_primary_name_current_snapshots,
+    upsert_name_surfaces, upsert_primary_name_current_snapshots,
     upsert_record_inventory_current_rows, upsert_resources, upsert_surface_bindings,
     upsert_token_lineages,
 };
@@ -4387,14 +4387,16 @@ async fn insert_primary_name_anchor(
     coin_type: &str,
     claim_status: PrimaryNameClaimStatus,
 ) -> Result<()> {
-    upsert_primary_name_current_rows(
+    let row =
+        primary_name_anchor_row_for_namespace(ENS_NAMESPACE, address, coin_type, claim_status);
+    upsert_primary_name_current_snapshots(
         database.pool(),
-        &[primary_name_anchor_row_for_namespace(
-            ENS_NAMESPACE,
-            address,
-            coin_type,
-            claim_status,
-        )],
+        &[PrimaryNameCurrentSnapshot {
+            row,
+            normalized_claim_name: (claim_status == PrimaryNameClaimStatus::Success)
+                .then(|| "alice.eth".to_owned()),
+            claim_name_is_normalized: claim_status == PrimaryNameClaimStatus::Success,
+        }],
     )
     .await?;
     Ok(())
@@ -4406,14 +4408,20 @@ async fn insert_basenames_primary_name_anchor(
     coin_type: &str,
     claim_status: PrimaryNameClaimStatus,
 ) -> Result<()> {
-    upsert_primary_name_current_rows(
+    let row = primary_name_anchor_row_for_namespace(
+        BASENAMES_NAMESPACE,
+        address,
+        coin_type,
+        claim_status,
+    );
+    upsert_primary_name_current_snapshots(
         database.pool(),
-        &[primary_name_anchor_row_for_namespace(
-            BASENAMES_NAMESPACE,
-            address,
-            coin_type,
-            claim_status,
-        )],
+        &[PrimaryNameCurrentSnapshot {
+            row,
+            normalized_claim_name: (claim_status == PrimaryNameClaimStatus::Success)
+                .then(|| "alice.base.eth".to_owned()),
+            claim_name_is_normalized: claim_status == PrimaryNameClaimStatus::Success,
+        }],
     )
     .await?;
     Ok(())
@@ -4788,6 +4796,22 @@ fn verified_primary_invalid_name_request() -> PersistEnsVerifiedPrimaryNameReque
     request
 }
 
+fn verified_primary_claim_not_normalized_request() -> PersistEnsVerifiedPrimaryNameRequest {
+    let mut request = verified_primary_invalid_name_request();
+    request.trace.final_payload = Some(json!({
+        "verified_primary_name": {
+            "status": "invalid_name",
+            "failure_reason": VERIFIED_PRIMARY_NAME_CLAIM_NOT_NORMALIZED_REASON,
+        }
+    }));
+    request.outcome.outcome_payload = request.trace.final_payload.clone();
+    request.trace.steps[1].step_payload = json!({
+        "normalizer_version": "ensip15@ens-normalize-0.1.1",
+        "normalized_name": "alice.eth",
+    });
+    request
+}
+
 fn verified_primary_execution_failed_request() -> PersistEnsVerifiedPrimaryNameRequest {
     let mut request = verified_primary_request(
         Uuid::from_u128(0x0e7ec7ace00000000000000000000025),
@@ -5146,6 +5170,70 @@ async fn persists_verified_primary_invalid_name_without_resolver_call() -> Resul
 }
 
 #[tokio::test]
+async fn rejects_verified_primary_success_for_non_normalized_claim() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let request = verified_primary_success_request();
+    upsert_primary_name_current_snapshots(
+        database.pool(),
+        &[PrimaryNameCurrentSnapshot {
+            row: primary_name_anchor_row_for_namespace(
+                ENS_NAMESPACE,
+                "0x00000000000000000000000000000000000000aa",
+                "60",
+                PrimaryNameClaimStatus::Success,
+            ),
+            normalized_claim_name: Some("alice.eth".to_owned()),
+            claim_name_is_normalized: false,
+        }],
+    )
+    .await?;
+
+    let error = persist_ens_verified_primary_name(database.pool(), &request)
+        .await
+        .expect_err("non-normalized claim must not persist verified success");
+    assert!(
+        error.to_string().contains("claim normalization changed"),
+        "unexpected error: {error:#}"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn persists_claim_not_normalized_for_non_normalized_claim() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let request = verified_primary_claim_not_normalized_request();
+    upsert_primary_name_current_snapshots(
+        database.pool(),
+        &[PrimaryNameCurrentSnapshot {
+            row: primary_name_anchor_row_for_namespace(
+                ENS_NAMESPACE,
+                "0x00000000000000000000000000000000000000ad",
+                "60",
+                PrimaryNameClaimStatus::Success,
+            ),
+            normalized_claim_name: Some("alice.eth".to_owned()),
+            claim_name_is_normalized: false,
+        }],
+    )
+    .await?;
+
+    let persisted = persist_ens_verified_primary_name(database.pool(), &request).await?;
+    let loaded = load_persisted_ens_verified_primary_name(database.pool(), &persisted.cache_key)
+        .await?
+        .expect("claim_not_normalized readback must exist");
+    assert_eq!(
+        loaded.verified_primary_name,
+        json!({
+            "status": "invalid_name",
+            "failure_reason": VERIFIED_PRIMARY_NAME_CLAIM_NOT_NORMALIZED_REASON,
+        })
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn persists_verified_primary_execution_failed_with_failure_payloads() -> Result<()> {
     let database = TestDatabase::new().await?;
     let request = verified_primary_execution_failed_request();
@@ -5288,6 +5376,7 @@ async fn rejects_verified_primary_stale_success_after_claim_name_changes() -> Re
                 PrimaryNameClaimStatus::Success,
             ),
             normalized_claim_name: Some("alice.eth".to_owned()),
+            claim_name_is_normalized: true,
         }],
     )
     .await?;
@@ -5301,6 +5390,7 @@ async fn rejects_verified_primary_stale_success_after_claim_name_changes() -> Re
                 PrimaryNameClaimStatus::Success,
             ),
             normalized_claim_name: Some("bob.eth".to_owned()),
+            claim_name_is_normalized: true,
         }],
     )
     .await?;
@@ -5351,6 +5441,7 @@ async fn rejects_verified_primary_when_claim_changes_after_fast_path_before_tran
                 PrimaryNameClaimStatus::Success,
             ),
             normalized_claim_name: Some("alice.eth".to_owned()),
+            claim_name_is_normalized: true,
         }],
     )
     .await?;
@@ -5422,6 +5513,7 @@ async fn rejects_verified_primary_when_claim_changes_after_fast_path_before_tran
                 PrimaryNameClaimStatus::Success,
             ),
             normalized_claim_name: Some("bob.eth".to_owned()),
+            claim_name_is_normalized: true,
         }],
     )
     .await?;

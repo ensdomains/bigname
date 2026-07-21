@@ -942,6 +942,7 @@ async fn identity_reverse_marks_primary_orders_and_batches_by_input() -> Result<
                     claim_provenance: json!({"source": "identity_test"}),
                 },
                 normalized_claim_name: Some("alice.eth".to_owned()),
+                claim_name_is_normalized: true,
             },
             bigname_storage::PrimaryNameCurrentSnapshot {
                 row: bigname_storage::PrimaryNameCurrentRow {
@@ -953,6 +954,7 @@ async fn identity_reverse_marks_primary_orders_and_batches_by_input() -> Result<
                     claim_provenance: json!({"source": "identity_test"}),
                 },
                 normalized_claim_name: Some("bob.eth".to_owned()),
+                claim_name_is_normalized: true,
             },
         ],
     )
@@ -1349,6 +1351,7 @@ async fn identity_reverse_returns_primary_names_across_namespaces() -> Result<()
                     claim_provenance: json!({"source": "identity_test"}),
                 },
                 normalized_claim_name: Some("alpha.eth".to_owned()),
+                claim_name_is_normalized: true,
             },
             bigname_storage::PrimaryNameCurrentSnapshot {
                 row: bigname_storage::PrimaryNameCurrentRow {
@@ -1360,6 +1363,7 @@ async fn identity_reverse_returns_primary_names_across_namespaces() -> Result<()
                     claim_provenance: json!({"source": "identity_test"}),
                 },
                 normalized_claim_name: Some("beta.base.eth".to_owned()),
+                claim_name_is_normalized: true,
             },
         ],
     )

@@ -17,6 +17,7 @@ pub struct PrimaryNameCurrentRow {
 pub struct PrimaryNameCurrentSnapshot {
     pub row: PrimaryNameCurrentRow,
     pub normalized_claim_name: Option<String>,
+    pub claim_name_is_normalized: bool,
 }
 
 /// Stable storage representation for projection-owned declared primary-name status.

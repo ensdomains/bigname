@@ -424,7 +424,7 @@ Historical backfill does not turn empty blocks into hot payload archives. A bloc
 
 `logical_name_id = "<namespace>:<normalized_name>"` — stable, human-auditable, derivable without database lookup.
 
-`normalized_name` is the output of the single ENSIP-15 normalizer declared as `ensip15@ens-normalize-0.1.1`; storage validation and projection inputs must not substitute IDNA/UTS-46 conversion, ASCII lowercasing, or trimming. Name-surface DNS wire names, namehashes, and labelhash paths are derived from the same normalized labels. `primary_names_current` treats blank or whitespace-only reverse-claim source values as absent claims; nonblank claim-name sources either normalize through ENSIP-15 or remain verbatim as `raw_claim_name` for `invalid_name`.
+`normalized_name` is the output of the single ENSIP-15 normalizer declared as `ensip15@ens-normalize-0.1.1`; storage validation and projection inputs must not substitute IDNA/UTS-46 conversion, ASCII lowercasing, or trimming. Name-surface DNS wire names, namehashes, and labelhash paths are derived from the same normalized labels. `primary_names_current` treats blank or whitespace-only reverse-claim source values as absent claims; nonblank claim-name sources either normalize through ENSIP-15 or remain verbatim as `raw_claim_name` for `invalid_name`. A successful row stores `normalized_claim_name` plus `claim_name_is_normalized`, which is true only when the untrimmed raw source byte-equals that normalized value. The database permits successful false rows because they preserve declared claim state while gating verified output.
 
 ENSv1 name-surface materialization does not admit embedded NUL bytes in registrar labels, wrapper DNS labels, or resolver `name` record preimages. Those observations may still remain as raw facts and, where applicable, resolver-record normalized events, but they do not mint or update `NameSurface` rows or label preimage state. This keeps displayable name identity distinct from literal onchain strings that reference indexers also treat as invalid or unnormalizable for label/name interpretation.[^ens-subgraph-label-null][^ens-subgraph-name-null][^ensnode-null-label]
 
@@ -1155,14 +1155,29 @@ keep public reads drained until every version-9 marker (including
 `name_current`) is current and all pending invalidations have drained, and never
 run the two worker versions concurrently; an older worker can otherwise publish
 the superseded result after the new replay.
+
+Replay version 10 retains the version-9 outputs and rebuilds
+`primary_names_current` to materialize `claim_name_is_normalized` from the
+untrimmed reverse claim under the pinned normalizer. The migration adds the
+non-null flag with a false default, so existing successful rows are deliberately
+not readable as verified successes until replay recomputes them. Full rebuild
+compares the current and staged claim rows, including this flag, and deletes
+request-matching `verified_primary_name` cache outcomes for changed tuples in one
+set-based statement before publishing the staged projection. Targeted rebuilds
+keep the existing transaction-scoped tuple invalidation. Because this field has
+no normalizer-version-keyed repair, a pinned-normalizer change requires another
+projection replay-version bump. Deployments must not run version-9 and version-10
+workers concurrently and must keep public reads drained until every version-10
+marker is current and pending invalidations have drained.
+
 Permission-backed v1/v2 routes and permission-derived address-name expansions
 enforce `permissions_current_publication` version 2 and return `409 stale` when
 it is absent or old. Address-name reads without the permission expansion remain
 available. This compatibility gate prevents readers from decoding a legacy
 permission row/summary contract, but it does not prove freshness. Exact-name
-reads have no corresponding replay-version gate, so the drain remains required
-for the `name_current` replay and pending invalidations as well as the permission
-cutover.
+and primary-name reads have no corresponding replay-version gate, so the drain
+remains required for the `name_current` and `primary_names_current` replays and
+pending invalidations as well as the permission cutover.
 
 Historical projection materializations are projection-owned caches, not truth. When a worker materializes an `at` or `chain_positions` snapshot, the rows are keyed by the normal projection key plus exact chain-position context or an equivalent snapshot key. They may be bounded and evicted by policy; absence returns `stale`. A historical materialization must never overwrite a newer current row in place, and the API must never fill a missing historical projection from raw facts or provider data.
 

@@ -2,13 +2,13 @@ use anyhow::{Context, Result, bail};
 use bigname_storage::{
     PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot,
     VERIFIED_PRIMARY_NAME_INVALIDATION_KEY, VERIFIED_PRIMARY_NAME_LOOKUP_KEY,
-    delete_primary_name_current_in_transaction,
+    VERIFIED_PRIMARY_NAME_REQUEST_TYPE, delete_primary_name_current_in_transaction,
     load_primary_name_current_snapshot_for_update_in_transaction, normalize_evm_address,
     upsert_primary_name_current_snapshots_in_transaction, verified_primary_name_claim_hooks,
 };
 use futures_util::{TryStreamExt, pin_mut};
 use serde_json::{Map, Value, json};
-use sqlx::{PgConnection, PgPool, Row};
+use sqlx::{PgConnection, PgPool};
 
 #[allow(clippy::duplicate_mod)]
 #[path = "../staged_rebuild.rs"]
@@ -133,9 +133,7 @@ async fn rebuild_all_primary_names(pool: &PgPool) -> Result<PrimaryNamesCurrentR
             stage_primary_names_current_snapshots(&mut conn, &stage_table, &projections).await?
                 as usize;
     }
-    let invalidation_targets =
-        load_full_rebuild_claim_change_invalidation_targets(&mut conn, &stage_table).await?;
-    invalidate_verified_primary_name_claim_changes(pool, &invalidation_targets).await?;
+    invalidate_full_rebuild_verified_primary_name_claim_changes(&mut conn, &stage_table).await?;
     // Publish through the trigger-disabled path: the per-row identity-feed
     // triggers take one advisory lock per address and exhaust the lock table
     // at full-rebuild scale; the sidecars are rebuilt in bulk instead.
@@ -275,69 +273,60 @@ async fn rebuild_one_primary_name(
     })
 }
 
-async fn load_full_rebuild_claim_change_invalidation_targets(
+async fn invalidate_full_rebuild_verified_primary_name_claim_changes(
     conn: &mut PgConnection,
     stage_table: &str,
-) -> Result<Vec<VerifiedPrimaryNameClaimChangeTarget>> {
-    let rows = sqlx::query(&format!(
+) -> Result<u64> {
+    let result = sqlx::query(&format!(
         r#"
-        SELECT DISTINCT
-            COALESCE(stage.namespace, current.namespace) AS namespace,
-            COALESCE(stage.address, current.address) AS address,
-            COALESCE(stage.coin_type, current.coin_type) AS coin_type
-        FROM primary_names_current AS current
-        FULL OUTER JOIN {stage_table} AS stage
-          ON stage.address = current.address
-         AND stage.namespace = current.namespace
-         AND stage.coin_type = current.coin_type
-        WHERE current.address IS NULL
-           OR stage.address IS NULL
-           OR current.claim_status IS DISTINCT FROM stage.claim_status
-           OR current.raw_claim_name IS DISTINCT FROM stage.raw_claim_name
-           OR current.normalized_claim_name IS DISTINCT FROM stage.normalized_claim_name
-           OR current.claim_provenance IS DISTINCT FROM stage.claim_provenance
+        WITH cached_outcomes AS MATERIALIZED (
+            SELECT
+                execution_cache_key,
+                namespace,
+                split_part(request_key, ':', 2) AS address,
+                split_part(request_key, ':', 3) AS coin_type
+            FROM execution_cache_outcomes
+            WHERE request_type = $1
+              AND split_part(request_key, ':', 1) = namespace
+              AND split_part(request_key, ':', 4) = ''
+        ),
+        changed_cached_outcomes AS (
+            SELECT cached.execution_cache_key
+            FROM cached_outcomes AS cached
+            LEFT JOIN primary_names_current AS existing
+              ON existing.address = cached.address
+             AND existing.namespace = cached.namespace
+             AND existing.coin_type = cached.coin_type
+            LEFT JOIN {stage_table} AS staged
+              ON staged.address = cached.address
+             AND staged.namespace = cached.namespace
+             AND staged.coin_type = cached.coin_type
+            WHERE (existing.address IS NOT NULL OR staged.address IS NOT NULL)
+              AND (
+                    existing.address IS NULL
+                 OR staged.address IS NULL
+                 OR existing.claim_status IS DISTINCT FROM staged.claim_status
+                 OR existing.raw_claim_name IS DISTINCT FROM staged.raw_claim_name
+                 OR existing.normalized_claim_name IS DISTINCT FROM staged.normalized_claim_name
+                 OR existing.claim_name_is_normalized IS DISTINCT FROM staged.claim_name_is_normalized
+                 OR existing.claim_provenance IS DISTINCT FROM staged.claim_provenance
+              )
+        )
+        DELETE FROM execution_cache_outcomes AS outcome
+        USING changed_cached_outcomes AS changed
+        WHERE outcome.execution_cache_key = changed.execution_cache_key
         "#
     ))
-    .fetch_all(conn)
+    .bind(VERIFIED_PRIMARY_NAME_REQUEST_TYPE)
+    .execute(conn)
     .await
     .with_context(|| {
         format!(
-            "failed to load verified primary-name claim invalidation targets from staging table {stage_table}"
+            "failed to invalidate verified primary-name claim changes from staging table {stage_table}"
         )
     })?;
 
-    rows.into_iter()
-        .map(|row| {
-            let namespace: String = row.try_get("namespace")?;
-            let address: String = row.try_get("address")?;
-            let coin_type: String = row.try_get("coin_type")?;
-            Ok(VerifiedPrimaryNameClaimChangeTarget {
-                request_key: verified_primary_name_request_key(&namespace, &address, &coin_type),
-                namespace,
-            })
-        })
-        .collect()
-}
-
-async fn invalidate_verified_primary_name_claim_changes(
-    pool: &PgPool,
-    targets: &[VerifiedPrimaryNameClaimChangeTarget],
-) -> Result<()> {
-    for target in targets {
-        super::super::execution::invalidate_verified_primary_name_claim_change(
-            pool,
-            &target.namespace,
-            &target.request_key,
-        )
-        .await?;
-    }
-    Ok(())
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct VerifiedPrimaryNameClaimChangeTarget {
-    namespace: String,
-    request_key: String,
+    Ok(result.rows_affected())
 }
 
 fn verified_primary_name_request_key(namespace: &str, address: &str, coin_type: &str) -> String {
@@ -360,6 +349,9 @@ pub(super) fn primary_name_row_with_provenance_extensions<const N: usize>(
     let normalized_claim = raw_claim
         .filter(|raw_name| !raw_claim_name_source_is_blank(raw_name))
         .and_then(|raw_name| bigname_domain::normalization::normalize_name(raw_name).ok());
+    let claim_name_is_normalized = raw_claim
+        .zip(normalized_claim.as_ref())
+        .is_some_and(|(raw_name, normalized)| raw_name == normalized.normalized_name);
     let (claim_status, raw_claim_name) = match raw_claim {
         Some(raw_name) if raw_claim_name_source_is_blank(raw_name) => {
             (PrimaryNameClaimStatus::NotFound, None)
@@ -388,6 +380,7 @@ pub(super) fn primary_name_row_with_provenance_extensions<const N: usize>(
             )?,
         },
         normalized_claim_name,
+        claim_name_is_normalized,
     })
 }
 

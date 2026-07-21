@@ -445,22 +445,22 @@ async fn restart_handoff_rejects_previous_replay_version_markers() -> Result<()>
 }
 
 #[tokio::test]
-async fn version_8_handoff_runs_version_9_replay_and_publishes_permission_compatibility()
+async fn version_9_handoff_runs_version_10_replay_and_preserves_permission_compatibility()
 -> Result<()> {
     let database = test_database().await?;
     seed_apply_cursor(database.pool()).await?;
     seed_ready_normalized_replay_cursor(database.pool(), 20).await?;
     seed_chain_checkpoint(database.pool(), 20).await?;
     seed_replay_markers(database.pool(), 20).await?;
-    sqlx::query("UPDATE current_projection_replay_status SET replay_version = 8")
+    sqlx::query("UPDATE current_projection_replay_status SET replay_version = 9")
         .execute(database.pool())
         .await
-        .context("failed to seed completed version-8 replay markers")?;
+        .context("failed to seed completed version-9 replay markers")?;
 
-    assert_eq!(replay::CURRENT_PROJECTION_REPLAY_VERSION, 9);
+    assert_eq!(replay::CURRENT_PROJECTION_REPLAY_VERSION, 10);
     assert!(
         !projection_bootstrap_already_handed_off_to_apply(database.pool()).await?,
-        "version-8 markers and an apply cursor must not skip the version-9 full replay"
+        "version-9 markers and an apply cursor must not skip the version-10 full replay"
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM permissions_current_publication")
@@ -471,7 +471,7 @@ async fn version_8_handoff_runs_version_9_replay_and_publishes_permission_compat
 
     assert!(
         replay_all_current_projections_when_ready(database.pool(), None, None).await?,
-        "version-9 automatic startup must complete the required full replay"
+        "version-10 automatic startup must complete the required full replay"
     );
     let publication = sqlx::query_as::<_, (i32, i64)>(
         r#"

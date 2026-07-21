@@ -411,6 +411,9 @@ fn primary_name_claim_provenance(row: &PrimaryNameCurrentRow) -> JsonValue {
 }
 
 fn primary_name_verified_result(namespace: &str, lookup_state: &PrimaryNameLookupState) -> JsonValue {
+    if projected_primary_name_claim_is_not_normalized(lookup_state) {
+        return primary_name_claim_not_normalized_result();
+    }
     if let Some(persisted_verified) = lookup_state.persisted_verified.as_ref() {
         let mut verified_primary_name = persisted_verified.verified_primary_name.clone();
         insert_value_field(
@@ -423,10 +426,23 @@ fn primary_name_verified_result(namespace: &str, lookup_state: &PrimaryNameLooku
 
     match lookup_state.tuple_state {
         PrimaryNameTupleState::TupleMissing => {
-            if let OnDemandPrimaryNameVerificationState::Verified(on_demand_verified) =
-                &lookup_state.on_demand_verified
-            {
-                return on_demand_verified.clone();
+            match &lookup_state.on_demand_verified {
+                OnDemandPrimaryNameVerificationState::ClaimNotNormalized => {
+                    return primary_name_claim_not_normalized_result();
+                }
+                OnDemandPrimaryNameVerificationState::Verified(on_demand_verified) => {
+                    return on_demand_verified.clone();
+                }
+                OnDemandPrimaryNameVerificationState::NotAttempted => {}
+            }
+            if matches!(
+                lookup_state.on_demand_claim,
+                OnDemandPrimaryNameClaimState::InvalidName(_)
+            ) {
+                return json!({
+                    "status": "invalid_name",
+                    "failure_reason": "claim_name_not_normalizable",
+                });
             }
             primary_name_not_found_result()
         }
@@ -437,6 +453,24 @@ fn primary_name_verified_result(namespace: &str, lookup_state: &PrimaryNameLooku
             primary_name_unsupported_result("verified primary-name entrypoint is not yet supported")
         }
     }
+}
+
+fn projected_primary_name_claim_is_not_normalized(
+    lookup_state: &PrimaryNameLookupState,
+) -> bool {
+    matches!(
+        lookup_state.tuple_state,
+        PrimaryNameTupleState::TuplePresent(ref row)
+            if row.claim_status == PrimaryNameClaimStatus::Success
+                && !lookup_state.claim_name_is_normalized
+    )
+}
+
+fn primary_name_claim_not_normalized_result() -> JsonValue {
+    json!({
+        "status": "invalid_name",
+        "failure_reason": bigname_execution::VERIFIED_PRIMARY_NAME_CLAIM_NOT_NORMALIZED_REASON,
+    })
 }
 
 fn primary_name_not_found_result() -> JsonValue {

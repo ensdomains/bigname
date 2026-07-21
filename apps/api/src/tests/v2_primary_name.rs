@@ -17,6 +17,7 @@ async fn v2_get_primary_name_shapes_answers_for_source_selection() -> Result<()>
             "ens",
             "60",
             Some("alice.eth"),
+            true,
         )
         .await?;
 
@@ -161,6 +162,7 @@ async fn v2_get_primary_name_surfaces_persisted_mismatch_in_verification() -> Re
             "ens",
             "60",
             Some("alice.eth"),
+            true,
         )
         .await?;
 
@@ -263,6 +265,204 @@ async fn v2_get_basenames_primary_name_verified_meta_spans_base_and_ethereum() -
 }
 
 #[tokio::test]
+async fn v2_get_basenames_primary_name_normalization_gate_keeps_meta_base_scoped() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000bcf";
+    seed_v2_basenames_primary_name_snapshot_positions(&database).await?;
+    seed_v2_basenames_primary_name_persisted_verified(&database, address).await?;
+    database
+        .insert_primary_name_current_normalized_claim_name(
+            address,
+            "basenames",
+            V2_BASENAMES_PRIMARY_COIN_TYPE,
+            Some("alice.base.eth"),
+            false,
+        )
+        .await?;
+
+    let verified = v2_primary_name_payload_for_database(
+        &database,
+        &format!(
+            "/v2/addresses/{address}/primary-name?namespace=basenames&coin_type={V2_BASENAMES_PRIMARY_COIN_TYPE}&source=verified"
+        ),
+    )
+    .await?;
+
+    assert_eq!(
+        verified["data"],
+        json!({
+            "address": address,
+            "coin_type": 2_147_492_101_u64,
+            "namespace": "basenames",
+            "answers": [{
+                "source": "verified",
+                "status": "not_found",
+                "failure_reason": "claim_not_normalized"
+            }],
+            "verification": {
+                "status": "not_found",
+                "failure_reason": "claim_not_normalized"
+            }
+        })
+    );
+    assert_primary_name_snapshot_meta_chain_ids(&verified, &["8453"]);
+    assert_primary_name_snapshot_token_slots(&verified, &["base"]);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn primary_name_routes_skip_pre_upgrade_success_readback_for_normalization_gate()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = V2_PRIMARY_NAME_ADDRESS;
+    database.seed_default_ens_snapshot_selector_position().await?;
+    database
+        .insert_primary_name_current_claim_row(
+            address,
+            "ens",
+            "60",
+            PrimaryNameClaimStatus::Success,
+            None,
+        )
+        .await?;
+    database
+        .insert_primary_name_current_normalized_claim_name(
+            address,
+            "ens",
+            "60",
+            Some("alice.eth"),
+            true,
+        )
+        .await?;
+
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000007a);
+    let verified_primary_name = json!({
+        "status": "success",
+        "name": {
+            "logical_name_id": "ens:alice.eth",
+            "namespace": "ens",
+            "normalized_name": "alice.eth",
+            "canonical_display_name": "Alice.eth",
+            "namehash": "0x0000000000000000000000000000000000000000000000000000000000000123",
+            "resource_id": "00000000-0000-0000-0000-000000000456",
+            "binding_kind": "declared_registry_path"
+        }
+    });
+    let finished_at = timestamp(1_717_172_470);
+    let trace = primary_name_execution_trace(
+        execution_trace_id,
+        "ens",
+        address,
+        "60",
+        verified_primary_name.clone(),
+        finished_at,
+    );
+    let outcome = primary_name_execution_outcome(
+        execution_trace_id,
+        "ens",
+        address,
+        "60",
+        verified_primary_name,
+        finished_at,
+    );
+    upsert_execution_trace(&database.pool, &trace).await?;
+    upsert_execution_outcome(&database.pool, &outcome).await?;
+
+    // Model a success cached before claim normalization was materialized. The persistence
+    // readback fence must continue rejecting that success after the tuple is marked non-normalized.
+    database
+        .insert_primary_name_current_normalized_claim_name(
+            address,
+            "ens",
+            "60",
+            Some("alice.eth"),
+            false,
+        )
+        .await?;
+    assert!(
+        bigname_execution::load_persisted_ens_verified_primary_name(
+            &database.pool,
+            &outcome.cache_key,
+        )
+        .await?
+        .is_none(),
+        "the persisted-success fence must reject a non-normalized current claim"
+    );
+
+    let lookup_state = match load_primary_name_lookup_state(
+        &database.pool,
+        address,
+        "ens",
+        "60",
+        ResolutionMode::Verified,
+    )
+    .await
+    {
+        Ok(lookup_state) => lookup_state,
+        Err(_) => panic!("primary-name lookup state must load"),
+    };
+    assert!(
+        lookup_state.persisted_verified.is_none(),
+        "the normalization gate must bypass persisted verified-primary readback"
+    );
+
+    let v1_response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/primary-names/{address}?namespace=ens&coin_type=60&mode=verified"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v1 pre-upgrade primary-name readback request failed")?;
+    assert_eq!(v1_response.status(), StatusCode::OK);
+    let v1_payload: PrimaryNameResponse = read_json(v1_response).await?;
+    assert_eq!(v1_payload.declared_state, None);
+    assert_eq!(
+        v1_payload.verified_state,
+        Some(json!({
+            "verified_primary_name": {
+                "status": "invalid_name",
+                "failure_reason": bigname_execution::VERIFIED_PRIMARY_NAME_CLAIM_NOT_NORMALIZED_REASON,
+            }
+        }))
+    );
+
+    let v2_payload = v2_primary_name_payload_for_database(
+        &database,
+        &format!(
+            "/v2/addresses/{address}/primary-name?namespace=ens&coin_type=60&source=verified"
+        ),
+    )
+    .await?;
+    assert_eq!(
+        v2_payload["data"],
+        json!({
+            "address": address,
+            "coin_type": 60,
+            "namespace": "ens",
+            "answers": [{
+                "source": "verified",
+                "status": "not_found",
+                "failure_reason": "claim_not_normalized"
+            }],
+            "verification": {
+                "status": "not_found",
+                "failure_reason": "claim_not_normalized"
+            }
+        })
+    );
+    assert_primary_name_snapshot_meta(&v2_payload);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_basenames_primary_name_without_persisted_verified_stays_base_scoped() -> Result<()>
 {
     let database = TestDatabase::new_migrated().await?;
@@ -283,6 +483,7 @@ async fn v2_get_basenames_primary_name_without_persisted_verified_stays_base_sco
             "basenames",
             V2_BASENAMES_PRIMARY_COIN_TYPE,
             Some("alice.base.eth"),
+            true,
         )
         .await?;
 
@@ -355,6 +556,7 @@ async fn v2_get_primary_name_requires_reason_for_verified_unsupported() -> Resul
             "ens",
             "60",
             Some("alice.eth"),
+            true,
         )
         .await?;
 
@@ -430,6 +632,7 @@ async fn v2_get_primary_name_rejects_pipeline_unsupported_reason() -> Result<()>
             "ens",
             "60",
             Some("alice.eth"),
+            true,
         )
         .await?;
 
@@ -744,6 +947,7 @@ async fn seed_v2_basenames_primary_name_persisted_verified(
             "basenames",
             V2_BASENAMES_PRIMARY_COIN_TYPE,
             Some("alice.base.eth"),
+            true,
         )
         .await?;
 

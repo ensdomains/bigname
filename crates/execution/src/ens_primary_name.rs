@@ -193,13 +193,12 @@ async fn lookup_ens_reverse_primary_name_with_rpc(
     }
 
     let name = lookup_reverse_name(rpc, resolver_address, reverse_node).await?;
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
+    if name.trim().is_empty() {
         return Ok(None);
     }
 
     Ok(Some(OnDemandEnsPrimaryName {
-        name: trimmed.to_owned(),
+        name,
         resolver_address: hex_string(resolver_address.as_slice()),
     }))
 }

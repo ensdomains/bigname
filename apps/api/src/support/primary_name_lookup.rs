@@ -11,24 +11,33 @@ pub(super) async fn load_primary_name_lookup_state(
 ) -> ApiResult<PrimaryNameLookupState> {
     let coin_type = canonical_primary_name_coin_type(coin_type)?;
     match load_primary_name_current_snapshot(pool, address, namespace, &coin_type).await {
-        Ok(Some(snapshot)) => Ok(PrimaryNameLookupState {
-            tuple_state: PrimaryNameTupleState::TuplePresent(snapshot.row),
-            normalized_claim_name: mode
-                .includes_declared()
-                .then_some(snapshot.normalized_claim_name)
-                .flatten(),
-            on_demand_claim: OnDemandPrimaryNameClaimState::NotAttempted,
-            on_demand_verified: OnDemandPrimaryNameVerificationState::NotAttempted,
-            persisted_verified: if mode.includes_verified() {
+        Ok(Some(snapshot)) => {
+            let claim_gates_verified_readback = snapshot.row.claim_status
+                == PrimaryNameClaimStatus::Success
+                && !snapshot.claim_name_is_normalized;
+            let persisted_verified = if mode.includes_verified() && !claim_gates_verified_readback {
                 load_persisted_primary_name_verified_readback(pool, address, namespace, &coin_type)
                     .await?
             } else {
                 None
-            },
-        }),
+            };
+
+            Ok(PrimaryNameLookupState {
+                tuple_state: PrimaryNameTupleState::TuplePresent(snapshot.row),
+                normalized_claim_name: mode
+                    .includes_declared()
+                    .then_some(snapshot.normalized_claim_name)
+                    .flatten(),
+                claim_name_is_normalized: snapshot.claim_name_is_normalized,
+                on_demand_claim: OnDemandPrimaryNameClaimState::NotAttempted,
+                on_demand_verified: OnDemandPrimaryNameVerificationState::NotAttempted,
+                persisted_verified,
+            })
+        }
         Ok(None) => Ok(PrimaryNameLookupState {
             tuple_state: PrimaryNameTupleState::TupleMissing,
             normalized_claim_name: None,
+            claim_name_is_normalized: false,
             on_demand_claim: OnDemandPrimaryNameClaimState::NotAttempted,
             on_demand_verified: OnDemandPrimaryNameVerificationState::NotAttempted,
             persisted_verified: None,
@@ -37,6 +46,7 @@ pub(super) async fn load_primary_name_lookup_state(
             Ok(PrimaryNameLookupState {
                 tuple_state: PrimaryNameTupleState::ProjectionUnavailable,
                 normalized_claim_name: None,
+                claim_name_is_normalized: false,
                 on_demand_claim: OnDemandPrimaryNameClaimState::NotAttempted,
                 on_demand_verified: OnDemandPrimaryNameVerificationState::NotAttempted,
                 persisted_verified: None,
@@ -432,6 +442,7 @@ pub(super) async fn load_on_demand_primary_name_claim(
 
     Ok(OnDemandPrimaryNameClaimState::Found(
         OnDemandPrimaryNameClaim {
+            raw_name: on_demand.name,
             normalized_name: parsed.normalized_name,
             resolver_address: on_demand.resolver_address,
         },
@@ -448,6 +459,9 @@ pub(super) async fn load_on_demand_primary_name_verification(
     let coin_type = canonical_primary_name_coin_type(coin_type)?;
     if namespace != bigname_storage::ENS_NAMESPACE || coin_type != "60" {
         return Ok(OnDemandPrimaryNameVerificationState::NotAttempted);
+    }
+    if claim.raw_name != claim.normalized_name {
+        return Ok(OnDemandPrimaryNameVerificationState::ClaimNotNormalized);
     }
 
     let verification = match bigname_execution::verify_ens_primary_name_forward_address(

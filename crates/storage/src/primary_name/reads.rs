@@ -33,6 +33,7 @@ pub async fn load_primary_name_current_snapshot(
             claim_status,
             raw_claim_name,
             normalized_claim_name,
+            claim_name_is_normalized,
             claim_provenance
         FROM primary_names_current
         WHERE address = $1
@@ -71,6 +72,7 @@ pub async fn load_primary_name_current_snapshot_for_update_in_transaction(
             claim_status,
             raw_claim_name,
             normalized_claim_name,
+            claim_name_is_normalized,
             claim_provenance
         FROM primary_names_current
         WHERE address = $1
