@@ -41,6 +41,8 @@ Each manifest contains:
 - `contracts`
 - `discovery_rules`
 
+For one `(namespace, source_family, chain)` tuple in a selected deployment-profile root, at most one manifest version may declare `rollout_status = "active"`. Zero active versions remains valid for a family whose versions are only `draft`, `shadow`, or `deprecated`. Within one manifest version, every `[[contracts]].role` must be unique. The loader rejects either violation before repository sync.
+
 Each `[[roots]]` and `[[contracts]]` entry may declare an optional `start_block`. `start_block` is the inclusive first historical block for that target. Omitted means unknown — adapters preserve that state rather than inferring zero, the current job range, the manifest activation height, or any other fallback.
 
 For `[[contracts]]`, `proxy_kind` is required. `proxy_kind = "none"` omits `implementation`. Any non-`none` `proxy_kind` includes `implementation` as the current implementation address for that manifest version.
