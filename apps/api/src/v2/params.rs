@@ -315,6 +315,24 @@ fn invalid_parameter(parameter: &'static str) -> V2Error {
     V2Error::invalid_input(format!("{parameter} is invalid"))
 }
 
+pub(crate) fn validate_latest_collection_selectors(
+    at: Option<&AtSelector>,
+    finality: Finality,
+) -> V2Result<()> {
+    if at.is_some() {
+        return Err(V2Error::invalid_input(
+            "at is not supported because collection routes read latest state",
+        ));
+    }
+    if finality != Finality::Latest {
+        return Err(V2Error::invalid_input(
+            "finality must be latest because collection routes read latest state",
+        ));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,6 +463,31 @@ mod tests {
             .expect("scope value must parse");
             assert_eq!(params.scope, expected);
         }
+    }
+
+    #[test]
+    fn latest_collection_selectors_reject_at_and_historical_finality() {
+        let at = AtSelector::Timestamp("2026-07-21T00:00:00Z".to_owned());
+        let at_error = validate_latest_collection_selectors(Some(&at), Finality::Latest)
+            .expect_err("collection at selector must fail");
+        assert_eq!(at_error.code(), ErrorCode::InvalidInput);
+        assert_eq!(
+            at_error.envelope().error.message,
+            "at is not supported because collection routes read latest state"
+        );
+
+        for finality in [Finality::Safe, Finality::Finalized] {
+            let error = validate_latest_collection_selectors(None, finality)
+                .expect_err("historical collection finality must fail");
+            assert_eq!(error.code(), ErrorCode::InvalidInput);
+            assert_eq!(
+                error.envelope().error.message,
+                "finality must be latest because collection routes read latest state"
+            );
+        }
+
+        validate_latest_collection_selectors(None, Finality::Latest)
+            .expect("latest collection selector must remain valid");
     }
 
     #[test]

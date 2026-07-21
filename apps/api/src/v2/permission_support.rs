@@ -3,11 +3,25 @@ use std::collections::BTreeMap;
 use bigname_storage::{PermissionCoverageStatus, PermissionsCurrentResourceSummary};
 use sqlx::types::Uuid;
 
-use super::{Completeness, Meta};
+use crate::ApiError;
+
+use super::{Completeness, Meta, V2Error};
 
 const PERMISSION_SUPPORT_UNKNOWN_REASON: &str = "permission_support_unknown";
 const WRAPPER_HOLDER_PERMISSIONS_NOT_SUPPORTED_REASON: &str =
     "wrapper_holder_permissions_not_supported";
+
+pub(crate) fn permission_read_error_to_v2(error: ApiError) -> V2Error {
+    if error.code != "stale" {
+        return V2Error::internal_error("failed to read permission data");
+    }
+
+    if error.message == "permissions_current projection changed during the request" {
+        V2Error::stale("permission data changed during the request")
+    } else {
+        V2Error::stale("permission data publication is not compatible")
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PermissionSupport {
@@ -141,6 +155,29 @@ mod tests {
         assert_eq!(
             meta.unsupported_reason.as_deref(),
             Some(PERMISSION_SUPPORT_UNKNOWN_REASON)
+        );
+    }
+
+    #[test]
+    fn permission_read_errors_use_current_state_messages() {
+        let incompatible = permission_read_error_to_v2(ApiError {
+            status: axum::http::StatusCode::CONFLICT,
+            code: "stale",
+            message: "permissions_current projection publication is not compatible".to_owned(),
+        });
+        assert_eq!(
+            incompatible.envelope().error.message,
+            "permission data publication is not compatible"
+        );
+
+        let changed = permission_read_error_to_v2(ApiError {
+            status: axum::http::StatusCode::CONFLICT,
+            code: "stale",
+            message: "permissions_current projection changed during the request".to_owned(),
+        });
+        assert_eq!(
+            changed.envelope().error.message,
+            "permission data changed during the request"
         );
     }
 }

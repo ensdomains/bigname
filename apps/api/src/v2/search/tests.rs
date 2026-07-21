@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use anyhow::{Context, Result};
 use axum::{
     Router,
@@ -8,12 +6,11 @@ use axum::{
     response::Response,
 };
 use bigname_storage::{
-    CanonicalityState, ChainCheckpointUpdate, ChainLineageBlock, ChainPosition, ChainPositions,
-    CheckpointBlockRef, NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentRow,
-    NameSurface, Resource, SelectedSnapshot, SnapshotConsistency, SurfaceBinding,
-    SurfaceBindingKind, TokenLineage, advance_chain_checkpoints, upsert_chain_lineage_blocks,
-    upsert_name_current_rows, upsert_name_surfaces, upsert_resources, upsert_surface_bindings,
-    upsert_token_lineages,
+    CanonicalityState, ChainCheckpointUpdate, ChainLineageBlock, CheckpointBlockRef,
+    NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentRow, NameSurface, Resource,
+    SurfaceBinding, SurfaceBindingKind, TokenLineage, advance_chain_checkpoints,
+    upsert_chain_lineage_blocks, upsert_name_current_rows, upsert_name_surfaces, upsert_resources,
+    upsert_surface_bindings, upsert_token_lineages,
 };
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::{Value, json};
@@ -23,7 +20,7 @@ use sqlx::types::{
 };
 use tower::ServiceExt;
 
-use crate::v2::{ErrorCode, SnapshotReadResource, resolve_v2_snapshot_for};
+use crate::v2::ErrorCode;
 
 use super::*;
 
@@ -40,7 +37,7 @@ fn search_cursor_payload_round_trips_name_cursor() {
         normalized_name: "alpha.eth".to_owned(),
         namehash: "node:alpha.eth".to_owned(),
     };
-    let binding = cursor_binding("al", SearchMatch::Prefix, Some("ens"), "snapshot-1");
+    let binding = cursor_binding("al", SearchMatch::Prefix, Some("ens"));
     let payload = search_cursor_payload(&cursor, &binding).expect("name cursor must encode");
 
     assert_eq!(
@@ -51,17 +48,18 @@ fn search_cursor_payload_round_trips_name_cursor() {
     assert_eq!(payload.filters[Q_FILTER_KEY], "al");
     assert_eq!(payload.filters[MATCH_FILTER_KEY], "prefix");
     assert_eq!(payload.filters[NAMESPACE_FILTER_KEY], "ens");
+    assert!(payload.snapshot.is_none());
 }
 
 #[test]
-fn search_cursor_rejects_cross_filter_match_namespace_or_snapshot() {
+fn search_cursor_rejects_cross_filter_match_namespace_or_sort() {
     let cursor = NameCurrentListCursor {
         sort_value: NameCurrentListCursorValue::Name("alpha.eth".to_owned()),
         namespace: "ens".to_owned(),
         normalized_name: "alpha.eth".to_owned(),
         namehash: "node:alpha.eth".to_owned(),
     };
-    let binding = cursor_binding("al", SearchMatch::Prefix, Some("ens"), "snapshot-1");
+    let binding = cursor_binding("al", SearchMatch::Prefix, Some("ens"));
 
     let mut payload = search_cursor_payload(&cursor, &binding).expect("name cursor must encode");
     payload
@@ -82,12 +80,27 @@ fn search_cursor_rejects_cross_filter_match_namespace_or_snapshot() {
     assert!(search_storage_cursor(&payload, &binding).is_err());
 
     let mut payload = search_cursor_payload(&cursor, &binding).expect("name cursor must encode");
-    payload.snapshot = Some("snapshot-2".to_owned());
-    assert!(search_storage_cursor(&payload, &binding).is_err());
-
-    let mut payload = search_cursor_payload(&cursor, &binding).expect("name cursor must encode");
     payload.sort = "name_desc".to_owned();
     assert!(search_storage_cursor(&payload, &binding).is_err());
+}
+
+#[test]
+fn search_cursor_ignores_legacy_snapshot_component() {
+    let cursor = NameCurrentListCursor {
+        sort_value: NameCurrentListCursorValue::Name("alpha.eth".to_owned()),
+        namespace: "ens".to_owned(),
+        normalized_name: "alpha.eth".to_owned(),
+        namehash: "node:alpha.eth".to_owned(),
+    };
+    let binding = cursor_binding("al", SearchMatch::Prefix, Some("ens"));
+    let mut payload = search_cursor_payload(&cursor, &binding).expect("name cursor must encode");
+    payload.snapshot = Some("legacy-snapshot".to_owned());
+
+    assert_eq!(
+        search_storage_cursor(&payload, &binding)
+            .expect("legacy snapshot component must not bind a latest-state cursor"),
+        cursor
+    );
 }
 
 #[test]
@@ -98,7 +111,7 @@ fn search_cursor_payload_rejects_non_name_storage_cursor() {
         normalized_name: "alpha.eth".to_owned(),
         namehash: "node:alpha.eth".to_owned(),
     };
-    let binding = cursor_binding("al", SearchMatch::Prefix, Some("ens"), "snapshot-1");
+    let binding = cursor_binding("al", SearchMatch::Prefix, Some("ens"));
 
     let error =
         search_cursor_payload(&cursor, &binding).expect_err("non-name cursor must not encode");
@@ -158,14 +171,7 @@ async fn v2_search_prefix_returns_record_rows() -> Result<()> {
     assert_eq!(payload["page"]["page_size"], json!(50));
     assert_eq!(payload["page"]["total_count"], Value::Null);
     assert_eq!(payload["page"]["has_more"], json!(false));
-    assert_eq!(
-        payload["meta"]["as_of"]["1"],
-        json!({
-            "block_number": 110,
-            "block_hash": "0xeth110",
-            "timestamp": "2026-04-17T00:01:50Z"
-        })
-    );
+    assert_eq!(payload["meta"], json!({}));
 
     let data = payload["data"].as_array().expect("data must be an array");
     assert_eq!(names(data), vec!["alpha.eth", "alpine.eth"]);
@@ -262,22 +268,14 @@ async fn v2_search_lowercases_q_and_filters_namespace() -> Result<()> {
         names(all_namespaces["data"].as_array().unwrap()),
         vec!["alpha.base.eth", "alpha.eth"]
     );
-    assert!(all_namespaces["meta"]["as_of"].get("1").is_some());
-    assert!(all_namespaces["meta"]["as_of"].get("8453").is_some());
+    assert_eq!(all_namespaces["meta"], json!({}));
 
     let basenames = search_payload(&database, "/v2/search?q=alpha&namespace=basenames").await?;
     assert_eq!(
         names(basenames["data"].as_array().unwrap()),
         vec!["alpha.base.eth"]
     );
-    assert_eq!(
-        basenames["meta"]["as_of"]["8453"],
-        json!({
-            "block_number": 210,
-            "block_hash": "0xbase210",
-            "timestamp": "2026-04-17T00:03:30Z"
-        })
-    );
+    assert_eq!(basenames["meta"], json!({}));
 
     let unknown = search_response(&database, "/v2/search?q=alpha&namespace=unknown").await?;
     assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
@@ -379,7 +377,6 @@ async fn v2_search_rejects_cursor_anchor_changes() -> Result<()> {
         format!("/v2/search?q=ga&namespace=ens&page_size=1&cursor={cursor}"),
         format!("/v2/search?q=al&match=contains&namespace=ens&page_size=1&cursor={cursor}"),
         format!("/v2/search?q=al&namespace=basenames&page_size=1&cursor={cursor}"),
-        format!("/v2/search?q=al&namespace=ens&finality=finalized&page_size=1&cursor={cursor}"),
     ] {
         let response = search_response(&database, &uri).await?;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
@@ -393,36 +390,41 @@ async fn v2_search_rejects_cursor_anchor_changes() -> Result<()> {
 }
 
 #[tokio::test]
-async fn v2_search_snapshot_selectors_unknown_params_and_empty_matches() -> Result<()> {
+async fn v2_search_rejects_snapshot_selectors_and_accepts_explicit_latest() -> Result<()> {
     let database = SearchDatabase::new().await?;
     seed_search_fixture(&database).await?;
 
-    let safe = search_payload(&database, "/v2/search?q=al&namespace=ens&finality=safe").await?;
-    assert_eq!(
-        safe["meta"]["as_of"]["1"],
-        json!({
-            "block_number": 109,
-            "block_hash": "0xeth109",
-            "timestamp": "2026-04-17T00:01:49Z"
-        })
-    );
+    for (uri, message) in [
+        (
+            "/v2/search?q=al&namespace=ens&at=2026-04-17T00:01:48Z",
+            "at is not supported because collection routes read latest state",
+        ),
+        (
+            "/v2/search?q=al&namespace=ens&finality=safe",
+            "finality must be latest because collection routes read latest state",
+        ),
+        (
+            "/v2/search?q=al&namespace=ens&finality=finalized",
+            "finality must be latest because collection routes read latest state",
+        ),
+    ] {
+        let response = search_response(&database, uri).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        let error = read_json(response).await?;
+        assert_eq!(error["error"]["code"], json!("invalid_input"));
+        assert_eq!(error["error"]["message"], json!(message));
+    }
 
-    let snapshot_token = database
-        .snapshot_token("ens", "2026-04-17T00:01:48Z")
-        .await?;
-    let pinned = search_payload(
-        &database,
-        &format!("/v2/search?q=al&namespace=ens&at={snapshot_token}"),
-    )
-    .await?;
-    assert_eq!(
-        pinned["meta"]["as_of"]["1"],
-        json!({
-            "block_number": 108,
-            "block_hash": "0xeth108",
-            "timestamp": "2026-04-17T00:01:48Z"
-        })
-    );
+    let latest = search_payload(&database, "/v2/search?q=al&namespace=ens&finality=latest").await?;
+    assert_eq!(latest["meta"], json!({}));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_search_rejects_unknown_params_and_returns_empty_matches() -> Result<()> {
+    let database = SearchDatabase::new().await?;
+    seed_search_fixture(&database).await?;
 
     let unknown = search_response(&database, "/v2/search?q=al&namespace=ens&sort=name").await?;
     assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
@@ -440,70 +442,19 @@ async fn v2_search_snapshot_selectors_unknown_params_and_empty_matches() -> Resu
 }
 
 #[tokio::test]
-async fn v2_search_union_at_replay_rejects_single_name_scope() -> Result<()> {
+async fn v2_search_omits_snapshot_metadata_across_namespace_scopes() -> Result<()> {
     let database = SearchDatabase::new().await?;
     seed_search_fixture(&database).await?;
 
-    let first = search_payload(&database, "/v2/search?q=alpha").await?;
-    assert_eq!(
-        names(first["data"].as_array().unwrap()),
-        vec!["alpha.base.eth", "alpha.eth"]
-    );
-    assert_eq!(
-        first["meta"]["as_of"]["1"],
-        json!({
-            "block_number": 110,
-            "block_hash": "0xeth110",
-            "timestamp": "2026-04-17T00:01:50Z"
-        })
-    );
-    assert_eq!(
-        first["meta"]["as_of"]["8453"],
-        json!({
-            "block_number": 210,
-            "block_hash": "0xbase210",
-            "timestamp": "2026-04-17T00:03:30Z"
-        })
-    );
-    assert!(first["meta"]["as_of"].get("11155111").is_none());
-
-    let replay_at = first["meta"]["as_of_token"]
-        .as_str()
-        .context("search response must include meta.as_of_token")?;
-    let replay = search_payload(&database, &format!("/v2/search?q=alpha&at={replay_at}")).await?;
-    assert_eq!(replay["meta"]["as_of"], first["meta"]["as_of"]);
-    assert_eq!(replay["meta"]["as_of_token"], first["meta"]["as_of_token"]);
-    assert_eq!(replay["data"], first["data"]);
-
-    let rejected =
-        search_response(&database, &format!("/v2/names/alpha.eth?at={replay_at}")).await?;
-    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
-    let error = read_json(rejected).await?;
-    assert_eq!(error["error"]["code"], json!("invalid_input"));
-    assert_eq!(
-        error["error"]["message"],
-        json!("unsupported snapshot position slot base")
-    );
-
-    seed_chain(
-        &database,
-        "ethereum-sepolia",
-        "0xsepolia",
-        300,
-        310,
-        1_776_384_300,
-    )
-    .await?;
-    let sepolia_at = sepolia_snapshot_token();
-    let mixed_profile =
-        search_response(&database, &format!("/v2/search?q=alpha&at={sepolia_at}")).await?;
-    assert_eq!(mixed_profile.status(), StatusCode::CONFLICT);
-    let error = read_json(mixed_profile).await?;
-    assert_eq!(error["error"]["code"], json!("conflict"));
-    assert_eq!(
-        error["error"]["message"],
-        json!("snapshot selector cannot form one canonical snapshot across deployment profiles")
-    );
+    for uri in [
+        "/v2/search?q=alpha",
+        "/v2/search?q=alpha&namespace=ens",
+        "/v2/search?q=alpha&namespace=basenames",
+    ] {
+        let payload = search_payload(&database, uri).await?;
+        assert!(payload["meta"].get("as_of").is_none(), "{uri}");
+        assert!(payload["meta"].get("as_of_token").is_none(), "{uri}");
+    }
 
     database.cleanup().await
 }
@@ -512,13 +463,11 @@ fn cursor_binding<'a>(
     q: &'a str,
     match_mode: SearchMatch,
     namespace: Option<&'a str>,
-    snapshot_token: &'a str,
 ) -> SearchCursorBinding<'a> {
     SearchCursorBinding {
         q,
         match_mode,
         namespace,
-        snapshot_token,
     }
 }
 
@@ -526,38 +475,6 @@ fn names(rows: &[Value]) -> Vec<&str> {
     rows.iter()
         .map(|row| row["name"].as_str().expect("row must include name"))
         .collect()
-}
-
-fn sepolia_snapshot_token() -> String {
-    encode_at_token(&SelectedSnapshot {
-        chain_positions: ChainPositions::new(BTreeMap::from([(
-            "ethereum-sepolia".to_owned(),
-            snapshot_position(
-                "ethereum-sepolia",
-                "ethereum-sepolia",
-                308,
-                "0xsepolia308",
-                1_776_384_308,
-            ),
-        )])),
-        consistency: SnapshotConsistency::Head,
-    })
-}
-
-fn snapshot_position(
-    slot: &str,
-    chain_id: &str,
-    block_number: i64,
-    block_hash: &str,
-    unix_seconds: i64,
-) -> ChainPosition {
-    ChainPosition {
-        slot: slot.to_owned(),
-        chain_id: chain_id.to_owned(),
-        block_number,
-        block_hash: block_hash.to_owned(),
-        timestamp: timestamp(unix_seconds),
-    }
 }
 
 async fn search_payload(database: &SearchDatabase, uri: &str) -> Result<Value> {
@@ -619,25 +536,6 @@ impl SearchDatabase {
             pool: self.pool().clone(),
             chain_rpc_urls: bigname_execution::ChainRpcUrls::default(),
         }
-    }
-
-    async fn snapshot_token(&self, namespace: &str, at: &str) -> Result<String> {
-        let state = self.app_state();
-        let at_selector = AtSelector::Timestamp(at.to_owned());
-        let scope = v2_exact_name_snapshot_scope(&state, namespace, Some(&at_selector))
-            .await
-            .map_err(|error| anyhow::anyhow!("{:?}", error.envelope()))?;
-        let selected = resolve_v2_snapshot_for(
-            self.pool(),
-            &scope,
-            Some(&at_selector),
-            Finality::Latest,
-            SnapshotReadResource::Search,
-        )
-        .await
-        .map_err(|error| anyhow::anyhow!("{:?}", error.envelope()))?;
-
-        Ok(encode_at_token(&selected))
     }
 
     async fn cleanup(self) -> Result<()> {

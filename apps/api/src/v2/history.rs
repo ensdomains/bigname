@@ -11,17 +11,13 @@ use bigname_storage::{
 use serde::{Deserialize, Serialize};
 use sqlx::types::time::{OffsetDateTime, UtcOffset};
 
-use crate::{
-    AppState, ExactNameSnapshotSelector, load_name_current_for_selected_snapshot,
-    map_internal_api_error, normalize_inferred_route_name,
-};
+use crate::{AppState, ExactNameSnapshotSelector, normalize_inferred_route_name};
 
 use super::cursor::{cursor_value, invalid_cursor_error};
 use super::{
-    AtSelector, CursorPayload, Envelope, HistoryEventType, HistoryScope, Page, QueryParamAllowlist,
-    SnapshotReadResource, StrictQueryParams, V2Error, V2Result, api_error_to_v2,
-    api_error_to_v2_for_resource, decode, decode_at_token, encode, encode_at_token,
-    resolve_v2_snapshot_for, snapshot_meta,
+    AtSelector, CursorPayload, Envelope, HistoryEventType, HistoryScope, Meta, Page,
+    QueryParamAllowlist, StrictQueryParams, V2Error, V2Result, api_error_to_v2, decode,
+    decode_at_token, encode, validate_latest_collection_selectors,
 };
 
 const HISTORY_SORT: &str = "chain_position_desc";
@@ -66,6 +62,7 @@ pub(crate) async fn get_history(
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<Vec<HistoryEvent>>>> {
     let params = params.into_inner();
+    validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
     let normalized = normalize_inferred_route_name(&input_name)
         .map_err(|error| V2Error::invalid_input(error.message))?;
     let namespace = params
@@ -73,34 +70,21 @@ pub(crate) async fn get_history(
         .clone()
         .unwrap_or_else(|| normalized.namespace.to_owned());
 
-    let scope = v2_exact_name_snapshot_scope(&state, &namespace, params.at.as_ref()).await?;
-    let selected_snapshot = resolve_v2_snapshot_for(
-        &state.pool,
-        &scope,
-        params.at.as_ref(),
-        params.finality,
-        SnapshotReadResource::NameHistory,
-    )
-    .await?;
-    let parent = load_name_current_for_selected_snapshot(
-        &state.pool,
-        &namespace,
-        &normalized.normalized_name,
-        &selected_snapshot,
-    )
-    .await
-    .map_err(|error| {
-        api_error_to_v2_for_resource(
-            map_internal_api_error(
-                error,
-                format!(
-                    "failed to load history for {}/{}",
-                    namespace, normalized.normalized_name
-                ),
-            ),
-            SnapshotReadResource::NameHistory,
-        )
-    })?;
+    let logical_name_id = format!("{namespace}:{}", normalized.normalized_name);
+    let parent = bigname_storage::load_name_current(&state.pool, &logical_name_id)
+        .await
+        .map_err(|_| {
+            V2Error::internal_error(format!(
+                "failed to load history for {}/{}",
+                namespace, normalized.normalized_name
+            ))
+        })?
+        .ok_or_else(|| {
+            V2Error::not_found(format!(
+                "name {} was not found in namespace {namespace}",
+                normalized.normalized_name
+            ))
+        })?;
 
     let resource_ids = if matches!(params.scope, HistoryScope::Name) {
         Vec::new()
@@ -110,19 +94,12 @@ pub(crate) async fn get_history(
             .map_err(api_error_to_v2)?
     };
     let storage_scope = history_storage_scope(params.scope);
-    let snapshot_token = encode_at_token(&selected_snapshot);
     let storage_cursor = params
         .cursor
         .as_deref()
         .map(|cursor| {
             let payload = decode(cursor)?;
-            history_storage_cursor(
-                &payload,
-                &namespace,
-                &parent.logical_name_id,
-                params.scope,
-                &snapshot_token,
-            )
+            history_storage_cursor(&payload, &namespace, &parent.logical_name_id, params.scope)
         })
         .transpose()?;
 
@@ -157,7 +134,6 @@ pub(crate) async fn get_history(
             &namespace,
             &parent.logical_name_id,
             params.scope,
-            &snapshot_token,
         ))
     });
     let has_more = next_cursor.is_some();
@@ -166,8 +142,6 @@ pub(crate) async fn get_history(
         .iter()
         .filter_map(|row| build_history_event(row, &normalized.normalized_name))
         .collect();
-    let meta = snapshot_meta(&selected_snapshot)?;
-
     Ok(Json(Envelope {
         data,
         page: Some(Page {
@@ -177,7 +151,7 @@ pub(crate) async fn get_history(
             total_count: None,
             has_more,
         }),
-        meta,
+        meta: Meta::default(),
     }))
 }
 
@@ -211,7 +185,6 @@ pub(crate) fn history_cursor_payload(
     namespace: &str,
     parent_logical_name_id: &str,
     scope: HistoryScope,
-    snapshot_token: &str,
 ) -> CursorPayload {
     CursorPayload::new(
         HISTORY_SORT,
@@ -233,7 +206,7 @@ pub(crate) fn history_cursor_payload(
                 cursor.event_identity.clone(),
             ),
         ]),
-        Some(snapshot_token.to_owned()),
+        None,
     )
 }
 
@@ -242,12 +215,8 @@ pub(crate) fn history_storage_cursor(
     namespace: &str,
     parent_logical_name_id: &str,
     scope: HistoryScope,
-    snapshot_token: &str,
 ) -> V2Result<HistoryCursor> {
     if payload.sort != HISTORY_SORT {
-        return Err(invalid_cursor_error());
-    }
-    if payload.snapshot.as_deref() != Some(snapshot_token) {
         return Err(invalid_cursor_error());
     }
     if payload.filters.len() != 3
@@ -362,13 +331,7 @@ mod tests {
             normalized_event_id: 42,
             event_identity: "event:42".to_owned(),
         };
-        let payload = history_cursor_payload(
-            &cursor,
-            "ens",
-            "ens:parent.eth",
-            HistoryScope::Both,
-            "snapshot-1",
-        );
+        let payload = history_cursor_payload(&cursor, "ens", "ens:parent.eth", HistoryScope::Both);
 
         assert_eq!(
             payload.filters,
@@ -380,100 +343,56 @@ mod tests {
         );
 
         assert_eq!(
-            history_storage_cursor(
-                &payload,
-                "ens",
-                "ens:parent.eth",
-                HistoryScope::Both,
-                "snapshot-1"
-            )
-            .expect("cursor must decode"),
+            history_storage_cursor(&payload, "ens", "ens:parent.eth", HistoryScope::Both)
+                .expect("cursor must decode"),
             cursor
         );
+        assert!(payload.snapshot.is_none());
     }
 
     #[test]
-    fn history_cursor_rejects_wrong_sort_filter_scope_or_snapshot() {
+    fn history_cursor_rejects_wrong_sort_filter_or_scope() {
         let cursor = HistoryCursor {
             normalized_event_id: 42,
             event_identity: "event:42".to_owned(),
         };
 
-        let mut payload = history_cursor_payload(
-            &cursor,
-            "ens",
-            "ens:parent.eth",
-            HistoryScope::Both,
-            "snapshot-1",
-        );
+        let mut payload =
+            history_cursor_payload(&cursor, "ens", "ens:parent.eth", HistoryScope::Both);
         payload.sort = "wrong".to_owned();
         assert!(
-            history_storage_cursor(
-                &payload,
-                "ens",
-                "ens:parent.eth",
-                HistoryScope::Both,
-                "snapshot-1"
-            )
-            .is_err()
+            history_storage_cursor(&payload, "ens", "ens:parent.eth", HistoryScope::Both).is_err()
         );
 
-        let mut payload = history_cursor_payload(
-            &cursor,
-            "ens",
-            "ens:parent.eth",
-            HistoryScope::Both,
-            "snapshot-1",
-        );
+        let mut payload =
+            history_cursor_payload(&cursor, "ens", "ens:parent.eth", HistoryScope::Both);
         payload
             .filters
             .insert("name".to_owned(), "ens:other.eth".to_owned());
         assert!(
-            history_storage_cursor(
-                &payload,
-                "ens",
-                "ens:parent.eth",
-                HistoryScope::Both,
-                "snapshot-1"
-            )
-            .is_err()
+            history_storage_cursor(&payload, "ens", "ens:parent.eth", HistoryScope::Both).is_err()
         );
 
-        let payload = history_cursor_payload(
-            &cursor,
-            "ens",
-            "ens:parent.eth",
-            HistoryScope::Name,
-            "snapshot-1",
-        );
+        let payload = history_cursor_payload(&cursor, "ens", "ens:parent.eth", HistoryScope::Name);
         assert!(
-            history_storage_cursor(
-                &payload,
-                "ens",
-                "ens:parent.eth",
-                HistoryScope::Both,
-                "snapshot-1"
-            )
-            .is_err()
+            history_storage_cursor(&payload, "ens", "ens:parent.eth", HistoryScope::Both).is_err()
         );
+    }
 
-        let mut payload = history_cursor_payload(
-            &cursor,
-            "ens",
-            "ens:parent.eth",
-            HistoryScope::Both,
-            "snapshot-1",
-        );
-        payload.snapshot = Some("snapshot-2".to_owned());
-        assert!(
-            history_storage_cursor(
-                &payload,
-                "ens",
-                "ens:parent.eth",
-                HistoryScope::Both,
-                "snapshot-1"
-            )
-            .is_err()
+    #[test]
+    fn history_cursor_ignores_legacy_snapshot_component() {
+        let cursor = HistoryCursor {
+            normalized_event_id: 42,
+            event_identity: "event:42".to_owned(),
+        };
+        let mut payload =
+            history_cursor_payload(&cursor, "ens", "ens:parent.eth", HistoryScope::Both);
+        payload.snapshot = Some("legacy-snapshot".to_owned());
+
+        assert_eq!(
+            history_storage_cursor(&payload, "ens", "ens:parent.eth", HistoryScope::Both)
+                .expect("legacy snapshot component must not bind a latest-state cursor"),
+            cursor
         );
     }
 

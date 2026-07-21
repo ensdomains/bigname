@@ -5454,20 +5454,17 @@ async fn permission_publication_version_gates_every_permission_backed_route_and_
     .await
     .context("failed to seed permission publication snapshot lineage")?;
 
-    let v2_snapshot = "at=2100-01-01T00%3A00%3A00Z&finality=latest";
     let gated_routes = [
         format!("/v1/roles?account={address}"),
         "/v1/names/ens/publication-gate.eth/roles".to_owned(),
         format!("/v1/resources/{resource_id}/permissions"),
         format!("/v1/addresses/{address}/names?include=role_summary"),
-        format!("/v2/permissions?address={address}&{v2_snapshot}"),
-        format!(
-            "/v2/addresses/{address}/names?include=role_summary&{v2_snapshot}"
-        ),
+        format!("/v2/permissions?address={address}"),
+        format!("/v2/addresses/{address}/names?include=role_summary"),
     ];
     let ungated_base_routes = [
         format!("/v1/addresses/{address}/names"),
-        format!("/v2/addresses/{address}/names?{v2_snapshot}"),
+        format!("/v2/addresses/{address}/names"),
     ];
 
     for version_case in ["absent", "old"] {

@@ -107,35 +107,21 @@ pub(crate) async fn resolve_v2_snapshot_for(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SnapshotReadResource {
-    AddressHistory,
-    AddressNames,
     DiagnosticData,
-    Events,
     Name,
-    NameHistory,
     NameRecords,
-    Permissions,
     Resolver,
     Resource,
-    Search,
-    Subnames,
 }
 
 impl SnapshotReadResource {
     fn label(self) -> &'static str {
         match self {
-            Self::AddressHistory => "address history",
-            Self::AddressNames => "address names",
             Self::DiagnosticData => "diagnostic data",
-            Self::Events => "events",
             Self::Name => "name",
-            Self::NameHistory => "name history",
             Self::NameRecords => "name records",
-            Self::Permissions => "permissions",
             Self::Resolver => "resolver",
             Self::Resource => "resource",
-            Self::Search => "search results",
-            Self::Subnames => "subnames",
         }
     }
 }

@@ -15,14 +15,13 @@ use serde_json::Value;
 
 use super::cursor::invalid_cursor_error;
 use super::permission_support::{
-    apply_role_summary_support_meta, permission_support_for_resources,
+    apply_role_summary_support_meta, permission_read_error_to_v2, permission_support_for_resources,
 };
 use super::{
-    AddressNamesDedupe, AddressNamesSort, Envelope, Page, QueryParamAllowlist, RegistrationStatus,
-    Relation, RelationSet, SnapshotReadResource, SortOrder, StrictQueryParams, V2Error, V2Result,
-    api_error_to_v2, api_error_to_v2_for_resource, decode, encode, encode_at_token,
-    name_record::name_registration_fields, permission_powers_value, permission_scope_value,
-    resolve_v2_snapshot_for, snapshot_meta, v2_exact_name_snapshot_scope,
+    AddressNamesDedupe, AddressNamesSort, Envelope, Meta, Page, QueryParamAllowlist,
+    RegistrationStatus, Relation, RelationSet, SortOrder, StrictQueryParams, V2Error, V2Result,
+    api_error_to_v2, decode, encode, name_record::name_registration_fields,
+    permission_powers_value, permission_scope_value, validate_latest_collection_selectors,
 };
 
 #[cfg(test)]
@@ -100,10 +99,10 @@ pub(crate) async fn get_address_names(
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<Vec<AddressName>>>> {
     let params = params.into_inner();
+    validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
     let normalized_address =
         crate::parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
     let namespace_filter = params.namespace.clone();
-    let snapshot_namespace = namespace_filter.as_deref().unwrap_or("ens");
     let include_role_summary = address_names_include_role_summary(&params.include)?;
     let storage_relations = params
         .relation
@@ -116,16 +115,6 @@ pub(crate) async fn get_address_names(
     let storage_order = order_to_storage(params.order);
     let normalized_q = params.q.as_deref().map(str::to_lowercase);
 
-    let scope =
-        v2_exact_name_snapshot_scope(&state, snapshot_namespace, params.at.as_ref()).await?;
-    let selected_snapshot = resolve_v2_snapshot_for(
-        &state.pool,
-        &scope,
-        params.at.as_ref(),
-        params.finality,
-        SnapshotReadResource::AddressNames,
-    )
-    .await?;
     let permission_read = if include_role_summary {
         Some(
             crate::begin_permissions_current_read(
@@ -133,14 +122,11 @@ pub(crate) async fn get_address_names(
                 "/v2/addresses/{address}/names?include=role_summary",
             )
             .await
-            .map_err(|error| {
-                api_error_to_v2_for_resource(error, SnapshotReadResource::AddressNames)
-            })?,
+            .map_err(permission_read_error_to_v2)?,
         )
     } else {
         None
     };
-    let snapshot_token = encode_at_token(&selected_snapshot);
     let cursor_binding = AddressNamesCursorBinding {
         address: &normalized_address,
         namespace: namespace_filter.as_deref(),
@@ -149,7 +135,6 @@ pub(crate) async fn get_address_names(
         q: normalized_q.as_deref(),
         sort: params.sort,
         order: params.order,
-        snapshot_token: &snapshot_token,
     };
     let storage_cursor = params
         .cursor
@@ -283,7 +268,7 @@ pub(crate) async fn get_address_names(
             ))
         })
         .collect::<V2Result<Vec<_>>>()?;
-    let mut meta = snapshot_meta(&selected_snapshot)?;
+    let mut meta = Meta::default();
     if let Some(resource_ids) = role_resource_ids.as_deref() {
         let permission_support =
             permission_support_for_resources(resource_ids, &permission_summaries);
@@ -308,7 +293,7 @@ pub(crate) async fn get_address_names(
             permission_read,
         )
         .await
-        .map_err(|error| api_error_to_v2_for_resource(error, SnapshotReadResource::AddressNames))?;
+        .map_err(permission_read_error_to_v2)?;
     }
     Ok(response)
 }

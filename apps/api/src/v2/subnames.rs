@@ -9,17 +9,13 @@ use bigname_storage::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    AppState, load_name_current_for_selected_snapshot, map_internal_api_error,
-    normalize_inferred_route_name,
-};
+use crate::{AppState, normalize_inferred_route_name};
 
 use super::cursor::{cursor_value, invalid_cursor_error};
 use super::{
-    CursorPayload, Envelope, Page, QueryParamAllowlist, RegistrationStatus, SnapshotReadResource,
-    StrictQueryParams, V2Error, V2Result, api_error_to_v2_for_resource, decode, encode,
-    encode_at_token, name_record::name_registration_fields, resolve_v2_snapshot_for, snapshot_meta,
-    v2_exact_name_snapshot_scope,
+    CursorPayload, Envelope, Meta, Page, QueryParamAllowlist, RegistrationStatus,
+    StrictQueryParams, V2Error, V2Result, decode, encode, name_record::name_registration_fields,
+    validate_latest_collection_selectors,
 };
 
 const SUBNAMES_SORT: &str = "display_name_asc";
@@ -72,6 +68,7 @@ pub(crate) async fn get_subnames(
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<Vec<Subname>>>> {
     let params = params.into_inner();
+    validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
     let normalized = normalize_inferred_route_name(&input_name)
         .map_err(|error| V2Error::invalid_input(error.message))?;
     let namespace = params
@@ -80,47 +77,28 @@ pub(crate) async fn get_subnames(
         .unwrap_or_else(|| normalized.namespace.to_owned());
     let include_counts = subnames_include_counts(&params.include)?;
 
-    let scope = v2_exact_name_snapshot_scope(&state, &namespace, params.at.as_ref()).await?;
-    let selected_snapshot = resolve_v2_snapshot_for(
-        &state.pool,
-        &scope,
-        params.at.as_ref(),
-        params.finality,
-        SnapshotReadResource::Subnames,
-    )
-    .await?;
-    let parent = load_name_current_for_selected_snapshot(
-        &state.pool,
-        &namespace,
-        &normalized.normalized_name,
-        &selected_snapshot,
-    )
-    .await
-    .map_err(|error| {
-        api_error_to_v2_for_resource(
-            map_internal_api_error(
-                error,
-                format!(
-                    "failed to load subnames for {}/{}",
-                    namespace, normalized.normalized_name
-                ),
-            ),
-            SnapshotReadResource::Subnames,
-        )
-    })?;
+    let logical_name_id = format!("{namespace}:{}", normalized.normalized_name);
+    let parent = bigname_storage::load_name_current(&state.pool, &logical_name_id)
+        .await
+        .map_err(|_| {
+            V2Error::internal_error(format!(
+                "failed to load subnames for {}/{}",
+                namespace, normalized.normalized_name
+            ))
+        })?
+        .ok_or_else(|| {
+            V2Error::not_found(format!(
+                "name {} was not found in namespace {namespace}",
+                normalized.normalized_name
+            ))
+        })?;
 
-    let snapshot_token = encode_at_token(&selected_snapshot);
     let storage_cursor = params
         .cursor
         .as_deref()
         .map(|cursor| {
             let payload = decode(cursor)?;
-            subname_storage_cursor(
-                &payload,
-                &namespace,
-                &parent.logical_name_id,
-                &snapshot_token,
-            )
+            subname_storage_cursor(&payload, &namespace, &parent.logical_name_id)
         })
         .transpose()?;
 
@@ -175,7 +153,6 @@ pub(crate) async fn get_subnames(
             cursor,
             &namespace,
             &parent.logical_name_id,
-            &snapshot_token,
         ))
     });
     let has_more = next_cursor.is_some();
@@ -191,8 +168,6 @@ pub(crate) async fn get_subnames(
             )
         })
         .collect();
-    let meta = snapshot_meta(&selected_snapshot)?;
-
     Ok(Json(Envelope {
         data,
         page: Some(Page {
@@ -202,7 +177,7 @@ pub(crate) async fn get_subnames(
             total_count: None,
             has_more,
         }),
-        meta,
+        meta: Meta::default(),
     }))
 }
 
@@ -243,7 +218,6 @@ pub(crate) fn subname_cursor_payload(
     cursor: &ChildrenCurrentKeysetCursor,
     namespace: &str,
     parent_logical_name_id: &str,
-    snapshot_token: &str,
 ) -> CursorPayload {
     CursorPayload::new(
         SUBNAMES_SORT,
@@ -264,7 +238,7 @@ pub(crate) fn subname_cursor_payload(
                 cursor.child_logical_name_id.clone(),
             ),
         ]),
-        Some(snapshot_token.to_owned()),
+        None,
     )
 }
 
@@ -272,12 +246,8 @@ pub(crate) fn subname_storage_cursor(
     payload: &CursorPayload,
     namespace: &str,
     parent_logical_name_id: &str,
-    snapshot_token: &str,
 ) -> V2Result<ChildrenCurrentKeysetCursor> {
     if payload.sort != SUBNAMES_SORT {
-        return Err(invalid_cursor_error());
-    }
-    if payload.snapshot.as_deref() != Some(snapshot_token) {
         return Err(invalid_cursor_error());
     }
     if payload.filters.len() != 2
@@ -330,7 +300,7 @@ mod tests {
             canonical_display_name: "alice.eth".to_owned(),
             child_logical_name_id: "ens:alice.eth".to_owned(),
         };
-        let payload = subname_cursor_payload(&cursor, "ens", "ens:parent.eth", "snapshot-1");
+        let payload = subname_cursor_payload(&cursor, "ens", "ens:parent.eth");
 
         assert_eq!(
             payload.filters,
@@ -341,32 +311,44 @@ mod tests {
         );
 
         assert_eq!(
-            subname_storage_cursor(&payload, "ens", "ens:parent.eth", "snapshot-1")
-                .expect("cursor must decode"),
+            subname_storage_cursor(&payload, "ens", "ens:parent.eth").expect("cursor must decode"),
             cursor
         );
+        assert!(payload.snapshot.is_none());
     }
 
     #[test]
-    fn subname_cursor_rejects_wrong_sort_filter_or_snapshot() {
+    fn subname_cursor_rejects_wrong_sort_or_filter() {
         let cursor = ChildrenCurrentKeysetCursor {
             canonical_display_name: "alice.eth".to_owned(),
             child_logical_name_id: "ens:alice.eth".to_owned(),
         };
-        let mut payload = subname_cursor_payload(&cursor, "ens", "ens:parent.eth", "snapshot-1");
+        let mut payload = subname_cursor_payload(&cursor, "ens", "ens:parent.eth");
 
         payload.sort = "wrong".to_owned();
-        assert!(subname_storage_cursor(&payload, "ens", "ens:parent.eth", "snapshot-1").is_err());
+        assert!(subname_storage_cursor(&payload, "ens", "ens:parent.eth").is_err());
 
-        let mut payload = subname_cursor_payload(&cursor, "ens", "ens:parent.eth", "snapshot-1");
+        let mut payload = subname_cursor_payload(&cursor, "ens", "ens:parent.eth");
         payload
             .filters
             .insert("namespace".to_owned(), "basenames".to_owned());
-        assert!(subname_storage_cursor(&payload, "ens", "ens:parent.eth", "snapshot-1").is_err());
+        assert!(subname_storage_cursor(&payload, "ens", "ens:parent.eth").is_err());
+    }
 
-        let mut payload = subname_cursor_payload(&cursor, "ens", "ens:parent.eth", "snapshot-1");
-        payload.snapshot = Some("snapshot-2".to_owned());
-        assert!(subname_storage_cursor(&payload, "ens", "ens:parent.eth", "snapshot-1").is_err());
+    #[test]
+    fn subname_cursor_ignores_legacy_snapshot_component() {
+        let cursor = ChildrenCurrentKeysetCursor {
+            canonical_display_name: "alice.eth".to_owned(),
+            child_logical_name_id: "ens:alice.eth".to_owned(),
+        };
+        let mut payload = subname_cursor_payload(&cursor, "ens", "ens:parent.eth");
+        payload.snapshot = Some("legacy-snapshot".to_owned());
+
+        assert_eq!(
+            subname_storage_cursor(&payload, "ens", "ens:parent.eth")
+                .expect("legacy snapshot component must not bind a latest-state cursor"),
+            cursor
+        );
     }
 
     #[test]
@@ -375,8 +357,8 @@ mod tests {
             canonical_display_name: "alice.eth".to_owned(),
             child_logical_name_id: "ens:alice.eth".to_owned(),
         };
-        let payload = subname_cursor_payload(&cursor, "ens", "ens:parent-a.eth", "snapshot-1");
+        let payload = subname_cursor_payload(&cursor, "ens", "ens:parent-a.eth");
 
-        assert!(subname_storage_cursor(&payload, "ens", "ens:parent-b.eth", "snapshot-1").is_err());
+        assert!(subname_storage_cursor(&payload, "ens", "ens:parent-b.eth").is_err());
     }
 }

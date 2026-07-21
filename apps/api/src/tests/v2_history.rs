@@ -5,14 +5,7 @@ async fn v2_get_history_returns_lean_product_rows_newest_first() -> Result<()> {
     assert_eq!(payload["page"]["page_size"], json!(20));
     assert_eq!(payload["page"]["total_count"], Value::Null);
     assert_eq!(payload["page"]["has_more"], json!(false));
-    assert_eq!(
-        payload["meta"]["as_of"]["1"],
-        json!({
-            "block_number": 80,
-            "block_hash": "0xname50",
-            "timestamp": "2026-04-17T00:00:20Z"
-        })
-    );
+    assert_eq!(payload["meta"], json!({}));
 
     let data = payload["data"]
         .as_array()
@@ -267,34 +260,23 @@ async fn v2_get_history_empty_and_missing_name_semantics() -> Result<()> {
 }
 
 #[tokio::test]
-async fn v2_get_history_uses_sepolia_positioned_at_token_on_mixed_checkpoints() -> Result<()> {
+async fn v2_get_history_uses_current_sepolia_anchor_on_mixed_checkpoints() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_mixed_checkpoint_names(&database).await?;
     seed_v2_mixed_checkpoint_history(&database).await?;
 
-    let at = v2_sepolia_snapshot_token();
     let payload = v2_history_payload_for_database(
         &database,
-        &format!("/v2/names/{V2_SEPOLIA_SNAPSHOT_NAME}/history?at={at}"),
+        &format!("/v2/names/{V2_SEPOLIA_SNAPSHOT_NAME}/history"),
     )
     .await?;
-
-    assert_eq!(
-        payload["meta"]["as_of"]["11155111"],
-        json!({
-            "block_number": V2_SEPOLIA_SNAPSHOT_BLOCK,
-            "block_hash": V2_SEPOLIA_SNAPSHOT_HASH,
-            "timestamp": V2_SEPOLIA_SNAPSHOT_TIMESTAMP
-        })
-    );
-    assert!(payload["meta"]["as_of"].get("1").is_none());
+    assert_eq!(payload["meta"], json!({}));
     assert_eq!(
         history_types(payload["data"].as_array().expect("history data")),
         vec!["registration"]
     );
 
-    database.cleanup().await?;
-    Ok(())
+    database.cleanup().await
 }
 
 async fn v2_history_payload(uri: &str) -> Result<(TestDatabase, Value)> {
@@ -448,7 +430,7 @@ async fn seed_v2_mixed_checkpoint_history(database: &TestDatabase) -> Result<()>
     .await?;
 
     let mut event = history_event(
-        "v2-sepolia-snapshot-history-registration",
+        "v2-sepolia-current-history-registration",
         None,
         Some(resource_id),
         Some("ethereum-sepolia"),

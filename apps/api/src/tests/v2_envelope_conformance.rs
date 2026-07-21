@@ -202,7 +202,7 @@ const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
         error_uri: "/v2/names/alice.eth/subnames",
         success: V2SuccessFixture::Subnames,
         envelope: V2TopLevelEnvelope::DataPageMeta,
-        as_of: V2AsOfExpectation::Present,
+        as_of: V2AsOfExpectation::Absent,
         tier: V2RouteTier::Product,
         dictionary_allowlist: &[],
     },
@@ -211,7 +211,7 @@ const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
         error_uri: "/v2/names/alice.eth/history",
         success: V2SuccessFixture::NameHistory,
         envelope: V2TopLevelEnvelope::DataPageMeta,
-        as_of: V2AsOfExpectation::Present,
+        as_of: V2AsOfExpectation::Absent,
         tier: V2RouteTier::Product,
         dictionary_allowlist: &[],
     },
@@ -220,7 +220,7 @@ const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
         error_uri: "/v2/permissions",
         success: V2SuccessFixture::Permissions,
         envelope: V2TopLevelEnvelope::DataPageMeta,
-        as_of: V2AsOfExpectation::Present,
+        as_of: V2AsOfExpectation::Absent,
         tier: V2RouteTier::Product,
         dictionary_allowlist: &[],
     },
@@ -229,7 +229,7 @@ const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
         error_uri: "/v2/addresses/0x00000000000000000000000000000000000000aa/names",
         success: V2SuccessFixture::AddressNames,
         envelope: V2TopLevelEnvelope::DataPageMeta,
-        as_of: V2AsOfExpectation::Present,
+        as_of: V2AsOfExpectation::Absent,
         tier: V2RouteTier::Product,
         dictionary_allowlist: &[],
     },
@@ -247,7 +247,7 @@ const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
         error_uri: "/v2/addresses/0x00000000000000000000000000000000000000aa/history",
         success: V2SuccessFixture::AddressHistory,
         envelope: V2TopLevelEnvelope::DataPageMeta,
-        as_of: V2AsOfExpectation::Present,
+        as_of: V2AsOfExpectation::Absent,
         tier: V2RouteTier::Product,
         dictionary_allowlist: &[],
     },
@@ -256,7 +256,7 @@ const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
         error_uri: "/v2/search",
         success: V2SuccessFixture::Search,
         envelope: V2TopLevelEnvelope::DataPageMeta,
-        as_of: V2AsOfExpectation::Present,
+        as_of: V2AsOfExpectation::Absent,
         tier: V2RouteTier::Product,
         dictionary_allowlist: &[],
     },
@@ -265,7 +265,7 @@ const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
         error_uri: "/v2/events",
         success: V2SuccessFixture::Events,
         envelope: V2TopLevelEnvelope::DataPageMeta,
-        as_of: V2AsOfExpectation::Present,
+        as_of: V2AsOfExpectation::Absent,
         tier: V2RouteTier::Product,
         dictionary_allowlist: &[],
     },
@@ -346,7 +346,7 @@ const V2_CONFORMANCE_ROUTES: &[V2ConformanceRoute] = &[
         error_uri: "/v2/diagnostics/events",
         success: V2SuccessFixture::DiagnosticsEvents,
         envelope: V2TopLevelEnvelope::DataPageMeta,
-        as_of: V2AsOfExpectation::Present,
+        as_of: V2AsOfExpectation::Absent,
         tier: V2RouteTier::Diagnostics,
         dictionary_allowlist: DIAGNOSTICS_EVENTS_DICTIONARY_ALLOWLIST,
     },
@@ -490,7 +490,7 @@ async fn v2_success_responses_omit_banned_v1_dictionary_fields_family_wide() -> 
 }
 
 #[tokio::test]
-async fn v2_single_chain_as_of_token_replays_across_route_families() -> Result<()> {
+async fn v2_single_resource_as_of_token_replays_without_enabling_collection_replay() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_bound_names_fixture(&database).await?;
     bigname_storage::upsert_resolver_current_rows(
@@ -513,18 +513,6 @@ async fn v2_single_chain_as_of_token_replays_across_route_families() -> Result<(
             format!("/v2/names/alpha.eth/records?at={token}"),
         ),
         (
-            "subnames",
-            format!("/v2/names/alpha.eth/subnames?at={token}"),
-        ),
-        (
-            "history",
-            format!("/v2/names/alpha.eth/history?at={token}"),
-        ),
-        (
-            "namespace-scoped search",
-            format!("/v2/search?q=alpha&namespace=ens&at={token}"),
-        ),
-        (
             "resolver",
             format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?at={token}"),
         ),
@@ -537,6 +525,29 @@ async fn v2_single_chain_as_of_token_replays_across_route_families() -> Result<(
         assert_eq!(
             replay["meta"]["as_of_token"], minted["meta"]["as_of_token"],
             "{label} must preserve name-route as_of_token"
+        );
+    }
+
+    for base_uri in [
+        "/v2/names/alpha.eth/subnames",
+        "/v2/names/alpha.eth/history",
+        "/v2/permissions?address=0x00000000000000000000000000000000000000aa",
+        "/v2/addresses/0x00000000000000000000000000000000000000aa/names",
+        "/v2/addresses/0x00000000000000000000000000000000000000aa/history",
+        "/v2/search?q=alpha&namespace=ens",
+        "/v2/events",
+        "/v2/diagnostics/events",
+    ] {
+        let separator = if base_uri.contains('?') { '&' } else { '?' };
+        let uri = format!("{base_uri}{separator}at={token}");
+        let response = v2_conformance_response(&database, V2StrictQueryMethod::Get, &uri).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        let payload: Value = read_json(response).await?;
+        assert_v2_error_envelope(base_uri, &payload, "invalid_input");
+        assert_eq!(
+            payload["error"]["message"],
+            json!("at is not supported because collection routes read latest state"),
+            "{uri}"
         );
     }
 
@@ -1187,8 +1198,6 @@ async fn collect_v2_stale_and_conflict_error_violations(
     database.cleanup().await?;
 
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_history_fixture(&database).await?;
-    seed_v2_address_names_fixture(&database).await?;
     let resolver_conflict_at = v2_at_token(
         "ethereum",
         "ethereum-mainnet",
@@ -1204,91 +1213,10 @@ async fn collect_v2_stale_and_conflict_error_violations(
         )],
     )
     .await?;
-    for (route, uri, expected_code) in [
-        (
-            v2_conformance_route(V2SuccessFixture::AddressNames),
-            format!("/v2/addresses/{V2_ADDRESS}/names?at={conflict_at}"),
-            "conflict",
-        ),
-        (
-            v2_conformance_route(V2SuccessFixture::AddressHistory),
-            format!("/v2/addresses/{V2_ADDRESS}/history?at={conflict_at}"),
-            "conflict",
-        ),
-        (
-            v2_conformance_route(V2SuccessFixture::Search),
-            format!("/v2/search?q=alpha&namespace=ens&at={conflict_at}"),
-            "conflict",
-        ),
-        (
-            v2_conformance_route(V2SuccessFixture::Events),
-            format!("/v2/events?name=history.eth&at={conflict_at}"),
-            "conflict",
-        ),
-        (
-            v2_conformance_route(V2SuccessFixture::Resolver),
-            format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?at={resolver_conflict_at}"),
-            "conflict",
-        ),
-    ] {
-        let response = v2_conformance_response(&database, V2StrictQueryMethod::Get, &uri).await?;
-        assert_eq!(
-            response.status(),
-            StatusCode::CONFLICT,
-            "{} {uri}",
-            route.label
-        );
-        let payload: Value = read_json(response).await?;
-        assert_v2_error_envelope(route.label, &payload, expected_code);
-        collect_pipeline_vocabulary_in_error_body(route.label, &payload, violations);
-    }
-    database.cleanup().await?;
-
-    let database = TestDatabase::new_migrated().await?;
-    seed_v2_subnames_fixture(&database).await?;
-    seed_v2_history_fixture(&database).await?;
-    let name_tree_stale_at = seed_v2_conformance_snapshot_position(
-        &database,
-        "ethereum",
-        "ethereum-mainnet",
-        79,
-        "0xname4f",
-        "2026-04-17T00:00:19Z",
-    )
-    .await?;
-    for (route, uri, expected_code) in [
-        (
-            v2_conformance_route(V2SuccessFixture::Subnames),
-            format!("/v2/names/parent.eth/subnames?at={name_tree_stale_at}"),
-            "stale",
-        ),
-        (
-            v2_conformance_route(V2SuccessFixture::NameHistory),
-            format!("/v2/names/History.eth/history?at={name_tree_stale_at}"),
-            "stale",
-        ),
-    ] {
-        let response = v2_conformance_response(&database, V2StrictQueryMethod::Get, &uri).await?;
-        assert_eq!(
-            response.status(),
-            StatusCode::CONFLICT,
-            "{} {uri}",
-            route.label
-        );
-        let payload: Value = read_json(response).await?;
-        assert_v2_error_envelope(route.label, &payload, expected_code);
-        collect_pipeline_vocabulary_in_error_body(route.label, &payload, violations);
-    }
-    database.cleanup().await?;
-
-    let database = TestDatabase::new_migrated().await?;
-    seed_v2_permissions_fixture(&database).await?;
-    seed_v2_permissions_mainnet_rewind_checkpoint(&database).await?;
-    let permissions_stale_at = v2_permissions_mainnet_rewind_snapshot_token()?;
     for (route, uri, expected_code) in [(
-        v2_conformance_route(V2SuccessFixture::Permissions),
-        format!("/v2/permissions?name=Perms.eth&at={permissions_stale_at}"),
-        "stale",
+        v2_conformance_route(V2SuccessFixture::Resolver),
+        format!("/v2/resolvers/1/{V2_RESOLVER_ADDRESS}?at={resolver_conflict_at}"),
+        "conflict",
     )] {
         let response = v2_conformance_response(&database, V2StrictQueryMethod::Get, &uri).await?;
         assert_eq!(

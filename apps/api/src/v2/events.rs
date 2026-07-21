@@ -12,10 +12,9 @@ use crate::{AppState, normalize_inferred_route_name};
 
 use super::cursor::{cursor_value, invalid_cursor_error};
 use super::{
-    CursorPayload, Envelope, HistoryEventType, Page, QueryParamAllowlist, QueryParams,
-    SnapshotReadResource, StrictQueryParams, V2Error, V2Result, decode, encode, encode_at_token,
-    format_timestamp, history_event_type, resolve_v2_snapshot_for, snapshot_meta,
-    v2_exact_name_snapshot_scope,
+    CursorPayload, Envelope, HistoryEventType, Meta, Page, QueryParamAllowlist, QueryParams,
+    StrictQueryParams, V2Error, V2Result, decode, encode, format_timestamp, history_event_type,
+    validate_latest_collection_selectors,
 };
 
 const EVENTS_SORT: &str = "chain_position_desc";
@@ -77,25 +76,16 @@ pub(crate) async fn get_events(
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<Vec<Event>>>> {
     let params = params.into_inner();
+    validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
     let namespace = resolve_events_namespace(&params)?;
     let parsed = parse_events_filter(&params, &namespace)?;
 
-    let scope = v2_exact_name_snapshot_scope(&state, &namespace, params.at.as_ref()).await?;
-    let selected_snapshot = resolve_v2_snapshot_for(
-        &state.pool,
-        &scope,
-        params.at.as_ref(),
-        params.finality,
-        SnapshotReadResource::Events,
-    )
-    .await?;
-    let snapshot_token = encode_at_token(&selected_snapshot);
     let storage_cursor = params
         .cursor
         .as_deref()
         .map(|cursor| {
             let payload = decode(cursor)?;
-            events_storage_cursor(&payload, &parsed.cursor_filters, &snapshot_token)
+            events_storage_cursor(&payload, &parsed.cursor_filters)
         })
         .transpose()?;
 
@@ -119,17 +109,12 @@ pub(crate) async fn get_events(
         }
     })?;
 
-    let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
-        encode(&events_cursor_payload(
-            cursor,
-            &parsed.cursor_filters,
-            &snapshot_token,
-        ))
-    });
+    let next_cursor = storage_page
+        .next_cursor
+        .as_ref()
+        .map(|cursor| encode(&events_cursor_payload(cursor, &parsed.cursor_filters)));
     let has_more = next_cursor.is_some();
     let data = storage_page.rows.iter().filter_map(build_event).collect();
-    let meta = snapshot_meta(&selected_snapshot)?;
-
     Ok(Json(Envelope {
         data,
         page: Some(Page {
@@ -139,7 +124,7 @@ pub(crate) async fn get_events(
             total_count: None,
             has_more,
         }),
-        meta,
+        meta: Meta::default(),
     }))
 }
 
@@ -161,7 +146,6 @@ pub(crate) fn build_event(row: &StorageHistoryEvent) -> Option<Event> {
 pub(crate) fn events_cursor_payload(
     cursor: &HistoryCursor,
     filters: &BTreeMap<String, String>,
-    snapshot_token: &str,
 ) -> CursorPayload {
     CursorPayload::new(
         EVENTS_SORT,
@@ -176,19 +160,15 @@ pub(crate) fn events_cursor_payload(
                 cursor.event_identity.clone(),
             ),
         ]),
-        Some(snapshot_token.to_owned()),
+        None,
     )
 }
 
 pub(crate) fn events_storage_cursor(
     payload: &CursorPayload,
     expected_filters: &BTreeMap<String, String>,
-    snapshot_token: &str,
 ) -> V2Result<HistoryCursor> {
     if payload.sort != EVENTS_SORT {
-        return Err(invalid_cursor_error());
-    }
-    if payload.snapshot.as_deref() != Some(snapshot_token) {
         return Err(invalid_cursor_error());
     }
     if &payload.filters != expected_filters {
@@ -414,47 +394,56 @@ mod tests {
     fn events_cursor_payload_round_trips_storage_cursor() {
         let cursor = sample_cursor();
         let filters = sample_filters();
-        let payload = events_cursor_payload(&cursor, &filters, "snapshot-1");
+        let payload = events_cursor_payload(&cursor, &filters);
 
         assert_eq!(payload.filters, filters);
         assert_eq!(
-            events_storage_cursor(&payload, &sample_filters(), "snapshot-1")
-                .expect("cursor must decode"),
+            events_storage_cursor(&payload, &sample_filters()).expect("cursor must decode"),
             cursor
         );
+        assert!(payload.snapshot.is_none());
     }
 
     #[test]
-    fn events_cursor_rejects_wrong_sort_snapshot_or_filters() {
+    fn events_cursor_rejects_wrong_sort_or_filters() {
         let cursor = sample_cursor();
         let filters = sample_filters();
 
-        let mut payload = events_cursor_payload(&cursor, &filters, "snapshot-1");
+        let mut payload = events_cursor_payload(&cursor, &filters);
         payload.sort = "name".to_owned();
-        assert!(events_storage_cursor(&payload, &filters, "snapshot-1").is_err());
+        assert!(events_storage_cursor(&payload, &filters).is_err());
 
-        let mut payload = events_cursor_payload(&cursor, &filters, "snapshot-1");
-        payload.snapshot = Some("snapshot-2".to_owned());
-        assert!(events_storage_cursor(&payload, &filters, "snapshot-1").is_err());
-
-        let mut payload = events_cursor_payload(&cursor, &filters, "snapshot-1");
+        let mut payload = events_cursor_payload(&cursor, &filters);
         payload
             .filters
             .insert("to_block".to_owned(), "20".to_owned());
-        assert!(events_storage_cursor(&payload, &filters, "snapshot-1").is_err());
+        assert!(events_storage_cursor(&payload, &filters).is_err());
 
-        let mut payload = events_cursor_payload(&cursor, &filters, "snapshot-1");
+        let mut payload = events_cursor_payload(&cursor, &filters);
         payload.filters.remove("namespace");
-        assert!(events_storage_cursor(&payload, &filters, "snapshot-1").is_err());
+        assert!(events_storage_cursor(&payload, &filters).is_err());
 
-        let payload = events_cursor_payload(&cursor, &filters, "snapshot-1");
+        let payload = events_cursor_payload(&cursor, &filters);
         assert!(
             events_storage_cursor(
                 &payload,
                 &BTreeMap::from([("namespace".to_owned(), "ens".to_owned())]),
-                "snapshot-1",
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn events_cursor_ignores_legacy_snapshot_component() {
+        let cursor = sample_cursor();
+        let filters = sample_filters();
+        let mut payload = events_cursor_payload(&cursor, &filters);
+        payload.snapshot = Some("legacy-snapshot".to_owned());
+
+        assert_eq!(
+            events_storage_cursor(&payload, &filters)
+                .expect("legacy snapshot component must not bind a latest-state cursor"),
+            cursor
         );
     }
 
