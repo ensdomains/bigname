@@ -757,6 +757,94 @@ async fn full_rebuild_invalidates_changed_verified_primary_cache_without_touchin
 }
 
 #[tokio::test]
+async fn full_rebuild_invalidates_normalization_upgrade_in_one_set_based_statement() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let tuple_count = 8_i64;
+    let mut events = Vec::new();
+    for index in 1..=tuple_count {
+        let address = format!("0x{index:040x}");
+        let name = format!("alice-{index}.eth");
+        events.push(reverse_changed_event(
+            &format!("full-reverse-normalization-upgrade-{index}"),
+            &address,
+            "60",
+            400 + index * 2,
+            0,
+            CanonicalityState::Canonical,
+        ));
+        events.push(reverse_linked_name_event(
+            &format!("full-record-normalization-upgrade-{index}"),
+            &address,
+            "60",
+            Some(&name),
+            401 + index * 2,
+            0,
+            CanonicalityState::Canonical,
+        ));
+    }
+    upsert_normalized_events(database.pool(), &events).await?;
+    rebuild_primary_names_current(database.pool(), None, None, None).await?;
+
+    let updated = sqlx::query("UPDATE primary_names_current SET claim_name_is_normalized = false")
+        .execute(database.pool())
+        .await?
+        .rows_affected();
+    assert_eq!(updated, tuple_count as u64);
+
+    sqlx::query(
+        r#"
+        CREATE TABLE test_execution_cache_delete_statements (
+            statement_count BIGINT NOT NULL
+        )
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query("INSERT INTO test_execution_cache_delete_statements (statement_count) VALUES (0)")
+        .execute(database.pool())
+        .await?;
+    sqlx::query(
+        r#"
+        CREATE FUNCTION test_count_execution_cache_delete_statement()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            UPDATE test_execution_cache_delete_statements
+            SET statement_count = statement_count + 1;
+            RETURN NULL;
+        END;
+        $$
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE TRIGGER test_count_execution_cache_delete_statement
+        BEFORE DELETE ON execution_cache_outcomes
+        FOR EACH STATEMENT
+        EXECUTE FUNCTION test_count_execution_cache_delete_statement()
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    rebuild_primary_names_current(database.pool(), None, None, None).await?;
+
+    let statement_count: i64 =
+        sqlx::query_scalar("SELECT statement_count FROM test_execution_cache_delete_statements")
+            .fetch_one(database.pool())
+            .await?;
+    assert_eq!(
+        statement_count, 1,
+        "full rebuild must invalidate all changed cached tuples in one statement"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn full_rebuild_keeps_legacy_case_variant_verified_cache_unreadable() -> Result<()> {
     let database = TestDatabase::new().await?;
     let address = "0x0000000000000000000000000000000000000abc";

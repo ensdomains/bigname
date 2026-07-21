@@ -11,22 +11,29 @@ pub(super) async fn load_primary_name_lookup_state(
 ) -> ApiResult<PrimaryNameLookupState> {
     let coin_type = canonical_primary_name_coin_type(coin_type)?;
     match load_primary_name_current_snapshot(pool, address, namespace, &coin_type).await {
-        Ok(Some(snapshot)) => Ok(PrimaryNameLookupState {
-            tuple_state: PrimaryNameTupleState::TuplePresent(snapshot.row),
-            normalized_claim_name: mode
-                .includes_declared()
-                .then_some(snapshot.normalized_claim_name)
-                .flatten(),
-            claim_name_is_normalized: snapshot.claim_name_is_normalized,
-            on_demand_claim: OnDemandPrimaryNameClaimState::NotAttempted,
-            on_demand_verified: OnDemandPrimaryNameVerificationState::NotAttempted,
-            persisted_verified: if mode.includes_verified() {
+        Ok(Some(snapshot)) => {
+            let claim_gates_verified_readback = snapshot.row.claim_status
+                == PrimaryNameClaimStatus::Success
+                && !snapshot.claim_name_is_normalized;
+            let persisted_verified = if mode.includes_verified() && !claim_gates_verified_readback {
                 load_persisted_primary_name_verified_readback(pool, address, namespace, &coin_type)
                     .await?
             } else {
                 None
-            },
-        }),
+            };
+
+            Ok(PrimaryNameLookupState {
+                tuple_state: PrimaryNameTupleState::TuplePresent(snapshot.row),
+                normalized_claim_name: mode
+                    .includes_declared()
+                    .then_some(snapshot.normalized_claim_name)
+                    .flatten(),
+                claim_name_is_normalized: snapshot.claim_name_is_normalized,
+                on_demand_claim: OnDemandPrimaryNameClaimState::NotAttempted,
+                on_demand_verified: OnDemandPrimaryNameVerificationState::NotAttempted,
+                persisted_verified,
+            })
+        }
         Ok(None) => Ok(PrimaryNameLookupState {
             tuple_state: PrimaryNameTupleState::TupleMissing,
             normalized_claim_name: None,
