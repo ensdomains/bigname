@@ -344,7 +344,7 @@ async fn live_ingest(
         .await?;
     live_session.stop().await?;
     pipeline::worker_replay_all_current_projections(&root, &db.url).await?;
-    support::serve_existing_db(db, scratch).await
+    support::serve_existing_db(db, scratch, anvil).await
 }
 
 async fn automatic_catchup(
@@ -387,7 +387,7 @@ async fn automatic_catchup(
         .await?;
     session.stop().await?;
     pipeline::worker_replay_all_current_projections(&root, &db.url).await?;
-    support::serve_existing_db(db, scratch).await
+    support::serve_existing_db(db, scratch, anvil).await
 }
 
 #[tokio::test]

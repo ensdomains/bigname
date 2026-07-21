@@ -166,7 +166,8 @@ async fn live_worker_applies_registration_and_renewal_while_api_serves() -> Resu
              WHERE cursor_name = 'normalized_events_to_projection_invalidations')",
         )
         .await?;
-    let api = pipeline::ApiServer::start(&root, &db.url).await?;
+    let chain_rpc_urls = [("ethereum-mainnet", anvil.url.as_str())];
+    let api = pipeline::ApiServer::start(&root, &db.url, &chain_rpc_urls).await?;
 
     let user = rpc.accounts().await?[1];
     ens_v1::register_eth_name(
