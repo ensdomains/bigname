@@ -132,6 +132,12 @@ pub struct ActiveManifestVersion {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionOwnerManifestVersion {
+    pub manifest_version: u64,
+    pub source_family: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NamespaceManifestSnapshot {
     pub manifests: Vec<ActiveManifestVersion>,
     pub last_updated: String,

@@ -301,7 +301,10 @@ proofs, result). Traces are permanent; only cache reusability expires. A
 persisted outcome is reused only while its request tuple, selected chain
 positions, manifest versions, topology boundary, and record boundary still
 match; reorgs and manifest, resolver, topology, record, or primary-claim
-changes evict affected entries.
+changes evict affected entries. A verified-primary route-local result for an
+absent projection tuple has no projected topology or record identity; its two
+execution-cache boundary fields explicitly carry the selected checkpoint
+instead.
 
 **Walking skeleton** — the standard XP term for a minimal end-to-end path
 proving all layers connect. In this repo it names the first e2e scenario

@@ -148,9 +148,10 @@ pub(super) fn execution_outcome_block_dependencies(
         "topology_version_boundary",
         request_key,
     )?;
+    let topology_position = topology_boundary.chain_position();
     dependencies.insert((
-        topology_boundary.chain_position.chain_id,
-        topology_boundary.chain_position.block_hash,
+        topology_position.chain_id.clone(),
+        topology_position.block_hash.clone(),
     ));
 
     let record_boundary = decode_version_boundary(
@@ -158,9 +159,10 @@ pub(super) fn execution_outcome_block_dependencies(
         "record_version_boundary",
         request_key,
     )?;
+    let record_position = record_boundary.chain_position();
     dependencies.insert((
-        record_boundary.chain_position.chain_id,
-        record_boundary.chain_position.block_hash,
+        record_position.chain_id.clone(),
+        record_position.block_hash.clone(),
     ));
 
     if dependencies.is_empty() {
@@ -200,7 +202,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::execution::types::ExecutionCacheKey;
+    use crate::execution::types::{ExecutionCacheKey, SELECTED_CHECKPOINT_BOUNDARY_KIND};
 
     fn boundary(block_hash: &str) -> Value {
         json!({
@@ -208,6 +210,18 @@ mod tests {
             "resource_id": "0e7ec7ac-e000-0000-0000-00000000aaa1",
             "normalized_event_id": 1200,
             "event_kind": "RecordsChanged",
+            "chain_position": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_000,
+                "block_hash": block_hash,
+                "timestamp": "2024-06-01T00:00:17Z"
+            }
+        })
+    }
+
+    fn selected_checkpoint_boundary(block_hash: &str) -> Value {
+        json!({
+            "boundary_kind": SELECTED_CHECKPOINT_BOUNDARY_KIND,
             "chain_position": {
                 "chain_id": "ethereum-mainnet",
                 "block_number": 21_000_000,
@@ -270,6 +284,55 @@ mod tests {
             normalized.record_version_boundary["chain_position"]["block_hash"],
             "0xrecordsentinel"
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn normalizes_selected_checkpoint_boundaries_without_surface_identity() -> Result<()> {
+        let selected_boundary = selected_checkpoint_boundary(
+            "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        );
+        let cache_key = ExecutionCacheKey {
+            request_key: "ens:0x00000000000000000000000000000000000000af:60".to_owned(),
+            requested_chain_positions: json!([{
+                "chain_id": "ethereum-mainnet",
+                "block_number": 21_000_000,
+                "block_hash": "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            }]),
+            manifest_versions: json!([{
+                "source_family": "ens_execution",
+                "manifest_version": 3
+            }]),
+            topology_version_boundary: selected_boundary.clone(),
+            record_version_boundary: selected_boundary,
+        };
+
+        let normalized = normalize_execution_cache_key(&cache_key)?;
+        let expected_boundary = selected_checkpoint_boundary(
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        assert_eq!(normalized.topology_version_boundary, expected_boundary);
+        assert_eq!(normalized.record_version_boundary, expected_boundary);
+        assert!(
+            normalized
+                .topology_version_boundary
+                .get("logical_name_id")
+                .is_none()
+        );
+        assert!(
+            normalized
+                .topology_version_boundary
+                .get("resource_id")
+                .is_none()
+        );
+
+        let mut fabricated_identity = cache_key;
+        fabricated_identity.topology_version_boundary["resource_id"] =
+            json!("00000000-0000-0000-0000-000000000000");
+        let error = normalize_execution_cache_key(&fabricated_identity)
+            .expect_err("selected-checkpoint dependency must reject projected identity fields");
+        assert!(error.to_string().contains("unexpected field resource_id"));
 
         Ok(())
     }

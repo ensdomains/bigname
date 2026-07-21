@@ -21,12 +21,23 @@ fn primary_name_route_coverage(
         }
     }
 
+    if let Some(persisted_verified) = lookup_state.persisted_verified.as_ref()
+        && persisted_verified.route_local_claim.is_some()
+        && namespace == "ens"
+    {
+        return if persisted_verified.forward_call_attempted {
+            primary_name_exact_tuple_coverage(&["ens_reverse_rpc", "ens_execution"])
+        } else {
+            primary_name_exact_tuple_coverage(&["ens_reverse_rpc"])
+        };
+    }
+
     if matches!(
         lookup_state.on_demand_verified,
         OnDemandPrimaryNameVerificationState::Verified(_)
     ) && namespace == "ens"
     {
-        return primary_name_exact_tuple_coverage(&["ens_reverse_rpc", "ens_execution_rpc"]);
+        return primary_name_exact_tuple_coverage(&["ens_reverse_rpc", "ens_execution"]);
     }
 
     if matches!(
@@ -34,6 +45,7 @@ fn primary_name_route_coverage(
         OnDemandPrimaryNameClaimState::Found(_)
             | OnDemandPrimaryNameClaimState::InvalidName(_)
             | OnDemandPrimaryNameClaimState::NotFound
+            | OnDemandPrimaryNameClaimState::Unavailable
     ) && namespace == "ens"
     {
         return primary_name_exact_tuple_coverage(&["ens_reverse_rpc"]);

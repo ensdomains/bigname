@@ -426,15 +426,18 @@ Field ownership:
   a persisted or on-demand verified outcome exists. As an explicit exception,
   it also appears when the request includes the `verified` source and the
   projected or route-local on-demand claim fails the pre-forward normalization
-  gate; this synthetic gate result does not represent a forward resolver call.
+  gate. A projected gate result is synthetic; a route-local gate result is a
+  persisted trace of the pinned reverse lookup and normalization decision, but
+  neither represents a forward resolver call.
   An indexed-only response never includes `verification`. The `verified` answer
   entry is the source-specific payload; `verification` is the typed comparison
   summary and must not contradict that entry. Claimed-vs-verified remains one
   call without `declared_state`/`verified_state`. When a served head is
   available, `meta.as_of` and `meta.as_of_token` record the served positions
-  for staleness attribution and shadow-diff correlation. When the ENS/60
-  route-local on-demand fallback supplies the answer instead of persisted
-  snapshot state, the response omits `meta.as_of` and `meta.as_of_token`.
+  for staleness attribution and shadow-diff correlation. The ENS/60 route-local
+  fallback selects that stored Ethereum checkpoint, pins its reverse and
+  optional forward calls to the block hash, persists verified-mode outcomes,
+  and includes the same snapshot metadata.
   Basenames responses that serve a persisted verified answer include both the
   Base authority position and the Ethereum resolution-auxiliary position;
   indexed-only responses and missing persisted verified outcomes remain
@@ -443,9 +446,9 @@ Field ownership:
 - Snapshot behavior: current-state read over chain-derived primary-name state.
   The route does not accept `at` or `finality`. Successful responses carry
   `meta.as_of` and `meta.as_of_token` for indexed and persisted state served at
-  the API's current chain head. When the tuple is missing and the route falls
-  through to the live on-demand ENS RPC fallback, both fields are omitted because
-  that fallback is not yet pinned to the indexed head.
+  the API's current chain head. When the tuple is missing and the route uses the
+  on-demand ENS RPC fallback, both fields identify the stored Ethereum
+  checkpoint used for its hash-pinned calls and persisted execution identity.
 - Status semantics: answer entries use in-band `status`. Valid tuples with no
   indexed claim return an `indexed` entry with `status=not_found`. Unsupported,
   not-found, failed, and mismatched verified outcomes return `200` with the
@@ -457,8 +460,10 @@ Field ownership:
   produces an indexed answer with `status=invalid_name` and `raw_claim_name`
   when the indexed source is included, and a verified answer plus `verification`
   with `status=not_found` and `failure_reason=claim_name_not_normalizable` when
-  the verified source is included. Malformed addresses return `400
-  invalid_input`.
+  the verified source is included. Missing provider configuration or a reverse
+  provider failure produces in-band `status=stale` with
+  `failure_reason=resolver_call_failed` for each requested source; it is not an
+  in-band `not_found`. Malformed addresses return `400 invalid_input`.
 - Replaces (v1): `GET /v1/primary-names/{address}`.
 
 ### `GET /v2/addresses/{address}/history`

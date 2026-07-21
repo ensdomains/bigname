@@ -185,9 +185,8 @@ Rules:
   include `meta.as_of` and `meta.as_of_token` when they can attribute at least
   one served snapshot-pinned chain position. Top-level collection routes omit
   both because their mutable latest-state rows are not bound to one snapshot.
-  Control-plane routes (`/v2/status`, `/v2/namespaces/{namespace}`), verified
-  name-profile responses served by the route-local on-demand fallback, and
-  primary-name responses served by the route-local on-demand fallback also
+  Control-plane routes (`/v2/status`, `/v2/namespaces/{namespace}`) and verified
+  name-profile responses served by the route-local on-demand fallback also
   omit both. `meta.as_of` is human-readable staleness attribution on routes
   that provide it. `meta.as_of_token` is opaque and is the value to pass to
   `at` when a route supports snapshot replay. `meta.completeness`,
@@ -335,11 +334,12 @@ emitting a token that cannot replay on a compatible snapshot-read route.
 does not accept `at` or `finality`; when a served head is available, its
 `meta.as_of` and `meta.as_of_token` record the served positions for staleness
 attribution and shadow-diff correlation. When the ENS/60 route-local on-demand
-fallback supplies the answer instead of persisted snapshot state, the response
-omits `meta.as_of` and `meta.as_of_token`. Basenames responses that serve a
-persisted verified answer include both the Base authority position and the
-Ethereum resolution-auxiliary position; indexed-only responses and missing
-persisted verified outcomes remain Base-scoped.
+fallback supplies the answer instead of projection state, both metadata fields
+record the stored selected Ethereum checkpoint that pins the verified calls and
+the persisted execution trace. Basenames responses that serve a persisted
+verified answer include both the Base authority position and the Ethereum
+resolution-auxiliary position; indexed-only responses and missing persisted
+verified outcomes remain Base-scoped.
 
 The `chain_positions` query parameter from `v1` does not exist in `v2`.
 

@@ -91,9 +91,11 @@ async fn v2_get_primary_name_shapes_answers_for_source_selection() -> Result<()>
 }
 
 #[tokio::test]
-async fn v2_get_primary_name_no_claim_tuple_returns_in_band_not_found() -> Result<()> {
+async fn v2_get_primary_name_surfaces_reverse_provider_failure_in_band() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    database.seed_default_ens_snapshot_selector_position().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
 
     let response = v2_primary_name_response_for_database(
         &database,
@@ -112,17 +114,83 @@ async fn v2_get_primary_name_no_claim_tuple_returns_in_band_not_found() -> Resul
             "answers": [
                 {
                     "source": "indexed",
-                    "status": "not_found"
+                    "status": "stale",
+                    "failure_reason": "resolver_call_failed"
                 },
                 {
                     "source": "verified",
-                    "status": "not_found"
+                    "status": "stale",
+                    "failure_reason": "resolver_call_failed"
                 }
-            ]
+            ],
+            "verification": {
+                "status": "stale",
+                "failure_reason": "resolver_call_failed"
+            }
         })
     );
-    assert!(payload["data"].get("verification").is_none());
     assert_primary_name_snapshot_meta(&payload);
+    assert_primary_name_snapshot_meta_chain_ids(&payload, &["1"]);
+    assert_primary_name_snapshot_token_slots(&payload, &["ethereum"]);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_primary_name_keeps_persisted_unnormalizable_claim_verified_not_found()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        primary_name_reverse_name_response("alice..eth"),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_execution::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+
+    let response = app_router(database.app_state_with_chain_rpc_urls(chain_rpc_urls))
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v2/addresses/{V2_PRIMARY_NAME_ADDRESS}/primary-name"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 unnormalizable on-demand primary-name request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(
+        payload["data"],
+        json!({
+            "address": V2_PRIMARY_NAME_ADDRESS,
+            "coin_type": 60,
+            "namespace": "ens",
+            "answers": [
+                {
+                    "source": "indexed",
+                    "status": "invalid_name",
+                    "raw_claim_name": "alice..eth"
+                },
+                {
+                    "source": "verified",
+                    "status": "not_found",
+                    "failure_reason": "claim_name_not_normalizable"
+                }
+            ],
+            "verification": {
+                "status": "not_found",
+                "failure_reason": "claim_name_not_normalizable"
+            }
+        })
+    );
+    assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 2);
 
     database.cleanup().await?;
     Ok(())
@@ -677,7 +745,9 @@ async fn v2_get_primary_name_rejects_pipeline_unsupported_reason() -> Result<()>
 async fn v2_get_primary_name_runs_on_demand_claim_and_verification_for_default_tuple() -> Result<()>
 {
     let database = TestDatabase::new_migrated().await?;
-    database.seed_default_ens_snapshot_selector_position().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
     let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
         json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
         primary_name_reverse_name_response("taytems.eth"),
@@ -725,8 +795,17 @@ async fn v2_get_primary_name_runs_on_demand_claim_and_verification_for_default_t
             }
         })
     );
-    assert_primary_name_omits_snapshot_meta(&payload);
-    assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 3);
+    assert_primary_name_snapshot_meta(&payload);
+    assert_primary_name_snapshot_meta_chain_ids(&payload, &["1"]);
+    assert_primary_name_snapshot_token_slots(&payload, &["ethereum"]);
+    let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
+    assert_eq!(rpc_requests.len(), 3);
+    for request in rpc_requests {
+        assert_eq!(
+            request["params"][1],
+            primary_name_selected_block_selector()
+        );
+    }
 
     database.cleanup().await?;
     Ok(())
@@ -792,17 +871,6 @@ fn assert_primary_name_snapshot_meta(payload: &Value) {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')),
         "meta.as_of_token must be URL-safe"
-    );
-}
-
-fn assert_primary_name_omits_snapshot_meta(payload: &Value) {
-    assert!(
-        payload["meta"].get("as_of").is_none(),
-        "primary-name response must omit meta.as_of"
-    );
-    assert!(
-        payload["meta"].get("as_of_token").is_none(),
-        "primary-name response must omit meta.as_of_token"
     );
 }
 

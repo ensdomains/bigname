@@ -938,6 +938,21 @@ impl TestDatabase {
         .await
     }
 
+    async fn seed_default_ens_primary_name_fallback_context(&self) -> Result<()> {
+        self.seed_default_ens_snapshot_selector_position().await?;
+        self.insert_manifest(
+            "ens",
+            bigname_execution::ENS_EXECUTION_SOURCE_FAMILY,
+            "ethereum-mainnet",
+            "ens_v1",
+            1,
+            "shadow",
+            bigname_domain::normalization::ENS_NORMALIZER_VERSION,
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn rebuild_name_current(&self, logical_name_id: &str) -> Result<()> {
         let database_url = std::env::var("BIGNAME_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))

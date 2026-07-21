@@ -80,7 +80,7 @@ pub(super) fn primary_name_response_schema() -> JsonValue {
             "data": schema_ref("PrimaryNameData"),
             "declared_state": nullable_ref_schema("PrimaryNameDeclaredState"),
             "verified_state": nullable_ref_schema("PrimaryNameVerifiedState"),
-            "provenance": schema_ref("Provenance"),
+            "provenance": schema_ref("PrimaryNameRouteProvenance"),
             "coverage": schema_ref("CoverageResponse"),
             "chain_positions": schema_ref("ChainPositions"),
             "consistency": schema_ref("Consistency"),

@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use bigname_storage::{ExecutionOutcome, ExecutionTrace};
 use uuid::Uuid;
 
+use crate::ens_primary_name::validate_route_local_ens_primary_name_execution;
 use crate::json_helpers::{required_array, required_object};
 use crate::validation::{
     SupportedResolutionPathClass, SupportedResolutionStepSummary,
@@ -81,7 +82,16 @@ pub(super) fn validate_verified_primary_trace(
         Some(&trace.gateway_digests),
         &format!("{context} trace.gateway_digests"),
     )?;
-    if tuple.namespace == ENS_NAMESPACE && !gateway_digests.is_empty() {
+    let route_local_execution = (tuple.namespace == ENS_NAMESPACE)
+        .then(|| {
+            validate_route_local_ens_primary_name_execution(trace, &verified_primary_name.section)
+        })
+        .transpose()?
+        .flatten();
+    if tuple.namespace == ENS_NAMESPACE
+        && route_local_execution.is_none()
+        && !gateway_digests.is_empty()
+    {
         bail!("{context} must keep gateway_digests empty");
     }
 
@@ -103,7 +113,12 @@ pub(super) fn validate_verified_primary_trace(
         );
     }
 
-    let step_summary = if tuple.namespace == ENS_NAMESPACE {
+    let step_summary = if let Some(route_local_execution) = route_local_execution.as_ref() {
+        SupportedResolutionStepSummary {
+            saw_universal_resolver_call: route_local_execution.forward_call_attempted,
+            ..Default::default()
+        }
+    } else if tuple.namespace == ENS_NAMESPACE {
         ensure_steps_do_not_use_deferred_execution_paths(
             &trace.steps,
             trace.execution_trace_id,
@@ -122,6 +137,14 @@ pub(super) fn validate_verified_primary_trace(
             ),
         )?
     };
+    if let Some(route_local_execution) = route_local_execution.as_ref()
+        && route_local_execution.forward_call_attempted != step_summary.saw_universal_resolver_call
+    {
+        bail!(
+            "{context} trace {} route-local forward_call_attempted does not match call_universal_resolver steps",
+            trace.execution_trace_id
+        );
+    }
     if matches!(
         verified_primary_name.status,
         VerifiedPrimaryNameStatus::Success | VerifiedPrimaryNameStatus::Mismatch
@@ -146,11 +169,12 @@ pub(super) fn validate_verified_primary_trace(
             )?,
             _ => unreachable!("unsupported verified-primary namespace already rejected"),
         }
-    } else if !required_array(
-        Some(&trace.contracts_called),
-        &format!("{context} trace.contracts_called"),
-    )?
-    .is_empty()
+    } else if route_local_execution.is_none()
+        && !required_array(
+            Some(&trace.contracts_called),
+            &format!("{context} trace.contracts_called"),
+        )?
+        .is_empty()
     {
         match tuple.namespace.as_str() {
             ENS_NAMESPACE => ensure_contains_universal_resolver_call(

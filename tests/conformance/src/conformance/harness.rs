@@ -411,6 +411,29 @@
                 Ok(())
             }
 
+            async fn seed_default_ens_primary_name_fallback_context(&self) -> Result<()> {
+                self.seed_snapshot_selector_chain_positions(&json!({
+                    "ethereum": {
+                        "chain_id": "ethereum-mainnet",
+                        "block_number": 21_000_003,
+                        "block_hash": "0xbinding",
+                        "timestamp": "2026-04-17T00:00:03Z",
+                    }
+                }))
+                .await?;
+                self.insert_manifest(
+                    "ens",
+                    bigname_execution::ENS_EXECUTION_SOURCE_FAMILY,
+                    "ethereum-mainnet",
+                    "ens_v1",
+                    1,
+                    "active",
+                    bigname_domain::normalization::ENS_NORMALIZER_VERSION,
+                )
+                .await?;
+                Ok(())
+            }
+
             async fn seed_exact_name_rebuild_inputs(
                 &self,
                 logical_name_id: &str,

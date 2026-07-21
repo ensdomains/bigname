@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use sqlx::{PgPool, Postgres};
+use sqlx::{PgConnection, PgPool, Postgres};
 use uuid::Uuid;
 
 use super::{
@@ -20,6 +20,23 @@ pub async fn load_execution_trace(
         return Ok(None);
     };
     trace.steps = load_execution_steps_internal(pool, execution_trace_id).await?;
+    Ok(Some(trace))
+}
+
+/// Load one stored execution trace through a caller-owned PostgreSQL connection.
+///
+/// Callers use this variant when the trace read must share a transaction and its
+/// projection-read fence rather than borrowing an unrelated pool connection.
+pub async fn load_execution_trace_from_connection(
+    connection: &mut PgConnection,
+    execution_trace_id: Uuid,
+) -> Result<Option<ExecutionTrace>> {
+    let Some(mut trace) =
+        load_execution_trace_row_internal(&mut *connection, execution_trace_id).await?
+    else {
+        return Ok(None);
+    };
+    trace.steps = load_execution_steps_internal(&mut *connection, execution_trace_id).await?;
     Ok(Some(trace))
 }
 

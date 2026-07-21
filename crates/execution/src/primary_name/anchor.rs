@@ -38,6 +38,30 @@ pub(crate) async fn ensure_primary_name_anchor_matches(
     )
 }
 
+pub(crate) async fn ensure_primary_name_anchor_absent(
+    pool: &PgPool,
+    tuple: &VerifiedPrimaryNameTuple,
+) -> Result<()> {
+    let context = verified_primary_context_label(&tuple.namespace)?;
+    if load_primary_name_current_snapshot(
+        pool,
+        &tuple.normalized_address,
+        &tuple.namespace,
+        &tuple.coin_type,
+    )
+    .await?
+    .is_some()
+    {
+        bail!(
+            "{context} route-local persistence requires no primary_names_current anchor for address {} namespace {} coin_type {}",
+            tuple.normalized_address,
+            tuple.namespace,
+            tuple.coin_type
+        );
+    }
+    Ok(())
+}
+
 pub(crate) async fn ensure_primary_name_anchor_matches_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     tuple: &VerifiedPrimaryNameTuple,
@@ -82,6 +106,52 @@ pub(crate) async fn ensure_primary_name_anchor_matches_in_transaction(
         anchor.normalized_claim_name.as_deref(),
         anchor.claim_name_is_normalized,
     )
+}
+
+pub(crate) async fn ensure_primary_name_anchor_absent_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    tuple: &VerifiedPrimaryNameTuple,
+) -> Result<()> {
+    let context = verified_primary_context_label(&tuple.namespace)?;
+    // PostgreSQL cannot row-lock a tuple that does not exist. Hold a short SHARE
+    // table lock so projection inserts/updates wait until the absence check and
+    // execution trace commit as one serialized decision.
+    sqlx::query("LOCK TABLE primary_names_current IN SHARE MODE")
+        .execute(&mut **transaction)
+        .await
+        .context("failed to lock primary_names_current for route-local persistence")?;
+    let anchor_exists = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM primary_names_current
+            WHERE address = $1
+              AND namespace = $2
+              AND coin_type = $3
+            FOR UPDATE
+        )
+        "#,
+    )
+    .bind(&tuple.normalized_address)
+    .bind(&tuple.namespace)
+    .bind(&tuple.coin_type)
+    .fetch_one(&mut **transaction)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to check primary_names_current route-local anchor for address {} namespace {} coin_type {}",
+            tuple.normalized_address, tuple.namespace, tuple.coin_type
+        )
+    })?;
+    if anchor_exists {
+        bail!(
+            "{context} route-local persistence requires no primary_names_current anchor for address {} namespace {} coin_type {}",
+            tuple.normalized_address,
+            tuple.namespace,
+            tuple.coin_type
+        );
+    }
+    Ok(())
 }
 
 #[derive(sqlx::FromRow)]

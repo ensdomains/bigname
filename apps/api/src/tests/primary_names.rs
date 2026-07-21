@@ -1,5 +1,65 @@
 const BASE_PRIMARY_COIN_TYPE: &str = "2147492101";
 
+fn primary_name_selected_block_selector() -> Value {
+    json!({
+        "blockHash": "0xbinding",
+        "requireCanonical": true,
+    })
+}
+
+fn primary_name_fallback_chain_positions() -> Value {
+    json!({
+        "ethereum": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": 21_000_003,
+            "block_hash": "0xbinding",
+            "timestamp": "2026-04-17T00:00:03Z",
+        }
+    })
+}
+
+fn primary_name_verified_state_without_provenance(payload: &PrimaryNameResponse) -> Value {
+    let mut state = payload
+        .verified_state
+        .clone()
+        .expect("verified primary-name state must be present");
+    state["verified_primary_name"]
+        .as_object_mut()
+        .expect("verified primary-name section must be an object")
+        .remove("provenance");
+    state
+}
+
+fn assert_persisted_primary_name_fallback_metadata(payload: &PrimaryNameResponse) {
+    assert_eq!(payload.chain_positions, primary_name_fallback_chain_positions());
+    assert_eq!(payload.consistency, "head");
+    let provenance = payload
+        .provenance
+        .as_object()
+        .expect("persisted fallback route provenance must be present");
+    assert!(
+        provenance
+            .get("execution_trace_id")
+            .and_then(Value::as_str)
+            .is_some()
+    );
+    assert_eq!(
+        provenance.get("manifest_versions"),
+        Some(&json!([{
+            "source_family": "ens_execution",
+            "manifest_version": 1,
+        }]))
+    );
+    assert_eq!(
+        payload
+            .verified_state
+            .as_ref()
+            .and_then(|state| state.get("verified_primary_name"))
+            .and_then(|verified| verified.get("provenance")),
+        Some(&payload.provenance)
+    );
+}
+
 fn primary_name_supported_coverage(namespace: &str) -> Value {
     let source_classes_considered = match namespace {
         "ens" => json!(["ens_v1_reverse_l1", "ens_execution"]),
@@ -209,6 +269,7 @@ fn primary_name_response_uses_on_demand_claim_and_verification_for_default_tuple
         "60".to_owned(),
         ResolutionMode::Both,
         &lookup_state,
+        None,
     );
 
     assert_eq!(
@@ -225,8 +286,8 @@ fn primary_name_response_uses_on_demand_claim_and_verification_for_default_tuple
         }))
     );
     assert_eq!(
-        payload.verified_state,
-        Some(json!({
+        primary_name_verified_state_without_provenance(&payload),
+        json!({
             "verified_primary_name": {
                 "status": "success",
                 "name": {
@@ -237,14 +298,14 @@ fn primary_name_response_uses_on_demand_claim_and_verification_for_default_tuple
                     "namehash": bigname_execution::ens_namehash_hex("taytems.eth")?,
                 },
             }
-        }))
+        })
     );
     assert_eq!(
         payload.coverage,
         json!({
             "status": "partial",
             "exhaustiveness": "non_enumerable",
-            "source_classes_considered": ["ens_reverse_rpc", "ens_execution_rpc"],
+            "source_classes_considered": ["ens_reverse_rpc", "ens_execution"],
             "enumeration_basis": "primary_name_lookup",
             "unsupported_reason": null,
         })
@@ -280,15 +341,16 @@ fn primary_name_response_reports_supported_tuple_class_without_persisted_verifie
         "60".to_owned(),
         ResolutionMode::Both,
         &lookup_state,
+        None,
     );
 
     assert_eq!(
-        payload.verified_state,
-        Some(json!({
+        primary_name_verified_state_without_provenance(&payload),
+        json!({
             "verified_primary_name": {
                 "status": "not_found",
             }
-        }))
+        })
     );
     assert_eq!(payload.coverage, primary_name_supported_coverage("ens"));
     Ok(())
@@ -297,6 +359,7 @@ fn primary_name_response_reports_supported_tuple_class_without_persisted_verifie
 #[tokio::test]
 async fn get_primary_names_uses_configured_on_demand_rpc_for_default_tuple_miss() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
+    database.seed_default_ens_snapshot_selector_position().await?;
     let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
         json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
         json!(
@@ -343,6 +406,12 @@ async fn get_primary_names_uses_configured_on_demand_rpc_for_default_tuple_miss(
             "unsupported_reason": null,
         })
     );
+    assert_eq!(
+        payload.provenance,
+        json!({ "source_family": "ens_reverse_rpc" })
+    );
+    assert_eq!(payload.chain_positions, primary_name_fallback_chain_positions());
+    assert_eq!(payload.consistency, "head");
 
     let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
     assert_eq!(rpc_requests.len(), 2);
@@ -351,13 +420,19 @@ async fn get_primary_names_uses_configured_on_demand_rpc_for_default_tuple_miss(
         rpc_requests[0]["params"][0]["to"],
         bigname_execution::ENS_REGISTRY_ADDRESS
     );
-    assert_eq!(rpc_requests[0]["params"][1], "latest");
+    assert_eq!(
+        rpc_requests[0]["params"][1],
+        primary_name_selected_block_selector()
+    );
     assert_eq!(rpc_requests[1]["method"], "eth_call");
     assert_eq!(
         rpc_requests[1]["params"][0]["to"],
         "0xa2c122be93b0074270ebee7f6b7292c7deb45047"
     );
-    assert_eq!(rpc_requests[1]["params"][1], "latest");
+    assert_eq!(
+        rpc_requests[1]["params"][1],
+        primary_name_selected_block_selector()
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -366,6 +441,7 @@ async fn get_primary_names_uses_configured_on_demand_rpc_for_default_tuple_miss(
 #[tokio::test]
 async fn get_primary_names_canonical_coin_type_reaches_on_demand_fallback() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
+    database.seed_default_ens_snapshot_selector_position().await?;
     let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
         json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
         primary_name_reverse_name_response("taytems.eth"),
@@ -483,6 +559,7 @@ async fn get_primary_names_canonicalizes_coin_type_before_lookup_and_response() 
 #[tokio::test]
 async fn get_primary_names_reports_on_demand_unnormalizable_claim_as_invalid_name() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
+    database.seed_default_ens_snapshot_selector_position().await?;
     let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
         json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
         primary_name_reverse_name_response("alice..eth"),
@@ -538,6 +615,9 @@ async fn get_primary_names_reports_on_demand_unnormalizable_claim_as_invalid_nam
 #[tokio::test]
 async fn get_primary_names_verifies_default_tuple_miss_with_on_demand_rpc() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
     let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
         json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
         json!(
@@ -577,8 +657,8 @@ async fn get_primary_names_verifies_default_tuple_miss_with_on_demand_rpc() -> R
         }))
     );
     assert_eq!(
-        payload.verified_state,
-        Some(json!({
+        primary_name_verified_state_without_provenance(&payload),
+        json!({
             "verified_primary_name": {
                 "status": "success",
                 "name": {
@@ -589,14 +669,15 @@ async fn get_primary_names_verifies_default_tuple_miss_with_on_demand_rpc() -> R
                     "namehash": bigname_execution::ens_namehash_hex("taytems.eth")?,
                 },
             }
-        }))
+        })
     );
+    assert_persisted_primary_name_fallback_metadata(&payload);
     assert_eq!(
         payload.coverage,
         json!({
             "status": "partial",
             "exhaustiveness": "non_enumerable",
-            "source_classes_considered": ["ens_reverse_rpc", "ens_execution_rpc"],
+            "source_classes_considered": ["ens_reverse_rpc", "ens_execution"],
             "enumeration_basis": "primary_name_lookup",
             "unsupported_reason": null,
         })
@@ -604,11 +685,145 @@ async fn get_primary_names_verifies_default_tuple_miss_with_on_demand_rpc() -> R
 
     let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
     assert_eq!(rpc_requests.len(), 3);
+    for request in &rpc_requests {
+        assert_eq!(
+            request["params"][1],
+            primary_name_selected_block_selector()
+        );
+    }
     assert_eq!(
         rpc_requests[2]["params"][0]["to"],
         bigname_execution::ENS_UNIVERSAL_RESOLVER_ADDRESS
     );
-    assert_eq!(rpc_requests[2]["params"][1], "latest");
+
+    let database_url = std::env::var("BIGNAME_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .unwrap_or_else(|_| default_database_url().to_owned());
+    let projection_pool = PgPool::connect_with(
+        PgConnectOptions::from_str(&database_url)?
+            .database(&database.database_name)
+            .disable_statement_logging(),
+    )
+    .await?;
+    let mut projection_write = projection_pool.begin().await?;
+    sqlx::query("LOCK TABLE primary_names_current IN ROW EXCLUSIVE MODE")
+        .execute(&mut *projection_write)
+        .await?;
+    let readback_state = database.app_state();
+    let mut readback_task = tokio::spawn(async move {
+        app_router(readback_state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/primary-names/0x8e8db5ccef88cca9d624701db544989c996e3216?mode=both")
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .context("persisted primary-name fallback readback request failed")
+    });
+    let completed_while_projection_write_locked = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        &mut readback_task,
+    )
+    .await;
+    projection_write.commit().await?;
+    let readback_was_serialized = completed_while_projection_write_locked.is_err();
+    let second_response = match completed_while_projection_write_locked {
+        Ok(response) => response.context("persisted readback task panicked")??,
+        Err(_) => readback_task
+            .await
+            .context("persisted readback task panicked")??,
+    };
+    assert!(
+        readback_was_serialized,
+        "route-local trace readback must serialize with projection writes"
+    );
+    assert_eq!(second_response.status(), StatusCode::OK);
+    let second_payload: PrimaryNameResponse = read_json(second_response).await?;
+    assert_eq!(second_payload, payload);
+
+    let mut projection_insert = projection_pool.begin().await?;
+    sqlx::query("LOCK TABLE primary_names_current IN ROW EXCLUSIVE MODE")
+        .execute(&mut *projection_insert)
+        .await?;
+    let raced_readback_state = database.app_state();
+    let mut raced_readback_task = tokio::spawn(async move {
+        app_router(raced_readback_state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/primary-names/0x8e8db5ccef88cca9d624701db544989c996e3216?mode=both")
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .context("projection-raced primary-name fallback readback request failed")
+    });
+    let raced_readback_before_insert = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        &mut raced_readback_task,
+    )
+    .await;
+    assert!(
+        raced_readback_before_insert.is_err(),
+        "route-local trace readback must wait for the projection write fence"
+    );
+    sqlx::query(
+        r#"
+        INSERT INTO primary_names_current (
+            address,
+            namespace,
+            coin_type,
+            claim_status,
+            raw_claim_name,
+            normalized_claim_name,
+            claim_name_is_normalized,
+            claim_provenance
+        )
+        VALUES ($1, 'ens', '60', 'not_found', NULL, NULL, FALSE, '{}'::jsonb)
+        "#,
+    )
+    .bind("0x8e8db5ccef88cca9d624701db544989c996e3216")
+    .execute(&mut *projection_insert)
+    .await?;
+    projection_insert.commit().await?;
+    let raced_response = raced_readback_task
+        .await
+        .context("projection-raced persisted readback task panicked")??;
+    assert_eq!(raced_response.status(), StatusCode::OK);
+    let raced_payload: PrimaryNameResponse = read_json(raced_response).await?;
+    assert_eq!(
+        raced_payload.declared_state,
+        Some(json!({
+            "claimed_primary_name": {
+                "status": "not_found",
+                "provenance": {},
+            }
+        }))
+    );
+    assert_eq!(
+        raced_payload.verified_state,
+        Some(json!({
+            "verified_primary_name": {
+                "status": "not_found",
+            }
+        }))
+    );
+    assert!(raced_payload.provenance.is_null());
+    assert_eq!(raced_payload.chain_positions, json!({}));
+    projection_pool.close().await;
+
+    let persisted_outcome_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM execution_cache_outcomes
+        WHERE request_type = 'verified_primary_name'
+          AND namespace = 'ens'
+          AND request_key = 'ens:0x8e8db5ccef88cca9d624701db544989c996e3216:60'
+        "#,
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(persisted_outcome_count, 1);
 
     database.cleanup().await?;
     Ok(())
@@ -618,6 +833,9 @@ async fn get_primary_names_verifies_default_tuple_miss_with_on_demand_rpc() -> R
 async fn get_primary_names_rejects_case_variant_on_demand_claim_before_forward_lookup()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
     let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
         json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
         primary_name_reverse_name_response("Taytems.eth"),
@@ -652,13 +870,13 @@ async fn get_primary_names_rejects_case_variant_on_demand_claim_before_forward_l
         }))
     );
     assert_eq!(
-        payload.verified_state,
-        Some(json!({
+        primary_name_verified_state_without_provenance(&payload),
+        json!({
             "verified_primary_name": {
                 "status": "invalid_name",
                 "failure_reason": bigname_execution::VERIFIED_PRIMARY_NAME_CLAIM_NOT_NORMALIZED_REASON,
             }
-        }))
+        })
     );
     assert_eq!(
         payload.coverage,
@@ -670,7 +888,29 @@ async fn get_primary_names_rejects_case_variant_on_demand_claim_before_forward_l
             "unsupported_reason": null,
         })
     );
+    assert_persisted_primary_name_fallback_metadata(&payload);
     assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 2);
+    let execution_trace_id = payload.provenance["execution_trace_id"]
+        .as_str()
+        .context("persisted fallback provenance must include execution_trace_id")?
+        .parse::<Uuid>()?;
+    let trace = bigname_storage::load_execution_trace(&database.pool, execution_trace_id)
+        .await?
+        .context("normalization-gated fallback trace must be durable")?;
+    assert_eq!(
+        trace
+            .steps
+            .iter()
+            .map(|step| step.step_kind.as_str())
+            .collect::<Vec<_>>(),
+        vec!["call_ens_reverse_lookup", "normalize_claimed_name"]
+    );
+    assert!(
+        trace
+            .steps
+            .iter()
+            .all(|step| step.step_kind != "call_universal_resolver")
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -679,6 +919,9 @@ async fn get_primary_names_rejects_case_variant_on_demand_claim_before_forward_l
 #[tokio::test]
 async fn get_primary_names_does_not_trim_on_demand_claim_before_verification() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
     let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
         json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
         primary_name_reverse_name_response(" taytems.eth "),
@@ -713,14 +956,15 @@ async fn get_primary_names_does_not_trim_on_demand_claim_before_verification() -
         }))
     );
     assert_eq!(
-        payload.verified_state,
-        Some(json!({
+        primary_name_verified_state_without_provenance(&payload),
+        json!({
             "verified_primary_name": {
                 "status": "invalid_name",
                 "failure_reason": "claim_name_not_normalizable",
             }
-        }))
+        })
     );
+    assert_persisted_primary_name_fallback_metadata(&payload);
     assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 2);
 
     database.cleanup().await?;
@@ -730,6 +974,9 @@ async fn get_primary_names_does_not_trim_on_demand_claim_before_verification() -
 #[tokio::test]
 async fn get_primary_names_reports_on_demand_forward_addr_miss() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
     let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
         json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
         json!(
@@ -756,23 +1003,24 @@ async fn get_primary_names_reports_on_demand_forward_addr_miss() -> Result<()> {
     assert_eq!(response.status(), StatusCode::OK);
     let payload: PrimaryNameResponse = read_json(response).await?;
     assert_eq!(
-        payload.verified_state,
-        Some(json!({
+        primary_name_verified_state_without_provenance(&payload),
+        json!({
             "verified_primary_name": {
                 "status": "not_found",
             }
-        }))
+        })
     );
     assert_eq!(
         payload.coverage,
         json!({
             "status": "partial",
             "exhaustiveness": "non_enumerable",
-            "source_classes_considered": ["ens_reverse_rpc", "ens_execution_rpc"],
+            "source_classes_considered": ["ens_reverse_rpc", "ens_execution"],
             "enumeration_basis": "primary_name_lookup",
             "unsupported_reason": null,
         })
     );
+    assert_persisted_primary_name_fallback_metadata(&payload);
 
     assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 3);
     database.cleanup().await?;
@@ -782,6 +1030,7 @@ async fn get_primary_names_reports_on_demand_forward_addr_miss() -> Result<()> {
 #[tokio::test]
 async fn get_primary_names_reports_partial_coverage_for_on_demand_rpc_miss() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
+    database.seed_default_ens_snapshot_selector_position().await?;
     let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![json!(
         "0x0000000000000000000000000000000000000000000000000000000000000000"
     )])
@@ -834,8 +1083,9 @@ async fn get_primary_names_reports_partial_coverage_for_on_demand_rpc_miss() -> 
 }
 
 #[tokio::test]
-async fn get_primary_names_keeps_tuple_unsupported_when_on_demand_rpc_unconfigured() -> Result<()> {
+async fn get_primary_names_surfaces_reverse_provider_failure_as_execution_failed() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
+    database.seed_default_ens_snapshot_selector_position().await?;
 
     let response = app_router(database.app_state())
         .oneshot(
@@ -853,11 +1103,26 @@ async fn get_primary_names_keeps_tuple_unsupported_when_on_demand_rpc_unconfigur
         payload.declared_state,
         Some(json!({
             "claimed_primary_name": {
-                "status": "not_found",
+                "status": "execution_failed",
+                "failure_reason": "resolver_call_failed",
             }
         }))
     );
-    assert_eq!(payload.coverage, primary_name_unsupported_coverage());
+    assert_eq!(
+        payload.coverage,
+        json!({
+            "status": "partial",
+            "exhaustiveness": "non_enumerable",
+            "source_classes_considered": ["ens_reverse_rpc"],
+            "enumeration_basis": "primary_name_lookup",
+            "unsupported_reason": null,
+        })
+    );
+    assert_eq!(
+        payload.provenance,
+        json!({ "source_family": "ens_reverse_rpc" })
+    );
+    assert_eq!(payload.chain_positions, primary_name_fallback_chain_positions());
 
     database.cleanup().await?;
     Ok(())
@@ -972,8 +1237,12 @@ async fn get_primary_names_freezes_bootstrap_mode_envelopes() -> Result<()> {
 }
 
 #[tokio::test]
-async fn get_primary_names_returns_not_found_for_tuple_miss_when_projection_exists() -> Result<()> {
+async fn get_primary_names_does_not_conflate_tuple_miss_provider_failure_with_not_found()
+-> Result<()> {
     let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
     database
         .insert_primary_name_current_row("0x0000000000000000000000000000000000000abc", "ens", "61")
         .await?;
@@ -1026,20 +1295,39 @@ async fn get_primary_names_returns_not_found_for_tuple_miss_when_projection_exis
         payload.declared_state,
         Some(json!({
             "claimed_primary_name": {
-                "status": "not_found",
+                "status": "execution_failed",
+                "failure_reason": "resolver_call_failed",
             }
         }))
     );
     assert_eq!(
-        payload.verified_state,
-        Some(json!({
+        primary_name_verified_state_without_provenance(&payload),
+        json!({
             "verified_primary_name": {
-                "status": "not_found",
+                "status": "execution_failed",
+                "failure_reason": "resolver_call_failed",
             }
-        }))
+        })
     );
-    assert!(payload.provenance.is_null());
-    assert_eq!(payload.coverage, primary_name_unsupported_coverage());
+    assert_persisted_primary_name_fallback_metadata(&payload);
+    let execution_trace_id = payload.provenance["execution_trace_id"]
+        .as_str()
+        .context("provider-failure fallback must include execution_trace_id")?
+        .parse::<Uuid>()?;
+    let trace = bigname_storage::load_execution_trace(&database.pool, execution_trace_id)
+        .await?
+        .context("provider-failure fallback trace must be durable")?;
+    assert_eq!(trace.contracts_called, json!([]));
+    assert_eq!(
+        payload.coverage,
+        json!({
+            "status": "partial",
+            "exhaustiveness": "non_enumerable",
+            "source_classes_considered": ["ens_reverse_rpc"],
+            "enumeration_basis": "primary_name_lookup",
+            "unsupported_reason": null,
+        })
+    );
 
     database.cleanup().await?;
     Ok(())

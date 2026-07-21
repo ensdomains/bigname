@@ -172,16 +172,19 @@ back to declared record cache for verified values. The indexer RPC setting and
 Reth DB source settings do not satisfy this API live-execution provider
 requirement by themselves.
 
-The primary-name fallback is deliberately softer than verified resolution: when
-`GET /v1/primary-names/{address}` defaults to `namespace=ens&coin_type=60` and
-the persisted tuple is missing, a configured API provider lets the route read
-the current Ethereum Mainnet reverse resolver and, in verified modes, validate
-the claimed name's current `addr:60` value through the ENS Universal Resolver.
-A zero resolver, empty name, wrong namespace, unnormalizable reverse name, or
-empty forward `addr` is a supported fallback miss. Missing provider configuration
-or reverse-provider failure is logged and suppresses the fallback, leaving the
-route to return the persisted/no-fallback response instead of failing the
-request. Forward-verification provider failure after a reverse claim returns
+When `GET /v1/primary-names/{address}` defaults to
+`namespace=ens&coin_type=60` and the persisted tuple is missing, a configured
+API provider lets the route read the Ethereum Mainnet reverse resolver at the
+latest stored checkpoint and, in verified modes, validate the claimed name's
+`addr:60` value through the ENS Universal Resolver at that same block hash. A
+zero resolver, empty name, wrong namespace, unnormalizable reverse name, or
+empty forward `addr` is a supported fallback miss. Missing provider
+configuration or reverse-provider failure returns the route's execution-failure
+class instead of being reported as `not_found`. In verified modes, the API
+persists the reverse result, normalization gate, optional forward call, and
+outcome before responding; an identical request at the same selected checkpoint
+can reuse that trace without another provider call. Forward-verification
+provider failure after a reverse claim likewise returns
 `verified_primary_name.status=execution_failed`.
 
 The worker may use the same provider shape for projection-owned ENSv1 text

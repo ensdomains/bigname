@@ -2,6 +2,9 @@ use serde_json::Value;
 use sqlx::types::time::OffsetDateTime;
 use uuid::Uuid;
 
+/// Discriminator for an execution cache dependency that has no projected surface/resource.
+pub const SELECTED_CHECKPOINT_BOUNDARY_KIND: &str = "selected_checkpoint";
+
 /// Persisted execution trace with request, chain, manifest, and ordered-step context.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionTrace {

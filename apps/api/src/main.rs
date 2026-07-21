@@ -21,18 +21,18 @@ use bigname_storage::{
     SnapshotSelectionScope, SnapshotSelectorInput, SurfaceBindingKind,
     VERIFIED_PRIMARY_NAME_INVALIDATION_KEY, VERIFIED_PRIMARY_NAME_LOOKUP_KEY,
     VERIFIED_PRIMARY_NAME_REQUEST_TYPE, load_address_history_page, load_chain_checkpoint,
-    load_event_history_page, load_execution_outcome, load_execution_trace, load_name_current,
-    load_name_current_for_snapshot, load_name_history_page, load_name_surface,
-    load_primary_name_current_snapshot, load_record_inventory_current,
-    load_record_inventory_current_for_snapshot, load_resolver_current, load_resource,
-    load_resource_history_page, load_surface_bindings_by_logical_name_id,
-    load_surface_bindings_by_resource_id, parse_rfc3339_utc_timestamp,
-    resolve_exact_name_snapshot_selection,
+    load_event_history_page, load_execution_outcome, load_execution_trace,
+    load_execution_trace_from_connection, load_name_current, load_name_current_for_snapshot,
+    load_name_history_page, load_name_surface, load_primary_name_current_snapshot,
+    load_record_inventory_current, load_record_inventory_current_for_snapshot,
+    load_resolver_current, load_resource, load_resource_history_page,
+    load_surface_bindings_by_logical_name_id, load_surface_bindings_by_resource_id,
+    parse_rfc3339_utc_timestamp, resolve_exact_name_snapshot_selection,
 };
 use clap::Parser;
 use serde_json::{Map as JsonMap, json};
 use sqlx::{
-    PgPool, Row,
+    PgConnection, PgPool, Row,
     types::{JsonValue, Uuid, time::OffsetDateTime},
 };
 use tracing::{error, info, warn};

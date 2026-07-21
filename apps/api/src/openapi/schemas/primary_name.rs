@@ -82,6 +82,40 @@ pub(super) fn primary_name_claimed_result_schema() -> JsonValue {
                 },
                 "additionalProperties": false,
             }),
+            json!({
+                "type": "object",
+                "required": ["status", "failure_reason"],
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "const": "execution_failed",
+                    },
+                    "failure_reason": {
+                        "type": "string",
+                    },
+                },
+                "additionalProperties": false,
+            }),
+        ],
+    })
+}
+
+pub(super) fn primary_name_route_provenance_schema() -> JsonValue {
+    json!({
+        "oneOf": [
+            schema_ref("NullValue"),
+            json!({
+                "type": "object",
+                "required": ["source_family"],
+                "properties": {
+                    "source_family": {
+                        "type": "string",
+                        "const": "ens_reverse_rpc",
+                    },
+                },
+                "additionalProperties": false,
+            }),
+            schema_ref("PrimaryNameVerifiedResultProvenance"),
         ],
     })
 }

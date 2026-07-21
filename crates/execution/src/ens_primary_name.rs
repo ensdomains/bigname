@@ -12,6 +12,19 @@ use crate::ens_resolution_ccip::{follow_ccip_read, rpc_error_contains_offchain_l
 use crate::rpc::{ChainRpcUrls, JsonRpcCallError, JsonRpcCallResult, JsonRpcHttpClient};
 use crate::{ENS_REGISTRY_ADDRESS, ENS_UNIVERSAL_RESOLVER_ADDRESS, ETHEREUM_MAINNET_CHAIN_ID};
 
+const ENS_REGISTRY_RESOLVER_SELECTOR: &str = "0x0178b8bf";
+const ENS_REVERSE_NAME_SELECTOR: &str = "0x691f3431";
+const ENS_UNIVERSAL_RESOLVER_RESOLVE_SELECTOR: &str = "0x9061b923";
+
+#[path = "ens_primary_name/route_fallback.rs"]
+mod route_fallback;
+pub(crate) use route_fallback::validate_route_local_ens_primary_name_execution;
+pub use route_fallback::{
+    BuildOnDemandEnsVerifiedPrimaryNameRequest, RouteLocalEnsPrimaryNameClaim,
+    RouteLocalEnsPrimaryNameExecution, build_on_demand_ens_verified_primary_name_request,
+    route_local_ens_primary_name_execution,
+};
+
 mod abi {
     use super::*;
 
@@ -25,6 +38,7 @@ mod abi {
 pub struct OnDemandEnsPrimaryNameRequest<'a> {
     pub normalized_address: &'a str,
     pub chain_rpc_urls: &'a ChainRpcUrls,
+    pub block_hash: &'a str,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -33,11 +47,25 @@ pub struct OnDemandEnsPrimaryName {
     pub resolver_address: String,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct OnDemandEnsPrimaryNameExecutionEvidence {
+    pub contracts_called: Vec<Value>,
+    pub gateway_digests: Vec<String>,
+    pub ccip_step_payloads: Vec<Value>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OnDemandEnsPrimaryNameLookup {
+    pub primary_name: Option<OnDemandEnsPrimaryName>,
+    pub evidence: OnDemandEnsPrimaryNameExecutionEvidence,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OnDemandEnsPrimaryNameVerificationRequest<'a> {
     pub normalized_address: &'a str,
     pub normalized_name: &'a str,
     pub chain_rpc_urls: &'a ChainRpcUrls,
+    pub block_hash: &'a str,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -52,6 +80,7 @@ pub struct EnsForwardAddressLookupRequest<'a> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OnDemandEnsPrimaryNameVerification {
     pub resolved_address: Option<String>,
+    pub evidence: OnDemandEnsPrimaryNameExecutionEvidence,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,6 +95,7 @@ pub struct OnDemandEnsPrimaryNameError {
     message: String,
     plain_execution_revert: bool,
     offchain_lookup_required: bool,
+    evidence: OnDemandEnsPrimaryNameExecutionEvidence,
 }
 
 impl OnDemandEnsPrimaryNameError {
@@ -75,6 +105,7 @@ impl OnDemandEnsPrimaryNameError {
             message: message.into(),
             plain_execution_revert: false,
             offchain_lookup_required: false,
+            evidence: OnDemandEnsPrimaryNameExecutionEvidence::default(),
         }
     }
 
@@ -92,6 +123,7 @@ impl OnDemandEnsPrimaryNameError {
             message: message.into(),
             plain_execution_revert,
             offchain_lookup_required,
+            evidence: OnDemandEnsPrimaryNameExecutionEvidence::default(),
         }
     }
 
@@ -109,6 +141,15 @@ impl OnDemandEnsPrimaryNameError {
 
     pub const fn is_offchain_lookup_required(&self) -> bool {
         self.offchain_lookup_required
+    }
+
+    pub fn evidence(&self) -> &OnDemandEnsPrimaryNameExecutionEvidence {
+        &self.evidence
+    }
+
+    fn with_evidence(mut self, evidence: OnDemandEnsPrimaryNameExecutionEvidence) -> Self {
+        self.evidence = evidence;
+        self
     }
 
     #[doc(hidden)]
@@ -132,35 +173,62 @@ impl std::error::Error for OnDemandEnsPrimaryNameError {}
 pub async fn lookup_ens_reverse_primary_name(
     request: OnDemandEnsPrimaryNameRequest<'_>,
 ) -> std::result::Result<Option<OnDemandEnsPrimaryName>, OnDemandEnsPrimaryNameError> {
-    let rpc = primary_name_rpc(request.chain_rpc_urls)?;
+    execute_ens_reverse_primary_name_lookup(request)
+        .await
+        .map(|lookup| lookup.primary_name)
+}
 
-    lookup_ens_reverse_primary_name_with_rpc(&rpc, request.normalized_address).await
+pub async fn execute_ens_reverse_primary_name_lookup(
+    request: OnDemandEnsPrimaryNameRequest<'_>,
+) -> std::result::Result<OnDemandEnsPrimaryNameLookup, OnDemandEnsPrimaryNameError> {
+    let rpc = primary_name_rpc(request.chain_rpc_urls)?;
+    let mut evidence = OnDemandEnsPrimaryNameExecutionEvidence::default();
+
+    let primary_name = lookup_ens_reverse_primary_name_with_rpc(
+        &rpc,
+        request.normalized_address,
+        hash_pinned_block_selector(request.block_hash),
+        &mut evidence,
+    )
+    .await
+    .map_err(|error| error.with_evidence(evidence.clone()))?;
+    Ok(OnDemandEnsPrimaryNameLookup {
+        primary_name,
+        evidence,
+    })
 }
 
 pub async fn verify_ens_primary_name_forward_address(
     request: OnDemandEnsPrimaryNameVerificationRequest<'_>,
 ) -> std::result::Result<OnDemandEnsPrimaryNameVerification, OnDemandEnsPrimaryNameError> {
     let rpc = primary_name_rpc(request.chain_rpc_urls)?;
+    let mut evidence = OnDemandEnsPrimaryNameExecutionEvidence::default();
 
     verify_ens_primary_name_forward_address_with_rpc(
         &rpc,
         request.normalized_address,
         request.normalized_name,
+        hash_pinned_block_selector(request.block_hash),
+        &mut evidence,
     )
     .await
+    .map_err(|error| error.with_evidence(evidence))
 }
 
 pub async fn lookup_ens_forward_address_at_block(
     request: EnsForwardAddressLookupRequest<'_>,
 ) -> std::result::Result<Option<String>, OnDemandEnsPrimaryNameError> {
     let rpc = primary_name_rpc(request.chain_rpc_urls)?;
+    let mut evidence = OnDemandEnsPrimaryNameExecutionEvidence::default();
     resolve_ens_primary_name_forward_address_with_rpc(
         &rpc,
         request.normalized_name,
         hash_pinned_block_selector(request.block_hash),
         request.follow_ccip_read,
+        &mut evidence,
     )
     .await
+    .map_err(|error| error.with_evidence(evidence))
 }
 
 fn primary_name_rpc(
@@ -181,25 +249,37 @@ fn primary_name_rpc(
 async fn lookup_ens_reverse_primary_name_with_rpc(
     rpc: &JsonRpcHttpClient,
     normalized_address: &str,
+    block_selector: Value,
+    evidence: &mut OnDemandEnsPrimaryNameExecutionEvidence,
 ) -> std::result::Result<Option<OnDemandEnsPrimaryName>, OnDemandEnsPrimaryNameError> {
     let reverse_node = reverse_node(normalized_address).map_err(|error| {
         OnDemandEnsPrimaryNameError::configuration(format!(
             "failed to build ENS reverse node for {normalized_address}: {error}"
         ))
     })?;
-    let resolver_address = lookup_reverse_resolver(rpc, reverse_node).await?;
+    evidence.contracts_called.push(primary_name_contract_call(
+        ENS_REGISTRY_ADDRESS,
+        ENS_REGISTRY_RESOLVER_SELECTOR,
+    ));
+    let resolver_address =
+        lookup_reverse_resolver(rpc, reverse_node, block_selector.clone()).await?;
     if resolver_address == Address::ZERO {
         return Ok(None);
     }
 
-    let name = lookup_reverse_name(rpc, resolver_address, reverse_node).await?;
+    let resolver_address_hex = hex_string(resolver_address.as_slice());
+    evidence.contracts_called.push(primary_name_contract_call(
+        &resolver_address_hex,
+        ENS_REVERSE_NAME_SELECTOR,
+    ));
+    let name = lookup_reverse_name(rpc, resolver_address, reverse_node, block_selector).await?;
     if name.trim().is_empty() {
         return Ok(None);
     }
 
     Ok(Some(OnDemandEnsPrimaryName {
         name,
-        resolver_address: hex_string(resolver_address.as_slice()),
+        resolver_address: resolver_address_hex,
     }))
 }
 
@@ -207,6 +287,8 @@ async fn verify_ens_primary_name_forward_address_with_rpc(
     rpc: &JsonRpcHttpClient,
     normalized_address: &str,
     normalized_name: &str,
+    block_selector: Value,
+    evidence: &mut OnDemandEnsPrimaryNameExecutionEvidence,
 ) -> std::result::Result<OnDemandEnsPrimaryNameVerification, OnDemandEnsPrimaryNameError> {
     reverse_node(normalized_address).map_err(|error| {
         OnDemandEnsPrimaryNameError::configuration(format!(
@@ -216,12 +298,16 @@ async fn verify_ens_primary_name_forward_address_with_rpc(
     let resolved_address = resolve_ens_primary_name_forward_address_with_rpc(
         rpc,
         normalized_name,
-        Value::String("latest".to_owned()),
+        block_selector,
         true,
+        evidence,
     )
     .await?;
 
-    Ok(OnDemandEnsPrimaryNameVerification { resolved_address })
+    Ok(OnDemandEnsPrimaryNameVerification {
+        resolved_address,
+        evidence: evidence.clone(),
+    })
 }
 
 async fn resolve_ens_primary_name_forward_address_with_rpc(
@@ -229,6 +315,7 @@ async fn resolve_ens_primary_name_forward_address_with_rpc(
     normalized_name: &str,
     block_selector: Value,
     follow_ccip: bool,
+    evidence: &mut OnDemandEnsPrimaryNameExecutionEvidence,
 ) -> std::result::Result<Option<String>, OnDemandEnsPrimaryNameError> {
     let dns_name = dns_encode_name(normalized_name).map_err(|error| {
         OnDemandEnsPrimaryNameError::configuration(format!(
@@ -249,12 +336,17 @@ async fn resolve_ens_primary_name_forward_address_with_rpc(
         ))
     })?;
     let universal_call = universal_resolver_call(&dns_name, resolver_call.calldata());
+    evidence.contracts_called.push(primary_name_contract_call(
+        ENS_UNIVERSAL_RESOLVER_ADDRESS,
+        ENS_UNIVERSAL_RESOLVER_RESOLVE_SELECTOR,
+    ));
     let return_data = if follow_ccip {
         eth_call_following_ccip_with_block_selector(
             rpc,
             ENS_UNIVERSAL_RESOLVER_ADDRESS,
             universal_call.calldata(),
             block_selector,
+            evidence,
         )
         .await?
     } else {
@@ -294,12 +386,14 @@ fn reverse_node(normalized_address: &str) -> Result<[u8; 32]> {
 async fn lookup_reverse_resolver(
     rpc: &JsonRpcHttpClient,
     reverse_node: [u8; 32],
+    block_selector: Value,
 ) -> std::result::Result<Address, OnDemandEnsPrimaryNameError> {
     let calldata = abi::resolverCall {
         node: B256::from(reverse_node),
     }
     .abi_encode();
-    let return_data = eth_call(rpc, ENS_REGISTRY_ADDRESS, &calldata).await?;
+    let return_data =
+        eth_call_with_block_selector(rpc, ENS_REGISTRY_ADDRESS, &calldata, block_selector).await?;
     abi::resolverCall::abi_decode_returns_validate(&return_data).map_err(|error| {
         OnDemandEnsPrimaryNameError::execution(format!(
             "ENS registry resolver(bytes32) return data is malformed: {error}"
@@ -311,26 +405,24 @@ async fn lookup_reverse_name(
     rpc: &JsonRpcHttpClient,
     resolver_address: Address,
     reverse_node: [u8; 32],
+    block_selector: Value,
 ) -> std::result::Result<String, OnDemandEnsPrimaryNameError> {
     let calldata = abi::nameCall {
         node: B256::from(reverse_node),
     }
     .abi_encode();
-    let return_data = eth_call(rpc, &hex_string(resolver_address.as_slice()), &calldata).await?;
+    let return_data = eth_call_with_block_selector(
+        rpc,
+        &hex_string(resolver_address.as_slice()),
+        &calldata,
+        block_selector,
+    )
+    .await?;
     abi::nameCall::abi_decode_returns_validate(&return_data).map_err(|error| {
         OnDemandEnsPrimaryNameError::execution(format!(
             "ENS reverse resolver name(bytes32) return data is malformed: {error}"
         ))
     })
-}
-
-async fn eth_call(
-    rpc: &JsonRpcHttpClient,
-    to: &str,
-    calldata: &[u8],
-) -> std::result::Result<Vec<u8>, OnDemandEnsPrimaryNameError> {
-    let result = eth_call_result(rpc, to, calldata).await?;
-    decode_eth_call_result(result)
 }
 
 async fn eth_call_with_block_selector(
@@ -348,12 +440,21 @@ async fn eth_call_following_ccip_with_block_selector(
     to: &str,
     calldata: &[u8],
     block_selector: Value,
+    evidence: &mut OnDemandEnsPrimaryNameExecutionEvidence,
 ) -> std::result::Result<Vec<u8>, OnDemandEnsPrimaryNameError> {
     let result =
         eth_call_result_with_block_selector(rpc, to, calldata, block_selector.clone()).await?;
     let result = match &result.result {
         Err(error) => match follow_ccip_read(rpc, error, &block_selector, to).await {
-            Ok(Some(outcome)) => outcome.result,
+            Ok(Some(outcome)) => {
+                evidence
+                    .gateway_digests
+                    .extend(outcome.summary.gateway_digests);
+                evidence
+                    .ccip_step_payloads
+                    .extend(outcome.summary.step_payloads);
+                outcome.result
+            }
             Ok(None) | Err(_) => result,
         },
         Ok(_) => result,
@@ -361,19 +462,19 @@ async fn eth_call_following_ccip_with_block_selector(
     decode_eth_call_result(result)
 }
 
+fn primary_name_contract_call(contract_address: &str, selector: &str) -> Value {
+    json!({
+        "chain_id": ETHEREUM_MAINNET_CHAIN_ID,
+        "contract_address": contract_address,
+        "selector": selector,
+    })
+}
+
 fn hash_pinned_block_selector(block_hash: &str) -> Value {
     json!({
         "blockHash": block_hash,
         "requireCanonical": true,
     })
-}
-
-async fn eth_call_result(
-    rpc: &JsonRpcHttpClient,
-    to: &str,
-    calldata: &[u8],
-) -> std::result::Result<JsonRpcCallResult, OnDemandEnsPrimaryNameError> {
-    eth_call_result_with_block_selector(rpc, to, calldata, Value::String("latest".to_owned())).await
 }
 
 async fn eth_call_result_with_block_selector(

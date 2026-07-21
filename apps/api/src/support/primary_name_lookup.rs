@@ -2,6 +2,11 @@ use super::*;
 
 const PERSISTED_PRIMARY_NAME_VERIFIED_READBACK_SCAN_LIMIT: i64 = 16;
 
+pub(super) enum PrimaryNameVerifiedReadbackFence<'a> {
+    ProjectedClaim,
+    RouteLocalFallback(&'a SelectedSnapshot),
+}
+
 pub(super) async fn load_primary_name_lookup_state(
     pool: &PgPool,
     address: &str,
@@ -89,11 +94,12 @@ pub(super) fn canonical_primary_name_coin_type(coin_type: &str) -> ApiResult<Str
     })
 }
 
-pub(super) async fn load_persisted_primary_name_verified_readback(
-    pool: &PgPool,
+pub(super) async fn load_persisted_primary_name_verified_readback_from_connection(
+    connection: &mut PgConnection,
     address: &str,
     namespace: &str,
     coin_type: &str,
+    fence: PrimaryNameVerifiedReadbackFence<'_>,
 ) -> ApiResult<Option<PersistedPrimaryNameVerifiedReadback>> {
     let request_key = primary_name_verified_request_key(namespace, address, coin_type);
     let rows = sqlx::query(
@@ -122,7 +128,7 @@ pub(super) async fn load_persisted_primary_name_verified_readback(
     .bind(namespace)
     .bind(&request_key)
     .bind(PERSISTED_PRIMARY_NAME_VERIFIED_READBACK_SCAN_LIMIT)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await;
 
     let rows = match rows {
@@ -319,7 +325,7 @@ pub(super) async fn load_persisted_primary_name_verified_readback(
             )));
         }
 
-        let trace = load_execution_trace(pool, outcome.execution_trace_id)
+        let trace = load_execution_trace_from_connection(connection, outcome.execution_trace_id)
             .await
             .map_err(|load_error| {
                 error!(
@@ -355,6 +361,62 @@ pub(super) async fn load_persisted_primary_name_verified_readback(
             continue;
         }
 
+        let route_local_execution = bigname_execution::route_local_ens_primary_name_execution(
+            &trace,
+        )
+        .map_err(|load_error| {
+            error!(
+                service = "api",
+                address = %address,
+                namespace = %namespace,
+                coin_type = %coin_type,
+                execution_trace_id = %trace.execution_trace_id,
+                error = ?load_error,
+                "persisted route-local verified primary-name claim metadata malformed"
+            );
+            ApiError::internal_error(format!(
+                "persisted verified primary-name trace metadata mismatch for address {address}"
+            ))
+        })?;
+        let (route_local_claim, forward_call_attempted) = match (
+            &fence,
+            route_local_execution,
+        ) {
+            (PrimaryNameVerifiedReadbackFence::ProjectedClaim, None) => (None, false),
+            (PrimaryNameVerifiedReadbackFence::ProjectedClaim, Some(_)) => continue,
+            (PrimaryNameVerifiedReadbackFence::RouteLocalFallback(_), None) => continue,
+            (
+                PrimaryNameVerifiedReadbackFence::RouteLocalFallback(selected_snapshot),
+                Some(route_local_execution),
+            ) => {
+                let requested_positions = bigname_storage::build_resolution_requested_chain_positions(
+                    &selected_snapshot.chain_positions_value(),
+                )
+                .map_err(|load_error| {
+                    error!(
+                        service = "api",
+                        address = %address,
+                        namespace = %namespace,
+                        coin_type = %coin_type,
+                        error = ?load_error,
+                        "failed to build route-local verified primary-name selected positions"
+                    );
+                    ApiError::internal_error(format!(
+                        "failed to validate persisted verified primary-name snapshot for address {address}"
+                    ))
+                })?;
+                if outcome.cache_key.requested_chain_positions != requested_positions {
+                    continue;
+                }
+                (
+                    Some(on_demand_claim_from_persisted_route_local_execution(
+                        route_local_execution.claim,
+                    )),
+                    route_local_execution.forward_call_attempted,
+                )
+            }
+        };
+
         let verified_primary_name = persisted_verified_primary_name_section(
             &trace, &outcome, address, namespace, coin_type,
         )?;
@@ -366,10 +428,41 @@ pub(super) async fn load_persisted_primary_name_verified_readback(
             verified_primary_name,
             provenance,
             finished_at: outcome.finished_at,
+            route_local_claim,
+            forward_call_attempted,
         }));
     }
 
     Ok(None)
+}
+
+fn on_demand_claim_from_persisted_route_local_execution(
+    claim: bigname_execution::RouteLocalEnsPrimaryNameClaim,
+) -> OnDemandPrimaryNameClaimState {
+    match claim {
+        bigname_execution::RouteLocalEnsPrimaryNameClaim::Found {
+            raw_name,
+            normalized_name,
+            resolver_address,
+        } => OnDemandPrimaryNameClaimState::Found(OnDemandPrimaryNameClaim {
+            raw_name,
+            normalized_name,
+            resolver_address,
+        }),
+        bigname_execution::RouteLocalEnsPrimaryNameClaim::NotFound => {
+            OnDemandPrimaryNameClaimState::NotFound
+        }
+        bigname_execution::RouteLocalEnsPrimaryNameClaim::InvalidName {
+            raw_name,
+            resolver_address,
+        } => OnDemandPrimaryNameClaimState::InvalidName(OnDemandPrimaryNameInvalidClaim {
+            raw_name,
+            resolver_address,
+        }),
+        bigname_execution::RouteLocalEnsPrimaryNameClaim::ExecutionFailed { .. } => {
+            OnDemandPrimaryNameClaimState::Unavailable
+        }
+    }
 }
 
 pub(super) fn primary_name_verified_request_key(
@@ -378,157 +471,4 @@ pub(super) fn primary_name_verified_request_key(
     coin_type: &str,
 ) -> String {
     format!("{namespace}:{address}:{coin_type}")
-}
-
-pub(super) async fn load_on_demand_primary_name_claim(
-    state: &AppState,
-    address: &str,
-    namespace: &str,
-    coin_type: &str,
-) -> ApiResult<OnDemandPrimaryNameClaimState> {
-    let coin_type = canonical_primary_name_coin_type(coin_type)?;
-    if namespace != bigname_storage::ENS_NAMESPACE || coin_type != "60" {
-        return Ok(OnDemandPrimaryNameClaimState::NotAttempted);
-    }
-
-    let Some(on_demand) = (match bigname_execution::lookup_ens_reverse_primary_name(
-        bigname_execution::OnDemandEnsPrimaryNameRequest {
-            normalized_address: address,
-            chain_rpc_urls: &state.chain_rpc_urls,
-        },
-    )
-    .await
-    {
-        Ok(on_demand) => on_demand,
-        Err(error) => {
-            warn!(
-                service = "api",
-                address = %address,
-                namespace = %namespace,
-                coin_type = %coin_type,
-                error_kind = ?error.kind(),
-                error = %error.message(),
-                "on-demand primary-name reverse lookup failed"
-            );
-            return Ok(OnDemandPrimaryNameClaimState::Unavailable);
-        }
-    }) else {
-        return Ok(OnDemandPrimaryNameClaimState::NotFound);
-    };
-
-    let parsed = match normalize_inferred_route_name(&on_demand.name) {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            warn!(
-                service = "api",
-                address = %address,
-                namespace = %namespace,
-                coin_type = %coin_type,
-                raw_name = %on_demand.name,
-                error = %error.message,
-                "on-demand primary-name reverse lookup returned an unnormalizable name"
-            );
-            return Ok(OnDemandPrimaryNameClaimState::InvalidName(
-                OnDemandPrimaryNameInvalidClaim {
-                    raw_name: on_demand.name,
-                    resolver_address: on_demand.resolver_address,
-                },
-            ));
-        }
-    };
-    if parsed.namespace != namespace {
-        return Ok(OnDemandPrimaryNameClaimState::NotFound);
-    }
-
-    Ok(OnDemandPrimaryNameClaimState::Found(
-        OnDemandPrimaryNameClaim {
-            raw_name: on_demand.name,
-            normalized_name: parsed.normalized_name,
-            resolver_address: on_demand.resolver_address,
-        },
-    ))
-}
-
-pub(super) async fn load_on_demand_primary_name_verification(
-    state: &AppState,
-    address: &str,
-    namespace: &str,
-    coin_type: &str,
-    claim: &OnDemandPrimaryNameClaim,
-) -> ApiResult<OnDemandPrimaryNameVerificationState> {
-    let coin_type = canonical_primary_name_coin_type(coin_type)?;
-    if namespace != bigname_storage::ENS_NAMESPACE || coin_type != "60" {
-        return Ok(OnDemandPrimaryNameVerificationState::NotAttempted);
-    }
-    if claim.raw_name != claim.normalized_name {
-        return Ok(OnDemandPrimaryNameVerificationState::ClaimNotNormalized);
-    }
-
-    let verification = match bigname_execution::verify_ens_primary_name_forward_address(
-        bigname_execution::OnDemandEnsPrimaryNameVerificationRequest {
-            normalized_address: address,
-            normalized_name: &claim.normalized_name,
-            chain_rpc_urls: &state.chain_rpc_urls,
-        },
-    )
-    .await
-    {
-        Ok(verification) => verification,
-        Err(error) => {
-            warn!(
-                service = "api",
-                address = %address,
-                namespace = %namespace,
-                coin_type = %coin_type,
-                normalized_name = %claim.normalized_name,
-                error_kind = ?error.kind(),
-                error = %error.message(),
-                "on-demand primary-name forward verification failed"
-            );
-            return Ok(OnDemandPrimaryNameVerificationState::Verified(json!({
-                "status": "execution_failed",
-                "failure_reason": "resolver_call_failed",
-            })));
-        }
-    };
-
-    let name = on_demand_primary_name_ref(namespace, &claim.normalized_name)?;
-    let section = match verification.resolved_address {
-        Some(resolved_address) if resolved_address.eq_ignore_ascii_case(address) => json!({
-            "status": "success",
-            "name": name,
-        }),
-        Some(_) => json!({
-            "status": "mismatch",
-            "name": name,
-            "failure_reason": "resolved_target_mismatch",
-        }),
-        None => json!({
-            "status": "not_found",
-        }),
-    };
-    Ok(OnDemandPrimaryNameVerificationState::Verified(section))
-}
-
-fn on_demand_primary_name_ref(namespace: &str, normalized_name: &str) -> ApiResult<JsonValue> {
-    let namehash = bigname_execution::ens_namehash_hex(normalized_name).map_err(|error| {
-        error!(
-            service = "api",
-            namespace = %namespace,
-            normalized_name = %normalized_name,
-            error = ?error,
-            "failed to build on-demand primary-name namehash"
-        );
-        ApiError::internal_error(format!(
-            "failed to build on-demand primary-name identity for {namespace}/{normalized_name}"
-        ))
-    })?;
-
-    Ok(json!({
-        "logical_name_id": format!("{namespace}:{normalized_name}"),
-        "namespace": namespace,
-        "normalized_name": normalized_name,
-        "canonical_display_name": normalized_name,
-        "namehash": namehash,
-    }))
 }
