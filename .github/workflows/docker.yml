@@ -72,6 +72,7 @@ jobs:
           platforms: linux/amd64
           build-args: |
             RUST_VERSION=${{ env.RUST_VERSION }}
+            BIGNAME_BUILD_SHA=${{ github.event.workflow_run.head_sha }}
           tags: ${{ steps.image.outputs.tags }}
           labels: ${{ steps.image.outputs.labels }}
           cache-from: type=gha

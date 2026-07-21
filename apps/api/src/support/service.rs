@@ -30,7 +30,8 @@ pub(super) fn init_tracing(service: &'static str) {
 
     info!(
         service = service,
-        phase = bigname_domain::bootstrap_phase(),
+        version = SOFTWARE_VERSION,
+        build_sha = BUILD_SHA,
         "logging configured"
     );
 }

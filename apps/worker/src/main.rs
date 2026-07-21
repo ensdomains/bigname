@@ -26,6 +26,12 @@ use clap::Parser;
 
 use crate::cli::Cli;
 
+pub(crate) const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub(crate) const BUILD_SHA: &str = match option_env!("BIGNAME_BUILD_SHA") {
+    Some(build_sha) => build_sha,
+    None => "unknown",
+};
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();

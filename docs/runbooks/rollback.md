@@ -162,7 +162,7 @@ A passing gate means:
   from the configured local database;
 - the API binary builds locally from the rollback checkout;
 - the API process can start from that built binary; and
-- the private readiness endpoint reports ready against that database.
+- the unversioned readiness endpoint reports ready against that database.
 
 ## Failure Criteria
 

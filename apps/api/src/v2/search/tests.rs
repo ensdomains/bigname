@@ -616,7 +616,6 @@ impl SearchDatabase {
 
     fn app_state(&self) -> crate::AppState {
         crate::AppState {
-            phase: "test",
             pool: self.pool().clone(),
             chain_rpc_urls: bigname_execution::ChainRpcUrls::default(),
         }

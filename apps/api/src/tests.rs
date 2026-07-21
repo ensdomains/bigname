@@ -1,5 +1,17 @@
 include!("tests/support.rs");
 
+fn expected_health_identity() -> Value {
+    json!({
+        "version": SOFTWARE_VERSION,
+        "build_sha": BUILD_SHA,
+        "schema_migration_version": bigname_storage::latest_migration_version(),
+        "projection_replay_version": bigname_storage::CURRENT_PROJECTION_REPLAY_VERSION,
+        "projection_publication_versions": {
+            "permissions_current": bigname_storage::PERMISSIONS_CURRENT_PUBLICATION_VERSION,
+        },
+    })
+}
+
 #[tokio::test]
 async fn healthz_reports_ready_when_database_is_reachable() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -16,7 +28,8 @@ async fn healthz_reports_ready_when_database_is_reachable() -> Result<()> {
     assert_eq!(response.status(), StatusCode::OK);
     let payload: Value = read_json(response).await?;
     assert_eq!(payload.get("service"), Some(&json!("api")));
-    assert_eq!(payload.get("phase"), Some(&json!("test")));
+    assert_eq!(payload.get("identity"), Some(&expected_health_identity()));
+    assert!(payload.get("phase").is_none());
     assert_eq!(payload.get("status"), Some(&json!("ready")));
     assert_eq!(
         payload.get("process"),
@@ -56,7 +69,8 @@ async fn healthz_reports_degraded_when_database_is_unreachable() -> Result<()> {
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let payload: Value = read_json(response).await?;
     assert_eq!(payload.get("service"), Some(&json!("api")));
-    assert_eq!(payload.get("phase"), Some(&json!("test")));
+    assert_eq!(payload.get("identity"), Some(&expected_health_identity()));
+    assert!(payload.get("phase").is_none());
     assert_eq!(payload.get("status"), Some(&json!("degraded")));
     assert_eq!(
         payload.get("process"),

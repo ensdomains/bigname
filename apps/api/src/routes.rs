@@ -38,7 +38,7 @@ pub(crate) struct ApiRouteErrorResponses {
 }
 
 impl ApiRouteDefinition {
-    const fn private_get(id: ApiRouteId, path: &'static str) -> Self {
+    const fn unversioned_get(id: ApiRouteId, path: &'static str) -> Self {
         Self {
             id,
             method: ApiRouteMethod::Get,
@@ -151,7 +151,7 @@ pub(crate) enum ApiRouteId {
 }
 
 pub(crate) const API_ROUTE_DEFINITIONS: &[ApiRouteDefinition] = &[
-    ApiRouteDefinition::private_get(ApiRouteId::Health, "/healthz"),
+    ApiRouteDefinition::unversioned_get(ApiRouteId::Health, "/healthz"),
     ApiRouteDefinition::public_get(
         ApiRouteId::PublicStatus,
         "/v1/status",

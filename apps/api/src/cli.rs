@@ -6,7 +6,7 @@ use bigname_storage::DatabaseConfig;
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser, Debug)]
-#[command(name = "bigname-api", about = "Bootstrap API process for bigname")]
+#[command(name = "bigname-api", about = "Read API process for bigname")]
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) command: Command,

@@ -6,8 +6,8 @@ use tower_http::cors::CorsLayer;
 use tracing::info;
 
 use crate::{
-    API_ROUTE_DEFINITIONS, AppState, Router, ServeArgs, shutdown_signal,
-    warm_compact_records_route_sql_path,
+    API_ROUTE_DEFINITIONS, AppState, BUILD_SHA, Router, SOFTWARE_VERSION, ServeArgs,
+    shutdown_signal, warm_compact_records_route_sql_path,
 };
 
 use super::schemas::openapi_components;
@@ -18,7 +18,6 @@ pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
     let pool = bigname_storage::connect(&args.database).await?;
     let chain_rpc_urls = args.effective_chain_rpc_urls()?;
     let state = AppState {
-        phase: bigname_domain::bootstrap_phase(),
         pool,
         chain_rpc_urls,
     };
@@ -33,7 +32,11 @@ pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
     info!(
         service = "api",
         bind_addr = %args.bind_addr,
-        phase = bigname_domain::bootstrap_phase(),
+        version = SOFTWARE_VERSION,
+        build_sha = BUILD_SHA,
+        schema_migration_version = bigname_storage::latest_migration_version(),
+        projection_replay_version = bigname_storage::CURRENT_PROJECTION_REPLAY_VERSION,
+        permissions_current_publication_version = bigname_storage::PERMISSIONS_CURRENT_PUBLICATION_VERSION,
         "API booted"
     );
 
@@ -90,7 +93,7 @@ pub(crate) fn openapi_document() -> JsonValue {
         "openapi": "3.1.0",
         "info": {
             "title": "bigname API v1",
-            "version": "phase-7",
+            "version": SOFTWARE_VERSION,
             "description": "Machine-readable publication of the currently shipped public API surface derived from apps/api/src/main.rs.",
         },
         "paths": JsonValue::Object(paths),

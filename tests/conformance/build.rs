@@ -568,16 +568,18 @@ fn rewrite_openapi_components(source: &str) -> String {
         ),
     );
     schemas.insert(
+        "HealthProjectionPublicationVersions".to_owned(),
+        health_projection_publication_versions_schema(),
+    );
+    schemas.insert(
+        "HealthIdentity".to_owned(),
+        health_identity_schema(),
+    );
+    schemas.insert("HealthProcess".to_owned(), health_process_schema());
+    schemas.insert("HealthDatabase".to_owned(), health_database_schema());
+    schemas.insert(
         "HealthResponse".to_owned(),
-        json!({
-            "type": "object",
-            "required": ["service", "phase", "status"],
-            "properties": {
-                "service": { "type": "string" },
-                "phase": { "type": "string" },
-                "status": { "type": "string" },
-            },
-        }),
+        health_response_schema(),
     );
     schemas.insert(
         "ErrorBody".to_owned(),

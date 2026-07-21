@@ -1,4 +1,4 @@
-//! ENS verified-resolution exact-surface execution persistence bootstrap.
+//! Verified resolution and primary-name execution with durable persistence.
 
 mod ens_primary_name;
 mod ens_resolution;
@@ -66,11 +66,6 @@ pub const RESOLVER_ALIAS_PATH_BINDING_KIND: &str = "resolver_alias_path";
 pub const OBSERVED_WILDCARD_PATH_BINDING_KIND: &str = "observed_wildcard_path";
 pub const MIGRATION_REBIND_BINDING_KIND: &str = "migration_rebind";
 pub const OBSERVED_ONLY_BINDING_KIND: &str = "observed_only";
-
-/// Current execution bootstrap status.
-pub const fn bootstrap_status() -> &'static str {
-    "ens-direct-and-basenames-transport-verified-resolution-producer-ready"
-}
 
 #[cfg(test)]
 mod tests;

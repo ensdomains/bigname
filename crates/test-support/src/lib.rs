@@ -16,7 +16,7 @@ pub use test_hook_registry::{ScopedTestHookGuard, ScopedTestHookRegistry};
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
-/// Default bootstrap database URL for local development.
+/// Default database URL for local development.
 pub const fn default_database_url() -> &'static str {
     "postgres://bigname:bigname@127.0.0.1:5432/bigname"
 }

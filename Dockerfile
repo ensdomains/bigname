@@ -17,6 +17,9 @@ COPY crates crates
 COPY migrations migrations
 COPY manifests manifests
 
+ARG BIGNAME_BUILD_SHA=unknown
+ENV BIGNAME_BUILD_SHA=${BIGNAME_BUILD_SHA}
+
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     cargo build --locked --release --workspace --bins --features bigname-indexer/reth-db

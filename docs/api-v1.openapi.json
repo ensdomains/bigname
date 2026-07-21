@@ -740,10 +740,99 @@
         ],
         "type": "object"
       },
+      "HealthDatabase": {
+        "properties": {
+          "check": {
+            "type": "string"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reachable": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "reachable",
+          "check",
+          "error"
+        ],
+        "type": "object"
+      },
+      "HealthIdentity": {
+        "properties": {
+          "build_sha": {
+            "description": "Source commit identifier compiled into this binary, or \"unknown\" when unavailable; not live database state.",
+            "type": "string"
+          },
+          "projection_publication_versions": {
+            "$ref": "#/components/schemas/HealthProjectionPublicationVersions",
+            "description": "Projection publication compatibility versions compiled into this binary; not the database's applied publication state."
+          },
+          "projection_replay_version": {
+            "description": "Projection replay compatibility version compiled into this binary; not the database's applied replay state.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "schema_migration_version": {
+            "description": "Latest migration version compiled into this binary; not the database's applied state.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "version": {
+            "description": "Cargo package version compiled into this binary; not live database state.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "build_sha",
+          "schema_migration_version",
+          "projection_replay_version",
+          "projection_publication_versions"
+        ],
+        "type": "object"
+      },
+      "HealthProcess": {
+        "properties": {
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "HealthProjectionPublicationVersions": {
+        "properties": {
+          "permissions_current": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "permissions_current"
+        ],
+        "type": "object"
+      },
       "HealthResponse": {
         "properties": {
-          "phase": {
-            "type": "string"
+          "database": {
+            "$ref": "#/components/schemas/HealthDatabase"
+          },
+          "identity": {
+            "$ref": "#/components/schemas/HealthIdentity"
+          },
+          "process": {
+            "$ref": "#/components/schemas/HealthProcess"
           },
           "service": {
             "type": "string"
@@ -754,8 +843,10 @@
         },
         "required": [
           "service",
-          "phase",
-          "status"
+          "identity",
+          "status",
+          "process",
+          "database"
         ],
         "type": "object"
       },
@@ -2016,7 +2107,7 @@
   "info": {
     "description": "Machine-readable publication of the currently shipped public API surface derived from apps/api/src/main.rs.",
     "title": "bigname API v1",
-    "version": "phase-7"
+    "version": "0.1.0"
   },
   "openapi": "3.1.0",
   "paths": {

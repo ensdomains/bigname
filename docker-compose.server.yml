@@ -6,7 +6,7 @@ x-bigname-env: &bigname-env
   RUST_LOG: ${RUST_LOG:-info,sqlx::query=error}
 
 x-bigname-service: &bigname-service
-  image: ${BIGNAME_IMAGE:-ghcr.io/tateb/bigname:latest}
+  image: ${BIGNAME_IMAGE:-ghcr.io/ensdomains/bigname:latest}
   restart: unless-stopped
 
 services:

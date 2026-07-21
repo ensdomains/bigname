@@ -56,7 +56,7 @@ Use the normal server environment from `.env.server`, plus these production edge
 settings:
 
 ```sh
-BIGNAME_IMAGE=ghcr.io/tateb/bigname:<tag>
+BIGNAME_IMAGE=ghcr.io/ensdomains/bigname:<tag>
 BIGNAME_API_HOST=127.0.0.1
 BIGNAME_API_PORT=3000
 BIGNAME_PUBLIC_SITE_ADDRESS=api.example.com

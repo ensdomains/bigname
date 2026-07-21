@@ -7,7 +7,7 @@ use crate::inspect;
 #[derive(Parser, Debug)]
 #[command(
     name = "bigname-worker",
-    about = "Bootstrap worker process for bigname"
+    about = "Projection and execution worker process for bigname"
 )]
 pub(crate) struct Cli {
     #[command(subcommand)]

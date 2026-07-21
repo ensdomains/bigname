@@ -61,8 +61,12 @@ pub(crate) async fn run_worker(args: RunArgs) -> Result<()> {
 
     info!(
         service = "worker",
-        phase = bigname_domain::bootstrap_phase(),
-        execution_status = bigname_execution::bootstrap_status(),
+        version = crate::SOFTWARE_VERSION,
+        build_sha = crate::BUILD_SHA,
+        schema_migration_version = bigname_storage::latest_migration_version(),
+        projection_replay_version = replay::CURRENT_PROJECTION_REPLAY_VERSION,
+        permissions_current_publication_version =
+            bigname_storage::PERMISSIONS_CURRENT_PUBLICATION_VERSION,
         poll_interval_secs = args.poll_interval_secs,
         database_max_connections = database.max_connections,
         automatic_projection_replay = true,

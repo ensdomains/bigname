@@ -7,30 +7,15 @@ use sqlx::types::{JsonValue, time::OffsetDateTime};
 
 use crate::pagination::HistoryPageResponse;
 
+#[path = "types/health.rs"]
+mod health;
+
+pub(crate) use health::{
+    HealthDatabaseResponse, HealthIdentityResponse, HealthProcessResponse, HealthResponse,
+};
+
 fn json_value_is_null(value: &JsonValue) -> bool {
     value.is_null()
-}
-
-#[derive(Serialize)]
-pub(crate) struct HealthResponse {
-    pub(crate) service: &'static str,
-    pub(crate) phase: &'static str,
-    pub(crate) status: &'static str,
-    pub(crate) process: HealthProcessResponse,
-    pub(crate) database: HealthDatabaseResponse,
-}
-
-#[derive(Serialize)]
-pub(crate) struct HealthProcessResponse {
-    pub(crate) status: &'static str,
-}
-
-#[derive(Serialize)]
-pub(crate) struct HealthDatabaseResponse {
-    pub(crate) status: &'static str,
-    pub(crate) reachable: bool,
-    pub(crate) check: &'static str,
-    pub(crate) error: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

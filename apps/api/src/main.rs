@@ -73,6 +73,11 @@ use crate::errors::ErrorResponse;
 use axum::response::Response;
 
 pub(crate) const PUBLIC_NAMESPACES: &[&str] = &["ens", "basenames"];
+pub(crate) const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub(crate) const BUILD_SHA: &str = match option_env!("BIGNAME_BUILD_SHA") {
+    Some(build_sha) => build_sha,
+    None => "unknown",
+};
 const VERIFIED_RESOLUTION_REQUEST_TYPE: &str = "verified_resolution";
 
 #[tokio::main]

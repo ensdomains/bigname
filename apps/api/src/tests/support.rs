@@ -595,7 +595,6 @@ impl TestDatabase {
         chain_rpc_urls: bigname_execution::ChainRpcUrls,
     ) -> AppState {
         AppState {
-            phase: "test",
             pool: self.pool.clone(),
             chain_rpc_urls,
         }

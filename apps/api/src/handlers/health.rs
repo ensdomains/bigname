@@ -19,7 +19,7 @@ pub(super) async fn health(State(state): State<AppState>) -> (StatusCode, Json<H
         Err(readiness_error) => {
             warn!(
                 service = "api",
-                phase = state.phase,
+                build_sha = BUILD_SHA,
                 error = ?readiness_error,
                 "database readiness probe failed"
             );
@@ -40,7 +40,7 @@ pub(super) async fn health(State(state): State<AppState>) -> (StatusCode, Json<H
         http_status,
         Json(HealthResponse {
             service: "api",
-            phase: state.phase,
+            identity: HealthIdentityResponse::current(),
             status,
             process: HealthProcessResponse { status: "running" },
             database,
