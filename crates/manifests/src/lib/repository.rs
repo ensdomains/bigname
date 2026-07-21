@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -63,6 +63,8 @@ pub fn load_repository(root: impl AsRef<Path>) -> Result<ManifestRepository> {
         manifests.push(loaded_manifest);
     }
 
+    validate_repository_manifests(&manifests)?;
+
     let manifest_count = manifests.len();
     let status = if manifests.is_empty() {
         ManifestLoadStatus::Empty
@@ -114,6 +116,80 @@ fn load_manifest_file(root: &Path, path: &Path) -> Result<LoadedManifest> {
         version_tag,
         manifest,
     })
+}
+
+fn validate_repository_manifests(manifests: &[LoadedManifest]) -> Result<()> {
+    let mut manifests_by_storage_identity =
+        BTreeMap::<(&str, &str, &str, &str, u64), &LoadedManifest>::new();
+
+    for loaded_manifest in manifests {
+        let manifest = &loaded_manifest.manifest;
+        let storage_identity = (
+            manifest.namespace.as_str(),
+            manifest.source_family.as_str(),
+            manifest.chain.as_str(),
+            manifest.deployment_epoch.as_str(),
+            manifest.manifest_version,
+        );
+
+        if let Some(previous_manifest) =
+            manifests_by_storage_identity.insert(storage_identity, loaded_manifest)
+        {
+            bail!(
+                "manifest storage identity (namespace={}, source_family={}, chain={}, deployment_epoch={}, manifest_version={}) is declared by both {} and {}",
+                manifest.namespace,
+                manifest.source_family,
+                manifest.chain,
+                manifest.deployment_epoch,
+                manifest.manifest_version,
+                previous_manifest.relative_path.display(),
+                loaded_manifest.relative_path.display(),
+            );
+        }
+    }
+
+    let mut active_versions_by_family = BTreeMap::<(&str, &str, &str), Vec<&LoadedManifest>>::new();
+
+    for loaded_manifest in manifests
+        .iter()
+        .filter(|loaded_manifest| loaded_manifest.manifest.rollout_status.is_active())
+    {
+        let manifest = &loaded_manifest.manifest;
+        active_versions_by_family
+            .entry((
+                manifest.namespace.as_str(),
+                manifest.source_family.as_str(),
+                manifest.chain.as_str(),
+            ))
+            .or_default()
+            .push(loaded_manifest);
+    }
+
+    for ((namespace, source_family, chain), active_versions) in active_versions_by_family {
+        if active_versions.len() <= 1 {
+            continue;
+        }
+
+        let version_tags = active_versions
+            .iter()
+            .map(|loaded_manifest| {
+                (
+                    loaded_manifest.manifest.manifest_version,
+                    loaded_manifest.version_tag.as_str(),
+                )
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|(_, version_tag)| version_tag)
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!(
+            "source family {source_family} for namespace {namespace} on chain {chain} has more than one active manifest version: {}",
+            version_tags
+        );
+    }
+
+    Ok(())
 }
 
 fn validate_manifest_metadata(
@@ -212,7 +288,9 @@ fn validate_manifest_metadata(
     for contract in &manifest.contracts {
         if !contract_roles.insert(contract.role.as_str()) {
             bail!(
-                "manifest {} duplicates contract role {}",
+                "source family {} manifest version {} in {} duplicates contract role {}",
+                manifest.source_family,
+                version_tag,
                 path.display(),
                 contract.role
             );
