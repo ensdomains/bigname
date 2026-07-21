@@ -1,11 +1,26 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Result, bail};
+use anyhow::{Result, bail, ensure};
 use serde_json::Value;
 
 use super::pipeline::ApiServer;
 
 pub type RouteSnapshots = BTreeMap<String, Value>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CatchupEquivalenceContract {
+    Full,
+    MissingStatelessLabelPreimages,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct StatelessLabelPreimage(String);
+
+impl StatelessLabelPreimage {
+    pub fn from_expected_row(row: Value) -> Result<Self> {
+        stateless_label_preimage(&serde_json::to_string(&row)?)
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct RouteSnapshotSubjects {
@@ -72,6 +87,80 @@ pub fn assert_snapshots_equal(expected: &RouteSnapshots, actual: &RouteSnapshots
         );
     }
     Ok(())
+}
+
+/// Automatic catch-up parity is full
+/// [normalized-event](../../../../docs/glossary.md) row equality after
+/// normalizing per-corpus [contract-instance](../../../../docs/glossary.md)
+/// ids. The temporary #157 contract permits only the exact expected finalized,
+/// raw-log-derived [label-preimage](../../../../docs/glossary.md) events to be
+/// live-only; catch-up-only or any other live-only row fails.
+pub async fn assert_catchup_normalized_event_parity(
+    live: &sqlx::PgPool,
+    catchup: &sqlx::PgPool,
+    contract: CatchupEquivalenceContract,
+    expected_missing_preimages: &[StatelessLabelPreimage],
+) -> Result<()> {
+    let live_rows = normalized_event_rows(live, None).await?;
+    let catchup_rows = normalized_event_rows(catchup, None).await?;
+    if contract == CatchupEquivalenceContract::Full {
+        if live_rows != catchup_rows {
+            bail!(
+                "live and automatic catch-up normalized_events differed: live {} rows, catch-up {} rows\n{}",
+                live_rows.len(),
+                catchup_rows.len(),
+                first_line_diff(&live_rows.join("\n"), &catchup_rows.join("\n"))
+            );
+        }
+        return Ok(());
+    }
+
+    ensure!(
+        !expected_missing_preimages.is_empty(),
+        "the contained catch-up preimage divergence must name at least one expected event"
+    );
+    let catchup_only = multiset_difference(&catchup_rows, &live_rows);
+    if !catchup_only.is_empty() {
+        bail!(
+            "automatic catch-up derived {} unexpected normalized event(s):\n{}",
+            catchup_only.len(),
+            catchup_only.join("\n")
+        );
+    }
+
+    let live_only = multiset_difference(&live_rows, &catchup_rows);
+    let mut observed_missing_preimages = live_only
+        .iter()
+        .map(|row| stateless_label_preimage(row))
+        .collect::<Result<Vec<_>>>()?;
+    observed_missing_preimages.sort();
+    let mut expected_missing_preimages = expected_missing_preimages.to_vec();
+    expected_missing_preimages.sort();
+    if observed_missing_preimages != expected_missing_preimages {
+        bail!(
+            "automatic catch-up omitted a different stateless label-preimage set: expected {expected_missing_preimages:#?}, observed {observed_missing_preimages:#?}"
+        );
+    }
+    Ok(())
+}
+
+fn stateless_label_preimage(row: &str) -> Result<StatelessLabelPreimage> {
+    let event: Value = serde_json::from_str(row)?;
+    ensure!(
+        event.get("event_kind").and_then(Value::as_str) == Some("PreimageObserved")
+            && event.get("derivation_kind").and_then(Value::as_str)
+                == Some("raw_log_preimage_observation")
+            && event.get("logical_name_id").is_some_and(Value::is_null)
+            && event.get("resource_id").is_some_and(Value::is_null)
+            && event.get("canonicality_state").and_then(Value::as_str) == Some("finalized")
+            && event
+                .get("event_identity")
+                .and_then(Value::as_str)
+                .is_some_and(|identity| identity.starts_with("raw_log_preimage_observed:"))
+            && event.pointer("/raw_fact_ref/kind").and_then(Value::as_str) == Some("raw_log"),
+        "unexpected live-only normalized event outside the stateless label-preimage class: {row}"
+    );
+    Ok(StatelessLabelPreimage(serde_json::to_string(&event)?))
 }
 
 async fn normalized_event_rows(

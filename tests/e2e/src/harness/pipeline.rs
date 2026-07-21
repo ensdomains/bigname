@@ -731,6 +731,26 @@ impl IndexerRunSession {
         .await
     }
 
+    /// Derive the already-deployed contract baseline inline, then keep live
+    /// poll adapter sync enabled for events produced after the first checkpoint.
+    pub async fn start_with_inline_bootstrap_and_live_poll_adapter_sync(
+        repo_root: &Path,
+        database_url: &str,
+        manifests_root: &Path,
+        chain_rpc_urls: &[ChainRpcUrl<'_>],
+        log_label: &str,
+    ) -> Result<Self> {
+        Self::start_with_chain_rpc_urls_and_adapter_sync_mode(
+            repo_root,
+            database_url,
+            manifests_root,
+            chain_rpc_urls,
+            log_label,
+            Some("inline"),
+        )
+        .await
+    }
+
     async fn start_with_chain_rpc_urls_and_adapter_sync_mode(
         repo_root: &Path,
         database_url: &str,

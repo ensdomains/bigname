@@ -1,5 +1,6 @@
 mod basenames;
 mod basenames_lifecycle;
+mod catchup_equivalence;
 mod cross_protocol;
 mod ens_v2;
 mod ens_v2_lifecycle;
