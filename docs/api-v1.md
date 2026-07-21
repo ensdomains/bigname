@@ -452,8 +452,18 @@ Separate from the REST contract above, bigname serves a narrow subgraph-compatib
 - **Operations served:** `domain(id:)`, `domains(where, first, skip, orderBy, orderDirection)`, `domainConnection(first, where) { totalCount }`, `registrationConnection(first, where) { totalCount }`. These are the only operations in scope; no other GraphQL operations are implemented.
 - **Backing data:** the existing `name_current` and `record_inventory_current` projections — the same source of truth as the REST surface. The GraphQL layer is a shape adapter, not a new index.
 - **Contract owner:** bigname owns this documented compatibility subset. Field shapes are locked by the checked-in GraphQL SDL fixture and endpoint tests; widening the subset requires updating this section and those fixtures together.
+- **Lifecycle:** this compatibility endpoint remains public while ENS Manager
+  reads through a browser-reachable GraphQL indexer. It sunsets when Manager
+  migrates to the re-baselined v1 REST contract. Keeping the SDL after that
+  migration requires an explicit decision to support it as an independent
+  contract rather than silently extending compatibility indefinitely.
 - **Conventions differ from REST:** GraphQL responses use the subgraph's `camelCase` field names and entity shapes (`Domain`, `Resolver`, `Account`, `AddressRecord`), not the `snake_case` v1 wire format. Values are declared on-chain state from the projections; consumers re-validate live values against chain where needed (the "dictionary, not live state" model).
-- **CORS:** the endpoint is unauthenticated and read-only; permissive CORS applies (shared with the v1/v2 REST router).
+- **CORS:** the endpoint is unauthenticated and read-only; the process router
+  applies permissive CORS to GraphQL and REST. The [production
+  edge](production.md#public-edge) is narrower: it forwards browser preflights
+  only for `POST /graphql` and `POST /v1/identity:lookup`. Cross-origin v1 GETs
+  therefore need to remain simple requests that do not require an `OPTIONS`
+  preflight.
 
 See [`architecture.md`](architecture.md#subgraph-compatible-graphql-surface) for the strategic framing.
 

@@ -1,0 +1,348 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/public-edge-smoke [--start-caddy] [--no-network]
+
+Checks the public Caddy allowlist against a running bigname API:
+  - allowed helper, v1 REST, GraphQL POST, and browser preflight requests
+  - denied v2, GraphiQL, and unknown-path requests
+  - direct internal success for every denied route that exists in the API
+
+Browser preflights use the deployed ENS Manager origin, https://app.ens.dev.
+
+By default the script checks an already-running edge. --start-caddy launches an
+ephemeral Caddy container with host networking, validates the repository
+Caddyfile, and removes the container on exit. It never mounts named volumes.
+
+Environment:
+  BIGNAME_SMOKE_INTERNAL_API_URL  Internal API URL, default http://127.0.0.1:3000.
+  BIGNAME_SMOKE_PUBLIC_EDGE_URL   Public edge URL, default http://127.0.0.1:3001.
+  BIGNAME_SMOKE_CADDY_IMAGE       Caddy image, default caddy:2-alpine.
+  BIGNAME_SMOKE_INTERNAL_REQUEST_TIMEOUT_SECS
+                                   Internal request timeout, default 60.
+USAGE
+}
+
+log() {
+  printf '[public-edge-smoke] %s\n' "$*"
+}
+
+smoke_tmp=""
+caddy_container=""
+caddy_started=0
+
+dump_caddy_logs() {
+  [ "$caddy_started" -eq 1 ] || return 0
+  docker logs "$caddy_container" 2>&1 | sed -n '1,160p' >&2 || true
+}
+
+fail() {
+  printf '[public-edge-smoke] ERROR: %s\n' "$*" >&2
+  dump_caddy_logs
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
+}
+
+cleanup() {
+  if [ "$caddy_started" -eq 1 ]; then
+    docker rm --force "$caddy_container" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$smoke_tmp" ] && [ -d "$smoke_tmp" ]; then
+    rm -rf -- "$smoke_tmp"
+  fi
+}
+trap cleanup EXIT INT TERM
+
+start_caddy=0
+no_network=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --start-caddy)
+      start_caddy=1
+      ;;
+    --no-network)
+      no_network=1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      fail "unknown argument: $1"
+      ;;
+  esac
+  shift
+done
+
+internal_api_url="${BIGNAME_SMOKE_INTERNAL_API_URL:-http://127.0.0.1:3000}"
+public_edge_url="${BIGNAME_SMOKE_PUBLIC_EDGE_URL:-http://127.0.0.1:3001}"
+caddy_image="${BIGNAME_SMOKE_CADDY_IMAGE:-caddy:2-alpine}"
+internal_request_timeout_secs="${BIGNAME_SMOKE_INTERNAL_REQUEST_TIMEOUT_SECS:-60}"
+internal_api_url="${internal_api_url%/}"
+public_edge_url="${public_edge_url%/}"
+smoke_tmp="$(mktemp -d -t bigname-public-edge-smoke.XXXXXX)"
+caddy_container="bigname-public-edge-smoke-$$"
+
+if ! [[ "$internal_request_timeout_secs" =~ ^[1-9][0-9]{0,3}$ ]] ||
+  [ "$internal_request_timeout_secs" -gt 3600 ]; then
+  fail "BIGNAME_SMOKE_INTERNAL_REQUEST_TIMEOUT_SECS must be an integer from 1 to 3600"
+fi
+
+loopback_http_port() {
+  local url="$1"
+  local port
+  if [[ "$url" =~ ^http://(127\.0\.0\.1|localhost):([0-9]{1,5})$ ]]; then
+    port="${BASH_REMATCH[2]}"
+  elif [[ "$url" =~ ^http://\[::1\]:([0-9]{1,5})$ ]]; then
+    port="${BASH_REMATCH[1]}"
+  else
+    return 1
+  fi
+
+  local numeric_port=$((10#$port))
+  if [ "$numeric_port" -lt 1 ] || [ "$numeric_port" -gt 65535 ]; then
+    return 1
+  fi
+  printf '%d\n' "$numeric_port"
+}
+
+loopback_http_bind() {
+  local url="$1"
+  if [[ "$url" =~ ^http://(127\.0\.0\.1|localhost):[0-9]{1,5}$ ]]; then
+    printf '127.0.0.1\n'
+  elif [[ "$url" =~ ^http://\[::1\]:[0-9]{1,5}$ ]]; then
+    printf '::1\n'
+  else
+    return 1
+  fi
+}
+
+is_loopback_http_url() {
+  loopback_http_port "$1" >/dev/null
+}
+
+if [ "$no_network" -eq 1 ]; then
+  is_loopback_http_url "$internal_api_url" ||
+    fail "--no-network requires a loopback internal API URL, got ${internal_api_url}"
+  is_loopback_http_url "$public_edge_url" ||
+    fail "--no-network requires a loopback public edge URL, got ${public_edge_url}"
+  log "no-network mode enabled: every HTTP request uses loopback"
+fi
+
+require_command curl
+require_command grep
+require_command sed
+require_command seq
+
+if [ "$start_caddy" -eq 1 ]; then
+  require_command docker
+  require_command ss
+  is_loopback_http_url "$internal_api_url" ||
+    fail "--start-caddy requires a loopback HTTP internal API URL, got ${internal_api_url}"
+  is_loopback_http_url "$public_edge_url" ||
+    fail "--start-caddy requires a loopback HTTP public edge URL, got ${public_edge_url}"
+
+  internal_upstream="${internal_api_url#http://}"
+  public_edge_port="$(loopback_http_port "$public_edge_url")"
+  public_edge_bind="$(loopback_http_bind "$public_edge_url")"
+  case "$internal_upstream" in
+    */*) fail "--start-caddy internal API URL must not contain a path" ;;
+  esac
+
+  if ss --no-header --listening --tcp "sport = :${public_edge_port}" | grep -q .; then
+    fail "refusing to share public edge port ${public_edge_port} with an existing listener"
+  fi
+
+  docker image inspect "$caddy_image" >/dev/null 2>&1 ||
+    fail "Caddy image is not available locally: ${caddy_image}"
+  docker container inspect "$caddy_container" >/dev/null 2>&1 &&
+    fail "refusing to replace existing container: ${caddy_container}"
+
+  docker_run_args=(--rm)
+  if [ "$no_network" -eq 1 ]; then
+    docker_run_args+=(--pull=never)
+  fi
+fi
+
+last_status=""
+last_headers=""
+last_body=""
+request_timeout_secs="$internal_request_timeout_secs"
+
+request() {
+  local label="$1"
+  local method="$2"
+  local url="$3"
+  local body="${4-}"
+  shift 4 || true
+
+  last_headers="${smoke_tmp}/${label}.headers"
+  last_body="${smoke_tmp}/${label}.body"
+  local curl_args=(
+    --silent
+    --show-error
+    --max-time "$request_timeout_secs"
+    --dump-header "$last_headers"
+    --output "$last_body"
+    --write-out '%{http_code}'
+  )
+  if [ "$method" = "HEAD" ]; then
+    curl_args+=(--head)
+  else
+    curl_args+=(--request "$method")
+  fi
+  if [ "$no_network" -eq 1 ]; then
+    curl_args+=(--noproxy '*')
+  fi
+  if [ -n "$body" ]; then
+    curl_args+=(--header 'content-type: application/json' --data-binary "$body")
+  fi
+  curl_args+=("$@")
+
+  if ! last_status="$(curl --disable "${curl_args[@]}" "$url")"; then
+    return 1
+  fi
+}
+
+show_last_response() {
+  sed -n '1,80p' "$last_headers" >&2 || true
+  sed -n '1,120p' "$last_body" >&2 || true
+}
+
+assert_status() {
+  local label="$1"
+  local expected="$2"
+  local method="$3"
+  local url="$4"
+  local body="${5-}"
+  shift 5 || true
+
+  if ! request "$label" "$method" "$url" "$body" "$@"; then
+    fail "${label}: request failed: ${method} ${url}"
+  fi
+  if [ "$last_status" != "$expected" ]; then
+    show_last_response
+    fail "${label}: expected HTTP ${expected}, got ${last_status}: ${method} ${url}"
+  fi
+  log "${label}: ${method} ${url} -> ${last_status}"
+}
+
+assert_last_header() {
+  local label="$1"
+  local pattern="$2"
+  if ! tr -d '\r' < "$last_headers" | grep -Eiq "$pattern"; then
+    show_last_response
+    fail "${label}: response headers did not match ${pattern}"
+  fi
+}
+
+assert_preflight_headers() {
+  local label="$1"
+  local requested_method="${2:-POST}"
+  assert_last_header "$label" '^access-control-allow-origin:[[:space:]]*\*$'
+  assert_last_header "$label" "^access-control-allow-methods:[[:space:]]*(\\*|.*${requested_method}.*)$"
+  assert_last_header "$label" '^access-control-allow-headers:[[:space:]]*(\*|.*content-type.*)$'
+}
+
+v1_lookup_body='{"profile":"feed","namespace":"public","inputs":[]}'
+v2_lookup_body='{"profile":"feed","namespace":"public","inputs":[]}'
+graphql_body='{"query":"{ __typename }"}'
+diagnostic_path='/v2/diagnostics/namespaces/ens/manifests'
+unknown_path='/public-edge-smoke-unknown'
+manager_origin='https://app.ens.dev'
+
+log "proving denied API routes exist on the internal listener"
+assert_status internal-v2-status 200 GET "${internal_api_url}/v2/status" ''
+assert_status internal-v2-lookup 200 POST "${internal_api_url}/v2/lookup" "$v2_lookup_body"
+assert_status internal-v2-diagnostic 200 GET "${internal_api_url}${diagnostic_path}" ''
+assert_status internal-graphiql 200 GET "${internal_api_url}/graphql" ''
+assert_status internal-v1-read-preflight 200 OPTIONS "${internal_api_url}/v1/status" '' \
+  --header "origin: ${manager_origin}" \
+  --header 'access-control-request-method: GET' \
+  --header 'access-control-request-headers: content-type'
+assert_preflight_headers internal-v1-read-preflight GET
+assert_status internal-v1-wrong-method 405 POST "${internal_api_url}/v1/status" ''
+assert_status internal-unknown 404 GET "${internal_api_url}${unknown_path}" ''
+request_timeout_secs=10
+
+if [ "$start_caddy" -eq 1 ]; then
+  log "validating docker/caddy/Caddyfile with ${caddy_image}"
+  docker run "${docker_run_args[@]}" \
+    --network host \
+    --env "BIGNAME_PUBLIC_SITE_ADDRESS=${public_edge_url}" \
+    --env "BIGNAME_PUBLIC_UPSTREAM=${internal_upstream}" \
+    --env "BIGNAME_PUBLIC_BIND_DIRECTIVE=bind ${public_edge_bind}" \
+    --env BIGNAME_CADDY_ADMIN=off \
+    --volume "${ROOT}/docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro" \
+    "$caddy_image" \
+    caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null
+
+  log "starting ephemeral Caddy container ${caddy_container}"
+  docker run --detach "${docker_run_args[@]}" \
+    --name "$caddy_container" \
+    --network host \
+    --env "BIGNAME_PUBLIC_SITE_ADDRESS=${public_edge_url}" \
+    --env "BIGNAME_PUBLIC_UPSTREAM=${internal_upstream}" \
+    --env "BIGNAME_PUBLIC_BIND_DIRECTIVE=bind ${public_edge_bind}" \
+    --env BIGNAME_CADDY_ADMIN=off \
+    --volume "${ROOT}/docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro" \
+    "$caddy_image" >/dev/null
+  caddy_started=1
+
+  for _attempt in $(seq 1 30); do
+    request caddy-readiness GET "${public_edge_url}/healthz" '' 2>/dev/null || true
+    if [ "$last_status" = "200" ]; then
+      break
+    fi
+    sleep 1
+  done
+  if [ "$last_status" != "200" ]; then
+    show_last_response
+    fail "Caddy did not become ready at ${public_edge_url}"
+  fi
+fi
+
+log "checking allowed public requests"
+assert_status public-root 200 GET "${public_edge_url}/" ''
+assert_status public-docs 200 GET "${public_edge_url}/docs" ''
+assert_status public-docs-slash 200 GET "${public_edge_url}/docs/" ''
+assert_status public-docs-head 200 HEAD "${public_edge_url}/docs" ''
+assert_status public-health 200 GET "${public_edge_url}/healthz" ''
+assert_status public-openapi 200 GET "${public_edge_url}/openapi.json" ''
+assert_status public-v1-get 200 GET "${public_edge_url}/v1/namespaces/ens" ''
+assert_status public-v1-head 200 HEAD "${public_edge_url}/v1/namespaces/ens" ''
+assert_status public-v1-lookup 200 POST "${public_edge_url}/v1/identity:lookup" "$v1_lookup_body"
+assert_status public-graphql 200 POST "${public_edge_url}/graphql" "$graphql_body"
+assert_status public-v1-preflight 200 OPTIONS "${public_edge_url}/v1/identity:lookup" '' \
+  --header "origin: ${manager_origin}" \
+  --header 'access-control-request-method: POST' \
+  --header 'access-control-request-headers: content-type'
+assert_preflight_headers public-v1-preflight
+assert_status public-graphql-preflight 200 OPTIONS "${public_edge_url}/graphql" '' \
+  --header "origin: ${manager_origin}" \
+  --header 'access-control-request-method: POST' \
+  --header 'access-control-request-headers: content-type'
+assert_preflight_headers public-graphql-preflight
+
+log "checking public default-deny behavior"
+assert_status public-v2-status 404 GET "${public_edge_url}/v2/status" ''
+assert_status public-v2-lookup 404 POST "${public_edge_url}/v2/lookup" "$v2_lookup_body"
+assert_status public-v2-diagnostic 404 GET "${public_edge_url}${diagnostic_path}" ''
+assert_status public-graphiql 404 GET "${public_edge_url}/graphql" ''
+assert_status public-v1-read-preflight 404 OPTIONS "${public_edge_url}/v1/status" '' \
+  --header "origin: ${manager_origin}" \
+  --header 'access-control-request-method: GET' \
+  --header 'access-control-request-headers: content-type'
+assert_status public-v1-wrong-method 404 POST "${public_edge_url}/v1/status" ''
+assert_status public-unknown 404 GET "${public_edge_url}${unknown_path}" ''
+
+log "public-edge allowlist smoke passed"

@@ -21,11 +21,17 @@ Runs the local release smoke gate:
   - runtime watch-plan inspection
   - prebuilt local API binary
   - local API /healthz readiness
+  - public-edge allowlist through an ephemeral Caddy container
 
 Environment:
   BIGNAME_DATABASE_URL or DATABASE_URL      PostgreSQL connection URL.
   BIGNAME_SMOKE_API_BIND_ADDR              API bind addr, default 127.0.0.1:3000.
   BIGNAME_SMOKE_API_HEALTH_URL             Health URL, default derived from bind addr.
+  BIGNAME_SMOKE_INTERNAL_API_URL           API origin for edge checks, default derived from bind addr.
+  BIGNAME_SMOKE_PUBLIC_EDGE_URL            Scratch Caddy URL, default http://127.0.0.1:3001.
+  BIGNAME_SMOKE_CADDY_IMAGE                Caddy image, default caddy:2-alpine.
+  BIGNAME_SMOKE_INTERNAL_REQUEST_TIMEOUT_SECS
+                                            Internal edge-check timeout, default 60.
 USAGE
 }
 
@@ -64,10 +70,18 @@ BIGNAME_DATABASE_URL_OVERRIDE="${BIGNAME_DATABASE_URL-}"
 DATABASE_URL_OVERRIDE="${DATABASE_URL-}"
 BIGNAME_SMOKE_API_BIND_ADDR_OVERRIDE="${BIGNAME_SMOKE_API_BIND_ADDR-}"
 BIGNAME_SMOKE_API_HEALTH_URL_OVERRIDE="${BIGNAME_SMOKE_API_HEALTH_URL-}"
+BIGNAME_SMOKE_INTERNAL_API_URL_OVERRIDE="${BIGNAME_SMOKE_INTERNAL_API_URL-}"
+BIGNAME_SMOKE_PUBLIC_EDGE_URL_OVERRIDE="${BIGNAME_SMOKE_PUBLIC_EDGE_URL-}"
+BIGNAME_SMOKE_CADDY_IMAGE_OVERRIDE="${BIGNAME_SMOKE_CADDY_IMAGE-}"
+BIGNAME_SMOKE_INTERNAL_REQUEST_TIMEOUT_SECS_OVERRIDE="${BIGNAME_SMOKE_INTERNAL_REQUEST_TIMEOUT_SECS-}"
 BIGNAME_DATABASE_URL_WAS_SET="${BIGNAME_DATABASE_URL+x}"
 DATABASE_URL_WAS_SET="${DATABASE_URL+x}"
 BIGNAME_SMOKE_API_BIND_ADDR_WAS_SET="${BIGNAME_SMOKE_API_BIND_ADDR+x}"
 BIGNAME_SMOKE_API_HEALTH_URL_WAS_SET="${BIGNAME_SMOKE_API_HEALTH_URL+x}"
+BIGNAME_SMOKE_INTERNAL_API_URL_WAS_SET="${BIGNAME_SMOKE_INTERNAL_API_URL+x}"
+BIGNAME_SMOKE_PUBLIC_EDGE_URL_WAS_SET="${BIGNAME_SMOKE_PUBLIC_EDGE_URL+x}"
+BIGNAME_SMOKE_CADDY_IMAGE_WAS_SET="${BIGNAME_SMOKE_CADDY_IMAGE+x}"
+BIGNAME_SMOKE_INTERNAL_REQUEST_TIMEOUT_SECS_WAS_SET="${BIGNAME_SMOKE_INTERNAL_REQUEST_TIMEOUT_SECS+x}"
 
 if [ -f .env ]; then
   set -a
@@ -86,10 +100,24 @@ fi
 if [ -n "$BIGNAME_SMOKE_API_HEALTH_URL_WAS_SET" ]; then
   export BIGNAME_SMOKE_API_HEALTH_URL="$BIGNAME_SMOKE_API_HEALTH_URL_OVERRIDE"
 fi
+if [ -n "$BIGNAME_SMOKE_INTERNAL_API_URL_WAS_SET" ]; then
+  export BIGNAME_SMOKE_INTERNAL_API_URL="$BIGNAME_SMOKE_INTERNAL_API_URL_OVERRIDE"
+fi
+if [ -n "$BIGNAME_SMOKE_PUBLIC_EDGE_URL_WAS_SET" ]; then
+  export BIGNAME_SMOKE_PUBLIC_EDGE_URL="$BIGNAME_SMOKE_PUBLIC_EDGE_URL_OVERRIDE"
+fi
+if [ -n "$BIGNAME_SMOKE_CADDY_IMAGE_WAS_SET" ]; then
+  export BIGNAME_SMOKE_CADDY_IMAGE="$BIGNAME_SMOKE_CADDY_IMAGE_OVERRIDE"
+fi
+if [ -n "$BIGNAME_SMOKE_INTERNAL_REQUEST_TIMEOUT_SECS_WAS_SET" ]; then
+  export BIGNAME_SMOKE_INTERNAL_REQUEST_TIMEOUT_SECS="$BIGNAME_SMOKE_INTERNAL_REQUEST_TIMEOUT_SECS_OVERRIDE"
+fi
 
 export BIGNAME_DATABASE_URL="${BIGNAME_DATABASE_URL:-${DATABASE_URL:-postgres://bigname:bigname@127.0.0.1:5432/bigname}}"
 BIGNAME_SMOKE_API_BIND_ADDR="${BIGNAME_SMOKE_API_BIND_ADDR:-127.0.0.1:3000}"
 BIGNAME_SMOKE_API_HEALTH_URL="${BIGNAME_SMOKE_API_HEALTH_URL:-http://${BIGNAME_SMOKE_API_BIND_ADDR}/healthz}"
+BIGNAME_SMOKE_INTERNAL_API_URL="${BIGNAME_SMOKE_INTERNAL_API_URL:-http://${BIGNAME_SMOKE_API_BIND_ADDR}}"
+BIGNAME_SMOKE_INTERNAL_REQUEST_TIMEOUT_SECS="${BIGNAME_SMOKE_INTERNAL_REQUEST_TIMEOUT_SECS:-60}"
 
 cargo_args=(--locked)
 if [ "$no_network" -eq 1 ]; then
@@ -224,6 +252,19 @@ run_readiness_check() {
   fail "API readiness probe failed at ${BIGNAME_SMOKE_API_HEALTH_URL}"
 }
 
+run_public_edge_check() {
+  local edge_args
+  edge_args=(--start-caddy)
+  if [ "$no_network" -eq 1 ]; then
+    edge_args+=(--no-network)
+  fi
+
+  log "checking the public-edge allowlist through Caddy"
+  BIGNAME_SMOKE_INTERNAL_API_URL="$BIGNAME_SMOKE_INTERNAL_API_URL" \
+    BIGNAME_SMOKE_INTERNAL_REQUEST_TIMEOUT_SECS="$BIGNAME_SMOKE_INTERNAL_REQUEST_TIMEOUT_SECS" \
+    scripts/public-edge-smoke "${edge_args[@]}"
+}
+
 require_command cargo
 require_command diff
 require_command seq
@@ -239,4 +280,5 @@ run_manifest_drift_audit_gate
 run_watch_plan_inspection_gate
 build_api_for_readiness
 run_readiness_check
+run_public_edge_check
 log "release smoke gate passed"
