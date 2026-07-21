@@ -5,6 +5,8 @@ use bigname_execution::ChainRpcUrls;
 use bigname_storage::DatabaseConfig;
 use clap::{Args, Parser, Subcommand};
 
+use crate::ApiBoundsConfig;
+
 #[derive(Parser, Debug)]
 #[command(name = "bigname-api", about = "Read API process for bigname")]
 pub(crate) struct Cli {
@@ -28,6 +30,8 @@ pub(crate) struct ServeArgs {
         value_delimiter = ','
     )]
     pub(crate) chain_rpc_urls: Vec<String>,
+    #[command(flatten)]
+    pub(crate) bounds: ApiBoundsConfig,
     #[command(flatten)]
     pub(crate) database: DatabaseConfig,
 }

@@ -112,7 +112,21 @@ pub(crate) fn parse_compact_name_records_request(
         include.content_hash = true;
     }
 
+    let texts = parse_compact_records_csv("texts", query.texts.as_deref())?;
     let coin_types = parse_compact_records_coin_types(query.coin_types.as_deref())?;
+    let explicit_selector_count = texts.len()
+        + coin_types.len()
+        + usize::from(avatar)
+        + usize::from(content_hash);
+    if mode.includes_verified() && explicit_selector_count > MAX_VERIFIED_RECORD_KEYS {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_input",
+            message: format!(
+                "explicit record request must contain at most {MAX_VERIFIED_RECORD_KEYS} selectors when mode can use verified execution"
+            ),
+        });
+    }
     if !coin_types.is_empty() {
         include.coins = true;
     }
@@ -120,7 +134,7 @@ pub(crate) fn parse_compact_name_records_request(
     Ok(CompactNameRecordsRequest {
         mode,
         meta,
-        texts: parse_compact_records_csv("texts", query.texts.as_deref())?,
+        texts,
         known_text_keys,
         avatar,
         content_hash,

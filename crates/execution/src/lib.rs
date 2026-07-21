@@ -49,7 +49,7 @@ pub use persistence::{
     persist_basenames_exact_name_verified_resolution_transport_direct,
     persist_ens_exact_name_verified_resolution_direct, persist_ens_verified_primary_name,
 };
-pub use rpc::ChainRpcUrls;
+pub use rpc::{ChainRpcUrls, validate_rpc_http_client_config};
 
 pub const VERIFIED_RESOLUTION_REQUEST_TYPE: &str = "verified_resolution";
 pub const VERIFIED_PRIMARY_NAME_REQUEST_TYPE: &str = "verified_primary_name";

@@ -111,6 +111,9 @@ impl ApiRouteContract {
         if errors.include_conflict {
             operation = operation.with_conflict_response();
         }
+        if errors.include_rate_limit {
+            operation = operation.with_rate_limit_response();
+        }
         operation
     }
 }

@@ -59,11 +59,14 @@ Live-execution rules:
   latest, a newer checkpoint, or a different snapshot mid-request
 - the API Ethereum RPC provider must be configured
   (`BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<url>`) and able to serve the
-  selected Ethereum block; missing configuration or provider unavailability
-  fails closed rather than falling back to declared cache. `v1` routes surface
-  that as `409 stale`; `v2` product routes keep the successful envelope and
-  report in-band `status=stale` with `failure_reason` on the affected verified
-  record section.
+  selected Ethereum block; missing configuration or a JSON-RPC response
+  recognized as unable to serve that block fails closed rather than falling
+  back to declared cache. `v1` routes surface that as `409 stale`; `v2`
+  product routes keep the successful envelope and report in-band
+  `status=stale` with `failure_reason` on the affected verified record section.
+  Provider connect and total-response timeouts instead produce the existing
+  selector-local `execution_failed`/`resolver_call_failed` result, bounded by
+  `BIGNAME_API_RPC_CONNECT_TIMEOUT_MS` and `BIGNAME_API_RPC_TIMEOUT_MS`.
 - unsupported selector families and unsupported verified [path classes](glossary.md) stay
   selector-local `status=unsupported`; on-demand execution does not widen the
   support boundary
@@ -72,11 +75,11 @@ Live-execution rules:
 The compact records routes `GET /v1/names/{namespace}/{name}/records` and
 `GET /v2/names/{name}/records` use the same supported-selector boundary and
 selected stored snapshot as the profile routes. When either route needs
-on-demand ENS verified values, it executes against that snapshot, persists the
-trace and outcome, and fails closed when the provider cannot serve the selected
-block: `v1` returns `409 stale`, while `v2` reports in-band `status=stale` on
-the affected key or flat record. It never targets provider `latest`
-independently of the selected snapshot.
+on-demand ENS verified values, it executes against that snapshot and persists
+the trace and outcome. A JSON-RPC selected-block rejection returns `409 stale`
+in `v1` and in-band `status=stale` in `v2`; a transport timeout is persisted as
+an in-band `execution_failed` result for the affected selector. It never targets
+provider `latest` independently of the selected snapshot.
 
 ### Namespace inference
 

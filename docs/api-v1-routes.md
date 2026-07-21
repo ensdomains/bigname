@@ -381,6 +381,12 @@ Compact resolver records over declared inventory/cache and optional verified sel
 
 Query: `mode=auto|declared|verified|both`, `texts`, `known_text_keys=true|false`, `avatar=true|false`, `content_hash=true|false`, `coin_types`, `include=resolver_address,known_text_keys,avatar,content_hash,coins`, `view=compact`, `meta=none|summary|full`.
 
+When `mode` can use verified execution (`auto`, `verified`, or `both`), the
+explicit selectors requested across `texts`, `coin_types`, `avatar`, and
+`content_hash` are limited to 200. More returns `400 invalid_input`. Inventory-
+derived selectors requested through profile-style includes remain the separate
+keys-less fan-out decision tracked by #114.
+
 Defaults: `mode=declared`, `view=compact`, `meta=summary`, `include=resolver_address`.
 
 `data` is `CompactRecordSummary` for `view=compact`.
@@ -535,7 +541,7 @@ Rules:
 
 - Verified-only; doesn't duplicate declared topology, inventory, or cache.
 - `at`, `chain_positions`, and `consistency` are rejected with `400 invalid_input` on this route. Other undocumented query parameters follow the common `v1` convention and are ignored. The route still resolves the current exact-name snapshot at `consistency=head` before looking up persisted execution output. Basenames resolution also requires the timestamp-aligned auxiliary Ethereum position used by the transport path.
-- Duplicate or malformed `records` selectors return `400 invalid_input`. `addr:<coin_type>` selectors are canonicalized before duplicate detection, so `addr:060,addr:60` is a duplicate selector set; digit text outside `u64` is invalid input. The `u64` boundary is bigname's public-selector narrowing from upstream resolver `uint256 coinType` APIs `(upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddressResolver.sol:L14 @ ens_v1@91c966f)` `(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L93 @ basenames@1809bbc)`; see `docs/upstream.md` § Known divergences.
+- More than 200, duplicate, or malformed `records` selectors return `400 invalid_input`. `addr:<coin_type>` selectors are canonicalized before duplicate detection, so `addr:060,addr:60` is a duplicate selector set; digit text outside `u64` is invalid input. The `u64` boundary is bigname's public-selector narrowing from upstream resolver `uint256 coinType` APIs `(upstream: .refs/ens_v1/contracts/resolvers/profiles/IAddressResolver.sol:L14 @ ens_v1@91c966f)` `(upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L93 @ basenames@1809bbc)`; see `docs/upstream.md` § Known divergences.
 - Keyed by the explicit `{namespace, name}` exact surface and requested selector set. Explains the persisted answer.
 - ENS avatar readback may have both an avatar-elided compact cache identity and a full-selector cache identity for the same mixed request. The route accepts a compact hit only when its persisted output covers every requested selector; otherwise it falls back to the full-selector identity. A full-selector-only persisted answer is also readable. The response still returns exactly the caller's requested selectors in request order.
 - Public verified-resolution support boundary matches the full profile read for that exact surface. ENS direct, alias-only, and wildcard-derived classes are in scope. Basenames supports the exact-surface transport-assisted direct-path class through the L1 Resolver, including persisted CCIP-Read steps.[^bn-l1resolver-l154][^bn-l1resolver-l173][^bn-l1resolver-l191]

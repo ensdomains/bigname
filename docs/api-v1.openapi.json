@@ -2261,6 +2261,16 @@
             },
             "description": "Invalid request"
           },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeded the configured time limit"
+          },
           "409": {
             "content": {
               "application/json": {
@@ -2280,6 +2290,16 @@
               }
             },
             "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "API is temporarily overloaded"
           }
         },
         "summary": "Address-to-surface collection",
@@ -2379,6 +2399,16 @@
             },
             "description": "Requested resource was not found"
           },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeded the configured time limit"
+          },
           "409": {
             "content": {
               "application/json": {
@@ -2398,6 +2428,16 @@
               }
             },
             "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "API is temporarily overloaded"
           }
         },
         "summary": "Single-name coverage and explain details",
@@ -2575,6 +2615,16 @@
             },
             "description": "Invalid request"
           },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeded the configured time limit"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -2584,6 +2634,16 @@
               }
             },
             "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "API is temporarily overloaded"
           }
         },
         "summary": "App-facing compact event search",
@@ -2683,6 +2743,16 @@
             },
             "description": "Requested resource was not found"
           },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeded the configured time limit"
+          },
           "409": {
             "content": {
               "application/json": {
@@ -2702,6 +2772,16 @@
               }
             },
             "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "API is temporarily overloaded"
           }
         },
         "summary": "Current authority/control explain view for one exact name",
@@ -2801,6 +2881,16 @@
             },
             "description": "Requested resource was not found"
           },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeded the configured time limit"
+          },
           "409": {
             "content": {
               "application/json": {
@@ -2820,6 +2910,16 @@
               }
             },
             "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "API is temporarily overloaded"
           }
         },
         "summary": "Current surface-binding explain view for one exact name",
@@ -2855,7 +2955,7 @@
             }
           },
           {
-            "description": "Comma-separated record selectors. Required for the persisted execution explain lookup. addr:<coin_type> selectors are canonicalized as unsigned 64-bit decimal text before selector dedupe.",
+            "description": "Comma-separated record selectors, with at most 200 selectors. Required for the persisted execution explain lookup. addr:<coin_type> selectors are canonicalized as unsigned 64-bit decimal text before selector dedupe.",
             "explode": false,
             "in": "query",
             "name": "records",
@@ -2897,6 +2997,16 @@
             },
             "description": "Requested resource was not found"
           },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeded the configured time limit"
+          },
           "409": {
             "content": {
               "application/json": {
@@ -2916,6 +3026,16 @@
               }
             },
             "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "API is temporarily overloaded"
           }
         },
         "summary": "Persisted verified execution explain for one exact-name resolution request",
@@ -3050,6 +3170,16 @@
             },
             "description": "Invalid request"
           },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeded the configured time limit"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -3059,6 +3189,16 @@
               }
             },
             "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "API is temporarily overloaded"
           }
         },
         "summary": "Address activity across related surfaces and resources",
@@ -3189,6 +3329,16 @@
             },
             "description": "Requested resource was not found"
           },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeded the configured time limit"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -3198,6 +3348,16 @@
               }
             },
             "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "API is temporarily overloaded"
           }
         },
         "summary": "Surface or combined history",
@@ -3316,6 +3476,16 @@
             },
             "description": "Requested resource was not found"
           },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeded the configured time limit"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -3325,6 +3495,16 @@
               }
             },
             "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "API is temporarily overloaded"
           }
         },
         "summary": "Resource history",
@@ -3368,6 +3548,16 @@
             },
             "description": "Invalid request"
           },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeded the configured time limit"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -3377,6 +3567,16 @@
               }
             },
             "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "API is temporarily overloaded"
           }
         },
         "summary": "Native slim identity lookup",
@@ -3424,6 +3624,16 @@
             },
             "description": "Requested resource was not found"
           },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeded the configured time limit"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -3433,6 +3643,16 @@
               }
             },
             "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "API is temporarily overloaded"
           }
         },
         "summary": "Active manifest versions and capabilities",
@@ -3669,6 +3889,16 @@
             },
             "description": "Invalid request"
           },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeded the configured time limit"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -3678,6 +3908,16 @@
               }
             },
             "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "API is temporarily overloaded"
           }
         },
         "summary": "App-facing compact name search and exact lookup",
@@ -3777,6 +4017,16 @@
             },
             "description": "Requested resource was not found"
           },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeded the configured time limit"
+          },
           "409": {
             "content": {
               "application/json": {
@@ -3796,6 +4046,16 @@
               }
             },
             "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "API is temporarily overloaded"
           }
         },
         "summary": "Exact name lookup",
@@ -3937,6 +4197,16 @@
             },
             "description": "Requested resource was not found"
           },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeded the configured time limit"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -3946,6 +4216,16 @@
               }
             },
             "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "API is temporarily overloaded"
           }
         },
         "summary": "Declared child collection by default",
@@ -3997,7 +4277,7 @@
             }
           },
           {
-            "description": "Requested text record keys.",
+            "description": "Requested text record keys. Across texts, coin_types, avatar, and content_hash, modes that can use verified execution accept at most 200 explicit selectors.",
             "explode": false,
             "in": "query",
             "name": "texts",
@@ -4035,7 +4315,7 @@
             }
           },
           {
-            "description": "Requested textual coin-type selector keys; decimal addr coin types are canonicalized as unsigned 64-bit decimal text before duplicate detection, and exact or canonical duplicates are invalid input.",
+            "description": "Requested textual coin-type selector keys; decimal addr coin types are canonicalized as unsigned 64-bit decimal text before duplicate detection, and exact or canonical duplicates are invalid input. Across texts, coin_types, avatar, and content_hash, modes that can use verified execution accept at most 200 explicit selectors.",
             "explode": false,
             "in": "query",
             "name": "coin_types",
@@ -4124,6 +4404,26 @@
             },
             "description": "Requested resource was not found"
           },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeded the configured time limit"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Verified execution request rate limit exceeded"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -4133,6 +4433,16 @@
               }
             },
             "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "API is temporarily overloaded"
           }
         },
         "summary": "App-facing compact resolver records",
@@ -4265,6 +4575,16 @@
             },
             "description": "Requested resource was not found"
           },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeded the configured time limit"
+          },
           "409": {
             "content": {
               "application/json": {
@@ -4284,6 +4604,16 @@
               }
             },
             "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "API is temporarily overloaded"
           }
         },
         "summary": "App-facing role rows for a name, including ENSv2 root fallback",
@@ -4331,6 +4661,16 @@
             },
             "description": "Requested resource was not found"
           },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeded the configured time limit"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -4340,6 +4680,16 @@
               }
             },
             "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "API is temporarily overloaded"
           }
         },
         "summary": "Namespace metadata and support status",
@@ -4433,6 +4783,16 @@
             },
             "description": "Requested resource was not found"
           },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeded the configured time limit"
+          },
           "409": {
             "content": {
               "application/json": {
@@ -4443,6 +4803,16 @@
             },
             "description": "Snapshot conflict or stale projection"
           },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Verified execution request rate limit exceeded"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -4452,6 +4822,16 @@
               }
             },
             "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "API is temporarily overloaded"
           }
         },
         "summary": "Claimed and verified primary-name answer",
@@ -4568,6 +4948,16 @@
             },
             "description": "Requested resource was not found"
           },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeded the configured time limit"
+          },
           "409": {
             "content": {
               "application/json": {
@@ -4578,6 +4968,16 @@
             },
             "description": "Snapshot conflict or stale projection"
           },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Verified execution request rate limit exceeded"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -4587,6 +4987,16 @@
               }
             },
             "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "API is temporarily overloaded"
           }
         },
         "summary": "App-facing inferred-name full profile with declared and verified record results",
@@ -4695,6 +5105,16 @@
             },
             "description": "Requested resource was not found"
           },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeded the configured time limit"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -4704,6 +5124,16 @@
               }
             },
             "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "API is temporarily overloaded"
           }
         },
         "summary": "App-facing compact resolver overview",
@@ -4798,6 +5228,16 @@
             },
             "description": "Requested resource was not found"
           },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeded the configured time limit"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -4807,6 +5247,16 @@
               }
             },
             "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "API is temporarily overloaded"
           }
         },
         "summary": "App-facing lookup from name to current resource identity",
@@ -4889,6 +5339,16 @@
             },
             "description": "Invalid request"
           },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeded the configured time limit"
+          },
           "409": {
             "content": {
               "application/json": {
@@ -4908,6 +5368,16 @@
               }
             },
             "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "API is temporarily overloaded"
           }
         },
         "summary": "Resource-centric effective permissions",
@@ -5040,6 +5510,16 @@
             },
             "description": "Invalid request"
           },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeded the configured time limit"
+          },
           "409": {
             "content": {
               "application/json": {
@@ -5059,6 +5539,16 @@
               }
             },
             "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "API is temporarily overloaded"
           }
         },
         "summary": "App-facing role rows by account, resource, or name filters",
@@ -5082,6 +5572,16 @@
             },
             "description": "Successful response"
           },
+          "408": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request exceeded the configured time limit"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -5091,6 +5591,16 @@
               }
             },
             "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "API is temporarily overloaded"
           }
         },
         "summary": "Projection indexing status by chain",

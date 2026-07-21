@@ -379,6 +379,9 @@ Uniform mapping:
 | `unsupported` | 422 | the route cannot produce its contract for this input |
 | `stale` | 409 | coherent selector not yet served for the selected snapshot |
 | `conflict` | 409 | selector cannot form one canonical snapshot |
+| `request_timeout` | 408 | the whole request exceeded the configured deadline |
+| `rate_limited` | 429 | the enabled per-client-IP limit rejected a route that can trigger verified execution |
+| `overloaded` | 503 | the process-wide or verified-execution in-flight ceiling was exhausted |
 | `internal_error` | 500 | unexpected failure |
 
 Rules:
@@ -386,7 +389,14 @@ Rules:
 - `unsupported` is `422`.
 - Verified-execution failures surface as `status: "failed"` on the affected
   section with `failure_reason`, or as `stale` when the RPC provider cannot
-  serve the selected block.
+  serve the selected block. Provider connect and response timeouts use this
+  existing in-band execution-failure behavior; they are not whole-request
+  `408` responses.
+- Every route has a whole-request deadline. `/healthz`, `/v1/status`, and
+  `/v2/status` retain their bounded fast paths; the deadline is their final
+  backstop.
+- The verified-execution rate limit, when enabled, and both in-flight ceilings
+  reject work before it waits for execution capacity.
 - Single-resource GETs return `404 not_found` when no answer exists.
 - Collections return `200` with empty `data`.
 - Batch lookup results carry in-band `status` per input; a batch never returns

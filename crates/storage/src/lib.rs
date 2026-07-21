@@ -1,6 +1,6 @@
 //! Shared PostgreSQL storage and migration utilities.
 
-use std::str::FromStr;
+use std::{str::FromStr, time::Duration};
 
 mod address_names;
 mod audit;
@@ -368,7 +368,7 @@ const BASE_NORMALIZED_REDERIVE_WRITER_GUARD_MIN_CONNECTIONS: u32 = 2;
 
 /// Open a PostgreSQL connection pool using the shared settings.
 pub async fn connect(config: &DatabaseConfig) -> Result<PgPool> {
-    connect_inner(config, None).await
+    connect_inner(config, None, None).await
 }
 
 /// Open a PostgreSQL connection pool with an application name visible in
@@ -377,7 +377,20 @@ pub async fn connect_with_application_name(
     config: &DatabaseConfig,
     application_name: &str,
 ) -> Result<PgPool> {
-    connect_inner(config, Some(application_name)).await
+    connect_inner(config, Some(application_name), None).await
+}
+
+/// Open a named PostgreSQL pool whose every connection has a statement timeout.
+pub async fn connect_with_application_name_and_statement_timeout(
+    config: &DatabaseConfig,
+    application_name: &str,
+    statement_timeout: Duration,
+) -> Result<PgPool> {
+    ensure!(
+        !statement_timeout.is_zero(),
+        "PostgreSQL statement timeout must be greater than zero"
+    );
+    connect_inner(config, Some(application_name), Some(statement_timeout)).await
 }
 
 /// Open a named PostgreSQL pool and hold the shared operational guard that
@@ -397,28 +410,33 @@ pub async fn connect_with_base_normalized_rederive_writer_guard(
     Ok((pool, guard))
 }
 
-async fn connect_inner(config: &DatabaseConfig, application_name: Option<&str>) -> Result<PgPool> {
+async fn connect_inner(
+    config: &DatabaseConfig,
+    application_name: Option<&str>,
+    statement_timeout: Option<Duration>,
+) -> Result<PgPool> {
     let database_url = config
         .database_url
         .clone()
         .or_else(|| std::env::var("DATABASE_URL").ok())
         .unwrap_or_else(|| default_database_url().to_owned());
 
-    let pool_options = PgPoolOptions::new().max_connections(config.max_connections);
+    let mut options = PgConnectOptions::from_str(&database_url)
+        .context("failed to parse PostgreSQL database URL")?;
     if let Some(application_name) = application_name {
-        let options = PgConnectOptions::from_str(&database_url)
-            .context("failed to parse PostgreSQL database URL")?
-            .application_name(application_name);
-        pool_options
-            .connect_with(options)
-            .await
-            .context("failed to connect to PostgreSQL")
-    } else {
-        pool_options
-            .connect(&database_url)
-            .await
-            .context("failed to connect to PostgreSQL")
+        options = options.application_name(application_name);
     }
+    if let Some(statement_timeout) = statement_timeout {
+        options = options.options([(
+            "statement_timeout",
+            format!("{}ms", statement_timeout.as_millis()),
+        )]);
+    }
+    PgPoolOptions::new()
+        .max_connections(config.max_connections)
+        .connect_with(options)
+        .await
+        .context("failed to connect to PostgreSQL")
 }
 
 /// Apply all checked-in migrations.

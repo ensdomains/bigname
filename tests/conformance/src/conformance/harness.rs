@@ -268,6 +268,50 @@
             Ok(())
         }
 
+        #[test]
+        fn openapi_freezes_family_wide_request_bound_errors() -> Result<()> {
+            let document: Value = serde_json::from_str(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../docs/api-v1.openapi.json"
+            )))
+            .context("checked-in OpenAPI artifact must be valid JSON")?;
+            let paths = document
+                .get("paths")
+                .and_then(Value::as_object)
+                .context("checked-in OpenAPI artifact must expose paths")?;
+            let rate_limited_paths = BTreeSet::from([
+                "/v1/names/{namespace}/{name}/records",
+                "/v1/primary-names/{address}",
+                "/v1/profiles/names/{name}",
+            ]);
+
+            for (path, path_item) in paths {
+                let operation = path_item
+                    .as_object()
+                    .and_then(|methods| methods.values().next())
+                    .with_context(|| format!("OpenAPI path {path} must expose an operation"))?;
+                let responses = operation
+                    .get("responses")
+                    .and_then(Value::as_object)
+                    .with_context(|| format!("OpenAPI path {path} must expose responses"))?;
+                assert!(
+                    responses.contains_key("408"),
+                    "OpenAPI path {path} must freeze request_timeout"
+                );
+                assert!(
+                    responses.contains_key("503"),
+                    "OpenAPI path {path} must freeze overloaded"
+                );
+                assert_eq!(
+                    responses.contains_key("429"),
+                    rate_limited_paths.contains(path.as_str()),
+                    "OpenAPI path {path} has the wrong rate-limit surface"
+                );
+            }
+
+            Ok(())
+        }
+
         struct HarnessDatabase {
             admin_pool: PgPool,
             pool: PgPool,

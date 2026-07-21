@@ -49,7 +49,7 @@ Validation:
 - Positions that don't satisfy the requested `consistency` floor return `conflict`.
 - A `(chain_id, block_number, block_hash)` that isn't on stored canonical lineage, or that can't be reconciled across chains as one snapshot, returns `conflict`.
 - A coherent selector whose required projection rows aren't built yet returns `stale` rather than reading raw facts.
-- Persisted-readback routes return `stale` or `not_found` when matching output is absent. The exception is supported ENS verified selectors on `GET /v1/profiles/names/{name}` and `GET /v1/names/{namespace}/{name}/records`, which may execute on demand against the selected snapshot, persist the outcome, and return it. The profile route has no caller-selected `records` parameter: it selects profile records server-side from declared inventory selectors, explicit gaps, and record-cache entries that parse into bigname's public selector grammar. It falls back to the bounded app profile set only when a supported declared inventory exists but its public selector set is empty after non-public selector facts are omitted; missing, stale, or explicitly unsupported inventory does not use fallback records.
+- Persisted-readback routes return `stale` or `not_found` when matching output is absent. The exception is supported ENS verified selectors on `GET /v1/profiles/names/{name}` and `GET /v1/names/{namespace}/{name}/records`, which may execute on demand against the selected snapshot, persist the outcome, and return it. The records route accepts at most 200 caller-selected records across `texts`, `coin_types`, `avatar`, and `content_hash` when its mode can use verified execution. The profile route has no caller-selected `records` parameter: it selects profile records server-side from declared inventory selectors, explicit gaps, and record-cache entries that parse into bigname's public selector grammar. It falls back to the bounded app profile set only when a supported declared inventory exists but its public selector set is empty after non-public selector facts are omitted; missing, stale, or explicitly unsupported inventory does not use fallback records.
 - A current-state row may serve a later selected snapshot only when its stored chain context covers the same required chains and no newer canonical input exists for that row through the selected positions; otherwise `stale`.
 - Historical `at` and explicit `chain_positions` reads require projection or execution rows materialized for the exact selected positions. If rewind/rebuild has not produced that snapshot, the route returns `stale`; it never serves provider `latest`, raw facts, or newer current rows as a substitute.
 
@@ -436,7 +436,9 @@ Deploy note: name-role pagination now orders the `account_resource_scope_asc` te
 }
 ```
 
-Codes: `invalid_input`, `not_found`, `unsupported`, `stale`, `verification_failed`, `conflict`, `internal_error`.
+Codes: `invalid_input`, `not_found`, `unsupported`, `stale`,
+`verification_failed`, `conflict`, `request_timeout`, `rate_limited`,
+`overloaded`, `internal_error`.
 
 Rules:
 
@@ -444,7 +446,11 @@ Rules:
 - Malformed snapshot selectors, unsupported position slots, missing required slots, mixed-profile positions, and `at` plus `chain_positions` together return `400 invalid_input`.
 - A coherent selector that can't be served from current projections returns `409 stale`.
 - A selector whose supplied lineage, canonicality floor, or cross-chain reconciliation can't form one snapshot returns `409 conflict`.
-- Persisted-readback routes return their documented stale or not-found state when matching output is missing. Supported ENS verified selectors on the resolution and compact records routes instead execute on demand, then return `409 stale` with a configuration message if the Ethereum RPC provider is unconfigured or can't serve the selected block.
+- Persisted-readback routes return their documented stale or not-found state when matching output is missing. Supported ENS verified selectors on the resolution and compact records routes instead execute on demand. An unconfigured provider or a JSON-RPC response recognized as unable to serve the selected block returns `409 stale`; a provider transport failure is an in-band selector execution failure.
+- Every route has a whole-request deadline. Exceeding it returns `408 request_timeout`; `/healthz` and `/v1/status` retain their bounded fast-path behavior, with this deadline as a final backstop.
+- Routes that can trigger verified execution may return `429 rate_limited` when the deployment's per-client-IP token bucket is enabled. The limit applies before execution starts and does not turn a provider failure into an HTTP error.
+- Exhausting either the process-wide in-flight ceiling or the separate verified-execution ceiling returns `503 overloaded` without waiting for capacity.
+- A verified-resolution provider connect or response timeout is an execution result: the affected selector returns the existing in-band `execution_failed` class. Primary-name provider timeouts likewise use that route's existing in-band execution-failure class. They are distinct from the whole-request `408` backstop.
 
 ## Subgraph-compatible GraphQL endpoint
 

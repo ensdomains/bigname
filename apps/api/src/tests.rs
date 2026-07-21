@@ -92,6 +92,41 @@ async fn healthz_reports_degraded_when_database_is_unreachable() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn api_pool_applies_statement_timeout_to_every_connection() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let pool = bigname_storage::connect_with_application_name_and_statement_timeout(
+        &database.database_config(3)?,
+        "bigname-api-test",
+        std::time::Duration::from_millis(75),
+    )
+    .await?;
+    let mut connections = Vec::new();
+    for _ in 0..3 {
+        connections.push(pool.acquire().await?);
+    }
+    for connection in &mut connections {
+        let timeout = sqlx::query_scalar::<_, String>("SHOW statement_timeout")
+            .fetch_one(&mut **connection)
+            .await?;
+        assert_eq!(timeout, "75ms");
+    }
+    drop(connections);
+
+    let timeout_error = sqlx::query("SELECT pg_sleep(0.2)")
+        .execute(&pool)
+        .await
+        .expect_err("statement timeout must cancel a slow query");
+    assert!(matches!(
+        timeout_error,
+        sqlx::Error::Database(ref error) if error.code().as_deref() == Some("57014")
+    ));
+
+    pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
 include!("tests/exact_name.rs");
 
 include!("tests/resolution.rs");

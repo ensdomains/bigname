@@ -590,6 +590,19 @@ impl TestDatabase {
         self.app_state_with_chain_rpc_urls(bigname_execution::ChainRpcUrls::default())
     }
 
+    fn database_config(&self, max_connections: u32) -> Result<bigname_storage::DatabaseConfig> {
+        let database_url = std::env::var("BIGNAME_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| default_database_url().to_owned());
+        let options = PgConnectOptions::from_str(&database_url)
+            .context("failed to parse database URL for API pool configuration test")?
+            .database(&self.database_name);
+        Ok(bigname_storage::DatabaseConfig {
+            database_url: Some(options.to_url_lossy().to_string()),
+            max_connections,
+        })
+    }
+
     fn app_state_with_chain_rpc_urls(
         &self,
         chain_rpc_urls: bigname_execution::ChainRpcUrls,

@@ -142,8 +142,16 @@ pub(super) fn openapi_json_get_operation(
         );
     }
     responses.insert(
+        "408".to_owned(),
+        json_response("Request exceeded the configured time limit", "ErrorResponse"),
+    );
+    responses.insert(
         "500".to_owned(),
         json_response("Internal error", "ErrorResponse"),
+    );
+    responses.insert(
+        "503".to_owned(),
+        json_response("API is temporarily overloaded", "ErrorResponse"),
     );
 
     let mut operation = json!({
@@ -186,6 +194,7 @@ fn json_response(description: &'static str, schema_name: &'static str) -> JsonVa
 pub(super) trait OpenApiOperationExt {
     fn with_bad_request_description(self, description: &'static str) -> JsonValue;
     fn with_conflict_response(self) -> JsonValue;
+    fn with_rate_limit_response(self) -> JsonValue;
 }
 
 impl OpenApiOperationExt for JsonValue {
@@ -196,6 +205,15 @@ impl OpenApiOperationExt for JsonValue {
 
     fn with_conflict_response(mut self) -> JsonValue {
         insert_error_response(&mut self, "409", "Snapshot conflict or stale projection");
+        self
+    }
+
+    fn with_rate_limit_response(mut self) -> JsonValue {
+        insert_error_response(
+            &mut self,
+            "429",
+            "Verified execution request rate limit exceeded",
+        );
         self
     }
 }
