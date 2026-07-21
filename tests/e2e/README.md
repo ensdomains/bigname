@@ -555,6 +555,15 @@ route inventory or a claim that every protocol transition is covered.
   routes, because the backfill command does not promote canonical checkpoints
   required by snapshot-selected reads. These four perturbation checks validate
   that one corpus; they are not applied to every scenario or protocol.
+- `catchup_equivalence::automatic_catchup_matches_live_ingestion_outputs` —
+  compares a finalized ENSv1 registration, addr/text records, and registry-only
+  child ingested from the same chain by live polling and forced automatic
+  catch-up. Route snapshots and all common normalized-event rows are exact;
+  the temporary #157 containment requires the live-only delta to be exactly one
+  finalized registrar `PreimageObserved` for `catchupeq.eth`, with no catch-up-
+  only or other live-only rows. The scenario's contract constant switches to
+  full row equality when two-phase automatic replay adds the omitted stateless
+  label-preimage pass.
 - `cross_protocol::composed_mainnet_profile_serves_both_protocols_without_leakage`
   — ingests a generated structural mirror of the currently checked-in mainnet
   families (ENSv1 ethereum + Basenames base + the L1 Basenames
