@@ -1899,6 +1899,142 @@ async fn normalized_replay_catchup_recovers_multiple_new_ensv2_emitters_with_sco
 }
 
 #[tokio::test]
+async fn normalized_replay_coverage_recovery_rejects_raw_log_change_below_replay_span()
+-> Result<()> {
+    let outcome = run_normalized_replay_coverage_fence_test(
+        NormalizedReplayCoverageFenceMutation::RawLogBelowReplaySpan,
+    )
+    .await?;
+
+    assert_eq!(
+        bigname_adapters::ens_v2_missing_coverage(&outcome.error),
+        Some(&bigname_adapters::EnsV2MissingCoverage {
+            chain: NORMALIZED_REPLAY_COVERAGE_FENCE_CHAIN.to_owned(),
+            retention_generation: 1,
+            source_family: "ens_v2_registry_l1".to_owned(),
+            address: NORMALIZED_REPLAY_COVERAGE_FENCE_HISTORICAL_CHILD.to_owned(),
+            required_from_block: 1,
+            required_to_block: 1,
+        }),
+        "the fail-closed fence must preserve the typed recovery requirement"
+    );
+    let error = format!("{:#}", outcome.error);
+    assert!(
+        error.contains(
+            "raw-log staging input changed below normalized replay range start 1 during coverage recovery; replan from the durable cursor"
+        ),
+        "unexpected below-span recovery fence error: {error}"
+    );
+    assert_eq!(
+        outcome.input_version_after.retention_generation,
+        outcome.input_version_before.retention_generation,
+        "the injected raw-log mutation must remain in the original retention generation"
+    );
+    assert!(
+        outcome.input_version_after.revision > outcome.input_version_before.revision,
+        "the injected below-span raw log must advance the committed input revision"
+    );
+    assert!(
+        outcome.changed_below_replay_span,
+        "the injected raw-log revision must be visible strictly below from_block"
+    );
+    assert_eq!(
+        (
+            outcome.cursor_after.range_start_block_number,
+            outcome.cursor_after.next_block_number,
+            outcome.cursor_after.target_block_number,
+            outcome.cursor_after.last_completed_block_number,
+        ),
+        (
+            outcome.cursor_before.range_start_block_number,
+            outcome.cursor_before.next_block_number,
+            outcome.cursor_before.target_block_number,
+            outcome.cursor_before.last_completed_block_number,
+        ),
+        "the durable cursor must not advance after a below-span recovery fence failure"
+    );
+    assert_eq!(
+        (
+            outcome.cursor_after.raw_log_input_revision,
+            outcome.cursor_after.raw_log_retention_generation,
+        ),
+        (
+            outcome.cursor_before.raw_log_input_revision,
+            outcome.cursor_before.raw_log_retention_generation,
+        ),
+        "the failed attempt must not acknowledge any part of the newer raw-log input version"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn normalized_replay_coverage_recovery_rejects_retention_generation_change() -> Result<()> {
+    let outcome = run_normalized_replay_coverage_fence_test(
+        NormalizedReplayCoverageFenceMutation::RetentionGeneration,
+    )
+    .await?;
+
+    assert_eq!(
+        bigname_adapters::ens_v2_missing_coverage(&outcome.error),
+        Some(&bigname_adapters::EnsV2MissingCoverage {
+            chain: NORMALIZED_REPLAY_COVERAGE_FENCE_CHAIN.to_owned(),
+            retention_generation: 1,
+            source_family: "ens_v2_registry_l1".to_owned(),
+            address: NORMALIZED_REPLAY_COVERAGE_FENCE_HISTORICAL_CHILD.to_owned(),
+            required_from_block: 1,
+            required_to_block: 1,
+        }),
+        "the fail-closed fence must preserve the typed recovery requirement"
+    );
+    let error = format!("{:#}", outcome.error);
+    assert!(
+        error.contains(
+            "raw-log retention generation changed during normalized replay coverage recovery: expected 1, observed 2; replan the replay from current authority"
+        ),
+        "unexpected retention-generation recovery fence error: {error}"
+    );
+    assert_eq!(
+        outcome.input_version_after.revision,
+        outcome.input_version_before.revision,
+        "rotating retention authority must not manufacture a raw-log input revision"
+    );
+    assert_eq!(
+        outcome.input_version_after.retention_generation,
+        outcome.input_version_before.retention_generation + 1,
+        "the injected retention change must advance the generation exactly once"
+    );
+    assert_eq!(
+        (
+            outcome.cursor_after.range_start_block_number,
+            outcome.cursor_after.next_block_number,
+            outcome.cursor_after.target_block_number,
+            outcome.cursor_after.last_completed_block_number,
+        ),
+        (
+            outcome.cursor_before.range_start_block_number,
+            outcome.cursor_before.next_block_number,
+            outcome.cursor_before.target_block_number,
+            outcome.cursor_before.last_completed_block_number,
+        ),
+        "the durable cursor must not advance after a retention-generation fence failure"
+    );
+    assert_eq!(
+        (
+            outcome.cursor_after.raw_log_input_revision,
+            outcome.cursor_after.raw_log_retention_generation,
+        ),
+        (
+            outcome.cursor_before.raw_log_input_revision,
+            outcome.cursor_before.raw_log_retention_generation,
+        ),
+        "the failed attempt must not acknowledge any part of the changed raw-log input version"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn normalized_replay_recovery_preserves_full_stateless_span_after_preflight_gap()
 -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -3074,6 +3210,454 @@ async fn normalized_replay_catchup_rebuilds_deferred_indexes_when_configured_cha
     drop(outer_runtime_guard);
     database.cleanup().await?;
     Ok(())
+}
+
+const NORMALIZED_REPLAY_COVERAGE_FENCE_CHAIN: &str = "ethereum-sepolia";
+const NORMALIZED_REPLAY_COVERAGE_FENCE_HISTORICAL_CHILD: &str =
+    "0x0000000000000000000000000000000000005400";
+
+#[derive(Clone, Copy)]
+enum NormalizedReplayCoverageFenceMutation {
+    RawLogBelowReplaySpan,
+    RetentionGeneration,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NormalizedReplayCoverageFenceCursor {
+    range_start_block_number: i64,
+    next_block_number: i64,
+    target_block_number: i64,
+    last_completed_block_number: Option<i64>,
+    raw_log_input_revision: i64,
+    raw_log_retention_generation: i64,
+}
+
+struct NormalizedReplayCoverageFenceOutcome {
+    error: anyhow::Error,
+    cursor_before: NormalizedReplayCoverageFenceCursor,
+    cursor_after: NormalizedReplayCoverageFenceCursor,
+    input_version_before: bigname_storage::RawLogStagingInputVersion,
+    input_version_after: bigname_storage::RawLogStagingInputVersion,
+    changed_below_replay_span: bool,
+}
+
+async fn run_normalized_replay_coverage_fence_test(
+    mutation: NormalizedReplayCoverageFenceMutation,
+) -> Result<NormalizedReplayCoverageFenceOutcome> {
+    let database = TestDatabase::new().await?;
+    create_normalized_replay_cursor_table(database.pool()).await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let chain = NORMALIZED_REPLAY_COVERAGE_FENCE_CHAIN;
+    let root_manifest_id = 54_300;
+    let registry_manifest_id = 54_301;
+    let resolver_manifest_id = 54_302;
+    let root_contract_instance_id = Uuid::from_u128(54_300);
+    let registry_contract_instance_id = Uuid::from_u128(54_301);
+    let resolver_contract_instance_id = Uuid::from_u128(54_302);
+    let root_address = "0x0000000000000000000000000000000000005430";
+    let registry_address = "0x0000000000000000000000000000000000005431";
+    let child_address = "0x0000000000000000000000000000000000005432";
+    let resolver_address = "0x0000000000000000000000000000000000005433";
+    insert_normalized_replay_ens_v2_registry_manifests(
+        database.pool(),
+        chain,
+        root_manifest_id,
+        registry_manifest_id,
+        root_contract_instance_id,
+        registry_contract_instance_id,
+        root_address,
+        registry_address,
+    )
+    .await?;
+    insert_normalized_replay_ens_v2_resolver_manifest(
+        database.pool(),
+        chain,
+        resolver_manifest_id,
+        resolver_contract_instance_id,
+        resolver_address,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO discovery_admission_epochs (chain_id, epoch) VALUES ($1, 0) ON CONFLICT (chain_id) DO NOTHING",
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+
+    let block_1 = provider_block(&format!("0x{:064x}", 54_301), None, 1);
+    let block_2 = provider_block(&format!("0x{:064x}", 54_302), Some(&block_1.block_hash), 2);
+    let block_3 = provider_block(
+        &format!("0x{:064x}", 54_303),
+        Some(&block_2.block_hash),
+        3,
+    );
+    for block in [&block_1, &block_2, &block_3] {
+        insert_chain_lineage_for_block(
+            database.pool(),
+            chain,
+            block,
+            CanonicalityState::Finalized,
+        )
+        .await?;
+    }
+    upsert_raw_blocks(
+        database.pool(),
+        &[
+            provider_block_to_raw_block(chain, &block_1, CanonicalityState::Finalized),
+            provider_block_to_raw_block(chain, &block_2, CanonicalityState::Finalized),
+            provider_block_to_raw_block(chain, &block_3, CanonicalityState::Finalized),
+        ],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            RawLog {
+                chain_id: chain.to_owned(),
+                block_hash: block_1.block_hash.clone(),
+                block_number: block_1.block_number,
+                transaction_hash: transaction_hash_for_block(&block_1),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: registry_address.to_owned(),
+                topics: vec![
+                    keccak256_hex(b"SubregistryUpdated(uint256,address,address)"),
+                    hex_string(&abi_word_u64(2)),
+                    hex_string(&abi_word_address(
+                        NORMALIZED_REPLAY_COVERAGE_FENCE_HISTORICAL_CHILD,
+                    )),
+                    hex_string(&abi_word_address(
+                        "0x0000000000000000000000000000000000000dad",
+                    )),
+                ],
+                data: Vec::new(),
+                canonicality_state: CanonicalityState::Finalized,
+            },
+            RawLog {
+                chain_id: chain.to_owned(),
+                block_hash: block_3.block_hash.clone(),
+                block_number: block_3.block_number,
+                transaction_hash: transaction_hash_for_block(&block_3),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: registry_address.to_owned(),
+                topics: vec![
+                    ens_v2_label_registered_topic0(),
+                    hex_string(&abi_word_u64(1)),
+                    labelhash_hex("alice"),
+                    hex_string(&abi_word_address(
+                        "0x0000000000000000000000000000000000000dad",
+                    )),
+                ],
+                data: decode_hex_string(&encode_ens_v2_label_registered_log_data(
+                    "alice",
+                    "0x0000000000000000000000000000000000000aaa",
+                    block_3.block_timestamp_unix_secs + 31_536_000,
+                )),
+                canonicality_state: CanonicalityState::Finalized,
+            },
+            RawLog {
+                chain_id: chain.to_owned(),
+                block_hash: block_1.block_hash.clone(),
+                block_number: block_1.block_number,
+                transaction_hash: transaction_hash_for_block(&block_1),
+                transaction_index: 0,
+                log_index: 1,
+                emitting_address: registry_address.to_owned(),
+                topics: vec![
+                    keccak256_hex(b"SubregistryUpdated(uint256,address,address)"),
+                    hex_string(&abi_word_u64(2)),
+                    hex_string(&abi_word_address(
+                        "0x0000000000000000000000000000000000000000",
+                    )),
+                    hex_string(&abi_word_address(
+                        "0x0000000000000000000000000000000000000dad",
+                    )),
+                ],
+                data: Vec::new(),
+                canonicality_state: CanonicalityState::Finalized,
+            },
+            RawLog {
+                chain_id: chain.to_owned(),
+                block_hash: block_3.block_hash.clone(),
+                block_number: block_3.block_number,
+                transaction_hash: transaction_hash_for_block(&block_3),
+                transaction_index: 0,
+                log_index: 1,
+                emitting_address: registry_address.to_owned(),
+                topics: vec![
+                    keccak256_hex(b"SubregistryUpdated(uint256,address,address)"),
+                    hex_string(&abi_word_u64(1)),
+                    hex_string(&abi_word_address(child_address)),
+                    hex_string(&abi_word_address(
+                        "0x0000000000000000000000000000000000000dad",
+                    )),
+                ],
+                data: Vec::new(),
+                canonicality_state: CanonicalityState::Finalized,
+            },
+        ],
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE raw_log_staging_input_revisions
+        SET retention_generation = 1,
+            retained_history_complete = false,
+            incomplete_since = clock_timestamp(),
+            proven_retention_generation = NULL,
+            proven_discovery_admission_epoch = NULL,
+            proven_through_block = NULL
+        WHERE chain_id = $1
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    insert_completed_backfill_range_coverage_for_source_family(
+        database.pool(),
+        chain,
+        1,
+        3,
+        "ens_v2_root_l1",
+        &[root_address],
+    )
+    .await?;
+    insert_completed_backfill_range_coverage_for_source_family(
+        database.pool(),
+        chain,
+        1,
+        3,
+        "ens_v2_resolver_l1",
+        &[resolver_address],
+    )
+    .await?;
+    insert_completed_backfill_range_coverage_for_source_family(
+        database.pool(),
+        chain,
+        1,
+        3,
+        "ens_v2_registry_l1",
+        &[registry_address],
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE raw_log_staging_input_revisions
+        SET retained_history_complete = true,
+            incomplete_since = NULL,
+            proven_retention_generation = 1,
+            proven_discovery_admission_epoch = 0,
+            proven_through_block = 3
+        WHERE chain_id = $1
+          AND retention_generation = 1
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+
+    let config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
+        "sepolia".to_owned(),
+        vec![chain.to_owned()],
+        1_000,
+        1_000,
+        1,
+    )?
+    .with_defer_projection_indexes(false);
+    let recovery_hook = normalized_replay_catchup::install_after_coverage_recovery_test_hook(
+        database.pool(),
+        "sepolia",
+        chain,
+    )
+    .await;
+    let (provider, server) = bundle_provider_with_fixtures(vec![
+        ProviderBlockFixture {
+            block: block_1.clone(),
+            logs: vec![rpc_ens_v2_label_registered_log_payload(
+                &block_1,
+                NORMALIZED_REPLAY_COVERAGE_FENCE_HISTORICAL_CHILD,
+                2,
+                "historical-recovered",
+                3,
+            )],
+        },
+        ProviderBlockFixture {
+            block: block_3.clone(),
+            logs: vec![rpc_ens_v2_label_registered_log_payload(
+                &block_3,
+                child_address,
+                2,
+                "recovered",
+                2,
+            )],
+        },
+    ])
+    .await?;
+    let pool = database.pool().clone();
+    let task_config = config.clone();
+    let replay = tokio::spawn(async move {
+        normalized_replay_catchup::run_normalized_replay_catchup_iteration_with_provider_for_test(
+            &pool,
+            &task_config,
+            chain,
+            &provider,
+            HeaderAuditMode::Minimal,
+        )
+        .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        recovery_hook.wait_until_after_coverage_recovery(),
+    )
+    .await
+    .context("normalized replay did not reach its post-coverage-recovery barrier")?;
+
+    let cursor_before =
+        load_normalized_replay_coverage_fence_cursor(database.pool(), chain).await?;
+    let input_version_before =
+        bigname_storage::load_raw_log_staging_input_version(database.pool(), chain).await?;
+    let changed_below_replay_span = match mutation {
+        NormalizedReplayCoverageFenceMutation::RawLogBelowReplaySpan => {
+            let block_0 = provider_block(&format!("0x{:064x}", 54_300), None, 0);
+            insert_chain_lineage_for_block(
+                database.pool(),
+                chain,
+                &block_0,
+                CanonicalityState::Finalized,
+            )
+            .await?;
+            upsert_raw_blocks(
+                database.pool(),
+                &[provider_block_to_raw_block(
+                    chain,
+                    &block_0,
+                    CanonicalityState::Finalized,
+                )],
+            )
+            .await?;
+            upsert_raw_logs(
+                database.pool(),
+                &[RawLog {
+                    chain_id: chain.to_owned(),
+                    block_hash: block_0.block_hash.clone(),
+                    block_number: block_0.block_number,
+                    transaction_hash: transaction_hash_for_block(&block_0),
+                    transaction_index: 0,
+                    log_index: 9,
+                    emitting_address: registry_address.to_owned(),
+                    topics: vec![keccak256_hex(b"Unrelated(uint256)")],
+                    data: Vec::new(),
+                    canonicality_state: CanonicalityState::Finalized,
+                }],
+            )
+            .await?;
+            let revision = sqlx::query_scalar::<_, i64>(
+                "UPDATE raw_log_staging_input_revisions \
+                 SET revision = revision + 1 \
+                 WHERE chain_id = $1 \
+                 RETURNING revision",
+            )
+            .bind(chain)
+            .fetch_one(database.pool())
+            .await?;
+            sqlx::query(
+                r#"
+                INSERT INTO raw_log_staging_block_revisions (
+                    chain_id, block_hash, block_number, revision
+                )
+                VALUES ($1, $2, $3, $4)
+                "#,
+            )
+            .bind(chain)
+            .bind(&block_0.block_hash)
+            .bind(block_0.block_number)
+            .bind(revision)
+            .execute(database.pool())
+            .await?;
+            bigname_storage::raw_log_staging_block_range_changed_since(
+                database.pool(),
+                chain,
+                input_version_before.revision,
+                0,
+                0,
+            )
+            .await?
+        }
+        NormalizedReplayCoverageFenceMutation::RetentionGeneration => {
+            sqlx::query(
+                r#"
+                UPDATE raw_log_staging_input_revisions
+                SET retention_generation = retention_generation + 1,
+                    retained_history_complete = false,
+                    incomplete_since = clock_timestamp(),
+                    proven_retention_generation = NULL,
+                    proven_discovery_admission_epoch = NULL,
+                    proven_through_block = NULL
+                WHERE chain_id = $1
+                "#,
+            )
+            .bind(chain)
+            .execute(database.pool())
+            .await?;
+            false
+        }
+    };
+    let input_version_after =
+        bigname_storage::load_raw_log_staging_input_version(database.pool(), chain).await?;
+
+    recovery_hook.resume();
+    let error = tokio::time::timeout(std::time::Duration::from_secs(10), replay)
+        .await
+        .context("normalized replay did not resume after coverage recovery")?
+        .context("normalized replay task panicked")?
+        .expect_err("the injected recovery-fence change must fail the replay attempt");
+    let cursor_after =
+        load_normalized_replay_coverage_fence_cursor(database.pool(), chain).await?;
+
+    drop(recovery_hook);
+    server.abort();
+    database.cleanup().await?;
+    Ok(NormalizedReplayCoverageFenceOutcome {
+        error,
+        cursor_before,
+        cursor_after,
+        input_version_before,
+        input_version_after,
+        changed_below_replay_span,
+    })
+}
+
+async fn load_normalized_replay_coverage_fence_cursor(
+    pool: &PgPool,
+    chain: &str,
+) -> Result<NormalizedReplayCoverageFenceCursor> {
+    let row = sqlx::query_as::<_, (i64, i64, i64, Option<i64>, i64, i64)>(
+        r#"
+        SELECT
+            range_start_block_number,
+            next_block_number,
+            target_block_number,
+            last_completed_block_number,
+            raw_log_input_revision,
+            raw_log_retention_generation
+        FROM normalized_replay_cursors
+        WHERE deployment_profile = 'sepolia'
+          AND chain_id = $1
+          AND cursor_kind = 'raw_fact_normalized_events'
+        "#,
+    )
+    .bind(chain)
+    .fetch_one(pool)
+    .await?;
+    Ok(NormalizedReplayCoverageFenceCursor {
+        range_start_block_number: row.0,
+        next_block_number: row.1,
+        target_block_number: row.2,
+        last_completed_block_number: row.3,
+        raw_log_input_revision: row.4,
+        raw_log_retention_generation: row.5,
+    })
 }
 
 async fn insert_completed_replay_cursor_for_handoff_test(
