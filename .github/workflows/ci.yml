@@ -63,6 +63,9 @@ jobs:
             ./scripts/check-rust-file-size
           fi
 
+      - name: Migration version guard
+        run: ./scripts/check-migration-versions
+
       - name: Install native build dependencies
         run: |
           sudo apt-get update
