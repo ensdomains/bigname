@@ -1741,6 +1741,91 @@ fn rejects_manifest_version_tag_mismatch() -> Result<()> {
 }
 
 #[test]
+fn allows_active_versions_for_same_source_family_on_different_chains() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    test_dir.write_manifest_for_chain_combo(
+        "ethereum",
+        "ens",
+        "ens_v2_registry_l1",
+        "v1",
+        &manifest_contents(
+            "active",
+            "0x0000000000000000000000000000000000000001",
+            "0x00000000000000000000000000000000000000AA",
+            Some("0x00000000000000000000000000000000000000DD"),
+        ),
+    )?;
+    test_dir.write_manifest_for_chain_combo(
+        "base",
+        "ens",
+        "ens_v2_registry_l1",
+        "v1",
+        &manifest_contents(
+            "active",
+            "0x0000000000000000000000000000000000000002",
+            "0x00000000000000000000000000000000000000BB",
+            Some("0x00000000000000000000000000000000000000EE"),
+        )
+        .replacen(
+            "chain = \"ethereum-mainnet\"",
+            "chain = \"base-mainnet\"",
+            1,
+        ),
+    )?;
+
+    let repository = load_repository(&test_dir.path)?;
+    assert_eq!(repository.summary().status, ManifestLoadStatus::Loaded);
+    assert_eq!(repository.manifests().len(), 2);
+    assert_eq!(
+        repository
+            .manifests()
+            .iter()
+            .map(|loaded_manifest| loaded_manifest.manifest.chain.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["base-mainnet", "ethereum-mainnet"])
+    );
+
+    Ok(())
+}
+
+#[test]
+fn rejects_duplicate_storage_identity_across_repository_layouts() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    test_dir.write_manifest(
+        "ens",
+        "ens_v2_registry_l1",
+        "v1",
+        &manifest_contents(
+            "active",
+            "0x0000000000000000000000000000000000000001",
+            "0x00000000000000000000000000000000000000AA",
+            Some("0x00000000000000000000000000000000000000DD"),
+        ),
+    )?;
+    test_dir.write_manifest_for_chain_combo(
+        "ethereum",
+        "ens",
+        "ens_v2_registry_l1",
+        "v1",
+        &manifest_contents(
+            "deprecated",
+            "0x0000000000000000000000000000000000000002",
+            "0x00000000000000000000000000000000000000BB",
+            Some("0x00000000000000000000000000000000000000EE"),
+        ),
+    )?;
+
+    let error = load_repository(&test_dir.path)
+        .expect_err("split layouts must not declare the same manifest storage identity");
+    assert_eq!(
+        error.to_string(),
+        "manifest storage identity (namespace=ens, source_family=ens_v2_registry_l1, chain=ethereum-mainnet, deployment_epoch=ens_v2, manifest_version=1) is declared by both ens/ens_v2_registry_l1/v1.toml and ethereum/ens/ens_v2_registry_l1/v1.toml"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn rejects_multiple_active_versions_for_source_family() -> Result<()> {
     let test_dir = TestDir::new()?;
     test_dir.write_manifest(

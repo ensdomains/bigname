@@ -119,6 +119,35 @@ fn load_manifest_file(root: &Path, path: &Path) -> Result<LoadedManifest> {
 }
 
 fn validate_repository_manifests(manifests: &[LoadedManifest]) -> Result<()> {
+    let mut manifests_by_storage_identity =
+        BTreeMap::<(&str, &str, &str, &str, u64), &LoadedManifest>::new();
+
+    for loaded_manifest in manifests {
+        let manifest = &loaded_manifest.manifest;
+        let storage_identity = (
+            manifest.namespace.as_str(),
+            manifest.source_family.as_str(),
+            manifest.chain.as_str(),
+            manifest.deployment_epoch.as_str(),
+            manifest.manifest_version,
+        );
+
+        if let Some(previous_manifest) =
+            manifests_by_storage_identity.insert(storage_identity, loaded_manifest)
+        {
+            bail!(
+                "manifest storage identity (namespace={}, source_family={}, chain={}, deployment_epoch={}, manifest_version={}) is declared by both {} and {}",
+                manifest.namespace,
+                manifest.source_family,
+                manifest.chain,
+                manifest.deployment_epoch,
+                manifest.manifest_version,
+                previous_manifest.relative_path.display(),
+                loaded_manifest.relative_path.display(),
+            );
+        }
+    }
+
     let mut active_versions_by_family = BTreeMap::<(&str, &str, &str), Vec<&LoadedManifest>>::new();
 
     for loaded_manifest in manifests
@@ -136,15 +165,22 @@ fn validate_repository_manifests(manifests: &[LoadedManifest]) -> Result<()> {
             .push(loaded_manifest);
     }
 
-    for ((namespace, source_family, chain), mut active_versions) in active_versions_by_family {
+    for ((namespace, source_family, chain), active_versions) in active_versions_by_family {
         if active_versions.len() <= 1 {
             continue;
         }
 
-        active_versions.sort_by_key(|loaded_manifest| loaded_manifest.manifest.manifest_version);
         let version_tags = active_versions
             .iter()
-            .map(|loaded_manifest| loaded_manifest.version_tag.as_str())
+            .map(|loaded_manifest| {
+                (
+                    loaded_manifest.manifest.manifest_version,
+                    loaded_manifest.version_tag.as_str(),
+                )
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|(_, version_tag)| version_tag)
             .collect::<Vec<_>>()
             .join(", ");
         bail!(
