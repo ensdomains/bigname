@@ -2097,6 +2097,7 @@ impl TestDatabase {
         namespace: &str,
         coin_type: &str,
         normalized_claim_name: Option<&str>,
+        claim_name_is_normalized: bool,
     ) -> Result<()> {
         let row = load_primary_name_current(&self.pool, address, namespace, coin_type)
             .await
@@ -2113,7 +2114,7 @@ impl TestDatabase {
             &[PrimaryNameCurrentSnapshot {
                 row,
                 normalized_claim_name: normalized_claim_name.map(str::to_owned),
-                claim_name_is_normalized: normalized_claim_name.is_some(),
+                claim_name_is_normalized,
             }],
         )
         .await

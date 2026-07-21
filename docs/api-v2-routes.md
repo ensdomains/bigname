@@ -422,8 +422,14 @@ Field ownership:
 - Status semantics: answer entries use in-band `status`. Valid tuples with no
   indexed claim return an `indexed` entry with `status=not_found`. Unsupported,
   not-found, failed, and mismatched verified outcomes return `200` with the
-  corresponding `verified` entry status. Malformed addresses return
-  `400 invalid_input`.
+  corresponding `verified` entry status. A successful projected or on-demand
+  claim whose raw spelling differs from its normalized form produces a verified
+  answer and `verification` with `status=not_found` and
+  `failure_reason=claim_not_normalized`. An unnormalizable on-demand claim
+  produces an indexed answer with `status=invalid_name` and `raw_claim_name`,
+  plus a verified answer and `verification` with `status=not_found` and
+  `failure_reason=claim_name_not_normalizable`. Malformed addresses return `400
+  invalid_input`.
 - Replaces (v1): `GET /v1/primary-names/{address}`.
 
 ### `GET /v2/addresses/{address}/history`

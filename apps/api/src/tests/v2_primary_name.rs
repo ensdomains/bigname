@@ -17,6 +17,7 @@ async fn v2_get_primary_name_shapes_answers_for_source_selection() -> Result<()>
             "ens",
             "60",
             Some("alice.eth"),
+            true,
         )
         .await?;
 
@@ -161,6 +162,7 @@ async fn v2_get_primary_name_surfaces_persisted_mismatch_in_verification() -> Re
             "ens",
             "60",
             Some("alice.eth"),
+            true,
         )
         .await?;
 
@@ -283,6 +285,7 @@ async fn v2_get_basenames_primary_name_without_persisted_verified_stays_base_sco
             "basenames",
             V2_BASENAMES_PRIMARY_COIN_TYPE,
             Some("alice.base.eth"),
+            true,
         )
         .await?;
 
@@ -355,6 +358,7 @@ async fn v2_get_primary_name_requires_reason_for_verified_unsupported() -> Resul
             "ens",
             "60",
             Some("alice.eth"),
+            true,
         )
         .await?;
 
@@ -430,6 +434,7 @@ async fn v2_get_primary_name_rejects_pipeline_unsupported_reason() -> Result<()>
             "ens",
             "60",
             Some("alice.eth"),
+            true,
         )
         .await?;
 
@@ -744,6 +749,7 @@ async fn seed_v2_basenames_primary_name_persisted_verified(
             "basenames",
             V2_BASENAMES_PRIMARY_COIN_TYPE,
             Some("alice.base.eth"),
+            true,
         )
         .await?;
 

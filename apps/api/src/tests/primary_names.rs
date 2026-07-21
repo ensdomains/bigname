@@ -431,7 +431,13 @@ async fn get_primary_names_canonicalizes_coin_type_before_lookup_and_response() 
         )
         .await?;
     database
-        .insert_primary_name_current_normalized_claim_name(address, "ens", "60", Some("alice.eth"))
+        .insert_primary_name_current_normalized_claim_name(
+            address,
+            "ens",
+            "60",
+            Some("alice.eth"),
+            true,
+        )
         .await?;
 
     let response = app_router(database.app_state())
@@ -1275,6 +1281,113 @@ async fn get_primary_names_reads_basenames_declared_claim_status_for_exact_tuple
 }
 
 #[tokio::test]
+async fn get_primary_names_gates_basenames_case_variant_claim_even_with_persisted_success()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000bca";
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace00000000000000000000055);
+    let finished_at = timestamp(1_717_172_420);
+    let verified_primary_name = json!({
+        "status": "success",
+        "name": {
+            "logical_name_id": "basenames:alice.base.eth",
+            "namespace": "basenames",
+            "normalized_name": "alice.base.eth",
+            "canonical_display_name": "Alice.base.eth",
+            "namehash": "0x0000000000000000000000000000000000000000000000000000000000000b45",
+            "resource_id": "00000000-0000-0000-0000-000000000654",
+            "binding_kind": "declared_registry_path"
+        }
+    });
+
+    database
+        .insert_primary_name_current_claim_row(
+            address,
+            "basenames",
+            BASE_PRIMARY_COIN_TYPE,
+            PrimaryNameClaimStatus::Success,
+            None,
+        )
+        .await?;
+    database
+        .insert_primary_name_current_normalized_claim_name(
+            address,
+            "basenames",
+            BASE_PRIMARY_COIN_TYPE,
+            Some("alice.base.eth"),
+            false,
+        )
+        .await?;
+
+    upsert_execution_trace(
+        &database.pool,
+        &primary_name_execution_trace(
+            execution_trace_id,
+            "basenames",
+            address,
+            BASE_PRIMARY_COIN_TYPE,
+            verified_primary_name.clone(),
+            finished_at,
+        ),
+    )
+    .await?;
+    upsert_execution_outcome(
+        &database.pool,
+        &primary_name_execution_outcome(
+            execution_trace_id,
+            "basenames",
+            address,
+            BASE_PRIMARY_COIN_TYPE,
+            verified_primary_name,
+            finished_at,
+        ),
+    )
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/primary-names/{address}?namespace=basenames&coin_type={BASE_PRIMARY_COIN_TYPE}&mode=both"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("mixed Basenames case-variant primary-name request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let payload: PrimaryNameResponse = read_json(response).await?;
+    assert_eq!(
+        payload.declared_state,
+        Some(json!({
+            "claimed_primary_name": {
+                "status": "success",
+                "name": "alice.base.eth",
+                "provenance": {},
+            }
+        }))
+    );
+    assert_eq!(
+        payload.verified_state,
+        Some(json!({
+            "verified_primary_name": {
+                "status": "invalid_name",
+                "failure_reason": bigname_execution::VERIFIED_PRIMARY_NAME_CLAIM_NOT_NORMALIZED_REASON,
+            }
+        }))
+    );
+    assert_eq!(
+        payload.coverage,
+        primary_name_supported_coverage("basenames")
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_primary_names_reads_declared_claim_provenance_for_exact_tuple() -> Result<()> {
     let database = TestDatabase::new(false).await?;
     database.create_primary_names_current_table().await?;
@@ -1307,7 +1420,13 @@ async fn get_primary_names_reads_declared_claim_provenance_for_exact_tuple() -> 
         )
         .await?;
     database
-        .insert_primary_name_current_normalized_claim_name(address, "ens", "60", Some("alice.eth"))
+        .insert_primary_name_current_normalized_claim_name(
+            address,
+            "ens",
+            "60",
+            Some("alice.eth"),
+            true,
+        )
         .await?;
     database
         .insert_primary_name_current_claim_row_with_provenance(
@@ -1322,7 +1441,13 @@ async fn get_primary_names_reads_declared_claim_provenance_for_exact_tuple() -> 
         )
         .await?;
     database
-        .insert_primary_name_current_normalized_claim_name(address, "ens", "61", Some("beta.eth"))
+        .insert_primary_name_current_normalized_claim_name(
+            address,
+            "ens",
+            "61",
+            Some("beta.eth"),
+            true,
+        )
         .await?;
 
     let declared_response = app_router(database.app_state())
@@ -1449,7 +1574,13 @@ async fn get_primary_names_omit_declared_claim_provenance_from_top_level_route_s
         )
         .await?;
     database
-        .insert_primary_name_current_normalized_claim_name(address, "ens", "60", Some("alice.eth"))
+        .insert_primary_name_current_normalized_claim_name(
+            address,
+            "ens",
+            "60",
+            Some("alice.eth"),
+            true,
+        )
         .await?;
 
     let declared_response = app_router(database.app_state())
@@ -1864,7 +1995,13 @@ async fn get_primary_names_reads_execution_persisted_verified_primary_name_for_e
         )
         .await?;
     database
-        .insert_primary_name_current_normalized_claim_name(address, "ens", "60", Some("alice.eth"))
+        .insert_primary_name_current_normalized_claim_name(
+            address,
+            "ens",
+            "60",
+            Some("alice.eth"),
+            true,
+        )
         .await?;
 
     let trace = primary_name_execution_trace(

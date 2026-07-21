@@ -328,6 +328,20 @@ fn build_verified_answer(
                     outcome_exists: true,
                 });
             }
+            if matches!(
+                &lookup_state.on_demand_claim,
+                OnDemandPrimaryNameClaimState::InvalidName(_)
+            ) {
+                return Ok(VerifiedAnswer {
+                    answer: PrimaryNameAnswer {
+                        failure_reason: Some(product_primary_name_reason(
+                            "claim_name_not_normalizable",
+                        )?),
+                        ..PrimaryNameAnswer::new(Source::Verified, Status::NotFound)
+                    },
+                    outcome_exists: true,
+                });
+            }
             Ok(VerifiedAnswer {
                 answer: PrimaryNameAnswer::new(Source::Verified, Status::NotFound),
                 outcome_exists: false,

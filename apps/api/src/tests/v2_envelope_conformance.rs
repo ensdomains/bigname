@@ -991,6 +991,7 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
                     "ens",
                     "60",
                     Some("alice.eth"),
+                    true,
                 )
                 .await?;
             let payload = v2_primary_name_payload_for_database(
