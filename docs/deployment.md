@@ -810,6 +810,17 @@ source has pruned that block's state; bulk headers, logs, transactions, and
 receipts stay on the local source, so the remote-provider budget is spent only
 on unavailable historical code.
 
+Startup ENSv1 registry discovery and
+[unwrapped-authority](glossary.md#derivation-kind) sync target
+`BIGNAME_INDEXER_STARTUP_DISCOVERY_PAGE_LOGS` raw logs per physical page. The
+setting must be positive and below PostgreSQL's `BIGINT` maximum because paging
+reserves one value for lookahead. It defaults to `100000`, replacing registry
+discovery's former internal `10000`-log startup page. At roughly 2 KiB per log,
+the default target is about 200 MB of page-resident data. Unwrapped-authority
+paging preserves whole-block boundaries, so one unusually dense block can
+exceed the target; treat this setting as a page-size target, not a strict memory
+ceiling.
+
 Automatic normalized-event replay catch-up keeps its block cursor, but also caps
 each replay chunk with `BIGNAME_INDEXER_NORMALIZED_REPLAY_CATCHUP_MAX_LOGS_PER_CHUNK`
 so sparse eras can move in large block jumps while dense spans are bounded by

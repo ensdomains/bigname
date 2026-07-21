@@ -1217,6 +1217,7 @@ async fn focused_discovery_sync_before_widen_admits_bootstrap_edges_into_the_liv
         database.pool(),
         "test",
         &bootstrap_state.watched_chain_plan,
+        DEFAULT_STARTUP_DISCOVERY_PAGE_LOGS,
     )
     .await?;
     assert_eq!(
@@ -1426,6 +1427,7 @@ async fn discovery_refresh_does_not_advance_epoch_when_convergence_fails() -> Re
         database.pool(),
         "test",
         &state.watched_chain_plan,
+        DEFAULT_STARTUP_DISCOVERY_PAGE_LOGS,
     )
     .await?;
     sqlx::query("DROP TABLE resolver_profile_input_changes CASCADE")
