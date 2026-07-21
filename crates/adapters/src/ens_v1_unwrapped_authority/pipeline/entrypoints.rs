@@ -36,20 +36,6 @@ pub async fn sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limi
     .await
 }
 
-pub async fn sync_ens_v1_unwrapped_authority_with_startup_checkpoint(
-    pool: &PgPool,
-    chain: &str,
-    checkpoint: &StartupAdapterCheckpointContext,
-) -> Result<EnsV1UnwrappedAuthoritySyncSummary> {
-    sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit(
-        pool,
-        chain,
-        checkpoint,
-        FULL_REPLAY_RAW_LOG_STREAM_DEFAULT_MAX_LOGS_PER_PAGE,
-    )
-    .await
-}
-
 pub async fn sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit(
     pool: &PgPool,
     chain: &str,

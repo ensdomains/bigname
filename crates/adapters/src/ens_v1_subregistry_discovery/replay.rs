@@ -56,7 +56,11 @@ pub(super) async fn sync_ens_v1_subregistry_discovery_with_checkpoint_context(
     max_raw_logs_per_page: usize,
     progress_log_every_pages: Option<usize>,
 ) -> Result<EnsV1SubregistryDiscoverySyncSummary> {
-    let checkpoint_page_limit = i64::try_from(max_raw_logs_per_page.max(1))
+    ensure!(
+        max_raw_logs_per_page > 0,
+        "ENSv1 subregistry checkpoint max logs per page must be positive"
+    );
+    let checkpoint_page_limit = i64::try_from(max_raw_logs_per_page)
         .context("subregistry checkpoint page limit overflowed i64")?;
     ensure!(
         pool.options().get_max_connections() >= MIN_CHECKPOINT_POOL_CONNECTIONS,

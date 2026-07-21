@@ -4522,10 +4522,11 @@ async fn sync_ens_v1_unwrapped_authority_persists_registrar_identity_rows_idempo
     assert_eq!(second.total_normalized_event_count, 5);
 
     let startup_checkpoint = crate::StartupAdapterCheckpointContext::new("test-startup", 42)?;
-    let startup = sync_ens_v1_unwrapped_authority_with_startup_checkpoint(
+    let startup = sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit(
         database.pool(),
         "ethereum-mainnet",
         &startup_checkpoint,
+        100_000,
     )
     .await?;
     assert_eq!(startup.scanned_log_count, second.scanned_log_count);
@@ -4770,6 +4771,219 @@ async fn startup_authority_stages_page_events_until_identity_materialization() -
 }
 
 #[tokio::test]
+async fn startup_authority_resumes_across_page_limit_change() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let registrar_address = "0x00000000000000000000000000000000000000aa";
+    let block_42 = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let block_43 = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let block_44 = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    insert_active_contract_fixture(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+        "registrar",
+        registrar_address,
+        Some("registrar"),
+        "manifests/ens/ens_v1_registrar_l1/v1.toml",
+    )
+    .await?;
+    upsert_raw_blocks(
+        database.pool(),
+        &[
+            raw_block(block_42, None, 42, 1_700_000_042),
+            raw_block(block_43, Some(block_42), 43, 1_700_000_043),
+            raw_block(block_44, Some(block_43), 44, 1_700_000_044),
+        ],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            RawLog {
+                chain_id: chain.to_owned(),
+                block_hash: block_42.to_owned(),
+                block_number: 42,
+                transaction_hash:
+                    "0xtxaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: registrar_address.to_owned(),
+                topics: vec![
+                    name_registered_topic0(),
+                    keccak256_hex(b"alice"),
+                    hex_string(abi_word_address(
+                        "0x0000000000000000000000000000000000000001",
+                    )),
+                ],
+                data: encode_registrar_name_registered_log_data("alice", 1_700_010_000),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: chain.to_owned(),
+                block_hash: block_43.to_owned(),
+                block_number: 43,
+                transaction_hash:
+                    "0xtxbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: registrar_address.to_owned(),
+                topics: vec![
+                    name_registered_topic0(),
+                    keccak256_hex(b"bob"),
+                    hex_string(abi_word_address(
+                        "0x0000000000000000000000000000000000000002",
+                    )),
+                ],
+                data: encode_registrar_name_registered_log_data("bob", 1_700_020_000),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: chain.to_owned(),
+                block_hash: block_44.to_owned(),
+                block_number: 44,
+                transaction_hash:
+                    "0xtxcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: registrar_address.to_owned(),
+                topics: vec![
+                    name_registered_topic0(),
+                    keccak256_hex(b"carol"),
+                    hex_string(abi_word_address(
+                        "0x0000000000000000000000000000000000000003",
+                    )),
+                ],
+                data: encode_registrar_name_registered_log_data("carol", 1_700_030_000),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        ],
+    )
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE startup_authority_limit_page_audit (
+            scanned_log_count BIGINT PRIMARY KEY,
+            last_block_number BIGINT NOT NULL
+        )",
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        "CREATE TABLE startup_authority_limit_page_failure (
+            scanned_log_count BIGINT PRIMARY KEY
+        )",
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query("INSERT INTO startup_authority_limit_page_failure VALUES (2)")
+        .execute(database.pool())
+        .await?;
+    sqlx::query(
+        r#"
+        CREATE FUNCTION audit_startup_authority_limit_page() RETURNS TRIGGER AS $function$
+        BEGIN
+            IF NEW.adapter = 'ens_v1_unwrapped_authority'
+               AND NEW.checkpoint_scope = 'startup_adapter_sync'
+               AND NEW.status = 'running'
+               AND NEW.scanned_log_count > OLD.scanned_log_count THEN
+                IF EXISTS (
+                    SELECT 1
+                    FROM startup_authority_limit_page_failure
+                    WHERE scanned_log_count = NEW.scanned_log_count
+                ) THEN
+                    RAISE EXCEPTION 'injected failure after a committed startup authority page';
+                END IF;
+                INSERT INTO startup_authority_limit_page_audit
+                    VALUES (NEW.scanned_log_count, NEW.last_block_number);
+            END IF;
+            RETURN NEW;
+        END;
+        $function$ LANGUAGE plpgsql
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE TRIGGER audit_startup_authority_limit_page
+        BEFORE UPDATE ON normalized_replay_adapter_checkpoints
+        FOR EACH ROW EXECUTE FUNCTION audit_startup_authority_limit_page()
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    let checkpoint = crate::StartupAdapterCheckpointContext::new("test-limit-resume", 44)?;
+    let error = sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit(
+        database.pool(),
+        chain,
+        &checkpoint,
+        1,
+    )
+    .await
+    .expect_err("the injected second-page failure must interrupt authority startup");
+    assert!(
+        format!("{error:#}").contains("injected failure after a committed startup authority page")
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, Option<i64>, i64, i64)>(
+            "SELECT status, last_block_number, scanned_log_count, matched_log_count
+             FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = 'test-limit-resume'
+               AND adapter = 'ens_v1_unwrapped_authority'
+               AND checkpoint_scope = 'startup_adapter_sync'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        ("running".to_owned(), Some(42), 1, 1),
+        "the first page's whole-block boundary must survive interruption"
+    );
+
+    let resumed = sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit(
+        database.pool(),
+        chain,
+        &checkpoint,
+        100_000,
+    )
+    .await?;
+    assert_eq!(resumed.scanned_log_count, 3);
+    assert_eq!(resumed.matched_log_count, 3);
+    assert_eq!(resumed.total_normalized_event_count, 15);
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT scanned_log_count, last_block_number
+             FROM startup_authority_limit_page_audit
+             ORDER BY scanned_log_count",
+        )
+        .fetch_all(database.pool())
+        .await?,
+        vec![(1, 42), (3, 44)],
+        "resume must jump from the durable block boundary to the new larger-page boundary without rescanning block 42 or touching the old count-two boundary"
+    );
+    assert!(
+        load_name_surface(database.pool(), "ens:alice.eth")
+            .await?
+            .is_some(),
+        "the surface materialized before the page-limit seam must remain present"
+    );
+    assert!(
+        load_name_surface(database.pool(), "ens:bob.eth")
+            .await?
+            .is_some(),
+        "the surface materialized after the page-limit seam must be present"
+    );
+    assert!(
+        load_name_surface(database.pool(), "ens:carol.eth")
+            .await?
+            .is_some(),
+        "every surface materialized in the larger resumed page must be present"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn startup_authority_resets_completed_checkpoint_when_authority_epoch_changes() -> Result<()>
 {
     let _permit = crate::acquire_test_db_permit().await;
@@ -4821,10 +5035,11 @@ async fn startup_authority_resets_completed_checkpoint_when_authority_epoch_chan
     .await?;
 
     let checkpoint = crate::StartupAdapterCheckpointContext::new("test-authority-epoch", 42)?;
-    let first = sync_ens_v1_unwrapped_authority_with_startup_checkpoint(
+    let first = sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit(
         database.pool(),
         chain,
         &checkpoint,
+        100_000,
     )
     .await?;
     assert_eq!(first.total_normalized_event_inserted_count, 5);
@@ -4837,10 +5052,11 @@ async fn startup_authority_resets_completed_checkpoint_when_authority_epoch_chan
     .execute(database.pool())
     .await?;
 
-    let resumed = sync_ens_v1_unwrapped_authority_with_startup_checkpoint(
+    let resumed = sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit(
         database.pool(),
         chain,
         &checkpoint,
+        100_000,
     )
     .await?;
     assert_eq!(resumed.total_normalized_event_count, 5);
@@ -4939,10 +5155,11 @@ async fn startup_authority_extends_after_interrupted_finalize() -> Result<()> {
     .await?;
 
     let first_checkpoint = crate::StartupAdapterCheckpointContext::new("test-extend", 42)?;
-    let error = sync_ens_v1_unwrapped_authority_with_startup_checkpoint(
+    let error = sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit(
         database.pool(),
         chain,
         &first_checkpoint,
+        100_000,
     )
     .await
     .expect_err("the injected final checkpoint update must interrupt startup");
@@ -4991,10 +5208,11 @@ async fn startup_authority_extends_after_interrupted_finalize() -> Result<()> {
     .await?;
 
     let extended_checkpoint = crate::StartupAdapterCheckpointContext::new("test-extend", 43)?;
-    let resumed = sync_ens_v1_unwrapped_authority_with_startup_checkpoint(
+    let resumed = sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit(
         database.pool(),
         chain,
         &extended_checkpoint,
+        100_000,
     )
     .await?;
     assert_eq!(resumed.scanned_log_count, 2);
@@ -5031,10 +5249,11 @@ async fn startup_authority_completes_when_active_emitters_have_no_matching_logs(
 
     let no_block_checkpoint =
         crate::StartupAdapterCheckpointContext::new("test-no-block-authority", 42)?;
-    let no_block = sync_ens_v1_unwrapped_authority_with_startup_checkpoint(
+    let no_block = sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit(
         database.pool(),
         chain,
         &no_block_checkpoint,
+        100_000,
     )
     .await?;
     assert_eq!(no_block.scanned_log_count, 0);
@@ -5062,10 +5281,11 @@ async fn startup_authority_completes_when_active_emitters_have_no_matching_logs(
     .await?;
 
     let checkpoint = crate::StartupAdapterCheckpointContext::new("test-empty-authority", 42)?;
-    let summary = sync_ens_v1_unwrapped_authority_with_startup_checkpoint(
+    let summary = sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit(
         database.pool(),
         chain,
         &checkpoint,
+        100_000,
     )
     .await?;
     assert_eq!(summary.scanned_log_count, 0);
@@ -5164,10 +5384,11 @@ async fn startup_authority_completes_retained_checkpoint_after_all_authority_is_
     .await?;
 
     let checkpoint = crate::StartupAdapterCheckpointContext::new(deployment_profile, 0)?;
-    let summary = sync_ens_v1_unwrapped_authority_with_startup_checkpoint(
+    let summary = sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit(
         database.pool(),
         chain,
         &checkpoint,
+        100_000,
     )
     .await?;
     assert_eq!(summary.scanned_log_count, 0);
