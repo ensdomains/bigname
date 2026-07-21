@@ -10,6 +10,12 @@ use super::logging::{
     log_ens_v2_resolver_sync_summary,
 };
 
+// At roughly 2 KiB per log, the 100,000-log target is about 200 MB page-resident:
+// about 10x smaller than normalized replay's resident set and 400x smaller than
+// the #218 OOM class. Ownership/control pages preserve whole blocks, so an
+// unusually dense block can exceed this target.
+pub(crate) const DEFAULT_STARTUP_DISCOVERY_PAGE_LOGS: usize = 100_000;
+
 pub(crate) async fn sync_adapter_owned_raw_log_state(
     pool: &sqlx::PgPool,
     watched_chain_plan: &[WatchedChainPlan],
@@ -21,11 +27,12 @@ pub(crate) async fn sync_startup_adapter_owned_raw_log_state(
     pool: &sqlx::PgPool,
     deployment_profile: &str,
     watched_chain_plan: &[WatchedChainPlan],
+    startup_discovery_page_logs: usize,
 ) -> Result<()> {
     sync_adapter_owned_raw_log_state_with_startup_context(
         pool,
         watched_chain_plan,
-        Some(deployment_profile),
+        Some((deployment_profile, startup_discovery_page_logs)),
     )
     .await
 }
@@ -33,18 +40,19 @@ pub(crate) async fn sync_startup_adapter_owned_raw_log_state(
 async fn sync_adapter_owned_raw_log_state_with_startup_context(
     pool: &sqlx::PgPool,
     watched_chain_plan: &[WatchedChainPlan],
-    startup_deployment_profile: Option<&str>,
+    startup_context: Option<(&str, usize)>,
 ) -> Result<()> {
     // Broad startup/timer passes also recover any prior discovery transaction
     // that committed before its caller could journal the epoch change.
     journal_resolver_profile_authority(pool).await?;
     let mut completed_startup_checkpoints = Vec::new();
     for chain in watched_chain_plan {
-        let startup_checkpoint = match startup_deployment_profile {
-            Some(deployment_profile) => Some(
+        let startup_checkpoint = match startup_context {
+            Some((deployment_profile, page_logs)) => Some((
                 load_startup_adapter_checkpoint_context(pool, deployment_profile, &chain.chain)
                     .await?,
-            ),
+                page_logs,
+            )),
             None => None,
         };
         let summary = bigname_adapters::sync_ens_v1_reverse_claim(pool, &chain.chain)
@@ -58,11 +66,12 @@ async fn sync_adapter_owned_raw_log_state_with_startup_context(
         log_ens_v1_reverse_claim_sync_summary(&chain.chain, &summary);
 
         let summary = match startup_checkpoint.as_ref() {
-            Some(checkpoint) => {
-                bigname_adapters::sync_ens_v1_subregistry_discovery_with_startup_checkpoint(
+            Some((checkpoint, page_logs)) => {
+                bigname_adapters::sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit(
                     pool,
                     &chain.chain,
                     checkpoint,
+                    *page_logs,
                 )
                 .await
             }
@@ -77,11 +86,12 @@ async fn sync_adapter_owned_raw_log_state_with_startup_context(
         log_ens_v1_subregistry_discovery_sync_summary(&chain.chain, &summary);
 
         let summary = match startup_checkpoint.as_ref() {
-            Some(checkpoint) => {
-                bigname_adapters::sync_ens_v1_unwrapped_authority_with_startup_checkpoint(
+            Some((checkpoint, page_logs)) => {
+                bigname_adapters::sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit(
                     pool,
                     &chain.chain,
                     checkpoint,
+                    *page_logs,
                 )
                 .await
             }
@@ -135,7 +145,7 @@ async fn sync_adapter_owned_raw_log_state_with_startup_context(
             })?;
         log_ens_v2_permissions_sync_summary(&chain.chain, &summary);
 
-        if let Some(checkpoint) = startup_checkpoint {
+        if let Some((checkpoint, _)) = startup_checkpoint {
             completed_startup_checkpoints.push((chain.chain.clone(), checkpoint));
         }
     }
@@ -152,24 +162,27 @@ pub(crate) async fn sync_discovery_adapter_owned_raw_log_state(
     pool: &sqlx::PgPool,
     deployment_profile: &str,
     watched_chain_plan: &[WatchedChainPlan],
+    startup_discovery_page_logs: usize,
 ) -> Result<()> {
     journal_resolver_profile_authority(pool).await?;
     let mut completed_startup_checkpoints = Vec::new();
     for chain in watched_chain_plan {
         let startup_checkpoint =
             load_startup_adapter_checkpoint_context(pool, deployment_profile, &chain.chain).await?;
-        let summary = bigname_adapters::sync_ens_v1_subregistry_discovery_with_startup_checkpoint(
-            pool,
-            &chain.chain,
-            &startup_checkpoint,
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "failed to sync ENSv1 registry discovery from stored raw logs for chain {}",
-                chain.chain
+        let summary =
+            bigname_adapters::sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit(
+                pool,
+                &chain.chain,
+                &startup_checkpoint,
+                startup_discovery_page_logs,
             )
-        })?;
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to sync ENSv1 registry discovery from stored raw logs for chain {}",
+                    chain.chain
+                )
+            })?;
         log_ens_v1_subregistry_discovery_sync_summary(&chain.chain, &summary);
 
         let summary = bigname_adapters::sync_ens_v2_registry_resource_surface(pool, &chain.chain)

@@ -33,6 +33,17 @@ use crate::repair::{
     RAW_CODE_HASH_CORRECTION_DEFAULT_OBSERVED_BEFORE,
     RAW_CODE_HASH_CORRECTION_DEFAULT_OBSERVED_FROM,
 };
+use crate::runtime::DEFAULT_STARTUP_DISCOVERY_PAGE_LOGS;
+
+fn parse_positive_usize(value: &str) -> Result<usize, String> {
+    let value = value.parse::<usize>().map_err(|error| error.to_string())?;
+    let maximum = usize::try_from(i64::MAX - 1).unwrap_or(usize::MAX);
+    match value {
+        0 => Err("value must be positive".to_owned()),
+        value if value > maximum => Err(format!("value must be between 1 and {maximum}")),
+        value => Ok(value),
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "bigname-indexer", about = "Chain indexing process for bigname")]
@@ -117,6 +128,15 @@ pub(crate) struct RunArgs {
         default_value_t = DEFAULT_BOOTSTRAP_BACKFILL_RANGE_BLOCKS
     )]
     pub(crate) bootstrap_backfill_range_blocks: i64,
+    /// Target raw-log count per ENSv1 startup page. The ownership/control pass
+    /// preserves whole blocks, so a dense block can exceed this target.
+    #[arg(
+        long = "startup-discovery-page-logs",
+        env = "BIGNAME_INDEXER_STARTUP_DISCOVERY_PAGE_LOGS",
+        default_value_t = DEFAULT_STARTUP_DISCOVERY_PAGE_LOGS,
+        value_parser = parse_positive_usize
+    )]
+    pub(crate) startup_discovery_page_logs: usize,
     #[arg(
         long = "normalized-replay-catchup-enabled",
         env = "BIGNAME_INDEXER_NORMALIZED_REPLAY_CATCHUP_ENABLED",

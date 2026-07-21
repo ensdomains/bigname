@@ -4602,6 +4602,8 @@ async fn startup_authority_stages_page_events_until_identity_materialization() -
     let database = TestDatabase::new().await?;
     let chain = "ethereum-mainnet";
     let registrar_address = "0x00000000000000000000000000000000000000aa";
+    let block_42 = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let block_43 = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     insert_active_contract_fixture(
         database.pool(),
         SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
@@ -4613,36 +4615,54 @@ async fn startup_authority_stages_page_events_until_identity_materialization() -
     .await?;
     upsert_raw_blocks(
         database.pool(),
-        &[raw_block(
-            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            None,
-            42,
-            1_700_000_042,
-        )],
+        &[
+            raw_block(block_42, None, 42, 1_700_000_042),
+            raw_block(block_43, Some(block_42), 43, 1_700_000_043),
+        ],
     )
     .await?;
     upsert_raw_logs(
         database.pool(),
-        &[RawLog {
-            chain_id: chain.to_owned(),
-            block_hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                .to_owned(),
-            block_number: 42,
-            transaction_hash: "0xtxaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                .to_owned(),
-            transaction_index: 0,
-            log_index: 0,
-            emitting_address: registrar_address.to_owned(),
-            topics: vec![
-                name_registered_topic0(),
-                keccak256_hex(b"alice"),
-                hex_string(&abi_word_address(
-                    "0x0000000000000000000000000000000000000001",
-                )),
-            ],
-            data: encode_registrar_name_registered_log_data("alice", 1_700_010_000),
-            canonicality_state: CanonicalityState::Canonical,
-        }],
+        &[
+            RawLog {
+                chain_id: chain.to_owned(),
+                block_hash: block_42.to_owned(),
+                block_number: 42,
+                transaction_hash:
+                    "0xtxaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: registrar_address.to_owned(),
+                topics: vec![
+                    name_registered_topic0(),
+                    keccak256_hex(b"alice"),
+                    hex_string(abi_word_address(
+                        "0x0000000000000000000000000000000000000001",
+                    )),
+                ],
+                data: encode_registrar_name_registered_log_data("alice", 1_700_010_000),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: chain.to_owned(),
+                block_hash: block_43.to_owned(),
+                block_number: 43,
+                transaction_hash:
+                    "0xtxbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: registrar_address.to_owned(),
+                topics: vec![
+                    name_registered_topic0(),
+                    keccak256_hex(b"bob"),
+                    hex_string(abi_word_address(
+                        "0x0000000000000000000000000000000000000002",
+                    )),
+                ],
+                data: encode_registrar_name_registered_log_data("bob", 1_700_020_000),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        ],
     )
     .await?;
 
@@ -4659,7 +4679,7 @@ async fn startup_authority_stages_page_events_until_identity_materialization() -
             IF NEW.adapter = 'ens_v1_unwrapped_authority'
                AND NEW.checkpoint_scope = 'startup_adapter_sync'
                AND NEW.status = 'running'
-               AND NEW.scanned_log_count > OLD.scanned_log_count
+               AND NEW.scanned_log_count = 1
                AND EXISTS (SELECT 1 FROM startup_authority_page_failure WHERE enabled) THEN
                 RAISE EXCEPTION 'injected startup authority page failure';
             END IF;
@@ -4676,11 +4696,12 @@ async fn startup_authority_stages_page_events_until_identity_materialization() -
     .execute(database.pool())
     .await?;
 
-    let checkpoint = crate::StartupAdapterCheckpointContext::new("test-event-fence", 42)?;
-    let error = sync_ens_v1_unwrapped_authority_with_startup_checkpoint(
+    let checkpoint = crate::StartupAdapterCheckpointContext::new("test-event-fence", 43)?;
+    let error = sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit(
         database.pool(),
         chain,
         &checkpoint,
+        1,
     )
     .await
     .expect_err("the injected page failure must interrupt startup before materialization");
@@ -4713,16 +4734,22 @@ async fn startup_authority_stages_page_events_until_identity_materialization() -
     sqlx::query("DELETE FROM startup_authority_page_failure")
         .execute(database.pool())
         .await?;
-    let resumed = sync_ens_v1_unwrapped_authority_with_startup_checkpoint(
+    let resumed = sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit(
         database.pool(),
         chain,
         &checkpoint,
+        1,
     )
     .await?;
-    assert_eq!(resumed.scanned_log_count, 1);
-    assert_eq!(resumed.total_normalized_event_count, 5);
+    assert_eq!(resumed.scanned_log_count, 2);
+    assert_eq!(resumed.total_normalized_event_count, 10);
     assert!(
         load_name_surface(database.pool(), "ens:alice.eth")
+            .await?
+            .is_some()
+    );
+    assert!(
+        load_name_surface(database.pool(), "ens:bob.eth")
             .await?
             .is_some()
     );

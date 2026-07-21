@@ -51,6 +51,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
             &pool,
             &deployment_profile,
             &manifest_runtime_state.watched_chain_plan,
+            args.startup_discovery_page_logs,
         )
         .await?;
     } else {
@@ -96,6 +97,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
             &pool,
             &deployment_profile,
             &manifest_runtime_state.watched_chain_plan,
+            args.startup_discovery_page_logs,
         )
         .await?;
     } else if run_mode.sync_discovery_adapters_after_startup_backfill {
@@ -110,6 +112,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
             &pool,
             &deployment_profile,
             &manifest_runtime_state.watched_chain_plan,
+            args.startup_discovery_page_logs,
         )
         .await?;
     }
@@ -248,6 +251,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         live_poll_adapter_sync_after_normalized_replay_catchup =
             run_mode.live_poll_adapter_sync_after_normalized_replay_catchup,
         normalized_replay_catchup_enabled = run_mode.normalized_replay_catchup_enabled,
+        startup_discovery_page_logs = args.startup_discovery_page_logs,
         normalized_replay_catchup_chunk_blocks = args.normalized_replay_catchup_chunk_blocks,
         normalized_replay_catchup_max_logs_per_chunk = args.normalized_replay_catchup_max_logs_per_chunk,
         normalized_replay_catchup_poll_interval_secs = args.normalized_replay_catchup_poll_interval_secs,

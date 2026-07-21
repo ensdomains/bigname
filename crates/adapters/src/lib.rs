@@ -49,6 +49,7 @@ pub use ens_v1_unwrapped_authority::{
     reconcile_resolver_profile_events, sync_ens_v1_unwrapped_authority,
     sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limit,
     sync_ens_v1_unwrapped_authority_with_startup_checkpoint,
+    sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit,
 };
 pub use ens_v2_permissions::{
     EnsV2PermissionsKindSyncSummary, EnsV2PermissionsSyncSummary, sync_ens_v2_permissions,

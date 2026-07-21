@@ -478,6 +478,7 @@ pub use self::pipeline::{
     sync_ens_v1_unwrapped_authority,
     sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limit,
     sync_ens_v1_unwrapped_authority_with_startup_checkpoint,
+    sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit,
 };
 pub use checkpoint::clear_replay_adapter_checkpoints;
 pub use resolver_profile_reconciliation::{

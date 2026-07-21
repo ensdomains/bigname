@@ -1482,7 +1482,13 @@ async fn sync_adapter_owned_raw_log_state_backfills_wrapper_authority_from_store
     let watched_plan = load_watched_chain_plan(database.pool()).await?;
     sync_adapter_owned_raw_log_state(database.pool(), &watched_plan).await?;
     sync_adapter_owned_raw_log_state(database.pool(), &watched_plan).await?;
-    sync_startup_adapter_owned_raw_log_state(database.pool(), "test", &watched_plan).await?;
+    sync_startup_adapter_owned_raw_log_state(
+        database.pool(),
+        "test",
+        &watched_plan,
+        DEFAULT_STARTUP_DISCOVERY_PAGE_LOGS,
+    )
+    .await?;
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoints

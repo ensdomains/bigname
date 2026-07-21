@@ -41,12 +41,27 @@ pub async fn sync_ens_v1_unwrapped_authority_with_startup_checkpoint(
     chain: &str,
     checkpoint: &StartupAdapterCheckpointContext,
 ) -> Result<EnsV1UnwrappedAuthoritySyncSummary> {
+    sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit(
+        pool,
+        chain,
+        checkpoint,
+        FULL_REPLAY_RAW_LOG_STREAM_DEFAULT_MAX_LOGS_PER_PAGE,
+    )
+    .await
+}
+
+pub async fn sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit(
+    pool: &PgPool,
+    chain: &str,
+    checkpoint: &StartupAdapterCheckpointContext,
+    max_raw_logs_per_page: usize,
+) -> Result<EnsV1UnwrappedAuthoritySyncSummary> {
     let checkpoint = checkpoint.adapter_context(pool, chain).await?;
     sync_ens_v1_unwrapped_authority_with_checkpoint_context(
         pool,
         chain,
         &checkpoint,
-        FULL_REPLAY_RAW_LOG_STREAM_DEFAULT_MAX_LOGS_PER_PAGE,
+        max_raw_logs_per_page,
     )
     .await
 }
