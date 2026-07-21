@@ -92,17 +92,22 @@ pub fn assert_snapshots_equal(expected: &RouteSnapshots, actual: &RouteSnapshots
 /// Automatic catch-up parity is full
 /// [normalized-event](../../../../docs/glossary.md) row equality after
 /// normalizing per-corpus [contract-instance](../../../../docs/glossary.md)
-/// ids. The temporary #157 contract permits only the exact expected finalized,
-/// raw-log-derived [label-preimage](../../../../docs/glossary.md) events to be
-/// live-only; catch-up-only or any other live-only row fails.
+/// ids. The receipt-reconstructed [label-preimage](../../../../docs/glossary.md)
+/// events authenticate both paths under the full contract. The temporary #157
+/// containment contract permits only those exact events to be live-only;
+/// catch-up-only or any other live-only row fails.
 pub async fn assert_catchup_normalized_event_parity(
     live: &sqlx::PgPool,
     catchup: &sqlx::PgPool,
     contract: CatchupEquivalenceContract,
-    expected_missing_preimages: &[StatelessLabelPreimage],
+    expected_preimages: &[StatelessLabelPreimage],
 ) -> Result<()> {
     let live_rows = normalized_event_rows(live, None).await?;
     let catchup_rows = normalized_event_rows(catchup, None).await?;
+    ensure!(
+        !expected_preimages.is_empty(),
+        "catch-up equivalence must name at least one receipt-reconstructed stateless label-preimage event"
+    );
     if contract == CatchupEquivalenceContract::Full {
         if live_rows != catchup_rows {
             bail!(
@@ -112,13 +117,19 @@ pub async fn assert_catchup_normalized_event_parity(
                 first_line_diff(&live_rows.join("\n"), &catchup_rows.join("\n"))
             );
         }
+        assert_expected_stateless_label_preimages(
+            &live_rows,
+            expected_preimages,
+            "live ingestion",
+        )?;
+        assert_expected_stateless_label_preimages(
+            &catchup_rows,
+            expected_preimages,
+            "automatic catch-up",
+        )?;
         return Ok(());
     }
 
-    ensure!(
-        !expected_missing_preimages.is_empty(),
-        "the contained catch-up preimage divergence must name at least one expected event"
-    );
     let catchup_only = multiset_difference(&catchup_rows, &live_rows);
     if !catchup_only.is_empty() {
         bail!(
@@ -134,11 +145,31 @@ pub async fn assert_catchup_normalized_event_parity(
         .map(|row| stateless_label_preimage(row))
         .collect::<Result<Vec<_>>>()?;
     observed_missing_preimages.sort();
-    let mut expected_missing_preimages = expected_missing_preimages.to_vec();
+    let mut expected_missing_preimages = expected_preimages.to_vec();
     expected_missing_preimages.sort();
     if observed_missing_preimages != expected_missing_preimages {
         bail!(
             "automatic catch-up omitted a different stateless label-preimage set: expected {expected_missing_preimages:#?}, observed {observed_missing_preimages:#?}"
+        );
+    }
+    Ok(())
+}
+
+fn assert_expected_stateless_label_preimages(
+    rows: &[String],
+    expected_preimages: &[StatelessLabelPreimage],
+    corpus: &str,
+) -> Result<()> {
+    let expected_rows = expected_preimages
+        .iter()
+        .map(|preimage| preimage.0.clone())
+        .collect::<Vec<_>>();
+    let missing = multiset_difference(&expected_rows, rows);
+    if !missing.is_empty() {
+        bail!(
+            "{corpus} omitted {} receipt-reconstructed stateless label-preimage event(s):\n{}",
+            missing.len(),
+            missing.join("\n")
         );
     }
     Ok(())

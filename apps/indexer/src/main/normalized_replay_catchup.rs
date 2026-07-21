@@ -17,7 +17,8 @@ use crate::{
         HeaderAuditMode, RawFactNormalizedEventReplayOutcome, RawFactNormalizedEventReplayRequest,
         RawFactNormalizedEventReplaySelection, active_closure_or_dependency_replay_adapters,
         chain_has_closure_or_dependency_replay_adapter, replay_raw_fact_normalized_events,
-        sync_full_closure_normalized_events_from_persisted_raw_payloads,
+        select_log_bounded_replay_to_block,
+        sync_automatic_two_phase_full_closure_normalized_events,
         unsupported_closure_replay_adapters,
     },
 };
@@ -35,7 +36,10 @@ mod sources;
 mod test_hook;
 
 #[cfg(test)]
-pub(crate) use test_hook::install_after_rewind as install_after_rewind_test_hook;
+pub(crate) use test_hook::{
+    install_after_coverage_recovery as install_after_coverage_recovery_test_hook,
+    install_after_rewind as install_after_rewind_test_hook,
+};
 
 use coverage_recovery::replay_full_closure_with_coverage_recovery;
 use cursors::{
@@ -46,7 +50,7 @@ use indexes::{
     ensure_projection_indexes_after_catchup, prepare_deferred_projection_indexes_for_fresh_replay,
     restore_deferred_projection_indexes,
 };
-use sources::{load_canonical_raw_log_bounds, select_log_bounded_replay_to_block};
+use sources::load_canonical_raw_log_bounds;
 
 pub(crate) const DEFAULT_NORMALIZED_REPLAY_CATCHUP_CHUNK_BLOCKS: i64 = 262_144;
 pub(crate) const DEFAULT_NORMALIZED_REPLAY_CATCHUP_MAX_LOGS_PER_CHUNK: usize = 100_000;
@@ -520,6 +524,7 @@ async fn replay_full_closure_or_dependency_normalized_events(
     chain: &str,
     from_block: i64,
     to_block: i64,
+    stateless_ranges: &[(i64, i64)],
     max_raw_logs_per_page: usize,
 ) -> Result<RawFactNormalizedEventReplayOutcome> {
     let adapters = active_closure_or_dependency_replay_adapters(pool, chain).await?;
@@ -536,35 +541,41 @@ async fn replay_full_closure_or_dependency_normalized_events(
         chain,
         from_block,
         to_block,
+        stateless_range_count = stateless_ranges.len(),
+        stateless_ranges = ?stateless_ranges,
         max_raw_logs_per_page,
         adapter_count = adapters.len(),
         adapters = ?adapters,
-        "full closure normalized-event replay session started"
+        "two-phase full closure normalized-event replay session started"
     );
 
-    let replay = sync_full_closure_normalized_events_from_persisted_raw_payloads(
+    let replay = sync_automatic_two_phase_full_closure_normalized_events(
         pool,
         deployment_profile,
         chain,
         CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS,
         from_block,
         to_block,
+        stateless_ranges,
         &adapters,
         max_raw_logs_per_page,
     )
     .await?;
-    let summary = replay.summary;
+    let stateless = replay.stateless;
+    let closure = replay.closure;
 
     Ok(RawFactNormalizedEventReplayOutcome {
         deployment_profile: deployment_profile.to_owned(),
         chain: chain.to_owned(),
-        selection_kind: "full_closure",
+        selection_kind: "two_phase_full_closure",
         source_scope_target_count: adapters.len(),
-        selected_block_count: 0,
-        canonical_raw_log_count: summary.scanned_log_count,
-        scanned_raw_log_count: summary.scanned_log_count,
-        matched_raw_log_count: summary.matched_log_count,
-        normalized_event_synced_count: summary.total_synced_count,
-        normalized_event_inserted_count: summary.total_inserted_count,
+        selected_block_count: stateless.selected_block_count,
+        canonical_raw_log_count: stateless.canonical_raw_log_count,
+        scanned_raw_log_count: stateless.scanned_raw_log_count + closure.scanned_log_count,
+        matched_raw_log_count: stateless.matched_raw_log_count + closure.matched_log_count,
+        normalized_event_synced_count: stateless.normalized_event_synced_count
+            + closure.total_synced_count,
+        normalized_event_inserted_count: stateless.normalized_event_inserted_count
+            + closure.total_inserted_count,
     })
 }

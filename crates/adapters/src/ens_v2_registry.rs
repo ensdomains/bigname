@@ -48,7 +48,8 @@ use types::*;
 use util::normalize_address;
 
 pub use live::{
-    record_ens_v2_live_selected_raw_log_coverage, sync_ens_v2_registry_resource_surface_live_poll,
+    ensure_ens_v2_retained_history_proof_through, record_ens_v2_live_selected_raw_log_coverage,
+    sync_ens_v2_registry_resource_surface_live_poll,
 };
 pub use recovery::{EnsV2MissingCoverage, ens_v2_missing_coverage, is_ens_v2_missing_coverage};
 

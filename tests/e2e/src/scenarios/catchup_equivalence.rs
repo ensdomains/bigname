@@ -17,8 +17,8 @@ const YEAR: u64 = 365 * 24 * 60 * 60;
 // Anvil's finalized anchor trails the head by 64 blocks, so 66 is load-bearing:
 // fixture events must finalize for `live_ready_sql`, and the post-handoff cold-start
 // safe/finalized anchor must land above the last fixture event so live adapter sync
-// never touches fixture blocks. The roughly two-block headroom prevents
-// `PreimageObserved` from appearing in the catch-up corpus as an inscrutable parity flake.
+// never touches fixture blocks. The roughly two-block headroom prevents post-handoff
+// live sync from masking a replay omission in the catch-up corpus.
 const FINALITY_MARGIN_BLOCKS: u64 = 66;
 const REGISTRAR_MANIFEST_VERSION: i64 = 1;
 const REGISTRAR_SOURCE_MANIFEST_ID: i64 = 1;
@@ -26,10 +26,8 @@ const REGISTRAR_SOURCE_MANIFEST_ID: i64 = 1;
 const NAME_REGISTERED_EVENT_SIGNATURE: &str =
     "NameRegistered(string,bytes32,address,uint256,uint256,uint256,bytes32)";
 
-// #157 seam: change this one line to `Full` when automatic catch-up runs the stateless
-// [label-preimage](../../../../docs/glossary.md) pass.
 const CATCHUP_EQUIVALENCE_CONTRACT: perturb::CatchupEquivalenceContract =
-    perturb::CatchupEquivalenceContract::MissingStatelessLabelPreimages;
+    perturb::CatchupEquivalenceContract::Full;
 
 struct CatchupChain {
     deployment: ens_v1::EnsV1Deployment,
@@ -47,7 +45,7 @@ struct PreparedCorpus {
 
 struct CatchupFixture {
     last_event_block: u64,
-    missing_preimage: perturb::StatelessLabelPreimage,
+    expected_preimage: perturb::StatelessLabelPreimage,
 }
 
 impl CatchupChain {
@@ -196,7 +194,7 @@ async fn add_rich_name_fixture(anvil: &Anvil, chain: &CatchupChain) -> Result<Ca
         chain.resolver,
     )
     .await?;
-    let missing_preimage = expected_preimage_from_registration(&rpc, chain, &registration).await?;
+    let expected_preimage = expected_preimage_from_registration(&rpc, chain, &registration).await?;
     ens_v1::set_addr_record(&rpc, chain.resolver, chain.owner, NAME, chain.record_target).await?;
     ens_v1::set_text_record(&rpc, chain.resolver, chain.owner, NAME, TEXT_KEY, "catchup").await?;
     ens_v1::create_subname(
@@ -212,7 +210,7 @@ async fn add_rich_name_fixture(anvil: &Anvil, chain: &CatchupChain) -> Result<Ca
     rpc.mine(FINALITY_MARGIN_BLOCKS).await?;
     Ok(CatchupFixture {
         last_event_block,
-        missing_preimage,
+        expected_preimage,
     })
 }
 
@@ -422,7 +420,7 @@ async fn automatic_catchup_matches_live_ingestion_outputs() -> Result<()> {
         &live.db.pool,
         &catchup.db.pool,
         CATCHUP_EQUIVALENCE_CONTRACT,
-        &[fixture.missing_preimage],
+        &[fixture.expected_preimage],
     )
     .await?;
 

@@ -52,8 +52,9 @@ pub use ens_v2_registrar::{
 };
 pub use ens_v2_registry::{
     EnsV2MissingCoverage, EnsV2RegistryResourceSurfaceSyncSummary, ens_v2_missing_coverage,
-    is_ens_v2_missing_coverage, record_ens_v2_live_selected_raw_log_coverage,
-    sync_ens_v2_registry_resource_surface, sync_ens_v2_registry_resource_surface_live_poll,
+    ensure_ens_v2_retained_history_proof_through, is_ens_v2_missing_coverage,
+    record_ens_v2_live_selected_raw_log_coverage, sync_ens_v2_registry_resource_surface,
+    sync_ens_v2_registry_resource_surface_live_poll,
     sync_ens_v2_registry_resource_surface_through_block,
 };
 pub use ens_v2_resolver::{

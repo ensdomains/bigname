@@ -5,8 +5,11 @@ use anyhow::{Context, Result};
 use sqlx::PgPool;
 
 use super::event_topics::PreimageObservedEventTopics;
-use super::source_selection::{load_active_emitters, normalized_source_scope_targets};
-use super::types::WatchedRawLogRow;
+use super::source_selection::{
+    RawLogSourceScopeIndex, load_active_emitters, normalized_source_scope_targets,
+    select_emitter_for_block,
+};
+use super::types::{ActiveEmitter, WatchedRawLogRow};
 
 #[derive(Clone, Debug)]
 pub(super) struct WatchedRawLogLoad {
@@ -83,6 +86,10 @@ pub(super) async fn load_watched_raw_logs(
             event_topics: PreimageObservedEventTopics::default(),
         });
     }
+    let source_scope_index = source_scope
+        .as_deref()
+        .map(RawLogSourceScopeIndex::new)
+        .transpose()?;
     let scoped_emitter_identities = source_scope.as_ref().map(|source_scope| {
         source_scope
             .iter()
@@ -101,11 +108,15 @@ pub(super) async fn load_watched_raw_logs(
     let event_topics = PreimageObservedEventTopics::load(pool, &active_emitters).await?;
     let preimage_topic0s = event_topics.query_topic0s();
 
-    let emitters_by_address = active_emitters
-        .into_iter()
-        .map(|emitter| (emitter.address.clone(), emitter))
-        .collect::<HashMap<_, _>>();
-    let watched_addresses = emitters_by_address.keys().cloned().collect::<Vec<_>>();
+    let mut emitters_by_address = HashMap::<String, Vec<ActiveEmitter>>::new();
+    for emitter in active_emitters {
+        emitters_by_address
+            .entry(emitter.address.clone())
+            .or_default()
+            .push(emitter);
+    }
+    let mut watched_addresses = emitters_by_address.keys().cloned().collect::<Vec<_>>();
+    watched_addresses.sort();
 
     let rows = if let Some(source_scope) = &source_scope {
         let scoped_addresses = source_scope
@@ -245,19 +256,31 @@ pub(super) async fn load_watched_raw_logs(
         .map(|row| {
             let emitting_address = sql_row::get::<String>(&row, "emitting_address")?;
             let normalized_emitting_address = emitting_address.to_ascii_lowercase();
-            let active_emitter = emitters_by_address
+            let block_number = sql_row::get::<i64>(&row, "block_number")?;
+            let candidate_emitters = emitters_by_address
                 .get(&normalized_emitting_address)
                 .with_context(|| {
                     format!(
-                        "missing active emitter attribution for chain {} address {}",
-                        chain, emitting_address
+                        "missing block-derived emitter candidates for chain {chain} address {emitting_address}"
                     )
                 })?;
+            let active_emitter = select_emitter_for_block(
+                chain,
+                &emitting_address,
+                block_number,
+                candidate_emitters,
+                source_scope_index.as_ref(),
+            )?
+            .with_context(|| {
+                format!(
+                    "missing block-derived emitter attribution for chain {chain} address {emitting_address} at block {block_number}"
+                )
+            })?;
 
             Ok(WatchedRawLogRow {
                 chain_id: sql_row::get(&row, "chain_id")?,
                 block_hash: sql_row::get(&row, "block_hash")?,
-                block_number: sql_row::get(&row, "block_number")?,
+                block_number,
                 transaction_hash: sql_row::get(&row, "transaction_hash")?,
                 transaction_index: sql_row::get(&row, "transaction_index")?,
                 log_index: sql_row::get(&row, "log_index")?,

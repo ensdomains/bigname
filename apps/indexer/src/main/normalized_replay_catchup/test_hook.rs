@@ -9,6 +9,11 @@ pub(crate) struct NormalizedReplayAfterRewindTestHook {
     _registration: ScopedTestHookGuard<HookKey, NormalizedReplayAfterRewindTestHookState>,
 }
 
+pub(crate) struct NormalizedReplayAfterCoverageRecoveryTestHook {
+    state: NormalizedReplayAfterRewindTestHookState,
+    _registration: ScopedTestHookGuard<HookKey, NormalizedReplayAfterRewindTestHookState>,
+}
+
 #[derive(Clone)]
 struct NormalizedReplayAfterRewindTestHookState {
     after_rewind: Arc<Notify>,
@@ -25,7 +30,23 @@ impl NormalizedReplayAfterRewindTestHook {
     }
 }
 
+impl NormalizedReplayAfterCoverageRecoveryTestHook {
+    pub(crate) async fn wait_until_after_coverage_recovery(&self) {
+        self.state.after_rewind.notified().await;
+    }
+
+    pub(crate) fn resume(&self) {
+        self.state.resume.notify_one();
+    }
+}
+
 impl Drop for NormalizedReplayAfterRewindTestHook {
+    fn drop(&mut self) {
+        self.state.resume.notify_one();
+    }
+}
+
+impl Drop for NormalizedReplayAfterCoverageRecoveryTestHook {
     fn drop(&mut self) {
         self.state.resume.notify_one();
     }
@@ -35,6 +56,10 @@ type HookKey = (String, String, String);
 
 static HOOKS: ScopedTestHookRegistry<HookKey, NormalizedReplayAfterRewindTestHookState> =
     ScopedTestHookRegistry::new();
+static COVERAGE_RECOVERY_HOOKS: ScopedTestHookRegistry<
+    HookKey,
+    NormalizedReplayAfterRewindTestHookState,
+> = ScopedTestHookRegistry::new();
 
 pub(crate) async fn install_after_rewind(
     pool: &PgPool,
@@ -58,11 +83,49 @@ pub(crate) async fn install_after_rewind(
     }
 }
 
+pub(crate) async fn install_after_coverage_recovery(
+    pool: &PgPool,
+    deployment_profile: &str,
+    chain: &str,
+) -> NormalizedReplayAfterCoverageRecoveryTestHook {
+    let database = current_test_database(pool)
+        .await
+        .expect("normalized replay test hook must identify its database");
+    let state = NormalizedReplayAfterRewindTestHookState {
+        after_rewind: Arc::new(Notify::new()),
+        resume: Arc::new(Notify::new()),
+    };
+    let registration = COVERAGE_RECOVERY_HOOKS.install(
+        (database, deployment_profile.to_owned(), chain.to_owned()),
+        state.clone(),
+    );
+    NormalizedReplayAfterCoverageRecoveryTestHook {
+        state,
+        _registration: registration,
+    }
+}
+
 pub(super) async fn pause_after_rewind(pool: &PgPool, deployment_profile: &str, chain: &str) {
     let database = current_test_database(pool)
         .await
         .expect("normalized replay test hook must identify its database");
     let hook = HOOKS.take(&(database, deployment_profile.to_owned(), chain.to_owned()));
+    if let Some(hook) = hook {
+        hook.after_rewind.notify_one();
+        hook.resume.notified().await;
+    }
+}
+
+pub(super) async fn pause_after_coverage_recovery(
+    pool: &PgPool,
+    deployment_profile: &str,
+    chain: &str,
+) {
+    let database = current_test_database(pool)
+        .await
+        .expect("normalized replay test hook must identify its database");
+    let hook =
+        COVERAGE_RECOVERY_HOOKS.take(&(database, deployment_profile.to_owned(), chain.to_owned()));
     if let Some(hook) = hook {
         hook.after_rewind.notify_one();
         hook.resume.notified().await;

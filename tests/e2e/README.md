@@ -586,13 +586,10 @@ route inventory or a claim that every protocol transition is covered.
 - `catchup_equivalence::automatic_catchup_matches_live_ingestion_outputs` —
   compares a finalized ENSv1 registration, addr/text records, and registry-only
   child ingested from the same chain by live polling and forced automatic
-  catch-up. Route snapshots and all common normalized-event rows are exact;
-  the temporary #157 containment requires the live-only delta to be exactly one
-  finalized registrar `PreimageObserved` for `catchupeq.eth`, with no catch-up-
-  only or other live-only rows. The scenario's contract constant switches to
-  full row equality when two-phase automatic replay adds the omitted stateless
-  label-preimage pass. The result—only the #157-class divergence, with no
-  #161-style incremental-versus-replay under-derivation observed—is certified
+  catch-up. Route snapshots and all normalized-event rows are exact. The full
+  equality arm also requires the receipt-reconstructed finalized registrar
+  `PreimageObserved` for `catchupeq.eth` to exist identically in both corpora,
+  so equality cannot pass if both paths omit the event. The result is certified
   for the current corpus only: one finalized ENSv1 `.eth` registration with
   addr/text records and a registry-only child. Wrapper events, reverse/primary
   claims, renewals, expiry/grace, ENSv2, Basenames/multi-chain, non-finalized

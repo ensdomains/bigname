@@ -46,6 +46,8 @@ pub(super) struct ActiveEmitter {
     pub(super) source_family: String,
     pub(super) manifest_version: i64,
     pub(super) source_rank: i32,
+    pub(super) active_from_block_number: Option<i64>,
+    pub(super) active_to_block_number: Option<i64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

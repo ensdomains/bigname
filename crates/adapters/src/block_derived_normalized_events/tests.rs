@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     str::FromStr,
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
@@ -1812,6 +1812,358 @@ async fn sync_block_derived_normalized_events_replays_scoped_selected_logs_witho
     let counts =
         load_unselected_payload_row_counts(database.pool(), "ethereum-mainnet", block_hash).await?;
     assert_eq!(counts, UnselectedPayloadRowCounts::default());
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn scoped_historical_emitters_retain_disjoint_same_address_families() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-sepolia";
+    let address = "0x00000000000000000000000000000000000000aa";
+
+    let registry_manifest_id = insert_manifest_version(
+        database.pool(),
+        ManifestVersionSeed {
+            manifest_version: 1,
+            namespace: "ens",
+            source_family: SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
+            chain,
+            deployment_epoch: "ens_v2_registry",
+            rollout_status: "active",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
+            file_path: "manifests/ens/ens_v2_registry_l1/v1.toml",
+        },
+    )
+    .await?;
+    let resolver_manifest_id = insert_manifest_version(
+        database.pool(),
+        ManifestVersionSeed {
+            manifest_version: 1,
+            namespace: "ens",
+            source_family: SOURCE_FAMILY_ENS_V2_RESOLVER_L1,
+            chain,
+            deployment_epoch: "ens_v2_resolver",
+            rollout_status: "active",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
+            file_path: "manifests/ens/ens_v2_resolver_l1/v1.toml",
+        },
+    )
+    .await?;
+    let registry_contract_instance_id = Uuid::new_v4();
+    let resolver_contract_instance_id = Uuid::new_v4();
+    for contract_instance_id in [registry_contract_instance_id, resolver_contract_instance_id] {
+        insert_contract_instance(database.pool(), contract_instance_id, chain, "contract").await?;
+    }
+    insert_manifest_contract_instance(
+        database.pool(),
+        ManifestContractInstanceSeed {
+            manifest_id: registry_manifest_id,
+            declaration_kind: "contract",
+            declaration_name: "registry",
+            contract_instance_id: registry_contract_instance_id,
+            declared_address: address,
+            role: Some("registry"),
+            proxy_kind: Some("none"),
+            implementation_contract_instance_id: None,
+            declared_implementation_address: None,
+        },
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        ManifestContractInstanceSeed {
+            manifest_id: resolver_manifest_id,
+            declaration_kind: "contract",
+            declaration_name: "resolver",
+            contract_instance_id: resolver_contract_instance_id,
+            declared_address: address,
+            role: Some("resolver"),
+            proxy_kind: Some("none"),
+            implementation_contract_instance_id: None,
+            declared_implementation_address: None,
+        },
+    )
+    .await?;
+    insert_contract_instance_address(
+        database.pool(),
+        registry_contract_instance_id,
+        chain,
+        address,
+        registry_manifest_id,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET active_from_block_number = 1,
+            active_to_block_number = 10,
+            deactivated_at = now()
+        WHERE contract_instance_id = $1
+        "#,
+    )
+    .bind(registry_contract_instance_id)
+    .execute(database.pool())
+    .await?;
+    insert_contract_instance_address(
+        database.pool(),
+        resolver_contract_instance_id,
+        chain,
+        address,
+        resolver_manifest_id,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET active_from_block_number = 20,
+            active_to_block_number = 30,
+            deactivated_at = now()
+        WHERE contract_instance_id = $1
+        "#,
+    )
+    .bind(resolver_contract_instance_id)
+    .execute(database.pool())
+    .await?;
+
+    let scoped_identities = HashSet::from([
+        (
+            SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+            address.to_owned(),
+        ),
+        (
+            SOURCE_FAMILY_ENS_V2_RESOLVER_L1.to_owned(),
+            address.to_owned(),
+        ),
+    ]);
+    let emitters =
+        source_selection::load_active_emitters(database.pool(), chain, Some(&scoped_identities))
+            .await?;
+    assert_eq!(emitters.len(), 2);
+    assert!(
+        emitters
+            .iter()
+            .any(|emitter| emitter.source_family == SOURCE_FAMILY_ENS_V2_REGISTRY_L1)
+    );
+    assert!(
+        emitters
+            .iter()
+            .any(|emitter| emitter.source_family == SOURCE_FAMILY_ENS_V2_RESOLVER_L1)
+    );
+
+    let source_scope = source_selection::normalized_source_scope_targets(&[
+        (
+            SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+            address.to_owned(),
+            1,
+            10,
+        ),
+        (
+            SOURCE_FAMILY_ENS_V2_RESOLVER_L1.to_owned(),
+            address.to_owned(),
+            20,
+            30,
+        ),
+    ]);
+    let source_scope_index = source_selection::RawLogSourceScopeIndex::new(&source_scope)?;
+    let early = source_selection::select_emitter_for_block(
+        chain,
+        address,
+        5,
+        &emitters,
+        Some(&source_scope_index),
+    )?
+    .expect("registry interval should cover block 5");
+    assert_eq!(early.source_family, SOURCE_FAMILY_ENS_V2_REGISTRY_L1);
+    assert!(
+        source_selection::select_emitter_for_block(
+            chain,
+            address,
+            15,
+            &emitters,
+            Some(&source_scope_index),
+        )?
+        .is_none(),
+        "the inactive gap must not inherit either family"
+    );
+    let late = source_selection::select_emitter_for_block(
+        chain,
+        address,
+        25,
+        &emitters,
+        Some(&source_scope_index),
+    )?
+    .expect("resolver interval should cover block 25");
+    assert_eq!(late.source_family, SOURCE_FAMILY_ENS_V2_RESOLVER_L1);
+
+    let mut ranked_overlap = emitters.clone();
+    let resolver = ranked_overlap
+        .iter_mut()
+        .find(|emitter| emitter.source_family == SOURCE_FAMILY_ENS_V2_RESOLVER_L1)
+        .expect("resolver emitter exists");
+    resolver.active_from_block_number = Some(5);
+    resolver.source_rank += 1;
+    let overlap_scope = source_selection::normalized_source_scope_targets(&[
+        (
+            SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+            address.to_owned(),
+            1,
+            10,
+        ),
+        (
+            SOURCE_FAMILY_ENS_V2_RESOLVER_L1.to_owned(),
+            address.to_owned(),
+            5,
+            30,
+        ),
+    ]);
+    let overlap_scope_index = source_selection::RawLogSourceScopeIndex::new(&overlap_scope)?;
+    let preferred = source_selection::select_emitter_for_block(
+        chain,
+        address,
+        5,
+        &ranked_overlap,
+        Some(&overlap_scope_index),
+    )?
+    .expect("overlap should retain the higher-priority emitter");
+    assert_eq!(preferred.source_family, SOURCE_FAMILY_ENS_V2_REGISTRY_L1);
+
+    let resolver = ranked_overlap
+        .iter_mut()
+        .find(|emitter| emitter.source_family == SOURCE_FAMILY_ENS_V2_RESOLVER_L1)
+        .expect("resolver emitter exists");
+    resolver.source_rank -= 1;
+    let error = source_selection::select_emitter_for_block(
+        chain,
+        address,
+        5,
+        &ranked_overlap,
+        Some(&overlap_scope_index),
+    )
+    .expect_err("equal-priority overlapping families remain ambiguous");
+    assert!(
+        format!("{error:#}").contains("ambiguous block-derived emitter attribution"),
+        "unexpected ambiguity error: {error:#}"
+    );
+
+    let early_block_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let late_block_hash = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    upsert_raw_blocks(
+        database.pool(),
+        &[
+            RawBlock {
+                chain_id: chain.to_owned(),
+                block_hash: early_block_hash.to_owned(),
+                parent_hash: None,
+                block_number: 5,
+                block_timestamp: OffsetDateTime::UNIX_EPOCH,
+                logs_bloom: None,
+                transactions_root: None,
+                receipts_root: None,
+                state_root: None,
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawBlock {
+                chain_id: chain.to_owned(),
+                block_hash: late_block_hash.to_owned(),
+                parent_hash: None,
+                block_number: 25,
+                block_timestamp: OffsetDateTime::UNIX_EPOCH,
+                logs_bloom: None,
+                transactions_root: None,
+                receipts_root: None,
+                state_root: None,
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        ],
+    )
+    .await?;
+    let late_dns_name = dns_encoded_name(&["late", "eth"]);
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            RawLog {
+                chain_id: chain.to_owned(),
+                block_hash: early_block_hash.to_owned(),
+                block_number: 5,
+                transaction_hash: "0xearly".to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: address.to_owned(),
+                topics: vec![
+                    keccak_signature_hex(
+                        "LabelRegistered(uint256,bytes32,string,address,uint64,address)",
+                    ),
+                    hex_string(&abi_word_u64(1)),
+                    keccak256_hex(b"early"),
+                    hex_string(&abi_word_address(
+                        "0x00000000000000000000000000000000000000cc",
+                    )),
+                ],
+                data: encode_ens_v2_label_registered_data(
+                    "early",
+                    "0x00000000000000000000000000000000000000bb",
+                    2_000_000_000,
+                ),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: chain.to_owned(),
+                block_hash: late_block_hash.to_owned(),
+                block_number: 25,
+                transaction_hash: "0xlate".to_owned(),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: address.to_owned(),
+                topics: vec![
+                    keccak_signature_hex("NamedResource(uint256,bytes)"),
+                    hex_string(&abi_word_u64(42)),
+                ],
+                data: encode_single_dynamic_bytes(&late_dns_name),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        ],
+    )
+    .await?;
+
+    let summary = sync_block_derived_normalized_events(
+        database.pool(),
+        chain,
+        &[early_block_hash.to_owned(), late_block_hash.to_owned()],
+        Some(&[
+            (
+                SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+                address.to_owned(),
+                1,
+                10,
+            ),
+            (
+                SOURCE_FAMILY_ENS_V2_RESOLVER_L1.to_owned(),
+                address.to_owned(),
+                20,
+                30,
+            ),
+        ]),
+    )
+    .await?;
+    assert_eq!(summary.scanned_log_count, 2);
+    assert_eq!(summary.matched_log_count, 2);
+    assert_eq!(summary.total_synced_count, 2);
+
+    let events = load_normalized_events_by_namespace(database.pool(), "ens").await?;
+    let early = events
+        .iter()
+        .find(|event| event.after_state["decoded_name"] == "early")
+        .expect("early registry preimage event exists");
+    assert_eq!(early.source_manifest_id, Some(registry_manifest_id));
+    assert_eq!(early.source_family, SOURCE_FAMILY_ENS_V2_REGISTRY_L1);
+    let late = events
+        .iter()
+        .find(|event| event.after_state["decoded_name"] == "late.eth")
+        .expect("late resolver preimage event exists");
+    assert_eq!(late.source_manifest_id, Some(resolver_manifest_id));
+    assert_eq!(late.source_family, SOURCE_FAMILY_ENS_V2_RESOLVER_L1);
 
     database.cleanup().await
 }

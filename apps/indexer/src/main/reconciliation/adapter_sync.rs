@@ -13,7 +13,6 @@ use crate::runtime::{
 
 use super::replay::NormalizedEventReplayAdapter;
 use super::types::PersistedRawPayloadAdapterSyncSummary;
-
 #[path = "adapter_sync/backlog.rs"]
 mod backlog;
 #[path = "adapter_sync/ens_v1_subregistry.rs"]
@@ -48,11 +47,16 @@ pub(crate) use entrypoints::{
     sync_live_adapter_state_from_persisted_raw_payloads_after_reorg,
     sync_replay_normalized_events_from_persisted_raw_payloads,
 };
-#[cfg(test)]
-pub(crate) use full_closure::install_ownership_release_test_hook;
 pub(crate) use full_closure::{
-    sync_full_closure_normalized_events_from_persisted_raw_payloads,
+    AutomaticTwoPhaseFullClosureSyncResult, automatic_stateless_replay_completed,
+    sync_automatic_two_phase_full_closure_normalized_events,
     sync_manual_full_closure_normalized_events_from_persisted_raw_payloads,
+};
+#[cfg(test)]
+pub(crate) use full_closure::{
+    install_after_stateless_failure, install_ownership_release_test_hook,
+    install_stateless_page_observer,
+    sync_full_closure_normalized_events_from_persisted_raw_payloads,
 };
 use mode::{PersistedRawPayloadAdapterSyncMode, ensure_raw_fact_adapter_allowed};
 use scope::load_live_adapter_source_scope;
