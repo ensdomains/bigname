@@ -298,12 +298,12 @@
                 rollout_gate: &[
                     OPENAPI_ROUTE_OWNER_GATE,
                     "focused primary-name conformance",
-                    "persisted execution readback checks",
+                    "pinned fallback call, persisted execution readback, provider-failure class, and snapshot metadata checks",
                     RELEASE_SMOKE_GATE,
                 ],
                 rollback_gate: &[
                     ROLLBACK_SMOKE_GATE,
-                    "stable partial exact-tuple coverage, explicit unsupported out-of-class behavior, and execution-derived verification rollback",
+                    "stable partial exact-tuple coverage, pinned persisted ENS/60 fallback, explicit unsupported out-of-class behavior, and execution-derived verification rollback",
                 ],
             },
         ];

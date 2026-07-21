@@ -4,8 +4,14 @@ mod support_cursors;
 mod support_history;
 #[path = "support/primary_name_lookup.rs"]
 mod support_primary_name_lookup;
+#[path = "support/primary_name_execution.rs"]
+mod support_primary_name_execution;
 #[path = "support/primary_name_readback.rs"]
 mod support_primary_name_readback;
+#[path = "support/primary_name_readback_fence.rs"]
+mod support_primary_name_readback_fence;
+#[path = "support/primary_name_rpc.rs"]
+mod support_primary_name_rpc;
 #[path = "support/query_parsing.rs"]
 mod support_query_parsing;
 #[path = "support/record_json.rs"]
@@ -20,7 +26,10 @@ mod support_snapshots;
 use support_cursors::*;
 use support_history::*;
 use support_primary_name_lookup::*;
+use support_primary_name_execution::*;
 use support_primary_name_readback::*;
+use support_primary_name_readback_fence::*;
+use support_primary_name_rpc::*;
 use support_query_parsing::*;
 use support_record_json::*;
 use support_records::*;

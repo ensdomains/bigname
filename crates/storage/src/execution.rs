@@ -22,13 +22,13 @@ pub use outcome::{
     upsert_execution_outcome, upsert_execution_outcome_in_transaction,
 };
 pub use trace::{
-    load_execution_trace, load_execution_trace_inspection, upsert_execution_trace,
-    upsert_execution_trace_in_transaction,
+    load_execution_trace, load_execution_trace_from_connection, load_execution_trace_inspection,
+    upsert_execution_trace, upsert_execution_trace_in_transaction,
 };
 pub use types::{
     ExecutionBoundaryInvalidation, ExecutionCacheKey, ExecutionManifestInvalidation,
     ExecutionOutcome, ExecutionOutcomeInvalidationSummary, ExecutionTrace,
-    ExecutionTraceInspection, ExecutionTraceStep,
+    ExecutionTraceInspection, ExecutionTraceStep, SELECTED_CHECKPOINT_BOUNDARY_KIND,
 };
 
 #[cfg(test)]

@@ -6,6 +6,8 @@ use uuid::Uuid;
 
 use crate::evm_primitives::normalize_evm_b256;
 
+use super::types::SELECTED_CHECKPOINT_BOUNDARY_KIND;
+
 pub(super) fn decode_requested_chain_positions(
     value: &Value,
     request_key: &str,
@@ -94,6 +96,11 @@ pub(super) fn decode_version_boundary(
             "execution outcome cache key for request_key {request_key} {field_name} must be a JSON object"
         )
     })?;
+
+    if object.contains_key("boundary_kind") {
+        return decode_selected_checkpoint_boundary(object, field_name, request_key);
+    }
+
     let logical_name_id =
         required_string_field(object, "logical_name_id", field_name, request_key)?.to_owned();
     let resource_id = Uuid::parse_str(required_string_field(
@@ -143,33 +150,78 @@ pub(super) fn decode_version_boundary(
         request_key,
     )?;
 
-    Ok(VersionBoundaryParts {
-        logical_name_id,
-        resource_id,
-        normalized_event_id,
-        event_kind,
-        chain_position,
-    })
+    Ok(VersionBoundaryParts::Projected(
+        ProjectedVersionBoundaryParts {
+            logical_name_id,
+            resource_id,
+            normalized_event_id,
+            event_kind,
+            chain_position,
+        },
+    ))
+}
+
+fn decode_selected_checkpoint_boundary(
+    object: &Map<String, Value>,
+    field_name: &str,
+    request_key: &str,
+) -> Result<VersionBoundaryParts> {
+    let boundary_kind = required_string_field(object, "boundary_kind", field_name, request_key)?;
+    if boundary_kind != SELECTED_CHECKPOINT_BOUNDARY_KIND {
+        bail!(
+            "execution outcome cache key for request_key {request_key} {field_name}.boundary_kind must be {SELECTED_CHECKPOINT_BOUNDARY_KIND}"
+        );
+    }
+    if let Some(unexpected_field) = object
+        .keys()
+        .find(|field| field.as_str() != "boundary_kind" && field.as_str() != "chain_position")
+    {
+        bail!(
+            "execution outcome cache key for request_key {request_key} {field_name} selected-checkpoint boundary has unexpected field {unexpected_field}"
+        );
+    }
+    let chain_position = decode_chain_position(
+        object.get("chain_position").with_context(|| {
+            format!(
+                "execution outcome cache key for request_key {request_key} {field_name} must include chain_position"
+            )
+        })?,
+        &format!("{field_name}.chain_position"),
+        request_key,
+    )?;
+
+    Ok(VersionBoundaryParts::SelectedCheckpoint { chain_position })
 }
 
 pub(super) fn append_version_boundary_key_parts(
     buffer: &mut String,
     boundary: &VersionBoundaryParts,
 ) {
-    append_key_part(buffer, &boundary.logical_name_id);
-    append_key_part(buffer, &boundary.resource_id.to_string());
-    append_key_part(
-        buffer,
-        &boundary
-            .normalized_event_id
-            .map(|value| value.to_string())
-            .unwrap_or_default(),
-    );
-    append_key_part(buffer, boundary.event_kind.as_deref().unwrap_or_default());
-    append_key_part(buffer, &boundary.chain_position.chain_id);
-    append_key_part(buffer, &boundary.chain_position.block_number.to_string());
-    append_key_part(buffer, &boundary.chain_position.block_hash);
-    append_key_part(buffer, &boundary.chain_position.timestamp);
+    match boundary {
+        VersionBoundaryParts::Projected(boundary) => {
+            append_key_part(buffer, &boundary.logical_name_id);
+            append_key_part(buffer, &boundary.resource_id.to_string());
+            append_key_part(
+                buffer,
+                &boundary
+                    .normalized_event_id
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+            );
+            append_key_part(buffer, boundary.event_kind.as_deref().unwrap_or_default());
+        }
+        VersionBoundaryParts::SelectedCheckpoint { .. } => {
+            append_key_part(buffer, SELECTED_CHECKPOINT_BOUNDARY_KIND);
+            append_key_part(buffer, "");
+            append_key_part(buffer, "");
+            append_key_part(buffer, "");
+        }
+    }
+    let chain_position = boundary.chain_position();
+    append_key_part(buffer, &chain_position.chain_id);
+    append_key_part(buffer, &chain_position.block_number.to_string());
+    append_key_part(buffer, &chain_position.block_hash);
+    append_key_part(buffer, &chain_position.timestamp);
 }
 
 pub(super) fn manifest_version_identity_key(
@@ -377,7 +429,13 @@ impl ManifestVersionParts {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct VersionBoundaryParts {
+pub(super) enum VersionBoundaryParts {
+    Projected(ProjectedVersionBoundaryParts),
+    SelectedCheckpoint { chain_position: ChainPositionParts },
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ProjectedVersionBoundaryParts {
     pub(super) logical_name_id: String,
     pub(super) resource_id: Uuid,
     pub(super) normalized_event_id: Option<i64>,
@@ -387,13 +445,26 @@ pub(super) struct VersionBoundaryParts {
 
 impl VersionBoundaryParts {
     pub(super) fn to_value(&self) -> Value {
-        serde_json::json!({
-            "logical_name_id": self.logical_name_id.clone(),
-            "resource_id": self.resource_id.to_string(),
-            "normalized_event_id": self.normalized_event_id,
-            "event_kind": self.event_kind.clone(),
-            "chain_position": self.chain_position.to_value(),
-        })
+        match self {
+            Self::Projected(boundary) => serde_json::json!({
+                "logical_name_id": boundary.logical_name_id.clone(),
+                "resource_id": boundary.resource_id.to_string(),
+                "normalized_event_id": boundary.normalized_event_id,
+                "event_kind": boundary.event_kind.clone(),
+                "chain_position": boundary.chain_position.to_value(),
+            }),
+            Self::SelectedCheckpoint { chain_position } => serde_json::json!({
+                "boundary_kind": SELECTED_CHECKPOINT_BOUNDARY_KIND,
+                "chain_position": chain_position.to_value(),
+            }),
+        }
+    }
+
+    pub(super) fn chain_position(&self) -> &ChainPositionParts {
+        match self {
+            Self::Projected(boundary) => &boundary.chain_position,
+            Self::SelectedCheckpoint { chain_position } => chain_position,
+        }
     }
 }
 

@@ -13,8 +13,8 @@ use crate::{
 };
 
 use super::{
-    Envelope, Meta, RawQueryParams, Source, Status, V2Error, V2Result, api_error_to_v2,
-    load_served_head_meta, shared_product_reason,
+    Envelope, RawQueryParams, Source, Status, V2Error, V2Result, api_error_to_v2,
+    load_served_head_meta, shared_product_reason, snapshot_meta,
     v2_exact_name_snapshot_scope_with_resolution_auxiliary,
 };
 
@@ -142,8 +142,8 @@ pub(crate) async fn get_primary_name(
     let address = crate::parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
     let mode = params.source.resolution_mode();
     let coin_type = primary_name_coin_type_number(&params.coin_type)?;
-    let mut lookup_state = crate::load_primary_name_lookup_state(
-        &state.pool,
+    let read = crate::load_primary_name_route_read(
+        &state,
         &address,
         &params.namespace,
         &params.coin_type,
@@ -152,50 +152,10 @@ pub(crate) async fn get_primary_name(
     .await
     .map_err(api_error_to_v2)?;
 
-    if (mode.includes_declared() || mode.includes_verified())
-        && matches!(
-            lookup_state.tuple_state,
-            PrimaryNameTupleState::TupleMissing
-        )
-    {
-        lookup_state.on_demand_claim = crate::load_on_demand_primary_name_claim(
-            &state,
-            &address,
-            &params.namespace,
-            &params.coin_type,
-        )
-        .await
-        .map_err(api_error_to_v2)?;
-    }
-    if mode.includes_verified()
-        && matches!(
-            lookup_state.tuple_state,
-            PrimaryNameTupleState::TupleMissing
-        )
-        && let OnDemandPrimaryNameClaimState::Found(claim) = &lookup_state.on_demand_claim
-    {
-        lookup_state.on_demand_verified = crate::load_on_demand_primary_name_verification(
-            &state,
-            &address,
-            &params.namespace,
-            &params.coin_type,
-            claim,
-        )
-        .await
-        .map_err(api_error_to_v2)?;
-    }
+    let lookup_state = read.lookup_state;
 
-    let mut meta = if matches!(
-        lookup_state.on_demand_claim,
-        OnDemandPrimaryNameClaimState::NotFound
-            | OnDemandPrimaryNameClaimState::InvalidName(_)
-            | OnDemandPrimaryNameClaimState::Found(_)
-    ) || matches!(
-        lookup_state.on_demand_verified,
-        OnDemandPrimaryNameVerificationState::ClaimNotNormalized
-            | OnDemandPrimaryNameVerificationState::Verified(_)
-    ) {
-        Meta::default()
+    let mut meta = if let Some(selected_snapshot) = read.selected_snapshot.as_ref() {
+        snapshot_meta(selected_snapshot)?
     } else {
         let snapshot_scope = v2_exact_name_snapshot_scope_with_resolution_auxiliary(
             &state,
@@ -281,6 +241,10 @@ fn build_indexed_answer(lookup_state: &PrimaryNameLookupState) -> PrimaryNameAns
             OnDemandPrimaryNameClaimState::InvalidName(invalid_claim) => {
                 PrimaryNameAnswer::invalid(Source::Indexed, &invalid_claim.raw_name)
             }
+            OnDemandPrimaryNameClaimState::Unavailable => PrimaryNameAnswer {
+                failure_reason: Some("resolver_call_failed".to_owned()),
+                ..PrimaryNameAnswer::new(Source::Indexed, Status::Stale)
+            },
             _ => PrimaryNameAnswer::new(Source::Indexed, Status::NotFound),
         },
         PrimaryNameTupleState::TuplePresent(row) => {
@@ -315,6 +279,18 @@ fn build_verified_answer(
                 &crate::primary_name_claim_not_normalized_result(),
                 lookup_state,
             )?,
+            outcome_exists: true,
+        });
+    }
+    if matches!(
+        &lookup_state.on_demand_claim,
+        OnDemandPrimaryNameClaimState::Unavailable
+    ) {
+        return Ok(VerifiedAnswer {
+            answer: PrimaryNameAnswer {
+                failure_reason: Some("resolver_call_failed".to_owned()),
+                ..PrimaryNameAnswer::new(Source::Verified, Status::Stale)
+            },
             outcome_exists: true,
         });
     }
@@ -391,11 +367,14 @@ fn verified_answer_from_value(
             .unwrap_or("execution_failed"),
     );
     if status == Status::InvalidName
-        && failure_reason.as_deref()
-            == Some(bigname_execution::VERIFIED_PRIMARY_NAME_CLAIM_NOT_NORMALIZED_REASON)
+        && matches!(
+            failure_reason.as_deref(),
+            Some(bigname_execution::VERIFIED_PRIMARY_NAME_CLAIM_NOT_NORMALIZED_REASON)
+                | Some("claim_name_not_normalizable")
+        )
     {
         // v2 permits reasoned not_found results but does not attach failure_reason to
-        // invalid_name. The indexed answer still carries the normalized claimed candidate.
+        // invalid_name. The indexed answer carries the claim candidate or raw claim.
         status = Status::NotFound;
     }
     let mut answer = PrimaryNameAnswer::new(Source::Verified, status);

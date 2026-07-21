@@ -7,6 +7,15 @@ use tokio::{
     task::JoinHandle,
 };
 
+const TEST_BLOCK_HASH: &str = "0x1234000000000000000000000000000000000000000000000000000000000000";
+
+fn test_block_selector() -> Value {
+    json!({
+        "blockHash": TEST_BLOCK_HASH,
+        "requireCanonical": true,
+    })
+}
+
 enum MockRpcResponse {
     Result(Value),
     Error {
@@ -240,6 +249,7 @@ async fn lookup_ens_reverse_primary_name_executes_configured_rpc_calls() -> Resu
     let result = lookup_ens_reverse_primary_name(OnDemandEnsPrimaryNameRequest {
         normalized_address: "0x8e8db5ccef88cca9d624701db544989c996e3216",
         chain_rpc_urls: &chain_rpc_urls,
+        block_hash: TEST_BLOCK_HASH,
     })
     .await
     .expect("mock RPC lookup must succeed")
@@ -272,14 +282,14 @@ async fn lookup_ens_reverse_primary_name_executes_configured_rpc_calls() -> Resu
     assert_eq!(requests[0]["method"], "eth_call");
     assert_eq!(requests[0]["params"][0]["to"], ENS_REGISTRY_ADDRESS);
     assert_eq!(requests[0]["params"][0]["data"], expected_resolver_call);
-    assert_eq!(requests[0]["params"][1], "latest");
+    assert_eq!(requests[0]["params"][1], test_block_selector());
     assert_eq!(requests[1]["method"], "eth_call");
     assert_eq!(
         requests[1]["params"][0]["to"],
         "0xa2c122be93b0074270ebee7f6b7292c7deb45047"
     );
     assert_eq!(requests[1]["params"][0]["data"], expected_name_call);
-    assert_eq!(requests[1]["params"][1], "latest");
+    assert_eq!(requests[1]["params"][1], test_block_selector());
 
     Ok(())
 }
@@ -294,6 +304,7 @@ async fn lookup_ens_reverse_primary_name_returns_none_for_zero_resolver() -> Res
     let result = lookup_ens_reverse_primary_name(OnDemandEnsPrimaryNameRequest {
         normalized_address: "0x8e8db5ccef88cca9d624701db544989c996e3216",
         chain_rpc_urls: &chain_rpc_urls,
+        block_hash: TEST_BLOCK_HASH,
     })
     .await
     .expect("mock RPC lookup must not error");
@@ -312,6 +323,7 @@ async fn lookup_ens_reverse_primary_name_rejects_malformed_rpc_return() -> Resul
     let error = lookup_ens_reverse_primary_name(OnDemandEnsPrimaryNameRequest {
         normalized_address: "0x8e8db5ccef88cca9d624701db544989c996e3216",
         chain_rpc_urls: &chain_rpc_urls,
+        block_hash: TEST_BLOCK_HASH,
     })
     .await
     .expect_err("malformed RPC return must fail");
@@ -341,16 +353,16 @@ async fn verify_ens_primary_name_forward_address_executes_universal_resolver_cal
             normalized_address: "0x8e8db5ccef88cca9d624701db544989c996e3216",
             normalized_name: "taytems.eth",
             chain_rpc_urls: &chain_rpc_urls,
+            block_hash: TEST_BLOCK_HASH,
         })
         .await
         .expect("mock RPC verification must succeed");
 
     assert_eq!(
-        result,
-        OnDemandEnsPrimaryNameVerification {
-            resolved_address: Some("0x8e8db5ccef88cca9d624701db544989c996e3216".to_owned()),
-        }
+        result.resolved_address,
+        Some("0x8e8db5ccef88cca9d624701db544989c996e3216".to_owned())
     );
+    assert_eq!(result.evidence.contracts_called.len(), 1);
 
     let node = namehash("taytems.eth")?;
     let selector = SupportedVerifiedResolutionRecordKey::Addr {
@@ -370,7 +382,7 @@ async fn verify_ens_primary_name_forward_address_executes_universal_resolver_cal
         requests[0]["params"][0]["data"],
         universal_call.calldata_hex()
     );
-    assert_eq!(requests[0]["params"][1], "latest");
+    assert_eq!(requests[0]["params"][1], test_block_selector());
     Ok(())
 }
 
@@ -393,7 +405,7 @@ async fn lookup_ens_forward_address_at_block_uses_hash_pinned_eth_call() -> Resu
         normalized_name: "taytems.eth",
         chain_rpc_urls: &chain_rpc_urls,
         block_number: 123,
-        block_hash: "0x1234000000000000000000000000000000000000000000000000000000000000",
+        block_hash: TEST_BLOCK_HASH,
         follow_ccip_read: false,
     })
     .await
@@ -410,7 +422,7 @@ async fn lookup_ens_forward_address_at_block_uses_hash_pinned_eth_call() -> Resu
     assert_eq!(
         requests[0]["params"][1],
         json!({
-            "blockHash": "0x1234000000000000000000000000000000000000000000000000000000000000",
+            "blockHash": TEST_BLOCK_HASH,
             "requireCanonical": true,
         })
     );
@@ -432,7 +444,7 @@ async fn lookup_ens_forward_address_at_block_can_decline_ccip_read() -> Result<(
         normalized_name: "taytems.eth",
         chain_rpc_urls: &chain_rpc_urls,
         block_number: 123,
-        block_hash: "0x1234000000000000000000000000000000000000000000000000000000000000",
+        block_hash: TEST_BLOCK_HASH,
         follow_ccip_read: false,
     })
     .await
@@ -469,7 +481,7 @@ async fn lookup_ens_forward_address_at_block_can_decline_ccip_read() -> Result<(
         normalized_name: "taytems.eth",
         chain_rpc_urls: &chain_rpc_urls,
         block_number: 123,
-        block_hash: "0x1234000000000000000000000000000000000000000000000000000000000000",
+        block_hash: TEST_BLOCK_HASH,
         follow_ccip_read: true,
     })
     .await
@@ -482,6 +494,57 @@ async fn lookup_ens_forward_address_at_block_can_decline_ccip_read() -> Result<(
     let requests = join_requests(handle).await?;
     assert_eq!(requests.len(), 2);
     Ok(())
+}
+
+#[tokio::test]
+async fn verified_primary_name_exposes_ccip_trace_evidence() -> Result<()> {
+    let resolver_address = "0xa2c122be93b0074270ebee7f6b7292c7deb45047"
+        .parse::<Address>()
+        .context("resolver address must parse")?;
+    let requested_address = "0x8e8db5ccef88cca9d624701db544989c996e3216"
+        .parse::<Address>()
+        .context("requested address must parse")?;
+    let universal_return =
+        encode_universal_resolver_return(requested_address.abi_encode(), resolver_address);
+    let (rpc_url, handle) = spawn_mock_rpc_responses(vec![
+        MockRpcResponse::Error {
+            code: 3,
+            message: "execution reverted".to_owned(),
+            data: json!(encoded_local_batch_offchain_lookup_error()),
+        },
+        MockRpcResponse::Result(Value::String(hex_string(&universal_return))),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        ChainRpcUrls::from_entries(&[format!("{ETHEREUM_MAINNET_CHAIN_ID}={rpc_url}")])?;
+
+    let result =
+        verify_ens_primary_name_forward_address(OnDemandEnsPrimaryNameVerificationRequest {
+            normalized_address: "0x8e8db5ccef88cca9d624701db544989c996e3216",
+            normalized_name: "taytems.eth",
+            chain_rpc_urls: &chain_rpc_urls,
+            block_hash: TEST_BLOCK_HASH,
+        })
+        .await
+        .expect("CCIP-following primary-name verification must succeed");
+
+    assert_eq!(result.evidence.ccip_step_payloads.len(), 1);
+    assert_eq!(result.evidence.contracts_called.len(), 1);
+    assert_eq!(join_requests(handle).await?.len(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn primary_name_configuration_failure_records_no_contract_call() {
+    let error = lookup_ens_reverse_primary_name(OnDemandEnsPrimaryNameRequest {
+        normalized_address: "0x8e8db5ccef88cca9d624701db544989c996e3216",
+        chain_rpc_urls: &ChainRpcUrls::default(),
+        block_hash: TEST_BLOCK_HASH,
+    })
+    .await
+    .expect_err("missing provider configuration must fail");
+
+    assert!(error.evidence().contracts_called.is_empty());
 }
 
 #[tokio::test]
@@ -499,7 +562,7 @@ async fn lookup_ens_forward_address_at_block_classifies_plain_revert() -> Result
         normalized_name: "missing-forward.eth",
         chain_rpc_urls: &chain_rpc_urls,
         block_number: 123,
-        block_hash: "0x1234000000000000000000000000000000000000000000000000000000000000",
+        block_hash: TEST_BLOCK_HASH,
         follow_ccip_read: false,
     })
     .await
@@ -533,16 +596,13 @@ async fn verify_ens_primary_name_forward_address_returns_none_for_zero_addr() ->
             normalized_address: "0x8e8db5ccef88cca9d624701db544989c996e3216",
             normalized_name: "taytems.eth",
             chain_rpc_urls: &chain_rpc_urls,
+            block_hash: TEST_BLOCK_HASH,
         })
         .await
         .expect("mock RPC verification must succeed");
 
-    assert_eq!(
-        result,
-        OnDemandEnsPrimaryNameVerification {
-            resolved_address: None,
-        }
-    );
+    assert_eq!(result.resolved_address, None);
+    assert_eq!(result.evidence.contracts_called.len(), 1);
     assert_eq!(join_requests(handle).await?.len(), 1);
     Ok(())
 }

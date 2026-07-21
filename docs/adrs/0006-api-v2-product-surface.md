@@ -268,9 +268,8 @@ Rules:
 - `meta` is always present: `as_of` and `as_of_token` on single-resource routes
   that read snapshot-pinned chain-derived state. Top-level latest-state
   collections omit both. Control-plane routes (`/v2/status`,
-  `/v2/namespaces/{namespace}`), verified name-profile responses served by the
-  route-local on-demand fallback, and primary-name responses served by the
-  route-local on-demand fallback omit both. `completeness`,
+  `/v2/namespaces/{namespace}`) and verified name-profile responses served by
+  the route-local on-demand fallback omit both. `completeness`,
   `unsupported_fields`, and `unsupported_reason` only when the read is not clean;
   `source` when the route supports
   `?source=`. There is no `meta` query parameter — no `meta=full` (deeper
@@ -410,12 +409,13 @@ Rules:
 - `GET /v2/addresses/{address}/primary-name` is also a current-state read. It
   does not accept `at` or `finality`; its `meta.as_of`/`meta.as_of_token`
   record the served positions for staleness attribution and shadow-diff
-  correlation when the answer comes from persisted snapshot state. When the
-  ENS/60 route-local on-demand fallback supplies the answer, the response omits
-  `meta.as_of` and `meta.as_of_token`. Basenames responses that serve a
-  persisted verified answer include both the Base authority position and the
-  Ethereum resolution-auxiliary position; indexed-only responses and missing
-  persisted verified outcomes remain Base-scoped.
+  correlation. The ENS/60 route-local fallback selects the stored Ethereum
+  checkpoint represented by those fields, pins its reverse and optional
+  forward calls to that block hash, and persists verified-mode outcomes before
+  responding. Basenames responses that serve a persisted verified answer
+  include both the Base authority position and the Ethereum
+  resolution-auxiliary position; indexed-only responses and missing persisted
+  verified outcomes remain Base-scoped.
 
 ### Error model and statuses
 

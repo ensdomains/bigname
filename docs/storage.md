@@ -1220,6 +1220,29 @@ dependency boundaries. The API on-demand route exception and the
 reorg-invalidation exception above are the only non-execution-worker write paths
 for these execution-owned rows.
 
+Verified-primary materialized outcomes remain fenced by the exact
+`primary_names_current(address, coin_type, namespace)` claim row and its
+normalization/content state. The ENS/60 route-local producer is the bounded
+missing-row case: it may persist only while that exact row is absent, records
+the stored selected checkpoint in its cache identity, and is reusable only while
+the row remains absent and the route selects the same checkpoint. A route-local
+trace is never admitted through the materialized-row fence, and a materialized
+trace is never admitted through the missing-row fence.
+
+Because the missing tuple owns no projected name surface or backing resource,
+its `topology_version_boundary` and `record_version_boundary` JSON fields both
+use `{boundary_kind: "selected_checkpoint", chain_position}`. That internal
+execution-cache variant records the exact stored block number, hash, and
+timestamp without inventing a `logical_name_id`, `resource_id`, or normalized
+event. Materialized outcomes continue to use the ordinary projected
+`VersionBoundary` shape.
+
+Because PostgreSQL cannot row-lock an absent tuple, route-local persistence and
+readback hold a short `SHARE` lock on `primary_names_current` while they check
+absence and write or read the execution rows in the same transaction. Projection
+inserts and updates wait at that boundary, so a response cannot combine a
+missing-row decision with a trace read from the other side of a projection write.
+
 Exact block-anchored `raw_call_snapshots` used by verified resolution stay in
 the intake-owned `raw_*` family. Execution persistence, including the API
 on-demand route exception, may hand off candidate snapshots only through the

@@ -15,17 +15,30 @@ pub(crate) mod test_hooks {
     use uuid::Uuid;
 
     type VerifiedPrimaryPreTransactionHook = Arc<dyn Fn(Uuid) + Send + Sync + 'static>;
+    type VerifiedPrimaryPostAnchorCheckHook = Arc<dyn Fn(Uuid) + Send + Sync + 'static>;
 
     static VERIFIED_PRIMARY_PRE_TRANSACTION_HOOK: Mutex<Option<VerifiedPrimaryPreTransactionHook>> =
         Mutex::new(None);
+    static VERIFIED_PRIMARY_POST_ANCHOR_CHECK_HOOK: Mutex<
+        Option<VerifiedPrimaryPostAnchorCheckHook>,
+    > = Mutex::new(None);
 
     pub(crate) struct VerifiedPrimaryPreTransactionHookGuard;
+    pub(crate) struct VerifiedPrimaryPostAnchorCheckHookGuard;
 
     impl Drop for VerifiedPrimaryPreTransactionHookGuard {
         fn drop(&mut self) {
             *VERIFIED_PRIMARY_PRE_TRANSACTION_HOOK
                 .lock()
                 .expect("verified-primary pre-transaction hook mutex poisoned") = None;
+        }
+    }
+
+    impl Drop for VerifiedPrimaryPostAnchorCheckHookGuard {
+        fn drop(&mut self) {
+            *VERIFIED_PRIMARY_POST_ANCHOR_CHECK_HOOK
+                .lock()
+                .expect("verified-primary post-anchor-check hook mutex poisoned") = None;
         }
     }
 
@@ -47,9 +60,29 @@ pub(crate) mod test_hooks {
             hook(execution_trace_id);
         }
     }
+
+    pub(crate) fn install_verified_primary_post_anchor_check_hook(
+        hook: VerifiedPrimaryPostAnchorCheckHook,
+    ) -> VerifiedPrimaryPostAnchorCheckHookGuard {
+        *VERIFIED_PRIMARY_POST_ANCHOR_CHECK_HOOK
+            .lock()
+            .expect("verified-primary post-anchor-check hook mutex poisoned") = Some(hook);
+        VerifiedPrimaryPostAnchorCheckHookGuard
+    }
+
+    pub(super) fn run_verified_primary_post_anchor_check_hook(execution_trace_id: Uuid) {
+        let hook = VERIFIED_PRIMARY_POST_ANCHOR_CHECK_HOOK
+            .lock()
+            .expect("verified-primary post-anchor-check hook mutex poisoned")
+            .clone();
+        if let Some(hook) = hook {
+            hook(execution_trace_id);
+        }
+    }
 }
 
 use crate::primary_name::{
+    ensure_primary_name_anchor_absent, ensure_primary_name_anchor_absent_in_transaction,
     ensure_primary_name_anchor_content_matches, ensure_primary_name_anchor_matches,
     ensure_primary_name_anchor_matches_in_transaction,
     extract_verified_primary_readback_provenance, validate_verified_primary_request,
@@ -238,8 +271,17 @@ pub async fn persist_ens_verified_primary_name(
 ) -> Result<PersistedVerifiedPrimaryNameIdentity> {
     let validated = validate_verified_primary_request(request)?;
     let context = verified_primary_context_label(&validated.tuple.namespace)?;
-    ensure_primary_name_anchor_matches(pool, &validated.tuple, &validated.verified_primary_name)
+    let route_local_execution = crate::route_local_ens_primary_name_execution(&request.trace)?;
+    if route_local_execution.is_some() {
+        ensure_primary_name_anchor_absent(pool, &validated.tuple).await?;
+    } else {
+        ensure_primary_name_anchor_matches(
+            pool,
+            &validated.tuple,
+            &validated.verified_primary_name,
+        )
         .await?;
+    }
     #[cfg(test)]
     test_hooks::run_verified_primary_pre_transaction_hook(request.trace.execution_trace_id);
 
@@ -248,12 +290,19 @@ pub async fn persist_ens_verified_primary_name(
         .await
         .with_context(|| format!("failed to open transaction for {context} persistence"))?;
 
-    ensure_primary_name_anchor_matches_in_transaction(
-        &mut transaction,
-        &validated.tuple,
-        &validated.verified_primary_name,
-    )
-    .await?;
+    if route_local_execution.is_some() {
+        ensure_primary_name_anchor_absent_in_transaction(&mut transaction, &validated.tuple)
+            .await?;
+    } else {
+        ensure_primary_name_anchor_matches_in_transaction(
+            &mut transaction,
+            &validated.tuple,
+            &validated.verified_primary_name,
+        )
+        .await?;
+    }
+    #[cfg(test)]
+    test_hooks::run_verified_primary_post_anchor_check_hook(request.trace.execution_trace_id);
 
     // Validation requires request_metadata.cache_identity to mirror the outcome cache key; the
     // trace write carries that full identity for API readback.

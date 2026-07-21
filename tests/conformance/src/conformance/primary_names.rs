@@ -479,9 +479,12 @@
         }
 
         #[tokio::test]
-        async fn primary_names_contract_returns_not_found_results_by_mode_for_tuple_miss()
+        async fn primary_names_contract_reports_tuple_miss_provider_failure_as_execution_failed()
         -> Result<()> {
             let database = HarnessDatabase::new().await?;
+            database
+                .seed_default_ens_primary_name_fallback_context()
+                .await?;
             let address = "0x0000000000000000000000000000000000000abc";
             let expected_data = json!({
                 "address": address,
@@ -539,27 +542,64 @@
                 declared_payload.declared_state,
                 Some(json!({
                     "claimed_primary_name": {
-                        "status": "not_found",
+                        "status": "execution_failed",
+                        "failure_reason": "resolver_call_failed",
                     }
                 }))
             );
             assert_eq!(declared_payload.verified_state, None);
 
             assert_eq!(verified_payload.declared_state, None);
-            assert_eq!(
-                verified_payload.verified_state,
-                Some(json!({
-                    "verified_primary_name": {
-                        "status": "not_found",
-                    }
-                }))
+            let verified_provenance = verified_payload.provenance.clone();
+            assert!(
+                verified_provenance
+                    .get("execution_trace_id")
+                    .and_then(Value::as_str)
+                    .is_some()
             );
+            assert_eq!(
+                verified_provenance.get("manifest_versions"),
+                Some(&json!([{
+                    "source_family": "ens_execution",
+                    "manifest_version": 1,
+                }]))
+            );
+            let expected_verified_state = Some(json!({
+                "verified_primary_name": {
+                    "status": "execution_failed",
+                    "failure_reason": "resolver_call_failed",
+                    "provenance": verified_provenance,
+                }
+            }));
+            assert_eq!(verified_payload.verified_state, expected_verified_state);
 
             assert_eq!(both_payload.declared_state, declared_payload.declared_state);
             assert_eq!(both_payload.verified_state, verified_payload.verified_state);
+            assert_eq!(both_payload.provenance, verified_payload.provenance);
+            assert_eq!(
+                declared_payload.provenance,
+                json!({ "source_family": "ens_reverse_rpc" })
+            );
 
+            let expected_positions = json!({
+                "ethereum": {
+                    "chain_id": "ethereum-mainnet",
+                    "block_number": 21_000_003,
+                    "block_hash": "0xbinding",
+                    "timestamp": "2026-04-17T00:00:03Z",
+                }
+            });
+            let expected_coverage = json!({
+                "status": "partial",
+                "exhaustiveness": "non_enumerable",
+                "source_classes_considered": ["ens_reverse_rpc"],
+                "enumeration_basis": "primary_name_lookup",
+                "unsupported_reason": null,
+            });
             for payload in [&declared_payload, &verified_payload, &both_payload] {
-                assert_primary_name_unsupported_bootstrap_invariants(payload);
+                assert_eq!(payload.chain_positions, expected_positions);
+                assert_eq!(payload.consistency, "head");
+                assert_eq!(payload.coverage, expected_coverage);
             }
 
             database.cleanup().await?;
@@ -1444,15 +1484,6 @@
             assert!(payload.last_updated.ends_with('Z'));
         }
 
-        fn assert_primary_name_unsupported_bootstrap_invariants(
-            payload: &PrimaryNameResponse,
-        ) {
-            assert_primary_name_bootstrap_invariants_with_coverage(
-                payload,
-                primary_name_unsupported_exact_tuple_coverage(),
-            );
-        }
-
         fn assert_primary_name_supported_bootstrap_invariants_for_namespace(
             payload: &PrimaryNameResponse,
             namespace: &str,
@@ -1765,6 +1796,9 @@
         #[tokio::test]
         async fn primary_names_contract_requires_namespace_and_coin_type() -> Result<()> {
             let database = HarnessDatabase::new().await?;
+            database
+                .seed_default_ens_primary_name_fallback_context()
+                .await?;
             let address = "0x0000000000000000000000000000000000000abc";
 
             let missing_namespace = app_router(database.app_state())

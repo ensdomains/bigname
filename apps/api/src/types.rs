@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use bigname_manifests::{ActiveManifestVersion, CapabilityFlag};
-use bigname_storage::PrimaryNameCurrentRow;
+use bigname_storage::{PrimaryNameCurrentRow, SelectedSnapshot};
 use serde::{Deserialize, Serialize};
 use sqlx::types::{JsonValue, time::OffsetDateTime};
 
@@ -344,6 +344,13 @@ pub(crate) struct PersistedPrimaryNameVerifiedReadback {
     pub(crate) verified_primary_name: JsonValue,
     pub(crate) provenance: JsonValue,
     pub(crate) finished_at: OffsetDateTime,
+    pub(crate) route_local_claim: Option<OnDemandPrimaryNameClaimState>,
+    pub(crate) forward_call_attempted: bool,
+}
+
+pub(crate) struct PrimaryNameRouteRead {
+    pub(crate) lookup_state: PrimaryNameLookupState,
+    pub(crate) selected_snapshot: Option<SelectedSnapshot>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

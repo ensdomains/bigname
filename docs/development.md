@@ -104,11 +104,15 @@ verified selectors fail closed instead of falling back to declared record cache:
 v1 returns `409 stale` with a configuration message, while v2 product routes use
 their documented in-band `status=stale`/`failure_reason` envelope. For
 `GET /v1/primary-names/{address}` defaulting to `namespace=ens&coin_type=60`,
-missing provider configuration or provider failure logs a warning and suppresses
-only the route-local fallback; successful fallback misses still return
-`claimed_primary_name.status=not_found` with ENS reverse-RPC partial coverage.
-When `mode=verified|both` and the reverse claim succeeds, the API also uses the
-same provider for live `addr:60` verification through the ENS Universal Resolver.
+the API pins the reverse lookup to the stored checkpoint used in response
+metadata. Missing provider configuration or reverse-provider failure returns
+`claimed_primary_name.status=execution_failed`; successful fallback misses still
+return `claimed_primary_name.status=not_found` with ENS reverse-RPC partial
+coverage. When `mode=verified|both` and the reverse claim passes the
+normalization gate, the API uses the same provider and block hash for `addr:60`
+verification through the ENS Universal Resolver. It persists the verified-mode
+trace and outcome before responding so an identical request at the same
+checkpoint can use durable readback.
 
 Deployments with a local Reth database can also set
 `BIGNAME_INDEXER_CHAIN_RETH_DB_SOURCES` to a comma-delimited list of

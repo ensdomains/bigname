@@ -29,8 +29,8 @@ use health::{
     health_projection_publication_versions_schema, health_response_schema,
 };
 use primary_name::{
-    primary_name_claimed_result_schema, primary_name_verified_result_provenance_schema,
-    primary_name_verified_result_schema,
+    primary_name_claimed_result_schema, primary_name_route_provenance_schema,
+    primary_name_verified_result_provenance_schema, primary_name_verified_result_schema,
 };
 
 pub(super) fn openapi_components() -> JsonValue {
@@ -216,6 +216,7 @@ pub(super) fn openapi_components() -> JsonValue {
             }),
             "PrimaryNameVerifiedResult": primary_name_verified_result_schema(),
             "PrimaryNameVerifiedResultProvenance": primary_name_verified_result_provenance_schema(),
+            "PrimaryNameRouteProvenance": primary_name_route_provenance_schema(),
             "ExactNameResponse": declared_response_schema(
                 schema_ref("ExactNameData"),
                 schema_ref("JsonObject"),

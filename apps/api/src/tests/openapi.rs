@@ -709,6 +709,10 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
             "default": "declared",
         }))
     );
+    assert_eq!(
+        openapi_response_description(primary_names, "409"),
+        "Snapshot conflict or stale projection"
+    );
 
     let exact_name = openapi_schema(&document, "ExactNameResponse");
     assert_eq!(
@@ -865,6 +869,35 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
         primary_name
             .get("properties")
             .and_then(Value::as_object)
+            .and_then(|properties| properties.get("provenance")),
+        Some(&json!({
+            "$ref": "#/components/schemas/PrimaryNameRouteProvenance",
+        }))
+    );
+    let primary_name_route_provenance =
+        openapi_schema(&document, "PrimaryNameRouteProvenance");
+    assert_eq!(
+        primary_name_route_provenance.get("oneOf"),
+        Some(&json!([
+            { "$ref": "#/components/schemas/NullValue" },
+            {
+                "type": "object",
+                "required": ["source_family"],
+                "properties": {
+                    "source_family": {
+                        "type": "string",
+                        "const": "ens_reverse_rpc",
+                    },
+                },
+                "additionalProperties": false,
+            },
+            { "$ref": "#/components/schemas/PrimaryNameVerifiedResultProvenance" },
+        ]))
+    );
+    assert_eq!(
+        primary_name
+            .get("properties")
+            .and_then(Value::as_object)
             .and_then(|properties| properties.get("declared_state")),
         Some(&json!({
             "anyOf": [
@@ -1001,6 +1034,23 @@ fn openapi_document_freezes_query_params_and_shared_envelopes() {
                     },
                     "provenance": {
                         "$ref": "#/components/schemas/JsonObject",
+                    },
+                },
+                "additionalProperties": false,
+            })
+    }));
+    assert!(primary_name_claimed_variants.iter().any(|variant| {
+        variant
+            == &json!({
+                "type": "object",
+                "required": ["status", "failure_reason"],
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "const": "execution_failed",
+                    },
+                    "failure_reason": {
+                        "type": "string",
                     },
                 },
                 "additionalProperties": false,

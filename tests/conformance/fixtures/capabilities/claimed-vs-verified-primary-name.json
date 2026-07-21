@@ -15,7 +15,8 @@
       "unsupported_reason": null
     },
     "data": {
-      "fixture_version": 2,
+      "fallback_execution": "selected_checkpoint_persisted",
+      "fixture_version": 3,
       "non_verified_reason": "claim_not_normalized",
       "stable_identity": "capability-golden:claimed-vs-verified-primary-name"
     },
@@ -26,12 +27,12 @@
   },
   "rollback_gate": [
     "scripts/rollback-smoke",
-    "stable partial exact-tuple coverage, explicit unsupported out-of-class behavior, and execution-derived verification rollback"
+    "stable partial exact-tuple coverage, pinned persisted ENS/60 fallback, explicit unsupported out-of-class behavior, and execution-derived verification rollback"
   ],
   "rollout_gate": [
     "OpenAPI route owner guard",
     "focused primary-name conformance",
-    "persisted execution readback checks",
+    "pinned fallback call, persisted execution readback, provider-failure class, and snapshot metadata checks",
     "scripts/release-smoke"
   ],
   "route_owner": [

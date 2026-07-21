@@ -370,7 +370,7 @@ The actual published routes are listed below. Per-route semantics are in [`api-v
 | `GET /v1/names/{namespace}/{name}/children` | Direct children, compact by default, full via `view=full`. |
 | `GET /v1/names/{namespace}/{name}/records` | Compact resolver records over declared inventory/cache and verified selectors; compact view only. |
 | `GET /v1/addresses/{address}/names` | Address-to-surface collection. |
-| `GET /v1/primary-names/{address}` | App primary-name lookup for an address; defaults to ENS coin type 60, with route-local on-demand reverse claim and forward verification when the persisted tuple is missing. |
+| `GET /v1/primary-names/{address}` | App primary-name lookup for an address; defaults to ENS coin type 60, with selected-checkpoint-pinned route-local reverse claim and persisted forward verification when the claim tuple is missing. |
 | `GET /v1/resources/{resource_id}/permissions` | Resource-centric effective permissions. |
 | `GET /v1/events` | Compact event search across name, address, resource, type, block filters; compact view only. |
 

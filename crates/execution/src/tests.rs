@@ -4700,6 +4700,62 @@ fn verified_primary_success_request() -> PersistEnsVerifiedPrimaryNameRequest {
     )
 }
 
+fn route_local_verified_primary_success_request() -> Result<PersistEnsVerifiedPrimaryNameRequest> {
+    let execution_evidence = OnDemandEnsPrimaryNameExecutionEvidence {
+        contracts_called: vec![
+            json!({
+                "chain_id": ETHEREUM_MAINNET_CHAIN_ID,
+                "contract_address": ENS_REGISTRY_ADDRESS,
+                "selector": "0x0178b8bf",
+            }),
+            json!({
+                "chain_id": ETHEREUM_MAINNET_CHAIN_ID,
+                "contract_address": "0x00000000000000000000000000000000000000bb",
+                "selector": "0x691f3431",
+            }),
+            json!({
+                "chain_id": ETHEREUM_MAINNET_CHAIN_ID,
+                "contract_address": ENS_UNIVERSAL_RESOLVER_ADDRESS,
+                "selector": "0x9061b923",
+            }),
+        ],
+        gateway_digests: vec!["sha256:route-primary-name-gateway".to_owned()],
+        ccip_step_payloads: vec![json!({
+            "sender": ENS_UNIVERSAL_RESOLVER_ADDRESS,
+            "gateway_count": 1,
+            "used_local_batch_gateway": false,
+            "response_bytes": 32,
+            "latency_ms": 8,
+        })],
+    };
+    build_on_demand_ens_verified_primary_name_request(BuildOnDemandEnsVerifiedPrimaryNameRequest {
+        normalized_address: "0x00000000000000000000000000000000000000af",
+        claim: &RouteLocalEnsPrimaryNameClaim::Found {
+            raw_name: "alice.eth".to_owned(),
+            normalized_name: "alice.eth".to_owned(),
+            resolver_address: "0x00000000000000000000000000000000000000bb".to_owned(),
+        },
+        verified_primary_name: json!({
+            "status": "success",
+            "name": {
+                "logical_name_id": "ens:alice.eth",
+                "namespace": "ens",
+                "normalized_name": "alice.eth",
+                "canonical_display_name": "alice.eth",
+                "namehash": ens_namehash_hex("alice.eth")?,
+            }
+        }),
+        block_number: 21_000_000,
+        block_hash: "0xabc123",
+        block_timestamp: "2024-06-01T00:00:17Z",
+        manifest_versions: manifest_versions(),
+        forward_call_attempted: true,
+        reverse_latency_ms: 2,
+        forward_latency_ms: Some(14),
+        execution_evidence: &execution_evidence,
+    })
+}
+
 fn verified_primary_mismatch_request() -> PersistEnsVerifiedPrimaryNameRequest {
     verified_primary_request(
         Uuid::from_u128(0x0e7ec7ace00000000000000000000022),
@@ -5346,6 +5402,220 @@ async fn rejects_verified_primary_without_primary_name_anchor() -> Result<()> {
 }
 
 #[tokio::test]
+async fn persists_route_local_verified_primary_without_projection_anchor() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let request = route_local_verified_primary_success_request()?;
+
+    let persisted = persist_ens_verified_primary_name(database.pool(), &request).await?;
+    assert_eq!(
+        persisted.execution_trace_id,
+        request.trace.execution_trace_id
+    );
+    let trace = load_execution_trace(database.pool(), persisted.execution_trace_id)
+        .await?
+        .expect("route-local verified-primary trace must be durable");
+    let outcome = load_execution_outcome(database.pool(), &persisted.cache_key)
+        .await?
+        .expect("route-local verified-primary outcome must be durable");
+    assert_eq!(trace, request.trace);
+    assert_eq!(outcome, request.outcome);
+    let expected_boundary = json!({
+        "boundary_kind": "selected_checkpoint",
+        "chain_position": {
+            "chain_id": ETHEREUM_MAINNET_CHAIN_ID,
+            "block_number": 21_000_000,
+            "block_hash": "0xabc123",
+            "timestamp": "2024-06-01T00:00:17Z",
+        }
+    });
+    assert_eq!(
+        outcome.cache_key.topology_version_boundary,
+        expected_boundary
+    );
+    assert_eq!(outcome.cache_key.record_version_boundary, expected_boundary);
+    assert!(
+        outcome
+            .cache_key
+            .topology_version_boundary
+            .get("logical_name_id")
+            .is_none()
+    );
+    assert!(
+        outcome
+            .cache_key
+            .topology_version_boundary
+            .get("resource_id")
+            .is_none()
+    );
+    assert_eq!(
+        trace.gateway_digests,
+        json!(["sha256:route-primary-name-gateway"])
+    );
+    assert_eq!(
+        trace.steps.last().map(|step| step.step_kind.as_str()),
+        Some("ccip_offchain_lookup")
+    );
+    assert_eq!(
+        route_local_ens_primary_name_execution(&trace)?,
+        Some(RouteLocalEnsPrimaryNameExecution {
+            claim: RouteLocalEnsPrimaryNameClaim::Found {
+                raw_name: "alice.eth".to_owned(),
+                normalized_name: "alice.eth".to_owned(),
+                resolver_address: "0x00000000000000000000000000000000000000bb".to_owned(),
+            },
+            forward_call_attempted: true,
+        })
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn rejects_route_local_verified_primary_when_projection_anchor_exists() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let request = route_local_verified_primary_success_request()?;
+    insert_primary_name_anchor(
+        &database,
+        "0x00000000000000000000000000000000000000af",
+        "60",
+        PrimaryNameClaimStatus::Success,
+    )
+    .await?;
+
+    let error = persist_ens_verified_primary_name(database.pool(), &request)
+        .await
+        .expect_err("route-local persistence must not cross a materialized claim fence");
+    assert!(
+        error
+            .to_string()
+            .contains("requires no primary_names_current anchor"),
+        "unexpected error: {error:#}"
+    );
+    assert!(
+        load_execution_trace(database.pool(), request.trace.execution_trace_id)
+            .await?
+            .is_none(),
+        "rejected route-local request must not persist a trace"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serializes_route_local_missing_anchor_fence_with_projection_insert() -> Result<()> {
+    struct HookState {
+        reached: bool,
+        release: bool,
+    }
+
+    let database = TestDatabase::new().await?;
+    let request = route_local_verified_primary_success_request()?;
+    let hook_state = Arc::new((
+        Mutex::new(HookState {
+            reached: false,
+            release: false,
+        }),
+        Condvar::new(),
+    ));
+    let hook_trace_id = request.trace.execution_trace_id;
+    let hook_state_for_hook = Arc::clone(&hook_state);
+    let _hook_guard =
+        super::persistence::test_hooks::install_verified_primary_post_anchor_check_hook(Arc::new(
+            move |execution_trace_id| {
+                if execution_trace_id != hook_trace_id {
+                    return;
+                }
+                let (lock, condvar) = &*hook_state_for_hook;
+                let mut state = lock
+                    .lock()
+                    .expect("route-local anchor hook state mutex poisoned");
+                state.reached = true;
+                condvar.notify_all();
+                while !state.release {
+                    state = condvar
+                        .wait(state)
+                        .expect("route-local anchor hook state mutex poisoned while waiting");
+                }
+            },
+        ));
+
+    let persist_pool = database.pool().clone();
+    let request_for_task = request.clone();
+    let persist_task = tokio::spawn(async move {
+        persist_ens_verified_primary_name(&persist_pool, &request_for_task).await
+    });
+
+    let hook_state_for_wait = Arc::clone(&hook_state);
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let (lock, condvar) = &*hook_state_for_wait;
+        let mut state = lock
+            .lock()
+            .expect("route-local anchor hook state mutex poisoned");
+        while !state.reached {
+            state = condvar
+                .wait(state)
+                .expect("route-local anchor hook state mutex poisoned while waiting");
+        }
+        Ok(())
+    })
+    .await
+    .context("route-local anchor hook wait task panicked")??;
+
+    let insert_pool = database.pool().clone();
+    let mut insert_task = tokio::spawn(async move {
+        upsert_primary_name_current_snapshots(
+            &insert_pool,
+            &[PrimaryNameCurrentSnapshot {
+                row: primary_name_anchor_row_for_namespace(
+                    ENS_NAMESPACE,
+                    "0x00000000000000000000000000000000000000af",
+                    "60",
+                    PrimaryNameClaimStatus::Success,
+                ),
+                normalized_claim_name: Some("alice.eth".to_owned()),
+                claim_name_is_normalized: true,
+            }],
+        )
+        .await
+    });
+    let early_insert = timeout(Duration::from_millis(250), &mut insert_task).await;
+    let insert_was_blocked = early_insert.is_err();
+
+    {
+        let (lock, condvar) = &*hook_state;
+        let mut state = lock
+            .lock()
+            .expect("route-local anchor hook state mutex poisoned");
+        state.release = true;
+        condvar.notify_all();
+    }
+
+    let persist_result = persist_task
+        .await
+        .context("route-local persistence task panicked")?;
+    persist_result?;
+    match early_insert {
+        Ok(insert_result) => insert_result.context("projection insert task panicked")??,
+        Err(_) => insert_task
+            .await
+            .context("blocked projection insert task panicked")??,
+    };
+
+    assert!(
+        insert_was_blocked,
+        "projection insert must wait while route-local persistence holds its missing-anchor fence"
+    );
+    assert!(
+        load_execution_trace(database.pool(), request.trace.execution_trace_id)
+            .await?
+            .is_some(),
+        "serialized route-local persistence must retain its durable trace"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn verified_primary_readback_returns_none_when_anchor_is_missing() -> Result<()> {
     let database = TestDatabase::new().await?;
     let request = verified_primary_success_request();
@@ -5418,7 +5688,7 @@ async fn rejects_verified_primary_stale_success_after_claim_name_changes() -> Re
     database.cleanup().await
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rejects_verified_primary_when_claim_changes_after_fast_path_before_transaction()
 -> Result<()> {
     struct HookState {
@@ -5475,17 +5745,11 @@ async fn rejects_verified_primary_when_claim_changes_after_fast_path_before_tran
     );
 
     let pool = database.pool().clone();
-    let request_for_thread = request.clone();
-    let persist_thread = std::thread::spawn(move || -> Result<_> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("failed to build verified-primary persistence test runtime")?;
-        runtime.block_on(persist_ens_verified_primary_name(
-            &pool,
-            &request_for_thread,
-        ))
-    });
+    let request_for_task = request.clone();
+    let persist_task =
+        tokio::spawn(
+            async move { persist_ens_verified_primary_name(&pool, &request_for_task).await },
+        );
 
     let hook_state_for_wait = Arc::clone(&hook_state);
     tokio::task::spawn_blocking(move || -> Result<()> {
@@ -5527,13 +5791,9 @@ async fn rejects_verified_primary_when_claim_changes_after_fast_path_before_tran
         condvar.notify_all();
     }
 
-    let persist_result = tokio::task::spawn_blocking(move || {
-        persist_thread
-            .join()
-            .map_err(|_| anyhow::anyhow!("verified-primary persistence test thread panicked"))
-    })
-    .await
-    .context("verified-primary persistence join task panicked")??;
+    let persist_result = persist_task
+        .await
+        .context("verified-primary persistence task panicked")?;
     let error = persist_result
         .expect_err("stale verified-primary producer must fail after interleaved claim change");
     assert!(

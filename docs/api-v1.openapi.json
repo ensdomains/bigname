@@ -1612,6 +1612,23 @@
               "provenance"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "failure_reason": {
+                "type": "string"
+              },
+              "status": {
+                "const": "execution_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "failure_reason"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -1679,7 +1696,7 @@
             "type": "string"
           },
           "provenance": {
-            "$ref": "#/components/schemas/Provenance"
+            "$ref": "#/components/schemas/PrimaryNameRouteProvenance"
           },
           "verified_state": {
             "anyOf": [
@@ -1702,6 +1719,29 @@
           "last_updated"
         ],
         "type": "object"
+      },
+      "PrimaryNameRouteProvenance": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/NullValue"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "source_family": {
+                "const": "ens_reverse_rpc",
+                "type": "string"
+              }
+            },
+            "required": [
+              "source_family"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/PrimaryNameVerifiedResultProvenance"
+          }
+        ]
       },
       "PrimaryNameVerifiedResult": {
         "additionalProperties": true,
@@ -4392,6 +4432,16 @@
               }
             },
             "description": "Requested resource was not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Snapshot conflict or stale projection"
           },
           "500": {
             "content": {

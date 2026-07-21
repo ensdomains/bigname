@@ -35,6 +35,8 @@ fn builder_returns_indexed_then_verified_answers_for_both_sources() {
             }),
             provenance: json!({}),
             finished_at: sqlx::types::time::OffsetDateTime::UNIX_EPOCH,
+            route_local_claim: None,
+            forward_call_attempted: false,
         }),
     };
 
@@ -119,6 +121,8 @@ fn builder_maps_non_normalized_claims_to_reasoned_not_found() {
         }),
         provenance: json!({}),
         finished_at: sqlx::types::time::OffsetDateTime::UNIX_EPOCH,
+        route_local_claim: None,
+        forward_call_attempted: false,
     };
     let lookup_states = [
         (

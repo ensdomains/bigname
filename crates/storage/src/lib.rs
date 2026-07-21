@@ -128,7 +128,7 @@ pub use evm_primitives::{ens_namehash_label_bytes, normalize_evm_address, normal
 pub use execution::{
     ExecutionBoundaryInvalidation, ExecutionCacheKey, ExecutionManifestInvalidation,
     ExecutionOutcome, ExecutionOutcomeInvalidationSummary, ExecutionTrace,
-    ExecutionTraceInspection, ExecutionTraceStep,
+    ExecutionTraceInspection, ExecutionTraceStep, SELECTED_CHECKPOINT_BOUNDARY_KIND,
     invalidate_execution_outcomes_for_manifest_version,
     invalidate_execution_outcomes_for_manifest_version_and_request_key,
     invalidate_execution_outcomes_for_orphaned_blocks,
@@ -136,7 +136,7 @@ pub use execution::{
     invalidate_execution_outcomes_for_record_boundary_and_request_key,
     invalidate_execution_outcomes_for_topology_boundary,
     invalidate_execution_outcomes_for_topology_boundary_and_request_key, load_execution_outcome,
-    load_execution_trace, load_execution_trace_inspection,
+    load_execution_trace, load_execution_trace_from_connection, load_execution_trace_inspection,
     load_resolution_execution_outcome_at_snapshot, upsert_execution_outcome,
     upsert_execution_outcome_in_transaction, upsert_execution_trace,
     upsert_execution_trace_in_transaction,

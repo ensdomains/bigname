@@ -321,6 +321,7 @@ fn build_primary_name_response(
     coin_type: String,
     mode: ResolutionMode,
     lookup_state: &PrimaryNameLookupState,
+    selected_snapshot: Option<&SelectedSnapshot>,
 ) -> PrimaryNameResponse {
     let coin_type =
         canonical_primary_name_coin_type(&coin_type).unwrap_or_else(|_| coin_type.clone());
@@ -340,12 +341,30 @@ fn build_primary_name_response(
         data,
         declared_state,
         verified_state,
-        provenance: JsonValue::Null,
+        provenance: primary_name_route_provenance(lookup_state, selected_snapshot),
         coverage: primary_name_route_coverage(&namespace, lookup_state),
-        chain_positions: empty_object(),
-        consistency: "head".to_owned(),
+        chain_positions: selected_snapshot
+            .map(SelectedSnapshot::chain_positions_value)
+            .unwrap_or_else(empty_object),
+        consistency: selected_snapshot
+            .map(|snapshot| snapshot.consistency.as_str().to_owned())
+            .unwrap_or_else(|| "head".to_owned()),
         last_updated: primary_name_last_updated(lookup_state.persisted_verified.as_ref()),
     }
+}
+
+fn primary_name_route_provenance(
+    lookup_state: &PrimaryNameLookupState,
+    selected_snapshot: Option<&SelectedSnapshot>,
+) -> JsonValue {
+    if selected_snapshot.is_none() {
+        return JsonValue::Null;
+    }
+    lookup_state
+        .persisted_verified
+        .as_ref()
+        .map(|persisted| persisted.provenance.clone())
+        .unwrap_or_else(|| json!({ "source_family": "ens_reverse_rpc" }))
 }
 
 fn primary_name_claim_result(lookup_state: &PrimaryNameLookupState) -> JsonValue {
@@ -370,6 +389,10 @@ fn primary_name_claim_result(lookup_state: &PrimaryNameLookupState) -> JsonValue
                         "source_family": "ens_reverse_rpc",
                         "resolver_address": invalid_claim.resolver_address.clone(),
                     },
+                }),
+                OnDemandPrimaryNameClaimState::Unavailable => json!({
+                    "status": "execution_failed",
+                    "failure_reason": "resolver_call_failed",
                 }),
                 _ => primary_name_not_found_result(),
             }
@@ -442,6 +465,15 @@ fn primary_name_verified_result(namespace: &str, lookup_state: &PrimaryNameLooku
                 return json!({
                     "status": "invalid_name",
                     "failure_reason": "claim_name_not_normalizable",
+                });
+            }
+            if matches!(
+                lookup_state.on_demand_claim,
+                OnDemandPrimaryNameClaimState::Unavailable
+            ) {
+                return json!({
+                    "status": "execution_failed",
+                    "failure_reason": "resolver_call_failed",
                 });
             }
             primary_name_not_found_result()

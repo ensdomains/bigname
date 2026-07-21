@@ -222,7 +222,7 @@ pub(crate) const API_ROUTE_DEFINITIONS: &[ApiRouteDefinition] = &[
             "Resolution",
             PRIMARY_NAMES_PARAMETERS,
             "PrimaryNameResponse",
-            ApiRouteErrorResponses::new(true, true),
+            ApiRouteErrorResponses::conflict(true),
         ),
     ),
     ApiRouteDefinition::public_get(
