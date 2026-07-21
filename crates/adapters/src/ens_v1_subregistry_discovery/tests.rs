@@ -1127,7 +1127,7 @@ async fn startup_checkpointed_subregistry_resets_stream_complete_on_authority_ch
 }
 
 #[tokio::test]
-async fn startup_checkpointed_subregistry_resumes_after_a_committed_page() -> Result<()> {
+async fn startup_subregistry_resumes_across_page_limit_change() -> Result<()> {
     let _permit = crate::acquire_test_db_permit().await;
     let test_dir = TestDir::new()?;
     let database = TestDatabase::new().await?;
@@ -1136,41 +1136,67 @@ async fn startup_checkpointed_subregistry_resumes_after_a_committed_page() -> Re
 
     test_dir.write_manifest("ens", "ens_v1_registry_l1", "v1", &manifest_contents(true))?;
     sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
-    for (block_number, block_hash, label, owner) in [
+    let block_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    upsert_raw_blocks(
+        database.pool(),
+        &[RawBlock {
+            chain_id: chain.to_owned(),
+            block_hash: block_hash.to_owned(),
+            parent_hash: None,
+            block_number: 42,
+            block_timestamp: OffsetDateTime::UNIX_EPOCH,
+            logs_bloom: None,
+            transactions_root: None,
+            receipts_root: None,
+            state_root: None,
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    let raw_logs = [
         (
-            42,
-            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "0xtxaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01",
+            0,
+            0,
             "eth",
             "0x00000000000000000000000000000000000000CC",
         ),
         (
-            43,
-            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "0xtxaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01",
+            0,
+            1,
             "com",
             "0x00000000000000000000000000000000000000DD",
         ),
         (
-            44,
-            "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "0xtxaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02",
+            1,
+            2,
             "xyz",
             "0x00000000000000000000000000000000000000EE",
         ),
-    ] {
-        insert_raw_new_owner_log_with_key(
-            database.pool(),
-            RawNewOwnerLog {
-                chain_id: chain,
-                block_hash,
-                block_number,
-                emitting_address: registry_address,
-                owner,
-                parent_node: ZERO_NODE,
-                label,
-                canonicality_state: CanonicalityState::Canonical,
-            },
-        )
-        .await?;
-    }
+    ]
+    .into_iter()
+    .map(
+        |(transaction_hash, transaction_index, log_index, label, owner)| RawLog {
+            chain_id: chain.to_owned(),
+            block_hash: block_hash.to_owned(),
+            block_number: 42,
+            transaction_hash: transaction_hash.to_owned(),
+            transaction_index,
+            log_index,
+            emitting_address: registry_address.to_owned(),
+            topics: vec![
+                new_owner_topic0(),
+                ZERO_NODE.to_owned(),
+                labelhash_hex(label),
+            ],
+            data: encode_new_owner_log_data(owner),
+            canonicality_state: CanonicalityState::Canonical,
+        },
+    )
+    .collect::<Vec<_>>();
+    upsert_raw_logs(database.pool(), &raw_logs).await?;
     // Seed the expected edges so this exercise observes exactly one checkpoint
     // scan instead of the discovery fixed-point replay used for newly admitted
     // recursive emitters.
@@ -1221,7 +1247,7 @@ async fn startup_checkpointed_subregistry_resumes_after_a_committed_page() -> Re
     .execute(database.pool())
     .await?;
 
-    let startup_checkpoint = StartupAdapterCheckpointContext::new("test", 44)?;
+    let startup_checkpoint = StartupAdapterCheckpointContext::new("test", 42)?;
     let error = sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit(
         database.pool(),
         chain,
@@ -1234,8 +1260,9 @@ async fn startup_checkpointed_subregistry_resumes_after_a_committed_page() -> Re
         format!("{error:#}").contains("injected failure after a committed startup checkpoint page")
     );
     assert_eq!(
-        sqlx::query_as::<_, (String, i64, i64)>(
-            "SELECT status, scanned_log_count, staged_item_count
+        sqlx::query_as::<_, (String, i64, i64, Option<i64>, Option<i64>, Option<i64>)>(
+            "SELECT status, scanned_log_count, staged_item_count,
+                    last_block_number, last_transaction_index, last_log_index
              FROM normalized_replay_adapter_checkpoints
              WHERE deployment_profile = 'test'
                AND cursor_kind = 'startup_adapter_owned_raw_log_state'
@@ -1244,8 +1271,8 @@ async fn startup_checkpointed_subregistry_resumes_after_a_committed_page() -> Re
         )
         .fetch_one(database.pool())
         .await?,
-        ("running".to_owned(), 1, 1),
-        "the first page and its one-page staging shape must survive interruption"
+        ("running".to_owned(), 1, 1, Some(42), Some(0), Some(0)),
+        "the first page and its durable log position must survive interruption"
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -1259,18 +1286,26 @@ async fn startup_checkpointed_subregistry_resumes_after_a_committed_page() -> Re
         1
     );
 
-    sqlx::query("DELETE FROM startup_checkpoint_failure")
-        .execute(database.pool())
-        .await?;
     let resumed = sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit(
         database.pool(),
         chain,
         &startup_checkpoint,
-        1,
+        100_000,
     )
     .await?;
     assert_eq!(resumed.scanned_log_count, 3);
     assert_eq!(resumed.matched_log_count, 3);
+    assert_eq!(resumed.active_edge_count, 3);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events
+             WHERE event_kind = 'SubregistryChanged'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        3,
+        "each same-block assignment must produce exactly one normalized event"
+    );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT scanned_log_count FROM normalized_replay_adapter_checkpoints
@@ -1288,8 +1323,8 @@ async fn startup_checkpointed_subregistry_resumes_after_a_committed_page() -> Re
         )
         .fetch_all(database.pool())
         .await?,
-        vec![1, 2, 3],
-        "resume must continue with page two rather than scan page one again"
+        vec![1, 3],
+        "resume must continue after the durable log position without touching the old page-two boundary"
     );
 
     crate::clear_startup_adapter_checkpoints(database.pool(), chain, &startup_checkpoint).await?;
@@ -2122,6 +2157,33 @@ async fn checkpointed_subregistry_resume_restores_migrated_nodes_without_staged_
         .fetch_one(database.pool())
         .await?,
         "0x00000000000000000000000000000000000000ff"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn checkpointed_subregistry_rejects_zero_page_limit() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+    let checkpoint = ReplayAdapterCheckpointContext {
+        deployment_profile: "test".to_owned(),
+        cursor_kind: "checkpointed_subregistry_zero_page_limit".to_owned(),
+        range_start_block_number: 1,
+        target_block_number: 42,
+    };
+
+    let error = sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit(
+        database.pool(),
+        "ethereum-mainnet",
+        &checkpoint,
+        0,
+    )
+    .await
+    .expect_err("a zero checkpoint page limit must fail instead of being clamped");
+    assert!(
+        error.to_string().contains("must be positive"),
+        "unexpected error: {error:#}"
     );
 
     database.cleanup().await

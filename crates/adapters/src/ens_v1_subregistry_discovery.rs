@@ -82,10 +82,7 @@ pub use replay::{
     sync_ens_v1_subregistry_discovery_with_replay_checkpoint,
     sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit,
 };
-pub use startup::{
-    sync_ens_v1_subregistry_discovery_with_startup_checkpoint,
-    sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit,
-};
+pub use startup::sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum DiscoveryEdgeMutation {

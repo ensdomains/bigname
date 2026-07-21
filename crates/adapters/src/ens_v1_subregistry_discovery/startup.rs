@@ -3,26 +3,11 @@ use sqlx::PgPool;
 
 use super::{
     EnsV1SubregistryDiscoverySyncSummary, StartupAdapterCheckpointContext,
-    checkpoint::{PAGE_LIMIT, SubregistryReplayCheckpoint},
-    loader::RegistryRawLogPosition,
+    checkpoint::SubregistryReplayCheckpoint, loader::RegistryRawLogPosition,
     replay::sync_ens_v1_subregistry_discovery_with_checkpoint_context,
 };
 
 const STARTUP_PROGRESS_LOG_EVERY_PAGES: usize = 25;
-
-pub async fn sync_ens_v1_subregistry_discovery_with_startup_checkpoint(
-    pool: &PgPool,
-    chain: &str,
-    checkpoint: &StartupAdapterCheckpointContext,
-) -> Result<EnsV1SubregistryDiscoverySyncSummary> {
-    sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit(
-        pool,
-        chain,
-        checkpoint,
-        usize::try_from(PAGE_LIMIT)?,
-    )
-    .await
-}
 
 pub async fn sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit(
     pool: &PgPool,
