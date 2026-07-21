@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{future::Future, time::Instant};
 
 use anyhow::{Context, Result, ensure};
 use bigname_storage::{
@@ -25,11 +25,18 @@ use crate::reconciliation::{
     types::PersistedRawPayloadAdapterSyncSummary,
 };
 
+#[path = "full_closure/automatic.rs"]
+mod automatic;
 #[path = "full_closure/ownership.rs"]
 mod ownership;
 #[path = "full_closure/reverse_claim.rs"]
 mod reverse_claim;
 
+pub(crate) use automatic::{
+    AutomaticTwoPhaseFullClosureSyncResult, sync_automatic_two_phase_full_closure_normalized_events,
+};
+#[cfg(test)]
+pub(crate) use automatic::{install_after_stateless_failure, install_stateless_page_observer};
 #[cfg(test)]
 pub(crate) use ownership::install_ownership_release_test_hook;
 use ownership::with_full_closure_replay_lock;
@@ -40,6 +47,7 @@ unsafe extern "C" {
     fn malloc_trim(pad: usize) -> i32;
 }
 
+#[cfg(test)]
 #[expect(clippy::too_many_arguments)]
 pub(crate) async fn sync_full_closure_normalized_events_from_persisted_raw_payloads(
     pool: &sqlx::PgPool,
@@ -113,6 +121,39 @@ async fn sync_full_closure_with_checkpoint_completion(
     max_raw_logs_per_page: usize,
     checkpoint_completion: FullClosureCheckpointCompletion,
 ) -> Result<FullClosureSyncResult> {
+    let (result, ()) = sync_full_closure_with_checkpoint_completion_and_prelude(
+        pool,
+        deployment_profile,
+        chain,
+        checkpoint_cursor_kind,
+        range_start_block_number,
+        target_block_number,
+        adapters,
+        max_raw_logs_per_page,
+        checkpoint_completion,
+        || async { Ok(()) },
+    )
+    .await?;
+    Ok(result)
+}
+
+#[expect(clippy::too_many_arguments)]
+async fn sync_full_closure_with_checkpoint_completion_and_prelude<T, Prelude, PreludeFuture>(
+    pool: &sqlx::PgPool,
+    deployment_profile: &str,
+    chain: &str,
+    checkpoint_cursor_kind: &str,
+    range_start_block_number: i64,
+    target_block_number: i64,
+    adapters: &[NormalizedEventReplayAdapter],
+    max_raw_logs_per_page: usize,
+    checkpoint_completion: FullClosureCheckpointCompletion,
+    prelude: Prelude,
+) -> Result<(FullClosureSyncResult, T)>
+where
+    Prelude: FnOnce() -> PreludeFuture,
+    PreludeFuture: Future<Output = Result<T>>,
+{
     ensure!(
         !checkpoint_cursor_kind.trim().is_empty(),
         "full-closure replay checkpoint cursor kind must not be empty"
@@ -123,6 +164,7 @@ async fn sync_full_closure_with_checkpoint_completion(
         } else {
             load_raw_log_staging_input_version(pool, chain).await?
         };
+        let prelude_output = prelude().await?;
         if !adapters.is_empty() {
             ensure_full_closure_retention_authority_for_adapters(
                 pool,
@@ -177,7 +219,7 @@ async fn sync_full_closure_with_checkpoint_completion(
         if let Some(guard) = raw_log_guard {
             guard.release().await?;
         }
-        Ok(FullClosureSyncResult { summary })
+        Ok((FullClosureSyncResult { summary }, prelude_output))
     })
     .await
 }

@@ -2963,13 +2963,14 @@ async fn insert_active_replay_watched_contract_with_source_family(
             'active',
             'ensip15@ens-normalize-0.1.1',
             ('manifests/ens/' || $3 || '/v1.toml'),
-            DEFAULT
+            $4
         )
         "#,
     )
     .bind(manifest_id)
     .bind(chain)
     .bind(source_family)
+    .bind(test_manifest_payload())
     .execute(pool)
     .await
     .context("failed to insert manifest_versions for replay test")?;

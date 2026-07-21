@@ -7,6 +7,8 @@ use tracing::info;
 
 #[path = "replay/classification.rs"]
 mod classification;
+#[path = "replay/paging.rs"]
+mod paging;
 #[path = "replay/profile_scope.rs"]
 mod profile_scope;
 #[path = "replay/scoped.rs"]
@@ -23,6 +25,7 @@ use super::{
     },
 };
 use classification::classify_raw_fact_replay_contract;
+pub(crate) use paging::select_log_bounded_replay_to_block;
 use profile_scope::{
     ensure_replay_matches_deployment_profile_scope, load_replay_adapter_source_scopes,
 };
@@ -38,9 +41,57 @@ pub(crate) use classification::{
     source_scope_includes_adapter, unsupported_closure_replay_adapters,
 };
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RawFactReplayExecution {
+    Complete,
+    StatelessBeforeFullClosure,
+}
+
+impl RawFactReplayExecution {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::StatelessBeforeFullClosure => "stateless_before_full_closure",
+        }
+    }
+
+    const fn runs_full_closure(self) -> bool {
+        matches!(self, Self::Complete)
+    }
+
+    const fn validates_request_profile(self) -> bool {
+        matches!(self, Self::Complete)
+    }
+}
+
 pub(crate) async fn replay_raw_fact_normalized_events(
     pool: &sqlx::PgPool,
     request: RawFactNormalizedEventReplayRequest,
+) -> Result<RawFactNormalizedEventReplayOutcome> {
+    replay_raw_fact_normalized_events_with_execution(
+        pool,
+        request,
+        RawFactReplayExecution::Complete,
+    )
+    .await
+}
+
+pub(crate) async fn replay_stateless_normalized_events_before_full_closure(
+    pool: &sqlx::PgPool,
+    request: RawFactNormalizedEventReplayRequest,
+) -> Result<RawFactNormalizedEventReplayOutcome> {
+    replay_raw_fact_normalized_events_with_execution(
+        pool,
+        request,
+        RawFactReplayExecution::StatelessBeforeFullClosure,
+    )
+    .await
+}
+
+async fn replay_raw_fact_normalized_events_with_execution(
+    pool: &sqlx::PgPool,
+    request: RawFactNormalizedEventReplayRequest,
+    execution: RawFactReplayExecution,
 ) -> Result<RawFactNormalizedEventReplayOutcome> {
     if request.deployment_profile.trim().is_empty() {
         bail!("deployment_profile must not be empty");
@@ -54,7 +105,10 @@ pub(crate) async fn replay_raw_fact_normalized_events(
     let load_selection_ms = selection_started.elapsed().as_millis();
 
     let profile_scope_started = Instant::now();
-    ensure_replay_matches_deployment_profile_scope(pool, &request, raw_log_selection.range).await?;
+    if execution.validates_request_profile() {
+        ensure_replay_matches_deployment_profile_scope(pool, &request, raw_log_selection.range)
+            .await?;
+    }
     let profile_scope_ms = profile_scope_started.elapsed().as_millis();
 
     let source_scope_started = Instant::now();
@@ -68,14 +122,27 @@ pub(crate) async fn replay_raw_fact_normalized_events(
     let source_scope_ms = source_scope_started.elapsed().as_millis();
     let source_scope = &source_scopes.execution;
 
-    let replay_contract_plan = classify_raw_fact_replay_contract(
-        pool,
-        &request,
-        &raw_log_selection,
-        source_scope,
-        &source_scopes.closure_validation,
-    )
-    .await?;
+    let replay_contract_plan = match execution {
+        RawFactReplayExecution::Complete => {
+            classify_raw_fact_replay_contract(
+                pool,
+                &request,
+                &raw_log_selection,
+                source_scope,
+                &source_scopes.closure_validation,
+            )
+            .await?
+        }
+        // Automatic catch-up has already admitted the manifest corpus, and
+        // its cursor profile is an operational ownership identity rather than
+        // a manual replay request. It validates retained history immediately
+        // before phase two. Phase one uses the same restricted adapter
+        // selection as manual whole-range replay, so it runs only producers
+        // that phase two does not re-emit.
+        RawFactReplayExecution::StatelessBeforeFullClosure => {
+            RawFactReplayContractPlan::full_closure()
+        }
+    };
 
     let adapter_sync_started = Instant::now();
     let mut normalized_event_summary = if raw_log_selection.block_hashes.is_empty() {
@@ -100,7 +167,7 @@ pub(crate) async fn replay_raw_fact_normalized_events(
         )
         .await?
     };
-    if replay_contract_plan.permits_nonstateless_adapters() {
+    if execution.runs_full_closure() && replay_contract_plan.permits_nonstateless_adapters() {
         let RawFactNormalizedEventReplaySelection::BlockRange {
             from_block,
             to_block,
@@ -139,6 +206,7 @@ pub(crate) async fn replay_raw_fact_normalized_events(
     info!(
         service = "indexer",
         replay_cursor_kind = "raw_fact_normalized_events",
+        replay_phase = execution.as_str(),
         deployment_profile = %request.deployment_profile,
         chain = %request.chain,
         selection_kind,
@@ -146,7 +214,8 @@ pub(crate) async fn replay_raw_fact_normalized_events(
         selected_block_count = raw_log_selection.block_hashes.len(),
         address_target_count = raw_log_selection.address_targets.len(),
         replay_source_scope_target_count = source_scope.len(),
-        closure_or_dependency_replay = replay_contract_plan.permits_nonstateless_adapters(),
+        closure_or_dependency_replay = execution.runs_full_closure()
+            && replay_contract_plan.permits_nonstateless_adapters(),
         canonical_raw_log_count = raw_log_selection.canonical_raw_log_count,
         scanned_raw_log_count = normalized_event_summary.scanned_log_count,
         matched_raw_log_count = normalized_event_summary.matched_log_count,

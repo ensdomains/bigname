@@ -418,6 +418,8 @@ async fn normalized_replay_catchup_does_not_use_log_bound_as_stateful_boundary()
         1,
         1,
     )?;
+    let stateless_pages =
+        install_stateless_page_observer(database.pool(), "mainnet", chain).await?;
     let status = normalized_replay_catchup::run_normalized_replay_catchup_iteration(
         database.pool(),
         &config,
@@ -427,6 +429,11 @@ async fn normalized_replay_catchup_does_not_use_log_bound_as_stateful_boundary()
     assert_eq!(
         status,
         normalized_replay_catchup::CatchupIterationStatus::Progressed
+    );
+    assert_eq!(
+        stateless_pages.page_ranges(),
+        vec![(30, 30), (31, 31)],
+        "the stateless prelude must honor the configured whole-block raw-log page cap"
     );
 
     let cursor_kind = "raw_fact_normalized_events";
@@ -450,6 +457,19 @@ async fn normalized_replay_catchup_does_not_use_log_bound_as_stateful_boundary()
             .await?
             > 0
     );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events \
+             WHERE event_kind = 'PreimageObserved' \
+               AND derivation_kind = 'raw_log_preimage_observation' \
+               AND block_hash = $1"
+        )
+        .bind(&wrapper_block.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "automatic full-closure catch-up must run the stateless preimage pass"
+    );
     assert!(
         sqlx::query_scalar::<_, bool>(
             "SELECT to_regclass('normalized_events_namespace_idx') IS NOT NULL"
@@ -461,6 +481,124 @@ async fn normalized_replay_catchup_does_not_use_log_bound_as_stateful_boundary()
 
     database.cleanup().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn normalized_replay_catchup_retries_full_closure_after_stateless_phase_failure()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_normalized_replay_cursor_table(database.pool()).await?;
+    let deployment_profile = "automatic-catchup-test";
+    let chain = "ethereum-mainnet";
+    let wrapper_address = "0x0000000000000000000000000000000000000139";
+    let block = provider_block(
+        "0x3939393939393939393939393939393939393939393939393939393939393939",
+        Some("0x3838383838383838383838383838383838383838383838383838383838383838"),
+        39,
+    );
+
+    insert_active_replay_watched_contract(
+        database.pool(),
+        399,
+        chain,
+        Uuid::from_u128(0x399),
+        wrapper_address,
+    )
+    .await?;
+    insert_raw_name_wrapped_log(
+        database.pool(),
+        chain,
+        &block,
+        wrapper_address,
+        0,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+
+    let config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
+        deployment_profile.to_owned(),
+        vec![chain.to_owned()],
+        1_000,
+        1_000,
+        1,
+    )?;
+    let _failure =
+        install_after_stateless_failure(database.pool(), deployment_profile, chain).await?;
+    let error = normalized_replay_catchup::run_normalized_replay_catchup_iteration(
+        database.pool(),
+        &config,
+        chain,
+    )
+    .await
+    .expect_err("the injected phase-boundary failure must stop catch-up");
+    assert!(
+        format!("{error:#}").contains("injected failure after automatic stateless replay phase"),
+        "unexpected phase-boundary error: {error:#}"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, Option<i64>)>(
+            "SELECT next_block_number, last_completed_block_number \
+             FROM normalized_replay_cursors \
+             WHERE deployment_profile = $1 \
+               AND chain_id = $2 \
+               AND cursor_kind = 'raw_fact_normalized_events'"
+        )
+        .bind(deployment_profile)
+        .bind(chain)
+        .fetch_one(database.pool())
+        .await?,
+        (block.block_number, None),
+        "the shared completion cursor must stay pending between phases"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events \
+             WHERE event_kind = 'PreimageObserved' \
+               AND derivation_kind = 'raw_log_preimage_observation'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "phase one must durably publish the stateless preimage before the injected failure"
+    );
+
+    assert_eq!(
+        normalized_replay_catchup::run_normalized_replay_catchup_iteration(
+            database.pool(),
+            &config,
+            chain,
+        )
+        .await?,
+        normalized_replay_catchup::CatchupIterationStatus::Progressed
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, Option<i64>)>(
+            "SELECT next_block_number, last_completed_block_number \
+             FROM normalized_replay_cursors \
+             WHERE deployment_profile = $1 \
+               AND chain_id = $2 \
+               AND cursor_kind = 'raw_fact_normalized_events'"
+        )
+        .bind(deployment_profile)
+        .bind(chain)
+        .fetch_one(database.pool())
+        .await?,
+        (block.block_number + 1, Some(block.block_number)),
+        "retry must complete phase two before publishing the shared cursor"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events \
+             WHERE event_kind = 'PreimageObserved' \
+               AND derivation_kind = 'raw_log_preimage_observation'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "retrying phase one must be identity-idempotent"
+    );
+
+    database.cleanup().await
 }
 
 #[tokio::test]

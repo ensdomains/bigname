@@ -19,16 +19,19 @@ mod types;
 
 #[allow(unused_imports)]
 pub(crate) use adapter_sync::{
-    BacklogHandoffStatus, sync_adapter_state_from_persisted_raw_payloads,
+    AutomaticTwoPhaseFullClosureSyncResult, BacklogHandoffStatus,
+    sync_adapter_state_from_persisted_raw_payloads,
     sync_adapter_state_from_scoped_persisted_raw_payloads,
-    sync_full_closure_normalized_events_from_persisted_raw_payloads,
+    sync_automatic_two_phase_full_closure_normalized_events,
     sync_live_adapter_backlog_after_normalized_replay,
     sync_live_adapter_state_from_persisted_raw_payloads, validate_chain_handoff_while_guarded,
 };
 #[cfg(test)]
 pub(crate) use adapter_sync::{
-    install_backlog_after_adapter_sync_test_hook, install_ownership_release_test_hook,
-    install_post_discovery_mutation_failure_for_test,
+    install_after_stateless_failure, install_backlog_after_adapter_sync_test_hook,
+    install_ownership_release_test_hook, install_post_discovery_mutation_failure_for_test,
+    install_stateless_page_observer,
+    sync_full_closure_normalized_events_from_persisted_raw_payloads,
     sync_manual_full_closure_normalized_events_from_persisted_raw_payloads,
 };
 #[allow(unused_imports)]
@@ -74,7 +77,8 @@ pub(crate) use replay::{
     chain_has_closure_or_dependency_replay_adapter,
     ensure_full_closure_retention_authority_for_adapters,
     ensure_legacy_registry_closure_retention_authority_for_adapters,
-    replay_raw_fact_normalized_events, unsupported_closure_replay_adapters,
+    replay_raw_fact_normalized_events, select_log_bounded_replay_to_block,
+    unsupported_closure_replay_adapters,
 };
 #[allow(unused_imports)]
 pub(crate) use types::{
