@@ -30,6 +30,7 @@ pub(crate) async fn poll_provider_heads(
         tasks,
         provider_registry,
         "test",
+        &BTreeMap::new(),
         true,
         HeaderAuditMode::Minimal,
         &[],
@@ -45,6 +46,7 @@ pub(crate) async fn poll_provider_heads_with_adapter_sync(
     tasks: &mut Vec<IntakeChainTask>,
     provider_registry: &ProviderRegistry,
     deployment_profile: &str,
+    watched_plan_admission_epochs: &BTreeMap<String, i64>,
     adapter_sync_enabled: bool,
     header_audit_mode: HeaderAuditMode,
     event_silent_reverse_resolver_addresses: &[String],
@@ -65,6 +67,10 @@ pub(crate) async fn poll_provider_heads_with_adapter_sync(
                 deployment_profile,
                 task,
                 provider,
+                watched_plan_admission_epochs
+                    .get(&task.chain)
+                    .copied()
+                    .unwrap_or(0),
                 adapter_sync_enabled,
                 header_audit_mode,
                 event_silent_reverse_resolver_addresses,

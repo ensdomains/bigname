@@ -8,7 +8,7 @@ use bigname_manifests::{
     DiscoveryAdmissionState, ManifestLoadStatus, ManifestLoadSummary, ManifestRepository,
     ManifestSyncStatus, ManifestSyncSummary, WatchedChainPlan, WatchedContractSummary,
     load_manifest_declared_watched_chain_plan, load_manifest_declared_watched_contract_summary,
-    load_watched_chain_plan, load_watched_contract_summary,
+    load_watched_contract_summary_and_chain_plan,
 };
 
 use crate::resolver_profile_convergence::journal_resolver_profile_authority;
@@ -99,12 +99,14 @@ pub(crate) async fn build_manifest_runtime_state_with_watch_scope(
         RuntimeWatchScope::ActiveWatchedChain => {
             let admission_state = bigname_manifests::load_discovery_admission_state(pool).await?;
             verify_stored_manifest_state(&sync_summary, &admission_state)?;
+            let (watched_contract_summary, watched_chain_plan) =
+                load_watched_contract_summary_and_chain_plan(pool).await?;
             (
                 sync_summary,
                 discovery_admission_snapshot(&admission_state),
                 bigname_adapters::sync_manifest_normalized_events(pool).await?,
-                load_watched_contract_summary(pool).await?,
-                load_watched_chain_plan(pool).await?,
+                watched_contract_summary,
+                watched_chain_plan,
             )
         }
         RuntimeWatchScope::ManifestDeclaredOnly => {
@@ -129,6 +131,33 @@ pub(crate) async fn build_manifest_runtime_state_with_watch_scope(
         watched_contract_summary,
         watched_chain_plan,
     })
+}
+
+/// Repository refresh always updates manifest authority, but only broad
+/// (`inline`) runtime refresh may also emit manifest-derived normalized
+/// events. Non-inline modes build through the declared-only read/write scope,
+/// then widen the in-memory plan from stored discovery without adapter writes.
+pub(crate) async fn build_manifest_runtime_state_for_repository_refresh(
+    pool: &sqlx::PgPool,
+    manifest_repository: &ManifestRepository,
+    runtime_watch_scope: RuntimeWatchScope,
+    broad_runtime_refresh_enabled: bool,
+) -> Result<ManifestRuntimeState> {
+    let build_scope = if broad_runtime_refresh_enabled {
+        runtime_watch_scope
+    } else {
+        RuntimeWatchScope::ManifestDeclaredOnly
+    };
+    let mut state =
+        build_manifest_runtime_state_with_watch_scope(pool, manifest_repository, build_scope)
+            .await?;
+    if build_scope != runtime_watch_scope {
+        let (watched_contract_summary, watched_chain_plan) =
+            load_watched_contract_summary_and_chain_plan(pool).await?;
+        state.watched_contract_summary = watched_contract_summary;
+        state.watched_chain_plan = watched_chain_plan;
+    }
+    Ok(state)
 }
 
 async fn sync_repository_or_load_stored_for_pending_rederive(

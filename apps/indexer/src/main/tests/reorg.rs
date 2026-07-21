@@ -1,4 +1,77 @@
 #[tokio::test]
+async fn raw_code_orphaning_invalidates_completed_baseline_frontier() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let parent = provider_block(
+        "0x1010101010101010101010101010101010101010101010101010101010101010",
+        None,
+        10,
+    );
+    let losing = provider_block(
+        "0x1111111111111111111111111111111111111111111111111111111111111111",
+        Some(&parent.block_hash),
+        11,
+    );
+    upsert_raw_blocks(
+        database.pool(),
+        &[
+            provider_block_to_raw_block(chain, &parent, CanonicalityState::Canonical),
+            provider_block_to_raw_block(chain, &losing, CanonicalityState::Canonical),
+        ],
+    )
+    .await?;
+    upsert_raw_code_hashes(
+        database.pool(),
+        &[RawCodeHash {
+            chain_id: chain.to_owned(),
+            block_hash: losing.block_hash.clone(),
+            block_number: losing.block_number,
+            contract_address: "0x0000000000000000000000000000000000000001".to_owned(),
+            code_hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+            code_byte_length: 1,
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    let coverage_frontiers = ChainCoverageFrontiers::default();
+    coverage_frontiers.store_raw_code_baseline_frontier(
+        chain,
+        RawCodeBaselineFrontier {
+            completed_admission_epoch: Some(7),
+            ..RawCodeBaselineFrontier::default()
+        },
+    );
+
+    orphan_reorg_losing_branch_payloads(
+        database.pool(),
+        chain,
+        Some(&losing.block_hash),
+        Some(&parent.block_hash),
+        &coverage_frontiers,
+    )
+    .await?;
+
+    assert_eq!(
+        coverage_frontiers.raw_code_baseline_frontier(chain),
+        RawCodeBaselineFrontier::default(),
+        "orphaning the only baseline observation must re-arm the sweep"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT canonicality_state::TEXT FROM raw_code_hashes WHERE chain_id = $1 AND block_hash = $2",
+        )
+        .bind(chain)
+        .bind(&losing.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        "orphaned"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn reconcile_fetched_heads_marks_losing_branch_orphaned_on_reorg() -> Result<()> {
     let database = TestDatabase::new().await?;
     let root_contract_instance_id = Uuid::from_u128(71);

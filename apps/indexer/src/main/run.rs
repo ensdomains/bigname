@@ -12,13 +12,14 @@ use crate::{
     resolver_profile_convergence::drain_resolver_profile_input_changes,
     run_mode::IndexerRunMode,
     runtime::{
-        build_manifest_runtime_state_with_watch_scope, ensure_manifest_root_ready,
-        intake_runtime_state, load_manifest_repository, log_intake_chain_tasks,
-        log_manifest_runtime_state, log_manifest_summary, log_provider_registry,
-        log_watched_chain_plan, manifest_normalized_event_kind_count,
-        refresh_runtime_state_from_stored_discovery, run_poll_loop,
-        sync_adapter_owned_raw_log_state, sync_intake_chain_tasks,
+        IntakeChainTask, ManifestRuntimeState, build_manifest_runtime_state_with_watch_scope,
+        ensure_manifest_root_ready, intake_runtime_state, load_manifest_repository,
+        log_intake_chain_tasks, log_manifest_runtime_state, log_manifest_summary,
+        log_provider_registry, log_watched_chain_plan, manifest_normalized_event_kind_count,
+        run_poll_loop, sync_adapter_owned_raw_log_state,
+        sync_discovery_adapter_owned_raw_log_state, sync_intake_chain_tasks,
         validate_provider_registry_for_intake_tasks, watched_chain_plan_state,
+        widen_runtime_state_to_live_watch_scope_with_admission_epochs,
     },
 };
 
@@ -38,10 +39,10 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
     let header_audit_mode =
         HeaderAuditMode::from_retain_audit_fields(args.retain_header_audit_fields);
     let run_mode = IndexerRunMode::new(adapter_sync_mode, args.normalized_replay_catchup_enabled);
-    let mut manifest_runtime_state = build_manifest_runtime_state_with_watch_scope(
+    let manifest_runtime_state = build_manifest_runtime_state_with_watch_scope(
         &pool,
         &manifest_repository,
-        run_mode.runtime_watch_scope,
+        run_mode.bootstrap_watch_scope,
     )
     .await?;
     if run_mode.sync_adapter_before_startup_backfill {
@@ -50,13 +51,13 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         info!(
             service = "indexer",
             adapter_sync_mode = adapter_sync_mode.as_str(),
-            runtime_watch_scope = run_mode.runtime_watch_scope.as_str(),
-            "startup adapter-owned raw-log sync deferred until bootstrap backfill drains"
+            bootstrap_watch_scope = run_mode.bootstrap_watch_scope.as_str(),
+            "startup adapter-owned raw-log sync does not run before bootstrap backfill"
         );
     }
     log_manifest_runtime_state(&manifest_runtime_state);
     log_watched_chain_plan("startup", &manifest_runtime_state.watched_chain_plan);
-    let mut intake_chain_tasks =
+    let intake_chain_tasks =
         sync_intake_chain_tasks(&pool, &manifest_runtime_state.watched_chain_plan).await?;
     log_intake_chain_tasks("startup", &intake_chain_tasks);
     let provider_registry =
@@ -87,25 +88,33 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
             "startup bootstrap backfill drained; syncing adapter-owned raw-log state before live polling"
         );
         sync_adapter_owned_raw_log_state(&pool, &manifest_runtime_state.watched_chain_plan).await?;
-    }
-    if adapter_sync_mode != BackfillAdapterSyncMode::RawOnly
-        && let Some((next_manifest_runtime_state, next_intake_chain_tasks)) =
-            refresh_runtime_state_from_stored_discovery(&pool, &manifest_runtime_state).await?
-    {
-        validate_provider_registry_for_intake_tasks(&next_intake_chain_tasks, &provider_registry)?;
-        manifest_runtime_state = next_manifest_runtime_state;
-        intake_chain_tasks = next_intake_chain_tasks;
-        log_watched_chain_plan(
-            "post-bootstrap-discovery",
+    } else if run_mode.sync_discovery_adapters_after_startup_backfill {
+        info!(
+            service = "indexer",
+            adapter_sync_mode = adapter_sync_mode.as_str(),
+            effective_backfill_adapter_sync_mode =
+                run_mode.startup_backfill_adapter_sync_mode.as_str(),
+            "startup bootstrap backfill drained; syncing only discovery-materializing adapter families before the live-plan widen"
+        );
+        sync_discovery_adapter_owned_raw_log_state(
+            &pool,
             &manifest_runtime_state.watched_chain_plan,
-        );
-        log_intake_chain_tasks("post-bootstrap-discovery", &intake_chain_tasks);
-        log_provider_registry(
-            "post-bootstrap-discovery",
-            &intake_chain_tasks,
-            &provider_registry,
-        );
+        )
+        .await?;
     }
+
+    // Bootstrap backfill has drained, so the narrow bootstrap scope has served its purpose. Widen
+    // before spawning replay catch-up: both reconcile `contract_instance_addresses`, and the widen
+    // must not race it. The reload also picks up any discovery edges the post-bootstrap
+    // adapter-owned sync just materialized, which is why it runs even when the scopes are equal.
+    let (manifest_runtime_state, intake_chain_tasks, watched_plan_admission_epochs) =
+        widen_to_live_watch_scope(
+            &pool,
+            &run_mode,
+            &manifest_runtime_state,
+            &provider_registry,
+        )
+        .await?;
     if adapter_sync_mode != BackfillAdapterSyncMode::RawOnly
         && !run_mode.normalized_replay_catchup_enabled
     {
@@ -231,11 +240,12 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         normalized_replay_defer_projection_indexes = args.normalized_replay_defer_projection_indexes,
         adapter_sync_on_manifest_refresh = run_mode.broad_runtime_refresh_enabled,
         manifest_observation_refresh_enabled = run_mode.broad_runtime_refresh_enabled,
-        discovery_refresh_enabled = run_mode.broad_runtime_refresh_enabled,
+        discovery_refresh_enabled = run_mode.discovery_refresh_enabled,
         watched_plan_refresh_interval_secs = args.poll_interval_secs,
         adapter_status = bigname_adapters::bootstrap_status(),
         poll_interval_secs = args.poll_interval_secs,
-        runtime_watch_scope = run_mode.runtime_watch_scope.as_str(),
+        bootstrap_watch_scope = run_mode.bootstrap_watch_scope.as_str(),
+        live_watch_scope = run_mode.live_watch_scope.as_str(),
         "indexer booted"
     );
 
@@ -244,13 +254,16 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         args.manifests_root,
         manifest_runtime_state,
         intake_chain_tasks,
+        watched_plan_admission_epochs,
         &provider_registry,
         args.poll_interval_secs,
-        run_mode.runtime_watch_scope,
+        run_mode.live_watch_scope,
         run_mode.broad_runtime_refresh_enabled,
         run_mode.live_poll_adapter_sync_enabled,
         run_mode.live_poll_adapter_sync_after_normalized_replay_catchup,
         run_mode.broad_runtime_refresh_enabled,
+        run_mode.discovery_refresh_enabled,
+        run_mode.resolver_profile_convergence_enabled,
         run_mode.broad_runtime_refresh_enabled,
         header_audit_mode,
         args.event_silent_reverse_resolver_addresses,
@@ -261,4 +274,46 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         &crate::reconciliation::ChainCoverageFrontiers::default(),
     )
     .await
+}
+
+async fn widen_to_live_watch_scope(
+    pool: &sqlx::PgPool,
+    run_mode: &IndexerRunMode,
+    manifest_runtime_state: &ManifestRuntimeState,
+    provider_registry: &ProviderRegistry,
+) -> Result<(
+    ManifestRuntimeState,
+    Vec<IntakeChainTask>,
+    std::collections::BTreeMap<String, i64>,
+)> {
+    // No equal-scope short-circuit: even when bootstrap already ran at the live scope (`inline`),
+    // the post-bootstrap adapter-owned sync may have materialized new discovery edges, and this
+    // reload is what carries them into the live plan.
+    let previous_watch_state = watched_chain_plan_state(&manifest_runtime_state.watched_chain_plan);
+    let (live_manifest_runtime_state, watched_plan_admission_epochs) =
+        widen_runtime_state_to_live_watch_scope_with_admission_epochs(pool, manifest_runtime_state)
+            .await?;
+    let live_intake_chain_tasks =
+        sync_intake_chain_tasks(pool, &live_manifest_runtime_state.watched_chain_plan).await?;
+    validate_provider_registry_for_intake_tasks(&live_intake_chain_tasks, provider_registry)?;
+
+    let live_watch_state =
+        watched_chain_plan_state(&live_manifest_runtime_state.watched_chain_plan);
+    info!(
+        service = "indexer",
+        bootstrap_watch_scope = run_mode.bootstrap_watch_scope.as_str(),
+        live_watch_scope = run_mode.live_watch_scope.as_str(),
+        previous_watched_address_count = previous_watch_state.address_count,
+        watched_address_count = live_watch_state.address_count,
+        watched_entry_count_total = live_watch_state.entry_count,
+        "widened watch plan from bootstrap scope to live scope before polling"
+    );
+    log_watched_chain_plan("live", &live_manifest_runtime_state.watched_chain_plan);
+    log_intake_chain_tasks("live", &live_intake_chain_tasks);
+
+    Ok((
+        live_manifest_runtime_state,
+        live_intake_chain_tasks,
+        watched_plan_admission_epochs,
+    ))
 }

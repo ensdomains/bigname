@@ -113,6 +113,9 @@ fn optional_audit_field_conflicts<T: Eq>(left: &Option<T>, right: &Option<T>) ->
     matches!((left, right), (Some(left), Some(right)) if left != right)
 }
 
+// Owned-set variant retained for payload tests; live persistence probes the
+// plan's sorted address vector through `SelectedAddressSet` instead.
+#[allow(dead_code)]
 pub(crate) fn selected_address_set(addresses: &[String]) -> BTreeSet<String> {
     addresses
         .iter()
@@ -120,17 +123,61 @@ pub(crate) fn selected_address_set(addresses: &[String]) -> BTreeSet<String> {
         .collect()
 }
 
+/// Borrowed view over the intake task's watch-plan address vector, which is
+/// already sorted, deduplicated, and lowercase (the plan loader normalizes and
+/// accumulates addresses through a `BTreeSet`). Membership probes are
+/// case-insensitive binary searches, so the live tailer never rebuilds an
+/// owned lowercased set of the multi-million-address watch surface per tick.
+#[derive(Clone, Copy)]
+pub(crate) struct SelectedAddressSet<'a> {
+    sorted_lowercase_addresses: &'a [String],
+}
+
+impl<'a> SelectedAddressSet<'a> {
+    pub(crate) fn from_plan_addresses(sorted_lowercase_addresses: &'a [String]) -> Self {
+        debug_assert!(
+            sorted_lowercase_addresses
+                .windows(2)
+                .all(|pair| pair[0] < pair[1]),
+            "watch-plan addresses must be sorted and deduplicated"
+        );
+        debug_assert!(
+            sorted_lowercase_addresses
+                .iter()
+                .all(|address| !address.bytes().any(|byte| byte.is_ascii_uppercase())),
+            "watch-plan addresses must be lowercase"
+        );
+        Self {
+            sorted_lowercase_addresses,
+        }
+    }
+
+    pub(crate) fn contains(&self, address: &str) -> bool {
+        self.sorted_lowercase_addresses
+            .binary_search_by(|stored| {
+                stored
+                    .bytes()
+                    .cmp(address.bytes().map(|byte| byte.to_ascii_lowercase()))
+            })
+            .is_ok()
+    }
+
+    pub(crate) fn as_sorted_slice(&self) -> &'a [String] {
+        self.sorted_lowercase_addresses
+    }
+}
+
 pub(crate) fn provider_logs_to_live_selected_raw_logs(
     chain: &str,
     raw_block: &RawBlock,
     logs: &[ProviderLog],
-    selected_addresses: &BTreeSet<String>,
+    selected_addresses: SelectedAddressSet<'_>,
     generic_resolver_topic0s: &BTreeSet<String>,
 ) -> Result<Vec<RawLog>> {
     let selected_transaction_keys = logs
         .iter()
         .filter(|log| {
-            selected_addresses.contains(&log.address.to_ascii_lowercase())
+            selected_addresses.contains(&log.address)
                 || log.topics.first().is_some_and(|topic0| {
                     generic_resolver_topic0s.contains(&topic0.to_ascii_lowercase())
                 })

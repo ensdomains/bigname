@@ -1154,6 +1154,346 @@ async fn reconcile_fetched_heads_backfills_code_hashes_for_new_watched_addresses
 }
 
 #[tokio::test]
+async fn focused_discovery_sync_before_widen_admits_bootstrap_edges_into_the_live_plan()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let manifests = TestManifestDir::new()?;
+    manifests.write_manifest_for_source_family("ens_v1_registry_l1", &ens_v1_manifest_contents())?;
+    let manifest_repository = load_manifest_repository(&manifests.path)?;
+
+    // The narrow bootstrap scope that `auto`/`raw-only` boot with: manifest-declared targets only,
+    // with no adapter-owned discovery edges reloaded yet.
+    let bootstrap_state = build_manifest_runtime_state_with_watch_scope(
+        database.pool(),
+        &manifest_repository,
+        RuntimeWatchScope::ManifestDeclaredOnly,
+    )
+    .await?;
+    let registry_address = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
+    let discovered_owner_address = "0x0000000000000000000000000000000000000002";
+    assert_eq!(bootstrap_state.watched_chain_plan.len(), 1);
+    assert_eq!(
+        bootstrap_state.watched_chain_plan[0].addresses,
+        vec![registry_address.to_owned()]
+    );
+    assert_eq!(
+        bootstrap_state.watched_chain_plan[0].discovery_edge_entry_count,
+        0
+    );
+
+    // Bootstrap's raw-only backfill stored a NewOwner log from the registry; the discovery edge does
+    // not exist until the adapter-owned sync processes it.
+    let canonical_head = provider_block(
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        Some("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        42,
+    );
+    insert_raw_new_owner_log(
+        database.pool(),
+        "ethereum-mainnet",
+        &canonical_head,
+        "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
+        discovered_owner_address,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+
+    // Widening alone only reloads the stored plan, so the still-unmaterialized edge is missed — this
+    // is the dropped-target bug the post-bootstrap sync fixes.
+    let widened_without_sync =
+        widen_runtime_state_to_live_watch_scope(database.pool(), &bootstrap_state).await?;
+    assert_eq!(
+        widened_without_sync.watched_chain_plan[0].addresses,
+        vec![registry_address.to_owned()]
+    );
+    assert_eq!(
+        widened_without_sync.watched_chain_plan[0].discovery_edge_entry_count,
+        0
+    );
+
+    // Auto's focused post-bootstrap pass runs only the discovery-materializing families before the
+    // widen, so the live plan admits the target without deriving all seven adapter families.
+    sync_discovery_adapter_owned_raw_log_state(
+        database.pool(),
+        &bootstrap_state.watched_chain_plan,
+    )
+    .await?;
+    let widened_state =
+        widen_runtime_state_to_live_watch_scope(database.pool(), &bootstrap_state).await?;
+    assert_eq!(
+        widened_state.watched_chain_plan,
+        vec![WatchedChainPlan {
+            chain: "ethereum-mainnet".to_owned(),
+            addresses: vec![
+                discovered_owner_address.to_owned(),
+                registry_address.to_owned(),
+            ],
+            manifest_root_entry_count: 1,
+            manifest_contract_entry_count: 1,
+            discovery_edge_entry_count: 1,
+        }]
+    );
+
+    let widened_tasks =
+        sync_intake_chain_tasks(database.pool(), &widened_state.watched_chain_plan).await?;
+    assert_eq!(
+        widened_tasks[0].addresses,
+        widened_state.watched_chain_plan[0].addresses
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn stored_discovery_refresh_reloads_only_when_admission_epochs_move() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let manifests = TestManifestDir::new()?;
+    manifests.write_manifest_for_source_family("ens_v1_registry_l1", &ens_v1_manifest_contents())?;
+    let manifest_repository = load_manifest_repository(&manifests.path)?;
+    let initial_state = build_manifest_runtime_state_with_watch_scope(
+        database.pool(),
+        &manifest_repository,
+        RuntimeWatchScope::ActiveWatchedChain,
+    )
+    .await?;
+    let registry_address = "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e";
+    let discovered_owner_address = "0x0000000000000000000000000000000000000002";
+    assert_eq!(
+        initial_state.watched_chain_plan[0].addresses,
+        vec![registry_address.to_owned()]
+    );
+
+    // First pass produces a sentinel candidate. Nothing has moved, so the
+    // plan itself is equal; the caller commits the candidate only after its
+    // convergence/apply work succeeds.
+    let mut admission_epochs = None;
+    let seeded = refresh_runtime_state_from_stored_discovery_when_epochs_move(
+        database.pool(),
+        &initial_state,
+        admission_epochs.as_ref(),
+    )
+    .await?
+    .expect("a missing sentinel must check the stored plan");
+    assert!(seeded.refreshed_state.is_none());
+    assert!(admission_epochs.is_none(), "the loader must not commit its sentinel");
+    admission_epochs = Some(seeded.admission_epochs);
+    let seeded_epochs = admission_epochs
+        .clone()
+        .expect("first refresh must seed the admission-epoch sentinel");
+
+    // A stored NewOwner log whose adapter sync materializes a discovery edge
+    // and, per the ratified invariant, bumps the chain's admission epoch.
+    let canonical_head = provider_block(
+        "0xcafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe",
+        Some("0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddead"),
+        7,
+    );
+    insert_raw_new_owner_log(
+        database.pool(),
+        "ethereum-mainnet",
+        &canonical_head,
+        "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
+        discovered_owner_address,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    sync_adapter_owned_raw_log_state(database.pool(), &initial_state.watched_chain_plan).await?;
+    let bumped_epoch = sqlx::query_scalar::<_, i64>(
+        "SELECT epoch FROM discovery_admission_epochs WHERE chain_id = 'ethereum-mainnet'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert!(
+        bumped_epoch > seeded_epochs.get("ethereum-mainnet").copied().unwrap_or(0),
+        "adapter-owned discovery sync must bump the admission epoch"
+    );
+
+    // Roll the epoch row back to the sentinel's value: the plan tables now
+    // hold a new edge, but with an unmoved epoch the refresh must skip the
+    // full plan reload — reloads are keyed to the epoch invariant, never to
+    // per-tick scans of the multi-million-row watched surface.
+    sqlx::query("UPDATE discovery_admission_epochs SET epoch = $1 WHERE chain_id = 'ethereum-mainnet'")
+        .bind(seeded_epochs.get("ethereum-mainnet").copied().unwrap_or(0))
+        .execute(database.pool())
+        .await?;
+    let skipped = refresh_runtime_state_from_stored_discovery_when_epochs_move(
+        database.pool(),
+        &initial_state,
+        admission_epochs.as_ref(),
+    )
+    .await?;
+    assert!(
+        skipped.is_none(),
+        "an unmoved admission epoch must skip the stored plan reload"
+    );
+
+    // Restoring the bumped epoch makes the sentinel observe the move and
+    // reload the plan, admitting the discovered target.
+    sqlx::query("UPDATE discovery_admission_epochs SET epoch = $1 WHERE chain_id = 'ethereum-mainnet'")
+        .bind(bumped_epoch)
+        .execute(database.pool())
+        .await?;
+    let refreshed = refresh_runtime_state_from_stored_discovery_when_epochs_move(
+        database.pool(),
+        &initial_state,
+        admission_epochs.as_ref(),
+    )
+    .await?
+    .expect("a moved admission epoch must reload the stored plan");
+    let refreshed_epochs = refreshed.admission_epochs;
+    let (refreshed_state, refreshed_tasks) = refreshed
+        .refreshed_state
+        .expect("a moved discovery edge must change the stored plan");
+    assert_eq!(
+        refreshed_state.watched_chain_plan[0].addresses,
+        vec![
+            discovered_owner_address.to_owned(),
+            registry_address.to_owned(),
+        ]
+    );
+    assert_eq!(
+        refreshed_tasks[0].addresses,
+        refreshed_state.watched_chain_plan[0].addresses
+    );
+    admission_epochs = Some(refreshed_epochs);
+
+    // The successful reload re-seeds the sentinel, so the next tick skips.
+    let settled = refresh_runtime_state_from_stored_discovery_when_epochs_move(
+        database.pool(),
+        &refreshed_state,
+        admission_epochs.as_ref(),
+    )
+    .await?;
+    assert!(settled.is_none());
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn discovery_refresh_does_not_advance_epoch_when_convergence_fails() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let manifests = TestManifestDir::new()?;
+    manifests.write_manifest_for_source_family("ens_v1_registry_l1", &ens_v1_manifest_contents())?;
+    let repository = load_manifest_repository(&manifests.path)?;
+    let mut state = build_manifest_runtime_state(database.pool(), &repository).await?;
+    let mut tasks = sync_intake_chain_tasks(database.pool(), &state.watched_chain_plan).await?;
+    let original_addresses = tasks[0].addresses.clone();
+    let mut admission_epochs = Some(
+        bigname_manifests::load_discovery_admission_epochs(database.pool()).await?,
+    );
+    let loaded_epochs = admission_epochs.clone();
+
+    let canonical_head = provider_block(
+        "0xcacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacaca",
+        None,
+        7,
+    );
+    insert_raw_new_owner_log(
+        database.pool(),
+        "ethereum-mainnet",
+        &canonical_head,
+        "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
+        "0x0000000000000000000000000000000000000002",
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    sync_discovery_adapter_owned_raw_log_state(database.pool(), &state.watched_chain_plan).await?;
+    sqlx::query("DROP TABLE resolver_profile_input_changes CASCADE")
+        .execute(database.pool())
+        .await?;
+
+    let provider_registry = ProviderRegistry::from_chain_rpc_urls(&[])?;
+    assert!(
+        !refresh_discovery_watch_state(
+            database.pool(),
+            &provider_registry,
+            &mut state,
+            &mut tasks,
+            false,
+            true,
+            &mut admission_epochs,
+        )
+        .await?
+    );
+    assert_eq!(
+        admission_epochs, loaded_epochs,
+        "a failed convergence drain must leave the loaded-plan sentinel unchanged"
+    );
+    assert_eq!(tasks[0].addresses, original_addresses);
+
+    assert!(
+        refresh_discovery_watch_state(
+            database.pool(),
+            &provider_registry,
+            &mut state,
+            &mut tasks,
+            false,
+            false,
+            &mut admission_epochs,
+        )
+        .await?,
+        "raw-only refresh must apply the stored plan without draining resolver-profile work"
+    );
+    assert_ne!(admission_epochs, loaded_epochs);
+    assert_eq!(tasks[0].addresses.len(), original_addresses.len() + 1);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn stored_discovery_refresh_updates_summary_when_plan_is_equal() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let manifests = TestManifestDir::new()?;
+    manifests.write_manifest_for_source_family("ens_v1_registry_l1", &ens_v1_manifest_contents())?;
+    let repository = load_manifest_repository(&manifests.path)?;
+    let current = build_manifest_runtime_state(database.pool(), &repository).await?;
+    let expected_summary = current.watched_contract_summary.clone();
+    let mut stale = current.clone();
+    stale.watched_contract_summary.source_entry_count += 1;
+
+    let (refreshed, tasks) =
+        refresh_runtime_state_from_stored_discovery(database.pool(), &stale)
+            .await?
+            .expect("a changed watched-contract summary must refresh runtime metrics");
+
+    assert_eq!(refreshed.watched_chain_plan, current.watched_chain_plan);
+    assert_eq!(refreshed.watched_contract_summary, expected_summary);
+    assert_eq!(tasks[0].addresses, refreshed.watched_chain_plan[0].addresses);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn non_broad_repository_refresh_widens_plan_without_manifest_event_writes() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let manifests = TestManifestDir::new()?;
+    manifests.write_manifest_for_source_family("ens_v1_registry_l1", &ens_v1_manifest_contents())?;
+    let repository = load_manifest_repository(&manifests.path)?;
+
+    let state = build_manifest_runtime_state_for_repository_refresh(
+        database.pool(),
+        &repository,
+        RuntimeWatchScope::ActiveWatchedChain,
+        false,
+    )
+    .await?;
+
+    assert_eq!(state.watched_chain_plan.len(), 1);
+    assert_eq!(state.manifest_normalized_event_summary.total_synced_count, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM normalized_events")
+            .fetch_one(database.pool())
+            .await?,
+        0,
+        "non-inline repository refresh must not emit manifest-derived normalized events"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn storage_discovery_refresh_adds_ensv1_address_without_manifest_reload_and_next_poll_backfills_code_hash()
 -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -1482,6 +1822,174 @@ async fn runtime_refresh_adds_ensv1_resolver_watch_target_without_manifest_reloa
         )
         .fetch_one(database.pool())
         .await?
+    );
+
+    // The live tailer refreshes without re-deriving edges from the whole raw-log corpus. An edge
+    // already in storage must still widen the plan.
+    let (light_state, light_tasks) =
+        refresh_runtime_state_from_stored_discovery(database.pool(), &initial_state)
+            .await?
+    .expect("a stored discovery edge must widen the watch plan without adapter-owned resync");
+    assert_eq!(
+        light_state.watched_chain_plan[0].addresses,
+        refreshed_state.watched_chain_plan[0].addresses
+    );
+    assert_eq!(
+        light_state.watched_chain_plan[0].discovery_edge_entry_count,
+        1
+    );
+    assert_eq!(
+        light_tasks[0].addresses,
+        light_state.watched_chain_plan[0].addresses
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn widen_runtime_state_to_live_watch_scope_admits_discovered_targets_without_manifest_resync()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let manifests = TestManifestDir::new()?;
+    manifests.write_manifest_for_source_family(
+        "ens_v1_registry_l1",
+        &ens_v1_registry_resolver_discovery_manifest_contents(),
+    )?;
+    manifests.write_manifest_for_source_family(
+        "ens_v1_resolver_l1",
+        &ens_v1_resolver_manifest_contents(),
+    )?;
+    let repository = load_manifest_repository(&manifests.path)?;
+
+    let narrow_state = build_manifest_runtime_state_with_watch_scope(
+        database.pool(),
+        &repository,
+        RuntimeWatchScope::ManifestDeclaredOnly,
+    )
+    .await?;
+    assert_eq!(narrow_state.watched_chain_plan[0].addresses.len(), 1);
+    assert_eq!(
+        narrow_state.watched_chain_plan[0].discovery_edge_entry_count,
+        0
+    );
+
+    let narrow_tasks =
+        sync_intake_chain_tasks(database.pool(), &narrow_state.watched_chain_plan).await?;
+    let canonical_head = provider_block(
+        "0xabababababababababababababababababababababababababababababababab",
+        Some("0xbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc"),
+        43,
+    );
+    let (provider, server) = bundle_provider(vec![canonical_head.clone()]).await?;
+    reconcile_fetched_heads(
+        database.pool(),
+        &narrow_tasks[0],
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: canonical_head.clone(),
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?
+    .expect("initial ENSv1 registry poll must update task state");
+    insert_raw_new_resolver_log_for_node(
+        database.pool(),
+        "ethereum-mainnet",
+        &canonical_head,
+        "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
+        "0x0000000000000000000000000000000000000003",
+        &namehash_for_dns_name(&dns_encoded_eth_name("alice")),
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    sync_adapter_owned_raw_log_state(database.pool(), &narrow_state.watched_chain_plan).await?;
+
+    let live_state =
+        widen_runtime_state_to_live_watch_scope(database.pool(), &narrow_state).await?;
+
+    assert_eq!(
+        live_state.watched_chain_plan[0].addresses,
+        vec![
+            "0x0000000000000000000000000000000000000003".to_owned(),
+            "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned(),
+        ]
+    );
+    assert_eq!(live_state.watched_chain_plan[0].discovery_edge_entry_count, 1);
+    // Widening reloads the stored plan; it must not re-run manifest sync.
+    assert_eq!(live_state.manifest_summary, narrow_state.manifest_summary);
+    assert_eq!(live_state.sync_summary, narrow_state.sync_summary);
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn live_watch_scope_refresh_does_not_rederive_discovery_edges_from_raw_logs() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let manifests = TestManifestDir::new()?;
+    manifests.write_manifest_for_source_family(
+        "ens_v1_registry_l1",
+        &ens_v1_registry_resolver_discovery_manifest_contents(),
+    )?;
+    manifests.write_manifest_for_source_family(
+        "ens_v1_resolver_l1",
+        &ens_v1_resolver_manifest_contents(),
+    )?;
+
+    let repository = load_manifest_repository(&manifests.path)?;
+    let initial_state = build_manifest_runtime_state(database.pool(), &repository).await?;
+    let initial_tasks =
+        sync_intake_chain_tasks(database.pool(), &initial_state.watched_chain_plan).await?;
+
+    let canonical_head = provider_block(
+        "0xabababababababababababababababababababababababababababababababab",
+        Some("0xbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc"),
+        43,
+    );
+    let (provider, server) = bundle_provider(vec![canonical_head.clone()]).await?;
+    reconcile_fetched_heads(
+        database.pool(),
+        &initial_tasks[0],
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: canonical_head.clone(),
+            safe: None,
+            finalized: None,
+        },
+    )
+    .await?
+    .expect("initial ENSv1 registry poll must update task state");
+
+    insert_raw_new_resolver_log_for_node(
+        database.pool(),
+        "ethereum-mainnet",
+        &canonical_head,
+        "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E",
+        "0x0000000000000000000000000000000000000003",
+        &namehash_for_dns_name(&dns_encoded_eth_name("alice")),
+        CanonicalityState::Canonical,
+    )
+    .await?;
+
+    // Without the adapter-owned resync nothing derives the edge from the raw log, so the plan
+    // cannot widen. This is what keeps the whole-corpus re-derivation off the live poll tick.
+    assert!(
+        refresh_runtime_state_from_stored_discovery(database.pool(), &initial_state)
+            .await?
+            .is_none(),
+        "a raw log alone must not widen the plan when adapter-owned resync is skipped"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE deactivated_at IS NULL"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0
     );
 
     server.abort();

@@ -6,13 +6,17 @@ use bigname_storage::{
 };
 use tracing::info;
 
-use super::super::persistence::ensure_losing_branch_raw_blocks_exist;
+use super::{
+    super::persistence::ensure_losing_branch_raw_blocks_exist,
+    stored_lineage::ChainCoverageFrontiers,
+};
 
-pub(super) async fn orphan_reorg_losing_branch_payloads(
+pub(crate) async fn orphan_reorg_losing_branch_payloads(
     pool: &sqlx::PgPool,
     chain: &str,
     current_canonical_hash: Option<&str>,
     stop_before_hash: Option<&str>,
+    coverage_frontiers: &ChainCoverageFrontiers,
 ) -> Result<()> {
     if let Some(current_canonical_hash) = current_canonical_hash {
         ensure_losing_branch_raw_blocks_exist(
@@ -22,8 +26,16 @@ pub(super) async fn orphan_reorg_losing_branch_payloads(
             stop_before_hash,
         )
         .await?;
-        mark_raw_block_facts_range_orphaned(pool, chain, current_canonical_hash, stop_before_hash)
-            .await?;
+        let orphaned_raw_facts = mark_raw_block_facts_range_orphaned(
+            pool,
+            chain,
+            current_canonical_hash,
+            stop_before_hash,
+        )
+        .await?;
+        if orphaned_raw_facts.code_hash_count > 0 {
+            coverage_frontiers.invalidate_raw_code_baseline_frontier(chain);
+        }
         let orphaned_normalized_event_count = mark_block_derived_normalized_events_range_orphaned(
             pool,
             chain,

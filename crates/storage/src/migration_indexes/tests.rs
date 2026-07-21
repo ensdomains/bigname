@@ -102,11 +102,12 @@ async fn runtime_rebuild_matches_all_migrated_deferred_index_definitions() -> Re
 }
 
 #[tokio::test]
-async fn migrate_repairs_unready_contract_address_indexes() -> Result<()> {
+async fn migrate_repairs_unready_watch_lookup_indexes() -> Result<()> {
     let database = test_database().await?;
     for index in [
         ACTIVE_CONTRACT_ADDRESS_INDEX,
         HISTORICAL_CONTRACT_ADDRESS_INDEX,
+        NON_ORPHANED_RAW_CODE_LOWER_ADDRESS_INDEX,
     ] {
         sqlx::query(
             r#"
@@ -120,7 +121,7 @@ async fn migrate_repairs_unready_contract_address_indexes() -> Result<()> {
         .execute(database.pool())
         .await?;
     }
-    let ready = |index: &'static str| {
+    let ready = |index: &'static str, table: &'static str| {
         let pool = database.pool();
         async move {
             sqlx::query_scalar::<_, bool>(
@@ -129,27 +130,63 @@ async fn migrate_repairs_unready_contract_address_indexes() -> Result<()> {
                     SELECT indisvalid AND indisready
                     FROM pg_index
                     WHERE indexrelid = to_regclass($1)
-                      AND indrelid = 'public.contract_instance_addresses'::regclass
+                      AND indrelid = to_regclass($2)
                 ), FALSE)
                 "#,
             )
             .bind(index)
+            .bind(table)
             .fetch_one(pool)
             .await
         }
     };
-    assert!(!ready(ACTIVE_CONTRACT_ADDRESS_INDEX).await?);
-    assert!(!ready(HISTORICAL_CONTRACT_ADDRESS_INDEX).await?);
+    assert!(
+        !ready(
+            ACTIVE_CONTRACT_ADDRESS_INDEX,
+            "public.contract_instance_addresses"
+        )
+        .await?
+    );
+    assert!(
+        !ready(
+            HISTORICAL_CONTRACT_ADDRESS_INDEX,
+            "public.contract_instance_addresses"
+        )
+        .await?
+    );
+    assert!(
+        !ready(
+            NON_ORPHANED_RAW_CODE_LOWER_ADDRESS_INDEX,
+            "public.raw_code_hashes"
+        )
+        .await?
+    );
 
     crate::migrate(database.pool()).await?;
 
     assert!(
-        ready(ACTIVE_CONTRACT_ADDRESS_INDEX).await?,
+        ready(
+            ACTIVE_CONTRACT_ADDRESS_INDEX,
+            "public.contract_instance_addresses"
+        )
+        .await?,
         "migrate must repair the unready active index"
     );
     assert!(
-        ready(HISTORICAL_CONTRACT_ADDRESS_INDEX).await?,
+        ready(
+            HISTORICAL_CONTRACT_ADDRESS_INDEX,
+            "public.contract_instance_addresses"
+        )
+        .await?,
         "migrate must repair the unready historical index"
+    );
+    assert!(
+        ready(
+            NON_ORPHANED_RAW_CODE_LOWER_ADDRESS_INDEX,
+            "public.raw_code_hashes"
+        )
+        .await?,
+        "migrate must repair the unready raw-code baseline index"
     );
     database.cleanup().await?;
     Ok(())
@@ -198,6 +235,24 @@ async fn watched_address_lookup_indexes_cover_active_and_historical_rows() -> Re
     assert!(
         historical_plan.contains(HISTORICAL_CONTRACT_ADDRESS_INDEX),
         "historical watched-address lookup must use its expression index:\n{historical_plan}"
+    );
+
+    let raw_code_plan = sqlx::query_scalar::<_, String>(
+        r#"
+        EXPLAIN (FORMAT TEXT)
+        SELECT 1
+        FROM raw_code_hashes
+        WHERE chain_id = 'eip155:1'
+          AND LOWER(contract_address) = '0x0000000000000000000000000000000000000001'
+          AND canonicality_state <> 'orphaned'::canonicality_state
+        "#,
+    )
+    .fetch_all(&mut *transaction)
+    .await?
+    .join("\n");
+    assert!(
+        raw_code_plan.contains(NON_ORPHANED_RAW_CODE_LOWER_ADDRESS_INDEX),
+        "raw-code baseline lookup must use its expression index:\n{raw_code_plan}"
     );
 
     transaction.rollback().await?;

@@ -41,8 +41,27 @@ const MAX_PUBLICATIONS_PER_PROMOTION: usize = 10_000;
 pub(crate) struct ChainCoverageFrontiers {
     validated_snapshot_revisions: Mutex<BTreeMap<String, i64>>,
     promotion_epochs: Mutex<BTreeMap<String, i64>>,
+    raw_code_baseline_frontiers: Mutex<BTreeMap<String, RawCodeBaselineFrontier>>,
     #[cfg(test)]
     required_tuple_range_scans: Mutex<BTreeMap<String, Vec<(i64, i64)>>>,
+}
+
+/// Process-lifetime progress of the per-chain raw-code baseline sweep: the
+/// watched surface is verified in sorted-address chunks, at most a capped
+/// number of addresses per poll tick, with each chunk's observations upserted
+/// before the cursor advances. `completed_admission_epoch` records the epoch
+/// under which the swept plan was loaded; applying a plan with a later epoch
+/// starts a fresh sweep so newly watched addresses are eventually baselined
+/// without ever re-arming a whole-surface fetch inside one tick.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct RawCodeBaselineFrontier {
+    /// Discovery admission epoch the in-progress sweep started under.
+    pub(crate) sweep_admission_epoch: Option<i64>,
+    /// Last watched address (sorted order) verified by the in-progress sweep.
+    pub(crate) verified_through_address: Option<String>,
+    /// Admission epoch the last finished sweep started under; a moved epoch
+    /// starts a fresh sweep.
+    pub(crate) completed_admission_epoch: Option<i64>,
 }
 
 impl ChainCoverageFrontiers {
@@ -80,6 +99,33 @@ impl ChainCoverageFrontiers {
             );
         }
         Ok(epoch)
+    }
+
+    pub(crate) fn raw_code_baseline_frontier(&self, chain: &str) -> RawCodeBaselineFrontier {
+        self.raw_code_baseline_frontiers
+            .lock()
+            .expect("raw code baseline frontier lock must not be poisoned")
+            .get(chain)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn store_raw_code_baseline_frontier(
+        &self,
+        chain: &str,
+        frontier: RawCodeBaselineFrontier,
+    ) {
+        self.raw_code_baseline_frontiers
+            .lock()
+            .expect("raw code baseline frontier lock must not be poisoned")
+            .insert(chain.to_owned(), frontier);
+    }
+
+    pub(crate) fn invalidate_raw_code_baseline_frontier(&self, chain: &str) {
+        self.raw_code_baseline_frontiers
+            .lock()
+            .expect("raw code baseline frontier lock must not be poisoned")
+            .remove(chain);
     }
 
     fn record_required_tuple_range_scan(&self, chain: &str, from_block: i64, through_block: i64) {

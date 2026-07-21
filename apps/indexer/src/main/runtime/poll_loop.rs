@@ -20,7 +20,7 @@ use super::logging::{
     log_manifest_summary, log_provider_registry, log_watched_chain_plan,
 };
 use super::manifest::{
-    ManifestRuntimeState, RuntimeWatchScope, build_manifest_runtime_state_with_watch_scope,
+    ManifestRuntimeState, RuntimeWatchScope, build_manifest_runtime_state_for_repository_refresh,
     ensure_manifest_root_ready, load_manifest_repository,
 };
 use super::refresh::{refresh_intake_chain_tasks, refresh_manifest_normalized_events_from_storage};
@@ -30,7 +30,10 @@ mod discovery_refresh;
 #[path = "poll_loop/replay_handoff.rs"]
 mod replay_handoff;
 
+#[cfg(not(test))]
 use discovery_refresh::refresh_discovery_watch_state;
+#[cfg(test)]
+pub(crate) use discovery_refresh::refresh_discovery_watch_state;
 #[cfg(test)]
 pub(crate) use replay_handoff::{
     ReplayHandoffLatchStatus, install_replay_handoff_before_latch_test_hook,
@@ -45,6 +48,7 @@ pub(crate) async fn run_poll_loop(
     manifests_root: PathBuf,
     mut manifest_runtime_state: ManifestRuntimeState,
     mut intake_chain_tasks: Vec<IntakeChainTask>,
+    initial_watched_plan_admission_epochs: BTreeMap<String, i64>,
     provider_registry: &ProviderRegistry,
     poll_interval_secs: u64,
     runtime_watch_scope: RuntimeWatchScope,
@@ -53,6 +57,8 @@ pub(crate) async fn run_poll_loop(
     adapter_sync_on_live_poll_after_normalized_replay_catchup: bool,
     manifest_observation_refresh_enabled: bool,
     discovery_refresh_enabled: bool,
+    resolver_profile_convergence_enabled: bool,
+    resync_adapter_owned_state_on_discovery_refresh: bool,
     header_audit_mode: HeaderAuditMode,
     event_silent_reverse_resolver_addresses: Vec<String>,
     latched_bootstrap_finalized_heads: BTreeMap<String, ProviderBlock>,
@@ -60,6 +66,10 @@ pub(crate) async fn run_poll_loop(
 ) -> Result<()> {
     let deployment_profile = deployment_profile_from_manifest_root(&manifests_root);
     let mut live_poll_adapter_sync_restored_after_replay = false;
+    let mut forced_handoff_plan_reload_complete = false;
+    // Change-detection sentinel for the per-tick stored watch-plan reload:
+    // holds the discovery admission epochs the current plan was loaded under.
+    let mut watched_plan_admission_epochs = Some(initial_watched_plan_admission_epochs);
     let mut interval = tokio::time::interval(Duration::from_secs(poll_interval_secs));
     interval.tick().await;
 
@@ -98,10 +108,11 @@ pub(crate) async fn run_poll_loop(
                                 "failed to reload repository manifests; keeping last successful runtime state"
                             );
                         } else {
-                            match build_manifest_runtime_state_with_watch_scope(
+                            match build_manifest_runtime_state_for_repository_refresh(
                                 pool,
                                 &manifest_repository,
                                 runtime_watch_scope,
+                                adapter_sync_on_manifest_refresh,
                             )
                             .await
                             {
@@ -388,6 +399,8 @@ pub(crate) async fn run_poll_loop(
                         &deployment_profile,
                         &provider_configured_chains,
                         &mut live_poll_adapter_sync_restored_after_replay,
+                        &mut forced_handoff_plan_reload_complete,
+                        &mut watched_plan_admission_epochs,
                         header_audit_mode,
                         &event_silent_reverse_resolver_addresses,
                         coverage_frontiers,
@@ -399,11 +412,15 @@ pub(crate) async fn run_poll_loop(
                     }
                 }
 
+                let loaded_plan_admission_epochs = watched_plan_admission_epochs
+                    .as_ref()
+                    .context("live watch plan is missing its loaded admission-epoch snapshot")?;
                 poll_provider_heads_with_adapter_sync(
                     pool,
                     &mut intake_chain_tasks,
                     provider_registry,
                     &deployment_profile,
+                    loaded_plan_admission_epochs,
                     effective_adapter_sync_on_live_poll,
                     header_audit_mode,
                     &event_silent_reverse_resolver_addresses,
@@ -469,7 +486,9 @@ pub(crate) async fn run_poll_loop(
                         provider_registry,
                         &mut manifest_runtime_state,
                         &mut intake_chain_tasks,
-                        discovery_refresh_enabled,
+                        resync_adapter_owned_state_on_discovery_refresh,
+                        resolver_profile_convergence_enabled,
+                        &mut watched_plan_admission_epochs,
                     )
                     .await?;
                 }

@@ -1064,6 +1064,11 @@ async fn reconcile_fetched_heads_fetches_missing_emitter_code_despite_unrelated_
         Some("0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"),
         42,
     );
+    let safe_head = provider_block(
+        "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        None,
+        41,
+    );
     let task = crate::runtime::IntakeChainTask {
         chain: "ethereum-mainnet".to_owned(),
         addresses: vec![emitter_address.to_owned(), quiet_address.to_owned()],
@@ -1082,27 +1087,48 @@ async fn reconcile_fetched_heads_fetches_missing_emitter_code_despite_unrelated_
     };
     upsert_raw_blocks(
         database.pool(),
-        &[provider_block_to_raw_block(
-            "ethereum-mainnet",
-            &canonical_head,
-            CanonicalityState::Canonical,
-        )],
+        &[
+            provider_block_to_raw_block(
+                "ethereum-mainnet",
+                &canonical_head,
+                CanonicalityState::Canonical,
+            ),
+            provider_block_to_raw_block(
+                "ethereum-mainnet",
+                &safe_head,
+                CanonicalityState::Safe,
+            ),
+        ],
     )
     .await?;
     upsert_raw_logs(
         database.pool(),
-        &[RawLog {
-            chain_id: "ethereum-mainnet".to_owned(),
-            block_hash: canonical_head.block_hash.clone(),
-            block_number: canonical_head.block_number,
-            transaction_hash: transaction_hash_for_block(&canonical_head),
-            transaction_index: 0,
-            log_index: 0,
-            emitting_address: emitter_address.to_owned(),
-            topics: vec![name_wrapped_topic0()],
-            data: Vec::new(),
-            canonicality_state: CanonicalityState::Canonical,
-        }],
+        &[
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: canonical_head.block_hash.clone(),
+                block_number: canonical_head.block_number,
+                transaction_hash: transaction_hash_for_block(&canonical_head),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: emitter_address.to_owned(),
+                topics: vec![name_wrapped_topic0()],
+                data: Vec::new(),
+                canonicality_state: CanonicalityState::Canonical,
+            },
+            RawLog {
+                chain_id: "ethereum-mainnet".to_owned(),
+                block_hash: safe_head.block_hash.clone(),
+                block_number: safe_head.block_number,
+                transaction_hash: transaction_hash_for_block(&safe_head),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: emitter_address.to_owned(),
+                topics: vec![name_wrapped_topic0()],
+                data: Vec::new(),
+                canonicality_state: CanonicalityState::Safe,
+            },
+        ],
     )
     .await?;
     upsert_raw_code_hashes(
@@ -1117,6 +1143,165 @@ async fn reconcile_fetched_heads_fetches_missing_emitter_code_despite_unrelated_
             code_byte_length: 0,
             canonicality_state: CanonicalityState::Canonical,
         }],
+    )
+    .await?;
+
+    let code_requests =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, u64, u64)>::new()));
+    let request_log = std::sync::Arc::clone(&code_requests);
+    let (url, server) = spawn_json_rpc_server(std::sync::Arc::new(move |body| {
+        let method = body
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let params = body
+            .get("params")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let first_param = params
+            .first()
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+
+        let result = match method {
+            "eth_getCode" => {
+                request_log
+                    .lock()
+                    .expect("code request log must not be poisoned")
+                    .push((
+                        first_param.clone(),
+                        body.get("_test_http_request_id")
+                            .and_then(Value::as_u64)
+                            .expect("test server must annotate the HTTP request id"),
+                        body.get("_test_batch_size")
+                            .and_then(Value::as_u64)
+                            .expect("test server must annotate the batch size"),
+                    ));
+                Value::String("0x6001600155".to_owned())
+            }
+            _ => panic!("unexpected reconciliation RPC request: {body}"),
+        };
+
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": result,
+        })
+    }))
+    .await?;
+    let provider = provider::JsonRpcProvider::new(&url)?;
+
+    persist_reconciled_raw_code_hashes(
+        database.pool(),
+        &task,
+        &provider,
+        &ProviderHeadSnapshot {
+            canonical: canonical_head.clone(),
+            safe: Some(safe_head),
+            finalized: None,
+        },
+        &CanonicalReconciliation {
+            status: CanonicalReconciliationStatus::Unchanged,
+            canonical: Some(CheckpointBlockRef {
+                block_hash: canonical_head.block_hash.clone(),
+                block_number: canonical_head.block_number,
+            }),
+            fetched_parent_count: 0,
+            orphaned_block_count: 0,
+            reconciled_blocks: Vec::new(),
+            raw_orphan_stop_before_hash: None,
+        },
+        HeadChangeSet {
+            canonical_head_changed: false,
+            safe_head_changed: false,
+            finalized_head_changed: false,
+        },
+        0,
+        &ChainCoverageFrontiers::default(),
+    )
+    .await?;
+
+    assert_eq!(
+        code_requests
+            .lock()
+            .expect("code request log must not be poisoned")
+            .as_slice(),
+        &[
+            (emitter_address.to_owned(), 0, 2),
+            (emitter_address.to_owned(), 0, 2),
+        ],
+        "all candidate blocks must share one batched provider call"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_code_hashes")
+            .fetch_one(database.pool())
+            .await?,
+        3
+    );
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn raw_code_baseline_sweep_persists_progress_and_resweeps_on_admission_epoch_move()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address_a = "0x00000000000000000000000000000000000000aa";
+    let address_b = "0x00000000000000000000000000000000000000bb";
+    let address_c = "0x00000000000000000000000000000000000000cc";
+    let canonical_head = provider_block(
+        "0xfefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefe",
+        Some("0xadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad"),
+        61,
+    );
+    let task_for = |addresses: Vec<String>| crate::runtime::IntakeChainTask {
+        chain: "ethereum-mainnet".to_owned(),
+        addresses,
+        manifest_root_entry_count: 1,
+        manifest_contract_entry_count: 1,
+        discovery_edge_entry_count: 0,
+        checkpoint: bigname_storage::ChainCheckpoint {
+            chain_id: "ethereum-mainnet".to_owned(),
+            canonical_block_hash: Some(canonical_head.block_hash.clone()),
+            canonical_block_number: Some(canonical_head.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+    };
+    let heads = ProviderHeadSnapshot {
+        canonical: canonical_head.clone(),
+        safe: None,
+        finalized: None,
+    };
+    let canonical_reconciliation = CanonicalReconciliation {
+        status: CanonicalReconciliationStatus::Unchanged,
+        canonical: Some(CheckpointBlockRef {
+            block_hash: canonical_head.block_hash.clone(),
+            block_number: canonical_head.block_number,
+        }),
+        fetched_parent_count: 0,
+        orphaned_block_count: 0,
+        reconciled_blocks: Vec::new(),
+        raw_orphan_stop_before_hash: None,
+    };
+    let unchanged_heads = HeadChangeSet {
+        canonical_head_changed: false,
+        safe_head_changed: false,
+        finalized_head_changed: false,
+    };
+    upsert_raw_blocks(
+        database.pool(),
+        &[provider_block_to_raw_block(
+            "ethereum-mainnet",
+            &canonical_head,
+            CanonicalityState::Canonical,
+        )],
     )
     .await?;
 
@@ -1157,46 +1342,121 @@ async fn reconcile_fetched_heads_fetches_missing_emitter_code_despite_unrelated_
     }))
     .await?;
     let provider = provider::JsonRpcProvider::new(&url)?;
+    let coverage_frontiers = ChainCoverageFrontiers::default();
 
+    // First tick: every watched address is missing a baseline observation, so
+    // the sweep fetches them (in sorted order) and upserts the observations.
     persist_reconciled_raw_code_hashes(
         database.pool(),
-        &task,
+        &task_for(vec![address_a.to_owned(), address_b.to_owned()]),
         &provider,
-        &ProviderHeadSnapshot {
-            canonical: canonical_head.clone(),
-            safe: None,
-            finalized: None,
-        },
-        &CanonicalReconciliation {
-            status: CanonicalReconciliationStatus::Unchanged,
-            canonical: Some(CheckpointBlockRef {
-                block_hash: canonical_head.block_hash.clone(),
-                block_number: canonical_head.block_number,
-            }),
-            fetched_parent_count: 0,
-            orphaned_block_count: 0,
-            reconciled_blocks: Vec::new(),
-            raw_orphan_stop_before_hash: None,
-        },
-        HeadChangeSet {
-            canonical_head_changed: false,
-            safe_head_changed: false,
-            finalized_head_changed: false,
-        },
+        &heads,
+        &canonical_reconciliation,
+        unchanged_heads,
+        0,
+        &coverage_frontiers,
     )
     .await?;
-
     assert_eq!(
         *code_requests
             .lock()
             .expect("code request log must not be poisoned"),
-        vec![emitter_address.to_owned()]
+        vec![address_a.to_owned(), address_b.to_owned()]
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_code_hashes")
             .fetch_one(database.pool())
             .await?,
         2
+    );
+
+    // Second tick under the same admission epoch: the finished sweep is
+    // remembered, so no address is re-fetched and no anti-join re-runs over
+    // the watch surface.
+    persist_reconciled_raw_code_hashes(
+        database.pool(),
+        &task_for(vec![address_a.to_owned(), address_b.to_owned()]),
+        &provider,
+        &heads,
+        &canonical_reconciliation,
+        unchanged_heads,
+        0,
+        &coverage_frontiers,
+    )
+    .await?;
+    assert_eq!(
+        code_requests
+            .lock()
+            .expect("code request log must not be poisoned")
+            .len(),
+        2
+    );
+
+    // A watched-surface mutation bumps the chain's admission epoch (the
+    // ratified invariant). Once the matching plan is loaded, the sweep
+    // restarts — probing observed addresses and fetching only the new one.
+    sqlx::query(
+        r#"
+        INSERT INTO discovery_admission_epochs (chain_id, epoch)
+        VALUES ('ethereum-mainnet', 1)
+        ON CONFLICT (chain_id) DO UPDATE SET epoch = discovery_admission_epochs.epoch + 1
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    // The DB epoch can move before the poll loop applies the corresponding
+    // plan. A sweep over the still-loaded old plan must remain pinned to its
+    // old epoch rather than recording completion for the unseen address.
+    persist_reconciled_raw_code_hashes(
+        database.pool(),
+        &task_for(vec![address_a.to_owned(), address_b.to_owned()]),
+        &provider,
+        &heads,
+        &canonical_reconciliation,
+        unchanged_heads,
+        0,
+        &coverage_frontiers,
+    )
+    .await?;
+    assert_eq!(
+        code_requests
+            .lock()
+            .expect("code request log must not be poisoned")
+            .len(),
+        2
+    );
+
+    persist_reconciled_raw_code_hashes(
+        database.pool(),
+        &task_for(vec![
+            address_a.to_owned(),
+            address_b.to_owned(),
+            address_c.to_owned(),
+        ]),
+        &provider,
+        &heads,
+        &canonical_reconciliation,
+        unchanged_heads,
+        1,
+        &coverage_frontiers,
+    )
+    .await?;
+    assert_eq!(
+        *code_requests
+            .lock()
+            .expect("code request log must not be poisoned"),
+        vec![
+            address_a.to_owned(),
+            address_b.to_owned(),
+            address_c.to_owned(),
+        ]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM raw_code_hashes")
+            .fetch_one(database.pool())
+            .await?,
+        3
     );
 
     server.abort();

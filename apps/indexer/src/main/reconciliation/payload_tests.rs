@@ -6,11 +6,32 @@ use sqlx::types::time::OffsetDateTime;
 use super::*;
 
 #[test]
+fn selected_address_set_probes_sorted_plan_addresses_case_insensitively() {
+    let plan_addresses = vec![
+        "0x00000000000000000000000000000000000000aa".to_owned(),
+        "0x00000000000000000000000000000000000000bb".to_owned(),
+        "0x00000000000000000000000000000000000000cc".to_owned(),
+    ];
+    let selected = SelectedAddressSet::from_plan_addresses(&plan_addresses);
+
+    assert!(selected.contains("0x00000000000000000000000000000000000000aa"));
+    assert!(selected.contains("0x00000000000000000000000000000000000000BB"));
+    assert!(selected.contains("0x00000000000000000000000000000000000000Cc"));
+    assert!(!selected.contains("0x00000000000000000000000000000000000000dd"));
+    assert!(!selected.contains("0x00000000000000000000000000000000000000a"));
+    assert_eq!(selected.as_sorted_slice(), plan_addresses.as_slice());
+
+    let empty: Vec<String> = Vec::new();
+    assert!(!SelectedAddressSet::from_plan_addresses(&empty).contains("0x00"));
+}
+
+#[test]
 fn live_payload_retains_generic_resolver_topics_without_widening_other_emitters() {
     let selected_address = "0x00000000000000000000000000000000000000a1";
     let generic_emitter = "0x00000000000000000000000000000000000000b1";
     let unrelated_emitter = "0x00000000000000000000000000000000000000c1";
-    let selected_addresses = selected_address_set(&[selected_address.to_owned()]);
+    let selected_plan_addresses = vec![selected_address.to_owned()];
+    let selected_addresses = SelectedAddressSet::from_plan_addresses(&selected_plan_addresses);
     let generic_topic0 = crate::ens_v1_resolver::generic_resolver_record_topic0s()
         .into_iter()
         .next()
@@ -84,7 +105,7 @@ fn live_payload_retains_generic_resolver_topics_without_widening_other_emitters(
         "ethereum-mainnet",
         &raw_block,
         &logs,
-        &selected_addresses,
+        selected_addresses,
         &generic_resolver_topic0s,
     )
     .expect("live log selection must succeed");

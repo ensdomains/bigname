@@ -12,6 +12,9 @@ use super::{
 };
 
 impl JsonRpcProvider {
+    // Sequential per-address variant retained for provider parity tests; the
+    // live and baseline paths use the batched `_at_block_hashes` form.
+    #[allow(dead_code)]
     pub async fn fetch_code_observations_at_block(
         &self,
         addresses: &[String],
@@ -121,6 +124,7 @@ impl JsonRpcProvider {
         Ok(observations)
     }
 
+    #[allow(dead_code)]
     async fn fetch_code_for_address_at_block(
         &self,
         address: &str,

@@ -48,9 +48,9 @@ use contiguous_gap::reconcile_contiguous_checkpoint_gap;
 pub(crate) use ens_v2_coverage_recovery::{
     EnsV2LiveCoverageRecoveryStatus, recover_ens_v2_live_coverage_requirement,
 };
-use orphaning::orphan_reorg_losing_branch_payloads;
+pub(crate) use orphaning::orphan_reorg_losing_branch_payloads;
 pub(crate) use poll::{poll_provider_heads, poll_provider_heads_with_adapter_sync};
-pub(crate) use stored_lineage::ChainCoverageFrontiers;
+pub(crate) use stored_lineage::{ChainCoverageFrontiers, RawCodeBaselineFrontier};
 use stored_lineage::{
     StoredLineagePromotion, reconcile_large_checkpoint_gap_from_stored_lineage,
     stored_lineage_promotion_anchors,
@@ -70,6 +70,7 @@ pub(crate) async fn reconcile_intake_chain_task(
         "test",
         task,
         provider,
+        0,
         true,
         HeaderAuditMode::Minimal,
         &[],
@@ -85,6 +86,7 @@ pub(crate) async fn reconcile_intake_chain_task_with_adapter_sync(
     deployment_profile: &str,
     task: &IntakeChainTask,
     provider: &(impl ChainProviderOps + ?Sized),
+    loaded_plan_admission_epoch: i64,
     adapter_sync_enabled: bool,
     header_audit_mode: HeaderAuditMode,
     event_silent_reverse_resolver_addresses: &[String],
@@ -98,6 +100,7 @@ pub(crate) async fn reconcile_intake_chain_task_with_adapter_sync(
         task,
         provider,
         &heads,
+        loaded_plan_admission_epoch,
         adapter_sync_enabled,
         header_audit_mode,
         event_silent_reverse_resolver_addresses,
@@ -120,6 +123,7 @@ pub(crate) async fn reconcile_fetched_heads(
         task,
         provider,
         heads,
+        0,
         true,
         HeaderAuditMode::Minimal,
         &[],
@@ -147,6 +151,7 @@ pub(crate) async fn reconcile_fetched_heads_with_adapter_sync(
         task,
         provider,
         heads,
+        0,
         adapter_sync_enabled,
         header_audit_mode,
         event_silent_reverse_resolver_addresses,
@@ -163,6 +168,7 @@ async fn reconcile_fetched_heads_with_gap_policy(
     task: &IntakeChainTask,
     provider: &(impl ChainProviderOps + ?Sized),
     heads: &ProviderHeadSnapshot,
+    loaded_plan_admission_epoch: i64,
     adapter_sync_enabled: bool,
     header_audit_mode: HeaderAuditMode,
     event_silent_reverse_resolver_addresses: &[String],
@@ -199,6 +205,7 @@ async fn reconcile_fetched_heads_with_gap_policy(
             &task.chain,
             task.checkpoint.canonical_block_hash.as_deref(),
             canonical.raw_orphan_stop_before_hash.as_deref(),
+            coverage_frontiers,
         )
         .await?;
     }
@@ -267,9 +274,11 @@ async fn reconcile_fetched_heads_with_gap_policy(
         &accepted_heads,
         &canonical,
         head_change_set,
+        loaded_plan_admission_epoch,
         adapter_sync_enabled,
         header_audit_mode,
         event_silent_reverse_resolver_addresses,
+        coverage_frontiers,
     )
     .await?;
     if adapter_sync_enabled {

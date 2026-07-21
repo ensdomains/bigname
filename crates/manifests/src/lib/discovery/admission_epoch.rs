@@ -74,6 +74,26 @@ pub(crate) async fn bump_discovery_admission_epochs(
     Ok(())
 }
 
+/// Current admission epoch for every chain that has recorded a watched-surface
+/// mutation. A chain with no row has epoch `0` and is simply absent.
+///
+/// This is the change-detection sentinel for stored watch-plan reloads: any
+/// transaction that mutates the watched surface must bump the owning chain's
+/// epoch row in the same transaction (see [`bump_discovery_admission_epochs`]),
+/// so an unchanged map proves the stored plan has not moved without scanning
+/// the plan tables.
+pub async fn load_discovery_admission_epochs(
+    pool: &PgPool,
+) -> Result<std::collections::BTreeMap<String, i64>> {
+    let rows = sqlx::query_as::<_, (String, i64)>(
+        "SELECT chain_id, epoch FROM discovery_admission_epochs ORDER BY chain_id",
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to load discovery admission epochs")?;
+    Ok(rows.into_iter().collect())
+}
+
 /// Current admission epoch for a chain; `0` when no discovery mutation has
 /// ever been recorded.
 pub async fn load_discovery_admission_epoch(pool: &PgPool, chain: &str) -> Result<i64> {

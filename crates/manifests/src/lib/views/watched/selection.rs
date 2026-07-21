@@ -358,6 +358,20 @@ pub async fn load_watched_chain_plan(pool: &sqlx::PgPool) -> Result<Vec<WatchedC
     Ok(plan_watched_contracts(&watched_contracts))
 }
 
+/// One-scan load of both the watched-contract summary and the chain plan.
+/// Summary and plan are pure functions over the same `load_watched_contracts`
+/// result; loading them separately doubles the full watched-surface scan,
+/// which is minutes of work at discovery-graph scale.
+pub async fn load_watched_contract_summary_and_chain_plan(
+    pool: &sqlx::PgPool,
+) -> Result<(WatchedContractSummary, Vec<WatchedChainPlan>)> {
+    let watched_contracts = load_watched_contracts(pool).await?;
+    Ok((
+        summarize_watched_contracts(&watched_contracts),
+        plan_watched_contracts(&watched_contracts),
+    ))
+}
+
 pub async fn load_manifest_declared_watched_chain_plan(
     pool: &sqlx::PgPool,
 ) -> Result<Vec<WatchedChainPlan>> {
