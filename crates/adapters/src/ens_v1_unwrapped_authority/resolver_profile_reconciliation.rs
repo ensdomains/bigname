@@ -1,7 +1,12 @@
 use super::*;
-use alloy_primitives::keccak256;
 use anyhow::ensure;
-use sqlx::{Postgres, QueryBuilder};
+use sqlx::Postgres;
+
+mod targets;
+
+pub use targets::{
+    ResolverProfileEventReconciliation, ResolverProfileEventReconciliationPublication,
+};
 
 const DEFAULT_REPLAY_MAX_RAW_LOGS_PER_PAGE: usize = 100_000;
 
@@ -21,7 +26,7 @@ pub struct ResolverProfileEventReconciliationSummary {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ResolverEmitterReplayRange {
+pub(super) struct ResolverEmitterReplayRange {
     first_block_number: i64,
     last_block_number: i64,
     resolver_block_count: usize,
@@ -54,12 +59,13 @@ impl ResolverProfileReplayContext {
     }
 }
 
-/// Re-derive resolver-local events after resolver profile inputs change.
+/// Re-derive resolver-local events after
+/// [resolver-profile](../../../docs/glossary.md) inputs change.
 ///
 /// The replay admits only the requested ENSv1 or Basenames resolver emitters.
 /// Registry, registrar, and wrapper logs across the inclusive resolver-fact
 /// range remain chronological normalization context, but their events are
-/// never candidates for profile orphaning.
+/// never candidates for resolver-profile orphaning.
 pub async fn reconcile_resolver_profile_events(
     pool: &PgPool,
     chain: &str,
@@ -84,153 +90,118 @@ pub(super) async fn reconcile_resolver_profile_events_with_log_limit(
         max_raw_logs_per_page > 0,
         "resolver profile reconciliation max logs per page must be positive"
     );
-    let resolver_addresses = normalized_resolver_addresses(resolver_addresses)?;
     if resolver_addresses.is_empty() {
         return Ok(ResolverProfileEventReconciliationSummary::default());
     }
-
-    let mut raw_log_guard = acquire_raw_log_staging_read_guard(pool, chain).await?;
-    let retention_generation = raw_log_guard.version().retention_generation;
-    ensure!(
-        retention_generation == 0,
-        "resolver-profile reconciliation cannot establish complete stateful history from raw-log retention generation {retention_generation} on chain {chain}; fully rebootstrap the database into a new generation-zero corpus before retrying"
-    );
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(format!("resolver_profile_reconciliation:{chain}"))
-        .execute(raw_log_guard.connection_mut())
+    let mut reconciliation = begin_resolver_profile_event_reconciliation(pool, chain).await?;
+    reconciliation.stage_addresses(resolver_addresses).await?;
+    reconciliation
+        .reconcile_with_log_limit(max_raw_logs_per_page)
+        .await?
+        .finish()
         .await
-        .with_context(|| format!("failed to lock resolver-profile reconciliation for {chain}"))?;
-    let replay_range = load_resolver_emitter_replay_range(pool, chain, &resolver_addresses).await?;
-    let mut summary = ResolverProfileEventReconciliationSummary {
-        resolver_address_count: resolver_addresses.len(),
-        block_hash_count: replay_range.map_or(0, |range| range.resolver_block_count),
-        ..ResolverProfileEventReconciliationSummary::default()
-    };
-    let Some(replay_range) = replay_range else {
-        raw_log_guard.release().await?;
-        return Ok(summary);
-    };
-    let resolver_address_set_digest = resolver_address_set_digest(&resolver_addresses);
-    let run_id = start_reconciliation_run(
-        pool,
-        chain,
-        replay_range,
-        &resolver_addresses,
-        &resolver_address_set_digest,
-    )
-    .await?;
-    let mut replay_context = ResolverProfileReplayContext {
-        run_id,
-        first_block_number: replay_range.first_block_number,
-        last_block_number: replay_range.last_block_number,
-        max_raw_logs_per_page,
-        page_count: 0,
-        max_page_log_count: 0,
-        max_live_state_item_count: 0,
-        max_live_state_payload_bytes: 0,
-    };
-
-    // Derive one chronological history under the current profile. Resolver
-    // facts define the inclusive repair range; registry, registrar, and
-    // wrapper facts inside that range remain required authority context.
-    let replay = pipeline::sync_ens_v1_unwrapped_authority_with_scope(
-        pool,
-        chain,
-        false,
-        &[],
-        None,
-        None,
-        None,
-        None,
-        Some(&mut replay_context),
-    )
-    .await?;
-    summary.scanned_log_count = replay.scanned_log_count;
-    summary.matched_log_count = replay.matched_log_count;
-    summary.normalized_event_count = replay.total_normalized_event_count;
-    summary.normalized_event_inserted_count = replay.total_normalized_event_inserted_count;
-    summary.replay_page_count = replay_context.page_count;
-    summary.max_replay_page_log_count = replay_context.max_page_log_count;
-    summary.max_live_state_item_count = replay_context.max_live_state_item_count;
-    summary.max_live_state_payload_bytes = replay_context.max_live_state_payload_bytes;
-
-    mark_reconciliation_replay_complete(pool, chain, run_id).await?;
-    let (inserted_count, orphaned_count) = publish_resolver_profile_events(
-        raw_log_guard.transaction_mut(),
-        chain,
-        replay_range,
-        run_id,
-        &resolver_address_set_digest,
-        resolver_addresses.len(),
-    )
-    .await?;
-    summary.normalized_event_inserted_count = inserted_count;
-    summary.orphaned_normalized_event_count = usize::try_from(orphaned_count)
-        .context("orphaned resolver-profile normalized-event count does not fit usize")?;
-    raw_log_guard.release().await?;
-    Ok(summary)
 }
 
-async fn start_reconciliation_run(
+pub async fn begin_resolver_profile_event_reconciliation(
     pool: &PgPool,
     chain: &str,
-    replay_range: ResolverEmitterReplayRange,
-    resolver_addresses: &[String],
-    resolver_address_set_digest: &str,
-) -> Result<Uuid> {
-    let run_id = Uuid::new_v4();
-    let mut transaction = pool
-        .begin()
-        .await
-        .context("failed to start resolver-profile reconciliation run transaction")?;
-    sqlx::query("DELETE FROM resolver_profile_reconciliation_runs WHERE chain_id = $1")
-        .bind(chain)
-        .execute(transaction.as_mut())
-        .await
-        .with_context(|| {
-            format!("failed to clean an incomplete resolver-profile run for chain {chain}")
-        })?;
-    sqlx::query(
-        r#"
-        INSERT INTO resolver_profile_reconciliation_runs (
-            run_id,
-            chain_id,
-            first_block_number,
-            last_block_number,
-            resolver_address_count,
-            resolver_address_set_digest
-        ) VALUES ($1, $2, $3, $4, $5, $6)
-        "#,
-    )
-    .bind(run_id)
-    .bind(chain)
-    .bind(replay_range.first_block_number)
-    .bind(replay_range.last_block_number)
-    .bind(i64::try_from(resolver_addresses.len()).context("resolver address count overflowed i64")?)
-    .bind(resolver_address_set_digest)
-    .execute(transaction.as_mut())
-    .await
-    .with_context(|| format!("failed to create resolver-profile run for chain {chain}"))?;
-    for addresses in resolver_addresses.chunks(1_000) {
-        let mut builder = QueryBuilder::<Postgres>::new(
-            "INSERT INTO resolver_profile_reconciliation_targets (run_id, resolver_address) ",
-        );
-        builder.push_values(addresses, |mut row, address| {
-            row.push_bind(run_id).push_bind(address);
-        });
-        builder
-            .build()
-            .execute(transaction.as_mut())
+) -> Result<ResolverProfileEventReconciliation> {
+    targets::begin_reconciliation(pool, chain).await
+}
+
+impl ResolverProfileEventReconciliation {
+    /// Replay one chronological chain context after every target page has been
+    /// staged. The returned publication retains the exact target set until the
+    /// indexer durably publishes its projection invalidations.
+    pub async fn reconcile(self) -> Result<ResolverProfileEventReconciliationPublication> {
+        self.reconcile_with_log_limit(DEFAULT_REPLAY_MAX_RAW_LOGS_PER_PAGE)
             .await
-            .with_context(|| {
-                format!("failed to stage resolver-profile targets for chain {chain}")
-            })?;
     }
-    transaction
-        .commit()
-        .await
-        .context("failed to commit resolver-profile reconciliation run")?;
-    Ok(run_id)
+
+    async fn reconcile_with_log_limit(
+        mut self,
+        max_raw_logs_per_page: usize,
+    ) -> Result<ResolverProfileEventReconciliationPublication> {
+        ensure!(
+            max_raw_logs_per_page > 0,
+            "resolver profile reconciliation max logs per page must be positive"
+        );
+        let prepared = self.prepare().await?;
+        let targets::ResolverProfileEventReconciliation {
+            pool,
+            chain,
+            mut raw_log_guard,
+            run_id,
+        } = self;
+        let replay_range = prepared.replay_range;
+        let mut summary = ResolverProfileEventReconciliationSummary {
+            resolver_address_count: prepared.resolver_address_count,
+            block_hash_count: replay_range.map_or(0, |range| range.resolver_block_count),
+            ..ResolverProfileEventReconciliationSummary::default()
+        };
+        let Some(replay_range) = replay_range else {
+            return Ok(ResolverProfileEventReconciliationPublication::new(
+                chain,
+                run_id,
+                raw_log_guard,
+                summary,
+            ));
+        };
+        let mut replay_context = ResolverProfileReplayContext {
+            run_id,
+            first_block_number: replay_range.first_block_number,
+            last_block_number: replay_range.last_block_number,
+            max_raw_logs_per_page,
+            page_count: 0,
+            max_page_log_count: 0,
+            max_live_state_item_count: 0,
+            max_live_state_payload_bytes: 0,
+        };
+
+        // Derive one chronological history under the current resolver profile.
+        // Resolver facts define the inclusive repair range; registry, registrar,
+        // and wrapper facts inside that range remain required authority context.
+        let replay = pipeline::sync_ens_v1_unwrapped_authority_with_scope(
+            &pool,
+            &chain,
+            false,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            Some(&mut replay_context),
+        )
+        .await?;
+        summary.scanned_log_count = replay.scanned_log_count;
+        summary.matched_log_count = replay.matched_log_count;
+        summary.normalized_event_count = replay.total_normalized_event_count;
+        summary.normalized_event_inserted_count = replay.total_normalized_event_inserted_count;
+        summary.replay_page_count = replay_context.page_count;
+        summary.max_replay_page_log_count = replay_context.max_page_log_count;
+        summary.max_live_state_item_count = replay_context.max_live_state_item_count;
+        summary.max_live_state_payload_bytes = replay_context.max_live_state_payload_bytes;
+
+        mark_reconciliation_replay_complete(&pool, &chain, run_id).await?;
+        let (inserted_count, orphaned_count) = publish_resolver_profile_events(
+            raw_log_guard.transaction_mut(),
+            &chain,
+            replay_range,
+            run_id,
+            &prepared.resolver_address_set_digest,
+            prepared.resolver_address_count,
+        )
+        .await?;
+        summary.normalized_event_inserted_count = inserted_count;
+        summary.orphaned_normalized_event_count = usize::try_from(orphaned_count)
+            .context("orphaned resolver-profile normalized-event count does not fit usize")?;
+        Ok(ResolverProfileEventReconciliationPublication::new(
+            chain,
+            run_id,
+            raw_log_guard,
+            summary,
+        ))
+    }
 }
 
 async fn mark_reconciliation_replay_complete(
@@ -259,86 +230,6 @@ async fn mark_reconciliation_replay_complete(
         "resolver-profile replay run disappeared before completion for chain {chain}"
     );
     Ok(())
-}
-
-fn normalized_resolver_addresses(resolver_addresses: &[String]) -> Result<Vec<String>> {
-    let mut normalized = BTreeSet::new();
-    for address in resolver_addresses {
-        let address = address.trim().to_ascii_lowercase();
-        if address.is_empty() {
-            bail!("resolver profile reconciliation address must not be empty");
-        }
-        normalized.insert(address);
-    }
-    Ok(normalized.into_iter().collect())
-}
-
-fn resolver_address_set_digest(resolver_addresses: &[String]) -> String {
-    format!("{:#x}", keccak256(resolver_addresses.join("\n").as_bytes()))
-}
-
-async fn load_resolver_emitter_replay_range(
-    pool: &PgPool,
-    chain: &str,
-    resolver_addresses: &[String],
-) -> Result<Option<ResolverEmitterReplayRange>> {
-    let (first_block_number, last_block_number, resolver_block_count, invalid_lineage_count) =
-        sqlx::query_as::<_, (Option<i64>, Option<i64>, i64, i64)>(
-            r#"
-        SELECT
-            MIN(raw_log.block_number),
-            MAX(raw_log.block_number),
-            COUNT(DISTINCT raw_log.block_hash)::BIGINT,
-            COUNT(*) FILTER (
-                WHERE lineage.block_hash IS NULL
-                   OR lineage.block_number <> raw_log.block_number
-                   OR lineage.canonicality_state NOT IN (
-                       'canonical'::canonicality_state,
-                       'safe'::canonicality_state,
-                       'finalized'::canonicality_state
-                   )
-            )::BIGINT AS invalid_lineage_count
-        FROM raw_logs raw_log
-        LEFT JOIN chain_lineage lineage
-          ON lineage.chain_id = raw_log.chain_id
-         AND lineage.block_hash = raw_log.block_hash
-        WHERE raw_log.chain_id = $1
-          AND lower(raw_log.emitting_address) = ANY($2::TEXT[])
-          AND raw_log.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-        "#,
-        )
-        .bind(chain)
-        .bind(resolver_addresses)
-        .fetch_one(pool)
-        .await
-        .with_context(|| {
-            format!("failed to load retained resolver-emitter replay range for chain {chain}")
-        })?;
-
-    if invalid_lineage_count > 0 {
-        bail!(
-            "{invalid_lineage_count} canonical resolver-emitter raw logs lack matching canonical lineage on chain {chain}"
-        );
-    }
-    let Some(first_block_number) = first_block_number else {
-        ensure!(
-            last_block_number.is_none() && resolver_block_count == 0,
-            "empty resolver-emitter replay range has inconsistent aggregate values on chain {chain}"
-        );
-        return Ok(None);
-    };
-    let last_block_number = last_block_number
-        .context("non-empty resolver-emitter replay range must have a last block")?;
-    Ok(Some(ResolverEmitterReplayRange {
-        first_block_number,
-        last_block_number,
-        resolver_block_count: usize::try_from(resolver_block_count)
-            .context("resolver-emitter block count does not fit usize")?,
-    }))
 }
 
 async fn publish_resolver_profile_events(
@@ -460,10 +351,5 @@ async fn publish_resolver_profile_events(
     .await
     .with_context(|| format!("failed to orphan stale resolver-profile events for {chain}"))?
     .rows_affected();
-    sqlx::query("DELETE FROM resolver_profile_reconciliation_runs WHERE run_id = $1")
-        .bind(run_id)
-        .execute(transaction.as_mut())
-        .await
-        .with_context(|| format!("failed to clean resolver-profile run for {chain}"))?;
     Ok((inserted_count, orphaned))
 }

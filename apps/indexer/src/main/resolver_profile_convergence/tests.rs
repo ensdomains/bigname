@@ -8,10 +8,6 @@ use super::{
     authority::{ResolverProfileAdmissionSemantics, ResolverProfileAuthorityEntry},
     drain_resolver_profile_input_changes, expanded_reconciliation_targets,
     expanded_reconciliation_targets_with_family_count, input_requires_reconciliation,
-    invalidations::{
-        enqueue_resolver_profile_projection_invalidations,
-        load_resolver_profile_projection_invalidation_plan,
-    },
 };
 
 #[test]
@@ -309,6 +305,242 @@ fn indexed_authority_matches_full_scans_for_load_shaped_inputs() {
             });
         assert_eq!(input_requires_reconciliation(candidate, &index), expected);
     }
+}
+
+#[tokio::test]
+async fn pending_input_drain_never_loads_the_full_authority_snapshot() -> anyhow::Result<()> {
+    let database = TestDatabase::create_migrated(
+        TestDatabaseConfig::new("indexer_resolver_profile_scoped_authority_drain"),
+        &bigname_storage::MIGRATOR,
+        "failed to apply migrations for scoped resolver-profile drain test",
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO resolver_profile_input_changes (
+            chain_id,
+            contract_address,
+            previous_code_hash,
+            current_code_hash
+        ) VALUES (
+            'ethereum-mainnet',
+            '0x0000000000000000000000000000000000000099',
+            NULL,
+            '0x01'
+        )
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    let summary = drain_resolver_profile_input_changes(database.pool()).await?;
+    assert_eq!(summary.loaded_input_count, 1);
+    assert_eq!(summary.authority_target_read_statement_count, 1);
+    assert_eq!(summary.max_authority_target_read_batch_size, 1);
+    assert_eq!(summary.family_target_read_statement_count, 0);
+    assert_eq!(summary.reconciled_target_count, 0);
+    assert_eq!(summary.acknowledged_input_count, 1);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn seed_change_reconciles_journal_family_in_bounded_pages() -> anyhow::Result<()> {
+    let database = TestDatabase::create_migrated(
+        TestDatabaseConfig::new("indexer_resolver_profile_seed_family_pages")
+            .pool_max_connections(3),
+        &bigname_storage::MIGRATOR,
+        "failed to apply migrations for resolver-profile seed-family paging test",
+    )
+    .await?;
+    let mut entries = Vec::new();
+    for address_number in 1..=2_501 {
+        entries.push(
+            bigname_storage::ResolverProfileAuthorityJournalEntry::from_payload(
+                serde_json::to_value(entry(
+                    "ethereum-mainnet",
+                    "ens_v1_resolver_l1",
+                    &format!("0x{address_number:040x}"),
+                    address_number == 1,
+                ))?,
+            )?,
+        );
+    }
+    let mut baseline =
+        bigname_storage::begin_resolver_profile_authority_journal_advance(database.pool(), 0)
+            .await?;
+    baseline.stage_entries(&entries).await?;
+    baseline.publish(&serde_json::json!({})).await?.unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO resolver_profile_input_changes (
+            chain_id,
+            contract_address,
+            previous_code_hash,
+            current_code_hash
+        ) VALUES (
+            'ethereum-mainnet',
+            '0x0000000000000000000000000000000000000001',
+            '0x01',
+            '0x02'
+        )
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    let runtime_guard = bigname_storage::hold_base_normalized_rederive_runtime_shared_lock(
+        database.pool(),
+        "bigname-indexer",
+    )
+    .await?;
+    let summary = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        drain_resolver_profile_input_changes(database.pool()),
+    )
+    .await
+    .expect("three-connection seed-family drain must not starve bounded journal/event reads")?;
+    drop(runtime_guard);
+    assert_eq!(summary.loaded_input_count, 1);
+    assert_eq!(summary.authority_target_read_statement_count, 1);
+    assert_eq!(summary.max_authority_target_read_batch_size, 1);
+    assert_eq!(summary.family_target_read_statement_count, 12);
+    assert_eq!(summary.max_family_target_page_size, 250);
+    assert_eq!(
+        summary.adapter_reconciliation_call_count, 1,
+        "one chain-context reconciliation must consume every bounded target page"
+    );
+    assert_eq!(
+        summary.invalidation_capture_pass_count, 1,
+        "one streamed invalidation capture must consume every staged chain target"
+    );
+    assert_eq!(summary.reconciled_target_count, 2_501);
+    assert_eq!(summary.invalidated_projection_key_count, 2_501);
+    assert_eq!(summary.acknowledged_input_count, 1);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn completed_reconciliation_crash_preserves_precaptured_invalidations() -> anyhow::Result<()>
+{
+    let database = TestDatabase::create_migrated(
+        TestDatabaseConfig::new("indexer_resolver_profile_crash_invalidation_staging"),
+        &bigname_storage::MIGRATOR,
+        "failed to apply migrations for resolver-profile invalidation crash test",
+    )
+    .await?;
+    let chain = "ethereum-mainnet";
+    let resolver = "0x00000000000000000000000000000000000000aa".to_owned();
+
+    let mut first =
+        bigname_adapters::begin_resolver_profile_event_reconciliation(database.pool(), chain)
+            .await?;
+    first
+        .stage_addresses(std::slice::from_ref(&resolver))
+        .await?;
+    super::invalidations::stage_resolver_profile_projection_invalidations(
+        database.pool(),
+        first.run_id(),
+        chain,
+    )
+    .await?;
+    let abandoned_publication = first.reconcile().await?;
+    drop(abandoned_publication);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT \
+             FROM resolver_profile_reconciliation_invalidation_keys"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+
+    let mut retry =
+        bigname_adapters::begin_resolver_profile_event_reconciliation(database.pool(), chain)
+            .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT \
+             FROM resolver_profile_reconciliation_invalidation_keys"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "starting a retry must preserve the prior pre-repair invalidation keys"
+    );
+    retry
+        .stage_addresses(std::slice::from_ref(&resolver))
+        .await?;
+    retry.reconcile().await?.finish().await?;
+    sqlx::query("DELETE FROM resolver_profile_reconciliation_invalidation_keys")
+        .execute(database.pool())
+        .await?;
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn same_chain_reconciliation_lock_covers_invalidation_publication() -> anyhow::Result<()> {
+    let database = TestDatabase::create_migrated(
+        TestDatabaseConfig::new("indexer_resolver_profile_invalidation_serialization"),
+        &bigname_storage::MIGRATOR,
+        "failed to apply migrations for resolver-profile invalidation serialization test",
+    )
+    .await?;
+    let chain = "ethereum-mainnet";
+    let resolver = "0x00000000000000000000000000000000000000aa".to_owned();
+
+    let mut reconciliation =
+        bigname_adapters::begin_resolver_profile_event_reconciliation(database.pool(), chain)
+            .await?;
+    reconciliation
+        .stage_addresses(std::slice::from_ref(&resolver))
+        .await?;
+    super::invalidations::stage_resolver_profile_projection_invalidations(
+        database.pool(),
+        reconciliation.run_id(),
+        chain,
+    )
+    .await?;
+    let mut publication = reconciliation.reconcile().await?;
+
+    let same_chain_lock_was_available =
+        sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("resolver_profile_reconciliation:{chain}"))
+            .fetch_one(database.pool())
+            .await?;
+
+    super::invalidations::publish_resolver_profile_projection_invalidations(
+        publication.connection_mut(),
+        chain,
+    )
+    .await?;
+    let visible_invalidation_count_before_finish = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM projection_invalidations \
+         WHERE projection = 'resolver_current' AND claim_token IS NULL",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    publication.finish().await?;
+    let visible_invalidation_count_after_finish = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM projection_invalidations \
+         WHERE projection = 'resolver_current' AND claim_token IS NULL",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    database.cleanup().await?;
+
+    assert!(
+        !same_chain_lock_was_available,
+        "same-chain reconciliation must remain serialized until its staged invalidations publish"
+    );
+    assert_eq!(
+        visible_invalidation_count_before_finish, 0,
+        "a projection worker must not see invalidations before event repair commits"
+    );
+    assert_eq!(visible_invalidation_count_after_finish, 1);
+    Ok(())
 }
 
 #[tokio::test]
@@ -646,7 +878,7 @@ async fn unavailable_chain_does_not_block_eligible_chain_convergence() -> anyhow
 }
 
 #[tokio::test]
-async fn invalidation_plan_includes_readable_history_but_excludes_orphaned_fork_rows()
+async fn staged_invalidations_include_readable_history_but_exclude_orphaned_fork_rows()
 -> anyhow::Result<()> {
     let database = TestDatabase::create_migrated(
         TestDatabaseConfig::new("indexer_resolver_profile_invalidation_scope"),
@@ -754,13 +986,17 @@ async fn invalidation_plan_includes_readable_history_but_excludes_orphaned_fork_
     .execute(database.pool())
     .await?;
 
-    let targets = std::collections::BTreeMap::from([(
-        "ethereum-mainnet".to_owned(),
-        std::collections::BTreeSet::from([resolver.to_owned()]),
-    )]);
-    let plan =
-        load_resolver_profile_projection_invalidation_plan(database.pool(), &targets).await?;
-    enqueue_resolver_profile_projection_invalidations(database.pool(), &plan).await?;
+    bigname_storage::enqueue_resolver_profile_reconciliations(
+        database.pool(),
+        &[bigname_storage::ResolverProfileReconciliationTarget {
+            chain_id: "ethereum-mainnet".to_owned(),
+            contract_address: resolver.to_owned(),
+        }],
+    )
+    .await?;
+    let summary = drain_resolver_profile_input_changes(database.pool()).await?;
+    assert_eq!(summary.reconciled_target_count, 1);
+    assert_eq!(summary.acknowledged_input_count, 1);
     let inventory_keys = sqlx::query_scalar::<_, String>(
         r#"
         SELECT projection_key
@@ -772,6 +1008,16 @@ async fn invalidation_plan_includes_readable_history_but_excludes_orphaned_fork_
     .fetch_all(database.pool())
     .await?;
     assert_eq!(inventory_keys, vec![readable_resource.to_string()]);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT \
+             FROM resolver_profile_reconciliation_invalidation_keys"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "successful reconciliation must cascade-delete staged invalidation keys"
+    );
 
     database.cleanup().await
 }
