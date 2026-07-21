@@ -4,6 +4,7 @@ use anyhow::{Context, Result, ensure};
 use bigname_manifests::{FullDiscoveryReconciliationOptions, reconcile_discovery_observations};
 use sqlx::PgPool;
 
+use crate::checkpoint_context::AdapterCheckpointContext;
 use crate::registry_migration_cache::MigratedRegistryNodes;
 
 mod assignment;
@@ -17,6 +18,7 @@ mod migration_guard;
 mod reconciliation;
 mod replay;
 mod scope;
+mod startup;
 
 use assignment::{
     ObservedRegistryAssignment, build_registry_assignment, ens_v1_resolver_discovery_source,
@@ -68,7 +70,10 @@ pub struct EnsV1SubregistryDiscoverySyncSummary {
 
 pub(super) type EnsV1SubregistryDiscoverySyncOutcome = (EnsV1SubregistryDiscoverySyncSummary, bool);
 
-pub use checkpoint::{ReplayAdapterCheckpointContext, clear_replay_adapter_checkpoints};
+pub use crate::checkpoint_context::{
+    ReplayAdapterCheckpointContext, StartupAdapterCheckpointContext,
+};
+pub use checkpoint::clear_replay_adapter_checkpoints;
 pub use entrypoints::{
     sync_ens_v1_subregistry_discovery, sync_ens_v1_subregistry_discovery_through_block,
     sync_ens_v1_subregistry_discovery_through_block_with_expected_admission_epoch,
@@ -76,6 +81,10 @@ pub use entrypoints::{
 pub use replay::{
     sync_ens_v1_subregistry_discovery_with_replay_checkpoint,
     sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit,
+};
+pub use startup::{
+    sync_ens_v1_subregistry_discovery_with_startup_checkpoint,
+    sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -93,15 +102,16 @@ pub(super) async fn sync_ens_v1_subregistry_discovery_with_scope(
     discovery_edge_mutation: DiscoveryEdgeMutation,
     full_source_through_block: Option<i64>,
     full_source_expected_admission_epoch: Option<i64>,
-    replay_checkpoint: Option<&ReplayAdapterCheckpointContext>,
+    checkpoint_context: Option<&AdapterCheckpointContext>,
     checkpoint_page_limit: i64,
+    checkpoint_progress_log_every_pages: Option<usize>,
 ) -> Result<EnsV1SubregistryDiscoverySyncOutcome> {
     ensure!(
         full_source_through_block.is_none()
             || (!restrict_to_block_hashes
                 && source_scope.is_none()
                 && discovery_edge_mutation == DiscoveryEdgeMutation::Reconcile
-                && replay_checkpoint.is_none()),
+                && checkpoint_context.is_none()),
         "target-bounded ENSv1 registry reconciliation requires an uncheckpointed complete-source pass"
     );
     ensure!(
@@ -118,7 +128,7 @@ pub(super) async fn sync_ens_v1_subregistry_discovery_with_scope(
     let use_replay_checkpoint = !restrict_to_block_hashes
         && source_scope.is_none()
         && discovery_edge_mutation == DiscoveryEdgeMutation::Reconcile
-        && replay_checkpoint.is_some();
+        && checkpoint_context.is_some();
     if source_scope.as_ref().is_some_and(Vec::is_empty) {
         return Ok((empty_sync_summary(), false));
     }
@@ -141,17 +151,15 @@ pub(super) async fn sync_ens_v1_subregistry_discovery_with_scope(
     let mut latest_assignments = BTreeMap::<String, assignment::ObservedRegistryAssignment>::new();
     let mut migrated_registry_nodes = MigratedRegistryNodes::empty();
     let mut active_checkpoint = if use_replay_checkpoint {
-        let checkpoint = replay_checkpoint.expect("checkpoint presence was checked");
+        let checkpoint = checkpoint_context.expect("checkpoint presence was checked");
         let active_checkpoint =
             SubregistryReplayCheckpoint::load_or_start(pool, chain, checkpoint).await?;
         if let Some(summary) = active_checkpoint.completed_summary()? {
             return Ok((summary, false));
         }
         if !active_checkpoint.stream_complete() {
-            // Staged assignments stay in the database: the checkpointed
-            // stream only appends page-local changes and the finalize path
-            // reads them back in pages. Only the migrated-node guard state
-            // must be resident while streaming (#168).
+            // Assignments stay DB-staged and page-local; only the migrated-node
+            // guard state must be resident while streaming (#168).
             migrated_registry_nodes = active_checkpoint
                 .load_staged_migrated_registry_nodes(pool)
                 .await?;
@@ -163,8 +171,10 @@ pub(super) async fn sync_ens_v1_subregistry_discovery_with_scope(
         None
     };
     if !restrict_to_block_hashes && source_scope.is_none() {
-        if !emitters.is_empty() {
-            if let Some(checkpoint) = active_checkpoint.as_mut() {
+        if let Some(checkpoint) = active_checkpoint.as_mut() {
+            if !emitters.is_empty()
+                || (checkpoint.context.is_startup() && checkpoint.last_position().is_none())
+            {
                 let (scanned, matched) = sync_checkpointed_registry_raw_logs(
                     pool,
                     chain,
@@ -172,12 +182,15 @@ pub(super) async fn sync_ens_v1_subregistry_discovery_with_scope(
                     current_registry.as_ref(),
                     checkpoint,
                     checkpoint_page_limit,
+                    checkpoint_progress_log_every_pages,
                     &mut migrated_registry_nodes,
                 )
                 .await?;
                 scanned_log_count = scanned;
                 matched_log_count = matched;
-            } else if let Some(through_block) = full_source_through_block {
+            }
+        } else if !emitters.is_empty() {
+            if let Some(through_block) = full_source_through_block {
                 scanned_log_count = stream_registry_raw_logs_through_block(
                     pool,
                     chain,
@@ -430,6 +443,7 @@ async fn sync_checkpointed_registry_raw_logs(
     current_registry: Option<&loader::ActiveEmitter>,
     checkpoint: &mut SubregistryReplayCheckpoint,
     checkpoint_page_limit: i64,
+    progress_log_every_pages: Option<usize>,
     migrated_registry_nodes: &mut MigratedRegistryNodes,
 ) -> Result<(usize, usize)> {
     if checkpoint.stream_complete() {
@@ -442,6 +456,7 @@ async fn sync_checkpointed_registry_raw_logs(
     let mut start_after = checkpoint.last_position();
     let mut scanned_log_count = checkpoint.scanned_log_count();
     let mut matched_log_count = checkpoint.matched_log_count();
+    let mut page_count = 0usize;
     loop {
         let page = load_registry_raw_log_checkpoint_page(
             pool,
@@ -463,8 +478,7 @@ async fn sync_checkpointed_registry_raw_logs(
         // Page-local latest assignments: pages are processed in stream order
         // and `save_progress` upserts each page's changed keys, so
         // last-write-wins across pages is preserved in the staged rows while
-        // resident memory stays bounded by one page (#168). Only the
-        // migrated-node guard state accumulates across pages.
+        // memory stays page-bounded (#168); only the migrated-node guard accumulates.
         let mut page_assignments =
             BTreeMap::<String, assignment::ObservedRegistryAssignment>::new();
         let mut migrated_nodes = Vec::<String>::new();
@@ -496,6 +510,16 @@ async fn sync_checkpointed_registry_raw_logs(
                 migrated_registry_nodes.delta_nodes().count(),
             )
             .await?;
+        page_count += 1;
+        startup::log_checkpoint_stream_progress(
+            progress_log_every_pages,
+            checkpoint,
+            page_count,
+            checkpoint_page_limit,
+            &last_position,
+            scanned_log_count,
+            matched_log_count,
+        );
         start_after = Some(last_position);
     }
 

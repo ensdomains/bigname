@@ -41,7 +41,7 @@ pub(super) struct FinalizeAuthoritySync<'a> {
 }
 
 pub(super) async fn finalize_authority_sync(
-    input: FinalizeAuthoritySync<'_>,
+    mut input: FinalizeAuthoritySync<'_>,
 ) -> Result<EnsV1UnwrappedAuthoritySyncSummary> {
     let head_block = input
         .block_index
@@ -108,6 +108,15 @@ pub(super) async fn finalize_authority_sync(
     let bindings_upsert_ms = bindings_started.elapsed().as_millis();
     let binding_count = bindings.len();
     drop(bindings);
+    if let Some(checkpoint) = input
+        .active_replay_checkpoint
+        .as_mut()
+        .filter(|checkpoint| checkpoint.is_startup())
+    {
+        checkpoint
+            .publish_startup_events(input.pool, &mut input.flushed_events)
+            .await?;
+    }
     let normalized_events_started = Instant::now();
     let normalized_event_count = events.len();
     let event_inserted_count =

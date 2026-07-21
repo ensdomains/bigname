@@ -1215,9 +1215,32 @@ async fn focused_discovery_sync_before_widen_admits_bootstrap_edges_into_the_liv
     // widen, so the live plan admits the target without deriving all seven adapter families.
     sync_discovery_adapter_owned_raw_log_state(
         database.pool(),
+        "test",
         &bootstrap_state.watched_chain_plan,
     )
     .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = 'test'
+               AND checkpoint_scope = 'startup_adapter_sync'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "a successful startup discovery pass must clear its checkpoint rows"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoint_items
+             WHERE deployment_profile = 'test'
+               AND checkpoint_scope = 'startup_adapter_sync'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "startup checkpoint item cleanup must cascade with the parent row"
+    );
     let widened_state =
         widen_runtime_state_to_live_watch_scope(database.pool(), &bootstrap_state).await?;
     assert_eq!(
@@ -1399,7 +1422,12 @@ async fn discovery_refresh_does_not_advance_epoch_when_convergence_fails() -> Re
         CanonicalityState::Canonical,
     )
     .await?;
-    sync_discovery_adapter_owned_raw_log_state(database.pool(), &state.watched_chain_plan).await?;
+    sync_discovery_adapter_owned_raw_log_state(
+        database.pool(),
+        "test",
+        &state.watched_chain_plan,
+    )
+    .await?;
     sqlx::query("DROP TABLE resolver_profile_input_changes CASCADE")
         .execute(database.pool())
         .await?;

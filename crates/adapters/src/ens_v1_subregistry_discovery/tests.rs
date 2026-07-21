@@ -424,6 +424,70 @@ async fn insert_raw_new_resolver_log(pool: &PgPool, log: RawNewResolverLog<'_>) 
     Ok(())
 }
 
+async fn load_subregistry_discovery_outputs(pool: &PgPool) -> Result<(Vec<String>, Vec<String>)> {
+    let edges = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT jsonb_build_object(
+            'chain_id', chain_id,
+            'edge_kind', edge_kind,
+            'discovery_source', discovery_source,
+            'source_manifest_id', source_manifest_id,
+            'admission', admission,
+            'active', deactivated_at IS NULL,
+            'active_from_block_number', active_from_block_number,
+            'active_from_block_hash', active_from_block_hash,
+            'active_to_block_number', active_to_block_number,
+            'active_to_block_hash', active_to_block_hash,
+            'provenance', provenance
+        )::TEXT
+        FROM discovery_edges
+        WHERE discovery_source IN (
+            'ens_v1_registry_new_owner:ethereum-mainnet',
+            'ens_v1_registry_resolver:ethereum-mainnet'
+        )
+        ORDER BY discovery_source, edge_kind, active_from_block_number,
+                 provenance ->> 'observation_key'
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    let events = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT jsonb_build_object(
+            'event_identity', event_identity,
+            'namespace', namespace,
+            'logical_name_id', logical_name_id,
+            'resource_id', resource_id,
+            'event_kind', event_kind,
+            'source_family', source_family,
+            'manifest_version', manifest_version,
+            'source_manifest_id', source_manifest_id,
+            'chain_id', chain_id,
+            'block_number', block_number,
+            'block_hash', block_hash,
+            'transaction_hash', transaction_hash,
+            'log_index', log_index,
+            'raw_fact_ref', raw_fact_ref,
+            'derivation_kind', derivation_kind,
+            'canonicality_state', canonicality_state,
+            'before_state', before_state,
+            'after_state', after_state
+                - 'from_contract_instance_id'
+                - 'to_contract_instance_id'
+        )::TEXT
+        FROM normalized_events
+        WHERE derivation_kind IN (
+            'ens_v1_subregistry_changed',
+            'ens_v1_registry_resolver_changed'
+        )
+        ORDER BY event_identity
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok((edges, events))
+}
+
 struct RawRegistryTransferLog<'a> {
     chain_id: &'a str,
     block_hash: &'a str,
@@ -714,6 +778,647 @@ async fn canonical_new_owner_log_persists_one_active_subregistry_edge_and_expand
             discovery_edge_entry_count: 1,
         }]
     );
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn startup_checkpointed_subregistry_matches_uncheckpointed_edges_and_events() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let test_dir = TestDir::new()?;
+    let expected_database = TestDatabase::new().await?;
+    let startup_database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let registry_address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+
+    test_dir.write_manifest("ens", "ens_v1_registry_l1", "v1", &manifest_contents(true))?;
+    let repository = load_repository(&test_dir.path)?;
+    for database in [&expected_database, &startup_database] {
+        sync_repository(database.pool(), &repository).await?;
+        insert_raw_new_owner_log_with_key(
+            database.pool(),
+            RawNewOwnerLog {
+                chain_id: chain,
+                block_hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                block_number: 42,
+                emitting_address: registry_address,
+                owner: "0x00000000000000000000000000000000000000CC",
+                parent_node: ZERO_NODE,
+                label: "eth",
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        )
+        .await?;
+        insert_raw_new_owner_log_with_key(
+            database.pool(),
+            RawNewOwnerLog {
+                chain_id: chain,
+                block_hash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                block_number: 43,
+                emitting_address: registry_address,
+                owner: "0x00000000000000000000000000000000000000DD",
+                parent_node: ZERO_NODE,
+                label: "com",
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        )
+        .await?;
+    }
+
+    sync_ens_v1_subregistry_discovery(expected_database.pool(), chain).await?;
+    let startup_checkpoint = StartupAdapterCheckpointContext::new("test", 43)?;
+    sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit(
+        startup_database.pool(),
+        chain,
+        &startup_checkpoint,
+        1,
+    )
+    .await?;
+
+    assert_eq!(
+        load_subregistry_discovery_outputs(startup_database.pool()).await?,
+        load_subregistry_discovery_outputs(expected_database.pool()).await?,
+        "startup checkpoint pages and streamed finalize must preserve full-pass output"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, String, String)>(
+            "SELECT cursor_kind, checkpoint_scope, status
+             FROM normalized_replay_adapter_checkpoints
+             WHERE adapter = 'ens_v1_subregistry_discovery'",
+        )
+        .fetch_one(startup_database.pool())
+        .await?,
+        (
+            startup_checkpoint.cursor_kind().to_owned(),
+            startup_checkpoint.checkpoint_scope().to_owned(),
+            "completed".to_owned(),
+        ),
+        "startup checkpoints must use their own key and reach completion"
+    );
+
+    crate::clear_startup_adapter_checkpoints(startup_database.pool(), chain, &startup_checkpoint)
+        .await?;
+    expected_database.cleanup().await?;
+    startup_database.cleanup().await
+}
+
+#[tokio::test]
+async fn startup_checkpointed_subregistry_resets_when_manifest_authority_changes() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let first_registry = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+    let second_registry = "0x00000000000000000000000000000000000000BB";
+
+    test_dir.write_manifest(
+        "ens",
+        "ens_v1_registry_l1",
+        "v1",
+        &manifest_contents_for_registry(
+            "ens",
+            ENS_V1_REGISTRY_SOURCE_FAMILY,
+            chain,
+            "ens_v1",
+            "ENSRegistry",
+            first_registry,
+            true,
+        ),
+    )?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+    for (block_number, block_hash, registry, label, owner) in [
+        (
+            42,
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            first_registry,
+            "eth",
+            "0x00000000000000000000000000000000000000CC",
+        ),
+        (
+            43,
+            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            second_registry,
+            "com",
+            "0x00000000000000000000000000000000000000DD",
+        ),
+    ] {
+        insert_raw_new_owner_log_with_key(
+            database.pool(),
+            RawNewOwnerLog {
+                chain_id: chain,
+                block_hash,
+                block_number,
+                emitting_address: registry,
+                owner,
+                parent_node: ZERO_NODE,
+                label,
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        )
+        .await?;
+    }
+
+    let startup_checkpoint = StartupAdapterCheckpointContext::new("test-authority-reset", 43)?;
+    sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit(
+        database.pool(),
+        chain,
+        &startup_checkpoint,
+        1,
+    )
+    .await?;
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events
+             WHERE event_kind = 'SubregistryChanged' AND block_number = 43",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+
+    test_dir.write_manifest(
+        "ens",
+        "ens_v1_registry_l1",
+        "v1",
+        &manifest_contents_for_registry(
+            "ens",
+            ENS_V1_REGISTRY_SOURCE_FAMILY,
+            chain,
+            "ens_v1",
+            "ENSRegistry",
+            second_registry,
+            true,
+        ),
+    )?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+
+    sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit(
+        database.pool(),
+        chain,
+        &startup_checkpoint,
+        1,
+    )
+    .await?;
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events
+             WHERE event_kind = 'SubregistryChanged' AND block_number = 43",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "a retained completed startup checkpoint must reset when manifest authority changes"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn startup_checkpointed_subregistry_resets_stream_complete_on_authority_change() -> Result<()>
+{
+    let _permit = crate::acquire_test_db_permit().await;
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let first_registry = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+    let second_registry = "0x00000000000000000000000000000000000000BB";
+    let write_registry_manifest = |registry| {
+        test_dir.write_manifest(
+            "ens",
+            "ens_v1_registry_l1",
+            "v1",
+            &manifest_contents_for_registry(
+                "ens",
+                ENS_V1_REGISTRY_SOURCE_FAMILY,
+                chain,
+                "ens_v1",
+                "ENSRegistry",
+                registry,
+                true,
+            ),
+        )
+    };
+
+    write_registry_manifest(first_registry)?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+    for (block_number, block_hash, registry, label, owner) in [
+        (
+            42,
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            first_registry,
+            "eth",
+            "0x00000000000000000000000000000000000000CC",
+        ),
+        (
+            43,
+            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            second_registry,
+            "com",
+            "0x00000000000000000000000000000000000000DD",
+        ),
+    ] {
+        insert_raw_new_owner_log_with_key(
+            database.pool(),
+            RawNewOwnerLog {
+                chain_id: chain,
+                block_hash,
+                block_number,
+                emitting_address: registry,
+                owner,
+                parent_node: ZERO_NODE,
+                label,
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        )
+        .await?;
+    }
+    sync_ens_v1_subregistry_discovery(database.pool(), chain).await?;
+
+    sqlx::query("CREATE TABLE startup_authority_finalize_failure (enabled BOOLEAN PRIMARY KEY)")
+        .execute(database.pool())
+        .await?;
+    sqlx::query("INSERT INTO startup_authority_finalize_failure VALUES (TRUE)")
+        .execute(database.pool())
+        .await?;
+    sqlx::query(
+        r#"
+        CREATE FUNCTION fail_startup_authority_finalize() RETURNS TRIGGER AS $function$
+        BEGIN
+            IF NEW.adapter = 'ens_v1_subregistry_discovery'
+               AND NEW.checkpoint_scope = 'startup_adapter_sync'
+               AND NEW.status = 'completed'
+               AND EXISTS (SELECT 1 FROM startup_authority_finalize_failure WHERE enabled) THEN
+                RAISE EXCEPTION 'injected startup authority finalize failure';
+            END IF;
+            RETURN NEW;
+        END;
+        $function$ LANGUAGE plpgsql
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        "CREATE TRIGGER fail_startup_authority_finalize BEFORE UPDATE ON normalized_replay_adapter_checkpoints FOR EACH ROW EXECUTE FUNCTION fail_startup_authority_finalize()",
+    )
+    .execute(database.pool())
+    .await?;
+
+    let checkpoint = StartupAdapterCheckpointContext::new("test-stream-authority-reset", 43)?;
+    let error = sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit(
+        database.pool(),
+        chain,
+        &checkpoint,
+        1,
+    )
+    .await
+    .expect_err("the injected completion failure must retain stream-complete state");
+    assert!(format!("{error:#}").contains("injected startup authority finalize failure"));
+    assert_eq!(
+        query_scalar::<_, String>(
+            "SELECT status FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = 'test-stream-authority-reset'
+               AND adapter = 'ens_v1_subregistry_discovery'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "stream_complete"
+    );
+    let raw_revision = query_scalar::<_, i64>(
+        "SELECT revision FROM raw_log_staging_input_revisions WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .fetch_one(database.pool())
+    .await?;
+
+    sqlx::query("DELETE FROM startup_authority_finalize_failure")
+        .execute(database.pool())
+        .await?;
+    write_registry_manifest(second_registry)?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT revision FROM raw_log_staging_input_revisions WHERE chain_id = $1",
+        )
+        .bind(chain)
+        .fetch_one(database.pool())
+        .await?,
+        raw_revision,
+        "this regression must exercise authority drift without a raw-log revision change"
+    );
+
+    sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit(
+        database.pool(),
+        chain,
+        &checkpoint,
+        1,
+    )
+    .await?;
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events
+             WHERE event_kind = 'SubregistryChanged' AND block_number = 43",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "stream-complete startup state must reset when its watched authority changes"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn startup_checkpointed_subregistry_resumes_after_a_committed_page() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let registry_address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+
+    test_dir.write_manifest("ens", "ens_v1_registry_l1", "v1", &manifest_contents(true))?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+    for (block_number, block_hash, label, owner) in [
+        (
+            42,
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "eth",
+            "0x00000000000000000000000000000000000000CC",
+        ),
+        (
+            43,
+            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "com",
+            "0x00000000000000000000000000000000000000DD",
+        ),
+        (
+            44,
+            "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "xyz",
+            "0x00000000000000000000000000000000000000EE",
+        ),
+    ] {
+        insert_raw_new_owner_log_with_key(
+            database.pool(),
+            RawNewOwnerLog {
+                chain_id: chain,
+                block_hash,
+                block_number,
+                emitting_address: registry_address,
+                owner,
+                parent_node: ZERO_NODE,
+                label,
+                canonicality_state: CanonicalityState::Canonical,
+            },
+        )
+        .await?;
+    }
+    // Seed the expected edges so this exercise observes exactly one checkpoint
+    // scan instead of the discovery fixed-point replay used for newly admitted
+    // recursive emitters.
+    sync_ens_v1_subregistry_discovery(database.pool(), chain).await?;
+
+    sqlx::query(
+        "CREATE TABLE startup_checkpoint_page_audit (scanned_log_count BIGINT PRIMARY KEY)",
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query("CREATE TABLE startup_checkpoint_failure (scanned_log_count BIGINT PRIMARY KEY)")
+        .execute(database.pool())
+        .await?;
+    sqlx::query("INSERT INTO startup_checkpoint_failure VALUES (2)")
+        .execute(database.pool())
+        .await?;
+    sqlx::query(
+        r#"
+        CREATE FUNCTION audit_startup_checkpoint_page() RETURNS TRIGGER AS $function$
+        BEGIN
+            IF NEW.adapter = 'ens_v1_subregistry_discovery'
+               AND NEW.checkpoint_scope = 'startup_adapter_sync'
+               AND NEW.status = 'running'
+               AND NEW.scanned_log_count > OLD.scanned_log_count THEN
+                IF EXISTS (
+                    SELECT 1
+                    FROM startup_checkpoint_failure
+                    WHERE scanned_log_count = NEW.scanned_log_count
+                ) THEN
+                    RAISE EXCEPTION 'injected failure after a committed startup checkpoint page';
+                END IF;
+                INSERT INTO startup_checkpoint_page_audit VALUES (NEW.scanned_log_count);
+            END IF;
+            RETURN NEW;
+        END;
+        $function$ LANGUAGE plpgsql
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE TRIGGER audit_startup_checkpoint_page
+        BEFORE UPDATE ON normalized_replay_adapter_checkpoints
+        FOR EACH ROW EXECUTE FUNCTION audit_startup_checkpoint_page()
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    let startup_checkpoint = StartupAdapterCheckpointContext::new("test", 44)?;
+    let error = sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit(
+        database.pool(),
+        chain,
+        &startup_checkpoint,
+        1,
+    )
+    .await
+    .expect_err("the injected second-page failure must interrupt startup");
+    assert!(
+        format!("{error:#}").contains("injected failure after a committed startup checkpoint page")
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, i64, i64)>(
+            "SELECT status, scanned_log_count, staged_item_count
+             FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = 'test'
+               AND cursor_kind = 'startup_adapter_owned_raw_log_state'
+               AND adapter = 'ens_v1_subregistry_discovery'
+               AND checkpoint_scope = 'startup_adapter_sync'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        ("running".to_owned(), 1, 1),
+        "the first page and its one-page staging shape must survive interruption"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM normalized_replay_adapter_checkpoint_items
+             WHERE checkpoint_scope = 'startup_adapter_sync'
+               AND item_kind = 'latest_assignment'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+
+    sqlx::query("DELETE FROM startup_checkpoint_failure")
+        .execute(database.pool())
+        .await?;
+    let resumed = sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit(
+        database.pool(),
+        chain,
+        &startup_checkpoint,
+        1,
+    )
+    .await?;
+    assert_eq!(resumed.scanned_log_count, 3);
+    assert_eq!(resumed.matched_log_count, 3);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT scanned_log_count FROM normalized_replay_adapter_checkpoints
+             WHERE checkpoint_scope = 'startup_adapter_sync'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        3
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT scanned_log_count
+             FROM startup_checkpoint_page_audit
+             ORDER BY scanned_log_count",
+        )
+        .fetch_all(database.pool())
+        .await?,
+        vec![1, 2, 3],
+        "resume must continue with page two rather than scan page one again"
+    );
+
+    crate::clear_startup_adapter_checkpoints(database.pool(), chain, &startup_checkpoint).await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoints
+             WHERE checkpoint_scope = 'startup_adapter_sync'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn startup_checkpointed_subregistry_extends_after_interrupted_finalize() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let registry_address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+
+    test_dir.write_manifest("ens", "ens_v1_registry_l1", "v1", &manifest_contents(true))?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+    insert_raw_new_owner_log_with_key(
+        database.pool(),
+        RawNewOwnerLog {
+            chain_id: chain,
+            block_hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            block_number: 42,
+            emitting_address: registry_address,
+            owner: "0x00000000000000000000000000000000000000CC",
+            parent_node: ZERO_NODE,
+            label: "eth",
+            canonicality_state: CanonicalityState::Canonical,
+        },
+    )
+    .await?;
+
+    sqlx::query("CREATE TABLE startup_finalize_failure (enabled BOOLEAN PRIMARY KEY)")
+        .execute(database.pool())
+        .await?;
+    sqlx::query("INSERT INTO startup_finalize_failure VALUES (TRUE)")
+        .execute(database.pool())
+        .await?;
+    sqlx::query(
+        r#"
+        CREATE FUNCTION fail_startup_finalize() RETURNS TRIGGER AS $function$
+        BEGIN
+            IF NEW.adapter = 'ens_v1_subregistry_discovery'
+               AND NEW.checkpoint_scope = 'startup_adapter_sync'
+               AND NEW.status = 'completed'
+               AND EXISTS (SELECT 1 FROM startup_finalize_failure WHERE enabled) THEN
+                RAISE EXCEPTION 'injected startup finalize failure';
+            END IF;
+            RETURN NEW;
+        END;
+        $function$ LANGUAGE plpgsql
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        "CREATE TRIGGER fail_startup_finalize BEFORE UPDATE ON normalized_replay_adapter_checkpoints FOR EACH ROW EXECUTE FUNCTION fail_startup_finalize()",
+    )
+    .execute(database.pool())
+    .await?;
+
+    let first_checkpoint = StartupAdapterCheckpointContext::new("test-finalize-resume", 42)?;
+    let error = sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit(
+        database.pool(),
+        chain,
+        &first_checkpoint,
+        1,
+    )
+    .await
+    .expect_err("the injected completion failure must retain a resumable checkpoint");
+    assert!(format!("{error:#}").contains("injected startup finalize failure"));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = 'test-finalize-resume'
+               AND adapter = 'ens_v1_subregistry_discovery'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "stream_complete"
+    );
+
+    sqlx::query("DELETE FROM startup_finalize_failure")
+        .execute(database.pool())
+        .await?;
+    insert_raw_new_owner_log_with_key(
+        database.pool(),
+        RawNewOwnerLog {
+            chain_id: chain,
+            block_hash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            block_number: 43,
+            emitting_address: registry_address,
+            owner: "0x00000000000000000000000000000000000000DD",
+            parent_node: ZERO_NODE,
+            label: "com",
+            canonicality_state: CanonicalityState::Canonical,
+        },
+    )
+    .await?;
+
+    let extended_checkpoint = StartupAdapterCheckpointContext::new("test-finalize-resume", 43)?;
+    let resumed = sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit(
+        database.pool(),
+        chain,
+        &extended_checkpoint,
+        1,
+    )
+    .await?;
+    assert_eq!(resumed.scanned_log_count, 2);
+    assert_eq!(resumed.matched_log_count, 2);
+    assert_eq!(resumed.active_edge_count, 2);
+    assert_eq!(
+        query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events
+             WHERE event_kind = 'SubregistryChanged'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        2
+    );
+
     database.cleanup().await
 }
 

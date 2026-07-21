@@ -8,38 +8,34 @@ use bigname_storage::{
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Row};
 
-use crate::registry_migration_cache::MigratedRegistryNodes;
+use crate::{
+    checkpoint_context::AdapterCheckpointContext, registry_migration_cache::MigratedRegistryNodes,
+};
 
 use super::{
     EnsV1SubregistryDiscoverySyncSummary, assignment::ObservedRegistryAssignment,
     loader::RegistryRawLogPosition,
 };
 
+mod cleanup;
 mod items;
 mod payload;
 
+pub use cleanup::clear_replay_adapter_checkpoints;
+pub(super) use cleanup::delete_checkpoint;
 use items::insert_checkpoint_items;
 use payload::{assignment_from_payload, assignment_payload, summary_from_payload, summary_payload};
 
 const ADAPTER: &str = "ens_v1_subregistry_discovery";
-const CHECKPOINT_SCOPE: &str = "full_closure";
 const ITEM_KIND_LATEST_ASSIGNMENT: &str = "latest_assignment";
 const ITEM_KIND_MIGRATED_NODE: &str = "migrated_registry_node";
 pub(super) const EVENT_PAGE_LIMIT: i64 = 20_000;
 pub(super) const PAGE_LIMIT: i64 = 10_000;
 pub(super) const RECONCILIATION_PAGE_LIMIT: i64 = 50_000;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReplayAdapterCheckpointContext {
-    pub deployment_profile: String,
-    pub cursor_kind: String,
-    pub range_start_block_number: i64,
-    pub target_block_number: i64,
-}
-
 #[derive(Clone, Debug)]
 pub(super) struct SubregistryReplayCheckpoint {
-    pub(super) context: ReplayAdapterCheckpointContext,
+    pub(super) context: AdapterCheckpointContext,
     pub(super) chain: String,
     status: String,
     last_position: Option<RegistryRawLogPosition>,
@@ -54,13 +50,14 @@ impl SubregistryReplayCheckpoint {
     pub(super) async fn load_or_start(
         pool: &PgPool,
         chain: &str,
-        context: &ReplayAdapterCheckpointContext,
+        context: &AdapterCheckpointContext,
     ) -> Result<Self> {
         let raw_log_input_version = load_raw_log_staging_input_version(pool, chain).await?;
         let existing = load_checkpoint_row(pool, chain, context).await?;
         let reset_existing = match existing.as_ref() {
             Some(checkpoint) => {
                 checkpoint.context.range_start_block_number != context.range_start_block_number
+                    || context.startup_authority_changed(&checkpoint.state_payload)
                     || checkpoint
                         .raw_log_input_requires_reset(pool, raw_log_input_version)
                         .await?
@@ -72,6 +69,7 @@ impl SubregistryReplayCheckpoint {
         }
 
         if existing.is_none() || reset_existing {
+            let state_payload = context.bind_startup_authority(json!({}))?;
             sqlx::query(
                 r#"
                 INSERT INTO normalized_replay_adapter_checkpoints (
@@ -82,19 +80,21 @@ impl SubregistryReplayCheckpoint {
                     checkpoint_scope,
                     replay_start_block_number,
                     replay_target_block_number,
+                    state_payload,
                     raw_log_retention_generation,
                     raw_log_input_revision
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 "#,
             )
             .bind(&context.deployment_profile)
             .bind(chain)
             .bind(&context.cursor_kind)
             .bind(ADAPTER)
-            .bind(CHECKPOINT_SCOPE)
+            .bind(context.checkpoint_scope)
             .bind(context.range_start_block_number)
             .bind(context.target_block_number)
+            .bind(state_payload)
             .bind(raw_log_input_version.retention_generation)
             .bind(raw_log_input_version.revision)
             .execute(pool)
@@ -112,7 +112,7 @@ impl SubregistryReplayCheckpoint {
                 SET
                     replay_target_block_number = GREATEST(replay_target_block_number, $6),
                     status = CASE
-                        WHEN status = 'completed' AND replay_target_block_number < $6 THEN 'running'
+                        WHEN replay_target_block_number < $6 AND (status = 'completed' OR (status = 'stream_complete' AND $5 = 'startup_adapter_sync')) THEN 'running'
                         ELSE status
                     END,
                     completed_at = CASE
@@ -133,7 +133,7 @@ impl SubregistryReplayCheckpoint {
             .bind(chain)
             .bind(&context.cursor_kind)
             .bind(ADAPTER)
-            .bind(CHECKPOINT_SCOPE)
+            .bind(context.checkpoint_scope)
             .bind(context.target_block_number)
             .bind(raw_log_input_version.retention_generation)
             .bind(raw_log_input_version.revision)
@@ -236,7 +236,7 @@ impl SubregistryReplayCheckpoint {
         .bind(&self.chain)
         .bind(&self.context.cursor_kind)
         .bind(ADAPTER)
-        .bind(CHECKPOINT_SCOPE)
+        .bind(self.context.checkpoint_scope)
         .bind(ITEM_KIND_MIGRATED_NODE)
         .fetch_all(pool)
         .await
@@ -275,7 +275,7 @@ impl SubregistryReplayCheckpoint {
         .bind(&self.chain)
         .bind(&self.context.cursor_kind)
         .bind(ADAPTER)
-        .bind(CHECKPOINT_SCOPE)
+        .bind(self.context.checkpoint_scope)
         .bind(ITEM_KIND_LATEST_ASSIGNMENT)
         .bind(discovery_sources)
         .bind(super::ZERO_ADDRESS)
@@ -312,7 +312,7 @@ impl SubregistryReplayCheckpoint {
         .bind(&self.chain)
         .bind(&self.context.cursor_kind)
         .bind(ADAPTER)
-        .bind(CHECKPOINT_SCOPE)
+        .bind(self.context.checkpoint_scope)
         .bind(ITEM_KIND_LATEST_ASSIGNMENT)
         .bind(discovery_source)
         .bind(after_key)
@@ -450,7 +450,7 @@ impl SubregistryReplayCheckpoint {
         .bind(&self.chain)
         .bind(&self.context.cursor_kind)
         .bind(ADAPTER)
-        .bind(CHECKPOINT_SCOPE)
+        .bind(self.context.checkpoint_scope)
         .bind(i64::try_from(scanned_log_count).context("scanned log count overflowed i64")?)
         .bind(i64::try_from(matched_log_count).context("matched log count overflowed i64")?)
         .bind(self.raw_log_input_version.retention_generation)
@@ -470,7 +470,9 @@ impl SubregistryReplayCheckpoint {
         pool: &PgPool,
         summary: &EnsV1SubregistryDiscoverySyncSummary,
     ) -> Result<()> {
-        let state_payload = json!({ "summary": summary_payload(summary) });
+        let state_payload = self
+            .context
+            .bind_startup_authority(json!({ "summary": summary_payload(summary) }))?;
         sqlx::query(
             r#"
             UPDATE normalized_replay_adapter_checkpoints
@@ -495,7 +497,7 @@ impl SubregistryReplayCheckpoint {
         .bind(&self.chain)
         .bind(&self.context.cursor_kind)
         .bind(ADAPTER)
-        .bind(CHECKPOINT_SCOPE)
+        .bind(self.context.checkpoint_scope)
         .bind(i64::try_from(summary.scanned_log_count).context("scanned log count overflowed i64")?)
         .bind(i64::try_from(summary.matched_log_count).context("matched log count overflowed i64")?)
         .bind(&state_payload)
@@ -513,51 +515,10 @@ impl SubregistryReplayCheckpoint {
     }
 }
 
-pub async fn clear_replay_adapter_checkpoints(
-    pool: &PgPool,
-    deployment_profile: &str,
-    chain: &str,
-    cursor_kind: &str,
-) -> Result<()> {
-    let result = sqlx::query(
-        r#"
-        DELETE FROM normalized_replay_adapter_checkpoints
-        WHERE deployment_profile = $1
-          AND chain_id = $2
-          AND cursor_kind = $3
-          AND adapter = $4
-          AND checkpoint_scope = $5
-        "#,
-    )
-    .bind(deployment_profile)
-    .bind(chain)
-    .bind(cursor_kind)
-    .bind(ADAPTER)
-    .bind(CHECKPOINT_SCOPE)
-    .execute(pool)
-    .await;
-    if is_undefined_table_error(&result) {
-        return Ok(());
-    }
-    result.with_context(|| {
-        format!(
-            "failed to clear replay adapter checkpoints for {deployment_profile}/{chain}/{cursor_kind}"
-        )
-    })?;
-    Ok(())
-}
-
-fn is_undefined_table_error<T>(result: &std::result::Result<T, sqlx::Error>) -> bool {
-    matches!(
-        result,
-        Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("42P01")
-    )
-}
-
 async fn load_checkpoint_row(
     pool: &PgPool,
     chain: &str,
-    context: &ReplayAdapterCheckpointContext,
+    context: &AdapterCheckpointContext,
 ) -> Result<Option<SubregistryReplayCheckpoint>> {
     let row = sqlx::query(
         r#"
@@ -587,7 +548,7 @@ async fn load_checkpoint_row(
     .bind(chain)
     .bind(&context.cursor_kind)
     .bind(ADAPTER)
-    .bind(CHECKPOINT_SCOPE)
+    .bind(context.checkpoint_scope)
     .fetch_optional(pool)
     .await
     .with_context(|| {
@@ -603,7 +564,7 @@ async fn load_checkpoint_row(
 
 fn checkpoint_from_row(
     chain: &str,
-    context: &ReplayAdapterCheckpointContext,
+    context: &AdapterCheckpointContext,
     row: sqlx::postgres::PgRow,
 ) -> Result<SubregistryReplayCheckpoint> {
     let range_start_block_number = row.try_get("replay_start_block_number")?;
@@ -630,11 +591,13 @@ fn checkpoint_from_row(
     };
 
     Ok(SubregistryReplayCheckpoint {
-        context: ReplayAdapterCheckpointContext {
+        context: AdapterCheckpointContext {
             deployment_profile: context.deployment_profile.clone(),
             cursor_kind: context.cursor_kind.clone(),
+            checkpoint_scope: context.checkpoint_scope,
             range_start_block_number,
             target_block_number,
+            startup_discovery_admission_epoch: context.startup_discovery_admission_epoch,
         },
         chain: chain.to_owned(),
         status: row.try_get("status")?,
@@ -651,32 +614,6 @@ fn checkpoint_from_row(
             revision: row.try_get("raw_log_input_revision")?,
         },
     })
-}
-
-pub(super) async fn delete_checkpoint(
-    pool: &PgPool,
-    chain: &str,
-    context: &ReplayAdapterCheckpointContext,
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        DELETE FROM normalized_replay_adapter_checkpoints
-        WHERE deployment_profile = $1
-          AND chain_id = $2
-          AND cursor_kind = $3
-          AND adapter = $4
-          AND checkpoint_scope = $5
-        "#,
-    )
-    .bind(&context.deployment_profile)
-    .bind(chain)
-    .bind(&context.cursor_kind)
-    .bind(ADAPTER)
-    .bind(CHECKPOINT_SCOPE)
-    .execute(pool)
-    .await
-    .context("failed to reset stale subregistry replay checkpoint")?;
-    Ok(())
 }
 
 async fn update_checkpoint_progress(
@@ -719,7 +656,7 @@ async fn update_checkpoint_progress(
     .bind(&checkpoint.chain)
     .bind(&checkpoint.context.cursor_kind)
     .bind(ADAPTER)
-    .bind(CHECKPOINT_SCOPE)
+    .bind(checkpoint.context.checkpoint_scope)
     .bind(status)
     .bind(last_position.map(|position| position.block_number))
     .bind(last_position.map(|position| position.transaction_index))

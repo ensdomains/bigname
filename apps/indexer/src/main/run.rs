@@ -17,15 +17,15 @@ use crate::{
         ensure_manifest_root_ready, intake_runtime_state, load_manifest_repository,
         log_intake_chain_tasks, log_manifest_runtime_state, log_manifest_summary,
         log_provider_registry, log_watched_chain_plan, manifest_normalized_event_kind_count,
-        run_poll_loop, sync_adapter_owned_raw_log_state,
-        sync_discovery_adapter_owned_raw_log_state, sync_intake_chain_tasks,
-        validate_provider_registry_for_intake_tasks, watched_chain_plan_state,
-        widen_runtime_state_to_live_watch_scope_with_admission_epochs,
+        run_poll_loop, sync_discovery_adapter_owned_raw_log_state, sync_intake_chain_tasks,
+        sync_startup_adapter_owned_raw_log_state, validate_provider_registry_for_intake_tasks,
+        watched_chain_plan_state, widen_runtime_state_to_live_watch_scope_with_admission_epochs,
     },
 };
 
 pub(crate) async fn run(args: RunArgs) -> Result<()> {
     let manifest_repository = load_manifest_repository(&args.manifests_root)?;
+    let deployment_profile = deployment_profile_from_manifest_root(&args.manifests_root);
     let manifest_summary = manifest_repository.summary().clone();
     log_manifest_summary(&manifest_summary);
     ensure_manifest_root_ready(&manifest_summary)?;
@@ -47,7 +47,12 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
     )
     .await?;
     if run_mode.sync_adapter_before_startup_backfill {
-        sync_adapter_owned_raw_log_state(&pool, &manifest_runtime_state.watched_chain_plan).await?;
+        sync_startup_adapter_owned_raw_log_state(
+            &pool,
+            &deployment_profile,
+            &manifest_runtime_state.watched_chain_plan,
+        )
+        .await?;
     } else {
         info!(
             service = "indexer",
@@ -87,7 +92,12 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
                 run_mode.startup_backfill_adapter_sync_mode.as_str(),
             "startup bootstrap backfill drained; syncing adapter-owned raw-log state before live polling"
         );
-        sync_adapter_owned_raw_log_state(&pool, &manifest_runtime_state.watched_chain_plan).await?;
+        sync_startup_adapter_owned_raw_log_state(
+            &pool,
+            &deployment_profile,
+            &manifest_runtime_state.watched_chain_plan,
+        )
+        .await?;
     } else if run_mode.sync_discovery_adapters_after_startup_backfill {
         info!(
             service = "indexer",
@@ -98,6 +108,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         );
         sync_discovery_adapter_owned_raw_log_state(
             &pool,
+            &deployment_profile,
             &manifest_runtime_state.watched_chain_plan,
         )
         .await?;
@@ -122,7 +133,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
     }
     if run_mode.normalized_replay_catchup_enabled {
         let catchup_config = NormalizedReplayCatchupConfig::new(
-            deployment_profile_from_manifest_root(&args.manifests_root),
+            deployment_profile.clone(),
             intake_chain_tasks
                 .iter()
                 .map(|task| task.chain.clone())

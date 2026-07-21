@@ -22,6 +22,7 @@ pub(crate) const BUILD_SHA: &str = match option_env!("BIGNAME_BUILD_SHA") {
 #[allow(unused_imports)]
 pub(crate) use adapter_sync::{
     sync_adapter_owned_raw_log_state, sync_discovery_adapter_owned_raw_log_state,
+    sync_startup_adapter_owned_raw_log_state,
 };
 #[allow(unused_imports)]
 pub(crate) use intake::{
