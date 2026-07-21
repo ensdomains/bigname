@@ -16,6 +16,7 @@ pub async fn upsert_primary_name_current_rows(
         .map(|row| PrimaryNameCurrentSnapshot {
             row,
             normalized_claim_name: None,
+            claim_name_is_normalized: false,
         })
         .collect::<Vec<_>>();
 
@@ -118,14 +119,16 @@ async fn upsert_primary_name_current_snapshot(
             claim_status,
             raw_claim_name,
             normalized_claim_name,
+            claim_name_is_normalized,
             claim_provenance
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
         ON CONFLICT (address, coin_type, namespace) DO UPDATE
         SET
             claim_status = EXCLUDED.claim_status,
             raw_claim_name = EXCLUDED.raw_claim_name,
             normalized_claim_name = EXCLUDED.normalized_claim_name,
+            claim_name_is_normalized = EXCLUDED.claim_name_is_normalized,
             claim_provenance = EXCLUDED.claim_provenance
         RETURNING
             address,
@@ -134,6 +137,7 @@ async fn upsert_primary_name_current_snapshot(
             claim_status,
             raw_claim_name,
             normalized_claim_name,
+            claim_name_is_normalized,
             claim_provenance
         "#,
     )
@@ -143,6 +147,7 @@ async fn upsert_primary_name_current_snapshot(
     .bind(snapshot.row.claim_status.as_str())
     .bind(&snapshot.row.raw_claim_name)
     .bind(&snapshot.normalized_claim_name)
+    .bind(snapshot.claim_name_is_normalized)
     .bind(claim_provenance)
     .fetch_one(&mut **executor)
     .await

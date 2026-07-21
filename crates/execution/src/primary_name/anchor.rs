@@ -4,6 +4,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 
 use super::context::verified_primary_context_label;
 use super::{VerifiedPrimaryNameSection, VerifiedPrimaryNameStatus, VerifiedPrimaryNameTuple};
+use crate::VERIFIED_PRIMARY_NAME_CLAIM_NOT_NORMALIZED_REASON;
 
 pub(crate) async fn ensure_primary_name_anchor_matches(
     pool: &PgPool,
@@ -27,12 +28,13 @@ pub(crate) async fn ensure_primary_name_anchor_matches(
         );
     };
 
-    ensure_anchor_content_matches(
+    ensure_primary_name_anchor_content_matches(
         context,
         tuple,
         verified_primary_name,
         snapshot.row.claim_status.as_str(),
         snapshot.normalized_claim_name.as_deref(),
+        snapshot.claim_name_is_normalized,
     )
 }
 
@@ -44,7 +46,7 @@ pub(crate) async fn ensure_primary_name_anchor_matches_in_transaction(
     let context = verified_primary_context_label(&tuple.namespace)?;
     let Some(anchor) = sqlx::query_as::<_, LockedPrimaryNameAnchor>(
         r#"
-        SELECT claim_status, normalized_claim_name
+        SELECT claim_status, normalized_claim_name, claim_name_is_normalized
         FROM primary_names_current
         WHERE address = $1
           AND namespace = $2
@@ -72,12 +74,13 @@ pub(crate) async fn ensure_primary_name_anchor_matches_in_transaction(
         );
     };
 
-    ensure_anchor_content_matches(
+    ensure_primary_name_anchor_content_matches(
         context,
         tuple,
         verified_primary_name,
         &anchor.claim_status,
         anchor.normalized_claim_name.as_deref(),
+        anchor.claim_name_is_normalized,
     )
 }
 
@@ -85,20 +88,32 @@ pub(crate) async fn ensure_primary_name_anchor_matches_in_transaction(
 struct LockedPrimaryNameAnchor {
     claim_status: String,
     normalized_claim_name: Option<String>,
+    claim_name_is_normalized: bool,
 }
 
-fn ensure_anchor_content_matches(
+pub(crate) fn ensure_primary_name_anchor_content_matches(
     context: &str,
     tuple: &VerifiedPrimaryNameTuple,
     verified_primary_name: &VerifiedPrimaryNameSection,
     current_claim_status: &str,
     current_normalized_claim_name: Option<&str>,
+    current_claim_name_is_normalized: bool,
 ) -> Result<()> {
+    let is_claim_not_normalized = verified_primary_name.status
+        == VerifiedPrimaryNameStatus::InvalidName
+        && verified_primary_name
+            .section
+            .get("failure_reason")
+            .and_then(serde_json::Value::as_str)
+            == Some(VERIFIED_PRIMARY_NAME_CLAIM_NOT_NORMALIZED_REASON);
     let expected_claim_status = match verified_primary_name.status {
         VerifiedPrimaryNameStatus::Success
         | VerifiedPrimaryNameStatus::Mismatch
         | VerifiedPrimaryNameStatus::NotFound
         | VerifiedPrimaryNameStatus::ExecutionFailed => PrimaryNameClaimStatus::Success.as_str(),
+        VerifiedPrimaryNameStatus::InvalidName if is_claim_not_normalized => {
+            PrimaryNameClaimStatus::Success.as_str()
+        }
         VerifiedPrimaryNameStatus::InvalidName => PrimaryNameClaimStatus::InvalidName.as_str(),
     };
     if current_claim_status != expected_claim_status {
@@ -109,6 +124,23 @@ fn ensure_anchor_content_matches(
             tuple.coin_type,
             current_claim_status,
             verified_primary_name.status
+        );
+    }
+
+    if current_claim_status == PrimaryNameClaimStatus::Success.as_str()
+        && current_claim_name_is_normalized == is_claim_not_normalized
+    {
+        bail!(
+            "{context} persistence claim normalization changed for address {} namespace {} coin_type {}: claim_name_is_normalized is {} but verified failure_reason is {}",
+            tuple.normalized_address,
+            tuple.namespace,
+            tuple.coin_type,
+            current_claim_name_is_normalized,
+            if is_claim_not_normalized {
+                VERIFIED_PRIMARY_NAME_CLAIM_NOT_NORMALIZED_REASON
+            } else {
+                "not claim_not_normalized"
+            }
         );
     }
 

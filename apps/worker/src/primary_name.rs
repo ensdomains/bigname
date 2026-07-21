@@ -36,6 +36,7 @@ pub struct PrimaryNameLegacyReverseHydrationSummary {
     pub success_row_count: usize,
     pub not_found_row_count: usize,
     pub invalid_name_row_count: usize,
+    pub claim_not_normalized_count: usize,
     pub failed_lookup_count: usize,
 }
 
@@ -88,6 +89,7 @@ pub(crate) fn log_legacy_reverse_hydration_summary(
         success_row_count = summary.success_row_count,
         not_found_row_count = summary.not_found_row_count,
         invalid_name_row_count = summary.invalid_name_row_count,
+        claim_not_normalized_count = summary.claim_not_normalized_count,
         failed_lookup_count = summary.failed_lookup_count,
         "primary_names_current legacy reverse-resolver hydration completed"
     );

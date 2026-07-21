@@ -49,6 +49,7 @@ pub use rpc::ChainRpcUrls;
 
 pub const VERIFIED_RESOLUTION_REQUEST_TYPE: &str = "verified_resolution";
 pub const VERIFIED_PRIMARY_NAME_REQUEST_TYPE: &str = "verified_primary_name";
+pub const VERIFIED_PRIMARY_NAME_CLAIM_NOT_NORMALIZED_REASON: &str = "claim_not_normalized";
 pub const ENS_NAMESPACE: &str = bigname_storage::ENS_NAMESPACE;
 pub const BASENAMES_NAMESPACE: &str = bigname_storage::BASENAMES_NAMESPACE;
 pub const BASE_MAINNET_CHAIN_ID: &str = bigname_storage::BASE_MAINNET_CHAIN_ID;

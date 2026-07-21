@@ -219,6 +219,7 @@ Rules:
 - Request-identity fields stay present even when `status != success`.
 - `unsupported_reason` is required when `status=unsupported`.
 - `failure_reason` may appear on `not_found`, `mismatch`, `invalid_name`, or `execution_failed`.
+- On `verified_primary_name` with `status=invalid_name`, `failure_reason=claim_name_not_normalizable` means a nonblank raw claim failed ENSIP-15 normalization; `failure_reason=claim_not_normalized` means normalization succeeded but the untrimmed raw claim did not byte-equal the normalized form.
 - Concrete value/identity fields appear only when the route established a concrete answer.
 
 ### `UnsupportedSummary`

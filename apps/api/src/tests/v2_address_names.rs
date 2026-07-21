@@ -165,6 +165,7 @@ async fn v2_get_address_names_non_success_primary_claim_does_not_mark_primary() 
                 }),
             },
             normalized_claim_name: None,
+            claim_name_is_normalized: false,
         }],
     )
     .await?;
@@ -746,6 +747,7 @@ async fn seed_v2_address_names_fixture(database: &TestDatabase) -> Result<()> {
                 }),
             },
             normalized_claim_name: Some("alpha.eth".to_owned()),
+            claim_name_is_normalized: true,
         }],
     )
     .await?;

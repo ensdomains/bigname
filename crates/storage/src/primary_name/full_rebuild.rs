@@ -13,7 +13,7 @@ const PRIMARY_NAMES_CURRENT_SIDECAR_TRIGGERS: &[&str] = &[
     "primary_names_current_identity_feed_after_insert_delete",
 ];
 
-const PRIMARY_NAMES_CURRENT_COLUMNS: &str = "address, coin_type, namespace, claim_status, raw_claim_name, normalized_claim_name, claim_provenance";
+const PRIMARY_NAMES_CURRENT_COLUMNS: &str = "address, coin_type, namespace, claim_status, raw_claim_name, normalized_claim_name, claim_name_is_normalized, claim_provenance";
 
 /// Replace primary_names_current from a staged rebuild table with the per-row
 /// sidecar triggers disabled, then rebuild the identity sidecars in bulk —

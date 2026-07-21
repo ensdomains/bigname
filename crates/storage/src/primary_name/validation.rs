@@ -88,6 +88,14 @@ pub(super) fn validate_primary_name_current_snapshot(
             );
         }
     }
+    if snapshot.claim_name_is_normalized
+        && (snapshot.row.claim_status != PrimaryNameClaimStatus::Success
+            || normalized_claim_name.is_none())
+    {
+        bail!(
+            "primary_names_current claim_name_is_normalized requires a successful normalized claim"
+        );
+    }
 
     Ok(())
 }

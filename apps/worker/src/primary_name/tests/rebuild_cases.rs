@@ -6,7 +6,8 @@ use std::{
 use anyhow::{Context, Result};
 use bigname_execution::{
     ENS_UNIVERSAL_RESOLVER_ADDRESS, ETHEREUM_MAINNET_CHAIN_ID,
-    PersistEnsVerifiedPrimaryNameRequest, persist_ens_verified_primary_name,
+    PersistEnsVerifiedPrimaryNameRequest, load_persisted_ens_verified_primary_name,
+    persist_ens_verified_primary_name,
 };
 use bigname_storage::{
     CanonicalityState, ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, ExecutionTraceStep,
@@ -150,8 +151,11 @@ async fn full_rebuild_projects_declared_claim_status_rows() -> Result<()> {
             "60",
         )
         .await?
-        .map(|snapshot| snapshot.normalized_claim_name),
-        Some(Some("alice.eth".to_owned()))
+        .map(|snapshot| (
+            snapshot.normalized_claim_name,
+            snapshot.claim_name_is_normalized,
+        )),
+        Some((Some("alice.eth".to_owned()), false))
     );
     assert_eq!(
         load_primary_name_current(
@@ -422,6 +426,7 @@ async fn targeted_rebuild_serializes_claim_publish_with_verified_primary_produce
             claim_provenance: json!({}),
         },
         normalized_claim_name: Some("alice.eth".to_owned()),
+        claim_name_is_normalized: true,
     };
     upsert_primary_name_current_snapshots(database.pool(), &[old_snapshot])
         .await
@@ -746,6 +751,64 @@ async fn full_rebuild_invalidates_changed_verified_primary_cache_without_touchin
     assert_eq!(
         load_execution_outcome(database.pool(), &sibling_outcome.cache_key).await?,
         Some(sibling_outcome)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn full_rebuild_keeps_legacy_case_variant_verified_cache_unreadable() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+
+    upsert_normalized_events(
+        database.pool(),
+        &[
+            reverse_changed_event(
+                "full-reverse-case-variant",
+                address,
+                "60",
+                330,
+                0,
+                CanonicalityState::Canonical,
+            ),
+            reverse_linked_name_event(
+                "full-record-case-variant",
+                address,
+                "60",
+                Some("Alice.eth"),
+                331,
+                0,
+                CanonicalityState::Canonical,
+            ),
+        ],
+    )
+    .await?;
+    rebuild_primary_names_current(database.pool(), None, None, None).await?;
+
+    let request = persistable_verified_primary_request(
+        Uuid::from_u128(0x5e710000000000000000000000020003),
+        address,
+        "60",
+        "alice.eth",
+        1_717_180_103,
+    );
+    upsert_execution_trace(database.pool(), &request.trace).await?;
+    upsert_execution_outcome(database.pool(), &request.outcome).await?;
+    let outcome = request.outcome;
+
+    // An upgrade replay recomputes false from the case-variant claim, matching the migration's
+    // fail-closed default. The old artifact can remain physically present, but it must not be a
+    // reusable verified-primary answer.
+    rebuild_primary_names_current(database.pool(), None, None, None).await?;
+    assert_eq!(
+        load_execution_outcome(database.pool(), &outcome.cache_key).await?,
+        Some(outcome.clone())
+    );
+    assert!(
+        load_persisted_ens_verified_primary_name(database.pool(), &outcome.cache_key)
+            .await?
+            .is_none()
     );
 
     database.cleanup().await

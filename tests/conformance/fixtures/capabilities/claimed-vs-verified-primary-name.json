@@ -15,7 +15,8 @@
       "unsupported_reason": null
     },
     "data": {
-      "fixture_version": 1,
+      "fixture_version": 2,
+      "non_verified_reason": "claim_not_normalized",
       "stable_identity": "capability-golden:claimed-vs-verified-primary-name"
     },
     "provenance": {

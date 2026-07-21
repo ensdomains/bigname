@@ -1,8 +1,9 @@
 use anyhow::{Context, Result, bail};
 use bigname_storage::{
     ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, RawCallSnapshot, load_execution_outcome,
-    load_execution_trace, load_primary_name_current, upsert_execution_outcome_in_transaction,
-    upsert_execution_trace_in_transaction, upsert_raw_call_snapshots_in_transaction,
+    load_execution_trace, load_primary_name_current_snapshot,
+    upsert_execution_outcome_in_transaction, upsert_execution_trace_in_transaction,
+    upsert_raw_call_snapshots_in_transaction,
 };
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
@@ -49,7 +50,8 @@ pub(crate) mod test_hooks {
 }
 
 use crate::primary_name::{
-    ensure_primary_name_anchor_matches, ensure_primary_name_anchor_matches_in_transaction,
+    ensure_primary_name_anchor_content_matches, ensure_primary_name_anchor_matches,
+    ensure_primary_name_anchor_matches_in_transaction,
     extract_verified_primary_readback_provenance, validate_verified_primary_request,
     validate_verified_primary_trace_and_outcome, verified_primary_context_label,
 };
@@ -310,14 +312,25 @@ pub async fn load_persisted_ens_verified_primary_name(
 
     let validated = validate_verified_primary_trace_and_outcome(&trace, &outcome)?;
     let provenance = extract_verified_primary_readback_provenance(&trace, &outcome)?;
-    if load_primary_name_current(
+    let Some(anchor) = load_primary_name_current_snapshot(
         pool,
         &validated.tuple.normalized_address,
         &validated.tuple.namespace,
         &validated.tuple.coin_type,
     )
     .await?
-    .is_none()
+    else {
+        return Ok(None);
+    };
+    if ensure_primary_name_anchor_content_matches(
+        context,
+        &validated.tuple,
+        &validated.verified_primary_name,
+        anchor.row.claim_status.as_str(),
+        anchor.normalized_claim_name.as_deref(),
+        anchor.claim_name_is_normalized,
+    )
+    .is_err()
     {
         return Ok(None);
     }

@@ -188,7 +188,8 @@ pub(crate) async fn get_primary_name(
             | OnDemandPrimaryNameClaimState::Found(_)
     ) || matches!(
         lookup_state.on_demand_verified,
-        OnDemandPrimaryNameVerificationState::Verified(_)
+        OnDemandPrimaryNameVerificationState::ClaimNotNormalized
+            | OnDemandPrimaryNameVerificationState::Verified(_)
     ) {
         Meta::default()
     } else {
@@ -294,6 +295,15 @@ fn build_verified_answer(
     namespace: &str,
     lookup_state: &PrimaryNameLookupState,
 ) -> V2Result<VerifiedAnswer> {
+    if crate::projected_primary_name_claim_is_not_normalized(lookup_state) {
+        return Ok(VerifiedAnswer {
+            answer: verified_answer_from_value(
+                &crate::primary_name_claim_not_normalized_result(),
+                lookup_state,
+            )?,
+            outcome_exists: true,
+        });
+    }
     if let Some(persisted) = lookup_state.persisted_verified.as_ref() {
         return Ok(VerifiedAnswer {
             answer: verified_answer_from_value(&persisted.verified_primary_name, lookup_state)?,
@@ -303,11 +313,18 @@ fn build_verified_answer(
 
     match &lookup_state.tuple_state {
         PrimaryNameTupleState::TupleMissing => {
-            if let OnDemandPrimaryNameVerificationState::Verified(on_demand_verified) =
-                &lookup_state.on_demand_verified
-            {
+            let on_demand_verified = match &lookup_state.on_demand_verified {
+                OnDemandPrimaryNameVerificationState::ClaimNotNormalized => {
+                    Some(crate::primary_name_claim_not_normalized_result())
+                }
+                OnDemandPrimaryNameVerificationState::Verified(on_demand_verified) => {
+                    Some(on_demand_verified.clone())
+                }
+                OnDemandPrimaryNameVerificationState::NotAttempted => None,
+            };
+            if let Some(on_demand_verified) = on_demand_verified {
                 return Ok(VerifiedAnswer {
-                    answer: verified_answer_from_value(on_demand_verified, lookup_state)?,
+                    answer: verified_answer_from_value(&on_demand_verified, lookup_state)?,
                     outcome_exists: true,
                 });
             }
@@ -338,19 +355,28 @@ fn verified_answer_from_value(
     verified_primary_name: &Value,
     lookup_state: &PrimaryNameLookupState,
 ) -> V2Result<PrimaryNameAnswer> {
-    let status = status_from_v1(
+    let failure_reason = str_field(verified_primary_name.get("failure_reason"));
+    let mut status = status_from_v1(
         verified_primary_name
             .get("status")
             .and_then(Value::as_str)
             .unwrap_or("execution_failed"),
     );
+    if status == Status::InvalidName
+        && failure_reason.as_deref()
+            == Some(bigname_execution::VERIFIED_PRIMARY_NAME_CLAIM_NOT_NORMALIZED_REASON)
+    {
+        // v2 permits reasoned not_found results but does not attach failure_reason to
+        // invalid_name. The indexed answer still carries the normalized claimed candidate.
+        status = Status::NotFound;
+    }
     let mut answer = PrimaryNameAnswer::new(Source::Verified, status);
     answer.name = primary_name_from_value(verified_primary_name);
     answer.unsupported_reason = primary_name_unsupported_reason(
         str_field(verified_primary_name.get("unsupported_reason")).as_deref(),
         status,
     )?;
-    answer.failure_reason = str_field(verified_primary_name.get("failure_reason"))
+    answer.failure_reason = failure_reason
         .map(|reason| product_primary_name_reason(&reason))
         .transpose()?;
     if status == Status::InvalidName {

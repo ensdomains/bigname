@@ -19,5 +19,6 @@ pub(super) fn decode_primary_name_current_snapshot(
             claim_provenance: crate::sql_row::get(&row, "claim_provenance")?,
         },
         normalized_claim_name: crate::sql_row::get(&row, "normalized_claim_name")?,
+        claim_name_is_normalized: crate::sql_row::get(&row, "claim_name_is_normalized")?,
     })
 }

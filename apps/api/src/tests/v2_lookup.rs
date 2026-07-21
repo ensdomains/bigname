@@ -1052,6 +1052,7 @@ async fn seed_v2_lookup_reverse_fixture(database: &TestDatabase, address: &str) 
                 claim_provenance: json!({"source": "v2_lookup_test"}),
             },
             normalized_claim_name: Some("alice.eth".to_owned()),
+            claim_name_is_normalized: true,
         }],
     )
     .await?;

@@ -295,6 +295,7 @@ async fn load_full_rebuild_claim_change_invalidation_targets(
            OR current.claim_status IS DISTINCT FROM stage.claim_status
            OR current.raw_claim_name IS DISTINCT FROM stage.raw_claim_name
            OR current.normalized_claim_name IS DISTINCT FROM stage.normalized_claim_name
+           OR current.claim_name_is_normalized IS DISTINCT FROM stage.claim_name_is_normalized
            OR current.claim_provenance IS DISTINCT FROM stage.claim_provenance
         "#
     ))
@@ -360,6 +361,9 @@ pub(super) fn primary_name_row_with_provenance_extensions<const N: usize>(
     let normalized_claim = raw_claim
         .filter(|raw_name| !raw_claim_name_source_is_blank(raw_name))
         .and_then(|raw_name| bigname_domain::normalization::normalize_name(raw_name).ok());
+    let claim_name_is_normalized = raw_claim
+        .zip(normalized_claim.as_ref())
+        .is_some_and(|(raw_name, normalized)| raw_name == normalized.normalized_name);
     let (claim_status, raw_claim_name) = match raw_claim {
         Some(raw_name) if raw_claim_name_source_is_blank(raw_name) => {
             (PrimaryNameClaimStatus::NotFound, None)
@@ -388,6 +392,7 @@ pub(super) fn primary_name_row_with_provenance_extensions<const N: usize>(
             )?,
         },
         normalized_claim_name,
+        claim_name_is_normalized,
     })
 }
 

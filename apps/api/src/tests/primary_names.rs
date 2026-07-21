@@ -184,7 +184,9 @@ fn primary_name_response_uses_on_demand_claim_and_verification_for_default_tuple
     let lookup_state = PrimaryNameLookupState {
         tuple_state: PrimaryNameTupleState::TupleMissing,
         normalized_claim_name: None,
+        claim_name_is_normalized: false,
         on_demand_claim: OnDemandPrimaryNameClaimState::Found(OnDemandPrimaryNameClaim {
+            raw_name: "taytems.eth".to_owned(),
             normalized_name: "taytems.eth".to_owned(),
             resolver_address: "0xa2c122be93b0074270ebee7f6b7292c7deb45047".to_owned(),
         }),
@@ -266,6 +268,7 @@ fn primary_name_response_reports_supported_tuple_class_without_persisted_verifie
             }),
         }),
         normalized_claim_name: Some("alice.eth".to_owned()),
+        claim_name_is_normalized: true,
         on_demand_claim: OnDemandPrimaryNameClaimState::NotAttempted,
         on_demand_verified: OnDemandPrimaryNameVerificationState::NotAttempted,
         persisted_verified: None,
@@ -606,6 +609,119 @@ async fn get_primary_names_verifies_default_tuple_miss_with_on_demand_rpc() -> R
 }
 
 #[tokio::test]
+async fn get_primary_names_rejects_case_variant_on_demand_claim_before_forward_lookup()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        primary_name_reverse_name_response("Taytems.eth"),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_execution::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+
+    let response = app_router(database.app_state_with_chain_rpc_urls(chain_rpc_urls))
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x8e8db5ccef88cca9d624701db544989c996e3216?mode=both")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("case-variant on-demand primary-name request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: PrimaryNameResponse = read_json(response).await?;
+    assert_eq!(
+        payload.declared_state,
+        Some(json!({
+            "claimed_primary_name": {
+                "status": "success",
+                "name": "taytems.eth",
+                "provenance": {
+                    "source_family": "ens_reverse_rpc",
+                    "resolver_address": "0xa2c122be93b0074270ebee7f6b7292c7deb45047",
+                },
+            }
+        }))
+    );
+    assert_eq!(
+        payload.verified_state,
+        Some(json!({
+            "verified_primary_name": {
+                "status": "invalid_name",
+                "failure_reason": bigname_execution::VERIFIED_PRIMARY_NAME_CLAIM_NOT_NORMALIZED_REASON,
+            }
+        }))
+    );
+    assert_eq!(
+        payload.coverage,
+        json!({
+            "status": "partial",
+            "exhaustiveness": "non_enumerable",
+            "source_classes_considered": ["ens_reverse_rpc"],
+            "enumeration_basis": "primary_name_lookup",
+            "unsupported_reason": null,
+        })
+    );
+    assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 2);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_primary_names_does_not_trim_on_demand_claim_before_verification() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        primary_name_reverse_name_response(" taytems.eth "),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_execution::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+
+    let response = app_router(database.app_state_with_chain_rpc_urls(chain_rpc_urls))
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x8e8db5ccef88cca9d624701db544989c996e3216?mode=both")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("whitespace-padded on-demand primary-name request failed")?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: PrimaryNameResponse = read_json(response).await?;
+    assert_eq!(
+        payload.declared_state,
+        Some(json!({
+            "claimed_primary_name": {
+                "status": "invalid_name",
+                "raw_claim_name": " taytems.eth ",
+                "provenance": {
+                    "source_family": "ens_reverse_rpc",
+                    "resolver_address": "0xa2c122be93b0074270ebee7f6b7292c7deb45047",
+                },
+            }
+        }))
+    );
+    assert_eq!(
+        payload.verified_state,
+        Some(json!({
+            "verified_primary_name": {
+                "status": "invalid_name",
+                "failure_reason": "claim_name_not_normalizable",
+            }
+        }))
+    );
+    assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 2);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn get_primary_names_reports_on_demand_forward_addr_miss() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
@@ -924,8 +1040,9 @@ async fn get_primary_names_returns_not_found_for_tuple_miss_when_projection_exis
 }
 
 #[tokio::test]
-async fn get_primary_names_reads_declared_claim_status_for_exact_tuple() -> Result<()> {
+async fn get_primary_names_gates_case_variant_claim_even_with_persisted_success() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
     upsert_normalized_events(
         &database.pool,
         &[
@@ -954,6 +1071,45 @@ async fn get_primary_names_reads_declared_claim_status_for_exact_tuple() -> Resu
         Some("0x0000000000000000000000000000000000000abc"),
         Some("ens"),
         Some("60"),
+    )
+    .await?;
+
+    let execution_trace_id = Uuid::from_u128(0x0e7ec7ace0000000000000000000003f);
+    let finished_at = timestamp(1_717_172_400);
+    let verified_primary_name = json!({
+        "status": "success",
+        "name": {
+            "logical_name_id": "ens:alice.eth",
+            "namespace": "ens",
+            "normalized_name": "alice.eth",
+            "canonical_display_name": "Alice.eth",
+            "namehash": "0x0000000000000000000000000000000000000000000000000000000000000123",
+            "resource_id": "00000000-0000-0000-0000-000000000456",
+            "binding_kind": "declared_registry_path"
+        }
+    });
+    upsert_execution_trace(
+        &database.pool,
+        &primary_name_execution_trace(
+            execution_trace_id,
+            "ens",
+            address,
+            "60",
+            verified_primary_name.clone(),
+            finished_at,
+        ),
+    )
+    .await?;
+    upsert_execution_outcome(
+        &database.pool,
+        &primary_name_execution_outcome(
+            execution_trace_id,
+            "ens",
+            address,
+            "60",
+            verified_primary_name,
+            finished_at,
+        ),
     )
     .await?;
 
@@ -1003,7 +1159,8 @@ async fn get_primary_names_reads_declared_claim_status_for_exact_tuple() -> Resu
         both_payload.verified_state,
         Some(json!({
             "verified_primary_name": {
-                "status": "not_found",
+                "status": "invalid_name",
+                "failure_reason": bigname_execution::VERIFIED_PRIMARY_NAME_CLAIM_NOT_NORMALIZED_REASON,
             }
         }))
     );
@@ -1099,7 +1256,8 @@ async fn get_primary_names_reads_basenames_declared_claim_status_for_exact_tuple
         both_payload.verified_state,
         Some(json!({
             "verified_primary_name": {
-                "status": "not_found",
+                "status": "invalid_name",
+                "failure_reason": bigname_execution::VERIFIED_PRIMARY_NAME_CLAIM_NOT_NORMALIZED_REASON,
             }
         }))
     );
@@ -1814,7 +1972,7 @@ async fn get_primary_names_reads_persisted_basenames_verified_primary_name_for_e
                 "basenames-record-b-60-success",
                 address,
                 BASE_PRIMARY_COIN_TYPE,
-                Some("Alice.base.eth"),
+                Some("alice.base.eth"),
                 361,
                 0,
                 CanonicalityState::Canonical,

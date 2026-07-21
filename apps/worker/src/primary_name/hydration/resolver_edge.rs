@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
-use bigname_execution::{OnDemandEnsPrimaryNameError, ens_namehash_hex};
+use bigname_execution::{
+    OnDemandEnsPrimaryNameError, VERIFIED_PRIMARY_NAME_CLAIM_NOT_NORMALIZED_REASON,
+    ens_namehash_hex,
+};
 use bigname_storage::{ENS_NAMESPACE, normalize_evm_address};
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -125,6 +128,21 @@ pub(super) async fn hydrate_resolver_edge_candidates(
                 delete_existing_resolver_edge_row(pool, candidate, summary).await?;
                 continue;
             };
+            if raw_name != normalized_name {
+                summary.claim_not_normalized_count += 1;
+                tracing::debug!(
+                    service = "worker",
+                    projection = "primary_names_current",
+                    chain_id,
+                    reverse_node = target.reverse_node,
+                    raw_name,
+                    normalized_name,
+                    failure_reason = VERIFIED_PRIMARY_NAME_CLAIM_NOT_NORMALIZED_REASON,
+                    "legacy reverse-resolver resolver-edge claim is not already ENSIP-15 normalized"
+                );
+                delete_existing_resolver_edge_row(pool, candidate, summary).await?;
+                continue;
+            }
             let address = match client
                 .lookup_forward_address(&chain_id, &position, &normalized_name)
                 .await

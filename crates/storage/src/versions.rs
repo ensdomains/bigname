@@ -10,8 +10,10 @@
 /// revision, including zero-event resources discovered from canonical resource identity evidence.
 /// Its all-current replay preserves the version 8 `name_current` output; exact-name reads have no
 /// replay-version compatibility gate, so deployments must keep them drained until all version 9
-/// markers are current and pending invalidations drain.
-pub const CURRENT_PROJECTION_REPLAY_VERSION: i32 = 9;
+/// markers are current and pending invalidations drain. Version 10 rebuilds
+/// `primary_names_current` with the untrimmed reverse-claim normalization gate; deployments remain
+/// drained until the new markers are current and pending invalidations drain.
+pub const CURRENT_PROJECTION_REPLAY_VERSION: i32 = 10;
 
 /// Latest checked-in migration version expected by this binary.
 pub fn latest_migration_version() -> i64 {

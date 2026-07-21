@@ -2019,6 +2019,7 @@ impl TestDatabase {
                     claim_status TEXT NOT NULL,
                     raw_claim_name TEXT,
                     normalized_claim_name TEXT,
+                    claim_name_is_normalized BOOLEAN NOT NULL DEFAULT FALSE,
                     claim_provenance JSONB NOT NULL DEFAULT '{}'::jsonb,
                     PRIMARY KEY (address, namespace, coin_type)
                 )
@@ -2112,6 +2113,7 @@ impl TestDatabase {
             &[PrimaryNameCurrentSnapshot {
                 row,
                 normalized_claim_name: normalized_claim_name.map(str::to_owned),
+                claim_name_is_normalized: normalized_claim_name.is_some(),
             }],
         )
         .await

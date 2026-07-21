@@ -170,7 +170,8 @@
                 both_payload.verified_state,
                 Some(json!({
                     "verified_primary_name": {
-                        "status": "not_found",
+                        "status": "invalid_name",
+                        "failure_reason": bigname_execution::VERIFIED_PRIMARY_NAME_CLAIM_NOT_NORMALIZED_REASON,
                     }
                 }))
             );
@@ -294,6 +295,7 @@
                             }),
                         },
                         normalized_claim_name: Some("alice.eth".to_owned()),
+                        claim_name_is_normalized: true,
                     },
                     PrimaryNameCurrentSnapshot {
                         row: PrimaryNameCurrentRow {
@@ -307,6 +309,7 @@
                             }),
                         },
                         normalized_claim_name: Some("beta.eth".to_owned()),
+                        claim_name_is_normalized: true,
                     },
                 ],
             )
@@ -896,7 +899,7 @@
                 .seed_basenames_primary_name_claim_observation(
                     address,
                     BASENAMES_PRIMARY_COIN_TYPE,
-                    "Alice.base.eth",
+                    "alice.base.eth",
                 )
                 .await?;
             database
