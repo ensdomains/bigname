@@ -1329,16 +1329,19 @@ async fn replay_normalized_events_block_hash_replay_fails_closed_for_ens_v2_regi
 }
 
 #[tokio::test]
-async fn replay_normalized_events_block_range_runs_ens_v2_closure_over_closed_emitter() -> Result<()>
-{
+async fn replay_normalized_events_block_range_rebuilds_ens_v2_proof_for_closed_emitter()
+-> Result<()> {
     let database = TestDatabase::new().await?;
     let chain = "ethereum-mainnet";
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
     create_complete_raw_log_staging_input_fixture(database.pool(), chain, 121).await?;
     let manifest_id = 121;
     let current_registry_id = Uuid::from_u128(0x1210);
     let retired_registry_id = Uuid::from_u128(0x1211);
+    let resolver_id = Uuid::from_u128(0x1212);
     let current_registry = "0x00000000000000000000000000000000000002a1";
     let retired_registry = "0x00000000000000000000000000000000000002a2";
+    let resolver = "0x00000000000000000000000000000000000002a3";
     let block = provider_block(
         "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a121",
         Some("0x1111111111111111111111111111111111111111111111111111111111111111"),
@@ -1362,6 +1365,14 @@ async fn replay_normalized_events_block_range_runs_ens_v2_closure_over_closed_em
         .bind(test_manifest_payload())
         .execute(database.pool())
         .await?;
+    insert_normalized_replay_ens_v2_resolver_manifest(
+        database.pool(),
+        chain,
+        manifest_id + 1,
+        resolver_id,
+        resolver,
+    )
+    .await?;
     insert_contract_instance(database.pool(), retired_registry_id, chain, "contract").await?;
     insert_active_contract_instance_address(
         database.pool(),
@@ -1425,6 +1436,39 @@ async fn replay_normalized_events_block_range_runs_ens_v2_closure_over_closed_em
         CanonicalityState::Canonical,
     )
     .await?;
+    sqlx::query(
+        r#"
+        UPDATE raw_log_staging_input_revisions
+        SET retention_generation = 1,
+            retained_history_complete = false,
+            incomplete_since = clock_timestamp(),
+            proven_retention_generation = NULL,
+            proven_discovery_admission_epoch = NULL,
+            proven_through_block = NULL
+        WHERE chain_id = $1
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    insert_completed_backfill_range_coverage_for_source_family(
+        database.pool(),
+        chain,
+        0,
+        block.block_number,
+        "ens_v2_registry_l1",
+        &[current_registry, retired_registry],
+    )
+    .await?;
+    insert_completed_backfill_range_coverage_for_source_family(
+        database.pool(),
+        chain,
+        0,
+        block.block_number,
+        "ens_v2_resolver_l1",
+        &[resolver],
+    )
+    .await?;
 
     let outcome = replay_raw_fact_normalized_events(
         database.pool(),
@@ -1443,6 +1487,23 @@ async fn replay_normalized_events_block_range_runs_ens_v2_closure_over_closed_em
     assert_eq!(
         outcome.scanned_raw_log_count, 2,
         "the stateless boundary and ENSv2 full-closure boundary must each see the retained closed-emitter fact"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (bool, Option<i64>, Option<i64>)>(
+            r#"
+            SELECT
+                retained_history_complete,
+                proven_retention_generation,
+                proven_through_block
+            FROM raw_log_staging_input_revisions
+            WHERE chain_id = $1
+            "#,
+        )
+        .bind(chain)
+        .fetch_one(database.pool())
+        .await?,
+        (true, Some(1), Some(block.block_number)),
+        "manual full-closure replay must rebuild its stale proof from current-generation coverage"
     );
 
     database.cleanup().await

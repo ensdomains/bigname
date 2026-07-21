@@ -330,14 +330,18 @@ pub(crate) async fn classify_raw_fact_replay_contract(
         );
     }
 
-    let closure_source_families = closure_source_families_for_contracts(&nonstateless_contracts);
-    ensure_full_closure_retention_authority(
+    let nonstateless_adapters = nonstateless_contracts
+        .iter()
+        .map(|contract| contract.adapter)
+        .collect::<Vec<_>>();
+    ensure_full_closure_retention_authority_for_adapters(
         pool,
         &request.chain,
-        &closure_source_families,
+        &nonstateless_adapters,
         *to_block,
     )
     .await?;
+    let closure_source_families = closure_source_families_for_contracts(&nonstateless_contracts);
     let closure_start_block = earliest_required_raw_fact_block(
         pool,
         &request.chain,
