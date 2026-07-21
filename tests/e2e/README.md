@@ -571,6 +571,10 @@ route inventory or a claim that every protocol transition is covered.
   same indexer process must reach the target checkpoint, retain and normalize
   the target log, hit every fault exactly once, and converge to the unfaulted
   control's route snapshots.
+- `provider_faults::transient_get_code_retries_primary_without_using_configured_fallback`
+  — injects one retryable JSON-RPC error into a healthy historical code read.
+  The primary provider must retry and persist the exact code observation while
+  the configured historical-code fallback receives zero requests.
 - `provider_faults::pruned_get_code_fails_closed_then_uses_configured_fallback`
   — targets one historical resolver `eth_getCode` with the pruned-state error
   recognized by the indexer. Without a fallback, bounded backfill must fail

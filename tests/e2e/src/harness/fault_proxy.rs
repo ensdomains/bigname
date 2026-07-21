@@ -54,6 +54,12 @@ enum FaultAction {
         code: i64,
         message: String,
     },
+    GetCodeJsonRpcError {
+        address: String,
+        block_hash: String,
+        code: i64,
+        message: String,
+    },
     DropReceipts {
         transaction_hash: String,
         count: usize,
@@ -121,6 +127,23 @@ impl FaultSpec {
             FaultKind::ErrorOnce,
             FaultAction::JsonRpcError {
                 transaction_hash: normalize_hex(transaction_hash),
+                code,
+                message: message.into(),
+            },
+        )
+    }
+
+    pub fn get_code_error_once(
+        address: impl Into<String>,
+        block_hash: impl Into<String>,
+        code: i64,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::once(
+            FaultKind::ErrorOnce,
+            FaultAction::GetCodeJsonRpcError {
+                address: normalize_hex(address),
+                block_hash: normalize_hex(block_hash),
                 code,
                 message: message.into(),
             },
@@ -323,16 +346,6 @@ impl FaultProxy {
             .count()
     }
 
-    pub fn request_count(&self, method: &str) -> usize {
-        self.state
-            .calls
-            .lock()
-            .expect("provider-fault calls lock must not be poisoned")
-            .iter()
-            .filter(|call| call.method == method)
-            .count()
-    }
-
     pub fn total_request_count(&self) -> usize {
         self.state
             .calls
@@ -465,7 +478,11 @@ async fn read_http_request_body(stream: &mut TcpStream) -> Result<Vec<u8>> {
             .await
             .context("read provider-fault HTTP request")?;
         if read == 0 {
-            bail!("provider-fault client closed before sending a complete request");
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "provider-fault client closed before sending a complete request",
+            )
+            .into());
         }
         buffer.extend_from_slice(&chunk[..read]);
     }
@@ -617,6 +634,28 @@ fn apply_fault_action(
             } else {
                 Ok(None)
             }
+        }
+        FaultAction::GetCodeJsonRpcError {
+            address,
+            block_hash,
+            code,
+            message,
+        } => {
+            let ids = request_ids_matching(request, "eth_getCode", |call| {
+                call.get("params")
+                    .is_some_and(|params| get_code_params_match(params, address, block_hash))
+            });
+            if ids.is_empty() {
+                return Ok(None);
+            }
+            let replaced = replace_response_ids_with_error(response, &ids, *code, message);
+            if replaced != ids.len() {
+                bail!(
+                    "get-code error fault matched {} requests but replaced {replaced} responses",
+                    ids.len()
+                );
+            }
+            Ok(Some(FaultDirective::Mutated))
         }
         FaultAction::DropReceipts {
             transaction_hash,
@@ -915,6 +954,23 @@ mod tests {
             "state at block #43 is pruned"
         );
         assert_eq!(response[1]["result"], "0x6001");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn clean_eof_before_complete_request_is_a_client_disconnect() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let mut client = TcpStream::connect(listener.local_addr()?).await?;
+        let (mut server, _) = listener.accept().await?;
+        client
+            .write_all(b"POST / HTTP/1.1\r\ncontent-length: 10\r\n\r\npartial")
+            .await?;
+        client.shutdown().await?;
+
+        let error = read_http_request_body(&mut server)
+            .await
+            .expect_err("an incomplete request ending in clean EOF must fail");
+        assert!(is_client_disconnect(&error));
         Ok(())
     }
 }

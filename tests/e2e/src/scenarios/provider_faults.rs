@@ -206,7 +206,8 @@ async fn await_short_log_observation(
     target_block: u64,
     delay_hits_before: usize,
 ) -> Result<ShortLogObservation> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let ready_timeout_secs = pipeline::ready_timeout_secs()?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(ready_timeout_secs);
     loop {
         session.assert_running()?;
         if canonical_checkpoint(pool)
@@ -220,7 +221,7 @@ async fn await_short_log_observation(
         }
         if tokio::time::Instant::now() >= deadline {
             bail!(
-                "short-log run neither retried the affected fetch nor advanced its checkpoint within 60s"
+                "short-log run neither retried the affected fetch nor advanced its checkpoint within the configured {ready_timeout_secs}s readiness deadline"
             );
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -305,9 +306,11 @@ async fn silently_short_logs_are_contained_until_refetch_then_match_control() ->
         "provider-fault-short-log",
     )
     .await;
-    proxy
-        .wait_for_hits(FaultKind::DropLogs, 1, Duration::from_secs(60))
-        .await?;
+    let short_backfill_drop_hits = proxy.hit_count(FaultKind::DropLogs);
+    ensure!(
+        short_backfill_drop_hits == 1,
+        "completed short-log backfill observed {short_backfill_drop_hits} drop-log hits instead of exactly one"
+    );
     let ready_sql = fixture.ready_sql();
     match SHORT_LOG_CONTRACT {
         ShortLogContract::Strict => {
@@ -434,7 +437,7 @@ async fn silently_short_logs_are_contained_until_refetch_then_match_control() ->
         .wait_for_hits(
             FaultKind::DropLogs,
             drop_hits_before + 1,
-            Duration::from_secs(60),
+            Duration::from_secs(pipeline::ready_timeout_secs()?),
         )
         .await?;
     let live_observation = await_short_log_observation(
@@ -646,6 +649,103 @@ async fn transient_provider_faults_and_partial_receipts_recover_to_control() -> 
 }
 
 #[tokio::test]
+async fn transient_get_code_retries_primary_without_using_configured_fallback() -> Result<()> {
+    let anvil = Anvil::spawn().await?;
+    let fixture = deploy_text_fixture(&anvil, "fault-code-retry", "healthy").await?;
+    anvil.client().mine(2).await?;
+    let head = anvil.client().block_number().await?;
+    let block_hash = anvil
+        .client()
+        .block_hash(fixture.text_receipt.block_number)
+        .await?;
+    let expected_code = anvil
+        .client()
+        .get_code_at_block_hash(fixture.deployment.public_resolver.address, &block_hash)
+        .await?;
+    let expected_code_hash = format!("{:#x}", keccak256(&expected_code));
+    let resolver = format!("{:#x}", fixture.deployment.public_resolver.address);
+
+    let primary = FaultProxy::spawn(&anvil.url).await?;
+    primary.add_fault(FaultSpec::get_code_error_once(
+        &resolver,
+        &block_hash,
+        -32005,
+        "injected healthy-block capacity limit",
+    ));
+    let fallback = FaultProxy::spawn(&anvil.url).await?;
+    let Corpus {
+        db,
+        scratch: _scratch,
+        profile,
+    } = prepare_corpus(&fixture.deployment).await?;
+    let primary_urls = [(CHAIN, primary.url.as_str())];
+    let fallback_urls = [(CHAIN, fallback.url.as_str())];
+    pipeline::indexer_backfill_with_chain_rpc_urls_and_code_fallbacks(
+        &repo_root(),
+        &db.url,
+        &profile.root,
+        ChainBackfillTarget {
+            chain_rpc_urls: &primary_urls,
+            chain: CHAIN,
+            block_range: 0..=head,
+            idempotency_key: "provider-fault-transient-code",
+        },
+        &fallback_urls,
+    )
+    .await?;
+
+    ensure!(
+        primary.hit_count(FaultKind::ErrorOnce) == 1,
+        "primary did not inject exactly one targeted transient eth_getCode error"
+    );
+    let targeted_primary_calls = primary.get_code_request_count(&resolver, &block_hash);
+    ensure!(
+        targeted_primary_calls >= 2,
+        "primary received {targeted_primary_calls} targeted eth_getCode calls; the transient error was not retried"
+    );
+    ensure!(
+        fallback.total_request_count() == 0,
+        "configured fallback received {} requests for a transient primary error",
+        fallback.total_request_count()
+    );
+    ensure!(
+        resolver_coverage_covers(
+            &db.pool,
+            fixture.deployment.public_resolver.address,
+            fixture.text_receipt.block_number,
+        )
+        .await?,
+        "primary retry recovery did not record resolver fetch coverage"
+    );
+    let code_observation: Option<(String, i64)> = sqlx::query_as(
+        "SELECT code_hash, code_byte_length FROM raw_code_hashes \
+         WHERE chain_id = $1 AND block_hash = $2 AND lower(contract_address) = lower($3)",
+    )
+    .bind(CHAIN)
+    .bind(&block_hash)
+    .bind(&resolver)
+    .fetch_optional(&db.pool)
+    .await?;
+    let (stored_code_hash, stored_code_byte_length) = code_observation
+        .context("primary retry did not persist a code observation at the healthy block")?;
+    ensure!(
+        stored_code_hash.eq_ignore_ascii_case(&expected_code_hash)
+            && stored_code_byte_length == expected_code.len() as i64,
+        "retried primary code observation differed from direct Anvil state: expected hash {expected_code_hash} and length {}, stored hash {stored_code_hash} and length {stored_code_byte_length}",
+        expected_code.len()
+    );
+    ensure!(
+        raw_log_count(&db.pool, &fixture.text_receipt.tx_hash).await? > 0,
+        "primary retry recovery did not complete target raw-log materialization"
+    );
+    primary.assert_healthy()?;
+    fallback.assert_healthy()?;
+
+    db.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn pruned_get_code_fails_closed_then_uses_configured_fallback() -> Result<()> {
     let anvil = Anvil::spawn().await?;
     let fixture = deploy_text_fixture(&anvil, "fault-pruned", "archive").await?;
@@ -735,8 +835,9 @@ async fn pruned_get_code_fails_closed_then_uses_configured_fallback() -> Result<
         "configured fallback never received the targeted historical eth_getCode"
     );
     ensure!(
-        fallback.request_count("eth_getCode") == fallback.total_request_count(),
-        "historical-code fallback received non-eth_getCode pipeline traffic"
+        fallback.total_request_count() == targeted_fallback_calls,
+        "historical-code fallback received {} total requests but only {targeted_fallback_calls} targeted the pruned resolver block",
+        fallback.total_request_count()
     );
     ensure!(
         resolver_coverage_covers(

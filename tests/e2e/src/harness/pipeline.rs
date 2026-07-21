@@ -384,7 +384,7 @@ fn parse_timeout_secs(variable: &str, value: &str) -> Result<u64> {
     Ok(seconds)
 }
 
-pub(super) fn ready_timeout_secs() -> Result<u64> {
+pub(crate) fn ready_timeout_secs() -> Result<u64> {
     timeout_secs_from_env("BIGNAME_E2E_READY_TIMEOUT_SECS", DEFAULT_READY_TIMEOUT_SECS)
 }
 
