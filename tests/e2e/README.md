@@ -555,6 +555,34 @@ route inventory or a claim that every protocol transition is covered.
   routes, because the backfill command does not promote canonical checkpoints
   required by snapshot-selected reads. These four perturbation checks validate
   that one corpus; they are not applied to every scenario or protocol.
+- `provider_faults::silently_short_logs_are_contained_until_refetch_then_match_control`
+  — injects one silently omitted resolver log into bounded backfill and live
+  polling. This is a regression test for known defect #154 and does not
+  demonstrate that the safety invariant holds: bounded backfill currently
+  marks the incomplete block range as fully fetched, and live polling
+  currently advances its canonical checkpoint across the omitted log. The
+  scenario holds the refetch behind a deterministic timeout, proves the raw
+  log is still absent at each premature advancement, repairs both affected
+  blocks from the unfaulted provider, and then requires route-snapshot equality
+  with an unfaulted control.
+- `provider_faults::transient_provider_faults_and_partial_receipts_recover_to_control`
+  — applies one JSON-RPC error, delayed HTTP timeout, truncated response, and
+  partial receipt batch in deterministic retry order to one live log poll. The
+  same indexer process must reach the target checkpoint, retain and normalize
+  the target log, hit every fault exactly once, and converge to the unfaulted
+  control's route snapshots.
+- `provider_faults::transient_get_code_retries_primary_without_using_configured_fallback`
+  — injects one retryable JSON-RPC error into a healthy historical code read.
+  The primary provider must retry and persist the exact code observation while
+  the configured historical-code fallback receives zero requests.
+- `provider_faults::pruned_get_code_fails_closed_then_uses_configured_fallback`
+  — targets one historical resolver `eth_getCode` with the pruned-state error
+  recognized by the indexer. Without a fallback, bounded backfill must fail
+  without marking any block range as fetched and without a chain checkpoint.
+  Re-running the same idempotent job with a historical-code fallback must try
+  the primary provider first, route only code reads to the fallback, persist
+  the exact code observation, retain the target log, and mark the resolver
+  block range as fetched.
 - `catchup_equivalence::automatic_catchup_matches_live_ingestion_outputs` —
   compares a finalized ENSv1 registration, addr/text records, and registry-only
   child ingested from the same chain by live polling and forced automatic

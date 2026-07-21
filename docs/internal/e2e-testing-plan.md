@@ -294,10 +294,12 @@ blocked migration row; revisit only if a profile ever admits both.
 
 ## Representative perturbation corpus (phase 3)
 
-These four tests exercise one moderately rich ENSv1 corpus (`perturb.eth`
+The first four rows exercise one moderately rich ENSv1 corpus (`perturb.eth`
 registration, resolver records, and a registry-only child). They establish
 that the harness can drive each failure mode and that this representative
 shape converges; they do not multiply every protocol scenario or checkpoint.
+The provider-fault rows use focused ENSv1 corpora to pin incomplete-response,
+retry, and historical-state fallback behavior.
 
 | Perturbation | Mechanism | Convergence requirement | Status |
 | --- | --- | --- | --- |
@@ -305,9 +307,14 @@ shape converges; they do not multiply every protocol scenario or checkpoint.
 | Indexer killed and relaunched mid-scenario | `pipeline::indexer_run_restart_after_first_checkpoint` kills the first `indexer run` after the first canonical checkpoint row, then restarts to scenario readiness | final route snapshots equal an unperturbed live ingest of the same finished chain | covered_e2e(`perturbations::rich_chain_indexer_restart_mid_scenario_matches_control`, `harness::pipeline::indexer_run_restart_after_first_checkpoint`, `harness::perturb::assert_snapshots_equal`) |
 | Backfill-from-zero after the fact | the harness's `backfill` runner over the finished chain, block `0..head` | every deterministic normalized-event field is compared after mapping only corpus-minted contract-instance UUIDs to stable chain/address identities; multiplicity is retained; live ⊆ backfill exactly, with backfill-only extras bounded to bookkeeping/late-round kinds (`SourceManifestUpdated`/`CapabilityChanged`/`PreimageObserved`); no API-route parity claim because backfill does not promote snapshot checkpoints | covered_backfill_only(`perturbations::rich_chain_backfill_normalized_events_match_live_ingest`, `harness::perturb::assert_backfill_normalized_event_parity`) |
 | Projection replay | snapshot fixed route set, run `replay all-current-projections`, then run full-range `replay normalized-events` plus projection replay and re-snapshot | route snapshots remain byte-equal after projection replay and after normalized-event replay plus projection replay | covered_e2e(`perturbations::rich_chain_projection_and_normalized_event_replay_are_route_stable`, `harness::perturb::route_snapshots`) |
+| Silently short log responses (#154) | omit one selected resolver log from bounded backfill and live polling, then hold the unfaulted refetch behind a deterministic timeout | pin the known defect: bounded backfill overclaims fetch coverage and live polling advances its checkpoint while the selected raw log is absent; after unfaulted refetch and replay, both affected logs are retained and route snapshots equal the control | known_broken(`provider_faults::silently_short_logs_are_contained_until_refetch_then_match_control`; #154 permits incomplete responses to overclaim durable fetch coverage and advance the live checkpoint) |
+| Transient provider faults and a partial receipt batch | inject one JSON-RPC error, transport timeout, truncated response, and omission of the selected transaction receipt into one live log poll | the same indexer process encounters every injected fault exactly once, recovers, reaches the target checkpoint, retains the selected raw log and receipt, normalizes the record change, and matches the control's route snapshots | covered_e2e(`provider_faults::transient_provider_faults_and_partial_receipts_recover_to_control`) |
+| Pruned historical state with and without fallback | return the recognized pruned-state error for one historical resolver `eth_getCode`; first run without a fallback, then rerun the same idempotent backfill job with a historical-code fallback | without fallback, fail closed with no fetched-range coverage or chain checkpoint; with fallback, try the primary first, route only the targeted code read to the fallback, persist the exact code observation and raw log, and record resolver fetch coverage | covered_backfill_only(`provider_faults::pruned_get_code_fails_closed_then_uses_configured_fallback`) |
+| Transient historical-state error with fallback configured | inject one retryable JSON-RPC error into a healthy historical resolver `eth_getCode` while a fallback is configured | retry the primary, persist the exact code observation and raw log, record resolver fetch coverage, and send zero requests to the fallback | covered_backfill_only(`provider_faults::transient_get_code_retries_primary_without_using_configured_fallback`) |
 
-Runtime verification of these four surfaced three wire/derivation facts now
-encoded in the harness: `last_updated` on empty collections is read-time
+Runtime verification of the first four rich-corpus rows surfaced three
+wire/derivation facts now encoded in the harness: `last_updated` on empty
+collections is read-time
 wall clock and is normalized only for those empty envelopes; non-empty route
 timestamps remain part of equality. Contract-instance ids are minted per
 corpus, so cross-database comparison replaces each with its stable

@@ -180,6 +180,20 @@ impl RpcClient {
         hex::decode(hex_str).context("eth_getCode hex decode")
     }
 
+    pub async fn get_code_at_block_hash(
+        &self,
+        address: Address,
+        block_hash: &str,
+    ) -> Result<Vec<u8>> {
+        let raw = self
+            .call("eth_getCode", json!([address, {"blockHash": block_hash}]))
+            .await?;
+        let hex_str = raw
+            .as_str()
+            .ok_or_else(|| anyhow!("eth_getCode non-string result"))?;
+        hex::decode(hex_str).context("historical eth_getCode hex decode")
+    }
+
     pub async fn set_code(&self, address: Address, code: &[u8]) -> Result<()> {
         self.call(
             "anvil_setCode",
