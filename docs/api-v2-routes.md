@@ -400,7 +400,11 @@ Field ownership:
   Supplying `source=indexed` or `source=verified` narrows the `answers` array
   to that source for single-source callers. `verification` is
   `{status, name?, unsupported_reason?, failure_reason?}` and appears whenever
-  a persisted or on-demand verified outcome exists. The `verified` answer
+  a persisted or on-demand verified outcome exists. As an explicit exception,
+  it also appears when the request includes the `verified` source and the
+  projected or route-local on-demand claim fails the pre-forward normalization
+  gate; this synthetic gate result does not represent a forward resolver call.
+  An indexed-only response never includes `verification`. The `verified` answer
   entry is the source-specific payload; `verification` is the typed comparison
   summary and must not contradict that entry. Claimed-vs-verified remains one
   call without `declared_state`/`verified_state`. When a served head is
@@ -422,13 +426,15 @@ Field ownership:
 - Status semantics: answer entries use in-band `status`. Valid tuples with no
   indexed claim return an `indexed` entry with `status=not_found`. Unsupported,
   not-found, failed, and mismatched verified outcomes return `200` with the
-  corresponding `verified` entry status. A successful projected or on-demand
-  claim whose raw spelling differs from its normalized form produces a verified
-  answer and `verification` with `status=not_found` and
+  corresponding `verified` entry status. When the requested output includes the
+  verified source, a successful projected or on-demand claim whose raw spelling
+  differs from its normalized form produces a verified answer and
+  `verification` with `status=not_found` and
   `failure_reason=claim_not_normalized`. An unnormalizable on-demand claim
-  produces an indexed answer with `status=invalid_name` and `raw_claim_name`,
-  plus a verified answer and `verification` with `status=not_found` and
-  `failure_reason=claim_name_not_normalizable`. Malformed addresses return `400
+  produces an indexed answer with `status=invalid_name` and `raw_claim_name`
+  when the indexed source is included, and a verified answer plus `verification`
+  with `status=not_found` and `failure_reason=claim_name_not_normalizable` when
+  the verified source is included. Malformed addresses return `400
   invalid_input`.
 - Replaces (v1): `GET /v1/primary-names/{address}`.
 

@@ -265,6 +265,54 @@ async fn v2_get_basenames_primary_name_verified_meta_spans_base_and_ethereum() -
 }
 
 #[tokio::test]
+async fn v2_get_basenames_primary_name_normalization_gate_keeps_meta_base_scoped() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let address = "0x0000000000000000000000000000000000000bcf";
+    seed_v2_basenames_primary_name_snapshot_positions(&database).await?;
+    seed_v2_basenames_primary_name_persisted_verified(&database, address).await?;
+    database
+        .insert_primary_name_current_normalized_claim_name(
+            address,
+            "basenames",
+            V2_BASENAMES_PRIMARY_COIN_TYPE,
+            Some("alice.base.eth"),
+            false,
+        )
+        .await?;
+
+    let verified = v2_primary_name_payload_for_database(
+        &database,
+        &format!(
+            "/v2/addresses/{address}/primary-name?namespace=basenames&coin_type={V2_BASENAMES_PRIMARY_COIN_TYPE}&source=verified"
+        ),
+    )
+    .await?;
+
+    assert_eq!(
+        verified["data"],
+        json!({
+            "address": address,
+            "coin_type": 2_147_492_101_u64,
+            "namespace": "basenames",
+            "answers": [{
+                "source": "verified",
+                "status": "not_found",
+                "failure_reason": "claim_not_normalized"
+            }],
+            "verification": {
+                "status": "not_found",
+                "failure_reason": "claim_not_normalized"
+            }
+        })
+    );
+    assert_primary_name_snapshot_meta_chain_ids(&verified, &["8453"]);
+    assert_primary_name_snapshot_token_slots(&verified, &["base"]);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_basenames_primary_name_without_persisted_verified_stays_base_scoped() -> Result<()>
 {
     let database = TestDatabase::new_migrated().await?;

@@ -113,6 +113,10 @@ impl TryFrom<RawQueryParams> for PrimaryNameQueryParams {
 }
 
 impl PrimaryNameSourceSelection {
+    const fn includes_verified(self) -> bool {
+        matches!(self, Self::Both | Self::Verified)
+    }
+
     pub(crate) const fn resolution_mode(self) -> crate::ResolutionMode {
         match self {
             Self::Both => crate::ResolutionMode::Both,
@@ -197,7 +201,8 @@ pub(crate) async fn get_primary_name(
             &state,
             &params.namespace,
             None,
-            params.namespace == BASENAMES_NAMESPACE && lookup_state.persisted_verified.is_some(),
+            params.namespace == BASENAMES_NAMESPACE
+                && persisted_verified_answer_is_served(params.source, &lookup_state),
         )
         .await?;
         load_served_head_meta(&state.pool, &snapshot_scope).await?
@@ -224,7 +229,10 @@ pub(crate) fn build_primary_name(
     source: PrimaryNameSourceSelection,
     lookup_state: &PrimaryNameLookupState,
 ) -> V2Result<PrimaryName> {
-    let verified = build_verified_answer(&namespace, lookup_state)?;
+    let verified = source
+        .includes_verified()
+        .then(|| build_verified_answer(&namespace, lookup_state))
+        .transpose()?;
     let mut answers = Vec::with_capacity(match source {
         PrimaryNameSourceSelection::Both => 2,
         PrimaryNameSourceSelection::Indexed | PrimaryNameSourceSelection::Verified => 1,
@@ -236,10 +244,7 @@ pub(crate) fn build_primary_name(
     ) {
         answers.push(build_indexed_answer(lookup_state));
     }
-    if matches!(
-        source,
-        PrimaryNameSourceSelection::Both | PrimaryNameSourceSelection::Verified
-    ) {
+    if let Some(verified) = verified.as_ref() {
         answers.push(verified.answer.clone());
     }
 
@@ -249,9 +254,18 @@ pub(crate) fn build_primary_name(
         namespace,
         answers,
         verification: verified
-            .outcome_exists
-            .then(|| verification_from_answer(&verified.answer)),
+            .filter(|verified| verified.outcome_exists)
+            .map(|verified| verification_from_answer(&verified.answer)),
     })
+}
+
+fn persisted_verified_answer_is_served(
+    source: PrimaryNameSourceSelection,
+    lookup_state: &PrimaryNameLookupState,
+) -> bool {
+    source.includes_verified()
+        && !crate::projected_primary_name_claim_is_not_normalized(lookup_state)
+        && lookup_state.persisted_verified.is_some()
 }
 
 fn build_indexed_answer(lookup_state: &PrimaryNameLookupState) -> PrimaryNameAnswer {
