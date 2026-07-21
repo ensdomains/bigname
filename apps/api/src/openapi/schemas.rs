@@ -9,6 +9,8 @@ mod primary_name;
 mod identity;
 #[path = "schemas/identity_native.rs"]
 mod identity_native;
+#[path = "schemas/health.rs"]
+mod health;
 
 use super::responses::{
     declared_response_schema, mixed_response_schema, paginated_declared_response_schema,
@@ -21,6 +23,10 @@ use identity::{
 use identity_native::{
     identity_lookup_input_schema, identity_lookup_page_schema, identity_lookup_response_schema,
     native_identity_record_schema, normalization_info_schema,
+};
+use health::{
+    health_database_schema, health_identity_schema, health_process_schema,
+    health_projection_publication_versions_schema, health_response_schema,
 };
 use primary_name::{
     primary_name_claimed_result_schema, primary_name_verified_result_provenance_schema,
@@ -345,15 +351,11 @@ pub(super) fn openapi_components() -> JsonValue {
                 schema_ref("NamespaceData"),
                 schema_ref("NamespaceManifestsDeclaredState"),
             ),
-            "HealthResponse": json!({
-                "type": "object",
-                "required": ["service", "phase", "status"],
-                "properties": {
-                    "service": { "type": "string" },
-                    "phase": { "type": "string" },
-                    "status": { "type": "string" },
-                },
-            }),
+            "HealthProjectionPublicationVersions": health_projection_publication_versions_schema(),
+            "HealthIdentity": health_identity_schema(),
+            "HealthProcess": health_process_schema(),
+            "HealthDatabase": health_database_schema(),
+            "HealthResponse": health_response_schema(),
             "ErrorBody": json!({
                 "type": "object",
                 "required": ["code", "message", "details"],

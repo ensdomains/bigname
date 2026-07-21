@@ -35,10 +35,7 @@ use crate::repair::{
 };
 
 #[derive(Parser, Debug)]
-#[command(
-    name = "bigname-indexer",
-    about = "Bootstrap indexer process for bigname"
-)]
+#[command(name = "bigname-indexer", about = "Chain indexing process for bigname")]
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) command: Command,

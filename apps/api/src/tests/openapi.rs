@@ -240,6 +240,62 @@ fn openapi_document_publishes_only_shipped_routes() {
 }
 
 #[test]
+fn openapi_document_uses_package_version_and_freezes_health_identity() {
+    let document = openapi_document();
+
+    assert_eq!(
+        document.pointer("/info/version"),
+        Some(&json!(SOFTWARE_VERSION))
+    );
+
+    let identity = openapi_schema(&document, "HealthIdentity");
+    assert_eq!(
+        required_fields(identity),
+        vec![
+            "version",
+            "build_sha",
+            "schema_migration_version",
+            "projection_replay_version",
+            "projection_publication_versions",
+        ]
+    );
+    assert_eq!(
+        identity.pointer("/properties/projection_publication_versions"),
+        Some(&json!({
+            "$ref": "#/components/schemas/HealthProjectionPublicationVersions",
+        }))
+    );
+
+    let process = openapi_schema(&document, "HealthProcess");
+    assert_eq!(required_fields(process), vec!["status"]);
+
+    let database = openapi_schema(&document, "HealthDatabase");
+    assert_eq!(
+        required_fields(database),
+        vec!["status", "reachable", "check", "error"]
+    );
+    assert_eq!(
+        database.pointer("/properties/error/type"),
+        Some(&json!(["string", "null"]))
+    );
+
+    let response = openapi_schema(&document, "HealthResponse");
+    assert_eq!(
+        required_fields(response),
+        vec!["service", "identity", "status", "process", "database"]
+    );
+    assert_eq!(
+        response.pointer("/properties/process"),
+        Some(&json!({ "$ref": "#/components/schemas/HealthProcess" }))
+    );
+    assert_eq!(
+        response.pointer("/properties/database"),
+        Some(&json!({ "$ref": "#/components/schemas/HealthDatabase" }))
+    );
+    assert!(!property_names(response).contains(&"phase"));
+}
+
+#[test]
 fn openapi_document_freezes_query_params_and_shared_envelopes() {
     let document = openapi_document();
 
@@ -1172,7 +1228,6 @@ async fn openapi_docs_route_serves_viewer() -> Result<()> {
 
 fn openapi_docs_test_state() -> AppState {
     AppState {
-        phase: "test",
         pool: PgPool::connect_lazy("postgres://bigname:bigname@127.0.0.1:5432/bigname")
             .expect("OpenAPI helper route tests only need a lazily parsed pool"),
         chain_rpc_urls: bigname_execution::ChainRpcUrls::default(),

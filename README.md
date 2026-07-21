@@ -4,7 +4,7 @@
 
 A replayable, auditable indexing and read API for ENS, ENSv2, and Basenames.
 
-bigname turns onchain state from Ethereum and Base into a versioned `v1` REST contract that answers point-in-time, provenance-tagged questions about names, addresses, resolvers, primary names, and verified resolution. Raw facts are immutable; projections are rebuildable; verified answers come from durable execution traces, not opportunistic onchain calls.
+bigname turns onchain state from Ethereum and Base into a versioned REST API. Its `v1` routes cover the supported portions of exact-name profiles, name and address collections, resolver records and overviews, primary names, history, roles, and verified record reads; see the [consumer capability matrix](docs/consumer-capabilities.md) for the exact boundaries. Partial and unsupported coverage is reported explicitly. Raw facts are immutable; [projections](docs/glossary.md) are rebuildable; supported on-demand verified reads are persisted with durable execution traces.
 
 ## What's here
 
@@ -15,13 +15,13 @@ bigname turns onchain state from Ethereum and Base into a versioned `v1` REST co
 - `manifests/` — checked-in profile roots such as `mainnet` and `sepolia`, split by chain combo
 - `migrations/` — Postgres schema
 - `docs/` — how it works
-- `tests/conformance/` — TypeScript conformance harness
+- `tests/conformance/` — Rust Cargo conformance project (`bigname-supported-read-conformance`), run by CI with `cargo test`
 
 ## Local development
 
 ```sh
 cp .env.example .env                       # optional, for custom ports/creds
-docker compose up -d                       # Postgres + MinIO
+docker compose up -d                       # PostgreSQL
 ./scripts/migrate                          # apply migrations
 ./scripts/dev-up                           # boot api + indexer + worker
 ```

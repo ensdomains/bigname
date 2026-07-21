@@ -379,7 +379,7 @@ The actual published routes are listed below. Per-route semantics are in [`api-v
 | --- | --- |
 | `GET /v1/namespaces/{namespace}` | Namespace metadata. |
 | `GET /v1/manifests/{namespace}` | Active manifest versions and capabilities. |
-| `GET /healthz` | Liveness check. Not part of the `v1` contract. |
+| `GET /healthz` | Process and database readiness check. Not part of the `v1` contract. |
 
 ### Diagnostics and provenance
 

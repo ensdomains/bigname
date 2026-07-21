@@ -1,4 +1,4 @@
-//! Bootstrap adapter surface for the repo skeleton.
+//! ENSv1, ENSv2, and Basenames event normalization adapters.
 
 #[cfg(test)]
 use std::sync::{Arc, OnceLock};
@@ -18,11 +18,6 @@ mod evm_abi;
 mod manifest_normalized_events;
 mod normalized_event_support;
 mod registry_migration_cache;
-
-/// Current adapter bootstrap status.
-pub const fn bootstrap_status() -> &'static str {
-    "reverse-claim-source-observation-ready"
-}
 
 pub use block_derived_normalized_events::{
     BlockDerivedNormalizedEventKindSyncSummary, BlockDerivedNormalizedEventSyncSummary,

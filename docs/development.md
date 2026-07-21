@@ -134,6 +134,17 @@ The API process exposes `GET /healthz` on the same bind address as
 `/healthz` is a private operator endpoint. It is not part of the versioned
 `/v1` read API and should not be treated as a consumer compatibility surface.
 
+The response's `identity` object describes the binary's compatibility inputs:
+`version` is the Cargo package version; `build_sha` is the compile-time
+`BIGNAME_BUILD_SHA` value (the published image supplies its Git commit, while
+other builds fall back to `unknown`); `schema_migration_version` is the latest
+checked-in database migration; `projection_replay_version` is the expected
+current-state [replay](glossary.md) version; and
+`projection_publication_versions.permissions_current` is the reader
+compatibility version for the published permissions read model. These are
+binary identity values, not a report of the database's applied migration or
+replay progress.
+
 The endpoint separates process readiness from database readiness:
 
 - Healthy database: `200 OK`, top-level `status` is `ready`,

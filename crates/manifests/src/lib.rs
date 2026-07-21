@@ -18,10 +18,6 @@ mod tests;
 #[path = "lib/views.rs"]
 mod views;
 
-pub const fn bootstrap_status() -> &'static str {
-    "manifest-loader-ready"
-}
-
 const DECLARATION_KIND_ROOT: &str = "root";
 const DECLARATION_KIND_CONTRACT: &str = "contract";
 const CONTRACT_KIND_ROOT: &str = "root";

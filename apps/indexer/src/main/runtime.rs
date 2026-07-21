@@ -13,6 +13,12 @@ mod refresh;
 #[path = "runtime/tracing_init.rs"]
 mod tracing_init;
 
+pub(crate) const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub(crate) const BUILD_SHA: &str = match option_env!("BIGNAME_BUILD_SHA") {
+    Some(build_sha) => build_sha,
+    None => "unknown",
+};
+
 #[allow(unused_imports)]
 pub(crate) use adapter_sync::{
     sync_adapter_owned_raw_log_state, sync_discovery_adapter_owned_raw_log_state,

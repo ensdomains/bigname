@@ -158,8 +158,11 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
 
     info!(
         service = "indexer",
-        phase = bigname_domain::bootstrap_phase(),
-        manifest_loader_status = bigname_manifests::bootstrap_status(),
+        version = crate::SOFTWARE_VERSION,
+        build_sha = crate::BUILD_SHA,
+        schema_migration_version = bigname_storage::latest_migration_version(),
+        projection_replay_version = bigname_storage::CURRENT_PROJECTION_REPLAY_VERSION,
+        permissions_current_publication_version = bigname_storage::PERMISSIONS_CURRENT_PUBLICATION_VERSION,
         manifests_root = %manifest_runtime_state.manifest_summary.root.display(),
         manifests_status = manifest_runtime_state.manifest_summary.status.as_str(),
         manifest_namespace_count = manifest_runtime_state.manifest_summary.namespace_count,
@@ -242,7 +245,6 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         manifest_observation_refresh_enabled = run_mode.broad_runtime_refresh_enabled,
         discovery_refresh_enabled = run_mode.discovery_refresh_enabled,
         watched_plan_refresh_interval_secs = args.poll_interval_secs,
-        adapter_status = bigname_adapters::bootstrap_status(),
         poll_interval_secs = args.poll_interval_secs,
         bootstrap_watch_scope = run_mode.bootstrap_watch_scope.as_str(),
         live_watch_scope = run_mode.live_watch_scope.as_str(),

@@ -77,7 +77,6 @@ mod tests {
     #[tokio::test]
     async fn status_route_rejects_query_params_with_v2_error_envelope() {
         let state = AppState {
-            phase: "test",
             pool: PgPool::connect_lazy("postgres://bigname:bigname@127.0.0.1:5432/bigname")
                 .expect("query rejection does not use the database"),
             chain_rpc_urls: bigname_execution::ChainRpcUrls::default(),

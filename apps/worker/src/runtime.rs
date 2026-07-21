@@ -28,7 +28,8 @@ pub(crate) fn init_tracing(service: &'static str, emit_logs_to_stderr: bool) {
 
     info!(
         service = service,
-        phase = bigname_domain::bootstrap_phase(),
+        version = crate::SOFTWARE_VERSION,
+        build_sha = crate::BUILD_SHA,
         "logging configured"
     );
 }

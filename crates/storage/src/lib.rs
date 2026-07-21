@@ -1,4 +1,4 @@
-//! Shared PostgreSQL bootstrap utilities.
+//! Shared PostgreSQL storage and migration utilities.
 
 use std::str::FromStr;
 
@@ -36,6 +36,7 @@ mod snapshot_selection;
 pub mod sql_row;
 mod stored_lineage_coverage;
 mod time;
+mod versions;
 
 use anyhow::{Context, Result, ensure};
 use clap::Args;
@@ -331,11 +332,12 @@ pub use stored_lineage_coverage::{
     load_stored_lineage_coverage_frontier_header,
     stored_lineage_coverage_frontier_requirements_are_valid,
 };
+pub use versions::{CURRENT_PROJECTION_REPLAY_VERSION, latest_migration_version};
 
-/// Checked-in migrations for the bootstrap workspace.
+/// Checked-in database migrations.
 pub const MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
-/// Common database settings shared by the bootstrap binaries.
+/// Common database settings shared by the services.
 #[derive(Args, Clone, Debug)]
 pub struct DatabaseConfig {
     #[arg(long, env = "BIGNAME_DATABASE_URL")]
@@ -357,14 +359,14 @@ impl Default for DatabaseConfig {
     }
 }
 
-/// Default bootstrap database URL for local development.
+/// Default database URL for local development.
 pub const fn default_database_url() -> &'static str {
     "postgres://bigname:bigname@127.0.0.1:5432/bigname"
 }
 
 const BASE_NORMALIZED_REDERIVE_WRITER_GUARD_MIN_CONNECTIONS: u32 = 2;
 
-/// Open a PostgreSQL connection pool using the shared bootstrap settings.
+/// Open a PostgreSQL connection pool using the shared settings.
 pub async fn connect(config: &DatabaseConfig) -> Result<PgPool> {
     connect_inner(config, None).await
 }

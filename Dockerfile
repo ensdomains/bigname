@@ -4,6 +4,9 @@ ARG RUST_VERSION=1.93.1
 
 FROM rust:${RUST_VERSION}-bookworm AS builder
 
+ARG BIGNAME_BUILD_SHA=unknown
+ENV BIGNAME_BUILD_SHA=${BIGNAME_BUILD_SHA}
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends clang libclang-dev \
     && rm -rf /var/lib/apt/lists/*

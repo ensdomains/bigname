@@ -330,7 +330,6 @@
 
             fn app_state(&self) -> AppState {
                 AppState {
-                    phase: "conformance",
                     pool: self.pool.clone(),
                     chain_rpc_urls: bigname_execution::ChainRpcUrls::default(),
                 }

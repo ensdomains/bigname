@@ -285,7 +285,6 @@ mod tests {
     #[tokio::test]
     async fn get_namespace_returns_not_found_for_unsupported_namespace() {
         let state = AppState {
-            phase: "test",
             pool: PgPool::connect_lazy("postgres://bigname:bigname@127.0.0.1:5432/bigname")
                 .expect("unsupported namespace validation does not use the database"),
             chain_rpc_urls: bigname_execution::ChainRpcUrls::default(),

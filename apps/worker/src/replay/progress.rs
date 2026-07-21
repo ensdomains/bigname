@@ -1,22 +1,8 @@
 use anyhow::{Context, Result};
+pub use bigname_storage::CURRENT_PROJECTION_REPLAY_VERSION;
 use sqlx::PgPool;
 
 use super::CurrentProjectionReplayStepSummary;
-
-/// Bump whenever a current projection's consumed input set changes semantically.
-/// Version 5 covers RootPermissionChanged and registry-scope permission consumption added in PR #24.
-/// Version 6 covers ENSv2 max/oversized expiry values projecting to null instead of stale finite timestamps.
-/// Version 7 covers ENSv2 fresh registrar registrations becoming exact-name-profile evidence.
-/// Version 8 covers `permissions_current_resource_summary` backfill and atomic publication with
-/// `permissions_current`, including resources with zero permission rows, and makes
-/// `name_current` publish explicit unsupported control for a current ENSv1 wrapper resource, while
-/// retaining version 7 exact-name-profile evidence.
-/// Version 9 forces the full permission cutover that seeds publication compatibility and its
-/// monotonic read-consistency revision, including zero-event resources discovered from canonical
-/// resource identity evidence. Its all-current replay retains the version 8 `name_current` wrapper
-/// control behavior; exact-name reads have no replay-version compatibility gate, so deployments
-/// must keep them drained until all version 9 markers are current and pending invalidations drain.
-pub const CURRENT_PROJECTION_REPLAY_VERSION: i32 = 9;
 
 pub(super) async fn projection_replay_completed(
     pool: &PgPool,
