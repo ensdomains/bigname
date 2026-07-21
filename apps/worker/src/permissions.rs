@@ -20,6 +20,10 @@ use sqlx::PgPool;
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
+use crate::primary_name::rebuild_heartbeat::{
+    LoopHeartbeat, record_rebuild_progress, run_rebuild_phase,
+};
+
 use staged_rebuild::{
     count_rows, create_stage_table, drop_stage_table, publish_permissions_current_stage_tables,
     stage_permissions_current_resource_summaries, stage_permissions_current_rows,
@@ -56,13 +60,32 @@ pub async fn rebuild_permissions_current(
     pool: &PgPool,
     resource_id: Option<&str>,
 ) -> Result<PermissionsCurrentRebuildSummary> {
+    rebuild_permissions_current_inner(pool, resource_id, None).await
+}
+
+pub(crate) async fn rebuild_permissions_current_with_heartbeat(
+    pool: &PgPool,
+    resource_id: Option<&str>,
+    loop_heartbeat: &mut LoopHeartbeat,
+) -> Result<PermissionsCurrentRebuildSummary> {
+    rebuild_permissions_current_inner(pool, resource_id, Some(loop_heartbeat)).await
+}
+
+async fn rebuild_permissions_current_inner(
+    pool: &PgPool,
+    resource_id: Option<&str>,
+    loop_heartbeat: Option<&mut LoopHeartbeat>,
+) -> Result<PermissionsCurrentRebuildSummary> {
     match resource_id {
         Some(resource_id) => rebuild_one_resource(pool, resource_id).await,
-        None => rebuild_all_resources(pool).await,
+        None => rebuild_all_resources(pool, loop_heartbeat).await,
     }
 }
 
-async fn rebuild_all_resources(pool: &PgPool) -> Result<PermissionsCurrentRebuildSummary> {
+async fn rebuild_all_resources(
+    pool: &PgPool,
+    mut loop_heartbeat: Option<&mut LoopHeartbeat>,
+) -> Result<PermissionsCurrentRebuildSummary> {
     let mut conn = pool
         .acquire()
         .await
@@ -70,7 +93,13 @@ async fn rebuild_all_resources(pool: &PgPool) -> Result<PermissionsCurrentRebuil
     let stage_table = create_stage_table(&mut conn, "permissions_current").await?;
     let summary_stage_table =
         create_stage_table(&mut conn, "permissions_current_resource_summary").await?;
-    let previous_row_count = count_rows(&mut conn, "permissions_current", None).await?;
+    let previous_row_count = run_rebuild_phase(
+        pool,
+        &mut loop_heartbeat,
+        "permissions_current.count_existing",
+        count_rows(&mut conn, "permissions_current", None),
+    )
+    .await?;
     let mut rows = Vec::with_capacity(PERMISSIONS_CURRENT_REBUILD_BATCH_SIZE);
     let mut summaries = Vec::with_capacity(PERMISSIONS_CURRENT_REBUILD_BATCH_SIZE);
     let mut requested_resource_count = 0usize;
@@ -93,6 +122,7 @@ async fn rebuild_all_resources(pool: &PgPool) -> Result<PermissionsCurrentRebuil
     while let Some(result) = tasks.join_next().await {
         completed_resource_count += 1;
         let projection = result??;
+        record_rebuild_progress(pool, &mut loop_heartbeat).await;
         rows.extend(projection.rows);
         if let Some(summary) = projection.summary {
             summaries.push(summary);
@@ -143,9 +173,13 @@ async fn rebuild_all_resources(pool: &PgPool) -> Result<PermissionsCurrentRebuil
         )
         .await? as usize;
     }
-    let (_deleted_row_count, published_row_count, published_summary_count) =
-        publish_permissions_current_stage_tables(&mut conn, &stage_table, &summary_stage_table)
-            .await?;
+    let (_deleted_row_count, published_row_count, published_summary_count) = run_rebuild_phase(
+        pool,
+        &mut loop_heartbeat,
+        "permissions_current.publish",
+        publish_permissions_current_stage_tables(&mut conn, &stage_table, &summary_stage_table),
+    )
+    .await?;
     drop_stage_table(&mut conn, &stage_table).await?;
     drop_stage_table(&mut conn, &summary_stage_table).await?;
     debug_assert_eq!(published_row_count as usize, upserted_row_count);

@@ -12,12 +12,11 @@ use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
 use tracing::{debug, info, warn};
 
+use crate::primary_name::rebuild_heartbeat as heartbeat;
 use crate::{cli::RunArgs, primary_name, projection_apply, record_inventory, replay};
 
 #[path = "automatic_projection_replay/bootstrap_replay.rs"]
 mod bootstrap_replay;
-#[path = "automatic_projection_replay/heartbeat.rs"]
-pub(crate) mod heartbeat;
 #[path = "automatic_projection_replay/primary_hydration.rs"]
 mod primary_hydration;
 #[path = "automatic_projection_replay/primary_hydration_loop.rs"]
@@ -126,7 +125,7 @@ pub(crate) async fn run_automatic_current_projection_replay(
     let mut loop_heartbeat = heartbeat::LoopHeartbeat::new(heartbeat_instance_id, poll_interval);
 
     loop {
-        loop_heartbeat.record_if_due(&pool).await?;
+        loop_heartbeat.record_if_due(&pool).await;
 
         let mut progressed = false;
         if !bootstrap_completed {
@@ -175,7 +174,7 @@ pub(crate) async fn run_automatic_current_projection_replay(
                     );
                 }
             }
-            loop_heartbeat.record_if_due(&pool).await?;
+            loop_heartbeat.record_if_due(&pool).await;
         }
 
         if bootstrap_completed {
@@ -225,7 +224,7 @@ pub(crate) async fn run_automatic_current_projection_replay(
                         );
                     }
                 }
-                loop_heartbeat.record_if_due(&pool).await?;
+                loop_heartbeat.record_if_due(&pool).await;
             }
 
             let _apply_hydration_guard = projection_apply_hydration_lock.lock().await;
@@ -252,7 +251,7 @@ pub(crate) async fn run_automatic_current_projection_replay(
                     );
                 }
             }
-            loop_heartbeat.record_if_due(&pool).await?;
+            loop_heartbeat.record_if_due(&pool).await;
         }
 
         if !progressed {

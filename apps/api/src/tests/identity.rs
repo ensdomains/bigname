@@ -1920,6 +1920,10 @@ async fn indexing_status_degrades_for_direct_pending_invalidations() -> Result<(
     let payload: Value = read_json(response).await?;
     assert_eq!(payload["data"]["status"], json!("degraded"));
     assert_eq!(payload["data"]["pending_invalidation_count"], json!(1));
+    assert_eq!(
+        payload["data"]["pending_invalidation_count_capped"],
+        json!(false)
+    );
     assert_eq!(payload["data"]["dead_letter_count"], json!(0));
     assert_eq!(
         payload["data"]["chains"]["ethereum-mainnet"]["latest_projected_block"],
@@ -1928,6 +1932,50 @@ async fn indexing_status_degrades_for_direct_pending_invalidations() -> Result<(
 
     database.cleanup().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn indexing_status_caps_the_pending_invalidation_count_with_an_explicit_marker() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    sqlx::query(
+        r#"
+        INSERT INTO projection_invalidations (
+            projection,
+            projection_key,
+            key_payload
+        )
+        SELECT
+            'name_current',
+            'bounded-status-' || sequence,
+            '{}'::jsonb
+        FROM generate_series(1, $1 + 1) AS sequence
+        "#,
+    )
+    .bind(bigname_storage::PENDING_INVALIDATION_COUNT_CAP)
+    .execute(&database.pool)
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/status")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(
+        payload["data"]["pending_invalidation_count"],
+        json!(bigname_storage::PENDING_INVALIDATION_COUNT_CAP)
+    );
+    assert_eq!(
+        payload["data"]["pending_invalidation_count_capped"],
+        json!(true)
+    );
+
+    database.cleanup().await
 }
 
 #[tokio::test]

@@ -126,10 +126,11 @@ environment variables above take precedence over values loaded from `.env`.
    <BIGNAME_SMOKE_API_BIND_ADDR>` binary directly from Cargo's local target
    directory and probes `/healthz`. A database with live indexer and worker
    loops must return `200` with `"status":"ready"`. The standalone smoke API
-   has no service loops of its own, so `503` is also the expected honest result
-   when the response says the API process is running, the database is
-   reachable, and each loop is `running`, `not_started`, or `stale`; an
-   `unavailable` loop probe still fails the gate.
+   has no service loops of its own, so it also accepts `200` with
+   `"api_status":"ready"`, aggregate `"status":"degraded"`, a running API
+   process, a reachable database, and each loop either `running` or
+   `not_started`. `not_started` is the explicit standalone exception. `stale`
+   proves a heartbeat row exists and fails the gate, as does `unavailable`.
 13. Validates `docker/caddy/Caddyfile`, starts an ephemeral Caddy container in
     front of that API, and runs `scripts/public-edge-smoke`. The check proves
     the mounted v2 routes and GraphiQL succeed on the internal listener but
@@ -200,7 +201,7 @@ A passing gate means:
 - the API binary builds locally from this revision;
 - the API process can start from that built binary; and
 - `/healthz` reports either full readiness with live service loops or the
-  documented standalone degraded state caused only by absent/stale loops;
+  documented API-local-ready standalone state caused only by absent loops;
 - the repository Caddyfile validates and starts in an ephemeral container; and
 - allowed public-edge requests reach the API while v2, GraphiQL, and unknown
   paths return the expected public `404` responses.

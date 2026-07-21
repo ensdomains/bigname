@@ -216,13 +216,16 @@ run_readiness_check() {
       return 0
     fi
 
-    if [ "$http_status" = "503" ] \
+    # A standalone smoke database has no indexer/worker processes, so not_started is admissible.
+    # A stale status proves a heartbeat row exists and must fail instead of masking a wedged loop.
+    if [ "$http_status" = "200" ] \
       && grep -q '"status":"degraded"' "$health_body_tmp" \
+      && grep -q '"api_status":"ready"' "$health_body_tmp" \
       && grep -q '"process":{"status":"running"}' "$health_body_tmp" \
       && grep -q '"database":{"status":"reachable","reachable":true' "$health_body_tmp" \
-      && grep -Eq '"indexer":{"status":"(running|not_started|stale)"' "$health_body_tmp" \
-      && grep -Eq '"worker":{"status":"(running|not_started|stale)"' "$health_body_tmp"; then
-      log "standalone health contract passed; absent or stale service loops correctly keep readiness degraded"
+      && grep -Eq '"indexer":{"status":"(running|not_started)"' "$health_body_tmp" \
+      && grep -Eq '"worker":{"status":"(running|not_started)"' "$health_body_tmp"; then
+      log "standalone health contract passed; absent service loops are explicitly not_started"
       return 0
     fi
 

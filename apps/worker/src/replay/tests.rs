@@ -137,7 +137,7 @@ async fn automatic_replay_refreshes_worker_heartbeat_between_projection_steps() 
     .execute(database.pool())
     .await?;
 
-    let mut heartbeat = crate::automatic_projection_replay::heartbeat::LoopHeartbeat::new(
+    let mut heartbeat = crate::primary_name::rebuild_heartbeat::LoopHeartbeat::new(
         instance_id.to_owned(),
         Duration::ZERO,
     );

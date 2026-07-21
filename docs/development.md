@@ -95,9 +95,11 @@ execution uses the selected exact-name snapshot: no `at` and no
 checkpoint, and the API call targets that selected block rather than provider
 latest.
 
-Configure `BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<http-url>` for the API
-process before relying on live ENS verified resolution or the ENS/60
-primary-name on-demand reverse/forward RPC fallback. This is separate from
+Configure `BIGNAME_API_CHAIN_RPC_URLS` for every chain expected by the status
+chain set before relying on `/v1/status` or `/v2/status`; startup warns with
+the exact missing chain names and their readiness stays fail-closed. Include
+`ethereum-mainnet=<http-url>` before relying on live ENS verified resolution or
+the ENS/60 primary-name on-demand reverse/forward RPC fallback. This is separate from
 `BIGNAME_INDEXER_CHAIN_RPC_URLS`, which feeds indexer intake and checkpoint
 state only. If the API Ethereum provider is not configured, supported live ENS
 verified selectors fail closed instead of falling back to declared record cache:
@@ -157,33 +159,50 @@ The endpoint separates API-process readiness, database readiness, and
 indexer/worker main-loop liveness:
 
 - Healthy database and recent indexer and worker loop heartbeats: `200 OK`,
-  top-level `status` is `ready`,
+  top-level `api_status` and aggregate `status` are `ready`,
   `process.status` is `running`, `database.status` is `reachable`,
   `database.reachable` is `true`, `database.check` is `select_1`, and
   `database.error` is `null`. `loops.indexer.status` and
   `loops.worker.status` are `running` and each includes `started_at`,
   `heartbeat_at`, `heartbeat_age_seconds`, and `max_age_seconds`.
 - Unreachable database or pool: `503 Service Unavailable`, top-level `status`
-  is `degraded`, `process.status` remains `running`, `database.status` is
+  and `api_status` are `degraded`, `process.status` remains `running`, `database.status` is
   `unreachable`, `database.reachable` is `false`, `database.check` remains
   `select_1`, `database.error` is `database readiness query failed`, and both
   loop statuses are `unavailable`.
-- Reachable database with a missing or old loop heartbeat: `503 Service
-  Unavailable`. A missing row is `not_started`; a row older than
+- Reachable database with a missing or old loop heartbeat: `200 OK` with
+  `api_status=ready` and aggregate `status=degraded`. This keeps API container
+  and public-edge readiness local to the serving process and database while
+  retaining the indexer/worker failure in the payload. A missing row is
+  `not_started`; a row older than
   `BIGNAME_API_HEARTBEAT_MAX_AGE_SECS` is `stale`. The default maximum age is
   20 seconds, four times the default five-second indexer and worker loop
   intervals.
 
 Database reachability is checked with `SELECT 1` through the configured
-PostgreSQL pool. A degraded response means the API process handled the request,
-but the database probe or one of the required service loops was not ready.
-The API uses the newest process heartbeat across replicas. The indexer and
-worker `healthcheck` subcommands instead validate the process row for their own
+PostgreSQL pool. `api_status` is API-local readiness: because the handler is
+serving by definition, it is `ready` exactly when that query succeeds, and the
+HTTP status follows this field. Aggregate `status` additionally requires both
+service loops and may therefore be `degraded` in an HTTP 200 response.
+The API prefers any replica with a currently healthy normal heartbeat or
+long-operation phase, using the newest stale evidence only when none is
+healthy. The indexer and worker `healthcheck` subcommands instead validate the process row for their own
 `BIGNAME_HEARTBEAT_INSTANCE_ID`, which defaults to the container `HOSTNAME`,
 and fail when the row is absent or older than the service-specific
 `BIGNAME_INDEXER_HEARTBEAT_MAX_AGE_SECS` or
 `BIGNAME_WORKER_HEARTBEAT_MAX_AGE_SECS` limit. This distinguishes a loop that
 never registered from one that registered and then stopped advancing. Worker
 bootstrap replay and projection apply refresh the process row only at actual
-progress boundaries; a free-running heartbeat task does not keep a stuck
-operation healthy.
+progress boundaries; the indexer registers before startup bootstrap and
+refreshes after completed hash-pinned progress units of at most 32 blocks
+inside the configured checkpoint chunk. A free-running heartbeat task does not
+keep a stuck operation healthy. Worker rebuilds refresh at their
+existing projection batch boundaries. A monolithic worker SQL or hydration
+operation instead sets `loops.worker.phase` and uses
+`BIGNAME_API_WORKER_REBUILD_PHASE_MAX_AGE_SECS` (default 43,200) in the API and
+`BIGNAME_WORKER_REBUILD_PHASE_MAX_AGE_SECS` in the worker container check. The
+named phase is removed when normal bounded progress resumes; if the process
+dies inside it, the retained phase becomes `stale` at that separate limit.
+Failure to persist the phase start aborts that rebuild attempt before its
+monolithic operation begins; ordinary bounded-progress beat failures still
+warn and retry at the next progress boundary.

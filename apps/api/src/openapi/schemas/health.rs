@@ -78,6 +78,7 @@ pub(super) fn health_loop_schema() -> JsonValue {
         "type": "object",
         "required": [
             "status",
+            "phase",
             "started_at",
             "heartbeat_at",
             "heartbeat_age_seconds",
@@ -87,6 +88,10 @@ pub(super) fn health_loop_schema() -> JsonValue {
             "status": {
                 "type": "string",
                 "enum": ["running", "stale", "not_started", "unavailable"],
+            },
+            "phase": {
+                "type": ["string", "null"],
+                "description": "Named worker rebuild phase when the loop is inside a monolithic operation governed by its separately configurable maximum age; null for normal loop progress.",
             },
             "started_at": { "type": ["string", "null"], "format": "date-time" },
             "heartbeat_at": { "type": ["string", "null"], "format": "date-time" },
@@ -110,11 +115,20 @@ pub(super) fn health_loops_schema() -> JsonValue {
 pub(super) fn health_response_schema() -> JsonValue {
     json!({
         "type": "object",
-        "required": ["service", "identity", "status", "process", "database", "loops"],
+        "required": ["service", "identity", "status", "api_status", "process", "database", "loops"],
         "properties": {
             "service": { "type": "string" },
             "identity": schema_ref("HealthIdentity"),
-            "status": { "type": "string" },
+            "status": {
+                "type": "string",
+                "enum": ["ready", "degraded"],
+                "description": "Aggregate database, indexer-loop, and worker-loop health for status consumers.",
+            },
+            "api_status": {
+                "type": "string",
+                "enum": ["ready", "degraded"],
+                "description": "API-local readiness: ready when this process is serving and its database reachability query succeeds; independent of indexer and worker loop state.",
+            },
             "process": schema_ref("HealthProcess"),
             "database": schema_ref("HealthDatabase"),
             "loops": schema_ref("HealthLoops"),

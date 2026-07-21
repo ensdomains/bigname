@@ -3,12 +3,12 @@ use axum::{Json, response::Html, routing::get};
 use serde_json::{Map as JsonMap, json};
 use sqlx::types::JsonValue;
 use tower_http::cors::CorsLayer;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     API_ROUTE_DEFINITIONS, ApiBoundsConfig, AppState, BUILD_SHA, Router, SOFTWARE_VERSION, ServeArgs,
     HEALTH_DATABASE_CHECK_TIMEOUT, HealthDatabasePool, shutdown_signal,
-    status_freshness::StatusFreshnessConfig,
+    status_freshness::{StatusFreshnessConfig, missing_status_rpc_chains},
     warm_compact_records_route_sql_path,
 };
 
@@ -31,9 +31,26 @@ pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
         HEALTH_DATABASE_CHECK_TIMEOUT,
     )
     .await?;
+    let expected_status_chain_ids =
+        bigname_storage::load_expected_status_chain_ids(&pool).await?;
+    let missing_status_rpc_chains =
+        missing_status_rpc_chains(&expected_status_chain_ids, &chain_rpc_urls);
+    if !missing_status_rpc_chains.is_empty() {
+        warn!(
+            service = "api",
+            configuration = "BIGNAME_API_CHAIN_RPC_URLS",
+            missing_chain_ids = ?missing_status_rpc_chains,
+            expected_chain_ids = ?expected_status_chain_ids,
+            "status network-head RPC configuration is incomplete; indexing status remains fail-closed for the named chains"
+        );
+    }
     ensure!(
         args.heartbeat_max_age_secs > 0,
         "BIGNAME_API_HEARTBEAT_MAX_AGE_SECS must be greater than zero"
+    );
+    ensure!(
+        args.worker_rebuild_phase_max_age_secs > 0,
+        "BIGNAME_API_WORKER_REBUILD_PHASE_MAX_AGE_SECS must be greater than zero"
     );
     let status_freshness_config = StatusFreshnessConfig::new(
         args.status_provider_timeout_ms,
@@ -44,6 +61,7 @@ pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
     )?;
     let state = AppState::new(pool, chain_rpc_urls)
         .with_heartbeat_max_age_secs(args.heartbeat_max_age_secs)
+        .with_worker_rebuild_phase_max_age_secs(args.worker_rebuild_phase_max_age_secs)
         .with_status_freshness_config(status_freshness_config);
     state
         .status_freshness

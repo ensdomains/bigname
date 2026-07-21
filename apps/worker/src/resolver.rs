@@ -3,6 +3,10 @@ use bigname_storage::{ResolverCurrentRow, delete_resolver_current, upsert_resolv
 use sqlx::PgPool;
 use tokio::task::JoinSet;
 
+use crate::primary_name::rebuild_heartbeat::{
+    LoopHeartbeat, record_rebuild_progress, run_rebuild_phase,
+};
+
 #[allow(clippy::duplicate_mod)]
 #[path = "staged_rebuild.rs"]
 mod staged_rebuild;
@@ -79,24 +83,63 @@ pub async fn rebuild_resolver_current(
     chain_id: Option<&str>,
     resolver_address: Option<&str>,
 ) -> Result<ResolverCurrentRebuildSummary> {
+    rebuild_resolver_current_inner(pool, chain_id, resolver_address, None).await
+}
+
+pub(crate) async fn rebuild_resolver_current_with_heartbeat(
+    pool: &PgPool,
+    chain_id: Option<&str>,
+    resolver_address: Option<&str>,
+    loop_heartbeat: &mut LoopHeartbeat,
+) -> Result<ResolverCurrentRebuildSummary> {
+    rebuild_resolver_current_inner(pool, chain_id, resolver_address, Some(loop_heartbeat)).await
+}
+
+async fn rebuild_resolver_current_inner(
+    pool: &PgPool,
+    chain_id: Option<&str>,
+    resolver_address: Option<&str>,
+    loop_heartbeat: Option<&mut LoopHeartbeat>,
+) -> Result<ResolverCurrentRebuildSummary> {
     match (chain_id, resolver_address) {
         (Some(chain_id), Some(resolver_address)) => {
             rebuild_one_resolver(pool, chain_id, resolver_address).await
         }
-        (None, None) => rebuild_all_resolvers(pool).await,
+        (None, None) => rebuild_all_resolvers(pool, loop_heartbeat).await,
         _ => bail!(
             "resolver_current rebuild requires both chain_id and resolver_address when targeting one resolver"
         ),
     }
 }
 
-async fn rebuild_all_resolvers(pool: &PgPool) -> Result<ResolverCurrentRebuildSummary> {
-    let profile_gate = ResolverProfileGate::load(pool).await?;
-    let targets = load_target_resolvers(pool).await?;
+async fn rebuild_all_resolvers(
+    pool: &PgPool,
+    mut loop_heartbeat: Option<&mut LoopHeartbeat>,
+) -> Result<ResolverCurrentRebuildSummary> {
+    let profile_gate = run_rebuild_phase(
+        pool,
+        &mut loop_heartbeat,
+        "resolver_current.load_profile",
+        ResolverProfileGate::load(pool),
+    )
+    .await?;
+    let targets = run_rebuild_phase(
+        pool,
+        &mut loop_heartbeat,
+        "resolver_current.load_targets",
+        load_target_resolvers(pool),
+    )
+    .await?;
     let requested_resolver_count = targets.len();
     let mut conn = pool.acquire().await.map_err(anyhow::Error::from)?;
     let stage_table = create_stage_table(&mut conn, "resolver_current").await?;
-    let previous_row_count = count_rows(&mut conn, "resolver_current", None).await?;
+    let previous_row_count = run_rebuild_phase(
+        pool,
+        &mut loop_heartbeat,
+        "resolver_current.count_existing",
+        count_rows(&mut conn, "resolver_current", None),
+    )
+    .await?;
     tracing::info!(
         projection = "resolver_current",
         requested_resolver_count,
@@ -119,7 +162,9 @@ async fn rebuild_all_resolvers(pool: &PgPool) -> Result<ResolverCurrentRebuildSu
 
     while let Some(result) = tasks.join_next().await {
         completed_resolver_count += 1;
-        if let Some(row) = result?? {
+        let row = result??;
+        record_rebuild_progress(pool, &mut loop_heartbeat).await;
+        if let Some(row) = row {
             rows.push(row);
         }
 
@@ -148,12 +193,17 @@ async fn rebuild_all_resolvers(pool: &PgPool) -> Result<ResolverCurrentRebuildSu
         upserted_row_count +=
             stage_resolver_current_rows(&mut conn, &stage_table, &rows).await? as usize;
     }
-    let (_deleted_row_count, published_row_count) = publish_stage_table(
-        &mut conn,
-        "resolver_current",
-        &stage_table,
-        RESOLVER_CURRENT_COLUMNS,
-        None,
+    let (_deleted_row_count, published_row_count) = run_rebuild_phase(
+        pool,
+        &mut loop_heartbeat,
+        "resolver_current.publish",
+        publish_stage_table(
+            &mut conn,
+            "resolver_current",
+            &stage_table,
+            RESOLVER_CURRENT_COLUMNS,
+            None,
+        ),
     )
     .await?;
     drop_stage_table(&mut conn, &stage_table).await?;

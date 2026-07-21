@@ -148,6 +148,7 @@ pub(crate) struct IdentityAsOfResponse {
 pub(crate) struct IndexingStatusResponse {
     pub(crate) status: String,
     pub(crate) pending_invalidation_count: i64,
+    pub(crate) pending_invalidation_count_capped: bool,
     pub(crate) dead_letter_count: i64,
     pub(crate) chains: BTreeMap<String, IndexingStatusChainResponse>,
 }

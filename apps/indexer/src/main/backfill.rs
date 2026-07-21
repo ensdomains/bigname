@@ -36,6 +36,7 @@ pub(crate) use coinbase_sql::{
 pub(crate) use concurrent_execution::{
     run_resumable_coinbase_sql_backfill_job_concurrently,
     run_resumable_hash_pinned_backfill_job_concurrently,
+    run_resumable_hash_pinned_backfill_job_concurrently_with_heartbeat,
 };
 pub(crate) use coverage_facts::{covered_block_interval, merged_covered_block_segments};
 #[cfg(test)]
