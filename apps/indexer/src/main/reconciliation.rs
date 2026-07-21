@@ -20,7 +20,7 @@ mod types;
 #[allow(unused_imports)]
 pub(crate) use adapter_sync::{
     AutomaticTwoPhaseFullClosureSyncResult, BacklogHandoffStatus,
-    sync_adapter_state_from_persisted_raw_payloads,
+    automatic_stateless_replay_completed, sync_adapter_state_from_persisted_raw_payloads,
     sync_adapter_state_from_scoped_persisted_raw_payloads,
     sync_automatic_two_phase_full_closure_normalized_events,
     sync_live_adapter_backlog_after_normalized_replay,

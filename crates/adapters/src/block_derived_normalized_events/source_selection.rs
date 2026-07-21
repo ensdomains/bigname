@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{Context, Result};
-use bigname_manifests::{load_manifest_declared_watched_contracts, load_watched_contracts};
+use anyhow::{Context, Result, bail};
+use bigname_manifests::{load_historical_watched_contracts_by_chain, load_watched_contracts};
 use sqlx::PgPool;
 
 use crate::adapter_manifest::{
@@ -34,10 +34,11 @@ pub(super) async fn load_active_emitters(
     chain: &str,
     scoped_emitter_identities: Option<&HashSet<(String, String)>>,
 ) -> Result<Vec<ActiveEmitter>> {
+    let scoped_historical_attribution = scoped_emitter_identities.is_some();
     let watched_contracts = if scoped_emitter_identities.is_some() {
-        load_manifest_declared_watched_contracts(pool)
+        load_historical_watched_contracts_by_chain(pool, chain)
             .await
-            .context("failed to load manifest-declared watched contracts for scoped adapter emitter attribution")?
+            .context("failed to load historical watched contracts for scoped adapter emitter attribution")?
     } else {
         load_watched_contracts(pool)
             .await
@@ -77,6 +78,19 @@ pub(super) async fn load_active_emitters(
         };
 
         match emitters_by_address.get(&candidate.address) {
+            Some(current)
+                if scoped_historical_attribution
+                    && !same_emitter_attribution(&candidate, current) =>
+            {
+                bail!(
+                    "ambiguous scoped historical emitter attribution for {chain} address {}: {} manifest_id {} conflicts with {} manifest_id {}; interval-aware attribution is required",
+                    candidate.address,
+                    current.source_family,
+                    current.source_manifest_id,
+                    candidate.source_family,
+                    candidate.source_manifest_id,
+                );
+            }
             Some(current) if !candidate_precedes(&candidate, current) => {}
             _ => {
                 emitters_by_address.insert(candidate.address.clone(), candidate);
@@ -93,6 +107,13 @@ pub(super) async fn load_active_emitters(
             .then(left.contract_instance_id.cmp(&right.contract_instance_id))
     });
     Ok(emitters)
+}
+
+fn same_emitter_attribution(left: &ActiveEmitter, right: &ActiveEmitter) -> bool {
+    left.source_manifest_id == right.source_manifest_id
+        && left.namespace == right.namespace
+        && left.source_family == right.source_family
+        && left.manifest_version == right.manifest_version
 }
 
 fn candidate_precedes(candidate: &ActiveEmitter, current: &ActiveEmitter) -> bool {

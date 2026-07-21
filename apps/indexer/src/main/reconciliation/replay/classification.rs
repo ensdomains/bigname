@@ -457,6 +457,10 @@ pub(crate) async fn ensure_full_closure_retention_authority_for_adapters(
     adapters: &[NormalizedEventReplayAdapter],
     through_block: i64,
 ) -> Result<()> {
+    if adapters.contains(&NormalizedEventReplayAdapter::EnsV2RegistryResourceSurface) {
+        bigname_adapters::ensure_ens_v2_retained_history_proof_through(pool, chain, through_block)
+            .await?;
+    }
     let contracts = adapters
         .iter()
         .copied()

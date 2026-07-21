@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     str::FromStr,
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
@@ -1812,6 +1812,139 @@ async fn sync_block_derived_normalized_events_replays_scoped_selected_logs_witho
     let counts =
         load_unselected_payload_row_counts(database.pool(), "ethereum-mainnet", block_hash).await?;
     assert_eq!(counts, UnselectedPayloadRowCounts::default());
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn scoped_historical_emitters_fail_closed_on_disjoint_same_address_families() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-sepolia";
+    let address = "0x00000000000000000000000000000000000000aa";
+
+    let registry_manifest_id = insert_manifest_version(
+        database.pool(),
+        ManifestVersionSeed {
+            manifest_version: 1,
+            namespace: "ens",
+            source_family: SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
+            chain,
+            deployment_epoch: "ens_v2_registry",
+            rollout_status: "active",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
+            file_path: "manifests/ens/ens_v2_registry_l1/v1.toml",
+        },
+    )
+    .await?;
+    let resolver_manifest_id = insert_manifest_version(
+        database.pool(),
+        ManifestVersionSeed {
+            manifest_version: 1,
+            namespace: "ens",
+            source_family: SOURCE_FAMILY_ENS_V2_RESOLVER_L1,
+            chain,
+            deployment_epoch: "ens_v2_resolver",
+            rollout_status: "active",
+            normalizer_version: "ensip15@ens-normalize-0.1.1",
+            file_path: "manifests/ens/ens_v2_resolver_l1/v1.toml",
+        },
+    )
+    .await?;
+    let registry_contract_instance_id = Uuid::new_v4();
+    let resolver_contract_instance_id = Uuid::new_v4();
+    for contract_instance_id in [registry_contract_instance_id, resolver_contract_instance_id] {
+        insert_contract_instance(database.pool(), contract_instance_id, chain, "contract").await?;
+    }
+    insert_manifest_contract_instance(
+        database.pool(),
+        ManifestContractInstanceSeed {
+            manifest_id: registry_manifest_id,
+            declaration_kind: "contract",
+            declaration_name: "registry",
+            contract_instance_id: registry_contract_instance_id,
+            declared_address: address,
+            role: Some("registry"),
+            proxy_kind: Some("none"),
+            implementation_contract_instance_id: None,
+            declared_implementation_address: None,
+        },
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        ManifestContractInstanceSeed {
+            manifest_id: resolver_manifest_id,
+            declaration_kind: "contract",
+            declaration_name: "resolver",
+            contract_instance_id: resolver_contract_instance_id,
+            declared_address: address,
+            role: Some("resolver"),
+            proxy_kind: Some("none"),
+            implementation_contract_instance_id: None,
+            declared_implementation_address: None,
+        },
+    )
+    .await?;
+    insert_contract_instance_address(
+        database.pool(),
+        registry_contract_instance_id,
+        chain,
+        address,
+        registry_manifest_id,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET active_from_block_number = 1,
+            active_to_block_number = 10,
+            deactivated_at = now()
+        WHERE contract_instance_id = $1
+        "#,
+    )
+    .bind(registry_contract_instance_id)
+    .execute(database.pool())
+    .await?;
+    insert_contract_instance_address(
+        database.pool(),
+        resolver_contract_instance_id,
+        chain,
+        address,
+        resolver_manifest_id,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET active_from_block_number = 20,
+            active_to_block_number = 30,
+            deactivated_at = now()
+        WHERE contract_instance_id = $1
+        "#,
+    )
+    .bind(resolver_contract_instance_id)
+    .execute(database.pool())
+    .await?;
+
+    let scoped_identities = HashSet::from([
+        (
+            SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+            address.to_owned(),
+        ),
+        (
+            SOURCE_FAMILY_ENS_V2_RESOLVER_L1.to_owned(),
+            address.to_owned(),
+        ),
+    ]);
+    let error =
+        source_selection::load_active_emitters(database.pool(), chain, Some(&scoped_identities))
+            .await
+            .expect_err("scoped historical attribution must reject one address with two families");
+    assert!(
+        format!("{error:#}").contains("ambiguous scoped historical emitter attribution"),
+        "unexpected ambiguity error: {error:#}"
+    );
 
     database.cleanup().await
 }

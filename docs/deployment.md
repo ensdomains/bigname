@@ -840,6 +840,87 @@ Use `RUST_LOG=info,sqlx::query=error` for these runs; otherwise SQLx slow-query
 warnings can print huge generated INSERT statements for dense chunks and waste
 time on logging instead of ingest.
 
+### Single-phase to two-phase normalized replay upgrade
+
+The `raw_fact_normalized_events` cursor has no phase-version field. Its state at
+the image change determines the upgrade procedure:
+
+- A cursor that completed under a pre-two-phase image has
+  `next_block_number > target_block_number`. The upgraded catch-up loop reports
+  `Idle`; it does not run phase 1 retroactively, so any stateless label-preimage
+  omission persists across that cursor's completed span. For each affected
+  chain, use the manual stateless replay stopgap over the cursor's exact saved
+  range (with the normal database environment configured):
+
+  ```sh
+  bigname-indexer replay normalized-events \
+    --deployment-profile <deployment-profile> \
+    --chain <chain-id> \
+    --from-block <range_start_block_number> \
+    --to-block <target_block_number>
+  ```
+
+  This manual range replay runs the stateless producers before its full-closure
+  pass; the completed automatic cursor itself is not reset or treated as proof
+  that the older image ran phase 1.
+
+  Cursor completion may already have allowed raw-log staging compaction. Before
+  the manual replay, inspect the chain's retention generation:
+
+  ```sql
+  SELECT
+      retention_generation,
+      retained_history_complete,
+      incomplete_since,
+      proven_retention_generation,
+      proven_discovery_admission_epoch,
+      proven_through_block
+  FROM raw_log_staging_input_revisions
+  WHERE chain_id = '<chain-id>';
+  ```
+
+  A missing row is a hard stop. Generation zero means the staging corpus has
+  never been destructively rotated. A later generation means compaction has
+  occurred, and cursor completion is not retained-history authority. The replay
+  command performs the authoritative source-family coverage/proof check before
+  phase 1; if it reports incomplete or stale retained history, stop and restore
+  raw facts before retrying.
+
+  When all required targets remain selectable, restore the saved range with a
+  provider-backed, raw-only hash-pinned backfill in the current retention
+  generation. Use a fresh idempotency key containing that generation so an old
+  completed job cannot be reused:
+
+  ```sh
+  bigname-indexer backfill \
+    --deployment-profile <deployment-profile> \
+    --chain <chain-id> \
+    --from-block <range_start_block_number> \
+    --to-block <target_block_number> \
+    --idempotency-key two-phase-upgrade-<chain-id>-g<retention_generation> \
+    --hash-pinned-adapter-sync raw-only
+  ```
+
+  Run it with the normal manifest root, database, and validation-provider
+  configuration, then retry manual normalized-event replay. If retention
+  validation still names a closed historical discovery interval that the
+  standalone current watch selector cannot refetch, the supported recovery is
+  a clean database rebootstrap: apply the checked-in migrations to a new
+  database, configure the same manifests and historical provider, and let
+  generation-zero historical bootstrap plus two-phase normalized replay finish
+  before cutover. Never weaken the retention check or mark the old cursor
+  pending without restoring its raw facts.
+- A cursor still in progress at upgrade has
+  `next_block_number <= target_block_number`. The two-phase image runs one full
+  phase-1 pass over the saved range and latched target, then resumes phase 2 from
+  the existing closure checkpoints. Those checkpoints carry over because both
+  images use the same deployment profile, chain, cursor kind, range, and target
+  as their replay checkpoint context.
+
+Where feasible, deploy the two-phase image before in-flight cursors complete.
+This converts the omission into the expected one-time full phase-1 cost and
+avoids a later manual replay of already completed spans.
+
 ### Streamed full-closure discovery finalize
 
 The ENSv1/Basenames registry full-closure replay finalizes its discovery-edge

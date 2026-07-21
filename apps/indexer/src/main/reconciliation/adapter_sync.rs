@@ -48,7 +48,7 @@ pub(crate) use entrypoints::{
     sync_replay_normalized_events_from_persisted_raw_payloads,
 };
 pub(crate) use full_closure::{
-    AutomaticTwoPhaseFullClosureSyncResult,
+    AutomaticTwoPhaseFullClosureSyncResult, automatic_stateless_replay_completed,
     sync_automatic_two_phase_full_closure_normalized_events,
     sync_manual_full_closure_normalized_events_from_persisted_raw_payloads,
 };

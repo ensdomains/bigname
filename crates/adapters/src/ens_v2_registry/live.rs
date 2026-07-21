@@ -109,6 +109,31 @@ pub async fn record_ens_v2_live_selected_raw_log_coverage(
     }
 }
 
+/// Rebuild the current ENSv2 retained-history proof from already-durable,
+/// generation-bound coverage without running projection reconciliation.
+/// Missing coverage remains a typed recovery requirement for the caller.
+pub async fn ensure_ens_v2_retained_history_proof_through(
+    pool: &PgPool,
+    chain: &str,
+    through_block: i64,
+) -> Result<()> {
+    if !has_authoritative_ens_v2_closure_through(pool, chain, through_block).await? {
+        return Ok(());
+    }
+    let guard = FullSourceRawLogHistoryGuard::acquire(
+        acquire_registry_sync_fence(pool, chain).await?,
+        chain,
+    )
+    .await?;
+    match guard.ensure_proof_through(pool, through_block).await {
+        Ok(_) => guard.release().await,
+        Err(error) => {
+            let _ = guard.abort().await;
+            Err(error)
+        }
+    }
+}
+
 /// Apply an ordinary ENSv2 live poll from a best-effort process-local
 /// lifecycle-state cache. Hydration is restricted to the exact retained
 /// ancestor path of one selected target hash. Cache reuse additionally

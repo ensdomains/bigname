@@ -33,7 +33,8 @@ mod ownership;
 mod reverse_claim;
 
 pub(crate) use automatic::{
-    AutomaticTwoPhaseFullClosureSyncResult, sync_automatic_two_phase_full_closure_normalized_events,
+    AutomaticTwoPhaseFullClosureSyncResult, automatic_stateless_replay_completed,
+    sync_automatic_two_phase_full_closure_normalized_events,
 };
 #[cfg(test)]
 pub(crate) use automatic::{install_after_stateless_failure, install_stateless_page_observer};
@@ -164,6 +165,15 @@ where
         } else {
             load_raw_log_staging_input_version(pool, chain).await?
         };
+        if !adapters.is_empty() {
+            ensure_full_closure_retention_authority_for_adapters(
+                pool,
+                chain,
+                adapters,
+                target_block_number,
+            )
+            .await?;
+        }
         let prelude_output = prelude().await?;
         if !adapters.is_empty() {
             ensure_full_closure_retention_authority_for_adapters(

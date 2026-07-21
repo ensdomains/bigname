@@ -521,6 +521,7 @@ async fn replay_full_closure_or_dependency_normalized_events(
     chain: &str,
     from_block: i64,
     to_block: i64,
+    stateless_ranges: &[(i64, i64)],
     max_raw_logs_per_page: usize,
 ) -> Result<RawFactNormalizedEventReplayOutcome> {
     let adapters = active_closure_or_dependency_replay_adapters(pool, chain).await?;
@@ -537,6 +538,8 @@ async fn replay_full_closure_or_dependency_normalized_events(
         chain,
         from_block,
         to_block,
+        stateless_range_count = stateless_ranges.len(),
+        stateless_ranges = ?stateless_ranges,
         max_raw_logs_per_page,
         adapter_count = adapters.len(),
         adapters = ?adapters,
@@ -550,6 +553,7 @@ async fn replay_full_closure_or_dependency_normalized_events(
         CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS,
         from_block,
         to_block,
+        stateless_ranges,
         &adapters,
         max_raw_logs_per_page,
     )

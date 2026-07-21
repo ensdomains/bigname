@@ -484,6 +484,79 @@ async fn normalized_replay_catchup_does_not_use_log_bound_as_stateful_boundary()
 }
 
 #[tokio::test]
+async fn normalized_replay_catchup_validates_retention_before_stateless_phase() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_normalized_replay_cursor_table(database.pool()).await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let deployment_profile = "retention-validation-test";
+    let chain = "ethereum-mainnet";
+    let wrapper_address = "0x0000000000000000000000000000000000000138";
+    let block = provider_block(
+        "0x3838383838383838383838383838383838383838383838383838383838383838",
+        Some("0x3737373737373737373737373737373737373737373737373737373737373737"),
+        38,
+    );
+
+    insert_active_replay_watched_contract(
+        database.pool(),
+        398,
+        chain,
+        Uuid::from_u128(0x398),
+        wrapper_address,
+    )
+    .await?;
+    insert_raw_name_wrapped_log(
+        database.pool(),
+        chain,
+        &block,
+        wrapper_address,
+        0,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    upsert_raw_staging_input_version_for_handoff_test(database.pool(), chain, 2, 1).await?;
+
+    let config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
+        deployment_profile.to_owned(),
+        vec![chain.to_owned()],
+        1_000,
+        1_000,
+        1,
+    )?;
+    let stateless_pages =
+        install_stateless_page_observer(database.pool(), deployment_profile, chain).await?;
+    let error = normalized_replay_catchup::run_normalized_replay_catchup_iteration(
+        database.pool(),
+        &config,
+        chain,
+    )
+    .await
+    .expect_err("incomplete retention authority must fail closed");
+    assert!(
+        format!("{error:#}").contains("retention generation 1"),
+        "unexpected retention validation error: {error:#}"
+    );
+    assert_eq!(
+        stateless_pages.page_ranges(),
+        Vec::<(i64, i64)>::new(),
+        "retention validation must abort before any stateless replay page"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events \
+             WHERE event_kind = 'PreimageObserved' \
+               AND derivation_kind = 'raw_log_preimage_observation'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "retention validation failure must attempt zero stateless upserts"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn normalized_replay_catchup_retries_full_closure_after_stateless_phase_failure()
 -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -1323,7 +1396,7 @@ async fn normalized_replay_catchup_accepts_commit_strictly_after_latched_closure
 }
 
 #[tokio::test]
-async fn normalized_replay_catchup_recovers_durable_ensv2_missing_coverage_without_early_cursor_advance()
+async fn normalized_replay_catchup_recovers_multiple_new_ensv2_emitters_with_scoped_phase_one()
 -> Result<()> {
     let database = TestDatabase::new().await?;
     create_normalized_replay_cursor_table(database.pool()).await?;
@@ -1331,11 +1404,15 @@ async fn normalized_replay_catchup_recovers_durable_ensv2_missing_coverage_witho
     let chain = "ethereum-sepolia";
     let root_manifest_id = 51_300;
     let registry_manifest_id = 51_301;
+    let resolver_manifest_id = 51_302;
     let root_contract_instance_id = Uuid::from_u128(51_300);
     let registry_contract_instance_id = Uuid::from_u128(51_301);
+    let resolver_contract_instance_id = Uuid::from_u128(51_302);
     let root_address = "0x0000000000000000000000000000000000005130";
     let registry_address = "0x0000000000000000000000000000000000005131";
+    let historical_child_address = "0x0000000000000000000000000000000000005100";
     let child_address = "0x0000000000000000000000000000000000005132";
+    let resolver_address = "0x0000000000000000000000000000000000005133";
     insert_normalized_replay_ens_v2_registry_manifests(
         database.pool(),
         chain,
@@ -1347,6 +1424,14 @@ async fn normalized_replay_catchup_recovers_durable_ensv2_missing_coverage_witho
         registry_address,
     )
     .await?;
+    insert_normalized_replay_ens_v2_resolver_manifest(
+        database.pool(),
+        chain,
+        resolver_manifest_id,
+        resolver_contract_instance_id,
+        resolver_address,
+    )
+    .await?;
     sqlx::query(
         "INSERT INTO discovery_admission_epochs (chain_id, epoch) VALUES ($1, 0) ON CONFLICT (chain_id) DO NOTHING",
     )
@@ -1356,10 +1441,22 @@ async fn normalized_replay_catchup_recovers_durable_ensv2_missing_coverage_witho
 
     let block_1 = provider_block(&format!("0x{:064x}", 51_301), None, 1);
     let block_2 = provider_block(&format!("0x{:064x}", 51_302), Some(&block_1.block_hash), 2);
+    let block_3 = provider_block(
+        &format!("0x{:064x}", 51_303),
+        Some(&block_2.block_hash),
+        3,
+    );
     insert_chain_lineage_for_block(
         database.pool(),
         chain,
         &block_1,
+        CanonicalityState::Finalized,
+    )
+    .await?;
+    insert_chain_lineage_for_block(
+        database.pool(),
+        chain,
+        &block_3,
         CanonicalityState::Finalized,
     )
     .await?;
@@ -1372,11 +1469,11 @@ async fn normalized_replay_catchup_recovers_durable_ensv2_missing_coverage_witho
     .await?;
     upsert_raw_blocks(
         database.pool(),
-        &[provider_block_to_raw_block(
-            chain,
-            &block_2,
-            CanonicalityState::Finalized,
-        )],
+        &[
+            provider_block_to_raw_block(chain, &block_1, CanonicalityState::Finalized),
+            provider_block_to_raw_block(chain, &block_2, CanonicalityState::Finalized),
+            provider_block_to_raw_block(chain, &block_3, CanonicalityState::Finalized),
+        ],
     )
     .await?;
     upsert_raw_logs(
@@ -1384,9 +1481,28 @@ async fn normalized_replay_catchup_recovers_durable_ensv2_missing_coverage_witho
         &[
             RawLog {
                 chain_id: chain.to_owned(),
-                block_hash: block_2.block_hash.clone(),
-                block_number: block_2.block_number,
-                transaction_hash: transaction_hash_for_block(&block_2),
+                block_hash: block_1.block_hash.clone(),
+                block_number: block_1.block_number,
+                transaction_hash: transaction_hash_for_block(&block_1),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: registry_address.to_owned(),
+                topics: vec![
+                    keccak256_hex(b"SubregistryUpdated(uint256,address,address)"),
+                    hex_string(&abi_word_u64(2)),
+                    hex_string(&abi_word_address(historical_child_address)),
+                    hex_string(&abi_word_address(
+                        "0x0000000000000000000000000000000000000dad",
+                    )),
+                ],
+                data: Vec::new(),
+                canonicality_state: CanonicalityState::Finalized,
+            },
+            RawLog {
+                chain_id: chain.to_owned(),
+                block_hash: block_3.block_hash.clone(),
+                block_number: block_3.block_number,
+                transaction_hash: transaction_hash_for_block(&block_3),
                 transaction_index: 0,
                 log_index: 0,
                 emitting_address: registry_address.to_owned(),
@@ -1401,15 +1517,36 @@ async fn normalized_replay_catchup_recovers_durable_ensv2_missing_coverage_witho
                 data: decode_hex_string(&encode_ens_v2_label_registered_log_data(
                     "alice",
                     "0x0000000000000000000000000000000000000aaa",
-                    block_2.block_timestamp_unix_secs + 31_536_000,
+                    block_3.block_timestamp_unix_secs + 31_536_000,
                 )),
                 canonicality_state: CanonicalityState::Finalized,
             },
             RawLog {
                 chain_id: chain.to_owned(),
-                block_hash: block_2.block_hash.clone(),
-                block_number: block_2.block_number,
-                transaction_hash: transaction_hash_for_block(&block_2),
+                block_hash: block_1.block_hash.clone(),
+                block_number: block_1.block_number,
+                transaction_hash: transaction_hash_for_block(&block_1),
+                transaction_index: 0,
+                log_index: 1,
+                emitting_address: registry_address.to_owned(),
+                topics: vec![
+                    keccak256_hex(b"SubregistryUpdated(uint256,address,address)"),
+                    hex_string(&abi_word_u64(2)),
+                    hex_string(&abi_word_address(
+                        "0x0000000000000000000000000000000000000000",
+                    )),
+                    hex_string(&abi_word_address(
+                        "0x0000000000000000000000000000000000000dad",
+                    )),
+                ],
+                data: Vec::new(),
+                canonicality_state: CanonicalityState::Finalized,
+            },
+            RawLog {
+                chain_id: chain.to_owned(),
+                block_hash: block_3.block_hash.clone(),
+                block_number: block_3.block_number,
+                transaction_hash: transaction_hash_for_block(&block_3),
                 transaction_index: 0,
                 log_index: 1,
                 emitting_address: registry_address.to_owned(),
@@ -1427,11 +1564,26 @@ async fn normalized_replay_catchup_recovers_durable_ensv2_missing_coverage_witho
         ],
     )
     .await?;
+    sqlx::query(
+        r#"
+        UPDATE raw_log_staging_input_revisions
+        SET retention_generation = 1,
+            retained_history_complete = false,
+            incomplete_since = clock_timestamp(),
+            proven_retention_generation = NULL,
+            proven_discovery_admission_epoch = NULL,
+            proven_through_block = NULL
+        WHERE chain_id = $1
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
     insert_completed_backfill_range_coverage_for_source_family(
         database.pool(),
         chain,
         1,
-        2,
+        3,
         "ens_v2_root_l1",
         &[root_address],
     )
@@ -1440,7 +1592,16 @@ async fn normalized_replay_catchup_recovers_durable_ensv2_missing_coverage_witho
         database.pool(),
         chain,
         1,
-        2,
+        3,
+        "ens_v2_resolver_l1",
+        &[resolver_address],
+    )
+    .await?;
+    insert_completed_backfill_range_coverage_for_source_family(
+        database.pool(),
+        chain,
+        1,
+        3,
         "ens_v2_registry_l1",
         &[registry_address],
     )
@@ -1450,11 +1611,11 @@ async fn normalized_replay_catchup_recovers_durable_ensv2_missing_coverage_witho
         UPDATE raw_log_staging_input_revisions
         SET retained_history_complete = true,
             incomplete_since = NULL,
-            proven_retention_generation = 0,
+            proven_retention_generation = 1,
             proven_discovery_admission_epoch = 0,
-            proven_through_block = 2
+            proven_through_block = 3
         WHERE chain_id = $1
-          AND retention_generation = 0
+          AND retention_generation = 1
         "#,
     )
     .bind(chain)
@@ -1469,65 +1630,30 @@ async fn normalized_replay_catchup_recovers_durable_ensv2_missing_coverage_witho
         1,
     )?
     .with_defer_projection_indexes(false);
-    let error = normalized_replay_catchup::run_normalized_replay_catchup_iteration(
-        database.pool(),
-        &config,
-        chain,
-    )
-    .await
-    .expect_err("new discovery without a configured provider must fail closed");
-    assert_eq!(
-        bigname_adapters::ens_v2_missing_coverage(&error),
-        Some(&bigname_adapters::EnsV2MissingCoverage {
-            chain: chain.to_owned(),
-            retention_generation: 0,
-            source_family: "ens_v2_registry_l1".to_owned(),
-            address: child_address.to_owned(),
-            required_from_block: 2,
-            required_to_block: 2,
-        }),
-        "the newly discovered requirement must survive catch-up context as an exact typed tuple"
-    );
-    assert_eq!(
-        sqlx::query_as::<_, (i64, Option<i64>)>(
-            r#"
-            SELECT next_block_number, last_completed_block_number
-            FROM normalized_replay_cursors
-            WHERE deployment_profile = 'sepolia'
-              AND chain_id = $1
-              AND cursor_kind = 'raw_fact_normalized_events'
-            "#,
-        )
-        .bind(chain)
-        .fetch_one(database.pool())
-        .await?,
-        (2, None),
-        "failed recovery must not advance the replay cursor or completion checkpoint"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoints",
-        )
-        .fetch_one(database.pool())
-        .await?,
-        0,
-        "failed ENSv2 replay must not publish an adapter checkpoint"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::BIGINT FROM discovery_edges WHERE chain_id = $1 AND edge_kind = 'subregistry' AND deactivated_at IS NULL",
-        )
-        .bind(chain)
-        .fetch_one(database.pool())
-        .await?,
-        1,
-        "the restart pass must begin from the already-durable child admission"
-    );
-
-    let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
-        block: block_2.clone(),
-        logs: Vec::new(),
-    }])
+    let stateless_pages =
+        install_stateless_page_observer(database.pool(), "sepolia", chain).await?;
+    let (provider, server) = bundle_provider_with_fixtures(vec![
+        ProviderBlockFixture {
+            block: block_1.clone(),
+            logs: vec![rpc_ens_v2_label_registered_log_payload(
+                &block_1,
+                historical_child_address,
+                2,
+                "historical-recovered",
+                3,
+            )],
+        },
+        ProviderBlockFixture {
+            block: block_3.clone(),
+            logs: vec![rpc_ens_v2_label_registered_log_payload(
+                &block_3,
+                child_address,
+                2,
+                "recovered",
+                2,
+            )],
+        },
+    ])
     .await?;
     assert_eq!(
         normalized_replay_catchup::run_normalized_replay_catchup_iteration_with_provider_for_test(
@@ -1564,11 +1690,11 @@ async fn normalized_replay_catchup_recovers_durable_ensv2_missing_coverage_witho
         (
             "ens_v2_registry_l1".to_owned(),
             child_address.to_owned(),
-            2,
-            2,
-            0,
+            3,
+            3,
+            1,
         ),
-        "restart recovery must persist only exact generation-zero address coverage"
+        "restart recovery must persist only exact current-generation address coverage"
     );
     assert_eq!(
         sqlx::query_as::<_, (i64, Option<i64>)>(
@@ -1583,8 +1709,384 @@ async fn normalized_replay_catchup_recovers_durable_ensv2_missing_coverage_witho
         .bind(chain)
         .fetch_one(database.pool())
         .await?,
-        (3, Some(2)),
+        (4, Some(3)),
         "the unchanged replay may advance only after provider-backed recovery succeeds"
+    );
+    assert_eq!(
+        stateless_pages.page_ranges(),
+        vec![(1, 3), (1, 1), (3, 3)],
+        "coverage recovery must retain every exact recovered span until phase one can run"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (bool, Option<i64>, Option<i64>, Option<i64>, i64)>(
+            r#"
+            SELECT
+                retained.retained_history_complete,
+                retained.proven_retention_generation,
+                retained.proven_discovery_admission_epoch,
+                retained.proven_through_block,
+                admission.epoch
+            FROM raw_log_staging_input_revisions retained
+            JOIN discovery_admission_epochs admission
+              ON admission.chain_id = retained.chain_id
+            WHERE retained.chain_id = $1
+            "#,
+        )
+        .bind(chain)
+        .fetch_one(database.pool())
+        .await?,
+        (true, Some(1), Some(1), Some(3), 1),
+        "coverage recovery must rebuild the generation-one proof at the discovered epoch"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events \
+             WHERE event_kind = 'PreimageObserved' \
+               AND derivation_kind = 'raw_log_preimage_observation' \
+               AND block_hash = $1 \
+               AND log_index = 2"
+        )
+        .bind(&block_3.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "phase one must derive a preimage row from the recovered raw log"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM raw_logs \
+             WHERE chain_id = $1 \
+               AND block_hash = $2 \
+               AND log_index = 3 \
+               AND emitting_address = $3"
+        )
+        .bind(chain)
+        .bind(&block_1.block_hash)
+        .bind(historical_child_address)
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "the first exact recovery must persist its raw log"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events \
+             WHERE event_kind = 'PreimageObserved' \
+               AND derivation_kind = 'raw_log_preimage_observation' \
+               AND block_hash = $1 \
+               AND log_index = 3"
+        )
+        .bind(&block_1.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "phase one must not drop a prior recovered span while validation finds the next gap"
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_replay_recovery_preserves_full_stateless_span_after_preflight_gap()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_normalized_replay_cursor_table(database.pool()).await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let chain = "ethereum-sepolia";
+    let root_manifest_id = 52_300;
+    let registry_manifest_id = 52_301;
+    let resolver_manifest_id = 52_302;
+    let root_contract_instance_id = Uuid::from_u128(52_300);
+    let registry_contract_instance_id = Uuid::from_u128(52_301);
+    let resolver_contract_instance_id = Uuid::from_u128(52_302);
+    let child_contract_instance_id = Uuid::from_u128(52_303);
+    let root_address = "0x0000000000000000000000000000000000005230";
+    let registry_address = "0x0000000000000000000000000000000000005231";
+    let child_address = "0x0000000000000000000000000000000000005232";
+    let resolver_address = "0x0000000000000000000000000000000000005233";
+    insert_normalized_replay_ens_v2_registry_manifests(
+        database.pool(),
+        chain,
+        root_manifest_id,
+        registry_manifest_id,
+        root_contract_instance_id,
+        registry_contract_instance_id,
+        root_address,
+        registry_address,
+    )
+    .await?;
+    insert_normalized_replay_ens_v2_resolver_manifest(
+        database.pool(),
+        chain,
+        resolver_manifest_id,
+        resolver_contract_instance_id,
+        resolver_address,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO discovery_admission_epochs (chain_id, epoch) VALUES ($1, 0) ON CONFLICT (chain_id) DO NOTHING",
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+
+    let block_1 = provider_block(&format!("0x{:064x}", 52_301), None, 1);
+    let block_2 = provider_block(&format!("0x{:064x}", 52_302), Some(&block_1.block_hash), 2);
+    let block_3 = provider_block(
+        &format!("0x{:064x}", 52_303),
+        Some(&block_2.block_hash),
+        3,
+    );
+    for block in [&block_1, &block_2, &block_3] {
+        insert_chain_lineage_for_block(
+            database.pool(),
+            chain,
+            block,
+            CanonicalityState::Finalized,
+        )
+        .await?;
+    }
+    upsert_raw_blocks(
+        database.pool(),
+        &[
+            provider_block_to_raw_block(chain, &block_1, CanonicalityState::Finalized),
+            provider_block_to_raw_block(chain, &block_2, CanonicalityState::Finalized),
+            provider_block_to_raw_block(chain, &block_3, CanonicalityState::Finalized),
+        ],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            RawLog {
+                chain_id: chain.to_owned(),
+                block_hash: block_1.block_hash.clone(),
+                block_number: block_1.block_number,
+                transaction_hash: transaction_hash_for_block(&block_1),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: registry_address.to_owned(),
+                topics: vec![
+                    ens_v2_label_registered_topic0(),
+                    hex_string(&abi_word_u64(1)),
+                    labelhash_hex("full-span"),
+                    hex_string(&abi_word_address(
+                        "0x0000000000000000000000000000000000000dad",
+                    )),
+                ],
+                data: decode_hex_string(&encode_ens_v2_label_registered_log_data(
+                    "full-span",
+                    "0x0000000000000000000000000000000000000aaa",
+                    block_1.block_timestamp_unix_secs + 31_536_000,
+                )),
+                canonicality_state: CanonicalityState::Finalized,
+            },
+            RawLog {
+                chain_id: chain.to_owned(),
+                block_hash: block_3.block_hash.clone(),
+                block_number: block_3.block_number,
+                transaction_hash: transaction_hash_for_block(&block_3),
+                transaction_index: 0,
+                log_index: 0,
+                emitting_address: "0x00000000000000000000000000000000000052ff".to_owned(),
+                topics: vec![keccak256_hex(b"Unrelated(uint256)")],
+                data: Vec::new(),
+                canonicality_state: CanonicalityState::Finalized,
+            },
+        ],
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE raw_log_staging_input_revisions
+        SET retention_generation = 1,
+            retained_history_complete = false,
+            incomplete_since = clock_timestamp(),
+            proven_retention_generation = NULL,
+            proven_discovery_admission_epoch = NULL,
+            proven_through_block = NULL
+        WHERE chain_id = $1
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    insert_completed_backfill_range_coverage_for_source_family(
+        database.pool(),
+        chain,
+        1,
+        3,
+        "ens_v2_root_l1",
+        &[root_address],
+    )
+    .await?;
+    insert_completed_backfill_range_coverage_for_source_family(
+        database.pool(),
+        chain,
+        1,
+        3,
+        "ens_v2_resolver_l1",
+        &[resolver_address],
+    )
+    .await?;
+    insert_completed_backfill_range_coverage_for_source_family(
+        database.pool(),
+        chain,
+        1,
+        3,
+        "ens_v2_registry_l1",
+        &[registry_address],
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE raw_log_staging_input_revisions
+        SET retained_history_complete = true,
+            incomplete_since = NULL,
+            proven_retention_generation = 1,
+            proven_discovery_admission_epoch = 0,
+            proven_through_block = 3
+        WHERE chain_id = $1
+          AND retention_generation = 1
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+
+    insert_contract_instance(database.pool(), child_contract_instance_id, chain, "contract")
+        .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        child_contract_instance_id,
+        chain,
+        child_address,
+        Some(registry_manifest_id),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE contract_instance_addresses \
+         SET active_from_block_number = 3, active_to_block_number = 3, deactivated_at = now() \
+         WHERE contract_instance_id = $1 AND chain_id = $2",
+    )
+    .bind(child_contract_instance_id)
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    insert_active_discovery_edge_with_range(
+        database.pool(),
+        chain,
+        "subregistry",
+        registry_contract_instance_id,
+        child_contract_instance_id,
+        Some(registry_manifest_id),
+        Some(3),
+        Some(3),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE discovery_edges \
+         SET deactivated_at = now() \
+         WHERE chain_id = $1 AND to_contract_instance_id = $2",
+    )
+    .bind(chain)
+    .bind(child_contract_instance_id)
+    .execute(database.pool())
+    .await?;
+    sqlx::query("UPDATE discovery_admission_epochs SET epoch = 1 WHERE chain_id = $1")
+        .bind(chain)
+        .execute(database.pool())
+        .await?;
+
+    let config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
+        "sepolia".to_owned(),
+        vec![chain.to_owned()],
+        1_000,
+        1_000,
+        1,
+    )?
+    .with_defer_projection_indexes(false);
+    let stateless_pages =
+        install_stateless_page_observer(database.pool(), "sepolia", chain).await?;
+    let error = normalized_replay_catchup::run_normalized_replay_catchup_iteration(
+        database.pool(),
+        &config,
+        chain,
+    )
+    .await
+    .expect_err("stale retained-history proof must fail before phase one without a provider");
+    assert_eq!(
+        bigname_adapters::ens_v2_missing_coverage(&error),
+        Some(&bigname_adapters::EnsV2MissingCoverage {
+            chain: chain.to_owned(),
+            retention_generation: 1,
+            source_family: "ens_v2_registry_l1".to_owned(),
+            address: child_address.to_owned(),
+            required_from_block: 3,
+            required_to_block: 3,
+        })
+    );
+    assert_eq!(
+        stateless_pages.page_ranges(),
+        Vec::<(i64, i64)>::new(),
+        "preflight coverage validation must fail before any stateless replay page"
+    );
+
+    let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
+        block: block_3.clone(),
+        logs: vec![rpc_ens_v2_label_registered_log_payload(
+            &block_3,
+            child_address,
+            2,
+            "recovered-preflight",
+            2,
+        )],
+    }])
+    .await?;
+    assert_eq!(
+        normalized_replay_catchup::run_normalized_replay_catchup_iteration_with_provider_for_test(
+            database.pool(),
+            &config,
+            chain,
+            &provider,
+            HeaderAuditMode::Minimal,
+        )
+        .await?,
+        normalized_replay_catchup::CatchupIterationStatus::Progressed
+    );
+    assert_eq!(
+        stateless_pages.page_ranges(),
+        vec![(1, 3)],
+        "a preflight recovery must preserve the original full stateless span"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events \
+             WHERE event_kind = 'PreimageObserved' \
+               AND derivation_kind = 'raw_log_preimage_observation' \
+               AND block_hash = $1 \
+               AND log_index = 0"
+        )
+        .bind(&block_1.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "the original full-span log must still receive its stateless preimage"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_events \
+             WHERE event_kind = 'PreimageObserved' \
+               AND derivation_kind = 'raw_log_preimage_observation' \
+               AND block_hash = $1 \
+               AND log_index = 2"
+        )
+        .bind(&block_3.block_hash)
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "the recovered log must receive its stateless preimage"
     );
 
     server.abort();
@@ -2504,6 +3006,62 @@ async fn insert_normalized_replay_ens_v2_registry_manifests(
         "subregistry",
         "registry",
         "reachable_from_root",
+    )
+    .await
+}
+
+async fn insert_normalized_replay_ens_v2_resolver_manifest(
+    pool: &PgPool,
+    chain: &str,
+    manifest_id: i64,
+    contract_instance_id: Uuid,
+    address: &str,
+) -> Result<()> {
+    let manifest_payload = json!({
+        "roots": [],
+        "contracts": [{
+            "role": "resolver",
+            "address": address,
+            "start_block": 1
+        }],
+        "abi": {"events": test_manifest_abi_events()},
+    });
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_versions (
+            manifest_id,
+            namespace,
+            source_family,
+            chain,
+            rollout_status,
+            manifest_payload
+        )
+        VALUES ($1, 'ens', 'ens_v2_resolver_l1', $2, 'active', $3::jsonb)
+        "#,
+    )
+    .bind(manifest_id)
+    .bind(chain)
+    .bind(serde_json::to_string(&manifest_payload)?)
+    .execute(pool)
+    .await?;
+    insert_contract_instance(pool, contract_instance_id, chain, "contract").await?;
+    insert_active_contract_instance_address(
+        pool,
+        contract_instance_id,
+        chain,
+        address,
+        Some(manifest_id),
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        pool,
+        manifest_id,
+        "resolver",
+        contract_instance_id,
+        address,
+        "none",
+        None,
+        None,
     )
     .await
 }

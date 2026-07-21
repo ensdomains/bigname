@@ -9,7 +9,7 @@ use crate::{
     provider::ChainProviderOps,
     reconciliation::{
         EnsV2LiveCoverageRecoveryStatus, HeaderAuditMode, RawFactNormalizedEventReplayOutcome,
-        recover_ens_v2_live_coverage_requirement,
+        automatic_stateless_replay_completed, recover_ens_v2_live_coverage_requirement,
     },
 };
 
@@ -31,6 +31,7 @@ pub(super) async fn replay_full_closure_with_coverage_recovery(
     RawLogStagingInputVersion,
 )> {
     let mut recovery_attempt = 0_usize;
+    let mut stateless_ranges = vec![(from_block, to_block)];
     loop {
         let replay_error = match replay_full_closure_or_dependency_normalized_events(
             pool,
@@ -38,6 +39,7 @@ pub(super) async fn replay_full_closure_with_coverage_recovery(
             chain,
             from_block,
             to_block,
+            &stateless_ranges,
             max_raw_logs_per_page,
         )
         .await
@@ -45,6 +47,7 @@ pub(super) async fn replay_full_closure_with_coverage_recovery(
             Ok(outcome) => return Ok((outcome, raw_log_input_version)),
             Err(error) => error,
         };
+        let stateless_replay_completed = automatic_stateless_replay_completed(&replay_error);
         let Some(requirement) = bigname_adapters::ens_v2_missing_coverage(&replay_error).cloned()
         else {
             return Err(replay_error);
@@ -85,6 +88,18 @@ pub(super) async fn replay_full_closure_with_coverage_recovery(
 
         raw_log_input_version =
             bigname_storage::load_raw_log_staging_input_version(pool, chain).await?;
+        // Preserve the original full span when preflight validation prevented
+        // phase one from running. Once phase one completed, retain only every
+        // exact span fetched by later recovery attempts. The stateful closure
+        // pass still restarts over its complete span.
+        if stateless_replay_completed {
+            stateless_ranges.clear();
+        }
+        include_stateless_range(
+            &mut stateless_ranges,
+            requirement.required_from_block,
+            requirement.required_to_block,
+        );
         info!(
             service = "indexer",
             command = "run",
@@ -96,7 +111,28 @@ pub(super) async fn replay_full_closure_with_coverage_recovery(
             to_block = requirement.required_to_block,
             retention_generation = requirement.retention_generation,
             recovery_attempt,
+            stateless_range_count = stateless_ranges.len(),
+            stateless_ranges = ?stateless_ranges,
             "retrying unchanged normalized replay after exact generation-bound coverage recovery"
         );
     }
+}
+
+fn include_stateless_range(ranges: &mut Vec<(i64, i64)>, from_block: i64, to_block: i64) {
+    debug_assert!(from_block <= to_block);
+    ranges.push((from_block, to_block));
+    ranges.sort_unstable();
+
+    let mut merged = Vec::<(i64, i64)>::with_capacity(ranges.len());
+    for (from_block, to_block) in ranges.drain(..) {
+        if let Some((_, merged_to_block)) = merged.last_mut()
+            && (from_block <= *merged_to_block
+                || merged_to_block.checked_add(1) == Some(from_block))
+        {
+            *merged_to_block = (*merged_to_block).max(to_block);
+        } else {
+            merged.push((from_block, to_block));
+        }
+    }
+    *ranges = merged;
 }
