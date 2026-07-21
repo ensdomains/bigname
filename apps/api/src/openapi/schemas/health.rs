@@ -24,11 +24,28 @@ pub(super) fn health_identity_schema() -> JsonValue {
             "projection_publication_versions",
         ],
         "properties": {
-            "version": { "type": "string" },
-            "build_sha": { "type": "string" },
-            "schema_migration_version": { "type": "integer", "minimum": 0 },
-            "projection_replay_version": { "type": "integer", "minimum": 1 },
-            "projection_publication_versions": schema_ref("HealthProjectionPublicationVersions"),
+            "version": {
+                "type": "string",
+                "description": "Cargo package version compiled into this binary; not live database state.",
+            },
+            "build_sha": {
+                "type": "string",
+                "description": "Source commit identifier compiled into this binary, or \"unknown\" when unavailable; not live database state.",
+            },
+            "schema_migration_version": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Latest migration version compiled into this binary; not the database's applied state.",
+            },
+            "projection_replay_version": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Projection replay compatibility version compiled into this binary; not the database's applied replay state.",
+            },
+            "projection_publication_versions": {
+                "$ref": "#/components/schemas/HealthProjectionPublicationVersions",
+                "description": "Projection publication compatibility versions compiled into this binary; not the database's applied publication state.",
+            },
         },
     })
 }

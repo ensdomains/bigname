@@ -260,9 +260,30 @@ fn openapi_document_uses_package_version_and_freezes_health_identity() {
         ]
     );
     assert_eq!(
-        identity.pointer("/properties/projection_publication_versions"),
+        identity.get("properties"),
         Some(&json!({
-            "$ref": "#/components/schemas/HealthProjectionPublicationVersions",
+            "version": {
+                "type": "string",
+                "description": "Cargo package version compiled into this binary; not live database state.",
+            },
+            "build_sha": {
+                "type": "string",
+                "description": "Source commit identifier compiled into this binary, or \"unknown\" when unavailable; not live database state.",
+            },
+            "schema_migration_version": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Latest migration version compiled into this binary; not the database's applied state.",
+            },
+            "projection_replay_version": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Projection replay compatibility version compiled into this binary; not the database's applied replay state.",
+            },
+            "projection_publication_versions": {
+                "$ref": "#/components/schemas/HealthProjectionPublicationVersions",
+                "description": "Projection publication compatibility versions compiled into this binary; not the database's applied publication state.",
+            },
         }))
     );
 

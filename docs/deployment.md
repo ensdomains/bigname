@@ -1125,6 +1125,7 @@ Manual publish from an authenticated checkout:
 
 ```sh
 docker buildx build --platform linux/amd64 \
+  --build-arg BIGNAME_BUILD_SHA=$(git rev-parse HEAD) \
   -t ghcr.io/tateb/bigname:latest \
   -t ghcr.io/tateb/bigname:$(git rev-parse --short HEAD) \
   --push .
