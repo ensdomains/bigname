@@ -1300,7 +1300,7 @@ async fn ensure_resolver_profile_convergence_tables(pool: &PgPool) -> Result<()>
     {
         sqlx::raw_sql(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../migrations/20260720120000_normalize_resolver_profile_authority_journal.sql"
+            "/../../migrations/20260720122000_normalize_resolver_profile_authority_journal.sql"
         )))
         .execute(pool)
         .await
