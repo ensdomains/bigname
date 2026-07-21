@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::{Postgres, QueryBuilder};
 
-use super::{ADAPTER, CHECKPOINT_SCOPE, ITEM_KIND_LATEST_ASSIGNMENT, SubregistryReplayCheckpoint};
+use super::{ADAPTER, ITEM_KIND_LATEST_ASSIGNMENT, SubregistryReplayCheckpoint};
 
 const CHECKPOINT_ITEM_INSERT_BATCH_SIZE: usize = 500;
 
@@ -51,7 +51,7 @@ pub(super) async fn insert_checkpoint_items(
                     .push_bind(&checkpoint.chain)
                     .push_bind(&checkpoint.context.cursor_kind)
                     .push_bind(ADAPTER)
-                    .push_bind(CHECKPOINT_SCOPE)
+                    .push_bind(checkpoint.context.checkpoint_scope)
                     .push_bind(*item_kind)
                     .push_bind(item_key)
                     .push_bind(item_payload);

@@ -156,7 +156,6 @@ async fn sync_adapter_owned_raw_log_state_backfills_reverse_claims_from_stored_r
     let watched_plan = load_watched_chain_plan(database.pool()).await?;
     sync_adapter_owned_raw_log_state(database.pool(), &watched_plan).await?;
     sync_adapter_owned_raw_log_state(database.pool(), &watched_plan).await?;
-
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'ReverseChanged'"
@@ -1483,6 +1482,18 @@ async fn sync_adapter_owned_raw_log_state_backfills_wrapper_authority_from_store
     let watched_plan = load_watched_chain_plan(database.pool()).await?;
     sync_adapter_owned_raw_log_state(database.pool(), &watched_plan).await?;
     sync_adapter_owned_raw_log_state(database.pool(), &watched_plan).await?;
+    sync_startup_adapter_owned_raw_log_state(database.pool(), "test", &watched_plan).await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = 'test'
+               AND checkpoint_scope = 'startup_adapter_sync'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "the broad startup pass must clean both completed ENSv1 checkpoint families"
+    );
 
     assert_eq!(
         sqlx::query_scalar::<_, i64>(

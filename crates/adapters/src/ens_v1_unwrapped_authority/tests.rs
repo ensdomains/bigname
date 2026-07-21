@@ -4521,6 +4521,37 @@ async fn sync_ens_v1_unwrapped_authority_persists_registrar_identity_rows_idempo
     assert_eq!(second.total_surface_binding_count, 1);
     assert_eq!(second.total_normalized_event_count, 5);
 
+    let startup_checkpoint = crate::StartupAdapterCheckpointContext::new("test-startup", 42)?;
+    let startup = sync_ens_v1_unwrapped_authority_with_startup_checkpoint(
+        database.pool(),
+        "ethereum-mainnet",
+        &startup_checkpoint,
+    )
+    .await?;
+    assert_eq!(startup.scanned_log_count, second.scanned_log_count);
+    assert_eq!(startup.matched_log_count, second.matched_log_count);
+    assert_eq!(
+        startup.total_normalized_event_count,
+        second.total_normalized_event_count
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT checkpoint_scope
+             FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = 'test-startup'
+               AND adapter = 'ens_v1_unwrapped_authority'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "startup_adapter_sync"
+    );
+    crate::clear_startup_adapter_checkpoints(
+        database.pool(),
+        "ethereum-mainnet",
+        &startup_checkpoint,
+    )
+    .await?;
+
     assert!(
         load_name_surface(database.pool(), "ens:alice.eth")
             .await?
@@ -4562,6 +4593,583 @@ async fn sync_ens_v1_unwrapped_authority_persists_registrar_identity_rows_idempo
         ])
     );
 
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn startup_authority_stages_page_events_until_identity_materialization() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let registrar_address = "0x00000000000000000000000000000000000000aa";
+    insert_active_contract_fixture(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+        "registrar",
+        registrar_address,
+        Some("registrar"),
+        "manifests/ens/ens_v1_registrar_l1/v1.toml",
+    )
+    .await?;
+    upsert_raw_blocks(
+        database.pool(),
+        &[raw_block(
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            None,
+            42,
+            1_700_000_042,
+        )],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[RawLog {
+            chain_id: chain.to_owned(),
+            block_hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+            block_number: 42,
+            transaction_hash: "0xtxaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: registrar_address.to_owned(),
+            topics: vec![
+                name_registered_topic0(),
+                keccak256_hex(b"alice"),
+                hex_string(&abi_word_address(
+                    "0x0000000000000000000000000000000000000001",
+                )),
+            ],
+            data: encode_registrar_name_registered_log_data("alice", 1_700_010_000),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+
+    sqlx::query("CREATE TABLE startup_authority_page_failure (enabled BOOLEAN PRIMARY KEY)")
+        .execute(database.pool())
+        .await?;
+    sqlx::query("INSERT INTO startup_authority_page_failure VALUES (TRUE)")
+        .execute(database.pool())
+        .await?;
+    sqlx::query(
+        r#"
+        CREATE FUNCTION fail_startup_authority_page() RETURNS TRIGGER AS $function$
+        BEGIN
+            IF NEW.adapter = 'ens_v1_unwrapped_authority'
+               AND NEW.checkpoint_scope = 'startup_adapter_sync'
+               AND NEW.status = 'running'
+               AND NEW.scanned_log_count > OLD.scanned_log_count
+               AND EXISTS (SELECT 1 FROM startup_authority_page_failure WHERE enabled) THEN
+                RAISE EXCEPTION 'injected startup authority page failure';
+            END IF;
+            RETURN NEW;
+        END;
+        $function$ LANGUAGE plpgsql
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        "CREATE TRIGGER fail_startup_authority_page BEFORE UPDATE ON normalized_replay_adapter_checkpoints FOR EACH ROW EXECUTE FUNCTION fail_startup_authority_page()",
+    )
+    .execute(database.pool())
+    .await?;
+
+    let checkpoint = crate::StartupAdapterCheckpointContext::new("test-event-fence", 42)?;
+    let error = sync_ens_v1_unwrapped_authority_with_startup_checkpoint(
+        database.pool(),
+        chain,
+        &checkpoint,
+    )
+    .await
+    .expect_err("the injected page failure must interrupt startup before materialization");
+    assert!(format!("{error:#}").contains("injected startup authority page failure"));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM normalized_events")
+            .fetch_one(database.pool())
+            .await?,
+        0,
+        "startup page events must not become worker-visible before identity materialization"
+    );
+    assert!(
+        load_name_surface(database.pool(), "ens:alice.eth")
+            .await?
+            .is_none()
+    );
+    assert!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoint_items
+             WHERE deployment_profile = 'test-event-fence'
+               AND adapter = 'ens_v1_unwrapped_authority'
+               AND item_kind = 'startup_pending_normalized_event'",
+        )
+        .fetch_one(database.pool())
+        .await?
+            > 0,
+        "the interrupted page must leave its events durably staged"
+    );
+
+    sqlx::query("DELETE FROM startup_authority_page_failure")
+        .execute(database.pool())
+        .await?;
+    let resumed = sync_ens_v1_unwrapped_authority_with_startup_checkpoint(
+        database.pool(),
+        chain,
+        &checkpoint,
+    )
+    .await?;
+    assert_eq!(resumed.scanned_log_count, 1);
+    assert_eq!(resumed.total_normalized_event_count, 5);
+    assert!(
+        load_name_surface(database.pool(), "ens:alice.eth")
+            .await?
+            .is_some()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoint_items
+             WHERE deployment_profile = 'test-event-fence'
+               AND adapter = 'ens_v1_unwrapped_authority'
+               AND item_kind = 'startup_pending_normalized_event'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "staged startup events must be deleted as bounded publication pages commit"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn startup_authority_resets_completed_checkpoint_when_authority_epoch_changes() -> Result<()>
+{
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let registrar_address = "0x00000000000000000000000000000000000000aa";
+    insert_active_contract_fixture(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+        "registrar",
+        registrar_address,
+        Some("registrar"),
+        "manifests/ens/ens_v1_registrar_l1/v1.toml",
+    )
+    .await?;
+    upsert_raw_blocks(
+        database.pool(),
+        &[raw_block(
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            None,
+            42,
+            1_700_000_042,
+        )],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[RawLog {
+            chain_id: chain.to_owned(),
+            block_hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+            block_number: 42,
+            transaction_hash: "0xtxaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: registrar_address.to_owned(),
+            topics: vec![
+                name_registered_topic0(),
+                keccak256_hex(b"alice"),
+                hex_string(&abi_word_address(
+                    "0x0000000000000000000000000000000000000001",
+                )),
+            ],
+            data: encode_registrar_name_registered_log_data("alice", 1_700_010_000),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+
+    let checkpoint = crate::StartupAdapterCheckpointContext::new("test-authority-epoch", 42)?;
+    let first = sync_ens_v1_unwrapped_authority_with_startup_checkpoint(
+        database.pool(),
+        chain,
+        &checkpoint,
+    )
+    .await?;
+    assert_eq!(first.total_normalized_event_inserted_count, 5);
+
+    sqlx::query(
+        "INSERT INTO discovery_admission_epochs (chain_id, epoch) VALUES ($1, 1)
+         ON CONFLICT (chain_id) DO UPDATE SET epoch = discovery_admission_epochs.epoch + 1",
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+
+    let resumed = sync_ens_v1_unwrapped_authority_with_startup_checkpoint(
+        database.pool(),
+        chain,
+        &checkpoint,
+    )
+    .await?;
+    assert_eq!(resumed.total_normalized_event_count, 5);
+    assert_eq!(
+        resumed.total_normalized_event_inserted_count, 0,
+        "authority-epoch drift must reset and replay instead of returning the retained summary"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT (state_payload ->> 'startup_discovery_admission_epoch')::BIGINT
+             FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = 'test-authority-epoch'
+               AND adapter = 'ens_v1_unwrapped_authority'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn startup_authority_extends_after_interrupted_finalize() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let registrar_address = "0x00000000000000000000000000000000000000aa";
+    let block_42 = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let block_43 = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    insert_active_contract_fixture(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+        "registrar",
+        registrar_address,
+        Some("registrar"),
+        "manifests/ens/ens_v1_registrar_l1/v1.toml",
+    )
+    .await?;
+    upsert_raw_blocks(
+        database.pool(),
+        &[raw_block(block_42, None, 42, 1_700_000_042)],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[RawLog {
+            chain_id: chain.to_owned(),
+            block_hash: block_42.to_owned(),
+            block_number: 42,
+            transaction_hash: "0xtxaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: registrar_address.to_owned(),
+            topics: vec![
+                name_registered_topic0(),
+                keccak256_hex(b"alice"),
+                hex_string(&abi_word_address(
+                    "0x0000000000000000000000000000000000000001",
+                )),
+            ],
+            data: encode_registrar_name_registered_log_data("alice", 1_700_010_000),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+
+    sqlx::query("CREATE TABLE startup_authority_finalize_failure (enabled BOOLEAN PRIMARY KEY)")
+        .execute(database.pool())
+        .await?;
+    sqlx::query("INSERT INTO startup_authority_finalize_failure VALUES (TRUE)")
+        .execute(database.pool())
+        .await?;
+    sqlx::query(
+        r#"
+        CREATE FUNCTION fail_startup_authority_finalize() RETURNS TRIGGER AS $function$
+        BEGIN
+            IF NEW.adapter = 'ens_v1_unwrapped_authority'
+               AND NEW.checkpoint_scope = 'startup_adapter_sync'
+               AND NEW.status = 'completed'
+               AND EXISTS (SELECT 1 FROM startup_authority_finalize_failure WHERE enabled) THEN
+                RAISE EXCEPTION 'injected startup authority finalize failure';
+            END IF;
+            RETURN NEW;
+        END;
+        $function$ LANGUAGE plpgsql
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        "CREATE TRIGGER fail_startup_authority_finalize BEFORE UPDATE ON normalized_replay_adapter_checkpoints FOR EACH ROW EXECUTE FUNCTION fail_startup_authority_finalize()",
+    )
+    .execute(database.pool())
+    .await?;
+
+    let first_checkpoint = crate::StartupAdapterCheckpointContext::new("test-extend", 42)?;
+    let error = sync_ens_v1_unwrapped_authority_with_startup_checkpoint(
+        database.pool(),
+        chain,
+        &first_checkpoint,
+    )
+    .await
+    .expect_err("the injected final checkpoint update must interrupt startup");
+    assert!(format!("{error:#}").contains("injected startup authority finalize failure"));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = 'test-extend'
+               AND adapter = 'ens_v1_unwrapped_authority'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "stream_complete"
+    );
+
+    sqlx::query("DELETE FROM startup_authority_finalize_failure")
+        .execute(database.pool())
+        .await?;
+    upsert_raw_blocks(
+        database.pool(),
+        &[raw_block(block_43, Some(block_42), 43, 1_700_000_043)],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[RawLog {
+            chain_id: chain.to_owned(),
+            block_hash: block_43.to_owned(),
+            block_number: 43,
+            transaction_hash: "0xtxbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_owned(),
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: registrar_address.to_owned(),
+            topics: vec![
+                name_registered_topic0(),
+                keccak256_hex(b"bob"),
+                hex_string(&abi_word_address(
+                    "0x0000000000000000000000000000000000000002",
+                )),
+            ],
+            data: encode_registrar_name_registered_log_data("bob", 1_700_020_000),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+
+    let extended_checkpoint = crate::StartupAdapterCheckpointContext::new("test-extend", 43)?;
+    let resumed = sync_ens_v1_unwrapped_authority_with_startup_checkpoint(
+        database.pool(),
+        chain,
+        &extended_checkpoint,
+    )
+    .await?;
+    assert_eq!(resumed.scanned_log_count, 2);
+    assert_eq!(resumed.matched_log_count, 2);
+    assert_eq!(resumed.total_normalized_event_count, 10);
+    assert!(
+        load_name_surface(database.pool(), "ens:alice.eth")
+            .await?
+            .is_some()
+    );
+    assert!(
+        load_name_surface(database.pool(), "ens:bob.eth")
+            .await?
+            .is_some()
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn startup_authority_completes_when_active_emitters_have_no_matching_logs() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    insert_active_contract_fixture(
+        database.pool(),
+        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1,
+        "registrar",
+        "0x00000000000000000000000000000000000000aa",
+        Some("registrar"),
+        "manifests/ens/ens_v1_registrar_l1/v1.toml",
+    )
+    .await?;
+
+    let no_block_checkpoint =
+        crate::StartupAdapterCheckpointContext::new("test-no-block-authority", 42)?;
+    let no_block = sync_ens_v1_unwrapped_authority_with_startup_checkpoint(
+        database.pool(),
+        chain,
+        &no_block_checkpoint,
+    )
+    .await?;
+    assert_eq!(no_block.scanned_log_count, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = 'test-no-block-authority'
+               AND adapter = 'ens_v1_unwrapped_authority'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "completed"
+    );
+    crate::clear_startup_adapter_checkpoints(database.pool(), chain, &no_block_checkpoint).await?;
+
+    upsert_raw_blocks(
+        database.pool(),
+        &[raw_block(
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            None,
+            42,
+            1_700_000_042,
+        )],
+    )
+    .await?;
+
+    let checkpoint = crate::StartupAdapterCheckpointContext::new("test-empty-authority", 42)?;
+    let summary = sync_ens_v1_unwrapped_authority_with_startup_checkpoint(
+        database.pool(),
+        chain,
+        &checkpoint,
+    )
+    .await?;
+    assert_eq!(summary.scanned_log_count, 0);
+    assert_eq!(summary.matched_log_count, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = 'test-empty-authority'
+               AND adapter = 'ens_v1_unwrapped_authority'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "completed",
+        "a healthy empty startup pass must be eligible for checkpoint cleanup"
+    );
+    crate::clear_startup_adapter_checkpoints(database.pool(), chain, &checkpoint).await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = 'test-empty-authority'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn startup_authority_completes_retained_checkpoint_after_all_authority_is_removed()
+-> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let deployment_profile = "test-removed-authority";
+    sqlx::query("INSERT INTO discovery_admission_epochs (chain_id, epoch) VALUES ($1, 1)")
+        .bind(chain)
+        .execute(database.pool())
+        .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_replay_adapter_checkpoints (
+            deployment_profile,
+            chain_id,
+            cursor_kind,
+            adapter,
+            checkpoint_scope,
+            replay_start_block_number,
+            replay_target_block_number,
+            status,
+            state_payload
+        ) VALUES (
+            $1,
+            $2,
+            'startup_adapter_owned_raw_log_state',
+            'ens_v1_unwrapped_authority',
+            'startup_adapter_sync',
+            0,
+            0,
+            'stream_complete',
+            '{"version":1,"startup_discovery_admission_epoch":0}'::JSONB
+        )
+        "#,
+    )
+    .bind(deployment_profile)
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_replay_adapter_checkpoint_items (
+            deployment_profile,
+            chain_id,
+            cursor_kind,
+            adapter,
+            checkpoint_scope,
+            item_kind,
+            item_key,
+            item_payload
+        ) VALUES (
+            $1,
+            $2,
+            'startup_adapter_owned_raw_log_state',
+            'ens_v1_unwrapped_authority',
+            'startup_adapter_sync',
+            'startup_pending_normalized_event',
+            'stale-event',
+            '{}'::JSONB
+        )
+        "#,
+    )
+    .bind(deployment_profile)
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+
+    let checkpoint = crate::StartupAdapterCheckpointContext::new(deployment_profile, 0)?;
+    let summary = sync_ens_v1_unwrapped_authority_with_startup_checkpoint(
+        database.pool(),
+        chain,
+        &checkpoint,
+    )
+    .await?;
+    assert_eq!(summary.scanned_log_count, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = $1
+               AND adapter = 'ens_v1_unwrapped_authority'",
+        )
+        .bind(deployment_profile)
+        .fetch_one(database.pool())
+        .await?,
+        "completed",
+        "removed startup authority must reset and complete retained state"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoint_items
+             WHERE deployment_profile = $1
+               AND adapter = 'ens_v1_unwrapped_authority'",
+        )
+        .bind(deployment_profile)
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "authority-drift reset must cascade stale private checkpoint items"
+    );
+
+    crate::clear_startup_adapter_checkpoints(database.pool(), chain, &checkpoint).await?;
     database.cleanup().await
 }
 

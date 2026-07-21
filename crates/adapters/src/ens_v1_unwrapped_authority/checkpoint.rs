@@ -1,5 +1,5 @@
 use super::*;
-use crate::ens_v1_subregistry_discovery::ReplayAdapterCheckpointContext;
+use crate::checkpoint_context::AdapterCheckpointContext;
 use anyhow::{Context, Result, ensure};
 use bigname_storage::{
     RawLogStagingInputVersion, load_raw_log_staging_input_version,
@@ -10,12 +10,12 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
 
 mod persistence;
-
+mod startup_events;
 use crate::checkpoint_codec::JsonbCheckpointCodec;
+pub use persistence::clear_replay_adapter_checkpoints;
 use persistence::{delete_checkpoint, load_checkpoint_row};
 
 const ADAPTER: &str = DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY;
-const CHECKPOINT_SCOPE: &str = "full_closure";
 const SNAPSHOT_VERSION: i64 = 1;
 const ITEM_KIND_HISTORY: &str = "name_history";
 const ITEM_KIND_REVERSE_HISTORY: &str = "reverse_history";
@@ -110,7 +110,7 @@ pub(super) struct UnwrappedAuthorityReplayFlushedEvents {
 }
 
 pub(super) struct UnwrappedAuthorityReplayCheckpoint {
-    context: ReplayAdapterCheckpointContext,
+    context: AdapterCheckpointContext,
     chain: String,
     status: String,
     last_block_number: Option<i64>,
@@ -121,45 +121,11 @@ pub(super) struct UnwrappedAuthorityReplayCheckpoint {
     raw_log_input_version: RawLogStagingInputVersion,
 }
 
-pub async fn clear_replay_adapter_checkpoints(
-    pool: &PgPool,
-    deployment_profile: &str,
-    chain: &str,
-    cursor_kind: &str,
-) -> Result<()> {
-    let result = sqlx::query(
-        r#"
-        DELETE FROM normalized_replay_adapter_checkpoints
-        WHERE deployment_profile = $1
-          AND chain_id = $2
-          AND cursor_kind = $3
-          AND adapter = $4
-          AND checkpoint_scope = $5
-        "#,
-    )
-    .bind(deployment_profile)
-    .bind(chain)
-    .bind(cursor_kind)
-    .bind(ADAPTER)
-    .bind(CHECKPOINT_SCOPE)
-    .execute(pool)
-    .await;
-    if is_undefined_table_error(&result) {
-        return Ok(());
-    }
-    result.with_context(|| {
-        format!(
-            "failed to clear unwrapped-authority replay adapter checkpoints for {deployment_profile}/{chain}/{cursor_kind}"
-        )
-    })?;
-    Ok(())
-}
-
 impl UnwrappedAuthorityReplayCheckpoint {
     pub(super) async fn load_or_start(
         pool: &PgPool,
         chain: &str,
-        context: &ReplayAdapterCheckpointContext,
+        context: &AdapterCheckpointContext,
     ) -> Result<Self> {
         let raw_log_input_version = load_raw_log_staging_input_version(pool, chain).await?;
         let existing = load_checkpoint_row(pool, chain, context).await?;
@@ -167,6 +133,7 @@ impl UnwrappedAuthorityReplayCheckpoint {
             Some(checkpoint) => {
                 checkpoint.context.range_start_block_number != context.range_start_block_number
                     || !checkpoint.snapshot_version_is_current()
+                    || context.startup_authority_changed(&checkpoint.state_payload)
                     || checkpoint
                         .raw_log_input_requires_reset(pool, raw_log_input_version)
                         .await?
@@ -178,6 +145,8 @@ impl UnwrappedAuthorityReplayCheckpoint {
         }
 
         if existing.is_none() || reset_existing {
+            let state_payload =
+                context.bind_startup_authority(json!({ "version": SNAPSHOT_VERSION }))?;
             sqlx::query(
                 r#"
                 INSERT INTO normalized_replay_adapter_checkpoints (
@@ -199,10 +168,10 @@ impl UnwrappedAuthorityReplayCheckpoint {
             .bind(chain)
             .bind(&context.cursor_kind)
             .bind(ADAPTER)
-            .bind(CHECKPOINT_SCOPE)
+            .bind(context.checkpoint_scope)
             .bind(context.range_start_block_number)
             .bind(context.target_block_number)
-            .bind(json!({ "version": SNAPSHOT_VERSION }))
+            .bind(state_payload)
             .bind(raw_log_input_version.retention_generation)
             .bind(raw_log_input_version.revision)
             .execute(pool)
@@ -220,7 +189,7 @@ impl UnwrappedAuthorityReplayCheckpoint {
                 SET
                     replay_target_block_number = GREATEST(replay_target_block_number, $6),
                     status = CASE
-                        WHEN status = 'completed' AND replay_target_block_number < $6 THEN 'running'
+                        WHEN replay_target_block_number < $6 AND (status = 'completed' OR (status = 'stream_complete' AND $5 = 'startup_adapter_sync')) THEN 'running'
                         ELSE status
                     END,
                     completed_at = CASE
@@ -241,7 +210,7 @@ impl UnwrappedAuthorityReplayCheckpoint {
             .bind(chain)
             .bind(&context.cursor_kind)
             .bind(ADAPTER)
-            .bind(CHECKPOINT_SCOPE)
+            .bind(context.checkpoint_scope)
             .bind(context.target_block_number)
             .bind(raw_log_input_version.retention_generation)
             .bind(raw_log_input_version.revision)
@@ -378,7 +347,7 @@ impl UnwrappedAuthorityReplayCheckpoint {
         .bind(&self.chain)
         .bind(&self.context.cursor_kind)
         .bind(ADAPTER)
-        .bind(CHECKPOINT_SCOPE)
+        .bind(self.context.checkpoint_scope)
         .bind(include_replay_auxiliary_state)
         .bind(&materialization_item_kinds)
         .fetch(pool);
@@ -471,13 +440,13 @@ impl UnwrappedAuthorityReplayCheckpoint {
             + state.namehash_to_labelhash.len()
             + state.pending_namehash_observations.len()
             + state.migrated_registry_nodes.delta_nodes().count();
-        let state_payload = json!({
+        let state_payload = self.context.bind_startup_authority(json!({
             "version": SNAPSHOT_VERSION,
             "last_block_number": boundary_block_number,
             "flushed_normalized_event_count": flushed_events.total_count,
             "flushed_normalized_event_inserted_count": flushed_events.inserted_count,
             "flushed_by_kind": &flushed_events.by_kind,
-        });
+        }))?;
 
         let mut transaction = pool
             .begin()
@@ -545,7 +514,7 @@ impl UnwrappedAuthorityReplayCheckpoint {
         .bind(&self.chain)
         .bind(&self.context.cursor_kind)
         .bind(ADAPTER)
-        .bind(CHECKPOINT_SCOPE)
+        .bind(self.context.checkpoint_scope)
         .bind(i64::try_from(scanned_log_count).context("scanned log count overflowed i64")?)
         .bind(i64::try_from(matched_log_count).context("matched log count overflowed i64")?)
         .bind(self.raw_log_input_version.retention_generation)
@@ -565,10 +534,10 @@ impl UnwrappedAuthorityReplayCheckpoint {
         pool: &PgPool,
         summary: &EnsV1UnwrappedAuthoritySyncSummary,
     ) -> Result<()> {
-        let state_payload = json!({
+        let state_payload = self.context.bind_startup_authority(json!({
             "version": SNAPSHOT_VERSION,
             "summary": summary_payload(summary),
-        });
+        }))?;
         sqlx::query(
             r#"
             UPDATE normalized_replay_adapter_checkpoints
@@ -593,7 +562,7 @@ impl UnwrappedAuthorityReplayCheckpoint {
         .bind(&self.chain)
         .bind(&self.context.cursor_kind)
         .bind(ADAPTER)
-        .bind(CHECKPOINT_SCOPE)
+        .bind(self.context.checkpoint_scope)
         .bind(i64::try_from(summary.scanned_log_count).context("scanned log count overflowed i64")?)
         .bind(i64::try_from(summary.matched_log_count).context("matched log count overflowed i64")?)
         .bind(&state_payload)
@@ -617,13 +586,6 @@ impl UnwrappedAuthorityReplayCheckpoint {
             .and_then(Value::as_i64)
             .is_none_or(|version| version == SNAPSHOT_VERSION)
     }
-}
-
-fn is_undefined_table_error<T>(result: &std::result::Result<T, sqlx::Error>) -> bool {
-    matches!(
-        result,
-        Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("42P01")
-    )
 }
 
 fn checkpoint_item_rows(
@@ -726,7 +688,7 @@ async fn delete_checkpoint_items(
         .bind(&checkpoint.chain)
         .bind(&checkpoint.context.cursor_kind)
         .bind(ADAPTER)
-        .bind(CHECKPOINT_SCOPE)
+        .bind(checkpoint.context.checkpoint_scope)
         .bind(item_kind)
         .bind(chunk)
         .execute(transaction.as_mut())
@@ -766,7 +728,7 @@ async fn insert_checkpoint_items(
                     .push_bind(&checkpoint.chain)
                     .push_bind(&checkpoint.context.cursor_kind)
                     .push_bind(ADAPTER)
-                    .push_bind(CHECKPOINT_SCOPE)
+                    .push_bind(checkpoint.context.checkpoint_scope)
                     .push_bind(*item_kind)
                     .push_bind(item_key)
                     .push_bind(item_payload);
@@ -836,7 +798,7 @@ async fn update_checkpoint_progress(
     .bind(&checkpoint.chain)
     .bind(&checkpoint.context.cursor_kind)
     .bind(ADAPTER)
-    .bind(CHECKPOINT_SCOPE)
+    .bind(checkpoint.context.checkpoint_scope)
     .bind(status)
     .bind(last_block_number)
     .bind(i64::try_from(staged_item_count).context("staged item count overflowed i64")?)

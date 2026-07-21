@@ -1,4 +1,7 @@
 use super::*;
+use crate::checkpoint_context::{
+    AdapterCheckpointContext, ReplayAdapterCheckpointContext, StartupAdapterCheckpointContext,
+};
 
 pub async fn sync_ens_v1_unwrapped_authority(
     pool: &PgPool,
@@ -22,6 +25,36 @@ pub async fn sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limi
     pool: &PgPool,
     chain: &str,
     checkpoint: &ReplayAdapterCheckpointContext,
+    max_raw_logs_per_page: usize,
+) -> Result<EnsV1UnwrappedAuthoritySyncSummary> {
+    sync_ens_v1_unwrapped_authority_with_checkpoint_context(
+        pool,
+        chain,
+        &AdapterCheckpointContext::for_replay(checkpoint),
+        max_raw_logs_per_page,
+    )
+    .await
+}
+
+pub async fn sync_ens_v1_unwrapped_authority_with_startup_checkpoint(
+    pool: &PgPool,
+    chain: &str,
+    checkpoint: &StartupAdapterCheckpointContext,
+) -> Result<EnsV1UnwrappedAuthoritySyncSummary> {
+    let checkpoint = checkpoint.adapter_context(pool, chain).await?;
+    sync_ens_v1_unwrapped_authority_with_checkpoint_context(
+        pool,
+        chain,
+        &checkpoint,
+        FULL_REPLAY_RAW_LOG_STREAM_DEFAULT_MAX_LOGS_PER_PAGE,
+    )
+    .await
+}
+
+async fn sync_ens_v1_unwrapped_authority_with_checkpoint_context(
+    pool: &PgPool,
+    chain: &str,
+    checkpoint: &AdapterCheckpointContext,
     max_raw_logs_per_page: usize,
 ) -> Result<EnsV1UnwrappedAuthoritySyncSummary> {
     let raw_log_guard = acquire_raw_log_staging_read_guard(pool, chain).await?;

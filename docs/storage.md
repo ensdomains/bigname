@@ -923,7 +923,31 @@ Full-closure replay may persist adapter-private checkpoints under `normalized_re
 
 A checkpoint can make process restarts resumable only for the adapter and checkpoint payload version that wrote it. One cross-process ownership fence per deployment profile and chain serializes automatic and operator full-closure sessions. Automatic catch-up owns the `raw_fact_normalized_events` checkpoint namespace; an unscoped operator block-range replay may use full closure only from the retained closure boundary and uses a deterministic range-scoped `manual_raw_fact_normalized_events:<from>:<to>` namespace. That manual session loads historically watched emitters, including closed canonical discovery intervals, retains its checkpoint after failure for an exact-range retry, and clears it only after successful completion. Source-restricted and block-hash selections remain restricted repair sessions.
 
-For `ens_v1_unwrapped_authority`, the durable checkpoint payload is the adapter's private closure snapshot: dirty name histories, reverse-claim histories, learned name metadata, pending namehash observations, migrated-registry markers, flushed normalized-event counters, and the block-boundary watermark. To keep closure replay bounded, the adapter may flush already-emitted normalized events through the adapter-owned `normalized_events` upsert boundary at checkpoint boundaries, then persist the checkpoint with those event buffers cleared. Those flushed rows are not projection readiness, public API readiness, identity-row finalization, or a cursor boundary; projection workers still wait for the global `raw_fact_normalized_events` cursor and identity finalization.
+The post-bootstrap startup adapter sync uses the separate
+`startup_adapter_owned_raw_log_state` cursor namespace and
+`startup_adapter_sync` checkpoint scope. It latches the greatest canonical
+stored block or raw-log block for the chain and uses the existing ENSv1
+adapter-private checkpoint formats without sharing rows with full-closure
+replay. Each startup checkpoint payload also records the chain's discovery
+admission epoch, which versions the manifest-declared and discovered watched
+surface; a retained checkpoint resets instead of resuming when that authority
+has changed. ENSv1 subregistry discovery stages only one raw-log page's changed
+assignments at a time, finalizes through the streamed full-source discovery
+reconcile, and emits normalized events from checkpoint pages. The streamed
+reconcile therefore applies its existing
+`BIGNAME_INDEXER_DISCOVERY_FULL_RECONCILE_MAX_DEACTIVATIONS` guard to startup
+as well. ENSv1 unwrapped-authority startup sync likewise uses checkpointed
+raw-log pages, but keeps each page's normalized events in adapter-private
+checkpoint items until its name surfaces, resources, and bindings have been
+materialized. It then publishes and deletes those staged events in pages of
+20,000, so a continuously running projection worker cannot consume an event
+before its identity rows exist. A failed startup retains its rows for the next
+boot, including a stream-complete checkpoint whose target is extended by a
+later boot. The indexer deletes completed startup-scoped checkpoint rows only
+after every requested startup family and the resolver-profile authority journal
+update have completed successfully.
+
+For `ens_v1_unwrapped_authority`, the durable checkpoint payload is the adapter's private closure snapshot: dirty name histories, reverse-claim histories, learned name metadata, pending namehash observations, migrated-registry markers, flushed normalized-event counters, and the block-boundary watermark. To keep full-closure replay bounded, that replay lane may flush already-emitted normalized events through the adapter-owned `normalized_events` upsert boundary at checkpoint boundaries, then persist the checkpoint with those event buffers cleared. Those full-closure rows are not projection readiness, public API readiness, identity-row finalization, or a cursor boundary; projection workers still wait for the global `raw_fact_normalized_events` cursor and identity finalization. Startup uses the private event staging and post-materialization paged publication described above instead; this distinction leaves the replay-catch-up lane unchanged.
 
 If a process exits after a flush but before the matching checkpoint save, restart may replay and upsert the same event identities again, and any differing payload remains a hard storage mismatch. A completed snapshot may remain after cursor advancement so the next closure target can extend from that private adapter boundary. Transient adapter checkpoints may be cleared after a successful closure pass only when they are not declared durable snapshot boundaries.
 

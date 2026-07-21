@@ -2,6 +2,8 @@ use anyhow::{Context, Result, ensure};
 use bigname_storage::acquire_raw_log_staging_read_guard;
 use sqlx::PgPool;
 
+use crate::checkpoint_context::AdapterCheckpointContext;
+
 use super::{
     DiscoveryEdgeMutation, EnsV1SubregistryDiscoverySyncSummary, ReplayAdapterCheckpointContext,
     checkpoint::PAGE_LIMIT, sync_ens_v1_subregistry_discovery_with_scope,
@@ -14,7 +16,7 @@ use super::{
 /// sharing the pool (the deployment model — the replay runner is a single
 /// supervised task); concurrent replays on one pool would each need their
 /// own three connections.
-const MIN_REPLAY_POOL_CONNECTIONS: u32 = 3;
+const MIN_CHECKPOINT_POOL_CONNECTIONS: u32 = 3;
 
 pub async fn sync_ens_v1_subregistry_discovery_with_replay_checkpoint(
     pool: &PgPool,
@@ -36,16 +38,35 @@ pub async fn sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_li
     checkpoint: &ReplayAdapterCheckpointContext,
     max_raw_logs_per_page: usize,
 ) -> Result<EnsV1SubregistryDiscoverySyncSummary> {
+    let checkpoint = AdapterCheckpointContext::for_replay(checkpoint);
+    sync_ens_v1_subregistry_discovery_with_checkpoint_context(
+        pool,
+        chain,
+        &checkpoint,
+        max_raw_logs_per_page,
+        None,
+    )
+    .await
+}
+
+pub(super) async fn sync_ens_v1_subregistry_discovery_with_checkpoint_context(
+    pool: &PgPool,
+    chain: &str,
+    checkpoint: &AdapterCheckpointContext,
+    max_raw_logs_per_page: usize,
+    progress_log_every_pages: Option<usize>,
+) -> Result<EnsV1SubregistryDiscoverySyncSummary> {
     let checkpoint_page_limit = i64::try_from(max_raw_logs_per_page.max(1))
         .context("subregistry checkpoint page limit overflowed i64")?;
     ensure!(
-        pool.options().get_max_connections() >= MIN_REPLAY_POOL_CONNECTIONS,
-        "checkpointed ENSv1 subregistry replay needs at least {MIN_REPLAY_POOL_CONNECTIONS} \
+        pool.options().get_max_connections() >= MIN_CHECKPOINT_POOL_CONNECTIONS,
+        "checkpointed ENSv1 subregistry sync needs at least {MIN_CHECKPOINT_POOL_CONNECTIONS} \
          pooled connections (raw-log staging guard, streamed reconcile transaction, and staged \
          assignment page reads), but the pool allows only {}",
         pool.options().get_max_connections()
     );
     let raw_log_guard = acquire_raw_log_staging_read_guard(pool, chain).await?;
+    let mut checkpoint = checkpoint.clone();
     let summary = loop {
         let (summary, repeat_checkpoint_replay) = sync_ens_v1_subregistry_discovery_with_scope(
             pool,
@@ -56,13 +77,15 @@ pub async fn sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_li
             DiscoveryEdgeMutation::Reconcile,
             None,
             None,
-            Some(checkpoint),
+            Some(&checkpoint),
             checkpoint_page_limit,
+            progress_log_every_pages,
         )
         .await?;
         if !repeat_checkpoint_replay {
             break summary;
         }
+        checkpoint.refresh_startup_authority(pool, chain).await?;
     };
     raw_log_guard.release().await?;
     Ok(summary)

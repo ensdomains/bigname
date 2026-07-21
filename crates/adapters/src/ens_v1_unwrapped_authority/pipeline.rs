@@ -1,6 +1,6 @@
 use super::resolver_profile_reconciliation::ResolverProfileReplayContext;
 use super::*;
-use crate::ens_v1_subregistry_discovery::ReplayAdapterCheckpointContext;
+use crate::checkpoint_context::AdapterCheckpointContext;
 use anyhow::ensure;
 
 mod apply;
@@ -29,7 +29,7 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
     block_hashes: &[String],
     transaction_hashes: Option<&[String]>,
     source_scope: Option<&[(String, String, i64, i64)]>,
-    replay_checkpoint: Option<&ReplayAdapterCheckpointContext>,
+    replay_checkpoint: Option<&AdapterCheckpointContext>,
     replay_max_raw_logs_per_page: Option<usize>,
     resolver_profile_replay: Option<&mut ResolverProfileReplayContext>,
 ) -> Result<EnsV1UnwrappedAuthoritySyncSummary> {
@@ -52,7 +52,16 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
         .collect::<Vec<_>>();
     let active_emitters_ms = active_emitters_started.elapsed().as_millis();
     if active_emitters.is_empty() && generic_resolver_event_sources.is_empty() {
-        return Ok(empty_summary(0));
+        let summary = empty_summary(0);
+        if let Some(context) = replay_checkpoint.filter(|context| context.is_startup()) {
+            let mut checkpoint =
+                UnwrappedAuthorityReplayCheckpoint::load_or_start(pool, chain, context).await?;
+            if let Some(completed_summary) = checkpoint.completed_summary()? {
+                return Ok(completed_summary);
+            }
+            checkpoint.mark_completed(pool, &summary).await?;
+        }
+        return Ok(summary);
     }
     let event_topics = AuthorityEventTopics::load_for_authority_sources(
         pool,
@@ -125,7 +134,14 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
         .await?;
         canonical_blocks_ms = canonical_blocks_started.elapsed().as_millis();
         if canonical_blocks.is_empty() {
-            return Ok(empty_summary(0));
+            let summary = empty_summary(0);
+            if let Some(checkpoint) = active_replay_checkpoint
+                .as_mut()
+                .filter(|checkpoint| checkpoint.is_startup())
+            {
+                checkpoint.mark_completed(pool, &summary).await?;
+            }
+            return Ok(summary);
         }
         block_index = CanonicalBlockIndex {
             blocks: canonical_blocks,
@@ -265,15 +281,27 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
                 }
             }
             stream_page_count += 1;
-            if active_replay_checkpoint.is_some() {
-                let flushed_event_count = flush_staged_replay_events(
-                    pool,
-                    &mut histories,
-                    &mut reverse_histories,
-                    &mut checkpoint_delta,
-                    &mut flushed_events,
-                )
-                .await?;
+            if let Some(checkpoint) = active_replay_checkpoint.as_ref() {
+                let flushed_event_count = if checkpoint.is_startup() {
+                    stage_startup_checkpoint_events(
+                        pool,
+                        checkpoint,
+                        &mut histories,
+                        &mut reverse_histories,
+                        &mut checkpoint_delta,
+                        &mut flushed_events,
+                    )
+                    .await?
+                } else {
+                    flush_staged_replay_events(
+                        pool,
+                        &mut histories,
+                        &mut reverse_histories,
+                        &mut checkpoint_delta,
+                        &mut flushed_events,
+                    )
+                    .await?
+                };
                 let checkpoint = active_replay_checkpoint
                     .as_mut()
                     .context("authority replay checkpoint disappeared before saving")?;
@@ -475,7 +503,14 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
     }
 
     if scanned_log_count == 0 {
-        return Ok(empty_summary(scanned_log_count));
+        let summary = empty_summary(scanned_log_count);
+        if let Some(checkpoint) = active_replay_checkpoint
+            .as_mut()
+            .filter(|checkpoint| checkpoint.is_startup())
+        {
+            checkpoint.mark_completed(pool, &summary).await?;
+        }
+        return Ok(summary);
     }
 
     if let Some(checkpoint) = active_replay_checkpoint.as_ref() {

@@ -40,6 +40,59 @@ pub(super) async fn flush_staged_replay_events(
     Ok(flushed_count)
 }
 
+pub(super) async fn stage_startup_checkpoint_events(
+    pool: &PgPool,
+    checkpoint: &UnwrappedAuthorityReplayCheckpoint,
+    histories: &mut BTreeMap<String, NameHistory>,
+    reverse_histories: &mut BTreeMap<String, ReverseClaimSourceHistory>,
+    checkpoint_delta: &mut UnwrappedAuthorityReplayCheckpointDelta,
+    staged_events: &mut UnwrappedAuthorityReplayFlushedEvents,
+) -> Result<usize> {
+    let mut staged_count = 0usize;
+    let mut buffer = Vec::with_capacity(REPLAY_EVENT_FLUSH_BATCH_SIZE);
+
+    for (key, history) in histories.iter_mut() {
+        if !history.events.is_empty() {
+            checkpoint_delta.mark_history(key.clone());
+            buffer.append(&mut history.events);
+        }
+        staged_count +=
+            stage_startup_event_buffer(pool, checkpoint, &mut buffer, staged_events, false).await?;
+    }
+    for (key, history) in reverse_histories.iter_mut() {
+        if !history.events.is_empty() {
+            checkpoint_delta.mark_reverse_history(key.clone());
+            buffer.append(&mut history.events);
+        }
+        staged_count +=
+            stage_startup_event_buffer(pool, checkpoint, &mut buffer, staged_events, false).await?;
+    }
+    staged_count +=
+        stage_startup_event_buffer(pool, checkpoint, &mut buffer, staged_events, true).await?;
+    Ok(staged_count)
+}
+
+async fn stage_startup_event_buffer(
+    pool: &PgPool,
+    checkpoint: &UnwrappedAuthorityReplayCheckpoint,
+    buffer: &mut Vec<NormalizedEvent>,
+    staged_events: &mut UnwrappedAuthorityReplayFlushedEvents,
+    flush_partial: bool,
+) -> Result<usize> {
+    if buffer.is_empty() || (!flush_partial && buffer.len() < REPLAY_EVENT_FLUSH_BATCH_SIZE) {
+        return Ok(0);
+    }
+    let event_count = buffer.len();
+    checkpoint
+        .stage_startup_events(pool, buffer, staged_events)
+        .await?;
+    buffer.clear();
+    if buffer.capacity() > REPLAY_EVENT_FLUSH_BATCH_SIZE * 4 {
+        buffer.shrink_to(REPLAY_EVENT_FLUSH_BATCH_SIZE);
+    }
+    Ok(event_count)
+}
+
 async fn flush_replay_event_buffer(
     pool: &PgPool,
     buffer: &mut Vec<NormalizedEvent>,
