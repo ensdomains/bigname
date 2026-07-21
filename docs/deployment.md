@@ -798,6 +798,14 @@ payload or rate limits. Receipt-heavy backfills can configure
 `<chain>=<url>` entries. The provider uses those URLs only for transaction
 receipt fallback work; block hashes, headers, canonicality, and primary payload
 validation still come from the chain's configured primary validation provider.
+Historical code reads can similarly configure
+`BIGNAME_INDEXER_CHAIN_RPC_CODE_FALLBACK_URLS` as comma-separated
+`<chain>=<url>` entries; every entry must name a chain with one configured
+primary provider source. The provider uses those URLs only when
+[hash-pinned](glossary.md#hash-pinned) `eth_getCode` fails because the primary
+source has pruned that block's state; bulk headers, logs, transactions, and
+receipts stay on the local source, so the remote-provider budget is spent only
+on unavailable historical code.
 
 Automatic normalized-event replay catch-up keeps its block cursor, but also caps
 each replay chunk with `BIGNAME_INDEXER_NORMALIZED_REPLAY_CATCHUP_MAX_LOGS_PER_CHUNK`

@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, fmt};
 
 use anyhow::{Result, bail};
+use reqwest::Url;
 
 use super::super::{
     ProviderBlock, ProviderBlockBundle, ProviderBlockCodeObservationRequest,
@@ -19,6 +20,14 @@ pub struct RethDbProvider;
 
 impl RethDbProvider {
     pub fn new(chain: &str, datadir: &str) -> Result<Self> {
+        Self::new_with_code_fallback(chain, datadir, None)
+    }
+
+    pub fn new_with_code_fallback(
+        chain: &str,
+        datadir: &str,
+        _code_fallback_endpoint: Option<Url>,
+    ) -> Result<Self> {
         if chain.trim().is_empty() {
             bail!("Reth DB provider chain cannot be empty");
         }

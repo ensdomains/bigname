@@ -30,18 +30,20 @@ pub(super) async fn derive_code_hashes(
 fn code_observation_requests(
     rows: &[RawCodeHashCorrectionCandidate],
 ) -> Vec<ProviderBlockCodeObservationRequest> {
-    let mut addresses_by_block_hash = BTreeMap::<String, Vec<String>>::new();
+    let mut requests_by_block_hash = BTreeMap::<String, (i64, Vec<String>)>::new();
     for row in rows {
-        addresses_by_block_hash
+        requests_by_block_hash
             .entry(row.block_hash.clone())
-            .or_default()
+            .or_insert_with(|| (row.block_number, Vec::new()))
+            .1
             .push(row.contract_address.clone());
     }
 
-    addresses_by_block_hash
+    requests_by_block_hash
         .into_iter()
         .map(
-            |(block_hash, addresses)| ProviderBlockCodeObservationRequest {
+            |(block_hash, (block_number, addresses))| ProviderBlockCodeObservationRequest {
+                block_number,
                 block_hash,
                 addresses,
             },
@@ -134,17 +136,19 @@ pub(super) async fn verify_rpc_code_sample(
 fn sample_code_observation_requests(
     samples: &[CorrectionSampleRow],
 ) -> Vec<ProviderBlockCodeObservationRequest> {
-    let mut addresses_by_block_hash = BTreeMap::<String, Vec<String>>::new();
+    let mut requests_by_block_hash = BTreeMap::<String, (i64, Vec<String>)>::new();
     for sample in samples {
-        addresses_by_block_hash
+        requests_by_block_hash
             .entry(sample.block_hash.clone())
-            .or_default()
+            .or_insert_with(|| (sample.block_number, Vec::new()))
+            .1
             .push(sample.contract_address.clone());
     }
-    addresses_by_block_hash
+    requests_by_block_hash
         .into_iter()
         .map(
-            |(block_hash, addresses)| ProviderBlockCodeObservationRequest {
+            |(block_hash, (block_number, addresses))| ProviderBlockCodeObservationRequest {
+                block_number,
                 block_hash,
                 addresses,
             },

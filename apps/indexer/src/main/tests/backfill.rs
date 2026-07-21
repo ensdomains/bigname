@@ -59,6 +59,117 @@ struct MaterializedRawFactSet {
 }
 
 #[tokio::test]
+async fn pruned_primary_code_fallback_persists_like_primary_observation() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let block = provider_block(
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        Some("0x9999999999999999999999999999999999999999999999999999999999999999"),
+        42,
+    );
+    let address = "0x0000000000000000000000000000000000000001";
+    let code = "0x6001600155";
+    let (control_url, control_server) = spawn_json_rpc_server(Arc::new(move |body| {
+        assert_eq!(
+            body.get("method").and_then(Value::as_str),
+            Some("eth_getCode")
+        );
+        json!({"jsonrpc": "2.0", "id": 1, "result": code})
+    }))
+    .await?;
+    let (primary_url, primary_server) = spawn_json_rpc_server(Arc::new(move |body| {
+        assert_eq!(
+            body.get("method").and_then(Value::as_str),
+            Some("eth_getCode")
+        );
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {"code": -32603, "message": "state at block #43 is pruned"}
+        })
+    }))
+    .await?;
+    let fallback_request_count = Arc::new(AtomicU64::new(0));
+    let request_count = Arc::clone(&fallback_request_count);
+    let (fallback_url, fallback_server) = spawn_json_rpc_server(Arc::new(move |body| {
+        assert_eq!(
+            body.get("method").and_then(Value::as_str),
+            Some("eth_getCode")
+        );
+        request_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        json!({"jsonrpc": "2.0", "id": 1, "result": code})
+    }))
+    .await?;
+    let control = JsonRpcProvider::new(&control_url)?;
+    let fallback = JsonRpcProvider::new_with_code_fallback(
+        chain,
+        &primary_url,
+        reqwest::Url::parse(&fallback_url)?,
+    )?;
+    let request = provider::ProviderBlockCodeObservationRequest {
+        block_number: block.block_number,
+        block_hash: block.block_hash.clone(),
+        addresses: vec![address.to_owned()],
+    };
+
+    let primary_observations = control
+        .fetch_code_observations_at_block_hashes(std::slice::from_ref(&request))
+        .await?;
+    let fallback_observations = fallback
+        .fetch_code_observations_at_block_hashes(std::slice::from_ref(&request))
+        .await?;
+    assert_eq!(fallback_observations, primary_observations);
+    assert_eq!(
+        fallback_request_count.load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+
+    let raw_block = provider_block_to_raw_block(chain, &block, CanonicalityState::Canonical);
+    let primary_raw = provider_code_observation_to_raw_code_hash(
+        chain,
+        &raw_block,
+        &primary_observations[0].observations[0],
+    )?;
+    let fallback_raw = provider_code_observation_to_raw_code_hash(
+        chain,
+        &raw_block,
+        &fallback_observations[0].observations[0],
+    )?;
+    assert_eq!(fallback_raw, primary_raw);
+
+    insert_chain_lineage_for_block(database.pool(), chain, &block, CanonicalityState::Canonical)
+        .await?;
+    upsert_raw_code_hashes(database.pool(), std::slice::from_ref(&fallback_raw)).await?;
+    let persisted = sqlx::query_as::<_, (String, i64, String, String, i64, String)>(
+        r#"
+        SELECT block_hash, block_number, contract_address, code_hash,
+               code_byte_length, canonicality_state::TEXT
+        FROM raw_code_hashes
+        WHERE chain_id = $1
+        "#,
+    )
+    .bind(chain)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        persisted,
+        (
+            primary_raw.block_hash,
+            primary_raw.block_number,
+            primary_raw.contract_address,
+            primary_raw.code_hash,
+            primary_raw.code_byte_length,
+            primary_raw.canonicality_state.as_str().to_owned(),
+        )
+    );
+
+    control_server.abort();
+    primary_server.abort();
+    fallback_server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn reused_completed_unscoped_job_warns_after_retention_generation_bump() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_backfill_job_tables(database.pool()).await?;

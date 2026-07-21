@@ -50,24 +50,18 @@ impl RethDbReader {
         Ok(observations)
     }
 
-    pub(super) fn fetch_code_observations_at_block_hashes_sync(
+    pub(super) fn fetch_code_observations_at_block_hash_sync(
         &self,
-        requests: &[ProviderBlockCodeObservationRequest],
-    ) -> Result<Vec<ProviderBlockCodeObservations>> {
-        let mut observations = Vec::with_capacity(requests.len());
-
-        for request in requests {
-            let block_hash = normalize_hash(&request.block_hash);
-            observations.push(ProviderBlockCodeObservations {
-                block_hash: block_hash.clone(),
-                observations: self.fetch_code_observations_at_block_sync(
-                    &request.addresses,
-                    ProviderBlockSelection::Hash(block_hash),
-                )?,
-            });
-        }
-
-        Ok(observations)
+        request: &ProviderBlockCodeObservationRequest,
+    ) -> Result<ProviderBlockCodeObservations> {
+        let block_hash = normalize_hash(&request.block_hash);
+        Ok(ProviderBlockCodeObservations {
+            block_hash: block_hash.clone(),
+            observations: self.fetch_code_observations_at_block_sync(
+                &request.addresses,
+                ProviderBlockSelection::Hash(block_hash),
+            )?,
+        })
     }
 
     fn resolve_block_selection_to_hash(

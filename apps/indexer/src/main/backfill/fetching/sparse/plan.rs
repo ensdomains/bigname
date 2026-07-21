@@ -76,7 +76,8 @@ impl SparseCodeObservationPlan {
             .clone()
             .into_iter()
             .map(
-                |((_block_number, block_hash), addresses)| ProviderBlockCodeObservationRequest {
+                |((block_number, block_hash), addresses)| ProviderBlockCodeObservationRequest {
+                    block_number,
                     block_hash,
                     addresses: addresses.into_iter().collect(),
                 },

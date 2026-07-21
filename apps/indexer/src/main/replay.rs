@@ -126,6 +126,7 @@ mod tests {
             manifests_root: PathBuf::from("manifests/mainnet"),
             chain_rpc_urls: Vec::new(),
             chain_reth_db_sources: Vec::new(),
+            chain_rpc_code_fallback_urls: Vec::new(),
             backfill_source: crate::backfill::BackfillSourceKind::HashPinned,
             coinbase_sql_urls: Vec::new(),
             coinbase_sql_api_key_id_env: crate::backfill::DEFAULT_COINBASE_SQL_API_KEY_ID_ENV

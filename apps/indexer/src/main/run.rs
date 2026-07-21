@@ -7,6 +7,7 @@ use crate::{
     cli::RunArgs,
     normalized_replay_catchup::{NormalizedReplayCatchupConfig, run_normalized_replay_catchup},
     provider::{ChainProviderKind, ProviderRegistry},
+    provider_configuration::ProviderSourceArgs,
     reconciliation::HeaderAuditMode,
     replay::deployment_profile_from_manifest_root,
     resolver_profile_convergence::drain_resolver_profile_input_changes,
@@ -60,8 +61,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
     let intake_chain_tasks =
         sync_intake_chain_tasks(&pool, &manifest_runtime_state.watched_chain_plan).await?;
     log_intake_chain_tasks("startup", &intake_chain_tasks);
-    let provider_registry =
-        ProviderRegistry::from_sources(&args.chain_rpc_urls, &args.chain_reth_db_sources)?;
+    let provider_registry = args.provider_registry()?;
     validate_provider_registry_for_intake_tasks(&intake_chain_tasks, &provider_registry)?;
     log_provider_registry("startup", &intake_chain_tasks, &provider_registry);
     // Automatic normalized catch-up replays bounded chunks after raw bootstrap drains.

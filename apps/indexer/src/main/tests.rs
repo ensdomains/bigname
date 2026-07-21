@@ -1,5 +1,7 @@
 include!("tests/support.rs");
 
+include!("tests/cli.rs");
+
 include!("tests/bootstrap.rs");
 
 include!("tests/reconcile.rs");

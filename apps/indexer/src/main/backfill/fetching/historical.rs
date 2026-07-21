@@ -165,11 +165,11 @@ pub(crate) async fn materialize_historical_payload_range(
         transactions.extend(materialized_payloads.transactions);
         receipts.extend(materialized_payloads.receipts);
         logs.extend(materialized_payloads.logs);
-
         let code_observation_addresses =
             selected_seed_log_addresses(&selection_logs, &selected_addresses);
         if !code_observation_addresses.is_empty() {
             code_observation_requests.push(ProviderBlockCodeObservationRequest {
+                block_number: raw_block.block_number,
                 block_hash: raw_block.block_hash.clone(),
                 addresses: code_observation_addresses,
             });

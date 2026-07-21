@@ -25,6 +25,8 @@ mod ops_catchup;
 #[path = "main/tests/ops_catchup.rs"]
 mod ops_catchup_tests;
 mod provider;
+#[path = "main/provider_configuration.rs"]
+mod provider_configuration;
 #[path = "main/reconciliation.rs"]
 mod reconciliation;
 #[path = "main/repair.rs"]
@@ -84,6 +86,7 @@ use drop_rederive::drop_and_rederive_base_normalized_events_command;
 use provider::{
     ChainProviderKind, JsonRpcProvider, ProviderBlock, ProviderHeadSnapshot, ProviderRegistry,
 };
+use provider_configuration::ProviderSourceArgs;
 #[allow(unused_imports)]
 use reconciliation::*;
 use repair::{
@@ -151,8 +154,7 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
     };
     log_manifest_runtime_state(&manifest_runtime_state);
     log_watched_chain_plan("backfill", &manifest_runtime_state.watched_chain_plan);
-    let provider_registry =
-        ProviderRegistry::from_sources(&args.chain_rpc_urls, &args.chain_reth_db_sources)?;
+    let provider_registry = args.provider_registry()?;
     let coinbase_sql_config = CoinbaseSqlBackfillConfig {
         initial_window_blocks: args.coinbase_sql_initial_window_blocks,
         max_window_blocks: args.coinbase_sql_max_window_blocks,
@@ -334,8 +336,7 @@ async fn run_ops_catchup(args: OpsCatchupArgs) -> Result<()> {
     let intake_chain_tasks =
         sync_intake_chain_tasks(&pool, &manifest_runtime_state.watched_chain_plan).await?;
     log_intake_chain_tasks("ops-catchup", &intake_chain_tasks);
-    let provider_registry =
-        ProviderRegistry::from_sources(&args.chain_rpc_urls, &args.chain_reth_db_sources)?;
+    let provider_registry = args.provider_registry()?;
     validate_provider_registry_for_intake_tasks(&intake_chain_tasks, &provider_registry)?;
     log_provider_registry("ops-catchup", &intake_chain_tasks, &provider_registry);
 
@@ -405,8 +406,7 @@ async fn run_repair(args: RepairArgs) -> Result<()> {
                     "bigname-indexer",
                 )
                 .await?;
-            let provider_registry =
-                ProviderRegistry::from_sources(&args.chain_rpc_urls, &args.chain_reth_db_sources)?;
+            let provider_registry = args.provider_registry()?;
             let provider = provider_registry.provider_for(&args.chain).with_context(|| {
                 format!(
                     "no provider source configured for {}; pass --chain-reth-db-source {}=<datadir> or --chain-rpc-url {}=<url>",

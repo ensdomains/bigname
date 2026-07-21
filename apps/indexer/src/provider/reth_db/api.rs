@@ -6,21 +6,32 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use reqwest::Url;
 use tokio::task;
 
 use super::{
     RethDbProvider, RethDbReader,
     convert::{normalized_contiguous_resolved_blocks, normalized_resolved_blocks},
+    requested_block_number_from_pruned_state_error,
 };
 use crate::provider::{
-    ProviderBlock, ProviderBlockBundle, ProviderBlockCodeObservationRequest,
-    ProviderBlockCodeObservations, ProviderBlockSelection, ProviderCodeObservation,
-    ProviderHeadSnapshot, ProviderLog, ProviderResolvedBlock, ProviderTransactionReceiptBundle,
-    ProviderTransactionReceiptRequest, decode::normalize_hash,
+    JSON_RPC_PROVIDER_REQUEST_TIMEOUT, JsonRpcProvider, ProviderBlock, ProviderBlockBundle,
+    ProviderBlockCodeObservationRequest, ProviderBlockCodeObservations, ProviderBlockSelection,
+    ProviderCodeObservation, ProviderHeadSnapshot, ProviderLog, ProviderResolvedBlock,
+    ProviderTransactionReceiptBundle, ProviderTransactionReceiptRequest,
+    code::fetch_code_observation_fallback, decode::normalize_hash,
 };
 
 impl RethDbProvider {
     pub fn new(chain: &str, datadir: &str) -> Result<Self> {
+        Self::new_with_code_fallback(chain, datadir, None)
+    }
+
+    pub fn new_with_code_fallback(
+        chain: &str,
+        datadir: &str,
+        code_fallback_endpoint: Option<Url>,
+    ) -> Result<Self> {
         let chain = chain.trim();
         let datadir = datadir.trim();
         if chain.is_empty() {
@@ -30,12 +41,20 @@ impl RethDbProvider {
             bail!("Reth DB provider datadir cannot be empty");
         }
 
+        let code_fallback_provider = code_fallback_endpoint
+            .map(|endpoint| {
+                JsonRpcProvider::new_code_fallback(endpoint, JSON_RPC_PROVIDER_REQUEST_TIMEOUT)
+                    .map(Arc::new)
+            })
+            .transpose()?;
+
         Ok(Self {
             reader: Arc::new(RethDbReader {
                 chain: chain.to_owned(),
                 datadir: PathBuf::from(datadir),
                 factory: OnceLock::new(),
             }),
+            code_fallback_provider,
         })
     }
 
@@ -176,14 +195,62 @@ impl RethDbProvider {
         let requests = requests
             .iter()
             .map(|request| ProviderBlockCodeObservationRequest {
+                block_number: request.block_number,
                 block_hash: normalize_hash(&request.block_hash),
                 addresses: request.addresses.clone(),
             })
             .collect::<Vec<_>>();
-        self.blocking("fetch_code_observations_at_block_hashes", move |reader| {
-            reader.fetch_code_observations_at_block_hashes_sync(&requests)
-        })
-        .await
+        let blocking_requests = requests.clone();
+        let outcomes = self
+            .blocking("fetch_code_observations_at_block_hashes", move |reader| {
+                Ok(blocking_requests
+                    .iter()
+                    .map(|request| reader.fetch_code_observations_at_block_hash_sync(request))
+                    .collect::<Vec<_>>())
+            })
+            .await?;
+        let mut observations = (0..requests.len()).map(|_| None).collect::<Vec<_>>();
+        let mut fallback_indexes = Vec::new();
+        let mut fallback_requests = Vec::new();
+        let mut primary_error = None;
+
+        for (index, (request, outcome)) in requests.iter().zip(outcomes).enumerate() {
+            match outcome {
+                Ok(observation) => observations[index] = Some(observation),
+                Err(error)
+                    if requested_block_number_from_pruned_state_error(&error)
+                        == Some(request.block_number) =>
+                {
+                    if self.code_fallback_provider.is_none() {
+                        return Err(error);
+                    }
+                    primary_error.get_or_insert(error);
+                    fallback_indexes.push(index);
+                    fallback_requests.push(request.clone());
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        if !fallback_requests.is_empty() {
+            let recovered = fetch_code_observation_fallback(
+                &self.reader.chain,
+                self.code_fallback_provider.as_deref(),
+                &fallback_requests,
+                primary_error.context("missing Reth DB code-observation fallback error")?,
+            )
+            .await?;
+            for (index, observation) in fallback_indexes.into_iter().zip(recovered) {
+                observations[index] = Some(observation);
+            }
+        }
+
+        observations
+            .into_iter()
+            .map(|observation| {
+                observation.context("Reth DB provider omitted code-observation block group")
+            })
+            .collect()
     }
 
     async fn blocking<T>(

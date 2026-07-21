@@ -155,6 +155,7 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
         .iter()
         .map(
             |(raw_block, addresses)| ProviderBlockCodeObservationRequest {
+                block_number: raw_block.block_number,
                 block_hash: raw_block.block_hash.clone(),
                 addresses: addresses.clone(),
             },
@@ -276,6 +277,7 @@ async fn sweep_raw_code_baseline_chunk(
     for chunk in missing_addresses.chunks(RAW_CODE_BASELINE_FETCH_CHUNK_ADDRESSES) {
         let observations = provider
             .fetch_code_observations_at_block_hashes(&[ProviderBlockCodeObservationRequest {
+                block_number: baseline_raw_block.block_number,
                 block_hash: baseline_raw_block.block_hash.clone(),
                 addresses: chunk.to_vec(),
             }])

@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    sync::Arc,
     time::Duration,
 };
 
@@ -68,15 +69,30 @@ impl ProviderRegistry {
         Self::from_sources(entries, &[])
     }
 
+    #[cfg(test)]
     pub fn from_sources(rpc_entries: &[String], reth_db_entries: &[String]) -> Result<Self> {
+        Self::from_sources_with_code_fallbacks(rpc_entries, reth_db_entries, &[])
+    }
+
+    pub fn from_sources_with_code_fallbacks(
+        rpc_entries: &[String],
+        reth_db_entries: &[String],
+        code_fallback_entries: &[String],
+    ) -> Result<Self> {
         let mut providers = BTreeMap::new();
+        let mut code_fallback_endpoints = parse_code_fallback_endpoints(code_fallback_entries)?;
 
         for entry in rpc_entries {
             let (chain, url) = parse_chain_source_entry(entry, "chain RPC", "<chain>=<url>")?;
+            let code_fallback_endpoint = code_fallback_endpoints.remove(&chain);
             insert_provider(
                 &mut providers,
                 &chain,
-                ChainProvider::JsonRpc(JsonRpcProvider::new_for_chain(&chain, &url)?),
+                ChainProvider::JsonRpc(JsonRpcProvider::new_for_chain(
+                    &chain,
+                    &url,
+                    code_fallback_endpoint,
+                )?),
             )?;
         }
 
@@ -86,8 +102,16 @@ impl ProviderRegistry {
             if providers.contains_key(&chain) {
                 bail!("duplicate provider source configuration for {chain}");
             }
-            let provider = RethDbProvider::new(&chain, &datadir)?;
+            let code_fallback_endpoint = code_fallback_endpoints.remove(&chain);
+            let provider =
+                RethDbProvider::new_with_code_fallback(&chain, &datadir, code_fallback_endpoint)?;
             providers.insert(chain, ChainProvider::RethDb(provider));
+        }
+
+        if let Some(chain) = code_fallback_endpoints.keys().next() {
+            bail!(
+                "code fallback provider configured for {chain} without a primary provider source"
+            );
         }
 
         Ok(Self { providers })
@@ -256,39 +280,82 @@ pub struct JsonRpcProvider {
     endpoint: Url,
     client: http_client::RecoveringHttpClient,
     receipt_fallback_endpoint: Option<Url>,
+    code_fallback_provider: Option<Arc<ConfiguredCodeFallback>>,
+}
+
+struct ConfiguredCodeFallback {
+    chain: String,
+    provider: JsonRpcProvider,
 }
 
 impl JsonRpcProvider {
     #[allow(dead_code)]
     pub fn new(endpoint: &str) -> Result<Self> {
-        Self::new_with_receipt_fallback(endpoint, None)
+        Self::new_with_fallbacks(endpoint, None, None, None)
     }
 
     pub(crate) fn new_with_request_timeout(
         endpoint: &str,
         request_timeout: Duration,
     ) -> Result<Self> {
-        Self::new_with_receipt_fallback_and_timeout(endpoint, None, request_timeout)
+        Self::new_with_fallbacks_and_timeout(endpoint, None, None, None, request_timeout)
     }
 
-    pub fn new_for_chain(chain: &str, endpoint: &str) -> Result<Self> {
-        Self::new_with_receipt_fallback(endpoint, receipt_fallback_endpoint_for_chain(chain)?)
+    pub fn new_for_chain(
+        chain: &str,
+        endpoint: &str,
+        code_fallback_endpoint: Option<Url>,
+    ) -> Result<Self> {
+        Self::new_with_fallbacks(
+            endpoint,
+            receipt_fallback_endpoint_for_chain(chain)?,
+            code_fallback_endpoint,
+            Some(chain.to_owned()),
+        )
     }
 
+    #[cfg(test)]
     fn new_with_receipt_fallback(
         endpoint: &str,
         receipt_fallback_endpoint: Option<Url>,
     ) -> Result<Self> {
-        Self::new_with_receipt_fallback_and_timeout(
+        Self::new_with_fallbacks(endpoint, receipt_fallback_endpoint, None, None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_code_fallback(
+        chain: &str,
+        endpoint: &str,
+        code_fallback_endpoint: Url,
+    ) -> Result<Self> {
+        Self::new_with_fallbacks(
+            endpoint,
+            None,
+            Some(code_fallback_endpoint),
+            Some(chain.to_owned()),
+        )
+    }
+
+    fn new_with_fallbacks(
+        endpoint: &str,
+        receipt_fallback_endpoint: Option<Url>,
+        code_fallback_endpoint: Option<Url>,
+        chain: Option<String>,
+    ) -> Result<Self> {
+        Self::new_with_fallbacks_and_timeout(
             endpoint,
             receipt_fallback_endpoint,
+            code_fallback_endpoint,
+            chain,
             JSON_RPC_PROVIDER_REQUEST_TIMEOUT,
         )
     }
 
-    fn new_with_receipt_fallback_and_timeout(
+    fn new_with_fallbacks_and_timeout(
         endpoint: &str,
         receipt_fallback_endpoint: Option<Url>,
+        code_fallback_endpoint: Option<Url>,
+        chain: Option<String>,
         request_timeout: Duration,
     ) -> Result<Self> {
         if request_timeout.is_zero() {
@@ -304,13 +371,71 @@ impl JsonRpcProvider {
             JSON_RPC_PROVIDER_CONNECT_TIMEOUT,
             request_timeout,
         )?;
+        let code_fallback_provider = code_fallback_endpoint
+            .map(|endpoint| -> Result<_> {
+                Ok(Arc::new(ConfiguredCodeFallback {
+                    chain: chain
+                        .clone()
+                        .context("code fallback RPC endpoint requires a chain")?,
+                    provider: Self::new_code_fallback(endpoint, request_timeout)?,
+                }))
+            })
+            .transpose()?;
 
         Ok(Self {
             endpoint,
             client,
             receipt_fallback_endpoint,
+            code_fallback_provider,
         })
     }
+
+    pub(super) fn new_code_fallback(endpoint: Url, request_timeout: Duration) -> Result<Self> {
+        if !matches!(endpoint.scheme(), "http" | "https") {
+            bail!("unsupported code fallback RPC endpoint scheme; expected http:// or https://");
+        }
+        Ok(Self {
+            endpoint,
+            client: http_client::RecoveringHttpClient::new(
+                JSON_RPC_PROVIDER_CONNECT_TIMEOUT,
+                request_timeout,
+            )?,
+            receipt_fallback_endpoint: None,
+            code_fallback_provider: None,
+        })
+    }
+}
+
+fn parse_code_fallback_endpoints(entries: &[String]) -> Result<BTreeMap<String, Url>> {
+    let mut fallback_endpoints = BTreeMap::new();
+    for entry in entries
+        .iter()
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        let Some((entry_chain, value)) = entry.split_once('=') else {
+            bail!("invalid chain RPC code fallback source entry; expected <chain>=<url>");
+        };
+        let entry_chain = entry_chain.trim();
+        let value = value.trim();
+        if entry_chain.is_empty() || value.is_empty() {
+            bail!("invalid chain RPC code fallback source entry; expected non-empty <chain>=<url>");
+        }
+        if fallback_endpoints.contains_key(entry_chain) {
+            bail!("duplicate code fallback provider source configuration for {entry_chain}");
+        }
+        let parsed = Url::parse(value).with_context(|| {
+            format!("failed to parse code fallback RPC endpoint for {entry_chain}")
+        })?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            bail!(
+                "unsupported code fallback RPC endpoint scheme for {entry_chain}; expected http:// or https://"
+            );
+        }
+        fallback_endpoints.insert(entry_chain.to_owned(), parsed);
+    }
+    Ok(fallback_endpoints)
 }
 
 fn receipt_fallback_endpoint_for_chain(chain: &str) -> Result<Option<Url>> {

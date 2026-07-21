@@ -283,6 +283,7 @@ pub(crate) async fn run_hash_pinned_backfill_range(
             selected_seed_log_addresses(&selection_logs, &selected_addresses);
         if !code_observation_addresses.is_empty() {
             code_observation_requests.push(ProviderBlockCodeObservationRequest {
+                block_number: raw_block.block_number,
                 block_hash: raw_block.block_hash.clone(),
                 addresses: code_observation_addresses,
             });

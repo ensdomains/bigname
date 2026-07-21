@@ -13,7 +13,7 @@ use reth_ethereum::{
     primitives::Block as _,
     provider::{
         BlockHashReader, BlockNumReader, BlockReader, ChainStateBlockReader, HeaderProvider,
-        ProviderFactory, ReceiptProvider, TransactionVariant, db::DatabaseEnv,
+        ProviderError, ProviderFactory, ReceiptProvider, TransactionVariant, db::DatabaseEnv,
         providers::ReadOnlyConfig,
     },
 };
@@ -34,7 +34,8 @@ use convert::{
 };
 
 use crate::provider::{
-    ProviderBlock, ProviderBlockBundle, ProviderHeadSnapshot, ProviderResolvedBlock,
+    JsonRpcProvider, ProviderBlock, ProviderBlockBundle, ProviderHeadSnapshot,
+    ProviderResolvedBlock,
 };
 
 type EthereumRethProviderFactory =
@@ -43,12 +44,30 @@ type EthereumRethProviderFactory =
 #[derive(Clone)]
 pub struct RethDbProvider {
     reader: Arc<RethDbReader>,
+    code_fallback_provider: Option<Arc<JsonRpcProvider>>,
 }
 
 struct RethDbReader {
     chain: String,
     datadir: PathBuf,
     factory: OnceLock<Result<Arc<EthereumRethProviderFactory>, String>>,
+}
+
+fn requested_block_number_from_pruned_state_error(error: &anyhow::Error) -> Option<i64> {
+    error.chain().find_map(|cause| {
+        let ProviderError::StateAtBlockPruned(block_number) =
+            cause.downcast_ref::<ProviderError>()?
+        else {
+            return None;
+        };
+        // Reth reconstructs state at B from the changeset boundary B + 1 and reports that
+        // boundary in StateAtBlockPruned.
+        // (upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L937 @ reth@88505c7)
+        // (upstream: .refs/reth/crates/storage/provider/src/providers/state/historical.rs:L190 @ reth@88505c7)
+        block_number
+            .checked_sub(1)
+            .and_then(|block_number| i64::try_from(block_number).ok())
+    })
 }
 
 impl RethDbReader {
@@ -445,4 +464,30 @@ fn validate_ethereum_datadir(datadir: &Path) -> Result<()> {
         })?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod pruned_state_error_tests {
+    use super::*;
+
+    #[test]
+    fn classifier_accepts_only_typed_reth_pruned_state_error() {
+        let typed = anyhow::Error::new(ProviderError::StateAtBlockPruned(43));
+        assert_eq!(
+            requested_block_number_from_pruned_state_error(&typed),
+            Some(42)
+        );
+
+        let matching_text = anyhow::anyhow!("state at block #42 is pruned");
+        assert_eq!(
+            requested_block_number_from_pruned_state_error(&matching_text),
+            None
+        );
+
+        let other_provider_error = anyhow::Error::new(ProviderError::StateForNumberNotFound(42));
+        assert_eq!(
+            requested_block_number_from_pruned_state_error(&other_provider_error),
+            None
+        );
+    }
 }
