@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use sqlx::PgPool;
 use tracing::info;
 
+use crate::automatic_projection_replay::heartbeat::LoopHeartbeat;
 use crate::record_inventory;
 
 pub(crate) use derive::{
@@ -52,12 +53,15 @@ impl ProjectionApplyIterationSummary {
 pub(crate) async fn run_once(
     pool: &PgPool,
     text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
+    loop_heartbeat: &mut LoopHeartbeat,
 ) -> Result<ProjectionApplyIterationSummary> {
     let derived = derive_once(pool).await?;
-    let applied = apply::apply_pending_invalidations(
+    loop_heartbeat.record_if_due(pool).await?;
+    let applied = apply::apply_pending_invalidations_with_heartbeat(
         pool,
         PROJECTION_APPLY_BATCH_LIMIT,
         text_hydration_config,
+        loop_heartbeat,
     )
     .await?;
 

@@ -24,5 +24,5 @@ async fn load_indexing_status_response(state: &AppState) -> ApiResult<IndexingSt
             ApiError::internal_error("failed to load indexing status")
         })?;
 
-    Ok(build_indexing_status_response(&read))
+    Ok(build_indexing_status_response(&read, state).await)
 }

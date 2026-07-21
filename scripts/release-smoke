@@ -20,7 +20,7 @@ Runs the local release smoke gate:
   - live manifest-drift audit
   - runtime watch-plan inspection
   - prebuilt local API binary
-  - local API /healthz readiness
+  - local API /healthz contract (ready with live loops, honestly degraded without them)
   - public-edge allowlist through an ephemeral Caddy container
 
 Environment:
@@ -142,10 +142,11 @@ assert_no_network_mode() {
       ;;
   esac
 
-  log "no-network mode enabled: cargo is offline and readiness uses loopback only"
+  log "no-network mode enabled: cargo is offline and API health uses loopback only"
 }
 
 api_pid=""
+health_http_status=""
 target_dir="${CARGO_TARGET_DIR:-target}"
 if [ -n "${CARGO_BUILD_TARGET:-}" ]; then
   api_bin="${target_dir}/${CARGO_BUILD_TARGET}/debug/bigname-api"
@@ -212,7 +213,7 @@ run_watch_plan_inspection_gate() {
 }
 
 build_api_for_readiness() {
-  log "building API binary for readiness probe"
+  log "building API binary for health probe"
   cargo build "${cargo_args[@]}" -p bigname-api --bin bigname-api
   [ -x "$api_bin" ] || fail "expected built API binary at ${api_bin}"
 }
@@ -220,7 +221,7 @@ build_api_for_readiness() {
 run_readiness_check() {
   require_command curl
 
-  log "starting API for readiness probe on ${BIGNAME_SMOKE_API_BIND_ADDR}"
+  log "starting API for health probe on ${BIGNAME_SMOKE_API_BIND_ADDR}"
   "$api_bin" serve \
     --bind-addr "$BIGNAME_SMOKE_API_BIND_ADDR" \
     > "$api_log_tmp" 2>&1 &
@@ -229,7 +230,7 @@ run_readiness_check() {
   for _attempt in $(seq 1 30); do
     if ! kill -0 "$api_pid" 2>/dev/null; then
       sed -n '1,160p' "$api_log_tmp" >&2 || true
-      fail "API exited before readiness probe completed"
+      fail "API exited before health probe completed"
     fi
 
     http_status="$(
@@ -240,7 +241,19 @@ run_readiness_check() {
     )"
 
     if [ "$http_status" = "200" ] && grep -q '"status":"ready"' "$health_body_tmp"; then
-      log "readiness probe passed"
+      health_http_status="$http_status"
+      log "full readiness probe passed"
+      return 0
+    fi
+
+    if [ "$http_status" = "503" ] \
+      && grep -q '"status":"degraded"' "$health_body_tmp" \
+      && grep -q '"process":{"status":"running"}' "$health_body_tmp" \
+      && grep -q '"database":{"status":"reachable","reachable":true' "$health_body_tmp" \
+      && grep -Eq '"indexer":{"status":"(running|not_started|stale)"' "$health_body_tmp" \
+      && grep -Eq '"worker":{"status":"(running|not_started|stale)"' "$health_body_tmp"; then
+      health_http_status="$http_status"
+      log "standalone health contract passed; absent or stale service loops correctly keep readiness degraded"
       return 0
     fi
 
@@ -249,7 +262,7 @@ run_readiness_check() {
 
   sed -n '1,160p' "$api_log_tmp" >&2 || true
   sed -n '1,80p' "$health_body_tmp" >&2 || true
-  fail "API readiness probe failed at ${BIGNAME_SMOKE_API_HEALTH_URL}"
+  fail "API health probe failed at ${BIGNAME_SMOKE_API_HEALTH_URL}"
 }
 
 run_public_edge_check() {
@@ -262,11 +275,13 @@ run_public_edge_check() {
   log "checking the public-edge allowlist through Caddy"
   BIGNAME_SMOKE_INTERNAL_API_URL="$BIGNAME_SMOKE_INTERNAL_API_URL" \
     BIGNAME_SMOKE_INTERNAL_REQUEST_TIMEOUT_SECS="$BIGNAME_SMOKE_INTERNAL_REQUEST_TIMEOUT_SECS" \
+    BIGNAME_SMOKE_EXPECTED_HEALTH_STATUS="$health_http_status" \
     scripts/public-edge-smoke "${edge_args[@]}"
 }
 
 require_command cargo
 require_command diff
+require_command grep
 require_command seq
 assert_no_network_mode
 run_pinned_refs_check

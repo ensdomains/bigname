@@ -28,6 +28,42 @@ pub(crate) struct ServeArgs {
         value_delimiter = ','
     )]
     pub(crate) chain_rpc_urls: Vec<String>,
+    #[arg(
+        long,
+        env = "BIGNAME_API_HEARTBEAT_MAX_AGE_SECS",
+        default_value_t = 20_i64
+    )]
+    pub(crate) heartbeat_max_age_secs: i64,
+    #[arg(
+        long,
+        env = "BIGNAME_API_STATUS_PROVIDER_TIMEOUT_MS",
+        default_value_t = crate::status_freshness::DEFAULT_PROVIDER_TIMEOUT_MS
+    )]
+    pub(crate) status_provider_timeout_ms: u64,
+    #[arg(
+        long,
+        env = "BIGNAME_API_STATUS_PROVIDER_REFRESH_SECS",
+        default_value_t = crate::status_freshness::DEFAULT_PROVIDER_REFRESH_SECS
+    )]
+    pub(crate) status_provider_refresh_secs: u64,
+    #[arg(
+        long,
+        env = "BIGNAME_API_STATUS_PROVIDER_CACHE_TTL_SECS",
+        default_value_t = crate::status_freshness::DEFAULT_PROVIDER_CACHE_TTL_SECS
+    )]
+    pub(crate) status_provider_cache_ttl_secs: u64,
+    #[arg(
+        long,
+        env = "BIGNAME_API_STATUS_MAX_BLOCK_LAG",
+        default_value_t = crate::status_freshness::DEFAULT_MAX_BLOCK_LAG
+    )]
+    pub(crate) status_max_block_lag: i64,
+    #[arg(
+        long,
+        env = "BIGNAME_API_STATUS_MAX_LAG_SECS",
+        default_value_t = crate::status_freshness::DEFAULT_MAX_LAG_SECS
+    )]
+    pub(crate) status_max_lag_secs: i64,
     #[command(flatten)]
     pub(crate) database: DatabaseConfig,
 }

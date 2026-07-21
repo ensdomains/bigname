@@ -25,6 +25,8 @@ Environment:
   BIGNAME_SMOKE_CADDY_IMAGE       Caddy image, default caddy:2-alpine.
   BIGNAME_SMOKE_INTERNAL_REQUEST_TIMEOUT_SECS
                                    Internal request timeout, default 60.
+  BIGNAME_SMOKE_EXPECTED_HEALTH_STATUS
+                                   Expected /healthz status, 200 (default) or 503.
 USAGE
 }
 
@@ -87,6 +89,7 @@ internal_api_url="${BIGNAME_SMOKE_INTERNAL_API_URL:-http://127.0.0.1:3000}"
 public_edge_url="${BIGNAME_SMOKE_PUBLIC_EDGE_URL:-http://127.0.0.1:3001}"
 caddy_image="${BIGNAME_SMOKE_CADDY_IMAGE:-caddy:2-alpine}"
 internal_request_timeout_secs="${BIGNAME_SMOKE_INTERNAL_REQUEST_TIMEOUT_SECS:-60}"
+expected_health_status="${BIGNAME_SMOKE_EXPECTED_HEALTH_STATUS:-200}"
 internal_api_url="${internal_api_url%/}"
 public_edge_url="${public_edge_url%/}"
 smoke_tmp="$(mktemp -d -t bigname-public-edge-smoke.XXXXXX)"
@@ -96,6 +99,11 @@ if ! [[ "$internal_request_timeout_secs" =~ ^[1-9][0-9]{0,3}$ ]] ||
   [ "$internal_request_timeout_secs" -gt 3600 ]; then
   fail "BIGNAME_SMOKE_INTERNAL_REQUEST_TIMEOUT_SECS must be an integer from 1 to 3600"
 fi
+
+case "$expected_health_status" in
+  200|503) ;;
+  *) fail "BIGNAME_SMOKE_EXPECTED_HEALTH_STATUS must be 200 or 503" ;;
+esac
 
 loopback_http_port() {
   local url="$1"
@@ -300,12 +308,12 @@ if [ "$start_caddy" -eq 1 ]; then
 
   for _attempt in $(seq 1 30); do
     request caddy-readiness GET "${public_edge_url}/healthz" '' 2>/dev/null || true
-    if [ "$last_status" = "200" ]; then
+    if [ "$last_status" = "$expected_health_status" ]; then
       break
     fi
     sleep 1
   done
-  if [ "$last_status" != "200" ]; then
+  if [ "$last_status" != "$expected_health_status" ]; then
     show_last_response
     fail "Caddy did not become ready at ${public_edge_url}"
   fi
@@ -316,7 +324,7 @@ assert_status public-root 200 GET "${public_edge_url}/" ''
 assert_status public-docs 200 GET "${public_edge_url}/docs" ''
 assert_status public-docs-slash 200 GET "${public_edge_url}/docs/" ''
 assert_status public-docs-head 200 HEAD "${public_edge_url}/docs" ''
-assert_status public-health 200 GET "${public_edge_url}/healthz" ''
+assert_status public-health "$expected_health_status" GET "${public_edge_url}/healthz" ''
 assert_status public-openapi 200 GET "${public_edge_url}/openapi.json" ''
 assert_status public-v1-get 200 GET "${public_edge_url}/v1/namespaces/ens" ''
 assert_status public-v1-head 200 HEAD "${public_edge_url}/v1/namespaces/ens" ''

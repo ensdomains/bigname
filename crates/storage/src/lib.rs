@@ -32,6 +32,7 @@ mod resolution_support;
 mod resolver;
 mod resolver_profile_authority_journal;
 mod resolver_profile_input_changes;
+mod service_heartbeats;
 mod snapshot_selection;
 pub mod sql_row;
 mod stored_lineage_coverage;
@@ -316,6 +317,12 @@ pub use resolver_profile_input_changes::{
     acknowledge_resolver_profile_input_changes, enqueue_resolver_profile_reconciliations,
     load_pending_resolver_profile_input_changes,
     load_pending_resolver_profile_input_changes_excluding,
+};
+pub use service_heartbeats::{
+    INDEXER_SERVICE_NAME, ServiceLoopHeartbeat, WORKER_SERVICE_NAME,
+    ensure_service_loop_heartbeat_recent, load_latest_service_loop_heartbeats,
+    load_service_loop_heartbeat, record_service_loop_heartbeat, register_service_loop,
+    resolve_service_instance_id,
 };
 pub use snapshot_selection::{
     ChainPosition, ChainPositions, SelectedSnapshot, SnapshotAt, SnapshotConsistency,

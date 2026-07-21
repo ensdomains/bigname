@@ -80,6 +80,8 @@ pub(crate) struct RunArgs {
         default_value_t = 5_u64
     )]
     pub(crate) poll_interval_secs: u64,
+    #[arg(long, env = "BIGNAME_HEARTBEAT_INSTANCE_ID")]
+    pub(crate) heartbeat_instance_id: Option<String>,
     #[arg(
         long = "chain-rpc-url",
         env = "BIGNAME_INDEXER_CHAIN_RPC_URLS",
@@ -185,6 +187,14 @@ pub(crate) struct HealthcheckArgs {
         default_value = "manifests/mainnet"
     )]
     pub(crate) manifests_root: PathBuf,
+    #[arg(long, env = "BIGNAME_HEARTBEAT_INSTANCE_ID")]
+    pub(crate) heartbeat_instance_id: Option<String>,
+    #[arg(
+        long,
+        env = "BIGNAME_INDEXER_HEARTBEAT_MAX_AGE_SECS",
+        default_value_t = 20_i64
+    )]
+    pub(crate) heartbeat_max_age_secs: i64,
 }
 
 #[derive(Args, Debug)]

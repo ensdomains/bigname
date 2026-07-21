@@ -53,6 +53,40 @@ impl ChainRpcUrls {
     pub fn url_for(&self, chain_id: &str) -> Option<&str> {
         self.urls.get(chain_id).map(String::as_str)
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.urls
+            .iter()
+            .map(|(chain_id, url)| (chain_id.as_str(), url.as_str()))
+    }
+}
+
+pub async fn fetch_network_head_block_number(endpoint: &str) -> Result<i64> {
+    let response = JsonRpcHttpClient::new(endpoint)?
+        .call("eth_blockNumber", Vec::new())
+        .await?;
+    let result = response.result.map_err(|error| {
+        anyhow::anyhow!(
+            "eth_blockNumber failed with provider code {:?}: {}",
+            error.code,
+            error.message
+        )
+    })?;
+    parse_quantity_i64(&result).context("eth_blockNumber returned an invalid block quantity")
+}
+
+fn parse_quantity_i64(value: &Value) -> Result<i64> {
+    let quantity = value
+        .as_str()
+        .context("JSON-RPC quantity must be a string")?;
+    let digits = quantity
+        .strip_prefix("0x")
+        .context("JSON-RPC quantity must start with 0x")?;
+    if digits.is_empty() {
+        bail!("JSON-RPC quantity must contain hexadecimal digits");
+    }
+    let value = u64::from_str_radix(digits, 16).context("JSON-RPC quantity is not hexadecimal")?;
+    i64::try_from(value).context("JSON-RPC quantity exceeds the supported signed block range")
 }
 
 #[derive(Clone)]
@@ -152,6 +186,15 @@ mod tests {
     #[test]
     fn json_rpc_client_accepts_https_endpoints() -> Result<()> {
         JsonRpcHttpClient::new("https://rpc.example.test")?;
+        Ok(())
+    }
+
+    #[test]
+    fn network_head_quantity_parser_is_strict_and_bounded() -> Result<()> {
+        assert_eq!(parse_quantity_i64(&Value::String("0x2a".to_owned()))?, 42);
+        assert!(parse_quantity_i64(&Value::String("2a".to_owned())).is_err());
+        assert!(parse_quantity_i64(&Value::String("0x".to_owned())).is_err());
+        assert!(parse_quantity_i64(&Value::String("0x8000000000000000".to_owned())).is_err());
         Ok(())
     }
 }

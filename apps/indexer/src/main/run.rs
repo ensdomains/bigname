@@ -24,6 +24,8 @@ use crate::{
 };
 
 pub(crate) async fn run(args: RunArgs) -> Result<()> {
+    let heartbeat_instance_id =
+        bigname_storage::resolve_service_instance_id(args.heartbeat_instance_id.as_deref())?;
     let manifest_repository = load_manifest_repository(&args.manifests_root)?;
     let deployment_profile = deployment_profile_from_manifest_root(&args.manifests_root);
     let manifest_summary = manifest_repository.summary().clone();
@@ -170,6 +172,13 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         watched_chain_plan_state(&manifest_runtime_state.watched_chain_plan);
     let intake_runtime_state = intake_runtime_state(&intake_chain_tasks);
 
+    bigname_storage::register_service_loop(
+        &pool,
+        bigname_storage::INDEXER_SERVICE_NAME,
+        &heartbeat_instance_id,
+    )
+    .await?;
+
     info!(
         service = "indexer",
         version = crate::SOFTWARE_VERSION,
@@ -268,6 +277,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
 
     run_poll_loop(
         &pool,
+        &heartbeat_instance_id,
         args.manifests_root,
         manifest_runtime_state,
         intake_chain_tasks,

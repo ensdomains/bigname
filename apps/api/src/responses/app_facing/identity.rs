@@ -77,38 +77,73 @@ fn build_name_record_response_for_coin_type(
     }
 }
 
-pub(crate) fn build_indexing_status_response(
+pub(crate) async fn build_indexing_status_response(
     read: &bigname_storage::IndexingStatusRead,
+    state: &AppState,
 ) -> IndexingStatusResponse {
-    let chains = read
-        .chains
-        .iter()
-        .map(|row| {
-            let projection_lag_blocks = row
-                .canonical_block
-                .zip(row.latest_projected_block)
-                .map(|(canonical, projected)| canonical.saturating_sub(projected));
-            let projection_lag_seconds = row
-                .canonical_timestamp
-                .zip(row.latest_projected_timestamp)
-                .map(|(canonical, projected)| (canonical - projected).whole_seconds().max(0));
-            (
-                row.chain_id.clone(),
-                IndexingStatusChainResponse {
-                    canonical_block: row.canonical_block,
-                    safe_block: row.safe_block,
-                    finalized_block: row.finalized_block,
-                    latest_projected_block: row.latest_projected_block,
-                    latest_projected_timestamp: row.latest_projected_timestamp.map(format_timestamp),
-                    projection_lag_blocks,
-                    projection_lag_seconds,
-                },
+    let mut chains = BTreeMap::new();
+    let mut saw_stale = false;
+    let mut saw_degraded = read.has_unscoped_pending_invalidations;
+    for row in &read.chains {
+        let projection_lag_blocks = row
+            .canonical_block
+            .zip(row.latest_projected_block)
+            .map(|(canonical, projected)| canonical.saturating_sub(projected));
+        let projection_lag_seconds = row
+            .canonical_timestamp
+            .zip(row.latest_projected_timestamp)
+            .map(|(canonical, projected)| (canonical - projected).whole_seconds().max(0));
+        let network_head = state
+            .status_freshness
+            .compare(
+                &state.chain_rpc_urls,
+                &row.chain_id,
+                row.canonical_block,
+                row.canonical_timestamp,
             )
-        })
-        .collect::<BTreeMap<_, _>>();
+            .await;
+        match crate::status_freshness::status_readiness(
+            row.canonical_block,
+            row.latest_projected_block,
+            projection_lag_blocks,
+            &network_head,
+        ) {
+            crate::status_freshness::StatusReadiness::Ready => {}
+            crate::status_freshness::StatusReadiness::Degraded => saw_degraded = true,
+            crate::status_freshness::StatusReadiness::Stale => saw_stale = true,
+        }
+        chains.insert(
+            row.chain_id.clone(),
+            IndexingStatusChainResponse {
+                canonical_block: row.canonical_block,
+                safe_block: row.safe_block,
+                finalized_block: row.finalized_block,
+                latest_projected_block: row.latest_projected_block,
+                latest_projected_timestamp: row.latest_projected_timestamp.map(format_timestamp),
+                projection_lag_blocks,
+                projection_lag_seconds,
+                network_block: network_head.block,
+                network_head_observed_at: network_head.observed_at.map(format_timestamp),
+                network_head_age_seconds: network_head.age_seconds,
+                network_head_status: network_head.status.as_str().to_owned(),
+                ingestion_lag_blocks: network_head.ingestion_lag_blocks,
+                ingestion_lag_seconds: network_head.ingestion_lag_seconds,
+            },
+        );
+    }
+
+    let status = if saw_stale {
+        "stale"
+    } else if saw_degraded || chains.is_empty() {
+        "degraded"
+    } else {
+        "ready"
+    };
 
     IndexingStatusResponse {
-        status: indexing_status_label(chains.values(), read.has_unscoped_pending_invalidations),
+        status: status.to_owned(),
+        pending_invalidation_count: read.pending_invalidation_count,
+        dead_letter_count: read.dead_letter_count,
         chains,
     }
 }
@@ -241,28 +276,4 @@ fn identity_as_of_timestamp(record: &bigname_storage::IdentityNameRecordRow) -> 
         .max()
         .map(format_timestamp)
         .unwrap_or_else(|| format_timestamp(OffsetDateTime::now_utc()))
-}
-
-fn indexing_status_label<'a>(
-    chains: impl Iterator<Item = &'a IndexingStatusChainResponse>,
-    has_unscoped_pending_invalidations: bool,
-) -> String {
-    let mut saw_degraded = has_unscoped_pending_invalidations;
-    let mut saw_chain = false;
-    for chain in chains {
-        saw_chain = true;
-        if chain.canonical_block.is_none() || chain.latest_projected_block.is_none() {
-            saw_degraded = true;
-            continue;
-        }
-        if chain.projection_lag_blocks.unwrap_or_default() > 0 {
-            return "stale".to_owned();
-        }
-    }
-
-    if saw_degraded || !saw_chain {
-        "degraded".to_owned()
-    } else {
-        "ready".to_owned()
-    }
 }

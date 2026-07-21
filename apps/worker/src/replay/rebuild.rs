@@ -5,7 +5,8 @@ use sqlx::PgPool;
 use tracing::info;
 
 use crate::{
-    address_names, children, name_current, permissions, primary_name, record_inventory, resolver,
+    address_names, automatic_projection_replay::heartbeat::LoopHeartbeat, children, name_current,
+    permissions, primary_name, record_inventory, resolver,
 };
 
 use super::{
@@ -28,6 +29,7 @@ pub async fn rebuild_all_current_projections(
         false,
         text_hydration_config,
         primary_hydration_config,
+        None,
     )
     .await
 }
@@ -44,6 +46,25 @@ pub async fn rebuild_pending_all_current_projections(
         true,
         text_hydration_config,
         primary_hydration_config,
+        None,
+    )
+    .await
+}
+
+pub async fn rebuild_pending_all_current_projections_with_heartbeat(
+    pool: &PgPool,
+    normalized_target_block: Option<i64>,
+    text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
+    primary_hydration_config: Option<&primary_name::PrimaryNameLegacyReverseHydrationConfig>,
+    loop_heartbeat: &mut LoopHeartbeat,
+) -> Result<AllCurrentProjectionsReplaySummary> {
+    rebuild_all_current_projections_inner(
+        pool,
+        normalized_target_block,
+        true,
+        text_hydration_config,
+        primary_hydration_config,
+        Some(loop_heartbeat),
     )
     .await
 }
@@ -54,6 +75,7 @@ async fn rebuild_all_current_projections_inner(
     skip_completed: bool,
     text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
     primary_hydration_config: Option<&primary_name::PrimaryNameLegacyReverseHydrationConfig>,
+    mut loop_heartbeat: Option<&mut LoopHeartbeat>,
 ) -> Result<AllCurrentProjectionsReplaySummary> {
     let mut steps = Vec::with_capacity(ALL_CURRENT_PROJECTION_ORDER.len());
 
@@ -85,16 +107,19 @@ async fn rebuild_all_current_projections_inner(
         name_current::rebuild_name_current(pool, None),
         requested_name_count
     ));
+    record_loop_progress(pool, &mut loop_heartbeat).await?;
     steps.push(replay_step!(
         "children_current",
         children::rebuild_children_current(pool, None),
         requested_parent_count
     ));
+    record_loop_progress(pool, &mut loop_heartbeat).await?;
     steps.push(replay_step!(
         "permissions_current",
         permissions::rebuild_permissions_current(pool, None),
         requested_resource_count
     ));
+    record_loop_progress(pool, &mut loop_heartbeat).await?;
     steps.push(
         replay_projection_step(
             pool,
@@ -125,16 +150,19 @@ async fn rebuild_all_current_projections_inner(
         )
         .await?,
     );
+    record_loop_progress(pool, &mut loop_heartbeat).await?;
     steps.push(replay_step!(
         "resolver_current",
         resolver::rebuild_resolver_current(pool, None, None),
         requested_resolver_count
     ));
+    record_loop_progress(pool, &mut loop_heartbeat).await?;
     steps.push(replay_step!(
         "address_names_current",
         address_names::rebuild_address_names_current(pool, None),
         requested_address_count
     ));
+    record_loop_progress(pool, &mut loop_heartbeat).await?;
     steps.push(
         replay_projection_step(
             pool,
@@ -171,6 +199,7 @@ async fn rebuild_all_current_projections_inner(
         )
         .await?,
     );
+    record_loop_progress(pool, &mut loop_heartbeat).await?;
 
     debug_assert_eq!(
         steps.iter().map(|step| step.projection).collect::<Vec<_>>(),
@@ -178,6 +207,16 @@ async fn rebuild_all_current_projections_inner(
     );
 
     Ok(AllCurrentProjectionsReplaySummary { steps })
+}
+
+async fn record_loop_progress(
+    pool: &PgPool,
+    loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
+) -> Result<()> {
+    if let Some(loop_heartbeat) = loop_heartbeat.as_deref_mut() {
+        loop_heartbeat.record_if_due(pool).await?;
+    }
+    Ok(())
 }
 
 async fn replay_projection_step<Fut>(

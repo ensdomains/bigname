@@ -73,16 +73,51 @@ pub(super) fn health_database_schema() -> JsonValue {
     })
 }
 
+pub(super) fn health_loop_schema() -> JsonValue {
+    json!({
+        "type": "object",
+        "required": [
+            "status",
+            "started_at",
+            "heartbeat_at",
+            "heartbeat_age_seconds",
+            "max_age_seconds",
+        ],
+        "properties": {
+            "status": {
+                "type": "string",
+                "enum": ["running", "stale", "not_started", "unavailable"],
+            },
+            "started_at": { "type": ["string", "null"], "format": "date-time" },
+            "heartbeat_at": { "type": ["string", "null"], "format": "date-time" },
+            "heartbeat_age_seconds": { "type": ["integer", "null"], "minimum": 0 },
+            "max_age_seconds": { "type": "integer", "minimum": 1 },
+        },
+    })
+}
+
+pub(super) fn health_loops_schema() -> JsonValue {
+    json!({
+        "type": "object",
+        "required": ["indexer", "worker"],
+        "properties": {
+            "indexer": schema_ref("HealthLoop"),
+            "worker": schema_ref("HealthLoop"),
+        },
+    })
+}
+
 pub(super) fn health_response_schema() -> JsonValue {
     json!({
         "type": "object",
-        "required": ["service", "identity", "status", "process", "database"],
+        "required": ["service", "identity", "status", "process", "database", "loops"],
         "properties": {
             "service": { "type": "string" },
             "identity": schema_ref("HealthIdentity"),
             "status": { "type": "string" },
             "process": schema_ref("HealthProcess"),
             "database": schema_ref("HealthDatabase"),
+            "loops": schema_ref("HealthLoops"),
         },
     })
 }

@@ -155,8 +155,9 @@ pub async fn load_indexing_status(pool: &PgPool) -> Result<IndexingStatusRead> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let has_unscoped_pending_invalidations = sqlx::query_scalar::<_, bool>(
-        r#"
+    let (has_unscoped_pending_invalidations, pending_invalidation_count, dead_letter_count) =
+        sqlx::query_as::<_, (bool, i64, i64)>(
+            r#"
         WITH apply_cursor AS (
             SELECT COALESCE((
                 SELECT last_change_id
@@ -170,7 +171,8 @@ pub async fn load_indexing_status(pool: &PgPool) -> Result<IndexingStatusRead> {
             CROSS JOIN apply_cursor
             WHERE change.change_id > apply_cursor.last_change_id
         )
-        SELECT EXISTS (
+        SELECT (
+            EXISTS (
             SELECT 1
             FROM projection_invalidations invalidation
             LEFT JOIN normalized_events event
@@ -181,8 +183,8 @@ pub async fn load_indexing_status(pool: &PgPool) -> Result<IndexingStatusRead> {
             WHERE event.normalized_event_id IS NULL
                OR event.chain_id IS NULL
                OR event.block_number IS NULL
-        )
-        OR EXISTS (
+            )
+            OR EXISTS (
             SELECT 1
             FROM unscanned_changes change
             CROSS JOIN LATERAL (
@@ -193,15 +195,23 @@ pub async fn load_indexing_status(pool: &PgPool) -> Result<IndexingStatusRead> {
             ) event
             WHERE event.chain_id IS NULL
                OR event.block_number IS NULL
-        )
+            )
+        ) AS has_unscoped_pending_invalidations,
+        (SELECT COUNT(*)::BIGINT FROM projection_invalidations) AS pending_invalidation_count,
+        (
+            SELECT COUNT(*)::BIGINT
+            FROM projection_invalidation_dead_letters
+        ) AS dead_letter_count
         "#,
-    )
-    .fetch_one(pool)
-    .await
-    .context("failed to load unscoped indexing invalidation status")?;
+        )
+        .fetch_one(pool)
+        .await
+        .context("failed to load unscoped indexing invalidation status")?;
 
     Ok(IndexingStatusRead {
         chains,
         has_unscoped_pending_invalidations,
+        pending_invalidation_count,
+        dead_letter_count,
     })
 }
