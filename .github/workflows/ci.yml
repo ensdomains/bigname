@@ -362,6 +362,7 @@ jobs:
         run: |
           cargo fetch --locked
           cargo fetch --locked --manifest-path tests/conformance/Cargo.toml
+          docker pull caddy:2-alpine
 
       - name: Sync upstream refs
         run: scripts/sync-refs

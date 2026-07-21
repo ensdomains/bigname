@@ -7,9 +7,10 @@ artifact consistency, and the conformance ownership table for published OpenAPI
 paths, runs focused reorg chaos, capability, and resolver-profile conformance
 guards, runs the live manifest-drift audit with worker-owned alert observation
 persistence, inspects the runtime [watch plan](../glossary.md), and checks the API process
-readiness endpoint from a prebuilt local binary. It does not deploy, contact
-external RPC providers, contact GitHub or Fly, or validate a remote production
-target.
+readiness endpoint from a prebuilt local binary. It then validates the public
+edge configuration and checks the allowlist through an ephemeral Caddy
+container in front of that API process. It does not deploy, contact external RPC
+providers, contact GitHub or Fly, or validate a remote production target.
 
 ## Command
 
@@ -33,7 +34,8 @@ scripts/release-smoke --help
 
 ## Local Prerequisites
 
-- `cargo`, `diff`, `seq`, and `curl` are available on `PATH`.
+- `cargo`, `diff`, `seq`, `curl`, `docker`, and `ss` are available on `PATH`,
+  and the Docker daemon supports host networking.
 - A PostgreSQL URL is available through `BIGNAME_DATABASE_URL` or
   `DATABASE_URL`. If neither is set, the script defaults to
   `postgres://bigname:bigname@127.0.0.1:5432/bigname`.
@@ -53,13 +55,32 @@ scripts/release-smoke --help
 - `BIGNAME_SMOKE_API_HEALTH_URL` is reachable from the operator host. By
   default it is derived from `BIGNAME_SMOKE_API_BIND_ADDR` as
   `http://<bind_addr>/healthz`.
+- `BIGNAME_SMOKE_INTERNAL_API_URL` is the pathless API origin Caddy uses for the
+  internal side of edge comparisons. It defaults to
+  `http://<BIGNAME_SMOKE_API_BIND_ADDR>` independently of the health-probe URL.
+  Set it explicitly when the API binds a wildcard address or the health probe
+  uses a different origin or path.
+- Direct internal route proofs have a 60-second request timeout so a
+  production-sized local dataset does not inherit the public edge's short probe
+  window. Override it with
+  `BIGNAME_SMOKE_INTERNAL_REQUEST_TIMEOUT_SECS` when necessary; accepted values
+  are 1 through 3600 seconds.
+- The Caddy image is already available locally. It defaults to
+  `caddy:2-alpine`; set `BIGNAME_SMOKE_CADDY_IMAGE` to use another locally
+  available image. The smoke script does not pull images.
+- The scratch public-edge address is free. It defaults to
+  `http://127.0.0.1:3001`; set `BIGNAME_SMOKE_PUBLIC_EDGE_URL` when that port is
+  already in use. The ephemeral Caddy container uses host networking and no
+  named volumes, then is removed when the check exits.
 - The readiness check builds `bigname-api` before starting the probe window,
   then runs the compiled binary from Cargo's local target directory directly.
   Slow local compilation therefore fails or completes before readiness polling
   begins; the 30 one-second probes measure server startup and health only.
-- For `--no-network`, Cargo dependencies must already be cached locally.
+- For `--no-network`, Cargo dependencies and the selected Caddy image must
+  already be cached locally.
 
-The script loads `.env` when it exists, then uses the environment values above.
+The script loads `.env` when it exists. Values supplied by the caller for the
+environment variables above take precedence over values loaded from `.env`.
 
 ## Gate Coverage
 
@@ -105,16 +126,32 @@ The script loads `.env` when it exists, then uses the environment values above.
    <BIGNAME_SMOKE_API_BIND_ADDR>` binary directly from Cargo's local target
    directory and probes `/healthz` until it returns `200` with
    `"status":"ready"`.
+13. Validates `docker/caddy/Caddyfile`, starts an ephemeral Caddy container in
+    front of that API, and runs `scripts/public-edge-smoke`. The check proves
+    the mounted v2 routes and GraphiQL succeed on the internal listener but
+    return `404` publicly, checks the unknown-path default, and verifies the
+    allowed helper routes, representative helper and v1 `HEAD` requests, v1
+    REST, Manager GraphQL, and browser-preflight requests from the deployed
+    `https://app.ens.dev` origin.
+    It also proves a forbidden v1 method reaches the API as `405` internally
+    but returns `404` at the edge, and proves a v1 GET preflight succeeds
+    internally but is denied by the edge outside the two admitted preflight
+    paths.
 
 With `--no-network`, the script also sets `CARGO_NET_OFFLINE=true`, passes
 `--offline` to Cargo, and rejects non-loopback smoke bind or health URLs. The
 local pinned-ref check still only reads the checked-out `.refs/` state, and the
-Cargo-backed conformance guards run from the local dependency cache. The gate
-does not contact external network services or external RPC providers, but the
-configured local PostgreSQL database must still be available. Once dependencies
-are cached, the manifest-drift audit and `inspect manifest-drift --json` triage
-path need no remote network; they still require the checked-out local refs and
-the configured local PostgreSQL database.
+Cargo-backed conformance guards run from the local dependency cache. The public
+edge and internal API URLs must also be loopback HTTP URLs, and Docker runs the
+already-cached Caddy image with pulling disabled. The gate does not contact
+external network services or external RPC providers, but the configured local
+PostgreSQL database must still be available. Once dependencies are cached, the
+manifest-drift audit and `inspect manifest-drift --json` triage path need no
+remote network; they still require the checked-out local refs and the configured
+local PostgreSQL database. The public-edge probe ignores curl configuration and
+proxy environment variables in this mode, and the ephemeral Caddy disables its
+admin listener. The Manager origin is only an HTTP `Origin` header value; this
+no-network gate does not contact the deployed Manager.
 
 Manifest-drift audit and inspection behavior:
 
@@ -158,7 +195,10 @@ A passing gate means:
   from the configured local database;
 - the API binary builds locally from this revision;
 - the API process can start from that built binary; and
-- the private readiness endpoint reports ready against that database.
+- the process readiness endpoint reports ready against that database;
+- the repository Caddyfile validates and starts in an ephemeral container; and
+- allowed public-edge requests reach the API while v2, GraphiQL, and unknown
+  paths return the expected public `404` responses.
 
 ## Failure Criteria
 
@@ -209,9 +249,16 @@ Any non-zero exit blocks the release candidate until triaged.
 - Readiness failure: the API did not stay up or `/healthz` did not report
   ready after the binary was built and started directly. Do not promote until
   the API logs and database reachability explain the failure.
+- Public-edge failure: the Caddyfile did not validate, the ephemeral Caddy
+  container did not start, an admitted helper, v1 REST, GraphQL, or preflight
+  request failed, or a denied v2, GraphiQL, or unknown-path request did not
+  return `404`. Compare the direct internal and public responses logged by
+  `scripts/public-edge-smoke` before release promotion.
 - No-network failure: the gate was not fully local, the bind or health URL was
-  not loopback, or Cargo could not build from its local cache. Fix the operator
-  environment before treating it as a release failure.
+  not loopback, the internal API or public edge URL was not loopback HTTP, Cargo
+  could not build from its local cache, or the selected Caddy image was not
+  available locally. Fix the operator environment before treating it as a
+  release failure.
 
 ## Rollback Decision Points
 
@@ -242,10 +289,13 @@ checks while adding the local pinned upstream-ref check, focused reorg chaos
 conformance guard, no-Postgres OpenAPI conformance-owner guard, focused
 capability cutover evidence guard, focused dynamic resolver-profile conformance
 guard, live manifest-drift audit with worker-owned alert persistence, runtime
-watch-plan inspection, and local API prebuild plus readiness. It uses
+watch-plan inspection, local API prebuild plus readiness, and the public-edge
+allowlist check. CI pulls `caddy:2-alpine` before entering the no-network smoke
+phase; the gate then uses that cached image with pulling disabled. It uses
 loopback-only smoke URLs, offline Cargo execution, the checked-out `.refs/`
 state, and the configured local PostgreSQL server/database for reorg chaos and
 dynamic resolver-profile temporary databases, migrations, manifest-drift audit,
-watch-plan inspection, API prebuild, and readiness. A CI failure has the same
-release-blocking meaning as a local non-zero exit, except that missing cached
-dependencies are a CI environment issue rather than a product regression.
+watch-plan inspection, API prebuild, readiness, and the internal side of the
+edge comparison. A CI failure has the same release-blocking meaning as a local
+non-zero exit, except that missing cached dependencies are a CI environment
+issue rather than a product regression.

@@ -1,4 +1,10 @@
+{
+	admin {$BIGNAME_CADDY_ADMIN:localhost:2019}
+}
+
 {$BIGNAME_PUBLIC_SITE_ADDRESS} {
+	{$BIGNAME_PUBLIC_BIND_DIRECTIVE}
+
 	encode zstd gzip
 
 	header {
@@ -11,5 +17,37 @@
 	@docs path /docs /docs/ /openapi.json
 	header @docs Cache-Control "public, max-age=300"
 
-	reverse_proxy {$BIGNAME_PUBLIC_UPSTREAM}
+	@helpers {
+		method GET HEAD
+		path / /docs /docs/ /openapi.json /healthz
+	}
+
+	@v1_reads {
+		method GET HEAD
+		path /v1/*
+	}
+
+	@v1_identity_lookup {
+		method POST
+		path /v1/identity:lookup
+	}
+
+	@graphql {
+		method POST
+		path /graphql
+	}
+
+	@preflight {
+		method OPTIONS
+		path /v1/identity:lookup /graphql
+	}
+
+	route {
+		reverse_proxy @helpers {$BIGNAME_PUBLIC_UPSTREAM}
+		reverse_proxy @v1_reads {$BIGNAME_PUBLIC_UPSTREAM}
+		reverse_proxy @v1_identity_lookup {$BIGNAME_PUBLIC_UPSTREAM}
+		reverse_proxy @graphql {$BIGNAME_PUBLIC_UPSTREAM}
+		reverse_proxy @preflight {$BIGNAME_PUBLIC_UPSTREAM}
+		respond 404
+	}
 }

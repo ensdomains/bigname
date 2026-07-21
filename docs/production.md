@@ -10,18 +10,45 @@ Public traffic terminates at Caddy, defined by `docker-compose.public.yml` and
 `docker/caddy/Caddyfile`. Caddy forwards requests to the internal API service at
 `api:3000`.
 
-The public edge exposes the same read-only API surface that the `bigname-api`
-process serves:
+The public edge exposes an explicit allowlisted subset of the routes served by
+the `bigname-api` process:
 
-- `GET /`
-- `GET /docs`
-- `GET /openapi.json`
-- `GET /healthz`
-- `GET /v1/...`
+- Helpers: `GET` and `HEAD` on `/`, `/docs`, `/docs/`, `/openapi.json`, and
+  `/healthz`.
+- REST: the operations published by `/openapi.json`. At the edge this is
+  `GET` and `HEAD` on `/v1/*`, `POST /v1/identity:lookup`, and the
+  `OPTIONS /v1/identity:lookup` browser preflight.
+- GraphQL: `POST /graphql` and its `OPTIONS` browser preflight. This is an
+  unauthenticated first-party ENS Manager compatibility subset governed by the
+  [committed SDL fixture](../apps/api/src/tests/fixtures/subgraph_schema.graphql),
+  separate from the v1 OpenAPI contract.
 
-There are no public admin or mutation routes in the API process. Worker,
-migration, PostgreSQL, and indexer control surfaces are not routed
-through Caddy.
+The Manager endpoint precondition was checked on 2026-07-21. The deployed
+`https://app.ens.dev` application loaded the hashed
+[`index-CKsYDyP0.js`](https://app.ens.dev/assets/index-CKsYDyP0.js) browser
+bundle (SHA-256
+`f45dd907511ae05efdf0fffa84ad0f53edab2b8b4530caf5cb95af9bf43b886b`),
+which constructs its GraphQL client with the public
+`https://graphql.ens.dev` endpoint. That is direct browser-to-indexer topology,
+so the replacement endpoint must retain public `POST` and preflight access. A
+same-day `OPTIONS` request to that endpoint with `Origin:
+https://app.ens.dev`, requested method `POST`, and requested header
+`content-type` returned `204` with permissive CORS headers; the edge smoke below
+replays that real browser origin against the candidate edge. Recheck this
+evidence before cutover: if Manager moves behind a private or same-origin
+backend, the public GraphQL matcher can be removed. Otherwise the compatibility
+endpoint sunsets when Manager migrates to the re-baselined v1 REST contract;
+retaining it beyond that point requires an explicit decision to support the SDL
+independently.
+
+Requests outside these method and path matcher groups return `404` at the edge.
+The API remains responsible for rejecting unknown paths or unsupported methods
+inside an admitted matcher such as `GET /v1/*`. In particular, `/v2/*` is
+internal parity and cutover staging and [never ships as a public
+contract](adrs/0006-api-v2-product-surface.md#rollout); it returns `404`
+publicly. `GET /graphql` is also denied, so GraphiQL is not exposed. Worker,
+migration, PostgreSQL, and indexer control surfaces are not routed through
+Caddy.
 
 ## Environment
 
@@ -51,14 +78,24 @@ server, Caddy automatically obtains and renews TLS certificates.
 
 ## Start
 
-Start or refresh the public stack with:
+Start or refresh the public stack, then recreate only the proxy so it loads the
+current bind-mounted Caddyfile:
 
 ```sh
 docker compose --env-file .env.server \
   -f docker-compose.server.yml \
   -f docker-compose.public.yml \
   up -d
+
+docker compose --env-file .env.server \
+  -f docker-compose.server.yml \
+  -f docker-compose.public.yml \
+  up -d --no-deps --force-recreate public-proxy
 ```
+
+The targeted recreation is required for Caddyfile-only changes because plain
+`docker compose up -d` does not recreate an otherwise unchanged proxy service.
+The persistent Caddy data and configuration volumes are retained.
 
 For a local image build on a server checkout, replace `BIGNAME_IMAGE` with
 `bigname:local` in the environment used for the command.
@@ -77,6 +114,16 @@ Check the public edge:
 curl -fsS -I http://127.0.0.1/
 curl -fsS -I http://127.0.0.1/docs
 curl -fsS -I http://127.0.0.1/openapi.json
+```
+
+Run the positive and default-deny edge checks against Caddy and its internal API
+listener. The preflight probes send the deployed Manager origin,
+`https://app.ens.dev`:
+
+```sh
+BIGNAME_SMOKE_INTERNAL_API_URL=http://127.0.0.1:3000 \
+BIGNAME_SMOKE_PUBLIC_EDGE_URL=https://api.example.com \
+  ./scripts/public-edge-smoke
 ```
 
 For hostname/TLS deployments, replace `127.0.0.1` with the public hostname and

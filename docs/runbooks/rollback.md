@@ -229,10 +229,20 @@ Start rollback execution when the current release is already promoted, the
 current release is unhealthy or unsafe, and a rollback candidate is expected to
 restore service faster than a forward fix.
 
-Run `scripts/rollback-smoke` against the rollback checkout before promotion when
-there is time to validate locally. For urgent incidents, run it in parallel with
-operational rollback preparation and use any failure as a reason to pause
-automatic promotion and escalate to the owning engineer.
+Run `scripts/rollback-smoke` against the rollback checkout before rollback
+promotion when there is time to validate locally. For urgent incidents, run it
+in parallel with operational rollback preparation and use any failure as a
+reason to pause automatic rollback promotion and escalate to the owning
+engineer.
+
+The public-edge allowlist is security configuration and must not be rolled back
+with an older application revision. Preserve or backport the current
+`docker/caddy/Caddyfile`; never restore a catch-all proxy. After changing the API
+revision, recreate only `public-proxy` from that preserved configuration and run
+the current trusted copy of `scripts/public-edge-smoke` against both the public
+edge and the internal API listener. A rollback is not complete if `/v2/*`, `GET
+/graphql`, or an unknown path is reachable through the public edge, even when
+the application rollback itself is healthy.
 
 After the operational rollback, rerun the gate against the revision and database
 state that represent the rolled-back service when local access is available. A
