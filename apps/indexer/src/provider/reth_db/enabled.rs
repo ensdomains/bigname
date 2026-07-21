@@ -12,8 +12,8 @@ use reth_ethereum::{
     node::{EthereumNode, api::NodeTypesWithDBAdapter},
     primitives::Block as _,
     provider::{
-        BlockHashReader, BlockNumReader, BlockReader, ChainStateBlockReader, HeaderProvider,
-        ProviderError, ProviderFactory, ReceiptProvider, TransactionVariant, db::DatabaseEnv,
+        BlockHashReader, BlockReader, ChainStateBlockReader, HeaderProvider, ProviderError,
+        ProviderFactory, ReceiptProvider, TransactionVariant, db::DatabaseEnv,
         providers::ReadOnlyConfig,
     },
 };
@@ -24,6 +24,8 @@ mod api;
 mod code;
 #[path = "convert.rs"]
 mod convert;
+#[path = "head.rs"]
+mod head;
 #[path = "logs.rs"]
 mod logs;
 #[path = "receipts.rs"]
@@ -96,23 +98,11 @@ impl RethDbReader {
 
     fn fetch_chain_heads_sync(&self) -> Result<ProviderHeadSnapshot> {
         let factory = self.factory()?;
-        let chain_info = factory.chain_info()?;
+        let canonical_hash = head::fetch_canonical_head_with_retry(&self.chain, &factory)?;
         let provider = factory.provider()?;
         let safe_number = nonzero_checkpoint_number(provider.last_safe_block_number()?);
         let finalized_number = nonzero_checkpoint_number(provider.last_finalized_block_number()?);
         drop(provider);
-        let canonical_hash = if chain_info.best_hash == B256::ZERO {
-            factory
-                .block_hash(chain_info.best_number)?
-                .with_context(|| {
-                    format!(
-                        "Reth DB did not return canonical block hash for best number {}",
-                        chain_info.best_number
-                    )
-                })?
-        } else {
-            chain_info.best_hash
-        };
 
         Ok(ProviderHeadSnapshot {
             canonical: self.fetch_block_by_b256(&factory, canonical_hash)?,
