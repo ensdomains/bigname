@@ -138,6 +138,180 @@ async fn v2_get_primary_name_surfaces_reverse_provider_failure_in_band() -> Resu
 }
 
 #[tokio::test]
+async fn v2_get_primary_name_reuses_persisted_route_local_claim_for_indexed_source() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        primary_name_reverse_name_response("taytems.eth"),
+        primary_name_universal_resolver_addr60_response(V2_ON_DEMAND_PRIMARY_NAME_ADDRESS),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_execution::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+    let state = database.app_state_with_chain_rpc_urls(chain_rpc_urls);
+
+    let verified_response = app_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 verified route-local primary-name request failed")?;
+    assert_eq!(verified_response.status(), StatusCode::OK);
+    let verified_payload: Value = read_json(verified_response).await?;
+    assert_eq!(
+        verified_payload["data"]["answers"],
+        json!([{
+            "source": "verified",
+            "status": "ok",
+            "name": "taytems.eth"
+        }])
+    );
+    assert_eq!(
+        persisted_route_local_primary_name_counts(
+            &database,
+            V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        )
+        .await?,
+        (1, 1)
+    );
+
+    let indexed_response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 indexed route-local primary-name readback request failed")?;
+    assert_eq!(indexed_response.status(), StatusCode::OK);
+    let indexed_payload: Value = read_json(indexed_response).await?;
+    assert_eq!(
+        indexed_payload["data"]["answers"],
+        json!([{
+            "source": "indexed",
+            "status": "ok",
+            "name": "taytems.eth"
+        }])
+    );
+    assert!(
+        indexed_payload["data"].get("verification").is_none(),
+        "indexed-only readback must not expose a verification object"
+    );
+    assert_eq!(indexed_payload["meta"]["source"], json!("indexed"));
+
+    let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
+    assert_eq!(
+        rpc_requests.len(),
+        3,
+        "indexed-only readback must not repeat provider requests"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_primary_name_indexed_fallback_persists_only_after_verified_request() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        primary_name_reverse_name_response("taytems.eth"),
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        primary_name_reverse_name_response("taytems.eth"),
+        primary_name_universal_resolver_addr60_response(V2_ON_DEMAND_PRIMARY_NAME_ADDRESS),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_execution::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+    let state = database.app_state_with_chain_rpc_urls(chain_rpc_urls);
+
+    let indexed_response = app_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=indexed"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 fresh indexed route-local primary-name request failed")?;
+    assert_eq!(indexed_response.status(), StatusCode::OK);
+    let indexed_payload: Value = read_json(indexed_response).await?;
+    assert_eq!(
+        indexed_payload["data"]["answers"],
+        json!([{
+            "source": "indexed",
+            "status": "ok",
+            "name": "taytems.eth"
+        }])
+    );
+    assert_eq!(
+        persisted_route_local_primary_name_counts(
+            &database,
+            V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        )
+        .await?,
+        (0, 0),
+        "indexed-only fallback must not persist execution artifacts"
+    );
+
+    let verified_response = app_router(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v2/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
+                ))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("v2 verified request after indexed fallback failed")?;
+    assert_eq!(verified_response.status(), StatusCode::OK);
+    let verified_payload: Value = read_json(verified_response).await?;
+    assert_eq!(
+        verified_payload["data"]["answers"],
+        json!([{
+            "source": "verified",
+            "status": "ok",
+            "name": "taytems.eth"
+        }])
+    );
+    assert_eq!(
+        persisted_route_local_primary_name_counts(
+            &database,
+            V2_ON_DEMAND_PRIMARY_NAME_ADDRESS,
+        )
+        .await?,
+        (1, 1)
+    );
+
+    let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
+    assert_eq!(
+        rpc_requests.len(),
+        5,
+        "verified mode must perform and persist the execution after an indexed-only miss"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_get_primary_name_keeps_persisted_unnormalizable_claim_verified_not_found()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -855,6 +1029,38 @@ async fn v2_primary_name_response_for_database(
         )
         .await
         .context("v2 primary-name request failed")
+}
+
+async fn persisted_route_local_primary_name_counts(
+    database: &TestDatabase,
+    address: &str,
+) -> Result<(i64, i64)> {
+    let request_key = format!("ens:{address}:60");
+    let trace_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM execution_traces
+        WHERE request_type = 'verified_primary_name'
+          AND namespace = 'ens'
+          AND request_key = $1
+        "#,
+    )
+    .bind(&request_key)
+    .fetch_one(&database.pool)
+    .await?;
+    let outcome_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM execution_cache_outcomes
+        WHERE request_type = 'verified_primary_name'
+          AND namespace = 'ens'
+          AND request_key = $1
+        "#,
+    )
+    .bind(request_key)
+    .fetch_one(&database.pool)
+    .await?;
+    Ok((trace_count, outcome_count))
 }
 
 fn assert_primary_name_snapshot_meta(payload: &Value) {

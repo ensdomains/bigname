@@ -19,51 +19,50 @@ pub(super) async fn load_primary_name_route_read(
     }
 
     let selected_snapshot = resolve_ens_primary_name_fallback_snapshot(&state.pool).await?;
-    if mode.includes_verified() {
-        let persisted_verified = load_persisted_primary_name_route_fallback_readback(
-            &state.pool,
-            address,
-            namespace,
-            coin_type,
-            &selected_snapshot,
-        )
-        .await?;
-        if let Some(persisted_verified) = persisted_verified {
-            lookup_state.on_demand_claim = persisted_verified
-                .route_local_claim
-                .clone()
-                .ok_or_else(|| {
-                    ApiError::internal_error(format!(
-                        "persisted route-local primary-name claim missing for address {address}"
-                    ))
-                })?;
+    let persisted_verified = load_persisted_primary_name_route_fallback_readback(
+        &state.pool,
+        address,
+        namespace,
+        coin_type,
+        &selected_snapshot,
+    )
+    .await?;
+    if let Some(persisted_verified) = persisted_verified {
+        lookup_state.on_demand_claim = persisted_verified
+            .route_local_claim
+            .clone()
+            .ok_or_else(|| {
+                ApiError::internal_error(format!(
+                    "persisted route-local primary-name claim missing for address {address}"
+                ))
+            })?;
+        if mode.includes_verified() {
             lookup_state.persisted_verified = Some(persisted_verified);
-            return Ok(PrimaryNameRouteRead {
-                lookup_state,
-                selected_snapshot: Some(selected_snapshot),
-            });
         }
-
-        // The route-local trace readback rechecks tuple absence under the same
-        // projection-write fence used by persistence. Reload the tuple after a
-        // miss so a row that won that race receives the normal projection and
-        // normalization-gate behavior before any RPC call.
-        let refreshed_lookup_state =
-            load_primary_name_lookup_state(&state.pool, address, namespace, coin_type, mode)
-                .await?;
-        if !primary_name_route_fallback_is_eligible(
-            namespace,
-            coin_type,
-            mode,
-            &refreshed_lookup_state,
-        ) {
-            return Ok(PrimaryNameRouteRead {
-                lookup_state: refreshed_lookup_state,
-                selected_snapshot: None,
-            });
-        }
-        lookup_state = refreshed_lookup_state;
+        return Ok(PrimaryNameRouteRead {
+            lookup_state,
+            selected_snapshot: Some(selected_snapshot),
+        });
     }
+
+    // The route-local trace readback rechecks tuple absence under the same
+    // projection-write fence used by persistence. Reload the tuple after a
+    // miss so a row that won that race receives the normal projection and
+    // normalization-gate behavior before any RPC call.
+    let refreshed_lookup_state =
+        load_primary_name_lookup_state(&state.pool, address, namespace, coin_type, mode).await?;
+    if !primary_name_route_fallback_is_eligible(
+        namespace,
+        coin_type,
+        mode,
+        &refreshed_lookup_state,
+    ) {
+        return Ok(PrimaryNameRouteRead {
+            lookup_state: refreshed_lookup_state,
+            selected_snapshot: None,
+        });
+    }
+    lookup_state = refreshed_lookup_state;
     let manifest_versions = if mode.includes_verified() {
         Some(load_ens_execution_manifest_versions(&state.pool).await?)
     } else {
@@ -217,9 +216,23 @@ async fn persist_route_local_primary_name_execution(
     )
     .map_err(|error| route_local_primary_name_persistence_error(address, error))?;
 
-    bigname_execution::persist_ens_verified_primary_name(&state.pool, &request)
-        .await
-        .map_err(|error| route_local_primary_name_persistence_error(address, error))?;
+    if let Err(error) =
+        bigname_execution::persist_ens_verified_primary_name(&state.pool, &request).await
+    {
+        let refreshed_lookup_state =
+            load_primary_name_lookup_state(&state.pool, address, namespace, coin_type, mode)
+                .await?;
+        if !primary_name_route_fallback_is_eligible(
+            namespace,
+            coin_type,
+            mode,
+            &refreshed_lookup_state,
+        ) {
+            *lookup_state = refreshed_lookup_state;
+            return Ok(false);
+        }
+        return Err(route_local_primary_name_persistence_error(address, error));
+    }
 
     let persisted_verified = load_persisted_primary_name_route_fallback_readback(
         &state.pool,

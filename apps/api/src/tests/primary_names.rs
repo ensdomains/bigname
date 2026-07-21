@@ -150,6 +150,58 @@ async fn spawn_primary_name_mock_rpc(
     Ok((url, handle))
 }
 
+async fn spawn_primary_name_mock_rpc_with_last_response_gate(
+    responses: Vec<Value>,
+) -> Result<(
+    String,
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<Result<Vec<Value>>>,
+)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("failed to bind gated mock primary-name RPC listener")?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let (last_request_reached_tx, last_request_reached_rx) = tokio::sync::oneshot::channel();
+    let (release_last_response_tx, release_last_response_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move {
+        let response_count = responses.len();
+        let mut requests = Vec::new();
+        let mut last_request_reached_tx = Some(last_request_reached_tx);
+        let mut release_last_response_rx = Some(release_last_response_rx);
+        for (index, response_result) in responses.into_iter().enumerate() {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .context("failed to accept gated mock primary-name RPC request")?;
+            let request_payload = read_primary_name_mock_rpc_request(&mut socket).await?;
+            requests.push(request_payload);
+            if index + 1 == response_count {
+                let Some(reached_tx) = last_request_reached_tx.take() else {
+                    anyhow::bail!("gated mock primary-name RPC reached its last request twice");
+                };
+                if reached_tx.send(()).is_err() {
+                    anyhow::bail!("gated mock primary-name RPC last-request receiver dropped");
+                }
+                release_last_response_rx
+                    .take()
+                    .context("gated mock primary-name RPC release receiver missing")?
+                    .await
+                    .context("gated mock primary-name RPC release sender dropped")?;
+            }
+            write_primary_name_mock_rpc_response(&mut socket, response_result).await?;
+        }
+        Ok(requests)
+    });
+
+    Ok((
+        url,
+        last_request_reached_rx,
+        release_last_response_tx,
+        handle,
+    ))
+}
+
 async fn read_primary_name_mock_rpc_request(socket: &mut tokio::net::TcpStream) -> Result<Value> {
     use tokio::io::AsyncReadExt;
 
@@ -825,6 +877,142 @@ async fn get_primary_names_verifies_default_tuple_miss_with_on_demand_rpc() -> R
     .await?;
     assert_eq!(persisted_outcome_count, 1);
 
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_primary_names_serves_projection_that_wins_route_local_persistence_fence()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
+    let (rpc_url, last_rpc_request_reached, release_last_rpc_response, rpc_handle) =
+        spawn_primary_name_mock_rpc_with_last_response_gate(vec![
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        primary_name_reverse_name_response("taytems.eth"),
+        primary_name_universal_resolver_addr60_response(
+            "0x8e8db5ccef88cca9d624701db544989c996e3216",
+        ),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_execution::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+
+    let database_url = std::env::var("BIGNAME_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .unwrap_or_else(|_| default_database_url().to_owned());
+    let projection_pool = PgPool::connect_with(
+        PgConnectOptions::from_str(&database_url)?
+            .database(&database.database_name)
+            .disable_statement_logging(),
+    )
+    .await?;
+    let request_state = database.app_state_with_chain_rpc_urls(chain_rpc_urls);
+    let mut request_task = tokio::spawn(async move {
+        app_router(request_state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/primary-names/0x8e8db5ccef88cca9d624701db544989c996e3216?mode=both")
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+            .context("projection-raced route-local primary-name request failed")
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        last_rpc_request_reached,
+    )
+    .await
+    .context("route-local primary-name RPC did not reach its final call")?
+    .context("route-local primary-name RPC last-call signal dropped")?;
+
+    let mut projection_insert = projection_pool.begin().await?;
+    sqlx::query("LOCK TABLE primary_names_current IN ROW EXCLUSIVE MODE")
+        .execute(&mut *projection_insert)
+        .await?;
+    assert!(
+        release_last_rpc_response.send(()).is_ok(),
+        "route-local primary-name request dropped before its final RPC response"
+    );
+    let rpc_requests = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        join_primary_name_mock_rpc_requests(rpc_handle),
+    )
+    .await
+    .context("route-local primary-name RPC calls did not complete")??;
+    assert_eq!(rpc_requests.len(), 3);
+
+    let raced_before_insert = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        &mut request_task,
+    )
+    .await;
+    assert!(
+        raced_before_insert.is_err(),
+        "route-local persistence must wait for the projection-write fence"
+    );
+    sqlx::query(
+        r#"
+        INSERT INTO primary_names_current (
+            address,
+            namespace,
+            coin_type,
+            claim_status,
+            raw_claim_name,
+            normalized_claim_name,
+            claim_name_is_normalized,
+            claim_provenance
+        )
+        VALUES ($1, 'ens', '60', 'not_found', NULL, NULL, FALSE, '{}'::jsonb)
+        "#,
+    )
+    .bind("0x8e8db5ccef88cca9d624701db544989c996e3216")
+    .execute(&mut *projection_insert)
+    .await?;
+    projection_insert.commit().await?;
+
+    let raced_response = request_task
+        .await
+        .context("projection-raced route-local primary-name task panicked")??;
+    assert_eq!(raced_response.status(), StatusCode::OK);
+    let raced_payload: PrimaryNameResponse = read_json(raced_response).await?;
+    assert_eq!(
+        raced_payload.declared_state,
+        Some(json!({
+            "claimed_primary_name": {
+                "status": "not_found",
+                "provenance": {},
+            }
+        }))
+    );
+    assert_eq!(
+        raced_payload.verified_state,
+        Some(json!({
+            "verified_primary_name": {
+                "status": "not_found",
+            }
+        }))
+    );
+    assert!(raced_payload.provenance.is_null());
+    assert_eq!(raced_payload.chain_positions, json!({}));
+
+    let persisted_outcome_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM execution_cache_outcomes
+        WHERE request_type = 'verified_primary_name'
+          AND namespace = 'ens'
+          AND request_key = 'ens:0x8e8db5ccef88cca9d624701db544989c996e3216:60'
+        "#,
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(persisted_outcome_count, 0);
+
+    projection_pool.close().await;
     database.cleanup().await?;
     Ok(())
 }
