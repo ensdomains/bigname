@@ -13,7 +13,6 @@ fn binding(sort: AddressNamesSort) -> AddressNamesCursorBinding<'static> {
         q: Some("al"),
         sort,
         order: SortOrder::Asc,
-        snapshot_token: "snapshot-1",
     }
 }
 
@@ -32,6 +31,7 @@ fn address_names_cursor_payload_round_trips_name_cursor() {
         cursor
     );
     assert_eq!(payload.last_item[SORT_KIND_CURSOR_KEY], SORT_KIND_NAME);
+    assert!(payload.snapshot.is_none());
 }
 
 #[test]
@@ -79,7 +79,7 @@ fn address_names_cursor_payload_distinguishes_timestamp_null_and_value() {
 }
 
 #[test]
-fn address_names_cursor_rejects_cross_sort_filter_order_or_snapshot() {
+fn address_names_cursor_rejects_cross_sort_filter_or_order() {
     let cursor = AddressNamesCurrentSortedCursor {
         sort_value: AddressNamesCurrentSortedCursorValue::Name("Alice.eth".to_owned()),
         logical_name_id: "ens:alice.eth".to_owned(),
@@ -101,10 +101,23 @@ fn address_names_cursor_rejects_cross_sort_filter_order_or_snapshot() {
         .filters
         .insert(ORDER_FILTER_KEY.to_owned(), "desc".to_owned());
     assert!(address_names_storage_cursor(&payload, &binding(AddressNamesSort::Name)).is_err());
+}
 
+#[test]
+fn address_names_cursor_ignores_legacy_snapshot_component() {
+    let cursor = AddressNamesCurrentSortedCursor {
+        sort_value: AddressNamesCurrentSortedCursorValue::Name("Alice.eth".to_owned()),
+        logical_name_id: "ens:alice.eth".to_owned(),
+        resource_id: Uuid::from_u128(0x1234),
+    };
     let mut payload = address_names_cursor_payload(&cursor, &binding(AddressNamesSort::Name));
-    payload.snapshot = Some("snapshot-2".to_owned());
-    assert!(address_names_storage_cursor(&payload, &binding(AddressNamesSort::Name)).is_err());
+    payload.snapshot = Some("legacy-snapshot".to_owned());
+
+    assert_eq!(
+        address_names_storage_cursor(&payload, &binding(AddressNamesSort::Name))
+            .expect("legacy snapshot component must not bind a latest-state cursor"),
+        cursor
+    );
 }
 
 #[test]

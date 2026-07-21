@@ -60,7 +60,7 @@ pub(crate) use name_records_inventory::{default_requested_records, validate_prod
 pub(crate) use namespaces::get_namespace;
 pub(crate) use params::{
     AtSelector, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, QueryParams, RawQueryParams, RequestSource,
-    SortOrder, parse_relation_set_param,
+    SortOrder, parse_relation_set_param, validate_latest_collection_selectors,
 };
 pub(crate) use permission_values::{permission_powers_value, permission_scope_value};
 pub(crate) use permissions::get_permissions;

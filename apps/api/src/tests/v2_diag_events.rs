@@ -13,21 +13,13 @@ async fn v2_get_diagnostic_events_returns_raw_rows_and_infers_namespace() -> Res
     assert_eq!(payload["page"]["page_size"], json!(10));
     assert_eq!(payload["page"]["total_count"], Value::Null);
     assert_eq!(payload["page"]["has_more"], json!(false));
-    assert_eq!(
-        payload["meta"]["as_of"]["1"],
-        json!({
-            "block_number": 305,
-            "block_hash": "0xname131",
-            "timestamp": "2026-04-17T00:00:05Z"
-        })
-    );
+    assert_eq!(payload["meta"], json!({}));
 
     let data = payload["data"]
         .as_array()
         .expect("diagnostic events data must be an array");
     let event_kinds = diagnostic_event_kinds(data);
-    // latest-only: at/finality never bounds the event set; only meta.as_of reflects the
-    // snapshot. diag:future (block 306, above the as_of head 305) is still returned.
+    // The collection reads mutable latest state, including the event above the served name head.
     assert_eq!(
         event_kinds,
         vec![
@@ -136,39 +128,34 @@ async fn v2_get_diagnostic_events_paginates_and_rejects_cursor_mismatch() -> Res
     let payload: Value = read_json(filter_mismatch).await?;
     assert_eq!(payload["error"]["code"], json!("invalid_input"));
 
-    let snapshot_mismatch = v2_diag_events_response_for_database(
+    let at_rejected = v2_diag_events_response_for_database(
         &database,
         &format!(
             "/v2/diagnostics/events?namespace=ens&name=diag.eth&at=2023-11-14T22:18:23Z&page_size=1&cursor={next_cursor}"
         ),
     )
     .await?;
-    assert_eq!(snapshot_mismatch.status(), StatusCode::BAD_REQUEST);
-    let payload: Value = read_json(snapshot_mismatch).await?;
+    assert_eq!(at_rejected.status(), StatusCode::BAD_REQUEST);
+    let payload: Value = read_json(at_rejected).await?;
     assert_eq!(payload["error"]["code"], json!("invalid_input"));
+    assert_eq!(
+        payload["error"]["message"],
+        json!("at is not supported because collection routes read latest state")
+    );
 
     database.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
-async fn v2_get_diagnostic_events_honors_namespace_snapshot_and_filters() -> Result<()> {
-    let (database, ens_snapshot) = v2_diag_events_payload(
-        "/v2/diagnostics/events?namespace=ens&name=diag.eth&at=2023-11-14T22:18:23Z&finality=latest&page_size=10",
+async fn v2_get_diagnostic_events_honors_namespace_and_filters_without_snapshot_meta() -> Result<()> {
+    let (database, ens) = v2_diag_events_payload(
+        "/v2/diagnostics/events?namespace=ens&name=diag.eth&finality=latest&page_size=10",
     )
     .await?;
+    assert_eq!(ens["meta"], json!({}));
     assert_eq!(
-        ens_snapshot["meta"]["as_of"]["1"],
-        json!({
-            "block_number": 303,
-            "block_hash": "0xdiag303",
-            "timestamp": "2023-11-14T22:18:23Z"
-        })
-    );
-    // latest-only: `at` sets meta.as_of (block 303) but does NOT cut the event set — all
-    // diag.eth events are returned regardless of the snapshot block.
-    assert_eq!(
-        diagnostic_event_kinds(ens_snapshot["data"].as_array().expect("ens snapshot data")),
+        diagnostic_event_kinds(ens["data"].as_array().expect("ens data")),
         vec![
             "SurfaceBound",
             "SurfaceBound",
@@ -187,14 +174,7 @@ async fn v2_get_diagnostic_events_honors_namespace_snapshot_and_filters() -> Res
     assert_eq!(data.len(), 1);
     assert_eq!(data[0]["namespace"], json!("basenames"));
     assert_eq!(data[0]["event_identity"], json!("diag:basenames:registration"));
-    assert_eq!(
-        basenames["meta"]["as_of"]["8453"],
-        json!({
-            "block_number": 401,
-            "block_hash": "0xbasediag401",
-            "timestamp": "2023-11-14T22:20:01Z"
-        })
-    );
+    assert_eq!(basenames["meta"], json!({}));
 
     let filtered = v2_diag_events_payload_for_database(
         &database,

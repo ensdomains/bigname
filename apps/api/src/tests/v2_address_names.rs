@@ -8,14 +8,7 @@ async fn v2_get_address_names_returns_record_rows_with_relations_and_primary_fla
     assert_eq!(payload["page"]["page_size"], json!(50));
     assert_eq!(payload["page"]["total_count"], Value::Null);
     assert_eq!(payload["page"]["has_more"], json!(false));
-    assert_eq!(
-        payload["meta"]["as_of"]["1"],
-        json!({
-            "block_number": 105,
-            "block_hash": "0xname69",
-            "timestamp": "2026-04-17T00:00:45Z"
-        })
-    );
+    assert_eq!(payload["meta"], json!({}));
 
     let data = payload["data"]
         .as_array()
@@ -426,6 +419,10 @@ async fn v2_address_role_summary_requires_compatible_permission_publication() ->
     assert_eq!(response.status(), StatusCode::CONFLICT);
     let payload: Value = read_json(response).await?;
     assert_eq!(payload["error"]["code"], json!("stale"));
+    assert_eq!(
+        payload["error"]["message"],
+        json!("permission data publication is not compatible")
+    );
 
     database.cleanup().await
 }

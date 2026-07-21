@@ -8,9 +8,9 @@ use crate::AppState;
 use super::cursor::invalid_cursor_error;
 use super::events::{parse_events_filter, resolve_events_namespace};
 use super::{
-    Envelope, Page, QueryParamAllowlist, SnapshotReadResource, StrictQueryParams, V2Error,
-    V2Result, decode, encode, encode_at_token, events_cursor_payload, events_storage_cursor,
-    format_timestamp, resolve_v2_snapshot_for, snapshot_meta, v2_exact_name_snapshot_scope,
+    Envelope, Meta, Page, QueryParamAllowlist, StrictQueryParams, V2Error, V2Result, decode,
+    encode, events_cursor_payload, events_storage_cursor, format_timestamp,
+    validate_latest_collection_selectors,
 };
 
 pub(crate) struct DiagnosticEventsQueryParams;
@@ -65,25 +65,16 @@ pub(crate) async fn get_diagnostic_events(
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<Vec<DiagnosticEvent>>>> {
     let params = params.into_inner();
+    validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
     let namespace = resolve_events_namespace(&params)?;
     let parsed = parse_events_filter(&params, &namespace)?;
 
-    let scope = v2_exact_name_snapshot_scope(&state, &namespace, params.at.as_ref()).await?;
-    let selected_snapshot = resolve_v2_snapshot_for(
-        &state.pool,
-        &scope,
-        params.at.as_ref(),
-        params.finality,
-        SnapshotReadResource::DiagnosticData,
-    )
-    .await?;
-    let snapshot_token = encode_at_token(&selected_snapshot);
     let storage_cursor = params
         .cursor
         .as_deref()
         .map(|cursor| {
             let payload = decode(cursor)?;
-            events_storage_cursor(&payload, &parsed.cursor_filters, &snapshot_token)
+            events_storage_cursor(&payload, &parsed.cursor_filters)
         })
         .transpose()?;
 
@@ -107,21 +98,16 @@ pub(crate) async fn get_diagnostic_events(
         }
     })?;
 
-    let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
-        encode(&events_cursor_payload(
-            cursor,
-            &parsed.cursor_filters,
-            &snapshot_token,
-        ))
-    });
+    let next_cursor = storage_page
+        .next_cursor
+        .as_ref()
+        .map(|cursor| encode(&events_cursor_payload(cursor, &parsed.cursor_filters)));
     let has_more = next_cursor.is_some();
     let data = storage_page
         .rows
         .iter()
         .map(build_diagnostic_event)
         .collect();
-    let meta = snapshot_meta(&selected_snapshot)?;
-
     Ok(Json(Envelope {
         data,
         page: Some(Page {
@@ -131,7 +117,7 @@ pub(crate) async fn get_diagnostic_events(
             total_count: None,
             has_more,
         }),
-        meta,
+        meta: Meta::default(),
     }))
 }
 

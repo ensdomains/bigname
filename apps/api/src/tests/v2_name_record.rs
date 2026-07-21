@@ -2450,14 +2450,7 @@ async fn v2_get_subnames_returns_record_shaped_rows_in_display_name_order() -> R
     assert_eq!(payload["page"]["page_size"], json!(3));
     assert_eq!(payload["page"]["total_count"], Value::Null);
     assert_eq!(payload["page"]["has_more"], json!(false));
-    assert_eq!(
-        payload["meta"]["as_of"]["1"],
-        json!({
-            "block_number": 80,
-            "block_hash": "0xname50",
-            "timestamp": "2026-04-17T00:00:20Z"
-        })
-    );
+    assert_eq!(payload["meta"], json!({}));
 
     let data = payload["data"]
         .as_array()
@@ -2538,6 +2531,52 @@ async fn v2_get_subnames_paginates_with_opaque_cursor_without_overlap() -> Resul
 
     database.cleanup().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn v2_get_subnames_uses_current_sepolia_anchor_on_mixed_checkpoints() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_mixed_checkpoint_names(&database).await?;
+    let child_logical_name_id = format!("ens:child.{V2_SEPOLIA_SNAPSHOT_NAME}");
+    seed_v2_subnames_bound_child(
+        &database,
+        &child_logical_name_id,
+        "Child.SepoliaPin.eth",
+        "namehash:child.sepolia-pin.eth",
+        91,
+        Uuid::from_u128(0x7e23),
+        Uuid::from_u128(0x7e24),
+        Uuid::from_u128(0x7e25),
+        json!({
+            "registration": {
+                "status": "active",
+                "authority_kind": "ens_v2_registry"
+            }
+        }),
+    )
+    .await?;
+    bigname_storage::upsert_children_current_rows(
+        &database.pool,
+        &[v2_subnames_declared_child_row(
+            &format!("ens:{V2_SEPOLIA_SNAPSHOT_NAME}"),
+            &child_logical_name_id,
+            "Child.SepoliaPin.eth",
+            "namehash:child.sepolia-pin.eth",
+            905,
+            91,
+        )],
+    )
+    .await?;
+
+    let payload = v2_subnames_payload_for_database(
+        &database,
+        &format!("/v2/names/{V2_SEPOLIA_SNAPSHOT_NAME}/subnames"),
+    )
+    .await?;
+    assert_eq!(payload["meta"], json!({}));
+    assert_eq!(payload["data"][0]["name"], json!("child.sepolia-pin.eth"));
+
+    database.cleanup().await
 }
 
 #[tokio::test]
@@ -2702,7 +2741,7 @@ async fn v2_get_subnames_rejects_malformed_cursor() -> Result<()> {
 }
 
 #[tokio::test]
-async fn v2_get_subnames_rejects_wrong_sort_or_snapshot_cursor() -> Result<()> {
+async fn v2_get_subnames_rejects_wrong_sort_but_ignores_legacy_snapshot_component() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_subnames_fixture(&database).await?;
 
@@ -2734,7 +2773,7 @@ async fn v2_get_subnames_rejects_wrong_sort_or_snapshot_cursor() -> Result<()> {
         .context("v2 wrong-sort subnames cursor request failed")?;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-    let wrong_snapshot = crate::v2::encode(&crate::v2::CursorPayload::new(
+    let legacy_snapshot = crate::v2::encode(&crate::v2::CursorPayload::new(
         "display_name_asc",
         BTreeMap::from([
             ("namespace".to_owned(), "ens".to_owned()),
@@ -2747,20 +2786,23 @@ async fn v2_get_subnames_rejects_wrong_sort_or_snapshot_cursor() -> Result<()> {
                 "ens:alpha.parent.eth".to_owned(),
             ),
         ]),
-        Some("wrong-snapshot".to_owned()),
+        Some("legacy-snapshot".to_owned()),
     ));
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v2/names/parent.eth/subnames?cursor={wrong_snapshot}"
+                    "/v2/names/parent.eth/subnames?cursor={legacy_snapshot}"
                 ))
                 .body(Body::empty())
                 .expect("request must build"),
         )
         .await
-        .context("v2 wrong-snapshot subnames cursor request failed")?;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        .context("v2 legacy-snapshot subnames cursor request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["data"][0]["name"], json!("beta.parent.eth"));
+    assert_eq!(payload["meta"], json!({}));
 
     database.cleanup().await?;
     Ok(())

@@ -10,21 +10,21 @@ use crate::{AppState, normalize_inferred_route_name};
 
 use super::cursor::{cursor_value, invalid_cursor_error};
 use super::permission_support::{
-    apply_permissions_collection_support_meta, permission_support_for_resources,
+    apply_permissions_collection_support_meta, permission_read_error_to_v2,
+    permission_support_for_resources,
 };
 use super::{
-    AddressNameGrant, CursorPayload, Envelope, Page, QueryParamAllowlist, QueryParams,
-    SnapshotReadResource, StrictQueryParams, V2Error, V2Result, api_error_to_v2_for_resource,
-    decode, encode, encode_at_token, permission_powers_value, permission_scope_value,
-    resolve_v2_snapshot_for, snapshot_meta, v2_exact_name_snapshot_scope,
+    AddressNameGrant, CursorPayload, Envelope, Meta, Page, QueryParamAllowlist, QueryParams,
+    StrictQueryParams, V2Error, V2Result, decode, encode, permission_powers_value,
+    permission_scope_value, validate_latest_collection_selectors,
 };
 
 #[path = "permissions/lineage.rs"]
 mod lineage;
 use lineage::permission_lineage;
-#[path = "permissions/snapshot.rs"]
-mod snapshot;
-use snapshot::load_name_row_for_snapshot;
+#[path = "permissions/current_name.rs"]
+mod current_name;
+use current_name::load_current_name_row;
 
 const PERMISSIONS_SORT: &str = "address_registration_scope_asc";
 const NAMESPACE_FILTER_KEY: &str = "namespace";
@@ -102,47 +102,29 @@ pub(crate) async fn get_permissions(
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<Vec<PermissionRow>>>> {
     let params = params.into_inner();
+    validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
     let include_lineage = permissions_include_lineage(&params.include)?;
     let filter_inputs = permissions_filter_inputs(&params)?;
 
-    let scope =
-        v2_exact_name_snapshot_scope(&state, &filter_inputs.namespace, params.at.as_ref()).await?;
-    let selected_snapshot = resolve_v2_snapshot_for(
-        &state.pool,
-        &scope,
-        params.at.as_ref(),
-        params.finality,
-        SnapshotReadResource::Permissions,
-    )
-    .await?;
     let permission_read = crate::begin_permissions_current_read(&state.pool, "/v2/permissions")
         .await
-        .map_err(|error| api_error_to_v2_for_resource(error, SnapshotReadResource::Permissions))?;
-    let resolved = resolve_permissions_filter(
-        &state,
-        &params,
-        include_lineage,
-        &filter_inputs,
-        &selected_snapshot,
-    )
-    .await?;
-    let snapshot_token = encode_at_token(&selected_snapshot);
+        .map_err(permission_read_error_to_v2)?;
+    let resolved =
+        resolve_permissions_filter(&state, &params, include_lineage, &filter_inputs).await?;
     let storage_cursor = params
         .cursor
         .as_deref()
         .map(|cursor| {
             let payload = decode(cursor)?;
-            permissions_storage_cursor(&payload, &resolved.cursor_filters, &snapshot_token)
+            permissions_storage_cursor(&payload, &resolved.cursor_filters)
         })
         .transpose()?;
 
     if resolved.known_empty {
-        let response = empty_permissions_response(&params, &selected_snapshot)?;
+        let response = empty_permissions_response(&params);
         crate::finish_permissions_current_read(&state.pool, "/v2/permissions", permission_read)
             .await
-            .map_err(|error| {
-                api_error_to_v2_for_resource(error, SnapshotReadResource::Permissions)
-            })?;
+            .map_err(permission_read_error_to_v2)?;
         return Ok(response);
     }
 
@@ -182,7 +164,6 @@ pub(crate) async fn get_permissions(
         encode(&permissions_cursor_payload(
             cursor,
             &resolved.cursor_filters,
-            &snapshot_token,
         ))
     });
     let has_more = next_cursor.is_some();
@@ -191,7 +172,7 @@ pub(crate) async fn get_permissions(
         .iter()
         .map(|row| build_permission_row(row, current_names.get(&row.resource_id), include_lineage))
         .collect::<V2Result<Vec<_>>>()?;
-    let mut meta = snapshot_meta(&selected_snapshot)?;
+    let mut meta = Meta::default();
     let permission_support =
         permission_support_for_resources(&support_resource_ids, &permission_summaries);
     apply_permissions_collection_support_meta(
@@ -213,17 +194,12 @@ pub(crate) async fn get_permissions(
     });
     crate::finish_permissions_current_read(&state.pool, "/v2/permissions", permission_read)
         .await
-        .map_err(|error| api_error_to_v2_for_resource(error, SnapshotReadResource::Permissions))?;
+        .map_err(permission_read_error_to_v2)?;
     Ok(response)
 }
 
-fn empty_permissions_response(
-    params: &QueryParams,
-    selected_snapshot: &bigname_storage::SelectedSnapshot,
-) -> V2Result<Json<Envelope<Vec<PermissionRow>>>> {
-    let meta = snapshot_meta(selected_snapshot)?;
-
-    Ok(Json(Envelope {
+fn empty_permissions_response(params: &QueryParams) -> Json<Envelope<Vec<PermissionRow>>> {
+    Json(Envelope {
         data: Vec::new(),
         page: Some(Page {
             cursor: params.cursor.clone(),
@@ -232,8 +208,8 @@ fn empty_permissions_response(
             total_count: None,
             has_more: false,
         }),
-        meta,
-    }))
+        meta: Meta::default(),
+    })
 }
 
 fn permissions_filter_inputs(params: &QueryParams) -> V2Result<PermissionsFilterInputs> {
@@ -271,17 +247,11 @@ async fn resolve_permissions_filter(
     params: &QueryParams,
     include_lineage: bool,
     inputs: &PermissionsFilterInputs,
-    selected_snapshot: &bigname_storage::SelectedSnapshot,
 ) -> V2Result<ResolvedPermissionsFilter> {
     let resolved_name_row = match inputs.name_filter.as_ref() {
         Some(name_filter) => Some(
-            load_name_row_for_snapshot(
-                state,
-                &name_filter.namespace,
-                &name_filter.normalized_name,
-                selected_snapshot,
-            )
-            .await?,
+            load_current_name_row(state, &name_filter.namespace, &name_filter.normalized_name)
+                .await?,
         ),
         None => None,
     };
@@ -363,7 +333,6 @@ pub(crate) fn build_permission_row(
 fn permissions_cursor_payload(
     cursor: &PermissionsCurrentAccountResourceCursor,
     filters: &BTreeMap<String, String>,
-    snapshot_token: &str,
 ) -> CursorPayload {
     CursorPayload::new(
         PERMISSIONS_SORT,
@@ -376,19 +345,15 @@ fn permissions_cursor_payload(
             ),
             (SCOPE_CURSOR_KEY.to_owned(), cursor.scope.clone()),
         ]),
-        Some(snapshot_token.to_owned()),
+        None,
     )
 }
 
 fn permissions_storage_cursor(
     payload: &CursorPayload,
     expected_filters: &BTreeMap<String, String>,
-    snapshot_token: &str,
 ) -> V2Result<PermissionsCurrentAccountResourceCursor> {
     if payload.sort != PERMISSIONS_SORT {
-        return Err(invalid_cursor_error());
-    }
-    if payload.snapshot.as_deref() != Some(snapshot_token) {
         return Err(invalid_cursor_error());
     }
     if &payload.filters != expected_filters {
@@ -490,38 +455,48 @@ mod tests {
     fn permissions_cursor_payload_round_trips_storage_cursor() {
         let cursor = sample_storage_cursor();
         let filters = sample_filters();
-        let payload = permissions_cursor_payload(&cursor, &filters, "snapshot-1");
+        let payload = permissions_cursor_payload(&cursor, &filters);
 
         assert_eq!(payload.filters, filters);
         assert_eq!(
-            permissions_storage_cursor(&payload, &sample_filters(), "snapshot-1")
-                .expect("cursor must decode"),
+            permissions_storage_cursor(&payload, &sample_filters()).expect("cursor must decode"),
             cursor
         );
+        assert!(payload.snapshot.is_none());
     }
 
     #[test]
-    fn permissions_cursor_rejects_wrong_sort_snapshot_or_filters() {
+    fn permissions_cursor_rejects_wrong_sort_or_filters() {
         let cursor = sample_storage_cursor();
         let filters = sample_filters();
 
-        let mut payload = permissions_cursor_payload(&cursor, &filters, "snapshot-1");
+        let mut payload = permissions_cursor_payload(&cursor, &filters);
         payload.sort = "name".to_owned();
-        assert!(permissions_storage_cursor(&payload, &filters, "snapshot-1").is_err());
+        assert!(permissions_storage_cursor(&payload, &filters).is_err());
 
-        let mut payload = permissions_cursor_payload(&cursor, &filters, "snapshot-1");
-        payload.snapshot = Some("snapshot-2".to_owned());
-        assert!(permissions_storage_cursor(&payload, &filters, "snapshot-1").is_err());
-
-        let mut payload = permissions_cursor_payload(&cursor, &filters, "snapshot-1");
+        let mut payload = permissions_cursor_payload(&cursor, &filters);
         payload
             .filters
             .insert("namespace".to_owned(), "ens".to_owned());
-        assert!(permissions_storage_cursor(&payload, &filters, "snapshot-1").is_err());
+        assert!(permissions_storage_cursor(&payload, &filters).is_err());
 
-        let mut payload = permissions_cursor_payload(&cursor, &filters, "snapshot-1");
+        let mut payload = permissions_cursor_payload(&cursor, &filters);
         payload.filters.remove("address");
-        assert!(permissions_storage_cursor(&payload, &filters, "snapshot-1").is_err());
+        assert!(permissions_storage_cursor(&payload, &filters).is_err());
+    }
+
+    #[test]
+    fn permissions_cursor_ignores_legacy_snapshot_component() {
+        let cursor = sample_storage_cursor();
+        let filters = sample_filters();
+        let mut payload = permissions_cursor_payload(&cursor, &filters);
+        payload.snapshot = Some("legacy-snapshot".to_owned());
+
+        assert_eq!(
+            permissions_storage_cursor(&payload, &filters)
+                .expect("legacy snapshot component must not bind a latest-state cursor"),
+            cursor
+        );
     }
 
     #[test]

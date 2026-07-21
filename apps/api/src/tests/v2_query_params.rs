@@ -67,6 +67,45 @@ async fn v2_routes_reject_known_but_inapplicable_query_params() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_latest_state_collections_reject_snapshot_selectors_family_wide() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+
+    for base_uri in V2_LATEST_STATE_COLLECTION_URIS {
+        for (selector, expected_message) in [
+            (
+                "at=2026-07-21T00:00:00Z",
+                "at is not supported because collection routes read latest state",
+            ),
+            (
+                "finality=safe",
+                "finality must be latest because collection routes read latest state",
+            ),
+            (
+                "finality=finalized",
+                "finality must be latest because collection routes read latest state",
+            ),
+        ] {
+            let separator = if base_uri.contains('?') { '&' } else { '?' };
+            let uri = format!("{base_uri}{separator}{selector}");
+            let response = app_router(database.app_state())
+                .oneshot(
+                    Request::builder()
+                        .uri(&uri)
+                        .body(Body::empty())
+                        .expect("request must build"),
+                )
+                .await
+                .with_context(|| format!("v2 latest-state collection request failed for {uri}"))?;
+
+            assert_v2_invalid_input(response, &uri, expected_message).await?;
+        }
+    }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn v2_documented_query_params_remain_accepted_for_positive_controls() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
 
@@ -194,6 +233,17 @@ const V2_STRICT_QUERY_CASES: &[V2StrictQueryCase] = &[
         uri: "/v2/diagnostics/events",
         expected_message: "unknown query parameter: bogus_param",
     },
+];
+
+const V2_LATEST_STATE_COLLECTION_URIS: &[&str] = &[
+    "/v2/names/alice.eth/subnames",
+    "/v2/names/alice.eth/history",
+    "/v2/permissions?address=0x00000000000000000000000000000000000000aa",
+    "/v2/addresses/0x00000000000000000000000000000000000000aa/names",
+    "/v2/addresses/0x00000000000000000000000000000000000000aa/history",
+    "/v2/search?q=alice",
+    "/v2/events",
+    "/v2/diagnostics/events",
 ];
 
 async fn v2_strict_query_response(

@@ -33,7 +33,6 @@ pub(crate) struct AddressNamesCursorBinding<'a> {
     pub(crate) q: Option<&'a str>,
     pub(crate) sort: AddressNamesSort,
     pub(crate) order: SortOrder,
-    pub(crate) snapshot_token: &'a str,
 }
 
 pub(crate) fn address_names_cursor_payload(
@@ -63,7 +62,7 @@ pub(crate) fn address_names_cursor_payload(
             ),
         ]),
         cursor_last_item(cursor),
-        Some(binding.snapshot_token.to_owned()),
+        None,
     )
 }
 
@@ -72,9 +71,6 @@ pub(crate) fn address_names_storage_cursor(
     binding: &AddressNamesCursorBinding<'_>,
 ) -> V2Result<AddressNamesCurrentSortedCursor> {
     if payload.sort != binding.sort.as_str() {
-        return Err(invalid_cursor_error());
-    }
-    if payload.snapshot.as_deref() != Some(binding.snapshot_token) {
         return Err(invalid_cursor_error());
     }
     if payload.filters.len() != 6

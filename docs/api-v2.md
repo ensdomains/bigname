@@ -108,8 +108,8 @@ step-3-gate vocabulary needed by the route schemas:
 | `data` | envelope root payload, and event-row payload when nested inside an event row | compact event payload objects |
 
 `GET /v2/permissions` and `GET /v2/addresses/{address}/names?include=role_summary`
-require the compatible projection-owned permission publication version after
-snapshot selection. Missing or older versions return `409 stale`. These reads
+require the compatible projection-owned permission publication version before
+permission rows are served. Missing or older versions return `409 stale`. These reads
 also verify the publication's read-consistency revision is unchanged before
 returning; an interleaved keyed or full publication returns `409 stale` rather
 than a mixed-generation response. These are schema/publication compatibility
@@ -181,14 +181,16 @@ Rules:
 - `total_count` is nullable. It is populated where a precomputed count makes
   it cheap or where a route explicitly documents `include=total_count`. Routes
   must not run unconditional full counts on the request path to fill it.
-- `meta` is always present. Routes that read chain-derived state include
-  `meta.as_of` and `meta.as_of_token` when they can attribute at least one
-  served snapshot-pinned chain position; control-plane routes (`/v2/status`,
-  `/v2/namespaces/{namespace}`), verified name-profile responses served by the
-  route-local on-demand fallback, and primary-name responses served by the
-  route-local on-demand fallback omit both. `meta.as_of` is human-readable
-  staleness attribution. `meta.as_of_token` is opaque and is the value to pass
-  to `at` when a route supports snapshot replay. `meta.completeness`,
+- `meta` is always present. Single-resource routes that read chain-derived state
+  include `meta.as_of` and `meta.as_of_token` when they can attribute at least
+  one served snapshot-pinned chain position. Top-level collection routes omit
+  both because their mutable latest-state rows are not bound to one snapshot.
+  Control-plane routes (`/v2/status`, `/v2/namespaces/{namespace}`), verified
+  name-profile responses served by the route-local on-demand fallback, and
+  primary-name responses served by the route-local on-demand fallback also
+  omit both. `meta.as_of` is human-readable staleness attribution on routes
+  that provide it. `meta.as_of_token` is opaque and is the value to pass to
+  `at` when a route supports snapshot replay. `meta.completeness`,
   `meta.unsupported_fields`, and `meta.unsupported_reason` appear only when the
   read is not clean. `meta.source` appears when the route supports `source`.
 - `meta.unsupported_fields` names response-level sections or expansions the
@@ -259,17 +261,19 @@ Common parameter rules:
 
 | Parameter | Applies to | Values |
 | --- | --- | --- |
-| `at` | Tier-2 snapshot reads: names, records, subnames, history, permissions, address name/history collections, search, events, and resolver overview; diagnostics exact-name snapshot/explain routes; not lookup, status, primary-name, or namespace metadata | RFC 3339 timestamp, or the URL-safe opaque snapshot token from `meta.as_of_token` |
-| `finality` | snapshot-read routes and diagnostics exact-name snapshot/explain routes; not lookup, status, primary-name, or namespace metadata | `latest` (default), `safe`, `finalized` |
+| `at` | Tier-2 single-resource snapshot reads: names, records, and resolver overview; diagnostics exact-name snapshot/explain routes. Top-level collection routes recognize `at` only to return the temporary latest-state limitation error. Lookup, status, primary-name, and namespace metadata do not accept it. | RFC 3339 timestamp, or the URL-safe opaque snapshot token from `meta.as_of_token` |
+| `finality` | Single-resource snapshot reads and diagnostics exact-name snapshot/explain routes accept `latest` (default), `safe`, and `finalized`. Top-level collection routes accept only omitted or explicit `latest`. Lookup, status, primary-name, and namespace metadata do not accept it. | `latest` (default), `safe`, `finalized` where supported |
 | `source` | names, records, primary-name | names and records use `indexed` (default) or `verified`; the records route also accepts `auto`; primary-name omits `source` to return all supported source answers and may use `indexed` or `verified` to request a subset |
 | `namespace` | name-inferred, address-anchored, and collection routes | explicit override or filter |
 | `include` | route-documented expansions | per-route allowlist |
 | `sort`, `order` | paginated routes that declare a sort set | route-documented field set plus `asc`/`desc` |
 | `cursor`, `page_size` | every paginated route | opaque cursor; default 50, max 200 |
 
-No advertised-but-rejected parameters are part of the `v2` contract.
 Unknown or undocumented query parameters are rejected with `400 invalid_input`
-on every `v2` route.
+on every `v2` route. As a documented temporary exception, latest-state
+collection routes recognize `at`, `finality=safe`, and `finality=finalized` so
+they can return the limitation errors defined below instead of implying
+snapshot support.
 Snapshot-pinned reads require the ADR 0003 slice-3 snapshot-service enabler;
 ADR 0006 rollout step 3 includes that read-layer work.
 
@@ -299,21 +303,27 @@ Rules:
 ## Finality And Snapshots
 
 `finality` values are `latest`, `safe`, and `finalized`. Snapshot selection is
-uniform across snapshot-read routes. Each chain-derived response carries
-`meta.as_of`, keyed by stringified `chain_id`, and `meta.as_of_token`, an
-opaque token that can round-trip as `at` to pin exact per-chain positions.
-Tokens must cover every required slot in the target route's snapshot scope and
-must not carry extra slots outside that scope. A single-chain token from a
-namespace-scoped read is rejected by namespace-omitted `/v2/search`, because
-the union search scope requires every public namespace slot. A multi-chain
-token from namespace-omitted search replays on the same union search and is
-rejected by single-namespace routes whose scope does not include every token
-slot.
-Event, history, and other collection routes use `at`/`finality` to resolve
-`meta.as_of`/`meta.as_of_token`, but their row sets currently read the latest
-projection or normalized-event rows unless the route section explicitly says
-otherwise. True row-bounding by `at`, `safe`, or `finalized` is deferred to
-storage follow-up work.
+uniform across single-resource snapshot-read routes. Each such chain-derived
+response carries `meta.as_of`, keyed by stringified `chain_id`, and
+`meta.as_of_token`, an opaque token that can round-trip as `at` to pin exact
+per-chain positions. Tokens must cover every required slot in the target
+route's snapshot scope and must not carry extra slots outside that scope.
+
+Top-level collections page over mutable latest-state tables. They therefore
+omit `meta.as_of` and `meta.as_of_token`, and their cursors do not claim a
+snapshot bound. Newly issued collection cursors carry no snapshot token; a
+legacy cursor's snapshot component is ignored rather than treated as a
+validity condition. Omitted `finality` and explicit `finality=latest` are accepted.
+An `at` selector returns `400 invalid_input` with
+`at is not supported because collection routes read latest state`.
+`finality=safe` and `finality=finalized` return `400 invalid_input` with
+`finality must be latest because collection routes read latest state`.
+
+This is issue #188 option 2. Option 1 is the storage follow-up: bind every page
+to an immutable publication revision and return explicit cursor-expired
+semantics when that revision is no longer available. Once revision-bound
+cursors and row reads land, the collection `at` and historical `finality`
+restrictions lift and collection snapshot metadata can be restored.
 
 `POST /v2/lookup` is a current-state read. It does not accept `at` or
 `finality`; when a served head is available, its `meta.as_of` and
@@ -336,8 +346,12 @@ The `chain_positions` query parameter from `v1` does not exist in `v2`.
 ## Cursors And Pagination
 
 Cursors are opaque and versioned. They are not bound to the route path string,
-so route evolution does not invalidate outstanding cursors. Cursors remain
-stable under replay for the same snapshot.
+so route evolution does not invalidate outstanding cursors. Top-level
+collection cursors bind the collection anchor, namespace, filters, and sort,
+but not a snapshot. They preserve keyset position across requests without
+claiming that the mutable dataset is frozen. A legacy collection cursor's
+snapshot component is ignored. Snapshot-bound cursor semantics remain on
+single-resource responses with nested pagination where documented.
 
 Every collection uses `cursor`, `next_cursor`, `page_size`, nullable
 `total_count`, and `has_more`. Default `page_size` is 50; maximum is 200.

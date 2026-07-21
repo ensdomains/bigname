@@ -11,10 +11,9 @@ use crate::AppState;
 use super::address_names::relation_set_to_storage;
 use super::cursor::{cursor_value, invalid_cursor_error};
 use super::{
-    CursorPayload, Envelope, Event, HistoryScope, Page, QueryParamAllowlist, RelationSet,
-    SnapshotReadResource, StrictQueryParams, V2Error, V2Result, api_error_to_v2, build_event,
-    decode, encode, encode_at_token, history_storage_scope, resolve_v2_snapshot_for, snapshot_meta,
-    v2_exact_name_snapshot_scope,
+    CursorPayload, Envelope, Event, HistoryScope, Meta, Page, QueryParamAllowlist, RelationSet,
+    StrictQueryParams, V2Error, V2Result, api_error_to_v2, build_event, decode, encode,
+    history_storage_scope, validate_latest_collection_selectors,
 };
 
 const ADDRESS_HISTORY_SORT: &str = "chain_position_desc";
@@ -47,6 +46,7 @@ pub(crate) async fn get_address_history(
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<Vec<Event>>>> {
     let params = params.into_inner();
+    validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
     let normalized_address =
         crate::parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
     let namespace = params.namespace.clone().unwrap_or_else(|| "ens".to_owned());
@@ -58,22 +58,11 @@ pub(crate) async fn get_address_history(
     let storage_relations = (!storage_relations.is_empty()).then_some(storage_relations.as_slice());
     let storage_scope = history_storage_scope(params.scope);
 
-    let scope = v2_exact_name_snapshot_scope(&state, &namespace, params.at.as_ref()).await?;
-    let selected_snapshot = resolve_v2_snapshot_for(
-        &state.pool,
-        &scope,
-        params.at.as_ref(),
-        params.finality,
-        SnapshotReadResource::AddressHistory,
-    )
-    .await?;
-    let snapshot_token = encode_at_token(&selected_snapshot);
     let cursor_binding = AddressHistoryCursorBinding {
         address: &normalized_address,
         namespace: &namespace,
         relation: params.relation.as_ref(),
         scope: params.scope,
-        snapshot_token: &snapshot_token,
     };
     let storage_cursor = params
         .cursor
@@ -113,8 +102,6 @@ pub(crate) async fn get_address_history(
         .map(|cursor| encode(&address_history_cursor_payload(cursor, &cursor_binding)));
     let has_more = next_cursor.is_some();
     let data = storage_page.rows.iter().filter_map(build_event).collect();
-    let meta = snapshot_meta(&selected_snapshot)?;
-
     Ok(Json(Envelope {
         data,
         page: Some(Page {
@@ -124,7 +111,7 @@ pub(crate) async fn get_address_history(
             total_count: None,
             has_more,
         }),
-        meta,
+        meta: Meta::default(),
     }))
 }
 
@@ -134,7 +121,6 @@ pub(crate) struct AddressHistoryCursorBinding<'a> {
     pub(crate) namespace: &'a str,
     pub(crate) relation: Option<&'a RelationSet>,
     pub(crate) scope: HistoryScope,
-    pub(crate) snapshot_token: &'a str,
 }
 
 pub(crate) fn address_history_cursor_payload(
@@ -154,7 +140,7 @@ pub(crate) fn address_history_cursor_payload(
                 cursor.event_identity.clone(),
             ),
         ]),
-        Some(binding.snapshot_token.to_owned()),
+        None,
     )
 }
 
@@ -163,9 +149,6 @@ pub(crate) fn address_history_storage_cursor(
     binding: &AddressHistoryCursorBinding<'_>,
 ) -> V2Result<HistoryCursor> {
     if payload.sort != ADDRESS_HISTORY_SORT {
-        return Err(invalid_cursor_error());
-    }
-    if payload.snapshot.as_deref() != Some(binding.snapshot_token) {
         return Err(invalid_cursor_error());
     }
     if payload.filters != address_history_cursor_filters(binding) {
@@ -232,7 +215,6 @@ mod tests {
             namespace: "ens",
             relation: Some(relation),
             scope: HistoryScope::Both,
-            snapshot_token: "snapshot-1",
         }
     }
 
@@ -255,6 +237,7 @@ mod tests {
             address_history_storage_cursor(&payload, &binding).expect("cursor must decode"),
             cursor
         );
+        assert!(payload.snapshot.is_none());
     }
 
     #[test]
@@ -274,16 +257,12 @@ mod tests {
     }
 
     #[test]
-    fn address_history_cursor_rejects_wrong_sort_snapshot_or_filters() {
+    fn address_history_cursor_rejects_wrong_sort_or_filters() {
         let cursor = sample_cursor();
         let binding = sample_binding();
 
         let mut payload = address_history_cursor_payload(&cursor, &binding);
         payload.sort = "name".to_owned();
-        assert!(address_history_storage_cursor(&payload, &binding).is_err());
-
-        let mut payload = address_history_cursor_payload(&cursor, &binding);
-        payload.snapshot = Some("snapshot-2".to_owned());
         assert!(address_history_storage_cursor(&payload, &binding).is_err());
 
         let mut payload = address_history_cursor_payload(&cursor, &binding);
@@ -301,5 +280,19 @@ mod tests {
         let mut payload = address_history_cursor_payload(&cursor, &binding);
         payload.filters.remove("relation");
         assert!(address_history_storage_cursor(&payload, &binding).is_err());
+    }
+
+    #[test]
+    fn address_history_cursor_ignores_legacy_snapshot_component() {
+        let cursor = sample_cursor();
+        let binding = sample_binding();
+        let mut payload = address_history_cursor_payload(&cursor, &binding);
+        payload.snapshot = Some("legacy-snapshot".to_owned());
+
+        assert_eq!(
+            address_history_storage_cursor(&payload, &binding)
+                .expect("legacy snapshot component must not bind a latest-state cursor"),
+            cursor
+        );
     }
 }

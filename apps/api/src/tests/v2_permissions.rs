@@ -15,6 +15,10 @@ async fn v2_permissions_require_compatible_permission_publication() -> Result<()
     assert_eq!(response.status(), StatusCode::CONFLICT);
     let payload: Value = read_json(response).await?;
     assert_eq!(payload["error"]["code"], json!("stale"));
+    assert_eq!(
+        payload["error"]["message"],
+        json!("permission data publication is not compatible")
+    );
 
     database.cleanup().await
 }
@@ -73,14 +77,8 @@ async fn v2_get_permissions_maps_rows_and_lineage() -> Result<()> {
     assert_eq!(payload["page"]["page_size"], json!(10));
     assert_eq!(payload["page"]["total_count"], Value::Null);
     assert_eq!(payload["page"]["has_more"], json!(false));
-    assert_eq!(
-        payload["meta"]["as_of"]["1"],
-        json!({
-            "block_number": 130,
-            "block_hash": "0xname82",
-            "timestamp": "2026-04-17T00:00:10Z"
-        })
-    );
+    assert!(payload["meta"].get("as_of").is_none());
+    assert!(payload["meta"].get("as_of_token").is_none());
     assert_eq!(payload["meta"]["completeness"], json!("partial"));
     assert_eq!(
         payload["meta"]["unsupported_reason"],
@@ -266,79 +264,89 @@ async fn v2_get_permissions_filters_by_name_registration_and_address() -> Result
 }
 
 #[tokio::test]
-async fn v2_get_permissions_name_filter_resolves_at_selected_snapshot() -> Result<()> {
+async fn v2_get_permissions_non_name_filters_do_not_require_chain_checkpoint() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_permissions_fixture(&database).await?;
-    seed_v2_permissions_sepolia_checkpoint(&database).await?;
+    sqlx::query("DELETE FROM chain_checkpoints")
+        .execute(&database.pool)
+        .await?;
+
+    for uri in [
+        format!("/v2/permissions?address={V2_PERMISSIONS_SUBJECT}"),
+        format!(
+            "/v2/permissions?registration_id={}",
+            v2_permissions_current_resource_id()
+        ),
+    ] {
+        let response = v2_permissions_response_for_database(&database, &uri).await?;
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        let payload: Value = read_json(response).await?;
+        assert!(!payload["data"].as_array().unwrap().is_empty(), "{uri}");
+        assert!(payload["meta"].get("as_of").is_none(), "{uri}");
+        assert!(payload["meta"].get("as_of_token").is_none(), "{uri}");
+    }
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_get_permissions_name_filter_uses_current_registration_without_snapshot_meta() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
     let current_resource_id = v2_permissions_current_resource_id();
 
-    let no_at =
+    let payload =
         v2_permissions_payload_for_database(&database, "/v2/permissions?name=Perms.eth").await?;
-    let no_at_rows = no_at["data"]
+    let rows = payload["data"]
         .as_array()
-        .expect("no-at name-filtered permissions data");
-    assert_eq!(no_at_rows.len(), 5);
+        .expect("name-filtered permissions data");
+    assert_eq!(rows.len(), 5);
     assert!(
-        no_at_rows
+        rows
             .iter()
             .all(|row| row["registration_id"] == json!(current_resource_id.to_string()))
     );
-    assert_eq!(
-        no_at["meta"]["as_of"]["1"],
-        json!({
-            "block_number": 130,
-            "block_hash": "0xname82",
-            "timestamp": "2026-04-17T00:00:10Z"
-        })
-    );
-    assert!(no_at["meta"]["as_of"].get("11155111").is_none());
-
-    let sepolia_at = v2_permissions_sepolia_snapshot_token()?;
-    let sepolia = v2_permissions_payload_for_database(
-        &database,
-        &format!("/v2/permissions?name=Perms.eth&at={sepolia_at}"),
-    )
-    .await?;
-    assert_eq!(sepolia["data"], json!([]));
-    assert_eq!(sepolia["page"]["has_more"], json!(false));
-    assert_eq!(sepolia["page"]["next_cursor"], Value::Null);
-    assert_eq!(
-        sepolia["meta"]["as_of"]["11155111"],
-        json!({
-            "block_number": V2_PERMISSIONS_SEPOLIA_BLOCK,
-            "block_hash": V2_PERMISSIONS_SEPOLIA_HASH,
-            "timestamp": V2_PERMISSIONS_SEPOLIA_TIMESTAMP
-        })
-    );
-    assert!(sepolia["meta"]["as_of"].get("1").is_none());
+    assert!(payload["meta"].get("as_of").is_none());
+    assert!(payload["meta"].get("as_of_token").is_none());
 
     database.cleanup().await?;
     Ok(())
 }
 
 #[tokio::test]
-async fn v2_get_permissions_name_filter_preserves_same_profile_stale() -> Result<()> {
+async fn v2_get_permissions_name_filter_uses_current_sepolia_anchor_on_mixed_checkpoints()
+-> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_permissions_fixture(&database).await?;
-    seed_v2_permissions_mainnet_rewind_checkpoint(&database).await?;
-
-    let stale_at = v2_permissions_mainnet_rewind_snapshot_token()?;
-    let response = v2_permissions_response_for_database(
-        &database,
-        &format!("/v2/permissions?name=Perms.eth&at={stale_at}"),
+    seed_v2_mixed_checkpoint_names(&database).await?;
+    let resource_id = Uuid::from_u128(0x7e20);
+    bigname_storage::upsert_permissions_current_rows(
+        &database.pool,
+        &[permission_current_row(
+            resource_id,
+            V2_PERMISSIONS_SUBJECT,
+            PermissionScope::Resource,
+            1,
+            V2_SEPOLIA_SNAPSHOT_BLOCK,
+        )],
     )
     .await?;
+    bigname_storage::upsert_permissions_current_resource_summary(
+        &database.pool,
+        &permission_current_resource_summary(resource_id, Some("registrar")),
+    )
+    .await?;
+    mark_permissions_current_projection_ready(&database).await?;
 
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let payload: Value = read_json(response).await?;
-    assert_eq!(payload["error"]["code"], json!("stale"));
-    assert_eq!(
-        payload["error"]["message"],
-        json!("requested snapshot is not available for permissions")
-    );
+    let payload = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v2/permissions?name={V2_SEPOLIA_SNAPSHOT_NAME}"),
+    )
+    .await?;
+    assert_eq!(payload["data"][0]["registration_id"], json!(resource_id));
+    assert!(payload["meta"].get("as_of").is_none());
+    assert!(payload["meta"].get("as_of_token").is_none());
 
-    database.cleanup().await?;
-    Ok(())
+    database.cleanup().await
 }
 
 #[tokio::test]
@@ -474,12 +482,6 @@ async fn v2_permissions_empty_resource_fails_closed_from_typed_support_summary()
 
 const V2_PERMISSIONS_SUBJECT: &str = "0x0000000000000000000000000000000000000cc1";
 const V2_PERMISSIONS_OTHER_SUBJECT: &str = "0x0000000000000000000000000000000000000cc2";
-const V2_PERMISSIONS_MAINNET_REWIND_BLOCK: i64 = 129;
-const V2_PERMISSIONS_MAINNET_REWIND_HASH: &str = "0xv2-permissions-mainnet-rewind";
-const V2_PERMISSIONS_MAINNET_REWIND_TIMESTAMP: &str = "2026-04-17T00:00:09Z";
-const V2_PERMISSIONS_SEPOLIA_BLOCK: i64 = 111_551_130;
-const V2_PERMISSIONS_SEPOLIA_HASH: &str = "0xv2-permissions-sepolia";
-const V2_PERMISSIONS_SEPOLIA_TIMESTAMP: &str = "2026-04-17T00:20:30Z";
 
 async fn v2_permissions_payload(uri: &str) -> Result<(TestDatabase, Value)> {
     let database = TestDatabase::new_migrated().await?;
@@ -665,76 +667,6 @@ async fn seed_v2_permissions_fixture(database: &TestDatabase) -> Result<()> {
     mark_permissions_current_projection_ready(database).await?;
 
     Ok(())
-}
-
-async fn seed_v2_permissions_sepolia_checkpoint(database: &TestDatabase) -> Result<()> {
-    database
-        .seed_snapshot_selector_chain_positions(&json!({
-            "ethereum-sepolia": {
-                "chain_id": "ethereum-sepolia",
-                "block_number": V2_PERMISSIONS_SEPOLIA_BLOCK,
-                "block_hash": V2_PERMISSIONS_SEPOLIA_HASH,
-                "timestamp": V2_PERMISSIONS_SEPOLIA_TIMESTAMP
-            }
-        }))
-        .await
-}
-
-async fn seed_v2_permissions_mainnet_rewind_checkpoint(database: &TestDatabase) -> Result<()> {
-    database
-        .seed_snapshot_selector_chain_positions(&json!({
-            "ethereum": {
-                "chain_id": "ethereum-mainnet",
-                "block_number": V2_PERMISSIONS_MAINNET_REWIND_BLOCK,
-                "block_hash": V2_PERMISSIONS_MAINNET_REWIND_HASH,
-                "timestamp": V2_PERMISSIONS_MAINNET_REWIND_TIMESTAMP
-            }
-        }))
-        .await
-}
-
-fn v2_permissions_mainnet_rewind_snapshot_token() -> Result<String> {
-    v2_permissions_at_token(
-        "ethereum",
-        "ethereum-mainnet",
-        V2_PERMISSIONS_MAINNET_REWIND_BLOCK,
-        V2_PERMISSIONS_MAINNET_REWIND_HASH,
-        V2_PERMISSIONS_MAINNET_REWIND_TIMESTAMP,
-    )
-}
-
-fn v2_permissions_sepolia_snapshot_token() -> Result<String> {
-    v2_permissions_at_token(
-        "ethereum-sepolia",
-        "ethereum-sepolia",
-        V2_PERMISSIONS_SEPOLIA_BLOCK,
-        V2_PERMISSIONS_SEPOLIA_HASH,
-        V2_PERMISSIONS_SEPOLIA_TIMESTAMP,
-    )
-}
-
-fn v2_permissions_at_token(
-    slot: &str,
-    chain_id: &str,
-    block_number: i64,
-    block_hash: &str,
-    timestamp: &str,
-) -> Result<String> {
-    let position = bigname_storage::ChainPosition {
-        slot: slot.to_owned(),
-        chain_id: chain_id.to_owned(),
-        block_number,
-        block_hash: block_hash.to_owned(),
-        timestamp: bigname_storage::parse_rfc3339_utc_timestamp(timestamp)
-            .map_err(|error| anyhow::anyhow!("{error}"))?,
-    };
-    let selected = bigname_storage::SelectedSnapshot {
-        chain_positions: bigname_storage::ChainPositions::new(std::collections::BTreeMap::from([
-            (slot.to_owned(), position),
-        ])),
-        consistency: bigname_storage::SnapshotConsistency::Head,
-    };
-    Ok(crate::v2::encode_at_token(&selected))
 }
 
 fn apply_raw_log_permission_lineage(

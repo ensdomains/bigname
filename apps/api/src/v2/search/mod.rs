@@ -7,20 +7,17 @@ use axum::{
 };
 use bigname_storage::{
     NameCurrentListCursor, NameCurrentListCursorValue, NameCurrentListFilter, NameCurrentListOrder,
-    NameCurrentListRow, NameCurrentListSort, SnapshotPositionRequirement, SnapshotSelectionScope,
+    NameCurrentListRow, NameCurrentListSort,
 };
 use serde::{Deserialize, Serialize};
-use tracing::error;
 
 use crate::{AppState, PUBLIC_NAMESPACES};
 
-use super::chains::deployment_profile_for_slug;
 use super::cursor::{cursor_value, invalid_cursor_error};
 use super::{
-    AtSelector, CursorPayload, Envelope, Finality, Page, QueryParams, RawQueryParams,
-    RegistrationStatus, SnapshotReadResource, V2Error, V2Result, decode, encode, encode_at_token,
-    name_record::name_registration_fields, resolve_v2_snapshot_for, snapshot_meta,
-    v2_exact_name_snapshot_scope,
+    AtSelector, CursorPayload, Envelope, Finality, Meta, Page, QueryParams, RawQueryParams,
+    RegistrationStatus, V2Error, V2Result, decode, encode, name_record::name_registration_fields,
+    validate_latest_collection_selectors,
 };
 
 const SEARCH_SORT: &str = "name_asc";
@@ -149,24 +146,11 @@ pub(crate) async fn get_search(
     params: SearchQueryParams,
     State(state): State<AppState>,
 ) -> V2Result<Json<Envelope<Vec<SearchName>>>> {
-    // Search is anchorless: `namespace` filters rows, while `at`/`finality`
-    // select response metadata and cursor binding for the latest-row read.
-    let scope =
-        search_snapshot_scope(&state, params.namespace.as_deref(), params.at.as_ref()).await?;
-    let selected_snapshot = resolve_v2_snapshot_for(
-        &state.pool,
-        &scope,
-        params.at.as_ref(),
-        params.finality,
-        SnapshotReadResource::Search,
-    )
-    .await?;
-    let snapshot_token = encode_at_token(&selected_snapshot);
+    validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
     let cursor_binding = SearchCursorBinding {
         q: &params.q,
         match_mode: params.match_mode,
         namespace: params.namespace.as_deref(),
-        snapshot_token: &snapshot_token,
     };
     let storage_cursor = params
         .cursor
@@ -191,8 +175,6 @@ pub(crate) async fn get_search(
         .transpose()?;
     let has_more = next_cursor.is_some();
     let data = storage_page.rows.iter().map(build_search_name).collect();
-    let meta = snapshot_meta(&selected_snapshot)?;
-
     Ok(Json(Envelope {
         data,
         page: Some(Page {
@@ -202,7 +184,7 @@ pub(crate) async fn get_search(
             total_count: None,
             has_more,
         }),
-        meta,
+        meta: Meta::default(),
     }))
 }
 
@@ -245,7 +227,7 @@ pub(crate) fn search_cursor_payload(
             ),
             (NAMEHASH_CURSOR_KEY.to_owned(), cursor.namehash.clone()),
         ]),
-        Some(binding.snapshot_token.to_owned()),
+        None,
     ))
 }
 
@@ -254,9 +236,6 @@ pub(crate) fn search_storage_cursor(
     binding: &SearchCursorBinding<'_>,
 ) -> V2Result<NameCurrentListCursor> {
     if payload.sort != SEARCH_SORT {
-        return Err(invalid_cursor_error());
-    }
-    if payload.snapshot.as_deref() != Some(binding.snapshot_token) {
         return Err(invalid_cursor_error());
     }
     if payload.filters != cursor_filters(binding) {
@@ -283,7 +262,6 @@ pub(crate) struct SearchCursorBinding<'a> {
     pub(crate) q: &'a str,
     pub(crate) match_mode: SearchMatch,
     pub(crate) namespace: Option<&'a str>,
-    pub(crate) snapshot_token: &'a str,
 }
 
 fn search_filter(params: &SearchQueryParams) -> NameCurrentListFilter {
@@ -304,52 +282,6 @@ fn search_filter(params: &SearchQueryParams) -> NameCurrentListFilter {
     }
 
     filter
-}
-
-async fn search_snapshot_scope(
-    state: &AppState,
-    namespace: Option<&str>,
-    at: Option<&AtSelector>,
-) -> V2Result<SnapshotSelectionScope> {
-    let Some(namespace) = namespace else {
-        let mut requirements = Vec::new();
-        for namespace in PUBLIC_NAMESPACES {
-            let scope = v2_exact_name_snapshot_scope(state, namespace, at).await?;
-            requirements.extend(scope.required_positions().iter().cloned());
-        }
-        validate_single_deployment_profile(&requirements)?;
-
-        return SnapshotSelectionScope::new(requirements, None).map_err(|error| {
-            error!(
-                service = "api",
-                message = %error.message(),
-                "failed to build v2 search snapshot scope"
-            );
-            V2Error::internal_error("failed to build search snapshot scope")
-        });
-    };
-
-    v2_exact_name_snapshot_scope(state, namespace, at).await
-}
-
-fn validate_single_deployment_profile(
-    requirements: &[SnapshotPositionRequirement],
-) -> V2Result<()> {
-    let mut profile = None;
-    for requirement in requirements {
-        let requirement_profile =
-            deployment_profile_for_slug(&requirement.chain_id).ok_or_else(|| {
-                V2Error::internal_error("snapshot scope contains an unregistered deployment chain")
-            })?;
-        if profile.is_some_and(|profile| profile != requirement_profile) {
-            return Err(V2Error::conflict(
-                "snapshot selector cannot form one canonical snapshot across deployment profiles",
-            ));
-        }
-        profile = Some(requirement_profile);
-    }
-
-    Ok(())
 }
 
 async fn load_search_storage_page(

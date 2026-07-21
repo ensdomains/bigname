@@ -3,6 +3,26 @@
 Status: Accepted
 Date: 2026-06-10
 Accepted: 2026-06-12
+Amended: 2026-07-21 (issue #188)
+
+## 2026-07-21 Amendment: Honest Latest-State Collection Cursors
+
+Issue #188 ratified option 2 for the current storage model. The top-level
+collections at `GET /v2/names/{name}/subnames`,
+`GET /v2/names/{name}/history`, `GET /v2/permissions`,
+`GET /v2/addresses/{address}/names`,
+`GET /v2/addresses/{address}/history`, `GET /v2/search`, `GET /v2/events`,
+and `GET /v2/diagnostics/events` page over mutable latest-state rows. They
+therefore omit `meta.as_of` and `meta.as_of_token`, issue cursors without a
+snapshot validity claim, and reject `at`, `finality=safe`, and
+`finality=finalized`. Their collection anchor, namespace, filter, and sort
+cursor bindings remain enforced. Existing cursor snapshot components are
+ignored rather than treated as a validity condition.
+
+Single-resource snapshot reads retain the snapshot contract accepted below.
+Option 1 remains the storage follow-up: immutable publication revisions,
+revision-bound cursors, and explicit cursor-expired semantics. The collection
+selector restrictions lift when that storage contract exists.
 
 ## Context
 
@@ -245,8 +265,9 @@ Rules:
   makes it cheap (the reverse-lookup count path) or where the caller opts in
   via `include=total_count`; routes must not run unconditional full counts on
   the request path to fill it.
-- `meta` is always present: `as_of` and `as_of_token` on routes that read
-  snapshot-pinned chain-derived state; control-plane routes (`/v2/status`,
+- `meta` is always present: `as_of` and `as_of_token` on single-resource routes
+  that read snapshot-pinned chain-derived state. Top-level latest-state
+  collections omit both. Control-plane routes (`/v2/status`,
   `/v2/namespaces/{namespace}`), verified name-profile responses served by the
   route-local on-demand fallback, and primary-name responses served by the
   route-local on-demand fallback omit both. `completeness`,
@@ -334,8 +355,8 @@ behavior per row.
 
 | Parameter | Applies to | Values |
 | --- | --- | --- |
-| `at` | Tier-2 projection reads (not the lookup primitive — see below) | RFC 3339 timestamp (selects the snapshot at or before it), or the URL-safe opaque snapshot token from a previous response's `meta.as_of_token` (pins exact per-chain positions) |
-| `finality` | projection-read routes | `latest` (default), `safe`, `finalized` |
+| `at` | Tier-2 single-resource snapshot reads (not the lookup primitive — see below). Top-level latest-state collections recognize it only to return the temporary limitation error. | RFC 3339 timestamp (selects the snapshot at or before it), or the URL-safe opaque snapshot token from a previous response's `meta.as_of_token` (pins exact per-chain positions) |
+| `finality` | Single-resource snapshot reads; top-level latest-state collections accept only omitted or explicit `latest` | `latest` (default), `safe`, `finalized` where supported |
 | `source` | names, records, primary-name | names and records use `indexed` (default) or `verified`; the records route also accepts `auto`; primary-name omits `source` to return all supported source answers and may use `indexed` or `verified` to request a subset |
 | `namespace` | name-inferred, address-anchored, and collection routes | explicit override / filter |
 | `include` | route-documented expansions | per-route allowlist |
@@ -344,30 +365,32 @@ behavior per row.
 
 Rules:
 
-- Snapshot selection (`at` + `finality`) is uniform across projection-read
-  routes. Exact multi-chain block pinning stays on product routes: every
-  chain-derived response carries `meta.as_of_token`, so snapshot reads can be
-  replayed at exactly the positions they were served from (the determinism tool
+- Snapshot selection (`at` + `finality`) is uniform across single-resource
+  snapshot-read routes. Exact multi-chain block pinning stays on those product
+  routes: each snapshot-pinned response carries `meta.as_of_token`, so it can
+  be replayed at exactly the positions it was served from (the determinism tool
   for the parity diff harness and shadow comparison). `meta.as_of` remains the
   readable per-chain attribution object; callers do not reconstruct tokens from
   it. What dies is `v1`'s separate `chain_positions` query parameter — one
   selector parameter, not two.
-- The first paginated collection routes, `GET /v2/names/{name}/subnames` and
-  `GET /v2/names/{name}/history`, accept `at` and `finality` and use them to
-  resolve the parent name plus `meta.as_of`/`meta.as_of_token`, but the
-  collection rows currently read the latest projection/history. True as-of
-  child and history enumeration is deferred to storage follow-up work.
-- `GET /v2/addresses/{address}/names` also accepts `at` and `finality` only
-  for `meta.as_of`/`meta.as_of_token` resolution. The address anchor has no
-  parent resource to resolve or 404, and collection rows read the latest
-  address-name projection; true as-of address-name enumeration is deferred to
-  storage follow-up work.
+- Top-level collection routes follow the 2026-07-21 amendment above until
+  revision-bound collection storage exists. Omitted or explicit
+  `finality=latest` reads current rows. `at` returns `400 invalid_input` with
+  `at is not supported because collection routes read latest state`;
+  `finality=safe` or `finality=finalized` returns `400 invalid_input` with
+  `finality must be latest because collection routes read latest state`.
 - Cursors are opaque and versioned but not bound to the route path string, so
-  route evolution does not invalidate outstanding cursors. Cursors remain
-  stable under replay for the same snapshot.
-- No advertised-but-rejected parameters. If a filter is unimplemented it is
-  absent from the contract and listed under deferred capabilities in
-  `docs/consumer-capabilities.md`, not reserved in the schema.
+  route evolution does not invalidate outstanding cursors. Top-level collection
+  cursors preserve keyset position and bind the collection anchor, namespace,
+  filters, and sort without claiming a frozen dataset. Snapshot-bound cursor
+  semantics remain on single-resource responses with nested pagination where
+  documented.
+- Unknown and undocumented parameters are rejected. As a temporary documented
+  exception, latest-state collections recognize the snapshot selectors above
+  to return a clear limitation error rather than imply support. If another
+  filter is unimplemented it is absent from the contract and listed under
+  deferred capabilities in `docs/consumer-capabilities.md`, not reserved in the
+  schema.
 - `POST /v2/lookup` body: `{inputs: [...], profile, namespace?}`, where each
   input is `{id?, name}` or
   `{id?, address, coin_type?, relation?, page_size?, cursor?}`.
@@ -447,8 +470,9 @@ filters, the reserved `/v1/events` parameter block, the `resource` vs
 
 ### What this ADR deliberately keeps
 
-- Snapshot-pinned reads, multi-chain coherence, and `stale`/`conflict`
-  semantics — renamed (`finality`, `as_of`), not removed.
+- Single-resource snapshot-pinned reads, multi-chain coherence, and
+  `stale`/`conflict` semantics — renamed (`finality`, `as_of`), not removed.
+  Latest-state collections temporarily use the amended contract above.
 - Verified execution, CCIP-Read support, Basenames L1-transport-assisted
   verified reads (`base-mainnet` → `ethereum-mainnet` through the L1
   Resolver (upstream: .refs/basenames/README.md:L69 @ basenames@1809bbc)
@@ -476,8 +500,8 @@ split — yes (Q20); typed unsupported inside 200s — yes, as `meta` +
 per-item `status` (Q31); `view=full` — deleted (Q33); `mode` public — renamed
 `source`, only on routes where verified execution is first-class (Q34);
 canonicality explicit in public behavior — yes, via `stale`/`conflict` (Q39);
-coherent multi-chain snapshots — yes, with exact pinning preserved on product
-routes via `meta.as_of_token` and the `at` snapshot token
+coherent multi-chain snapshots — yes, with exact pinning preserved on
+single-resource product routes via `meta.as_of_token` and the `at` snapshot token
 (Q40); normalized events as public semantics — no: history and events are
 route-owned compact DTOs, and raw normalized-event rows and kinds stay
 diagnostics-only (Q37). It also supersedes Q32's earlier `Yes`: `meta=full`

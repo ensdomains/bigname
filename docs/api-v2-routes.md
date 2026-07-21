@@ -32,6 +32,22 @@ with no claim, unsupported verification, or mismatched verification return
 All collection routes use the standard `page` object: `cursor`,
 `next_cursor`, `page_size`, nullable `total_count`, and `has_more`.
 
+The top-level latest-state collections are `GET /v2/names/{name}/subnames`,
+`GET /v2/names/{name}/history`, `GET /v2/permissions`,
+`GET /v2/addresses/{address}/names`,
+`GET /v2/addresses/{address}/history`, `GET /v2/search`, `GET /v2/events`,
+and `GET /v2/diagnostics/events`. They omit `meta.as_of` and
+`meta.as_of_token`, and their cursors bind the collection anchor, namespace,
+filters, and sort without claiming a frozen snapshot. Newly issued cursors
+carry no snapshot token; a legacy cursor's snapshot component is ignored. They
+accept omitted or explicit `finality=latest`. An `at` selector returns `400 invalid_input` with
+`at is not supported because collection routes read latest state`;
+`finality=safe` or `finality=finalized` returns `400 invalid_input` with
+`finality must be latest because collection routes read latest state`.
+Issue #188 option 1 remains the storage follow-up: revision-bound cursors with
+explicit cursor-expired semantics. These restrictions lift when that storage
+contract exists.
+
 Field ownership:
 
 - Shared record, lookup, primary-name, event, and count concepts are dictionary
@@ -211,8 +227,9 @@ Field ownership:
 - Method/path: `GET /v2/names/{name}/subnames`
 - Tier: product read.
 - Purpose: direct subnames.
-- Request parameters: path `name`; query `namespace`, `at`, `finality`,
-  `include=counts`, `cursor`, `page_size`.
+- Request parameters: path `name`; query `namespace`, `include=counts`,
+  `cursor`, `page_size`, and optional `finality=latest`. `at` and historical
+  `finality` values are rejected by the shared latest-state collection rule.
 - Response shape: `data` is an array of dedicated subname rows in dictionary
   vocabulary: `name`, `display_name`, `namespace`, `namehash`, `labelhash`,
   `owner`, `registrant`, `registration_status`, `registered_at`,
@@ -222,10 +239,10 @@ Field ownership:
   `include=counts` adds `subname_count`, the row's direct subname count.
 - Pagination behavior: standard collection pagination by
   `display_name` ascending.
-- Snapshot behavior: `at` and `finality` are accepted and used to resolve the
-  parent name and `meta.as_of`/`meta.as_of_token`. The subname list itself
-  reads the latest `children_current` projection; true as-of child enumeration
-  is deferred to a storage follow-up.
+- Snapshot behavior: the parent and subname rows are selected from current
+  state. The response omits `meta.as_of` and `meta.as_of_token`, and its cursor
+  carries no snapshot validity claim. True as-of child enumeration is deferred
+  to the revision-bound storage follow-up.
 - Status semantics: no direct subnames returns `200` with empty `data`.
   Missing parent names return `404 not_found`.
 - Replaces (v1): `GET /v1/names/{namespace}/{name}/children`.
@@ -235,8 +252,10 @@ Field ownership:
 - Method/path: `GET /v2/names/{name}/history`
 - Tier: product read.
 - Purpose: name history.
-- Request parameters: path `name`; query `namespace`, `at`, `finality`,
-  `scope=name|registration|both`, `cursor`, `page_size`.
+- Request parameters: path `name`; query `namespace`,
+  `scope=name|registration|both`, `cursor`, `page_size`, and optional
+  `finality=latest`. `at` and historical `finality` values are rejected by the
+  shared latest-state collection rule.
 - Response shape: `data` is an array of dedicated lean event rows:
   `{type, name, namespace, registration_id, block_number, timestamp,
   transaction_hash, log_index}`. `registration_id` is present only when the
@@ -248,17 +267,17 @@ Field ownership:
   by this product route.
 - Pagination behavior: standard newest-first collection pagination by chain
   position. The cursor is bound to the resolved namespace, parent name, scope,
-  and snapshot token. Product event-type filtering is applied after loading the
-  storage page, so `page_size` is an upper bound on returned product rows; a
-  page may contain fewer than `page_size` rows when non-product normalized
-  events are interleaved.
+  and sort. Product event-type filtering is applied after loading the storage
+  page, so `page_size` is an upper bound on returned product rows; a page may
+  contain fewer than `page_size` rows when non-product normalized events are
+  interleaved.
 - Scope behavior: `scope=name` reads name-surface events only,
   `scope=registration` reads registration-resource events associated with the
   requested name, and `scope=both` reads both sets. `scope` defaults to `both`.
-- Snapshot behavior: `at` and `finality` are accepted and used to resolve the
-  parent name and `meta.as_of`/`meta.as_of_token`. The history list itself
-  reads latest normalized-event history; true as-of history enumeration is
-  deferred to a storage follow-up.
+- Snapshot behavior: the parent anchor and history rows are selected from
+  current state. The response omits `meta.as_of` and `meta.as_of_token`, and
+  its cursor carries no snapshot validity claim. True as-of history
+  enumeration is deferred to the revision-bound storage follow-up.
 - Status semantics: no matching history returns `200` with empty `data`.
   Missing names return `404 not_found`.
 - Replaces (v1): `GET /v1/history/names/{namespace}/{name}`.
@@ -274,8 +293,9 @@ Field ownership:
 - Purpose: flat permission rows by name, registration, or address, including
   registrations that are no longer a name's current one.
 - Request parameters: at least one of `name`, `registration_id`, or `address`;
-  filters are combinable. Query `namespace`, `at`, `finality`,
-  `include=lineage`, `cursor`, `page_size`.
+  filters are combinable. Query `namespace`, `include=lineage`, `cursor`,
+  `page_size`, and optional `finality=latest`. `at` and historical `finality`
+  values are rejected by the shared latest-state collection rule.
 - Response shape: `data` is an array of permission rows
   `{address, grant_scope, powers, registration_id, name}`. `include=lineage`
   adds route-local `lineage` per row:
@@ -294,14 +314,15 @@ Field ownership:
   `{chain_id, manager}` for `record_manager`; `{predecessor_registration_id}`
   for `migration_derived`; and `{transport}` for `transport_derived`.
 - Pagination behavior: standard collection pagination.
-- Snapshot behavior: `at` and `finality` are accepted and used to resolve
-  `meta.as_of`/`meta.as_of_token` and the `name` filter's registration anchor.
-  Permission rows read the latest permissions projection; true as-of permission
-  enumeration is deferred to a storage follow-up.
+- Snapshot behavior: a `name` filter resolves its current registration anchor,
+  and permission rows come from current state. The response omits `meta.as_of`
+  and `meta.as_of_token`; completeness metadata remains available. Its cursor
+  carries no snapshot validity claim. True as-of permission enumeration is
+  deferred to the revision-bound storage follow-up.
 - Status semantics: no matching permission rows returns `200` with empty
   `data`, including when a `name` filter has no registration anchor in the
-  selected snapshot. Unsupported filter combinations return `422 unsupported`.
-  After snapshot selection, an absent or older projection-owned permission
+  current state. Unsupported filter combinations return `422 unsupported`.
+  An absent or older projection-owned permission
   publication version returns `409 stale` before permission rows are decoded.
   A publication revision change while rows and summaries are read also returns
   `409 stale`. The version and revision are schema/publication compatibility and
@@ -327,9 +348,11 @@ Field ownership:
 - Method/path: `GET /v2/addresses/{address}/names`
 - Tier: product read.
 - Purpose: names related to an address.
-- Request parameters: path `address`; query `namespace`, `at`, `finality`,
-  `relation`, `q`, `sort=name|expires_at|registered_at`, `order=asc|desc`,
-  `dedupe=name|registration`, `include=role_summary`, `cursor`, `page_size`.
+- Request parameters: path `address`; query `namespace`, `relation`, `q`,
+  `sort=name|expires_at|registered_at`, `order=asc|desc`,
+  `dedupe=name|registration`, `include=role_summary`, `cursor`, `page_size`,
+  and optional `finality=latest`. `at` and historical `finality` values are
+  rejected by the shared latest-state collection rule.
   `q` applies prefix matching to the dictionary `name` field case-insensitively:
   the prefix is lowercased to match the normalized name, and full Unicode
   normalization of partial prefixes is a follow-up. This route does not accept
@@ -356,12 +379,12 @@ Field ownership:
   `GET /v2/permissions`.
 - Pagination behavior: standard collection pagination. Cursors are bound to
   address, optional namespace filter, normalized relation set, `q`, dedupe
-  mode, sort, order, and the snapshot token emitted as `meta.as_of_token`.
-- Snapshot behavior: `at` and `finality` are accepted and used only to resolve
-  `meta.as_of`/`meta.as_of_token` (default namespace `ens` when `namespace` is
-  omitted). The address-name collection itself reads the latest
-  `address_names_current` projection; true as-of address-name enumeration is
-  deferred to a storage follow-up.
+  mode, sort, and order.
+- Snapshot behavior: address-name rows come from current state. The response
+  omits `meta.as_of` and `meta.as_of_token`; completeness metadata for
+  `include=role_summary` remains available. Its cursor carries no snapshot
+  validity claim. True as-of address-name enumeration is deferred to the
+  revision-bound storage follow-up.
 - Status semantics: no related names returns `200` with empty `data`.
   Malformed addresses return `400 invalid_input`. `include=role_summary`
   conditionally returns `409 stale` when the compatible projection-owned
@@ -443,19 +466,20 @@ Field ownership:
 - Method/path: `GET /v2/addresses/{address}/history`
 - Tier: product read.
 - Purpose: address activity history.
-- Request parameters: path `address`; query `namespace`, `at`, `finality`,
-  `relation`, `scope=name|registration|both`, `cursor`, `page_size`.
+- Request parameters: path `address`; query `namespace`, `relation`,
+  `scope=name|registration|both`, `cursor`, `page_size`, and optional
+  `finality=latest`. `at` and historical `finality` values are rejected by the
+  shared latest-state collection rule.
   `namespace` defaults to `ens` when omitted. `relation` accepts a
   comma-separated set of `owner`, `manager`, and `registrant`; `any`
   normalizes to all three values. Rows match when any listed relation matches.
 - Response shape: `data` is an array of compact event rows using the shared
   friendly `type` vocabulary.
 - Pagination behavior: standard collection pagination.
-- Snapshot behavior: `at` and `finality` are accepted and used to resolve
-  `meta.as_of`/`meta.as_of_token` (default namespace `ens` when `namespace` is
-  omitted). The address-history collection currently reads latest
-  normalized-event rows; true as-of/finality row-bounding is deferred to a
-  storage follow-up.
+- Snapshot behavior: address-history rows come from current state. The response
+  omits `meta.as_of` and `meta.as_of_token`, and its cursor carries no snapshot
+  validity claim. True as-of/finality row-bounding is deferred to the
+  revision-bound storage follow-up.
 - Status semantics: no matching activity returns `200` with empty `data`.
   Malformed addresses return `400 invalid_input`.
 - Replaces (v1): `GET /v1/history/addresses/{address}`.
@@ -466,20 +490,18 @@ Field ownership:
 - Tier: product read.
 - Purpose: name search and suggestions. No availability or pricing semantics.
 - Request parameters: query `q`, `match=prefix|contains` default `prefix`,
-  `namespace`, `at`, `finality`, `cursor`, `page_size`.
+  `namespace`, `cursor`, `page_size`, and optional `finality=latest`. `at` and
+  historical `finality` values are rejected by the shared latest-state
+  collection rule.
 - Response shape: `data` is an array of record-shaped name search results in
   dictionary vocabulary.
 - Pagination behavior: standard collection pagination.
-- Snapshot behavior: `at` and `finality` are accepted and used only to resolve
-  `meta.as_of`/`meta.as_of_token` (the snapshot scope spans all public
-  namespaces when `namespace` is omitted, and the single namespace when
-  provided). The search collection itself reads the latest `name_current`
-  projection; true as-of search enumeration is deferred to a storage follow-up.
+- Snapshot behavior: search rows come from current state. The response omits
+  `meta.as_of` and `meta.as_of_token`, and its cursor carries no snapshot
+  validity claim. True as-of search enumeration is deferred to the
+  revision-bound storage follow-up.
 - Status semantics: no matches returns `200` with empty `data`. `q` is
   required; a missing or empty `q` returns `400 invalid_input`.
-  Namespace-omitted search returns `409 conflict` when the selector cannot form
-  one canonical snapshot across the public namespaces' deployment profiles;
-  specify `namespace` to search a single namespace profile.
 - Replaces (v1): search, suggestion, and exact-name-filter uses of
   `GET /v1/names`; exact name profiles move to `GET /v2/names/{name}`.
 
@@ -490,18 +512,18 @@ Field ownership:
 - Purpose: compact event search across name, address, registration, type, and
   block filters.
 - Request parameters: query `namespace`, `name`, `address`,
-  `registration_id`, `type`, `from_block`, `to_block`, `at`, `finality`,
-  `cursor`, and `page_size`. When `name` is present and `namespace` is omitted,
-  namespace is inferred from the name; `namespace` defaults to `ens` only when
-  there is no name filter.
+  `registration_id`, `type`, `from_block`, `to_block`, `cursor`, `page_size`,
+  and optional `finality=latest`. `at` and historical `finality` values are
+  rejected by the shared latest-state collection rule. When `name` is present
+  and `namespace` is omitted, namespace is inferred from the name; `namespace`
+  defaults to `ens` only when there is no name filter.
 - Response shape: `data` is an array of compact event rows with friendly
   `type` vocabulary. Raw upstream event kinds are diagnostics-only.
 - Pagination behavior: standard collection pagination.
-- Snapshot behavior: `at` and `finality` are accepted and used to resolve
-  `meta.as_of`/`meta.as_of_token` using the same name-inference and default
-  namespace rules as request parameters. The event collection currently reads
-  latest normalized-event rows; true as-of/finality row-bounding is deferred to
-  a storage follow-up.
+- Snapshot behavior: event rows come from current state. The response omits
+  `meta.as_of` and `meta.as_of_token`, and its cursor carries no snapshot
+  validity claim. True as-of/finality row-bounding is deferred to the
+  revision-bound storage follow-up.
 - Status semantics: no matching events returns `200` with empty `data`.
   Malformed filters return `400 invalid_input`.
 - Replaces (v1): `GET /v1/events` compact event search.
@@ -562,9 +584,11 @@ Diagnostic snapshot rules:
   `/v2/diagnostics/names/{name}/binding`,
   `/v2/diagnostics/names/{name}/authority`,
   `/v2/diagnostics/names/{name}/records`,
-  `/v2/diagnostics/names/{name}/execution`, and `/v2/diagnostics/events`
-  accept `at` and `finality` and carry `meta.as_of`/`meta.as_of_token` because
-  they explain the same selected snapshot as product reads.
+  and `/v2/diagnostics/names/{name}/execution` accept `at` and `finality` and
+  carry `meta.as_of`/`meta.as_of_token` because they explain one selected
+  snapshot.
+- `/v2/diagnostics/events` follows the shared latest-state collection rule: it
+  omits snapshot metadata and rejects `at` and historical `finality`.
 - Diagnostics execution selection uses the exact name, `keys`, and selected
   snapshot. Omitting `at` selects the latest persisted execution artifact.
   RFC 3339 `at` selects the newest persisted artifact whose requested chain
@@ -691,10 +715,11 @@ Diagnostic snapshot rules:
 - Purpose: raw normalized-event rows: upstream event kinds, event identity, and
   full provenance.
 - Request parameters: query `namespace`, `name`, `address`,
-  `registration_id`, `type`, `from_block`, `to_block`, `at`, `finality`,
-  `cursor`, and `page_size`. When `name` is present and `namespace` is omitted,
-  namespace is inferred from the name; `namespace` defaults to `ens` only when
-  there is no name filter.
+  `registration_id`, `type`, `from_block`, `to_block`, `cursor`, `page_size`,
+  and optional `finality=latest`. `at` and historical `finality` values are
+  rejected by the shared latest-state collection rule. When `name` is present
+  and `namespace` is omitted, namespace is inferred from the name; `namespace`
+  defaults to `ens` only when there is no name filter.
 - Response shape: `data` is an array of raw normalized-event rows in
   diagnostics vocabulary:
   `{normalized_event_id, event_identity, namespace, name?, registration_id?,
@@ -702,11 +727,10 @@ Diagnostic snapshot rules:
   chain_position, transaction_hash, log_index, raw_fact_ref, derivation_kind,
   canonicality_state, before_state?, after_state?, provenance, coverage}`.
 - Pagination behavior: standard collection pagination.
-- Snapshot behavior: `at` and `finality` are accepted and used to resolve
-  `meta.as_of`/`meta.as_of_token` using the same name-inference and default
-  namespace rules as request parameters. The diagnostics event collection
-  currently reads latest normalized-event rows; true as-of/finality row-bounding
-  is deferred to a storage follow-up.
+- Snapshot behavior: diagnostic event rows come from current state. The
+  response omits `meta.as_of` and `meta.as_of_token`, and its cursor carries no
+  snapshot validity claim. True as-of/finality row-bounding is deferred to the
+  revision-bound storage follow-up.
 - Status semantics: no matching rows returns `200` with empty `data`.
 - Replaces (v1): `view=full` on `GET /v1/history/names/{namespace}/{name}`,
   `GET /v1/history/resources/{resource_id}`, and

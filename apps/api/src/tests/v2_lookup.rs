@@ -102,11 +102,7 @@ async fn v2_lookup_forward_results_are_in_order_with_head_meta() -> Result<()> {
     let token = payload["meta"]["as_of_token"]
         .as_str()
         .expect("lookup response must include meta.as_of_token");
-    let replay = v2_get_json(
-        &database,
-        &format!("/v2/search?q=case&namespace=ens&at={token}"),
-    )
-    .await?;
+    let replay = v2_get_json(&database, &format!("/v2/names/case.eth?at={token}")).await?;
     assert_eq!(replay["meta"]["as_of"], payload["meta"]["as_of"]);
     assert_eq!(replay["meta"]["as_of_token"], payload["meta"]["as_of_token"]);
 
@@ -228,7 +224,7 @@ async fn v2_lookup_internal_head_selection_error_is_sanitized() -> Result<()> {
 }
 
 #[tokio::test]
-async fn v2_lookup_namespace_scoped_token_replays_with_union_checkpoint_present() -> Result<()> {
+async fn v2_lookup_tokens_remain_snapshot_capable_while_collections_reject_at() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     database
         .seed_snapshot_selector_chain_positions(&json!({
@@ -264,13 +260,24 @@ async fn v2_lookup_namespace_scoped_token_replays_with_union_checkpoint_present(
         .as_str()
         .expect("lookup response must include meta.as_of_token");
 
-    let replay = v2_get_json(
+    let replay = v2_get_response(
+        &database,
+        &format!("/v2/names/missing.eth?at={token}"),
+    )
+    .await?;
+    assert_eq!(replay.status(), StatusCode::NOT_FOUND);
+
+    let collection = v2_get_response(
         &database,
         &format!("/v2/search?q=missing&namespace=ens&at={token}"),
     )
     .await?;
-    assert_eq!(replay["meta"]["as_of"], payload["meta"]["as_of"]);
-    assert_eq!(replay["meta"]["as_of_token"], payload["meta"]["as_of_token"]);
+    assert_eq!(collection.status(), StatusCode::BAD_REQUEST);
+    let collection_error: Value = read_json(collection).await?;
+    assert_eq!(
+        collection_error["error"]["message"],
+        json!("at is not supported because collection routes read latest state")
+    );
 
     let union_replay =
         v2_get_response(&database, &format!("/v2/search?q=missing&at={token}")).await?;
@@ -294,11 +301,12 @@ async fn v2_lookup_namespace_scoped_token_replays_with_union_checkpoint_present(
         .as_str()
         .expect("public lookup response must include meta.as_of_token");
     let public_replay =
-        v2_get_json(&database, &format!("/v2/search?q=missing&at={public_token}")).await?;
-    assert_eq!(public_replay["meta"]["as_of"], public_payload["meta"]["as_of"]);
+        v2_get_response(&database, &format!("/v2/search?q=missing&at={public_token}")).await?;
+    assert_eq!(public_replay.status(), StatusCode::BAD_REQUEST);
+    let public_replay_error: Value = read_json(public_replay).await?;
     assert_eq!(
-        public_replay["meta"]["as_of_token"],
-        public_payload["meta"]["as_of_token"]
+        public_replay_error["error"]["message"],
+        json!("at is not supported because collection routes read latest state")
     );
 
     database.cleanup().await?;
