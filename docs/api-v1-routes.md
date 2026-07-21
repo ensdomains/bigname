@@ -10,7 +10,7 @@ Use the route groups as integration guidance, not just documentation order:
 | --- | --- | --- |
 | Native slim identity | `POST /v1/identity:lookup`, `GET /v1/status` | Partner-1 feed/profile reads and shadow comparison. Use `profile=feed` for the under-10 ms p95 feed target. |
 | Canonical product reads | `/v1/names*`, `/v1/profiles/names/*`, `/v1/addresses/{address}/names`, `/v1/primary-names*`, `/v1/resources/{resource_id}/permissions`, `/v1/events` | New app, explorer, and public API integrations that want bigname-native semantics. |
-| Metadata/control plane | `/v1/namespaces/*`, `/v1/manifests/*` | Namespace and manifest introspection. |
+| Metadata/control plane | `/v1/namespaces/*`, `/v1/manifests/*`, `/healthz` | Namespace, manifest, API/database readiness, and indexer/worker loop-liveness introspection. |
 | Diagnostics/provenance | `/v1/coverage/*`, `/v1/explain/*` | Completeness, freshness, derivation, persisted execution, and audit detail. |
 | Specialist adjuncts | `/v1/roles`, `/v1/names/*/roles`, `/v1/resources/lookup`, `/v1/history/*`, `/v1/resolvers/*/overview` | Supported surfaces for specialist workflows; prefer canonical product reads for new integrations when they fit. |
 
@@ -309,7 +309,8 @@ Rules:
 
 ## `GET /v1/status`
 
-Projection/indexing readiness and chain lag. This is not `/healthz`; `/healthz` reports process and database readiness.
+Projection/indexing readiness and chain lag. This is not `/healthz`; `/healthz`
+reports API/database readiness and indexer/worker loop liveness.
 
 Response:
 
@@ -317,6 +318,8 @@ Response:
 {
   "data": {
     "status": "ready",
+    "pending_invalidation_count": 0,
+    "dead_letter_count": 0,
     "chains": {
       "ethereum-mainnet": {
         "canonical_block": 0,
@@ -325,7 +328,13 @@ Response:
         "latest_projected_block": 0,
         "latest_projected_timestamp": null,
         "projection_lag_blocks": 0,
-        "projection_lag_seconds": null
+        "projection_lag_seconds": null,
+        "network_block": 0,
+        "network_head_observed_at": "2026-07-21T12:00:00Z",
+        "network_head_age_seconds": 1,
+        "network_head_status": "fresh",
+        "ingestion_lag_blocks": 0,
+        "ingestion_lag_seconds": 0
       }
     }
   }
@@ -333,6 +342,39 @@ Response:
 ```
 
 Uses active/shadow `manifest_versions` to include chains expected by the loaded profile, plus `chain_checkpoints`, retained `chain_lineage`, `projection_normalized_event_changes`, `projection_apply_cursors`, and `projection_invalidations` where available. Fields stay `null` when the deployment has not yet retained the corresponding operational metadata. If no chain readiness data exists for an expected chain, or if pending direct invalidations cannot be tied to a normalized-event chain position, `status` is `degraded`. If any expected chain has unapplied normalized-event changes beyond the projection-apply cursor, `status` is `stale` and the lag fields identify the affected chain.
+
+`pending_invalidation_count` is the current number of rows in the live
+[projection](glossary.md) invalidation queue. `dead_letter_count` is the number
+of terminal invalidation failures retained for operator inspection. These
+numeric fields preserve the evidence that readiness previously folded into
+boolean state; dead letters are informational and do not by themselves change
+readiness.
+
+The API also compares each stored canonical head with a cached provider
+`eth_blockNumber` observation. `network_head_status` is `fresh`, `stale`,
+`unavailable`, `pending`, or `unconfigured`. A successful observation supplies
+`network_block`, `network_head_observed_at`, and
+`network_head_age_seconds`. When the network is ahead,
+`ingestion_lag_blocks` is the block difference and `ingestion_lag_seconds` is
+the difference between the provider observation time and the stored canonical
+block timestamp. A fresh observation changes chain readiness to `stale` when
+either lag exceeds `BIGNAME_API_STATUS_MAX_BLOCK_LAG` (default 5) or
+`BIGNAME_API_STATUS_MAX_LAG_SECS` (default 60). A missing, failed,
+not-yet-completed, or cache-expired provider observation changes readiness to
+`degraded`, with its reason retained in `network_head_status`. When a refresh
+fails after an earlier success, `network_head_status` becomes `unavailable`
+immediately while the prior head, observation time, age, and lag values remain
+available as cached evidence; the next successful refresh replaces them.
+
+Provider access is never performed by the status request. A background task
+refreshes all configured `BIGNAME_API_CHAIN_RPC_URLS` concurrently every
+`BIGNAME_API_STATUS_PROVIDER_REFRESH_SECS` (default 5), bounds each call by
+`BIGNAME_API_STATUS_PROVIDER_TIMEOUT_MS` (default 750), and serves the most
+recent successful evidence for at most
+`BIGNAME_API_STATUS_PROVIDER_CACHE_TTL_SECS` (default 30). A failed latest
+attempt is never presented as fresh even while that evidence remains visible.
+Status requests only read that in-memory cache, so a slow provider cannot hold
+the route open.
 
 ## `GET /v1/names`
 

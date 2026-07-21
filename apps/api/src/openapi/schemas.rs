@@ -25,8 +25,8 @@ use identity_native::{
     native_identity_record_schema, normalization_info_schema,
 };
 use health::{
-    health_database_schema, health_identity_schema, health_process_schema,
-    health_projection_publication_versions_schema, health_response_schema,
+    health_database_schema, health_identity_schema, health_loop_schema, health_loops_schema,
+    health_process_schema, health_projection_publication_versions_schema, health_response_schema,
 };
 use primary_name::{
     primary_name_claimed_result_schema, primary_name_route_provenance_schema,
@@ -356,6 +356,8 @@ pub(super) fn openapi_components() -> JsonValue {
             "HealthIdentity": health_identity_schema(),
             "HealthProcess": health_process_schema(),
             "HealthDatabase": health_database_schema(),
+            "HealthLoop": health_loop_schema(),
+            "HealthLoops": health_loops_schema(),
             "HealthResponse": health_response_schema(),
             "ErrorBody": json!({
                 "type": "object",

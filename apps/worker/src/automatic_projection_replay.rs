@@ -14,10 +14,18 @@ use tracing::{debug, info, warn};
 
 use crate::{cli::RunArgs, primary_name, projection_apply, record_inventory, replay};
 
+#[path = "automatic_projection_replay/bootstrap_replay.rs"]
+mod bootstrap_replay;
+#[path = "automatic_projection_replay/heartbeat.rs"]
+pub(crate) mod heartbeat;
 #[path = "automatic_projection_replay/primary_hydration.rs"]
 mod primary_hydration;
 #[path = "automatic_projection_replay/primary_hydration_loop.rs"]
 mod primary_hydration_loop;
+
+#[cfg(test)]
+use bootstrap_replay::replay_all_current_projections_when_ready;
+use bootstrap_replay::replay_all_current_projections_when_ready_with_heartbeat;
 
 const CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS: &str = "raw_fact_normalized_events";
 const ALL_CURRENT_PROJECTIONS_MIN_DATABASE_CONNECTIONS: u32 = 64;
@@ -38,6 +46,8 @@ pub(crate) fn all_current_projections_database_config(
 }
 
 pub(crate) async fn run_worker(args: RunArgs) -> Result<()> {
+    let heartbeat_instance_id =
+        bigname_storage::resolve_service_instance_id(args.heartbeat_instance_id.as_deref())?;
     let database = all_current_projections_database_config(args.database);
     let (pool, _runtime_rederive_guard) =
         bigname_storage::connect_with_base_normalized_rederive_writer_guard(
@@ -75,13 +85,21 @@ pub(crate) async fn run_worker(args: RunArgs) -> Result<()> {
         "worker booted"
     );
 
+    bigname_storage::register_service_loop(
+        &pool,
+        bigname_storage::WORKER_SERVICE_NAME,
+        &heartbeat_instance_id,
+    )
+    .await?;
+
     tokio::select! {
-        () = run_automatic_current_projection_replay(
+        result = run_automatic_current_projection_replay(
             pool,
+            heartbeat_instance_id,
             args.poll_interval_secs,
             text_hydration_config,
             primary_hydration_config,
-        ) => {}
+        ) => result?,
         signal = tokio::signal::ctrl_c() => {
             signal.context("failed to listen for shutdown signal")?;
         }
@@ -93,10 +111,11 @@ pub(crate) async fn run_worker(args: RunArgs) -> Result<()> {
 
 pub(crate) async fn run_automatic_current_projection_replay(
     pool: PgPool,
+    heartbeat_instance_id: String,
     poll_interval_secs: u64,
     text_hydration_config: Option<record_inventory::RecordInventoryTextHydrationConfig>,
     mut primary_hydration_config: Option<primary_name::PrimaryNameLegacyReverseHydrationConfig>,
-) {
+) -> Result<()> {
     let poll_interval = Duration::from_secs(poll_interval_secs.max(1));
     let mut bootstrap_completed = false;
     let mut bootstrap_text_hydration_completed = text_hydration_config.is_none();
@@ -104,8 +123,11 @@ pub(crate) async fn run_automatic_current_projection_replay(
     let mut projection_derivation_started = false;
     let projection_apply_generation = Arc::new(AtomicU64::new(0));
     let projection_apply_hydration_lock = Arc::new(Mutex::new(()));
+    let mut loop_heartbeat = heartbeat::LoopHeartbeat::new(heartbeat_instance_id, poll_interval);
 
     loop {
+        loop_heartbeat.record_if_due(&pool).await?;
+
         let mut progressed = false;
         if !bootstrap_completed {
             match projection_bootstrap_already_handed_off_to_apply(&pool).await {
@@ -131,10 +153,11 @@ pub(crate) async fn run_automatic_current_projection_replay(
         }
 
         if !bootstrap_completed {
-            match replay_all_current_projections_when_ready(
+            match replay_all_current_projections_when_ready_with_heartbeat(
                 &pool,
                 text_hydration_config.as_ref(),
                 primary_hydration_config.as_ref(),
+                &mut loop_heartbeat,
             )
             .await
             {
@@ -152,6 +175,7 @@ pub(crate) async fn run_automatic_current_projection_replay(
                     );
                 }
             }
+            loop_heartbeat.record_if_due(&pool).await?;
         }
 
         if bootstrap_completed {
@@ -201,10 +225,17 @@ pub(crate) async fn run_automatic_current_projection_replay(
                         );
                     }
                 }
+                loop_heartbeat.record_if_due(&pool).await?;
             }
 
             let _apply_hydration_guard = projection_apply_hydration_lock.lock().await;
-            match projection_apply::run_once(&pool, text_hydration_config.as_ref()).await {
+            match projection_apply::run_once(
+                &pool,
+                text_hydration_config.as_ref(),
+                &mut loop_heartbeat,
+            )
+            .await
+            {
                 Ok(summary) => {
                     let apply_progressed = summary.made_progress();
                     if apply_progressed {
@@ -221,6 +252,7 @@ pub(crate) async fn run_automatic_current_projection_replay(
                     );
                 }
             }
+            loop_heartbeat.record_if_due(&pool).await?;
         }
 
         if !progressed {
@@ -301,103 +333,6 @@ async fn hydrate_record_inventory_text_values_after_bootstrap(
         record_inventory::hydrate_record_inventory_text_values(pool, None, config.clone()).await?;
     record_inventory::log_text_hydration_summary(None, &summary);
     Ok(())
-}
-
-async fn replay_all_current_projections_when_ready(
-    pool: &PgPool,
-    text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
-    primary_hydration_config: Option<&primary_name::PrimaryNameLegacyReverseHydrationConfig>,
-) -> Result<bool> {
-    let readiness = load_projection_replay_readiness(pool).await?;
-    if !readiness.is_ready() {
-        debug!(
-            service = "worker",
-            replay = "all_current_projections",
-            normalized_replay_cursor_count = readiness.normalized_replay_cursor_count,
-            incomplete_normalized_replay_cursor_count =
-                readiness.incomplete_normalized_replay_cursor_count,
-            failed_normalized_replay_cursor_count = readiness.failed_normalized_replay_cursor_count,
-            active_index_build_count = readiness.active_index_build_count,
-            missing_projection_index_count = readiness.missing_projection_index_count,
-            "automatic all-current projection replay is waiting for normalized replay readiness"
-        );
-        return Ok(false);
-    }
-
-    let Some(mut replay_lock) = try_acquire_replay_lock(pool).await? else {
-        debug!(
-            service = "worker",
-            replay = "all_current_projections",
-            "automatic all-current projection replay skipped because another worker holds the replay lock"
-        );
-        return Ok(false);
-    };
-
-    let readiness = load_projection_replay_readiness(pool).await?;
-    if !readiness.is_ready() {
-        release_replay_lock(&mut replay_lock).await?;
-        return Ok(false);
-    }
-
-    let replay_result: Result<_> = async {
-        let cursor_exists = projection_apply::normalized_event_cursor_exists(pool).await?;
-        let captured_watermark =
-            projection_apply::load_normalized_event_change_watermark(pool).await?;
-        let chain_checkpoint_max_block =
-            projection_apply::load_chain_checkpoint_max_block(pool).await?;
-        let replay_target_block = projection_bootstrap_replay_target_block(
-            readiness.normalized_replay_max_target_block,
-            chain_checkpoint_max_block,
-        );
-        let reusable_marker_count =
-            load_current_projection_replay_marker_count(pool, replay_target_block).await?;
-        let cursor_seed = projection_bootstrap_apply_cursor_seed(
-            cursor_exists,
-            reusable_marker_count,
-            captured_watermark,
-        );
-
-        info!(
-            service = "worker",
-            replay = "all_current_projections",
-            normalized_replay_cursor_count = readiness.normalized_replay_cursor_count,
-            normalized_replay_max_target_block = readiness.normalized_replay_max_target_block,
-            chain_checkpoint_max_block,
-            projection_replay_target_block = replay_target_block,
-            captured_change_watermark = captured_watermark.change_id,
-            reusable_marker_count,
-            cursor_seed_change_id = cursor_seed.map(|cursor| cursor.change_id),
-            "automatic all-current projection replay started"
-        );
-        let summary = replay::rebuild_pending_all_current_projections(
-            pool,
-            replay_target_block,
-            text_hydration_config,
-            primary_hydration_config,
-        )
-        .await
-        .context("failed to automatically replay all current projections")?;
-        if let Some(cursor_seed) = cursor_seed {
-            projection_apply::seed_normalized_event_cursor_if_absent(pool, cursor_seed).await?;
-        }
-        Ok(summary)
-    }
-    .await;
-    release_replay_lock(&mut replay_lock).await?;
-
-    let summary = replay_result?;
-    info!(
-        service = "worker",
-        replay = "all_current_projections",
-        projection_order = ?summary.projection_order(),
-        projection_count = summary.steps.len(),
-        total_requested_key_count = summary.total_requested_key_count(),
-        total_upserted_row_count = summary.total_upserted_row_count(),
-        total_deleted_row_count = summary.total_deleted_row_count(),
-        "automatic all-current projection replay completed"
-    );
-
-    Ok(true)
 }
 
 async fn projection_bootstrap_already_handed_off_to_apply(pool: &PgPool) -> Result<bool> {

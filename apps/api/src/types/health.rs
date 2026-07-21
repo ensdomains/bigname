@@ -9,6 +9,7 @@ pub(crate) struct HealthResponse {
     pub(crate) status: &'static str,
     pub(crate) process: HealthProcessResponse,
     pub(crate) database: HealthDatabaseResponse,
+    pub(crate) loops: HealthLoopsResponse,
 }
 
 #[derive(Serialize)]
@@ -50,4 +51,19 @@ pub(crate) struct HealthDatabaseResponse {
     pub(crate) reachable: bool,
     pub(crate) check: &'static str,
     pub(crate) error: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct HealthLoopsResponse {
+    pub(crate) indexer: HealthLoopResponse,
+    pub(crate) worker: HealthLoopResponse,
+}
+
+#[derive(Serialize)]
+pub(crate) struct HealthLoopResponse {
+    pub(crate) status: &'static str,
+    pub(crate) started_at: Option<String>,
+    pub(crate) heartbeat_at: Option<String>,
+    pub(crate) heartbeat_age_seconds: Option<i64>,
+    pub(crate) max_age_seconds: i64,
 }

@@ -11,7 +11,8 @@ use crate::pagination::HistoryPageResponse;
 mod health;
 
 pub(crate) use health::{
-    HealthDatabaseResponse, HealthIdentityResponse, HealthProcessResponse, HealthResponse,
+    HealthDatabaseResponse, HealthIdentityResponse, HealthLoopResponse, HealthLoopsResponse,
+    HealthProcessResponse, HealthResponse,
 };
 
 fn json_value_is_null(value: &JsonValue) -> bool {
@@ -146,6 +147,8 @@ pub(crate) struct IdentityAsOfResponse {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct IndexingStatusResponse {
     pub(crate) status: String,
+    pub(crate) pending_invalidation_count: i64,
+    pub(crate) dead_letter_count: i64,
     pub(crate) chains: BTreeMap<String, IndexingStatusChainResponse>,
 }
 
@@ -163,6 +166,12 @@ pub(crate) struct IndexingStatusChainResponse {
     pub(crate) latest_projected_timestamp: Option<String>,
     pub(crate) projection_lag_blocks: Option<i64>,
     pub(crate) projection_lag_seconds: Option<i64>,
+    pub(crate) network_block: Option<i64>,
+    pub(crate) network_head_observed_at: Option<String>,
+    pub(crate) network_head_age_seconds: Option<i64>,
+    pub(crate) network_head_status: String,
+    pub(crate) ingestion_lag_blocks: Option<i64>,
+    pub(crate) ingestion_lag_seconds: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

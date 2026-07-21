@@ -135,11 +135,12 @@ The API process exposes `GET /healthz` on the same bind address as
 `cargo api -- serve` and `./scripts/dev-up`. The default local address is
 `http://127.0.0.1:3000/healthz`.
 
-`/healthz` is an unversioned operator endpoint. The production compose probe
+`/healthz` is an unversioned operator contract endpoint. The production compose probe
 connects to `127.0.0.1` inside the API container even though the process listens
 on its configured bind address (`0.0.0.0:3000` by default in compose); the
 public Caddy edge does not expose it. It is not part of the versioned `/v1` read
-API and should not be treated as a consumer compatibility surface.
+API and should not be treated as a consumer compatibility surface. Its frozen
+response may grow additively.
 
 The response's `identity` object describes the binary's compatibility inputs:
 `version` is the Cargo package version; `build_sha` is the compile-time
@@ -152,17 +153,37 @@ compatibility version for the published permissions read model. These are
 binary identity values, not a report of the database's applied migration or
 replay progress.
 
-The endpoint separates process readiness from database readiness:
+The endpoint separates API-process readiness, database readiness, and
+indexer/worker main-loop liveness:
 
-- Healthy database: `200 OK`, top-level `status` is `ready`,
+- Healthy database and recent indexer and worker loop heartbeats: `200 OK`,
+  top-level `status` is `ready`,
   `process.status` is `running`, `database.status` is `reachable`,
   `database.reachable` is `true`, `database.check` is `select_1`, and
-  `database.error` is `null`.
+  `database.error` is `null`. `loops.indexer.status` and
+  `loops.worker.status` are `running` and each includes `started_at`,
+  `heartbeat_at`, `heartbeat_age_seconds`, and `max_age_seconds`.
 - Unreachable database or pool: `503 Service Unavailable`, top-level `status`
   is `degraded`, `process.status` remains `running`, `database.status` is
   `unreachable`, `database.reachable` is `false`, `database.check` remains
-  `select_1`, and `database.error` is `database readiness query failed`.
+  `select_1`, `database.error` is `database readiness query failed`, and both
+  loop statuses are `unavailable`.
+- Reachable database with a missing or old loop heartbeat: `503 Service
+  Unavailable`. A missing row is `not_started`; a row older than
+  `BIGNAME_API_HEARTBEAT_MAX_AGE_SECS` is `stale`. The default maximum age is
+  20 seconds, four times the default five-second indexer and worker loop
+  intervals.
 
 Database reachability is checked with `SELECT 1` through the configured
 PostgreSQL pool. A degraded response means the API process handled the request,
-but the configured database pool could not satisfy the readiness query.
+but the database probe or one of the required service loops was not ready.
+The API uses the newest process heartbeat across replicas. The indexer and
+worker `healthcheck` subcommands instead validate the process row for their own
+`BIGNAME_HEARTBEAT_INSTANCE_ID`, which defaults to the container `HOSTNAME`,
+and fail when the row is absent or older than the service-specific
+`BIGNAME_INDEXER_HEARTBEAT_MAX_AGE_SECS` or
+`BIGNAME_WORKER_HEARTBEAT_MAX_AGE_SECS` limit. This distinguishes a loop that
+never registered from one that registered and then stopped advancing. Worker
+bootstrap replay and projection apply refresh the process row only at actual
+progress boundaries; a free-running heartbeat task does not keep a stuck
+operation healthy.

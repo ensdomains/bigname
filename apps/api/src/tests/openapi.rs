@@ -349,10 +349,30 @@ fn openapi_document_uses_package_version_and_freezes_health_identity() {
         Some(&json!(["string", "null"]))
     );
 
+    let service_loop = openapi_schema(&document, "HealthLoop");
+    assert_eq!(
+        required_fields(service_loop),
+        vec![
+            "status",
+            "started_at",
+            "heartbeat_at",
+            "heartbeat_age_seconds",
+            "max_age_seconds",
+        ]
+    );
+    assert_eq!(
+        service_loop.pointer("/properties/status/enum"),
+        Some(&json!(["running", "stale", "not_started", "unavailable"]))
+    );
+    let service_loops = openapi_schema(&document, "HealthLoops");
+    assert_eq!(required_fields(service_loops), vec!["indexer", "worker"]);
+
     let response = openapi_schema(&document, "HealthResponse");
     assert_eq!(
         required_fields(response),
-        vec!["service", "identity", "status", "process", "database"]
+        vec![
+            "service", "identity", "status", "process", "database", "loops",
+        ]
     );
     assert_eq!(
         response.pointer("/properties/process"),
@@ -362,7 +382,34 @@ fn openapi_document_uses_package_version_and_freezes_health_identity() {
         response.pointer("/properties/database"),
         Some(&json!({ "$ref": "#/components/schemas/HealthDatabase" }))
     );
+    assert_eq!(
+        response.pointer("/properties/loops"),
+        Some(&json!({ "$ref": "#/components/schemas/HealthLoops" }))
+    );
     assert!(!property_names(response).contains(&"phase"));
+
+    let indexing_status = openapi_schema(&document, "IndexingStatusResponse");
+    assert_eq!(
+        required_fields(indexing_status),
+        vec![
+            "status",
+            "pending_invalidation_count",
+            "dead_letter_count",
+            "chains",
+        ]
+    );
+    assert_eq!(
+        indexing_status.pointer(
+            "/properties/chains/additionalProperties/properties/network_head_status/enum"
+        ),
+        Some(&json!([
+            "fresh",
+            "stale",
+            "unavailable",
+            "pending",
+            "unconfigured",
+        ]))
+    );
 }
 
 #[test]
@@ -1347,9 +1394,9 @@ async fn openapi_docs_route_serves_viewer() -> Result<()> {
 }
 
 fn openapi_docs_test_state() -> AppState {
-    AppState {
-        pool: PgPool::connect_lazy("postgres://bigname:bigname@127.0.0.1:5432/bigname")
+    AppState::new(
+        PgPool::connect_lazy("postgres://bigname:bigname@127.0.0.1:5432/bigname")
             .expect("OpenAPI helper route tests only need a lazily parsed pool"),
-        chain_rpc_urls: bigname_execution::ChainRpcUrls::default(),
-    }
+        bigname_execution::ChainRpcUrls::default(),
+    )
 }

@@ -45,6 +45,7 @@ use replay_handoff::{
 #[expect(clippy::too_many_arguments)]
 pub(crate) async fn run_poll_loop(
     pool: &sqlx::PgPool,
+    heartbeat_instance_id: &str,
     manifests_root: PathBuf,
     mut manifest_runtime_state: ManifestRuntimeState,
     mut intake_chain_tasks: Vec<IntakeChainTask>,
@@ -80,6 +81,18 @@ pub(crate) async fn run_poll_loop(
                 return Ok(());
             }
             _ = interval.tick() => {
+                let heartbeat_chains = intake_chain_tasks
+                    .iter()
+                    .map(|task| task.chain.clone())
+                    .collect::<Vec<_>>();
+                bigname_storage::record_service_loop_heartbeat(
+                    pool,
+                    bigname_storage::INDEXER_SERVICE_NAME,
+                    heartbeat_instance_id,
+                    &heartbeat_chains,
+                )
+                .await?;
+
                 match load_manifest_repository(&manifests_root) {
                     Ok(manifest_repository) => {
                         let manifest_summary = manifest_repository.summary().clone();

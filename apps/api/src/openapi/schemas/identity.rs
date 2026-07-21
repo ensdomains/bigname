@@ -20,12 +20,19 @@ pub(super) fn name_record_status_schema() -> JsonValue {
 pub(super) fn indexing_status_response_schema() -> JsonValue {
     json!({
         "type": "object",
-        "required": ["status", "chains"],
+        "required": [
+            "status",
+            "pending_invalidation_count",
+            "dead_letter_count",
+            "chains",
+        ],
         "properties": {
             "status": {
                 "type": "string",
                 "enum": ["ready", "degraded", "stale"],
             },
+            "pending_invalidation_count": { "type": "integer", "minimum": 0 },
+            "dead_letter_count": { "type": "integer", "minimum": 0 },
             "chains": {
                 "type": "object",
                 "additionalProperties": {
@@ -38,6 +45,12 @@ pub(super) fn indexing_status_response_schema() -> JsonValue {
                         "latest_projected_timestamp",
                         "projection_lag_blocks",
                         "projection_lag_seconds",
+                        "network_block",
+                        "network_head_observed_at",
+                        "network_head_age_seconds",
+                        "network_head_status",
+                        "ingestion_lag_blocks",
+                        "ingestion_lag_seconds",
                     ],
                     "properties": {
                         "canonical_block": { "type": ["integer", "null"] },
@@ -50,6 +63,33 @@ pub(super) fn indexing_status_response_schema() -> JsonValue {
                         },
                         "projection_lag_blocks": { "type": ["integer", "null"] },
                         "projection_lag_seconds": { "type": ["integer", "null"] },
+                        "network_block": { "type": ["integer", "null"], "minimum": 0 },
+                        "network_head_observed_at": {
+                            "type": ["string", "null"],
+                            "format": "date-time",
+                        },
+                        "network_head_age_seconds": {
+                            "type": ["integer", "null"],
+                            "minimum": 0,
+                        },
+                        "network_head_status": {
+                            "type": "string",
+                            "enum": [
+                                "fresh",
+                                "stale",
+                                "unavailable",
+                                "pending",
+                                "unconfigured",
+                            ],
+                        },
+                        "ingestion_lag_blocks": {
+                            "type": ["integer", "null"],
+                            "minimum": 0,
+                        },
+                        "ingestion_lag_seconds": {
+                            "type": ["integer", "null"],
+                            "minimum": 0,
+                        },
                     },
                 },
             },

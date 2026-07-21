@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use axum::{Json, response::Html, routing::get};
 use serde_json::{Map as JsonMap, json};
 use sqlx::types::JsonValue;
@@ -8,6 +8,7 @@ use tracing::info;
 use crate::{
     API_ROUTE_DEFINITIONS, ApiBoundsConfig, AppState, BUILD_SHA, Router, SOFTWARE_VERSION, ServeArgs,
     HEALTH_DATABASE_CHECK_TIMEOUT, HealthDatabasePool, shutdown_signal,
+    status_freshness::StatusFreshnessConfig,
     warm_compact_records_route_sql_path,
 };
 
@@ -30,10 +31,23 @@ pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
         HEALTH_DATABASE_CHECK_TIMEOUT,
     )
     .await?;
-    let state = AppState {
-        pool,
-        chain_rpc_urls,
-    };
+    ensure!(
+        args.heartbeat_max_age_secs > 0,
+        "BIGNAME_API_HEARTBEAT_MAX_AGE_SECS must be greater than zero"
+    );
+    let status_freshness_config = StatusFreshnessConfig::new(
+        args.status_provider_timeout_ms,
+        args.status_provider_refresh_secs,
+        args.status_provider_cache_ttl_secs,
+        args.status_max_block_lag,
+        args.status_max_lag_secs,
+    )?;
+    let state = AppState::new(pool, chain_rpc_urls)
+        .with_heartbeat_max_age_secs(args.heartbeat_max_age_secs)
+        .with_status_freshness_config(status_freshness_config);
+    state
+        .status_freshness
+        .spawn_refresh(state.chain_rpc_urls.clone());
     warm_compact_records_route_sql_path(&state, args.database.max_connections)
         .await
         .context("failed to warm compact records route SQL path")?;

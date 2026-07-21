@@ -46,12 +46,24 @@ deployments normally set it to `127.0.0.1` and expose traffic through the Caddy
 override documented in `docs/production.md`.
 
 The indexer and worker healthcheck commands verify that applied database
-migrations exactly match the migration set compiled into the running binary.
-They fail closed for missing, failed, checksum-mismatched, or newer unknown
-migrations. During rolling upgrades, running `migrate` before recreating old
+migrations exactly match the migration set compiled into the running binary
+and that the checked process instance's main-loop heartbeat is recent. They
+fail closed for missing, failed, checksum-mismatched, or newer unknown
+migrations, for a loop that never registered, and for a loop whose heartbeat
+exceeds the service-specific maximum age. The default maximum is 20 seconds;
+set `BIGNAME_INDEXER_HEARTBEAT_MAX_AGE_SECS` and
+`BIGNAME_WORKER_HEARTBEAT_MAX_AGE_SECS` in proportion to custom poll
+intervals. During rolling upgrades, running `migrate` before recreating old
 service containers can therefore mark those old indexer/worker containers
-unhealthy until they are replaced with the matching image; treat that as version
-skew, not evidence that PostgreSQL is down.
+unhealthy until they are replaced with the matching image; treat that as
+version skew, not evidence that PostgreSQL is down.
+
+The API `/healthz` response also requires a recent indexer and worker process
+heartbeat, using `BIGNAME_API_HEARTBEAT_MAX_AGE_SECS` (default 20). The status
+routes use the API chain RPC mapping for an asynchronous cached network-head
+probe. Tune its provider timeout, refresh interval, cache TTL, and ingestion
+block/time limits with the `BIGNAME_API_STATUS_PROVIDER_*` and
+`BIGNAME_API_STATUS_MAX_*` variables in `.env.server.example`.
 
 ### Resolver-profile replay after an upgrade or compaction
 

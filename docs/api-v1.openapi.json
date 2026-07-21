@@ -800,6 +800,67 @@
         ],
         "type": "object"
       },
+      "HealthLoop": {
+        "properties": {
+          "heartbeat_age_seconds": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "heartbeat_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_age_seconds": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "started_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "enum": [
+              "running",
+              "stale",
+              "not_started",
+              "unavailable"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "started_at",
+          "heartbeat_at",
+          "heartbeat_age_seconds",
+          "max_age_seconds"
+        ],
+        "type": "object"
+      },
+      "HealthLoops": {
+        "properties": {
+          "indexer": {
+            "$ref": "#/components/schemas/HealthLoop"
+          },
+          "worker": {
+            "$ref": "#/components/schemas/HealthLoop"
+          }
+        },
+        "required": [
+          "indexer",
+          "worker"
+        ],
+        "type": "object"
+      },
       "HealthProcess": {
         "properties": {
           "status": {
@@ -831,6 +892,9 @@
           "identity": {
             "$ref": "#/components/schemas/HealthIdentity"
           },
+          "loops": {
+            "$ref": "#/components/schemas/HealthLoops"
+          },
           "process": {
             "$ref": "#/components/schemas/HealthProcess"
           },
@@ -846,7 +910,8 @@
           "identity",
           "status",
           "process",
-          "database"
+          "database",
+          "loops"
         ],
         "type": "object"
       },
@@ -1103,6 +1168,20 @@
                     "null"
                   ]
                 },
+                "ingestion_lag_blocks": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "ingestion_lag_seconds": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
                 "latest_projected_block": {
                   "type": [
                     "integer",
@@ -1115,6 +1194,37 @@
                     "string",
                     "null"
                   ]
+                },
+                "network_block": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "network_head_age_seconds": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "network_head_observed_at": {
+                  "format": "date-time",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "network_head_status": {
+                  "enum": [
+                    "fresh",
+                    "stale",
+                    "unavailable",
+                    "pending",
+                    "unconfigured"
+                  ],
+                  "type": "string"
                 },
                 "projection_lag_blocks": {
                   "type": [
@@ -1142,11 +1252,25 @@
                 "latest_projected_block",
                 "latest_projected_timestamp",
                 "projection_lag_blocks",
-                "projection_lag_seconds"
+                "projection_lag_seconds",
+                "network_block",
+                "network_head_observed_at",
+                "network_head_age_seconds",
+                "network_head_status",
+                "ingestion_lag_blocks",
+                "ingestion_lag_seconds"
               ],
               "type": "object"
             },
             "type": "object"
+          },
+          "dead_letter_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "pending_invalidation_count": {
+            "minimum": 0,
+            "type": "integer"
           },
           "status": {
             "enum": [
@@ -1159,6 +1283,8 @@
         },
         "required": [
           "status",
+          "pending_invalidation_count",
+          "dead_letter_count",
           "chains"
         ],
         "type": "object"

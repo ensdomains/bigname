@@ -607,10 +607,7 @@ impl TestDatabase {
         &self,
         chain_rpc_urls: bigname_execution::ChainRpcUrls,
     ) -> AppState {
-        AppState {
-            pool: self.pool.clone(),
-            chain_rpc_urls,
-        }
+        AppState::new(self.pool.clone(), chain_rpc_urls)
     }
 
     async fn seed_history_binding(

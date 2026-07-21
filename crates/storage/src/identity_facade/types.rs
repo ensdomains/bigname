@@ -146,6 +146,8 @@ pub struct IdentityPrimaryNameSnapshot {
 pub struct IndexingStatusRead {
     pub chains: Vec<IndexingStatusChainRow>,
     pub has_unscoped_pending_invalidations: bool,
+    pub pending_invalidation_count: i64,
+    pub dead_letter_count: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -358,7 +358,7 @@ The actual published routes are listed below. Per-route semantics are in [`api-v
 | Route | Purpose |
 | --- | --- |
 | `POST /v1/identity:lookup` | Native slim identity lookup. `profile=feed` is the partner-1 latency path; `profile=detail` is profile aggregation. |
-| `GET /v1/status` | Public projection/indexing readiness by chain. |
+| `GET /v1/status` | Public projection/indexing readiness by chain, including cached network-head freshness and invalidation/dead-letter counts. |
 
 ### Canonical product reads
 
@@ -380,7 +380,7 @@ The actual published routes are listed below. Per-route semantics are in [`api-v
 | --- | --- |
 | `GET /v1/namespaces/{namespace}` | Namespace metadata. |
 | `GET /v1/manifests/{namespace}` | Active manifest versions and capabilities. |
-| `GET /healthz` | Process and database readiness check. Not part of the `v1` contract. |
+| `GET /healthz` | API/database readiness and indexer/worker loop-liveness check. Unversioned operator contract; not part of the `v1` contract. |
 
 ### Diagnostics and provenance
 
