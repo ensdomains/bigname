@@ -14,6 +14,11 @@ const LABEL: &str = "catchupeq";
 const SUB_LABEL: &str = "sub";
 const TEXT_KEY: &str = "com.twitter";
 const YEAR: u64 = 365 * 24 * 60 * 60;
+// Anvil's finalized anchor trails the head by 64 blocks, so 66 is load-bearing:
+// fixture events must finalize for `live_ready_sql`, and the post-handoff cold-start
+// safe/finalized anchor must land above the last fixture event so live adapter sync
+// never touches fixture blocks. The roughly two-block headroom prevents
+// `PreimageObserved` from appearing in the catch-up corpus as an inscrutable parity flake.
 const FINALITY_MARGIN_BLOCKS: u64 = 66;
 const REGISTRAR_MANIFEST_VERSION: i64 = 1;
 const REGISTRAR_SOURCE_MANIFEST_ID: i64 = 1;

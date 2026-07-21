@@ -563,7 +563,16 @@ route inventory or a claim that every protocol transition is covered.
   finalized registrar `PreimageObserved` for `catchupeq.eth`, with no catch-up-
   only or other live-only rows. The scenario's contract constant switches to
   full row equality when two-phase automatic replay adds the omitted stateless
-  label-preimage pass.
+  label-preimage pass. The result—only the #157-class divergence, with no
+  #161-style incremental-versus-replay under-derivation observed—is certified
+  for the current corpus only: one finalized ENSv1 `.eth` registration with
+  addr/text records and a registry-only child. Wrapper events, reverse/primary
+  claims, renewals, expiry/grace, ENSv2, Basenames/multi-chain, non-finalized
+  spans, and reorged history are not yet exercised; follow-up issue #202 tracks
+  the corpus extension. The ENSv2-specific cases in #161 are not exercised
+  here. The shared baseline span contributes no detection power for catch-up
+  omissions because both corpora's baseline is live-derived; the catch-up
+  re-replay is identity-idempotent via `ON CONFLICT DO NOTHING`.
 - `cross_protocol::composed_mainnet_profile_serves_both_protocols_without_leakage`
   — ingests a generated structural mirror of the currently checked-in mainnet
   families (ENSv1 ethereum + Basenames base + the L1 Basenames
