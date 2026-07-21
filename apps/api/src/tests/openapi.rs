@@ -305,6 +305,7 @@ fn openapi_document_uses_package_version_and_freezes_health_identity() {
         required_fields(service_loop),
         vec![
             "status",
+            "phase",
             "started_at",
             "heartbeat_at",
             "heartbeat_age_seconds",
@@ -322,8 +323,18 @@ fn openapi_document_uses_package_version_and_freezes_health_identity() {
     assert_eq!(
         required_fields(response),
         vec![
-            "service", "identity", "status", "process", "database", "loops",
+            "service",
+            "identity",
+            "status",
+            "api_status",
+            "process",
+            "database",
+            "loops",
         ]
+    );
+    assert_eq!(
+        response.pointer("/properties/api_status/enum"),
+        Some(&json!(["ready", "degraded"]))
     );
     assert_eq!(
         response.pointer("/properties/process"),
@@ -345,9 +356,16 @@ fn openapi_document_uses_package_version_and_freezes_health_identity() {
         vec![
             "status",
             "pending_invalidation_count",
+            "pending_invalidation_count_capped",
             "dead_letter_count",
             "chains",
         ]
+    );
+    assert_eq!(
+        indexing_status.pointer("/properties/pending_invalidation_count/maximum"),
+        Some(&json!(
+            bigname_storage::PENDING_INVALIDATION_COUNT_CAP
+        ))
     );
     assert_eq!(
         indexing_status.pointer(

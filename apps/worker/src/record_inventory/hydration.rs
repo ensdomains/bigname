@@ -12,7 +12,13 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use crate::primary_name::rebuild_heartbeat::{LoopHeartbeat, record_rebuild_progress};
+
 use super::{constants::*, types::RecordInventoryTextHydrationSummary};
+
+#[path = "hydration/chain_positions.rs"]
+mod chain_positions;
+use chain_positions::{TextHydrationChainPosition, load_text_hydration_chain_positions};
 
 const DEFAULT_TEXT_HYDRATION_BATCH_SIZE: usize = 250;
 const DEFAULT_TEXT_HYDRATION_ROW_BATCH_SIZE: i64 = 500;
@@ -51,12 +57,6 @@ struct TextHydrationCall {
     name: String,
     namehash: String,
     text_key: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct TextHydrationChainPosition {
-    block_number: i64,
-    block_hash: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -147,10 +147,35 @@ pub(super) async fn hydrate_record_inventory_text_values(
     hydrate_record_inventory_text_values_with_client(pool, resource_id, &client).await
 }
 
+pub(super) async fn hydrate_record_inventory_text_values_with_heartbeat(
+    pool: &PgPool,
+    resource_id: Option<&str>,
+    config: RecordInventoryTextHydrationConfig,
+    loop_heartbeat: &mut LoopHeartbeat,
+) -> Result<RecordInventoryTextHydrationSummary> {
+    let client = MulticallTextHydrationClient { config };
+    hydrate_record_inventory_text_values_with_client_inner(
+        pool,
+        resource_id,
+        &client,
+        Some(loop_heartbeat),
+    )
+    .await
+}
+
 async fn hydrate_record_inventory_text_values_with_client(
     pool: &PgPool,
     resource_id: Option<&str>,
     client: &dyn TextHydrationClient,
+) -> Result<RecordInventoryTextHydrationSummary> {
+    hydrate_record_inventory_text_values_with_client_inner(pool, resource_id, client, None).await
+}
+
+async fn hydrate_record_inventory_text_values_with_client_inner(
+    pool: &PgPool,
+    resource_id: Option<&str>,
+    client: &dyn TextHydrationClient,
+    mut loop_heartbeat: Option<&mut LoopHeartbeat>,
 ) -> Result<RecordInventoryTextHydrationSummary> {
     let resource_id = resource_id
         .map(Uuid::parse_str)
@@ -299,60 +324,10 @@ async fn hydrate_record_inventory_text_values_with_client(
             update_record_inventory_entries(pool, row).await?;
             summary.updated_row_count += 1;
         }
+        record_rebuild_progress(pool, &mut loop_heartbeat).await;
     }
 
     Ok(summary)
-}
-
-async fn load_text_hydration_chain_positions(
-    pool: &PgPool,
-    chain_ids: &[String],
-) -> Result<BTreeMap<String, TextHydrationChainPosition>> {
-    if chain_ids.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-
-    let rows = sqlx::query(
-        r#"
-        SELECT
-            chain_id,
-            canonical_block_number,
-            canonical_block_hash
-        FROM chain_checkpoints
-        WHERE chain_id = ANY($1::TEXT[])
-        "#,
-    )
-    .bind(chain_ids)
-    .fetch_all(pool)
-    .await
-    .context("failed to load text hydration chain checkpoints")?;
-
-    let mut positions = BTreeMap::new();
-    for row in rows {
-        let chain_id: String = row.try_get("chain_id")?;
-        let block_number: Option<i64> = row.try_get("canonical_block_number")?;
-        let block_hash: Option<String> = row.try_get("canonical_block_hash")?;
-        let Some((block_number, block_hash)) = block_number.zip(block_hash) else {
-            continue;
-        };
-        positions.insert(
-            chain_id,
-            TextHydrationChainPosition {
-                block_number,
-                block_hash,
-            },
-        );
-    }
-
-    for chain_id in chain_ids {
-        if !positions.contains_key(chain_id) {
-            anyhow::bail!(
-                "record_inventory_current text hydration requires a canonical chain checkpoint for {chain_id}"
-            );
-        }
-    }
-
-    Ok(positions)
 }
 
 async fn load_supported_ensv1_text_resolvers(

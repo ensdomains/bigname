@@ -3,6 +3,32 @@ use sqlx::PgPool;
 
 use super::{IndexingStatusChainRow, IndexingStatusRead};
 
+pub const PENDING_INVALIDATION_COUNT_CAP: i64 = 10_000;
+
+pub async fn load_expected_status_chain_ids(pool: &PgPool) -> Result<Vec<String>> {
+    sqlx::query_scalar(
+        r#"
+        SELECT chain_id
+        FROM (
+            SELECT chain_id
+            FROM chain_checkpoints
+            UNION
+            SELECT chain AS chain_id
+            FROM manifest_versions
+            WHERE chain IS NOT NULL
+              AND rollout_status IN (
+                'active'::manifest_rollout_status,
+                'shadow'::manifest_rollout_status
+              )
+        ) AS known_chains
+        ORDER BY chain_id
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to load expected indexing status chains")
+}
+
 pub async fn load_indexing_status(pool: &PgPool) -> Result<IndexingStatusRead> {
     let rows = sqlx::query(
         r#"
@@ -197,21 +223,32 @@ pub async fn load_indexing_status(pool: &PgPool) -> Result<IndexingStatusRead> {
                OR event.block_number IS NULL
             )
         ) AS has_unscoped_pending_invalidations,
-        (SELECT COUNT(*)::BIGINT FROM projection_invalidations) AS pending_invalidation_count,
+        (
+            SELECT COUNT(*)::BIGINT
+            FROM (
+                SELECT 1
+                FROM projection_invalidations
+                LIMIT $1 + 1
+            ) AS bounded_pending_invalidations
+        ) AS observed_pending_invalidation_count,
         (
             SELECT COUNT(*)::BIGINT
             FROM projection_invalidation_dead_letters
         ) AS dead_letter_count
         "#,
         )
+        .bind(PENDING_INVALIDATION_COUNT_CAP)
         .fetch_one(pool)
         .await
         .context("failed to load unscoped indexing invalidation status")?;
 
+    let pending_invalidation_count_capped =
+        pending_invalidation_count > PENDING_INVALIDATION_COUNT_CAP;
     Ok(IndexingStatusRead {
         chains,
         has_unscoped_pending_invalidations,
-        pending_invalidation_count,
+        pending_invalidation_count: pending_invalidation_count.min(PENDING_INVALIDATION_COUNT_CAP),
+        pending_invalidation_count_capped,
         dead_letter_count,
     })
 }

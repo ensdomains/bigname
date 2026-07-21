@@ -15,7 +15,10 @@ use tokio::task::JoinSet;
 #[path = "staged_rebuild.rs"]
 mod staged_rebuild;
 
-use crate::projection_json::format_timestamp;
+use crate::{
+    primary_name::rebuild_heartbeat::{LoopHeartbeat, record_rebuild_progress, run_rebuild_phase},
+    projection_json::format_timestamp,
+};
 use staged_rebuild::{
     CHILDREN_CURRENT_COLUMNS, count_rows, create_stage_table, drop_stage_table,
     publish_stage_table, stage_children_current_rows,
@@ -38,22 +41,46 @@ pub async fn rebuild_children_current(
     pool: &PgPool,
     parent_logical_name_id: Option<&str>,
 ) -> Result<ChildrenCurrentRebuildSummary> {
+    rebuild_children_current_inner(pool, parent_logical_name_id, None).await
+}
+
+pub(crate) async fn rebuild_children_current_with_heartbeat(
+    pool: &PgPool,
+    parent_logical_name_id: Option<&str>,
+    loop_heartbeat: &mut LoopHeartbeat,
+) -> Result<ChildrenCurrentRebuildSummary> {
+    rebuild_children_current_inner(pool, parent_logical_name_id, Some(loop_heartbeat)).await
+}
+
+async fn rebuild_children_current_inner(
+    pool: &PgPool,
+    parent_logical_name_id: Option<&str>,
+    loop_heartbeat: Option<&mut LoopHeartbeat>,
+) -> Result<ChildrenCurrentRebuildSummary> {
     match parent_logical_name_id {
         Some(parent_logical_name_id) => rebuild_one_parent(pool, parent_logical_name_id).await,
-        None => rebuild_all_parents(pool).await,
+        None => rebuild_all_parents(pool, loop_heartbeat).await,
     }
 }
 
-async fn rebuild_all_parents(pool: &PgPool) -> Result<ChildrenCurrentRebuildSummary> {
+async fn rebuild_all_parents(
+    pool: &PgPool,
+    mut loop_heartbeat: Option<&mut LoopHeartbeat>,
+) -> Result<ChildrenCurrentRebuildSummary> {
     let mut conn = pool
         .acquire()
         .await
         .context("failed to acquire children_current staging connection")?;
     let stage_table = create_stage_table(&mut conn, "children_current").await?;
-    let previous_row_count = count_rows(
-        &mut conn,
-        "children_current",
-        Some("WHERE surface_class = 'declared'"),
+    let previous_row_count = run_rebuild_phase(
+        pool,
+        &mut loop_heartbeat,
+        "children_current.count_existing",
+        count_rows(
+            &mut conn,
+            "children_current",
+            Some("WHERE surface_class = 'declared'"),
+        ),
     )
     .await?;
     let mut rows = Vec::with_capacity(CHILDREN_CURRENT_REBUILD_BATCH_SIZE);
@@ -76,6 +103,7 @@ async fn rebuild_all_parents(pool: &PgPool) -> Result<ChildrenCurrentRebuildSumm
     while let Some(result) = tasks.join_next().await {
         completed_source_count += 1;
         rows.push(result??);
+        record_rebuild_progress(pool, &mut loop_heartbeat).await;
         if rows.len() >= CHILDREN_CURRENT_REBUILD_BATCH_SIZE {
             upserted_row_count +=
                 stage_children_current_rows(&mut conn, &stage_table, &rows).await? as usize;
@@ -105,18 +133,29 @@ async fn rebuild_all_parents(pool: &PgPool) -> Result<ChildrenCurrentRebuildSumm
         upserted_row_count +=
             stage_children_current_rows(&mut conn, &stage_table, &rows).await? as usize;
     }
-    let (_deleted_row_count, published_row_count) = publish_stage_table(
-        &mut conn,
-        "children_current",
-        &stage_table,
-        CHILDREN_CURRENT_COLUMNS,
-        Some("WHERE surface_class = 'declared'"),
+    let (_deleted_row_count, published_row_count) = run_rebuild_phase(
+        pool,
+        &mut loop_heartbeat,
+        "children_current.publish",
+        publish_stage_table(
+            &mut conn,
+            "children_current",
+            &stage_table,
+            CHILDREN_CURRENT_COLUMNS,
+            Some("WHERE surface_class = 'declared'"),
+        ),
     )
     .await?;
     drop_stage_table(&mut conn, &stage_table).await?;
     debug_assert_eq!(published_row_count as usize, upserted_row_count);
 
-    let requested_parent_count = count_children_current_parents(pool).await?;
+    let requested_parent_count = run_rebuild_phase(
+        pool,
+        &mut loop_heartbeat,
+        "children_current.count_published_parents",
+        count_children_current_parents(pool),
+    )
+    .await?;
 
     Ok(ChildrenCurrentRebuildSummary {
         requested_parent_count,

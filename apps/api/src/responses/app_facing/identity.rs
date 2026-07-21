@@ -143,6 +143,7 @@ pub(crate) async fn build_indexing_status_response(
     IndexingStatusResponse {
         status: status.to_owned(),
         pending_invalidation_count: read.pending_invalidation_count,
+        pending_invalidation_count_capped: read.pending_invalidation_count_capped,
         dead_letter_count: read.dead_letter_count,
         chains,
     }

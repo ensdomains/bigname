@@ -1,9 +1,13 @@
 use anyhow::Result;
+use tokio::time::Duration;
 use tracing::info;
+
+#[path = "startup_heartbeat.rs"]
+pub(crate) mod startup_heartbeat;
 
 use crate::{
     backfill::BackfillAdapterSyncMode,
-    bootstrap_backfill::run_startup_bootstrap_backfills,
+    bootstrap_backfill::run_startup_bootstrap_backfills_with_heartbeat,
     cli::RunArgs,
     normalized_replay_catchup::{NormalizedReplayCatchupConfig, run_normalized_replay_catchup},
     provider::{ChainProviderKind, ProviderRegistry},
@@ -23,6 +27,8 @@ use crate::{
     },
 };
 
+use startup_heartbeat::StartupHeartbeat;
+
 pub(crate) async fn run(args: RunArgs) -> Result<()> {
     let heartbeat_instance_id =
         bigname_storage::resolve_service_instance_id(args.heartbeat_instance_id.as_deref())?;
@@ -38,6 +44,16 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
             "bigname-indexer",
         )
         .await?;
+    bigname_storage::register_service_loop(
+        &pool,
+        bigname_storage::INDEXER_SERVICE_NAME,
+        &heartbeat_instance_id,
+    )
+    .await?;
+    let mut startup_heartbeat = StartupHeartbeat::new(
+        heartbeat_instance_id.clone(),
+        Duration::from_secs(args.poll_interval_secs.max(1)),
+    );
     let adapter_sync_mode = BackfillAdapterSyncMode::parse(&args.hash_pinned_adapter_sync)?;
     let header_audit_mode =
         HeaderAuditMode::from_retain_audit_fields(args.retain_header_audit_fields);
@@ -48,6 +64,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         run_mode.bootstrap_watch_scope,
     )
     .await?;
+    startup_heartbeat.record_if_due(&pool, &[]).await?;
     if run_mode.sync_adapter_before_startup_backfill {
         sync_startup_adapter_owned_raw_log_state(
             &pool,
@@ -68,13 +85,18 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
     log_watched_chain_plan("startup", &manifest_runtime_state.watched_chain_plan);
     let intake_chain_tasks =
         sync_intake_chain_tasks(&pool, &manifest_runtime_state.watched_chain_plan).await?;
+    let startup_chain_ids = intake_chain_tasks
+        .iter()
+        .map(|task| task.chain.clone())
+        .collect::<Vec<_>>();
+    startup_heartbeat.record(&pool, &startup_chain_ids).await?;
     log_intake_chain_tasks("startup", &intake_chain_tasks);
     let provider_registry = args.provider_registry()?;
     validate_provider_registry_for_intake_tasks(&intake_chain_tasks, &provider_registry)?;
     log_provider_registry("startup", &intake_chain_tasks, &provider_registry);
     // Automatic normalized catch-up replays bounded chunks after raw bootstrap drains.
     let replay_completed_startup_raw_ranges = false;
-    let bootstrap_backfill_outcome = run_startup_bootstrap_backfills(
+    let bootstrap_backfill_outcome = run_startup_bootstrap_backfills_with_heartbeat(
         &pool,
         &args.manifests_root,
         &intake_chain_tasks,
@@ -85,6 +107,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         header_audit_mode,
         args.bootstrap_backfill_workers,
         args.bootstrap_backfill_range_blocks,
+        &mut startup_heartbeat,
     )
     .await?;
     if run_mode.sync_adapter_after_startup_backfill {
@@ -131,6 +154,11 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
             &provider_registry,
         )
         .await?;
+    let live_chain_ids = intake_chain_tasks
+        .iter()
+        .map(|task| task.chain.clone())
+        .collect::<Vec<_>>();
+    startup_heartbeat.record(&pool, &live_chain_ids).await?;
     if adapter_sync_mode != BackfillAdapterSyncMode::RawOnly
         && !run_mode.normalized_replay_catchup_enabled
     {
@@ -171,13 +199,6 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
     let watched_chain_plan_state =
         watched_chain_plan_state(&manifest_runtime_state.watched_chain_plan);
     let intake_runtime_state = intake_runtime_state(&intake_chain_tasks);
-
-    bigname_storage::register_service_loop(
-        &pool,
-        bigname_storage::INDEXER_SERVICE_NAME,
-        &heartbeat_instance_id,
-    )
-    .await?;
 
     info!(
         service = "indexer",

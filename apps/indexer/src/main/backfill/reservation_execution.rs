@@ -8,6 +8,8 @@ mod generic_topic_identity;
 mod lease_heartbeat;
 #[path = "reservation_execution/scan_all.rs"]
 mod scan_all;
+#[path = "reservation_execution/startup_progress.rs"]
+mod startup_progress;
 #[cfg(test)]
 #[path = "reservation_execution/tests.rs"]
 mod tests;
@@ -20,7 +22,6 @@ use bigname_storage::{
     create_generation_scoped_backfill_job, load_backfill_job, reserve_backfill_range,
 };
 use serde_json::{Value, json};
-use sqlx::types::time::OffsetDateTime;
 use tracing::info;
 
 use crate::{
@@ -48,6 +49,7 @@ pub(crate) use coinbase_sql_execution::{
     run_reserved_coinbase_sql_backfill_range, run_resumable_coinbase_sql_backfill_job,
 };
 pub(super) use lease_heartbeat::{
+    backfill_lease_duration_secs, refreshed_backfill_lease_expires_at,
     run_with_backfill_lease_heartbeat, validate_hash_pinned_chunk_blocks,
 };
 pub(crate) use scan_all::effective_hash_pinned_adapter_sync_mode;
@@ -410,6 +412,48 @@ pub(super) async fn run_reserved_hash_pinned_backfill_range(
     reserved_range: &BackfillRange,
     aggregate: &mut BackfillJobRunOutcome,
 ) -> Result<()> {
+    run_reserved_hash_pinned_backfill_range_inner(
+        pool,
+        source_plan,
+        provider,
+        config,
+        reserved_range,
+        aggregate,
+        None,
+    )
+    .await
+}
+
+pub(super) async fn run_reserved_hash_pinned_backfill_range_with_progress(
+    pool: &sqlx::PgPool,
+    source_plan: &WatchedSourceSelectorPlan,
+    provider: &(impl ChainProviderOps + ?Sized),
+    config: &BackfillJobRunConfig,
+    reserved_range: &BackfillRange,
+    aggregate: &mut BackfillJobRunOutcome,
+    progress: &tokio::sync::mpsc::UnboundedSender<()>,
+) -> Result<()> {
+    run_reserved_hash_pinned_backfill_range_inner(
+        pool,
+        source_plan,
+        provider,
+        config,
+        reserved_range,
+        aggregate,
+        Some(progress),
+    )
+    .await
+}
+
+async fn run_reserved_hash_pinned_backfill_range_inner(
+    pool: &sqlx::PgPool,
+    source_plan: &WatchedSourceSelectorPlan,
+    provider: &(impl ChainProviderOps + ?Sized),
+    config: &BackfillJobRunConfig,
+    reserved_range: &BackfillRange,
+    aggregate: &mut BackfillJobRunOutcome,
+    progress: Option<&tokio::sync::mpsc::UnboundedSender<()>>,
+) -> Result<()> {
     let mut active_range = reserved_range.clone();
     let mut block_number = active_range
         .checkpoint_block_number
@@ -446,45 +490,50 @@ pub(super) async fn run_reserved_hash_pinned_backfill_range(
             .unwrap_or(active_range.range_end_block_number)
             .min(active_range.range_end_block_number);
         let chunk_range = BackfillBlockRange::new(block_number, chunk_end)?;
-        let selected_target_addresses_for_chunk = scan_all::chunk_addresses_for_plan(
-            source_plan,
-            &mut selected_target_range_cursor,
-            chunk_range,
-        );
-        let chunk_outcome = match run_with_backfill_lease_heartbeat(
-            pool,
-            &active_range,
-            config,
-            run_hash_pinned_backfill_range(
-                pool,
+        let progress_ranges =
+            startup_progress::heartbeat_progress_ranges(chunk_range, progress.is_some())?;
+        for progress_range in progress_ranges {
+            let selected_target_addresses = scan_all::chunk_addresses_for_plan(
                 source_plan,
-                &selected_target_index,
-                &selected_target_addresses_for_chunk,
-                provider,
-                chunk_range,
-                canonicality_evidence.clone(),
-                config.adapter_sync_mode,
-                config.header_audit_mode,
-            ),
-        )
-        .await
-        {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                return Err(record_reserved_range_failure(ReservedRangeFailure {
+                &mut selected_target_range_cursor,
+                progress_range,
+            );
+            let outcome = run_with_backfill_lease_heartbeat(
+                pool,
+                &active_range,
+                config,
+                run_hash_pinned_backfill_range(
                     pool,
-                    reserved_range: &active_range,
-                    config,
-                    failure_reason: "hash-pinned backfill failed",
-                    block_number: Some(block_number),
-                    attempted_range: Some(chunk_range),
-                    phase: "hash_pinned_intake",
-                    error,
-                })
-                .await);
+                    source_plan,
+                    &selected_target_index,
+                    &selected_target_addresses,
+                    provider,
+                    progress_range,
+                    canonicality_evidence.clone(),
+                    config.adapter_sync_mode,
+                    config.header_audit_mode,
+                ),
+            )
+            .await
+            .map_err(|error| ReservedRangeFailure {
+                pool,
+                reserved_range: &active_range,
+                config,
+                failure_reason: "hash-pinned backfill failed",
+                block_number: Some(progress_range.from_block),
+                attempted_range: Some(progress_range),
+                phase: "hash_pinned_intake",
+                error,
+            });
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(failure) => return Err(record_reserved_range_failure(failure).await),
+            };
+            aggregate.add_range_outcome(&outcome);
+            if let Some(progress) = progress {
+                let _ = progress.send(());
             }
-        };
-        aggregate.add_range_outcome(&chunk_outcome);
+        }
 
         active_range = match advance_backfill_range(
             pool,
@@ -509,7 +558,6 @@ pub(super) async fn run_reserved_hash_pinned_backfill_range(
                 .await);
             }
         };
-
         if chunk_end == active_range.range_end_block_number {
             break;
         }
@@ -527,22 +575,4 @@ pub(super) async fn run_reserved_hash_pinned_backfill_range(
         "backfill range completion failed",
     )
     .await
-}
-pub(super) fn backfill_lease_duration_secs(lease_expires_at: OffsetDateTime) -> Result<i64> {
-    let duration_secs = lease_expires_at
-        .unix_timestamp()
-        .checked_sub(OffsetDateTime::now_utc().unix_timestamp())
-        .context("backfill lease duration timestamp underflowed")?;
-    if duration_secs <= 0 {
-        bail!("lease_expires_at must be in the future");
-    }
-    Ok(duration_secs)
-}
-pub(super) fn refreshed_backfill_lease_expires_at(duration_secs: i64) -> Result<OffsetDateTime> {
-    let deadline = OffsetDateTime::now_utc()
-        .unix_timestamp()
-        .checked_add(duration_secs)
-        .context("backfill lease expiry timestamp overflowed while refreshing range lease")?;
-    OffsetDateTime::from_unix_timestamp(deadline)
-        .context("refreshed backfill lease expiry timestamp is out of range")
 }

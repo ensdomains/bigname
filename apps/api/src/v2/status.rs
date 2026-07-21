@@ -14,6 +14,7 @@ use super::{
 pub(crate) struct StatusData {
     pub(crate) status: OpsStatus,
     pub(crate) pending_invalidation_count: i64,
+    pub(crate) pending_invalidation_count_capped: bool,
     pub(crate) dead_letter_count: i64,
     pub(crate) chains: BTreeMap<String, ChainStatus>,
 }
@@ -79,6 +80,7 @@ async fn build_status_data(
     Ok(StatusData {
         status: root_status(chains.values(), read.has_unscoped_pending_invalidations),
         pending_invalidation_count: read.pending_invalidation_count,
+        pending_invalidation_count_capped: read.pending_invalidation_count_capped,
         dead_letter_count: read.dead_letter_count,
         chains,
     })
@@ -204,6 +206,7 @@ mod tests {
             ],
             has_unscoped_pending_invalidations: false,
             pending_invalidation_count: 7,
+            pending_invalidation_count_capped: false,
             dead_letter_count: 2,
         };
         let chain_rpc_urls = bigname_execution::ChainRpcUrls::from_entries(&[
@@ -235,6 +238,7 @@ mod tests {
 
         assert_eq!(data.status, OpsStatus::Stale);
         assert_eq!(data.pending_invalidation_count, 7);
+        assert!(!data.pending_invalidation_count_capped);
         assert_eq!(data.dead_letter_count, 2);
         assert_eq!(
             data.chains.keys().collect::<Vec<_>>(),
@@ -268,6 +272,7 @@ mod tests {
             )],
             has_unscoped_pending_invalidations: false,
             pending_invalidation_count: 0,
+            pending_invalidation_count_capped: false,
             dead_letter_count: 0,
         };
         let state = AppState::new(

@@ -96,6 +96,12 @@ pub(crate) struct HealthcheckArgs {
         default_value_t = 20_i64
     )]
     pub(crate) heartbeat_max_age_secs: i64,
+    #[arg(
+        long,
+        env = "BIGNAME_WORKER_REBUILD_PHASE_MAX_AGE_SECS",
+        default_value_t = bigname_storage::DEFAULT_WORKER_REBUILD_PHASE_MAX_AGE_SECS
+    )]
+    pub(crate) rebuild_phase_max_age_secs: i64,
 }
 
 #[derive(Args, Debug)]

@@ -9,7 +9,7 @@ use tracing::warn;
 pub(crate) const DEFAULT_PROVIDER_TIMEOUT_MS: u64 = 750;
 pub(crate) const DEFAULT_PROVIDER_REFRESH_SECS: u64 = 5;
 pub(crate) const DEFAULT_PROVIDER_CACHE_TTL_SECS: u64 = 30;
-pub(crate) const DEFAULT_MAX_BLOCK_LAG: i64 = 5;
+pub(crate) const DEFAULT_MAX_BLOCK_LAG: i64 = 30;
 pub(crate) const DEFAULT_MAX_LAG_SECS: i64 = 60;
 
 #[derive(Clone, Debug)]
@@ -58,6 +58,17 @@ impl StatusFreshnessConfig {
             max_lag_seconds,
         })
     }
+}
+
+pub(crate) fn missing_status_rpc_chains(
+    expected_chain_ids: &[String],
+    chain_rpc_urls: &ChainRpcUrls,
+) -> Vec<String> {
+    expected_chain_ids
+        .iter()
+        .filter(|chain_id| chain_rpc_urls.url_for(chain_id).is_none())
+        .cloned()
+        .collect()
 }
 
 impl Default for StatusFreshnessConfig {

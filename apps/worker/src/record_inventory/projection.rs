@@ -8,6 +8,10 @@ use sqlx::{PgPool, types::time::OffsetDateTime};
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
+use crate::primary_name::rebuild_heartbeat::{
+    LoopHeartbeat, record_rebuild_progress, run_rebuild_phase,
+};
+
 #[allow(clippy::duplicate_mod)]
 #[path = "../staged_rebuild.rs"]
 mod staged_rebuild;
@@ -80,19 +84,44 @@ pub(super) async fn rebuild_record_inventory_current(
     pool: &PgPool,
     resource_id: Option<&str>,
 ) -> Result<RecordInventoryCurrentRebuildSummary> {
+    rebuild_record_inventory_current_inner(pool, resource_id, None).await
+}
+
+pub(super) async fn rebuild_record_inventory_current_with_heartbeat(
+    pool: &PgPool,
+    resource_id: Option<&str>,
+    loop_heartbeat: &mut LoopHeartbeat,
+) -> Result<RecordInventoryCurrentRebuildSummary> {
+    rebuild_record_inventory_current_inner(pool, resource_id, Some(loop_heartbeat)).await
+}
+
+async fn rebuild_record_inventory_current_inner(
+    pool: &PgPool,
+    resource_id: Option<&str>,
+    loop_heartbeat: Option<&mut LoopHeartbeat>,
+) -> Result<RecordInventoryCurrentRebuildSummary> {
     match resource_id {
         Some(resource_id) => rebuild_one_resource(pool, resource_id).await,
-        None => rebuild_all_resources(pool).await,
+        None => rebuild_all_resources(pool, loop_heartbeat).await,
     }
 }
 
-async fn rebuild_all_resources(pool: &PgPool) -> Result<RecordInventoryCurrentRebuildSummary> {
+async fn rebuild_all_resources(
+    pool: &PgPool,
+    mut loop_heartbeat: Option<&mut LoopHeartbeat>,
+) -> Result<RecordInventoryCurrentRebuildSummary> {
     let mut conn = pool
         .acquire()
         .await
         .context("failed to acquire record_inventory_current staging connection")?;
     let stage_table = create_stage_table(&mut conn, "record_inventory_current").await?;
-    let previous_row_count = count_rows(&mut conn, "record_inventory_current", None).await?;
+    let previous_row_count = run_rebuild_phase(
+        pool,
+        &mut loop_heartbeat,
+        "record_inventory_current.count_existing",
+        count_rows(&mut conn, "record_inventory_current", None),
+    )
+    .await?;
     let mut rows = Vec::with_capacity(RECORD_INVENTORY_CURRENT_REBUILD_BATCH_SIZE);
     let mut requested_resource_count = 0usize;
     let mut completed_resource_count = 0usize;
@@ -112,7 +141,9 @@ async fn rebuild_all_resources(pool: &PgPool) -> Result<RecordInventoryCurrentRe
 
     while let Some(result) = tasks.join_next().await {
         completed_resource_count += 1;
-        if let Some(row) = result?? {
+        let row = result??;
+        record_rebuild_progress(pool, &mut loop_heartbeat).await;
+        if let Some(row) = row {
             rows.push(row);
         }
 
@@ -145,12 +176,17 @@ async fn rebuild_all_resources(pool: &PgPool) -> Result<RecordInventoryCurrentRe
         upserted_row_count +=
             stage_record_inventory_current_rows(&mut conn, &stage_table, &rows).await? as usize;
     }
-    let (_deleted_row_count, published_row_count) = publish_stage_table(
-        &mut conn,
-        "record_inventory_current",
-        &stage_table,
-        RECORD_INVENTORY_CURRENT_COLUMNS,
-        None,
+    let (_deleted_row_count, published_row_count) = run_rebuild_phase(
+        pool,
+        &mut loop_heartbeat,
+        "record_inventory_current.publish",
+        publish_stage_table(
+            &mut conn,
+            "record_inventory_current",
+            &stage_table,
+            RECORD_INVENTORY_CURRENT_COLUMNS,
+            None,
+        ),
     )
     .await?;
     drop_stage_table(&mut conn, &stage_table).await?;

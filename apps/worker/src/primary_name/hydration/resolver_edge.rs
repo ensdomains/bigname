@@ -9,6 +9,7 @@ use bigname_storage::{ENS_NAMESPACE, normalize_evm_address};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
+use super::super::rebuild_heartbeat::LoopHeartbeat;
 use super::super::{
     PrimaryNameLegacyReverseHydrationSummary,
     projection::primary_name_row_with_provenance_extensions,
@@ -19,7 +20,7 @@ use super::{
     ResolverEdgeHydrationCandidate, ResolverEdgeHydrationTarget, ReverseNameHydrationCall,
     ReverseNameHydrationChainPosition, ReverseNameHydrationClient, ReverseNameHydrationOutcome,
     SOURCE_FAMILY_ENS_V1_REVERSE_L1, TUPLE_SOURCE_RESOLVER_EDGE_FORWARD_CONFIRMED,
-    add_snapshot_status,
+    add_snapshot_status, record_rebuild_progress,
 };
 
 pub(super) async fn hydrate_resolver_edge_candidates(
@@ -28,6 +29,7 @@ pub(super) async fn hydrate_resolver_edge_candidates(
     client: &dyn ReverseNameHydrationClient,
     summary: &mut PrimaryNameLegacyReverseHydrationSummary,
     snapshots: &mut Vec<bigname_storage::PrimaryNameCurrentSnapshot>,
+    loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
 ) -> Result<()> {
     for candidate in candidates
         .iter()
@@ -46,16 +48,15 @@ pub(super) async fn hydrate_resolver_edge_candidates(
                 &existing_key.coin_type,
             )
             .await?;
+            record_rebuild_progress(pool, loop_heartbeat).await;
         }
     }
 
-    let calls_by_position = candidates.iter().enumerate().fold(
-        BTreeMap::<(String, i64, String), Vec<(usize, ReverseNameHydrationCall)>>::new(),
-        |mut by_position, (index, candidate)| {
-            let Some(target) = candidate.hydration_target.as_ref() else {
-                return by_position;
-            };
-            by_position
+    let mut calls_by_position =
+        BTreeMap::<(String, i64, String), Vec<(usize, ReverseNameHydrationCall)>>::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        if let Some(target) = candidate.hydration_target.as_ref() {
+            calls_by_position
                 .entry((
                     target.chain_id.clone(),
                     target.position.block_number,
@@ -69,131 +70,138 @@ pub(super) async fn hydrate_resolver_edge_candidates(
                         reverse_node: target.reverse_node.clone(),
                     },
                 ));
-            by_position
-        },
-    );
+        }
+        if index % 1_000 == 0 {
+            record_rebuild_progress(pool, loop_heartbeat).await;
+        }
+    }
 
     for ((chain_id, block_number, block_hash), calls_with_refs) in calls_by_position {
         let position = ReverseNameHydrationChainPosition {
             block_number,
             block_hash,
         };
-        let calls = calls_with_refs
-            .iter()
-            .map(|(_, call)| call.clone())
-            .collect::<Vec<_>>();
-        summary.queried_tuple_count += calls.len();
-        let outcomes = match client.hydrate(&chain_id, &position, &calls).await {
-            Ok(outcomes) => outcomes,
-            Err(error) => {
-                summary.failed_lookup_count += calls.len();
-                tracing::warn!(
-                    service = "worker",
-                    projection = "primary_names_current",
-                    chain_id,
-                    error = %format!("{error:#}"),
-                    failed_lookup_count = calls.len(),
-                    "legacy reverse-resolver resolver-edge hydration batch failed"
-                );
-                continue;
-            }
-        };
-        if outcomes.len() != calls_with_refs.len() {
-            anyhow::bail!(
-                "legacy reverse-resolver resolver-edge hydration provider returned {} outcomes for {} calls on {chain_id}",
-                outcomes.len(),
-                calls_with_refs.len()
-            );
-        }
-
-        for ((candidate_index, _), outcome) in calls_with_refs.iter().zip(outcomes) {
-            let candidate = candidates.get(*candidate_index).context(
-                "legacy reverse-resolver resolver-edge candidate reference is out of bounds",
-            )?;
-            let target = candidate.hydration_target.as_ref().context(
-                "legacy reverse-resolver resolver-edge candidate is missing hydration target",
-            )?;
-            let raw_name = match outcome {
-                ReverseNameHydrationOutcome::Success(value) => value,
-                ReverseNameHydrationOutcome::NotFound => {
-                    delete_existing_resolver_edge_row(pool, candidate, summary).await?;
-                    continue;
-                }
-                ReverseNameHydrationOutcome::Failed(_) => {
-                    summary.failed_lookup_count += 1;
-                    continue;
-                }
-            };
-            let Some(normalized_name) = normalize_hydrated_name(&raw_name) else {
-                delete_existing_resolver_edge_row(pool, candidate, summary).await?;
-                continue;
-            };
-            if raw_name != normalized_name {
-                summary.claim_not_normalized_count += 1;
-                tracing::debug!(
-                    service = "worker",
-                    projection = "primary_names_current",
-                    chain_id,
-                    reverse_node = target.reverse_node,
-                    raw_name,
-                    normalized_name,
-                    failure_reason = VERIFIED_PRIMARY_NAME_CLAIM_NOT_NORMALIZED_REASON,
-                    "legacy reverse-resolver resolver-edge claim is not already ENSIP-15 normalized"
-                );
-                delete_existing_resolver_edge_row(pool, candidate, summary).await?;
-                continue;
-            }
-            let address = match client
-                .lookup_forward_address(&chain_id, &position, &normalized_name)
-                .await
-            {
-                Ok(Some(address)) => address,
-                Ok(None) => {
-                    delete_existing_resolver_edge_row(pool, candidate, summary).await?;
-                    continue;
-                }
+        for calls_chunk in calls_with_refs.chunks(client.batch_size().max(1)) {
+            let calls = calls_chunk
+                .iter()
+                .map(|(_, call)| call.clone())
+                .collect::<Vec<_>>();
+            summary.queried_tuple_count += calls.len();
+            let outcomes = match client.hydrate(&chain_id, &position, &calls).await {
+                Ok(outcomes) => outcomes,
                 Err(error) => {
-                    if is_universal_resolver_non_confirmation(&error)
-                        || is_new_row_offchain_non_confirmation(candidate, &error)
-                    {
-                        delete_existing_resolver_edge_row(pool, candidate, summary).await?;
-                    } else {
-                        summary.failed_lookup_count += 1;
-                        tracing::warn!(
-                            service = "worker",
-                            projection = "primary_names_current",
-                            chain_id,
-                            reverse_node = target.reverse_node,
-                            normalized_name,
-                            error = %format!("{error:#}"),
-                            "legacy reverse-resolver resolver-edge forward confirmation failed"
-                        );
-                    }
+                    summary.failed_lookup_count += calls.len();
+                    tracing::warn!(
+                        service = "worker",
+                        projection = "primary_names_current",
+                        chain_id,
+                        error = %format!("{error:#}"),
+                        failed_lookup_count = calls.len(),
+                        "legacy reverse-resolver resolver-edge hydration batch failed"
+                    );
+                    record_rebuild_progress(pool, loop_heartbeat).await;
                     continue;
                 }
             };
-            let normalized_address = normalize_evm_address(&address);
-            if !forward_address_matches_reverse_node(&normalized_address, &target.reverse_node)? {
-                delete_existing_resolver_edge_row(pool, candidate, summary).await?;
-                continue;
+            if outcomes.len() != calls_chunk.len() {
+                anyhow::bail!(
+                    "legacy reverse-resolver resolver-edge hydration provider returned {} outcomes for {} calls on {chain_id}",
+                    outcomes.len(),
+                    calls_chunk.len()
+                );
             }
 
-            let tuple = resolver_edge_tuple(&normalized_address);
-            let primary_claim_source =
-                resolver_edge_primary_claim_source(&tuple.key, &target.reverse_node);
-            let claim_observation = NameClaimObservation {
-                key: tuple.key.clone(),
-                raw_name: Some(raw_name),
-                primary_claim_source,
-            };
-            let hydration_provenance = resolver_edge_hydration_provenance(target, &position);
-            let snapshot = primary_name_row_with_provenance_extensions(
-                &tuple,
-                Some(&claim_observation),
-                [(HYDRATION_PROVENANCE_KEY, hydration_provenance)],
-            )?;
-            add_snapshot_status(summary, &snapshot);
-            snapshots.push(snapshot);
+            for ((candidate_index, _), outcome) in calls_chunk.iter().zip(outcomes) {
+                let candidate = candidates.get(*candidate_index).context(
+                    "legacy reverse-resolver resolver-edge candidate reference is out of bounds",
+                )?;
+                let target = candidate.hydration_target.as_ref().context(
+                    "legacy reverse-resolver resolver-edge candidate is missing hydration target",
+                )?;
+                let raw_name = match outcome {
+                    ReverseNameHydrationOutcome::Success(value) => value,
+                    ReverseNameHydrationOutcome::NotFound => {
+                        delete_existing_resolver_edge_row(pool, candidate, summary).await?;
+                        continue;
+                    }
+                    ReverseNameHydrationOutcome::Failed(_) => {
+                        summary.failed_lookup_count += 1;
+                        continue;
+                    }
+                };
+                let Some(normalized_name) = normalize_hydrated_name(&raw_name) else {
+                    delete_existing_resolver_edge_row(pool, candidate, summary).await?;
+                    continue;
+                };
+                if raw_name != normalized_name {
+                    summary.claim_not_normalized_count += 1;
+                    tracing::debug!(
+                        service = "worker",
+                        projection = "primary_names_current",
+                        chain_id,
+                        reverse_node = target.reverse_node,
+                        raw_name,
+                        normalized_name,
+                        failure_reason = VERIFIED_PRIMARY_NAME_CLAIM_NOT_NORMALIZED_REASON,
+                        "legacy reverse-resolver resolver-edge claim is not already ENSIP-15 normalized"
+                    );
+                    delete_existing_resolver_edge_row(pool, candidate, summary).await?;
+                    continue;
+                }
+                let address = match client
+                    .lookup_forward_address(&chain_id, &position, &normalized_name)
+                    .await
+                {
+                    Ok(Some(address)) => address,
+                    Ok(None) => {
+                        delete_existing_resolver_edge_row(pool, candidate, summary).await?;
+                        continue;
+                    }
+                    Err(error) => {
+                        if is_universal_resolver_non_confirmation(&error)
+                            || is_new_row_offchain_non_confirmation(candidate, &error)
+                        {
+                            delete_existing_resolver_edge_row(pool, candidate, summary).await?;
+                        } else {
+                            summary.failed_lookup_count += 1;
+                            tracing::warn!(
+                                service = "worker",
+                                projection = "primary_names_current",
+                                chain_id,
+                                reverse_node = target.reverse_node,
+                                normalized_name,
+                                error = %format!("{error:#}"),
+                                "legacy reverse-resolver resolver-edge forward confirmation failed"
+                            );
+                        }
+                        continue;
+                    }
+                };
+                let normalized_address = normalize_evm_address(&address);
+                if !forward_address_matches_reverse_node(&normalized_address, &target.reverse_node)?
+                {
+                    delete_existing_resolver_edge_row(pool, candidate, summary).await?;
+                    continue;
+                }
+
+                let tuple = resolver_edge_tuple(&normalized_address);
+                let primary_claim_source =
+                    resolver_edge_primary_claim_source(&tuple.key, &target.reverse_node);
+                let claim_observation = NameClaimObservation {
+                    key: tuple.key.clone(),
+                    raw_name: Some(raw_name),
+                    primary_claim_source,
+                };
+                let hydration_provenance = resolver_edge_hydration_provenance(target, &position);
+                let snapshot = primary_name_row_with_provenance_extensions(
+                    &tuple,
+                    Some(&claim_observation),
+                    [(HYDRATION_PROVENANCE_KEY, hydration_provenance)],
+                )?;
+                add_snapshot_status(summary, &snapshot);
+                snapshots.push(snapshot);
+            }
+            record_rebuild_progress(pool, loop_heartbeat).await;
         }
     }
 

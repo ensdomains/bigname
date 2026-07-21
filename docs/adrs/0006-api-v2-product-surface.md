@@ -181,7 +181,7 @@ Tier 1 — lookup primitives:
 | Route | Purpose |
 | --- | --- |
 | `POST /v2/lookup` | Batched forward (name) and reverse (address + coin type) resolution. `profile=feed` is the latency path; `profile=detail` returns full records. Replaces `POST /v1/identity:lookup`. |
-| `GET /v2/status` | Per-chain indexing readiness: root `pending_invalidation_count` and `dead_letter_count` fields plus `chains: {<chain_id>: {latest_block, indexed_block, safe_block, finalized_block, lag_blocks, lag_seconds, network_block, network_head_observed_at, network_head_age_seconds, network_head_status, ingestion_lag_blocks, ingestion_lag_seconds, status}}`. The provider fields are a timeout-bounded asynchronously refreshed cache comparison; the request performs no provider I/O. `status` here is the ops vocabulary `ready\|degraded\|stale` — the one non-result status enum, scoped to this route. |
+| `GET /v2/status` | Per-chain indexing readiness: root `pending_invalidation_count`, `pending_invalidation_count_capped`, and `dead_letter_count` fields plus `chains: {<chain_id>: {latest_block, indexed_block, safe_block, finalized_block, lag_blocks, lag_seconds, network_block, network_head_observed_at, network_head_age_seconds, network_head_status, ingestion_lag_blocks, ingestion_lag_seconds, status}}`. The pending count is exact through 10,000; the capped marker means the bounded query observed at least 10,001 live rows. The provider fields are a timeout-bounded asynchronously refreshed cache comparison; the request performs no provider I/O. `status` here is the ops vocabulary `ready\|degraded\|stale` — the one non-result status enum, scoped to this route. |
 
 Tier 2 — product reads:
 
@@ -213,7 +213,9 @@ Tier 3 — diagnostics (the only routes carrying pipeline vocabulary):
 | `GET /v2/diagnostics/events` | Raw normalized-event rows: upstream event kinds, event identity, full provenance. Same filters as `/v2/events`. This is the home of `v1` history `view=full`, resolving ADR 0003's open history full-view decision: the full row shape survives as a diagnostics contract, not a product one. |
 
 `GET /healthz` remains the unversioned operator health contract outside the
-versioned product routes. `GET /`, `GET /docs`, and `GET /openapi.json` remain
+versioned product routes. Its HTTP status and `api_status` are API-local
+process/database readiness; aggregate `status` and `loops` retain indexer and
+worker liveness evidence. `GET /`, `GET /docs`, and `GET /openapi.json` remain
 non-contract helpers.
 
 Deleted from the public catalog (capability absorbed as noted): the `profiles/`

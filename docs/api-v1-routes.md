@@ -315,6 +315,7 @@ Response:
   "data": {
     "status": "ready",
     "pending_invalidation_count": 0,
+    "pending_invalidation_count_capped": false,
     "dead_letter_count": 0,
     "chains": {
       "ethereum-mainnet": {
@@ -339,12 +340,15 @@ Response:
 
 Uses active/shadow `manifest_versions` to include chains expected by the loaded profile, plus `chain_checkpoints`, retained `chain_lineage`, `projection_normalized_event_changes`, `projection_apply_cursors`, and `projection_invalidations` where available. Fields stay `null` when the deployment has not yet retained the corresponding operational metadata. If no chain readiness data exists for an expected chain, or if pending direct invalidations cannot be tied to a normalized-event chain position, `status` is `degraded`. If any expected chain has unapplied normalized-event changes beyond the projection-apply cursor, `status` is `stale` and the lag fields identify the affected chain.
 
-`pending_invalidation_count` is the current number of rows in the live
-[projection](glossary.md) invalidation queue. `dead_letter_count` is the number
-of terminal invalidation failures retained for operator inspection. These
-numeric fields preserve the evidence that readiness previously folded into
-boolean state; dead letters are informational and do not by themselves change
-readiness.
+`pending_invalidation_count` is an exact live [projection](glossary.md)
+invalidation-queue row count through 10,000. The status query reads at most
+10,001 queue rows: if it observes more than the reported cap, the response is
+`pending_invalidation_count=10000` and
+`pending_invalidation_count_capped=true`; otherwise the boolean is `false` and
+the integer is exact. `dead_letter_count` is the number of terminal
+invalidation failures retained for operator inspection. These numeric fields
+preserve the evidence that readiness previously folded into boolean state;
+dead letters are informational and do not by themselves change readiness.
 
 The API also compares each stored canonical head with a cached provider
 `eth_blockNumber` observation. `network_head_status` is `fresh`, `stale`,
@@ -354,7 +358,8 @@ The API also compares each stored canonical head with a cached provider
 `ingestion_lag_blocks` is the block difference and `ingestion_lag_seconds` is
 the difference between the provider observation time and the stored canonical
 block timestamp. A fresh observation changes chain readiness to `stale` when
-either lag exceeds `BIGNAME_API_STATUS_MAX_BLOCK_LAG` (default 5) or
+either lag exceeds `BIGNAME_API_STATUS_MAX_BLOCK_LAG` (default 30, so the
+fastest configured two-second chain tolerates ordinary poll and provider skew) or
 `BIGNAME_API_STATUS_MAX_LAG_SECS` (default 60). A missing, failed,
 not-yet-completed, or cache-expired provider observation changes readiness to
 `degraded`, with its reason retained in `network_head_status`. When a refresh
@@ -370,7 +375,10 @@ recent successful evidence for at most
 `BIGNAME_API_STATUS_PROVIDER_CACHE_TTL_SECS` (default 30). A failed latest
 attempt is never presented as fresh even while that evidence remains visible.
 Status requests only read that in-memory cache, so a slow provider cannot hold
-the route open.
+the route open. The mapping is load-bearing for status readiness: API startup
+compares it with every expected status chain, emits a warning naming omissions,
+and leaves each omitted chain `unconfigured` and aggregate readiness
+`degraded`.
 
 ## `GET /v1/names`
 

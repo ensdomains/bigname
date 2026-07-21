@@ -2,6 +2,7 @@ use std::{future::Future, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use bigname_storage::{BackfillRange, advance_backfill_range};
+use sqlx::types::time::OffsetDateTime;
 
 use crate::backfill::BackfillJobRunConfig;
 
@@ -68,4 +69,24 @@ pub(crate) fn validate_hash_pinned_chunk_blocks(chunk_blocks: i64) -> Result<()>
     }
 
     Ok(())
+}
+
+pub(crate) fn backfill_lease_duration_secs(lease_expires_at: OffsetDateTime) -> Result<i64> {
+    let duration_secs = lease_expires_at
+        .unix_timestamp()
+        .checked_sub(OffsetDateTime::now_utc().unix_timestamp())
+        .context("backfill lease duration timestamp underflowed")?;
+    if duration_secs <= 0 {
+        bail!("lease_expires_at must be in the future");
+    }
+    Ok(duration_secs)
+}
+
+pub(crate) fn refreshed_backfill_lease_expires_at(duration_secs: i64) -> Result<OffsetDateTime> {
+    let deadline = OffsetDateTime::now_utc()
+        .unix_timestamp()
+        .checked_add(duration_secs)
+        .context("backfill lease expiry timestamp overflowed while refreshing range lease")?;
+    OffsetDateTime::from_unix_timestamp(deadline)
+        .context("refreshed backfill lease expiry timestamp is out of range")
 }

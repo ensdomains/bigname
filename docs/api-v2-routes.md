@@ -81,7 +81,7 @@ Field ownership:
 - Ops status containers are route-local: `/v2/status` owns `chains`,
   `latest_block`, `indexed_block`, `safe_block`, `finalized_block`,
   `lag_blocks`, `lag_seconds`, `pending_invalidation_count`,
-  `dead_letter_count`, `network_block`, `network_head_observed_at`,
+  `pending_invalidation_count_capped`, `dead_letter_count`, `network_block`, `network_head_observed_at`,
   `network_head_age_seconds`, `network_head_status`,
   `ingestion_lag_blocks`, and `ingestion_lag_seconds`.
 - Diagnostic-only field names are route-local to diagnostics unless they are
@@ -140,8 +140,10 @@ Field ownership:
 - Purpose: per-chain indexing readiness.
 - Request parameters: none.
 - Response shape: `data.status` plus `data.chains`, keyed by `chain_id`.
-  `data.pending_invalidation_count` reports live queued work and
-  `data.dead_letter_count` reports terminal invalidation failures. Each chain
+  `data.pending_invalidation_count` reports live queued work exactly through
+  10,000. `data.pending_invalidation_count_capped=true` means the bounded query
+  observed at least 10,001 rows and reports 10,000 instead of scanning the
+  remaining queue. `data.dead_letter_count` reports terminal invalidation failures. Each chain
   entry carries `latest_block`, `indexed_block`, `safe_block`,
   `finalized_block`, `lag_blocks`, `lag_seconds`, `network_block`,
   `network_head_observed_at`, `network_head_age_seconds`,

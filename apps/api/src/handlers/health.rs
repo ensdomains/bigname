@@ -13,12 +13,14 @@ pub(super) async fn health(State(state): State<AppState>) -> (StatusCode, Json<H
                 check: "select_1",
                 error: None,
             };
-            match bigname_storage::load_latest_service_loop_heartbeats(
+            match bigname_storage::load_preferred_service_loop_heartbeats(
                 &state.pool,
                 &[
                     bigname_storage::INDEXER_SERVICE_NAME,
                     bigname_storage::WORKER_SERVICE_NAME,
                 ],
+                state.heartbeat_max_age_secs,
+                state.worker_rebuild_phase_max_age_secs,
             )
             .await
             {
@@ -28,12 +30,14 @@ pub(super) async fn health(State(state): State<AppState>) -> (StatusCode, Json<H
                             heartbeat.service_name == bigname_storage::INDEXER_SERVICE_NAME
                         }),
                         state.heartbeat_max_age_secs,
+                        state.heartbeat_max_age_secs,
                     );
                     let worker = loop_health_response(
                         heartbeats.iter().find(|heartbeat| {
                             heartbeat.service_name == bigname_storage::WORKER_SERVICE_NAME
                         }),
                         state.heartbeat_max_age_secs,
+                        state.worker_rebuild_phase_max_age_secs,
                     );
                     let loops_ready = indexer.status == "running" && worker.status == "running";
                     (database, HealthLoopsResponse { indexer, worker }, loops_ready)
@@ -74,13 +78,19 @@ pub(super) async fn health(State(state): State<AppState>) -> (StatusCode, Json<H
             )
         }
     };
-    let ready = database.reachable && loops_ready;
-    let http_status = if ready {
+    let api_ready = database.reachable;
+    let aggregate_ready = api_ready && loops_ready;
+    let http_status = if api_ready {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
-    let status = if ready { "ready" } else { "degraded" };
+    let status = if aggregate_ready {
+        "ready"
+    } else {
+        "degraded"
+    };
+    let api_status = if api_ready { "ready" } else { "degraded" };
 
     (
         http_status,
@@ -88,6 +98,7 @@ pub(super) async fn health(State(state): State<AppState>) -> (StatusCode, Json<H
             service: "api",
             identity: HealthIdentityResponse::current(),
             status,
+            api_status,
             process: HealthProcessResponse { status: "running" },
             database,
             loops,
@@ -98,22 +109,39 @@ pub(super) async fn health(State(state): State<AppState>) -> (StatusCode, Json<H
 fn loop_health_response(
     heartbeat: Option<&bigname_storage::ServiceLoopHeartbeat>,
     max_age_seconds: i64,
+    phase_max_age_seconds: i64,
 ) -> HealthLoopResponse {
     let Some(heartbeat) = heartbeat else {
         return HealthLoopResponse {
             status: "not_started",
+            phase: None,
             started_at: None,
             heartbeat_at: None,
             heartbeat_age_seconds: None,
             max_age_seconds,
         };
     };
+    if let Some(phase) = heartbeat.active_phase.as_ref() {
+        return HealthLoopResponse {
+            status: if phase.age_seconds <= phase_max_age_seconds {
+                "running"
+            } else {
+                "stale"
+            },
+            phase: Some(phase.phase.clone()),
+            started_at: Some(format_timestamp(phase.started_at)),
+            heartbeat_at: Some(format_timestamp(phase.heartbeat_at)),
+            heartbeat_age_seconds: Some(phase.age_seconds),
+            max_age_seconds: phase_max_age_seconds,
+        };
+    }
     HealthLoopResponse {
         status: if heartbeat.age_seconds <= max_age_seconds {
             "running"
         } else {
             "stale"
         },
+        phase: None,
         started_at: Some(format_timestamp(heartbeat.started_at)),
         heartbeat_at: Some(format_timestamp(heartbeat.heartbeat_at)),
         heartbeat_age_seconds: Some(heartbeat.age_seconds),
@@ -124,6 +152,7 @@ fn loop_health_response(
 fn unavailable_loop_health(max_age_seconds: i64) -> HealthLoopsResponse {
     let unavailable = || HealthLoopResponse {
         status: "unavailable",
+        phase: None,
         started_at: None,
         heartbeat_at: None,
         heartbeat_age_seconds: None,

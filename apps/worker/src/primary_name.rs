@@ -4,6 +4,8 @@ mod hydration;
 mod projection;
 #[path = "primary_name/query.rs"]
 mod query;
+#[path = "rebuild_heartbeat.rs"]
+pub(crate) mod rebuild_heartbeat;
 #[path = "primary_name/types.rs"]
 mod types;
 
@@ -16,6 +18,8 @@ pub use hydration::{
     PrimaryNameLegacyReverseHydrationConfig, PrimaryNameLegacyReverseHydrationTrigger,
 };
 pub use projection::rebuild_primary_names_current;
+#[allow(unused_imports)]
+pub(crate) use projection::rebuild_primary_names_current_with_heartbeat;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PrimaryNamesCurrentRebuildSummary {
@@ -45,6 +49,19 @@ pub async fn hydrate_legacy_reverse_resolver_primary_names(
     config: PrimaryNameLegacyReverseHydrationConfig,
 ) -> Result<PrimaryNameLegacyReverseHydrationSummary> {
     hydration::hydrate_legacy_reverse_resolver_primary_names(pool, config).await
+}
+
+pub(crate) async fn hydrate_legacy_reverse_resolver_primary_names_with_heartbeat(
+    pool: &PgPool,
+    config: PrimaryNameLegacyReverseHydrationConfig,
+    loop_heartbeat: &mut rebuild_heartbeat::LoopHeartbeat,
+) -> Result<PrimaryNameLegacyReverseHydrationSummary> {
+    hydration::hydrate_legacy_reverse_resolver_primary_names_with_heartbeat(
+        pool,
+        config,
+        loop_heartbeat,
+    )
+    .await
 }
 
 pub async fn load_legacy_reverse_resolver_call_triggers(

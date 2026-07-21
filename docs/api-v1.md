@@ -380,7 +380,7 @@ The actual published routes are listed below. Per-route semantics are in [`api-v
 | --- | --- |
 | `GET /v1/namespaces/{namespace}` | Namespace metadata. |
 | `GET /v1/manifests/{namespace}` | Active manifest versions and capabilities. |
-| `GET /healthz` | API/database readiness and indexer/worker loop-liveness check. Unversioned operator contract; not part of the `v1` contract. |
+| `GET /healthz` | API-local process/database readiness (`api_status` and HTTP status) plus aggregate indexer/worker loop-liveness evidence (`status` and `loops`). Unversioned operator contract; not part of the `v1` contract. |
 
 ### Diagnostics and provenance
 

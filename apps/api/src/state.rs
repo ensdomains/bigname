@@ -8,6 +8,7 @@ pub(crate) struct AppState {
     pub(crate) pool: PgPool,
     pub(crate) chain_rpc_urls: ChainRpcUrls,
     pub(crate) heartbeat_max_age_secs: i64,
+    pub(crate) worker_rebuild_phase_max_age_secs: i64,
     pub(crate) status_freshness: StatusFreshness,
 }
 
@@ -17,8 +18,18 @@ impl AppState {
             pool,
             chain_rpc_urls,
             heartbeat_max_age_secs: 20,
+            worker_rebuild_phase_max_age_secs:
+                bigname_storage::DEFAULT_WORKER_REBUILD_PHASE_MAX_AGE_SECS,
             status_freshness: StatusFreshness::new(StatusFreshnessConfig::default()),
         }
+    }
+
+    pub(crate) fn with_worker_rebuild_phase_max_age_secs(
+        mut self,
+        worker_rebuild_phase_max_age_secs: i64,
+    ) -> Self {
+        self.worker_rebuild_phase_max_age_secs = worker_rebuild_phase_max_age_secs;
+        self
     }
 
     pub(crate) fn with_heartbeat_max_age_secs(mut self, heartbeat_max_age_secs: i64) -> Self {

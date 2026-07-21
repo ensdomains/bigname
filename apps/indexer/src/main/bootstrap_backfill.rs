@@ -1,8 +1,8 @@
-use std::{collections::BTreeMap, path::Path};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use bigname_manifests::{
-    ManifestBootstrapSkippedTarget, load_ens_v2_authoritative_discovery_bootstrap_targets,
+    load_ens_v2_authoritative_discovery_bootstrap_targets,
     load_ens_v2_retained_history_recovery_targets, load_manifest_declared_bootstrap_targets,
     load_manifest_skipped_bootstrap_targets,
 };
@@ -12,20 +12,24 @@ use crate::{
     backfill::{
         BackfillAdapterSyncMode, BackfillBlockRange, backfill_job_source_identity_payload,
         hash_pinned_backfill_range_specs, run_resumable_hash_pinned_backfill_job_concurrently,
+        run_resumable_hash_pinned_backfill_job_concurrently_with_heartbeat,
     },
     backfill_lease_expires_at, default_backfill_lease_owner, deployment_profile_from_manifest_root,
     generated_backfill_lease_token,
-    provider::{ChainProviderOps, ProviderBlock, ProviderRegistry},
+    provider::{ChainProviderOps, ProviderRegistry},
     reconciliation::{
         HeaderAuditMode, RawFactNormalizedEventReplayRequest,
         RawFactNormalizedEventReplaySelection, log_raw_fact_normalized_event_replay_outcome,
         replay_raw_fact_normalized_events,
     },
+    run::startup_heartbeat::StartupHeartbeat,
     runtime::{IntakeChainTask, validate_provider_registry_for_intake_tasks},
 };
 
 #[path = "bootstrap_backfill/checkpoints.rs"]
 mod checkpoints;
+#[path = "bootstrap_backfill/entrypoints.rs"]
+mod entrypoints;
 #[path = "bootstrap_backfill/identity.rs"]
 mod identity;
 #[path = "bootstrap_backfill/planning.rs"]
@@ -36,6 +40,11 @@ mod recovery;
 use checkpoints::{
     bootstrap_segment_target_ids, load_bootstrap_segment_checkpoint,
     load_bootstrap_target_checkpoint,
+};
+#[cfg(test)]
+pub(crate) use entrypoints::run_startup_bootstrap_backfills;
+pub(crate) use entrypoints::{
+    BootstrapBackfillOutcome, run_startup_bootstrap_backfills_with_heartbeat,
 };
 pub(crate) use identity::bootstrap_backfill_idempotency_key;
 use identity::{
@@ -63,50 +72,8 @@ pub(crate) use recovery::{
 const BOOTSTRAP_BACKFILL_LEASE_DURATION_SECS: u64 = 300;
 pub(crate) const DEFAULT_BOOTSTRAP_BACKFILL_WORKERS: usize = 0;
 pub(crate) const DEFAULT_BOOTSTRAP_BACKFILL_RANGE_BLOCKS: i64 = 50_000;
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct BootstrapBackfillOutcome {
-    pub(crate) latched_finalized_heads: BTreeMap<String, ProviderBlock>,
-    pub(crate) active_chain_count: usize,
-    pub(crate) provider_configured_chain_count: usize,
-    pub(crate) missing_provider_chain_count: usize,
-    pub(crate) eligible_target_count: usize,
-    pub(crate) skipped_unknown_start_target_count: usize,
-    pub(crate) skipped_unknown_start_targets: Vec<ManifestBootstrapSkippedTarget>,
-    pub(crate) drained_job_count: usize,
-    pub(crate) skipped_future_target_count: usize,
-    pub(crate) reserved_range_count: usize,
-    pub(crate) completed_range_count: usize,
-    pub(crate) resolved_block_count: usize,
-    pub(crate) raw_block_count: usize,
-    pub(crate) raw_transaction_count: usize,
-    pub(crate) raw_receipt_count: usize,
-    pub(crate) raw_log_count: usize,
-    pub(crate) raw_code_hash_count: usize,
-    pub(crate) normalized_replay_job_count: usize,
-    pub(crate) normalized_replay_synced_count: usize,
-    pub(crate) normalized_replay_inserted_count: usize,
-    pub(crate) requested_worker_count: usize,
-    pub(crate) effective_worker_count: usize,
-    pub(crate) range_partition_block_count: i64,
-}
-
-impl BootstrapBackfillOutcome {
-    fn add_job(&mut self, outcome: &crate::backfill::BackfillJobRunOutcome) {
-        self.drained_job_count += 1;
-        self.reserved_range_count += outcome.reserved_range_count;
-        self.completed_range_count += outcome.completed_range_count;
-        self.resolved_block_count += outcome.resolved_block_count;
-        self.raw_block_count += outcome.raw_block_count;
-        self.raw_transaction_count += outcome.raw_transaction_count;
-        self.raw_receipt_count += outcome.raw_receipt_count;
-        self.raw_log_count += outcome.raw_log_count;
-        self.raw_code_hash_count += outcome.raw_code_hash_count;
-    }
-}
-
-// Startup orchestration keeps provider, replay, audit, and worker settings explicit.
 #[expect(clippy::too_many_arguments)]
-pub(crate) async fn run_startup_bootstrap_backfills(
+async fn run_startup_bootstrap_backfills_inner(
     pool: &sqlx::PgPool,
     manifests_root: &Path,
     intake_chain_tasks: &[IntakeChainTask],
@@ -117,8 +84,14 @@ pub(crate) async fn run_startup_bootstrap_backfills(
     header_audit_mode: HeaderAuditMode,
     bootstrap_backfill_workers: usize,
     bootstrap_backfill_range_blocks: i64,
+    mut heartbeat: Option<&mut StartupHeartbeat>,
 ) -> Result<BootstrapBackfillOutcome> {
     validate_provider_registry_for_intake_tasks(intake_chain_tasks, provider_registry)?;
+    let heartbeat_chain_ids = intake_chain_tasks
+        .iter()
+        .map(|task| task.chain.clone())
+        .collect::<Vec<_>>();
+    record_bootstrap_progress(pool, &mut heartbeat, &heartbeat_chain_ids).await?;
     let backfill_adapter_sync_mode = adapter_sync_mode.startup_hash_pinned_backfill_mode();
     let deployment_profile = deployment_profile_from_manifest_root(manifests_root);
     let lease_owner = format!("{}:bootstrap-backfill", default_backfill_lease_owner());
@@ -487,15 +460,29 @@ pub(crate) async fn run_startup_bootstrap_backfills(
                     header_audit_mode,
                 };
 
-                let job_outcome = run_resumable_hash_pinned_backfill_job_concurrently(
-                    pool,
-                    &source_plan,
-                    provider,
-                    config,
-                    range_specs,
-                    effective_worker_count,
-                )
-                .await?;
+                let job_outcome = if let Some(heartbeat) = heartbeat.as_deref_mut() {
+                    run_resumable_hash_pinned_backfill_job_concurrently_with_heartbeat(
+                        pool,
+                        &source_plan,
+                        provider,
+                        config,
+                        range_specs,
+                        effective_worker_count,
+                        heartbeat,
+                        &heartbeat_chain_ids,
+                    )
+                    .await?
+                } else {
+                    run_resumable_hash_pinned_backfill_job_concurrently(
+                        pool,
+                        &source_plan,
+                        provider,
+                        config,
+                        range_specs,
+                        effective_worker_count,
+                    )
+                    .await?
+                };
                 outcome.add_job(&job_outcome);
                 if replay_completed_raw_ranges && job_outcome.raw_log_count > 0 {
                     let replay_outcome = replay_raw_fact_normalized_events(
@@ -528,6 +515,7 @@ pub(crate) async fn run_startup_bootstrap_backfills(
                     outcome.normalized_replay_inserted_count +=
                         replay_outcome.normalized_event_inserted_count;
                 }
+                record_bootstrap_progress(pool, &mut heartbeat, &heartbeat_chain_ids).await?;
             }
 
             let pass_status = finish_bootstrap_convergence_pass(
@@ -595,4 +583,15 @@ pub(crate) async fn run_startup_bootstrap_backfills(
     );
 
     Ok(outcome)
+}
+
+async fn record_bootstrap_progress(
+    pool: &sqlx::PgPool,
+    heartbeat: &mut Option<&mut StartupHeartbeat>,
+    chain_ids: &[String],
+) -> Result<()> {
+    if let Some(heartbeat) = heartbeat.as_deref_mut() {
+        heartbeat.record_if_due(pool, chain_ids).await?;
+    }
+    Ok(())
 }

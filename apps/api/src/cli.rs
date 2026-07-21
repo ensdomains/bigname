@@ -36,6 +36,12 @@ pub(crate) struct ServeArgs {
     pub(crate) heartbeat_max_age_secs: i64,
     #[arg(
         long,
+        env = "BIGNAME_API_WORKER_REBUILD_PHASE_MAX_AGE_SECS",
+        default_value_t = bigname_storage::DEFAULT_WORKER_REBUILD_PHASE_MAX_AGE_SECS
+    )]
+    pub(crate) worker_rebuild_phase_max_age_secs: i64,
+    #[arg(
+        long,
         env = "BIGNAME_API_STATUS_PROVIDER_TIMEOUT_MS",
         default_value_t = crate::status_freshness::DEFAULT_PROVIDER_TIMEOUT_MS
     )]

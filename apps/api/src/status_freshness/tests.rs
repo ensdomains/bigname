@@ -2,6 +2,32 @@ use tokio::net::TcpListener;
 
 use super::*;
 
+#[test]
+fn default_block_lag_tolerates_fast_chain_poll_and_provider_skew() {
+    assert_eq!(StatusFreshnessConfig::default().max_block_lag, 30);
+}
+
+#[test]
+fn missing_status_rpc_chains_names_every_expected_unconfigured_chain() -> Result<()> {
+    let urls = ChainRpcUrls::from_entries(&[
+        "ethereum-mainnet=http://rpc.test".to_owned(),
+        "base-mainnet=http://base.test".to_owned(),
+    ])?;
+
+    assert_eq!(
+        missing_status_rpc_chains(
+            &[
+                "base-mainnet".to_owned(),
+                "ethereum-mainnet".to_owned(),
+                "ethereum-sepolia".to_owned(),
+            ],
+            &urls,
+        ),
+        vec!["ethereum-sepolia".to_owned()]
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn comparison_distinguishes_probe_states_and_applies_both_lag_thresholds() -> Result<()> {
     let urls = ChainRpcUrls::from_entries(&["ethereum-mainnet=http://rpc.test".to_owned()])?;

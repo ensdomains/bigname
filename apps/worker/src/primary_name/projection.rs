@@ -10,6 +10,8 @@ use futures_util::{TryStreamExt, pin_mut};
 use serde_json::{Map, Value, json};
 use sqlx::{PgConnection, PgPool};
 
+use super::rebuild_heartbeat::{LoopHeartbeat, record_rebuild_progress, run_rebuild_phase};
+
 #[allow(clippy::duplicate_mod)]
 #[path = "../staged_rebuild.rs"]
 mod staged_rebuild;
@@ -78,24 +80,54 @@ pub async fn rebuild_primary_names_current(
     namespace: Option<&str>,
     coin_type: Option<&str>,
 ) -> Result<PrimaryNamesCurrentRebuildSummary> {
+    rebuild_primary_names_current_inner(pool, address, namespace, coin_type, None).await
+}
+
+pub(crate) async fn rebuild_primary_names_current_with_heartbeat(
+    pool: &PgPool,
+    address: Option<&str>,
+    namespace: Option<&str>,
+    coin_type: Option<&str>,
+    loop_heartbeat: &mut LoopHeartbeat,
+) -> Result<PrimaryNamesCurrentRebuildSummary> {
+    rebuild_primary_names_current_inner(pool, address, namespace, coin_type, Some(loop_heartbeat))
+        .await
+}
+
+async fn rebuild_primary_names_current_inner(
+    pool: &PgPool,
+    address: Option<&str>,
+    namespace: Option<&str>,
+    coin_type: Option<&str>,
+    loop_heartbeat: Option<&mut LoopHeartbeat>,
+) -> Result<PrimaryNamesCurrentRebuildSummary> {
     match (address, namespace, coin_type) {
         (Some(address), Some(namespace), Some(coin_type)) => {
             rebuild_one_primary_name(pool, address, namespace, coin_type).await
         }
-        (None, None, None) => rebuild_all_primary_names(pool).await,
+        (None, None, None) => rebuild_all_primary_names(pool, loop_heartbeat).await,
         _ => bail!(
             "primary_names_current rebuild requires address, namespace, and coin_type together when targeting one tuple"
         ),
     }
 }
 
-async fn rebuild_all_primary_names(pool: &PgPool) -> Result<PrimaryNamesCurrentRebuildSummary> {
+async fn rebuild_all_primary_names(
+    pool: &PgPool,
+    mut loop_heartbeat: Option<&mut LoopHeartbeat>,
+) -> Result<PrimaryNamesCurrentRebuildSummary> {
     let mut conn = pool
         .acquire()
         .await
         .context("failed to acquire primary_names_current staging connection")?;
     let stage_table = create_stage_table(&mut conn, "primary_names_current").await?;
-    let previous_row_count = count_rows(&mut conn, "primary_names_current", None).await?;
+    let previous_row_count = run_rebuild_phase(
+        pool,
+        &mut loop_heartbeat,
+        "primary_names_current.count_existing",
+        count_rows(&mut conn, "primary_names_current", None),
+    )
+    .await?;
     let mut projections = Vec::with_capacity(PRIMARY_NAMES_CURRENT_REBUILD_BATCH_SIZE);
     let mut status_counts = StatusCounts::default();
     let mut requested_tuple_count = 0usize;
@@ -107,6 +139,7 @@ async fn rebuild_all_primary_names(pool: &PgPool) -> Result<PrimaryNamesCurrentR
     while let Some(input) = inputs.try_next().await? {
         requested_tuple_count += 1;
         let projection = primary_name_row(&input.tuple, input.claim_observation.as_ref())?;
+        record_rebuild_progress(pool, &mut loop_heartbeat).await;
         add_status(&mut status_counts, &projection.row);
         projections.push(projection);
 
@@ -133,13 +166,23 @@ async fn rebuild_all_primary_names(pool: &PgPool) -> Result<PrimaryNamesCurrentR
             stage_primary_names_current_snapshots(&mut conn, &stage_table, &projections).await?
                 as usize;
     }
-    invalidate_full_rebuild_verified_primary_name_claim_changes(&mut conn, &stage_table).await?;
+    run_rebuild_phase(
+        pool,
+        &mut loop_heartbeat,
+        "primary_names_current.invalidate_execution_cache",
+        invalidate_full_rebuild_verified_primary_name_claim_changes(&mut conn, &stage_table),
+    )
+    .await?;
     // Publish through the trigger-disabled path: the per-row identity-feed
     // triggers take one advisory lock per address and exhaust the lock table
     // at full-rebuild scale; the sidecars are rebuilt in bulk instead.
-    let (_deleted_row_count, published_row_count) =
-        bigname_storage::publish_primary_names_current_full_rebuild(&mut conn, &stage_table)
-            .await?;
+    let (_deleted_row_count, published_row_count) = run_rebuild_phase(
+        pool,
+        &mut loop_heartbeat,
+        "primary_names_current.publish",
+        bigname_storage::publish_primary_names_current_full_rebuild(&mut conn, &stage_table),
+    )
+    .await?;
     drop_stage_table(&mut conn, &stage_table).await?;
     debug_assert_eq!(published_row_count as usize, upserted_row_count);
 

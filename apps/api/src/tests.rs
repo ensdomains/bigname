@@ -42,6 +42,7 @@ async fn healthz_reports_ready_when_database_is_reachable() -> Result<()> {
     assert_eq!(payload.get("identity"), Some(&expected_health_identity()));
     assert!(payload.get("phase").is_none());
     assert_eq!(payload.get("status"), Some(&json!("ready")));
+    assert_eq!(payload.get("api_status"), Some(&json!("ready")));
     assert_eq!(
         payload.get("process"),
         Some(&json!({
@@ -60,6 +61,7 @@ async fn healthz_reports_ready_when_database_is_reachable() -> Result<()> {
     for service_name in ["indexer", "worker"] {
         let loop_health = &payload["loops"][service_name];
         assert_eq!(loop_health["status"], json!("running"));
+        assert_eq!(loop_health["phase"], Value::Null);
         assert!(loop_health["started_at"].is_string());
         assert!(loop_health["heartbeat_at"].is_string());
         assert!(loop_health["heartbeat_age_seconds"].is_number());
@@ -91,6 +93,7 @@ async fn healthz_reports_degraded_when_database_is_unreachable() -> Result<()> {
     assert_eq!(payload.get("identity"), Some(&expected_health_identity()));
     assert!(payload.get("phase").is_none());
     assert_eq!(payload.get("status"), Some(&json!("degraded")));
+    assert_eq!(payload.get("api_status"), Some(&json!("degraded")));
     assert_eq!(
         payload.get("process"),
         Some(&json!({
@@ -125,8 +128,10 @@ async fn healthz_distinguishes_not_started_and_stale_service_loops() -> Result<(
                 .unwrap(),
         )
         .await?;
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::OK);
     let payload: Value = read_json(response).await?;
+    assert_eq!(payload["status"], json!("degraded"));
+    assert_eq!(payload["api_status"], json!("ready"));
     assert_eq!(payload["loops"]["indexer"]["status"], json!("not_started"));
     assert_eq!(payload["loops"]["worker"]["status"], json!("not_started"));
 
@@ -151,8 +156,10 @@ async fn healthz_distinguishes_not_started_and_stale_service_loops() -> Result<(
                 .unwrap(),
         )
         .await?;
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::OK);
     let payload: Value = read_json(response).await?;
+    assert_eq!(payload["status"], json!("degraded"));
+    assert_eq!(payload["api_status"], json!("ready"));
     assert_eq!(payload["loops"]["indexer"]["status"], json!("stale"));
     assert_eq!(payload["loops"]["worker"]["status"], json!("running"));
     assert!(payload["loops"]["indexer"]["started_at"].is_string());
@@ -165,6 +172,116 @@ async fn healthz_distinguishes_not_started_and_stale_service_loops() -> Result<(
 
     database.cleanup().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn healthz_uses_the_worker_phase_threshold_during_monolithic_rebuild_work() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    register_ready_health_loops(&database).await?;
+    bigname_storage::begin_service_loop_phase(
+        &database.pool,
+        bigname_storage::WORKER_SERVICE_NAME,
+        "api-health-worker",
+        "resolver_current.publish",
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE service_loop_heartbeats
+        SET started_at = clock_timestamp() - INTERVAL '2 minutes',
+            heartbeat_at = clock_timestamp() - INTERVAL '1 minute'
+        WHERE service_name = 'worker'
+          AND instance_id = 'api-health-worker'
+          AND scope_kind = 'process'
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["status"], json!("ready"));
+    assert_eq!(payload["api_status"], json!("ready"));
+    assert_eq!(payload["loops"]["worker"]["status"], json!("running"));
+    assert_eq!(
+        payload["loops"]["worker"]["phase"],
+        json!("resolver_current.publish")
+    );
+    assert_eq!(
+        payload["loops"]["worker"]["max_age_seconds"],
+        json!(bigname_storage::DEFAULT_WORKER_REBUILD_PHASE_MAX_AGE_SECS)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn healthz_prefers_a_healthy_worker_phase_over_a_newer_stale_replica() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    register_ready_health_loops(&database).await?;
+    bigname_storage::begin_service_loop_phase(
+        &database.pool,
+        bigname_storage::WORKER_SERVICE_NAME,
+        "api-health-worker",
+        "resolver_current.publish",
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE service_loop_heartbeats
+        SET started_at = clock_timestamp() - INTERVAL '3 hours',
+            heartbeat_at = clock_timestamp() - INTERVAL '2 hours'
+        WHERE service_name = 'worker'
+          AND instance_id = 'api-health-worker'
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+
+    bigname_storage::register_service_loop(
+        &database.pool,
+        bigname_storage::WORKER_SERVICE_NAME,
+        "newer-stale-worker",
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE service_loop_heartbeats
+        SET started_at = clock_timestamp() - INTERVAL '90 minutes',
+            heartbeat_at = clock_timestamp() - INTERVAL '1 hour'
+        WHERE service_name = 'worker'
+          AND instance_id = 'newer-stale-worker'
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["status"], json!("ready"));
+    assert_eq!(payload["loops"]["worker"]["status"], json!("running"));
+    assert_eq!(
+        payload["loops"]["worker"]["phase"],
+        json!("resolver_current.publish")
+    );
+
+    database.cleanup().await
 }
 
 include!("tests/exact_name.rs");

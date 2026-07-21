@@ -108,9 +108,11 @@ The script loads `.env` when it exists, then uses the environment values above.
    <BIGNAME_SMOKE_API_BIND_ADDR>` binary directly from Cargo's local target
    directory and probes `/healthz`. A database with live indexer and worker
    loops must return `200` with `"status":"ready"`. The standalone smoke API
-   also accepts `503` only when the response says the API process is running,
-   the database is reachable, and each loop is `running`, `not_started`, or
-   `stale`; an `unavailable` loop probe still fails the gate.
+   also accepts `200` only when `api_status` is `ready`, aggregate `status` is
+   `degraded`, the API process is running, the database is reachable, and each
+   loop is `running` or `not_started`. `not_started` is the explicit standalone
+   exception. A `stale` loop has a persisted heartbeat row and fails the gate,
+   as does `unavailable`.
 
 With `--no-network`, the script also sets `CARGO_NET_OFFLINE=true`, passes
 `--offline` to Cargo, and rejects non-loopback smoke bind or health URLs. The
@@ -167,7 +169,7 @@ A passing gate means:
 - the API binary builds locally from the rollback checkout;
 - the API process can start from that built binary; and
 - `/healthz` reports either full readiness with live service loops or the
-  documented standalone degraded state caused only by absent/stale loops.
+  documented API-local-ready standalone state caused only by absent loops.
 
 ## Failure Criteria
 

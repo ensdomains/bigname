@@ -487,26 +487,57 @@ For ENSv2, `resource_id` keys by `(chain_id, registry_contract_instance_id, upst
 | `current_projection_replay_status` | projection workers; ratified storage correction tooling may clear affected markers when it deletes projection rows | durable operational completion markers for bootstrap/full all-current projection replay |
 | `projection_normalized_event_changes` | normalized-event storage trigger; projection workers consume | append-only downstream change log for normalized-event inserts and canonicality-state updates, consumed through finite, bounded-wait complete-prefix captures |
 | `projection_apply_cursors`, `projection_invalidations`, `projection_invalidation_dead_letters` | projection workers; storage trigger for projection-relevant `surface_bindings` repairs; bounded normalized-event adapter repair invalidations | durable projection apply watermarks, live key-scoped projection invalidation queue, and terminal operator-visible dead-letter records |
-| `service_loop_heartbeats` | indexer and worker main loops | durable per-process loop liveness, plus per-chain indexer loop liveness; operational health evidence only, not chain progress or API read-model data |
+| `service_loop_heartbeats` | indexer and worker main loops | durable per-process loop liveness, per-chain indexer loop liveness, and named worker long-operation phases; operational health evidence only, not chain progress or API read-model data |
 | `execution_*` | execution workers; API on-demand verified-resolution cache misses for documented product routes; synchronous indexer/reorg repair for orphan-block cache outcome deletes only | durable traces and steps, normal `execution_cache_outcomes` writes, invalidation records |
 
 The API process is otherwise read-only against storage.
 
 `service_loop_heartbeats` identifies a service instance by `service_name` and
 `instance_id`. Registering the process-scoped row resets `started_at`; each
-main-loop tick advances `heartbeat_at` for that row. The worker also advances
-the same row between completed bootstrap-projection steps and bounded
-projection-apply units. This keeps long, actively progressing multi-step work
-live without using a detached timer that could mask a stuck operation. The
-indexer updates its current chain-scoped rows in the same batched statement. A missing
+main-loop tick advances `heartbeat_at` for that row. The indexer registers this
+row immediately after opening its database pool, before startup bootstrap, and
+advances the process plus deduplicated chain rows after completed hash-pinned
+bootstrap progress units of at most 32 blocks, without changing the configured
+1,024-block default checkpoint boundary for non-startup backfills. The worker
+advances the process row after bounded
+[projection](glossary.md) rebuild batches and projection-apply units. This
+keeps long, actively progressing work live without using a detached timer that
+could mask a stuck operation. A missing
 process-scoped row therefore means that instance's loop never started, while a
 present row older than the configured maximum age means the loop stopped or
-wedged after starting. The API reads the newest process-scoped row for each
-service so one live replica can satisfy shared readiness; each container's
+wedged after starting. For each service, the API prefers a replica whose normal
+heartbeat or active long-operation phase is within its configured age, then
+falls back to the newest stale evidence when none is healthy. One live replica
+can therefore satisfy shared readiness without being hidden by a newer replica
+that stopped. Each container's
 `healthcheck` subcommand reads its own instance row, so a live replica cannot
 hide a stopped sibling. These rows are mutable operational signals. They are
 not raw facts, [replay](glossary.md) checkpoints, chain checkpoints, or
-[projection](glossary.md) freshness evidence.
+projection freshness evidence.
+
+Full worker rebuild heartbeat routes are explicit:
+
+| Rebuild step | Bounded progress heartbeat | Named monolithic phases |
+| --- | --- | --- |
+| `name_current` | each completed name task; staged writes remain in 2,000-row batches | `name_current.load_inputs`, `name_current.publish` |
+| `children_current` | each completed declared-child source; staged writes remain in 2,000-row batches | `children_current.count_existing`, `children_current.publish`, `children_current.count_published_parents` |
+| `permissions_current` | each completed resource task; staged writes remain in 2,000-row batches | `permissions_current.count_existing`, `permissions_current.publish` |
+| `record_inventory_current` | each completed resource task, staged in 500-row batches; text hydration also beats after each bounded 500-row page | `record_inventory_current.count_existing`, `record_inventory_current.publish` |
+| `resolver_current` | each completed resolver target; staged writes remain in 1,000-row batches | `resolver_current.load_profile`, `resolver_current.load_targets`, `resolver_current.count_existing`, `resolver_current.publish` |
+| `address_names_current` | each completed surface binding; staged writes remain in 2,000-row batches | `address_names_current.prepare`, `address_names_current.publish`, `address_names_current.count_published_addresses` |
+| `primary_names_current` | each streamed tuple; legacy hydration beats during 1,000-candidate planning, configured provider batches, resolver-edge batches, and 1,000-row upserts | `primary_names_current.count_existing`, `primary_names_current.invalidate_execution_cache`, `primary_names_current.publish`, `primary_names_current.legacy_hydration.load_reverse_claim_candidates`, `primary_names_current.legacy_hydration.load_resolver_edge_candidates` |
+
+A named phase is a distinct `scope_kind='phase'` row for the worker instance.
+Its `heartbeat_at` is the phase start rather than a free-running timer, so a
+crash or wedge still ages out. Worker and API checks use the separately
+environment-tunable phase maximum (default 43,200 seconds) only while that row
+exists; completing the phase removes it and refreshes ordinary process
+evidence. Ordinary worker heartbeat-write failures warn and continue so a
+transient database write failure degrades liveness evidence and remains due for
+retry, rather than converting the database blip into worker restart churn. A
+named phase is different: if its start marker cannot be persisted, the current
+rebuild attempt fails before starting the monolithic work, so the worker never
+runs a many-hour operation without the evidence used to interpret it.
 
 Within `execution_*`, the API may write traces, steps, and normal
 `execution_cache_outcomes` only for documented on-demand verified-resolution

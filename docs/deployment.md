@@ -32,7 +32,13 @@ docker run --rm ghcr.io/ensdomains/bigname:latest bigname-worker inspect watch-p
 1. Install Docker and Docker Compose.
 2. Copy `.env.server.example` to `.env.server` and change the placeholder passwords.
 3. Set `BIGNAME_IMAGE` to the image tag to run.
-4. Start the stack:
+4. Set `BIGNAME_API_CHAIN_RPC_URLS` with one `<chain>=<url>` entry for every
+   chain expected by an active/shadow manifest or stored checkpoint. This
+   variable is load-bearing for `/v1/status` and `/v2/status` readiness. The
+   API starts and serves local readiness when entries are absent, but logs a
+   `WARN` naming every missing chain and keeps those status chains fail-closed
+   as `degraded`.
+5. Start the stack:
 
 ```sh
 docker compose --env-file .env.server -f docker-compose.server.yml up -d
@@ -53,17 +59,25 @@ migrations, for a loop that never registered, and for a loop whose heartbeat
 exceeds the service-specific maximum age. The default maximum is 20 seconds;
 set `BIGNAME_INDEXER_HEARTBEAT_MAX_AGE_SECS` and
 `BIGNAME_WORKER_HEARTBEAT_MAX_AGE_SECS` in proportion to custom poll
-intervals. During rolling upgrades, running `migrate` before recreating old
+intervals. Worker rebuild operations with no safe inner batch boundary use a
+named phase row and the independently tunable
+`BIGNAME_WORKER_REBUILD_PHASE_MAX_AGE_SECS` (default 43,200); set the matching
+API interpretation with `BIGNAME_API_WORKER_REBUILD_PHASE_MAX_AGE_SECS`.
+During rolling upgrades, running `migrate` before recreating old
 service containers can therefore mark those old indexer/worker containers
 unhealthy until they are replaced with the matching image; treat that as
 version skew, not evidence that PostgreSQL is down.
 
-The API `/healthz` response also requires a recent indexer and worker process
-heartbeat, using `BIGNAME_API_HEARTBEAT_MAX_AGE_SECS` (default 20). The status
-routes use the API chain RPC mapping for an asynchronous cached network-head
-probe. Tune its provider timeout, refresh interval, cache TTL, and ingestion
-block/time limits with the `BIGNAME_API_STATUS_PROVIDER_*` and
-`BIGNAME_API_STATUS_MAX_*` variables in `.env.server.example`.
+The API `/healthz` HTTP status and `api_status` field cover only the serving API
+process and its `SELECT 1` database probe. Its aggregate `status` and `loops`
+object still require recent indexer and worker evidence, using
+`BIGNAME_API_HEARTBEAT_MAX_AGE_SECS` (default 20), so a planned indexer restart
+or long worker phase stays visible without making the API container or public
+edge unhealthy. The status routes use the API chain RPC mapping for an
+asynchronous cached network-head probe. Tune its provider timeout, refresh
+interval, cache TTL, and ingestion block/time limits with the
+`BIGNAME_API_STATUS_PROVIDER_*` and `BIGNAME_API_STATUS_MAX_*` variables in
+`.env.server.example`; the default maximum block lag is 30.
 
 ### Resolver-profile replay after an upgrade or compaction
 
@@ -165,9 +179,12 @@ If `BIGNAME_INDEXER_CHAIN_RPC_URLS` is unset, the indexer still syncs
 manifest/watch state, but provider-backed live ingestion remains idle. Current
 bootstrap RPC support accepts `http://` and `https://` endpoints.
 
-The API service also needs its own Ethereum JSON-RPC provider for live ENS
-verified resolution and the ENS/60 primary-name on-demand reverse/forward RPC
-fallback, configured as
+The API service uses its own JSON-RPC mapping both for indexing-status
+network-head readiness and for live execution. Every chain expected by the
+status chain set needs an entry; startup logs a loud warning with the missing
+chain names, and their status remains fail-closed. Ethereum mainnet is also
+required for live ENS verified resolution and the ENS/60 primary-name
+on-demand reverse/forward RPC fallback, configured as
 `BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<http-url>`. `GET /v1/profiles/names/{name}`
 in `mode=verified|both`, `GET /v1/names/{namespace}/{name}/records` when it
 needs verified values, `GET /v2/names/{name}?source=verified`, and
@@ -561,7 +578,10 @@ Hash-pinned backfill execution batches each reserved range into
 `BIGNAME_INDEXER_HASH_PINNED_BACKFILL_CHUNK_BLOCKS`-sized chunks. The default
 server profile uses `1024` blocks. Larger chunks reduce checkpoint churn and RPC
 round trips during long historical bootstrap, while also increasing the amount
-of range work retried after a failed chunk. Raw-only sparse backfill also caps
+of range work retried after a failed chunk. During automatic startup only, each
+configured chunk is executed as progress units of at most 32 blocks and the
+indexer heartbeat advances after each completed unit; manual backfills retain
+the configured chunk as their execution unit. Raw-only sparse backfill also caps
 each materialized push with
 `BIGNAME_INDEXER_HASH_PINNED_BACKFILL_MAX_LOGS_PER_PUSH` so dense log spans are
 split before transaction and receipt fetch/persist work. The older

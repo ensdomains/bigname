@@ -7,6 +7,7 @@ pub(crate) struct HealthResponse {
     pub(crate) service: &'static str,
     pub(crate) identity: HealthIdentityResponse,
     pub(crate) status: &'static str,
+    pub(crate) api_status: &'static str,
     pub(crate) process: HealthProcessResponse,
     pub(crate) database: HealthDatabaseResponse,
     pub(crate) loops: HealthLoopsResponse,
@@ -62,6 +63,7 @@ pub(crate) struct HealthLoopsResponse {
 #[derive(Serialize)]
 pub(crate) struct HealthLoopResponse {
     pub(crate) status: &'static str,
+    pub(crate) phase: Option<String>,
     pub(crate) started_at: Option<String>,
     pub(crate) heartbeat_at: Option<String>,
     pub(crate) heartbeat_age_seconds: Option<i64>,

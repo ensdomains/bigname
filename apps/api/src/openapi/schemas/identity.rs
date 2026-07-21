@@ -23,6 +23,7 @@ pub(super) fn indexing_status_response_schema() -> JsonValue {
         "required": [
             "status",
             "pending_invalidation_count",
+            "pending_invalidation_count_capped",
             "dead_letter_count",
             "chains",
         ],
@@ -31,7 +32,16 @@ pub(super) fn indexing_status_response_schema() -> JsonValue {
                 "type": "string",
                 "enum": ["ready", "degraded", "stale"],
             },
-            "pending_invalidation_count": { "type": "integer", "minimum": 0 },
+            "pending_invalidation_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": bigname_storage::PENDING_INVALIDATION_COUNT_CAP,
+                "description": "Exact live queue row count when pending_invalidation_count_capped is false. When capped is true, this field equals the cap and the queue contains at least one additional row.",
+            },
+            "pending_invalidation_count_capped": {
+                "type": "boolean",
+                "description": "True when the bounded status query stopped after observing more rows than pending_invalidation_count reports.",
+            },
             "dead_letter_count": { "type": "integer", "minimum": 0 },
             "chains": {
                 "type": "object",
