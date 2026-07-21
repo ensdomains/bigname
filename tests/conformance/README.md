@@ -46,8 +46,8 @@ cargo test --manifest-path tests/conformance/Cargo.toml openapi --locked
 ```
 
 This no-Postgres guard reads `docs/api-v1.openapi.json` and fails if a published
-public path lacks either a conformance harness owner or an explicit private/out-of-scope reason;
-private `/healthz` remains out of scope.
+path lacks either a conformance harness owner or an explicit out-of-scope reason;
+the unversioned `/healthz` endpoint remains out of scope.
 
 Focused backfilled-data consumer conformance job, from the repository root:
 

@@ -14,17 +14,17 @@ The production container image contains the three runnable bigname binaries:
 The image entrypoint accepts one service selector:
 
 ```sh
-docker run --rm ghcr.io/tateb/bigname:latest api
-docker run --rm ghcr.io/tateb/bigname:latest indexer
-docker run --rm ghcr.io/tateb/bigname:latest worker
-docker run --rm ghcr.io/tateb/bigname:latest migrate
+docker run --rm ghcr.io/ensdomains/bigname:latest api
+docker run --rm ghcr.io/ensdomains/bigname:latest indexer
+docker run --rm ghcr.io/ensdomains/bigname:latest worker
+docker run --rm ghcr.io/ensdomains/bigname:latest migrate
 ```
 
 The default command is `api`. Raw binary invocations are also supported:
 
 ```sh
-docker run --rm ghcr.io/tateb/bigname:latest bigname-api print-openapi
-docker run --rm ghcr.io/tateb/bigname:latest bigname-worker inspect watch-plan --json
+docker run --rm ghcr.io/ensdomains/bigname:latest bigname-api print-openapi
+docker run --rm ghcr.io/ensdomains/bigname:latest bigname-worker inspect watch-plan --json
 ```
 
 ## Fresh Server Compose
@@ -357,7 +357,7 @@ docker compose --env-file .env.server \
   stop indexer
 
 export OBSERVED_BEFORE="$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
-export BIGNAME_IMAGE="${BIGNAME_IMAGE:-ghcr.io/tateb/bigname:latest}"
+export BIGNAME_IMAGE="${BIGNAME_IMAGE:-ghcr.io/ensdomains/bigname:latest}"
 
 docker run --rm \
   --network bigname_default \
@@ -1114,7 +1114,7 @@ blocks.
 The repository publishes the image to:
 
 ```text
-ghcr.io/tateb/bigname
+ghcr.io/ensdomains/bigname
 ```
 
 The GitHub Actions workflow publishes only after the full CI workflow succeeds
@@ -1126,7 +1126,7 @@ Manual publish from an authenticated checkout:
 ```sh
 docker buildx build --platform linux/amd64 \
   --build-arg BIGNAME_BUILD_SHA=$(git rev-parse HEAD) \
-  -t ghcr.io/tateb/bigname:latest \
-  -t ghcr.io/tateb/bigname:$(git rev-parse --short HEAD) \
+  -t ghcr.io/ensdomains/bigname:latest \
+  -t ghcr.io/ensdomains/bigname:$(git rev-parse --short HEAD) \
   --push .
 ```

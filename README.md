@@ -4,7 +4,14 @@
 
 A replayable, auditable indexing and read API for ENS, ENSv2, and Basenames.
 
-bigname turns onchain state from Ethereum and Base into a versioned REST API. Its `v1` routes cover the supported portions of exact-name profiles, name and address collections, resolver records and overviews, primary names, history, roles, and verified record reads; see the [consumer capability matrix](docs/consumer-capabilities.md) for the exact boundaries. Partial and unsupported coverage is reported explicitly. Raw facts are immutable; [projections](docs/glossary.md) are rebuildable; supported on-demand verified reads are persisted with durable execution traces.
+bigname turns onchain state from Ethereum and Base into a versioned REST API. Its `v1`
+routes cover the supported portions of [exact-name profiles](docs/glossary.md), name and
+address collections, resolver records and overviews, primary names, history, roles, and
+verified record reads; see the [consumer capability matrix](docs/consumer-capabilities.md)
+for the exact boundaries. Partial and unsupported coverage is reported explicitly.
+[Raw facts](docs/glossary.md) are immutable; [projections](docs/glossary.md) are
+rebuildable; supported on-demand verified record reads are persisted with durable
+[execution traces](docs/glossary.md).
 
 ## What's here
 
@@ -39,7 +46,7 @@ To enable live ingestion, live verified ENS resolution, and the ENS/60 primary-n
 
 ## Container
 
-Published as `ghcr.io/tateb/bigname`. The image entrypoint takes a service name (`api`, `indexer`, `worker`, or `migrate`).
+Published as `ghcr.io/ensdomains/bigname`. The image entrypoint takes a service name (`api`, `indexer`, `worker`, or `migrate`).
 
 For server deployment:
 
@@ -48,7 +55,7 @@ cp .env.server.example .env.server         # set passwords + image tag
 docker compose --env-file .env.server -f docker-compose.server.yml up -d
 ```
 
-The compose file runs `migrate` once, then leaves `api`, `indexer`, and `worker` as long-running services. One-shot invocations (`migrate`, `bigname-api print-openapi`, `bigname-worker inspect ...`) can be run with `docker run --rm ghcr.io/tateb/bigname:latest <command>`.
+The compose file runs `migrate` once, then leaves `api`, `indexer`, and `worker` as long-running services. One-shot invocations (`migrate`, `bigname-api print-openapi`, `bigname-worker inspect ...`) can be run with `docker run --rm ghcr.io/ensdomains/bigname:latest <command>`.
 
 See [`docs/deployment.md`](docs/deployment.md) and [`docs/production.md`](docs/production.md) for the public-edge stack.
 

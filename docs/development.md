@@ -125,14 +125,15 @@ workspace checks do not build those native dependencies.
 `BIGNAME_INDEXER_POLL_INTERVAL_SECS` controls the local indexer poll interval
 and defaults to `5`.
 
-## Private Readiness Endpoint
+## Readiness Endpoint
 
 The API process exposes `GET /healthz` on the same bind address as
 `cargo api -- serve` and `./scripts/dev-up`. The default local address is
 `http://127.0.0.1:3000/healthz`.
 
-`/healthz` is a private operator endpoint. It is not part of the versioned
-`/v1` read API and should not be treated as a consumer compatibility surface.
+`/healthz` is an unversioned operator endpoint. The production public edge
+exposes it for readiness checks, but it is not part of the versioned `/v1` read
+API and should not be treated as a consumer compatibility surface.
 
 The response's `identity` object describes the binary's compatibility inputs:
 `version` is the Cargo package version; `build_sha` is the compile-time

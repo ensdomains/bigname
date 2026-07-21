@@ -63,7 +63,7 @@
             OpenApiConformanceCoverage {
                 path: "/healthz",
                 scope: OpenApiConformanceScope::OutOfScope(
-                    "private operator endpoint; not published in docs/api-v1.openapi.json",
+                    "unversioned operator endpoint; not published in docs/api-v1.openapi.json",
                 ),
             },
             OpenApiConformanceCoverage {
@@ -262,7 +262,7 @@
             );
             assert!(
                 !published_paths.contains_key("/healthz"),
-                "private /healthz must stay outside docs/api-v1.openapi.json"
+                "unversioned /healthz must stay outside docs/api-v1.openapi.json"
             );
 
             Ok(())
