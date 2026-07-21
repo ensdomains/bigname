@@ -1259,15 +1259,14 @@ pub struct ApiServer {
 }
 
 impl ApiServer {
-    pub async fn start(repo_root: &Path, database_url: &str) -> Result<Self> {
-        Self::start_with_chain_rpc_urls(repo_root, database_url, &[]).await
-    }
-
-    pub async fn start_with_chain_rpc_urls(
+    pub async fn start(
         repo_root: &Path,
         database_url: &str,
         chain_rpc_urls: &[ChainRpcUrl<'_>],
     ) -> Result<Self> {
+        if chain_rpc_urls.is_empty() {
+            bail!("e2e API startup requires at least one chain RPC URL");
+        }
         let api = &pipeline_binaries(repo_root).await?.api;
         let ready_timeout_secs = ready_timeout_secs()?;
         let deadline = deadline_after(ready_timeout_secs, "API readiness")?;
@@ -1331,10 +1330,10 @@ impl ApiServer {
             "--database-url",
             database_url,
         ]);
-        if !chain_rpc_urls.is_empty() {
-            let chain_rpc_urls = format_chain_rpc_urls(chain_rpc_urls);
-            command.args(["--chain-rpc-url", &chain_rpc_urls]);
-        }
+        command.env(
+            "BIGNAME_API_CHAIN_RPC_URLS",
+            format_chain_rpc_urls(chain_rpc_urls),
+        );
         let child = command
             .kill_on_drop(true)
             .spawn()

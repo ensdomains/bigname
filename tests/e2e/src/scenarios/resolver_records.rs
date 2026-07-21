@@ -673,7 +673,7 @@ async fn live_code_hash_profile_transition_orphans_and_reactivates_records() -> 
     worker
         .wait_for_sql(&db.pool, &initial_projection_ready)
         .await?;
-    let api = pipeline::ApiServer::start(&root, &db.url).await?;
+    let api = pipeline::ApiServer::start(&root, &db.url, &chain_rpc_urls).await?;
 
     let initial_exact = exact_name(&api, "ens", NAME).await?;
     assert_resolver(&initial_exact, resolver.address);

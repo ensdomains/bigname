@@ -117,11 +117,12 @@ suite only at an isolated test PostgreSQL server.
    `register_eth_name::live_worker_applies_registration_and_renewal_while_api_serves`
    smoke instead keeps the production `worker run` loop active with the
    indexer and API, proving bootstrap handoff and continuous projection apply
-   for one registration/renewal path. Execution-plane scenarios start the API
-   with `--chain-rpc-url ethereum-mainnet=<anvil>` so on-demand verified
-   resolution executes against the selected stored snapshot. Backfill helpers
-   exercise raw-fact-to-normalized-event and projection rebuild boundaries
-   where canonical checkpoints intentionally make API reads unavailable.
+   for one registration/renewal path. Every process-backed API session sets
+   `BIGNAME_API_CHAIN_RPC_URLS` to `chain=<anvil>` for each served chain, so
+   status freshness and on-demand verified resolution use the same local
+   providers as intake. Backfill helpers exercise raw-fact-to-normalized-event
+   and projection rebuild boundaries where canonical checkpoints intentionally
+   make API reads unavailable.
 5. **Assertions** — each scenario asserts the validation layers material to
    its claim. Many cover persisted raw logs, canonical normalized events,
    rebuilt projections, and public HTTP output; the verified-resolution
