@@ -2090,6 +2090,122 @@ async fn json_rpc_provider_uses_code_fallback_only_for_pruned_blocks() -> Result
 }
 
 #[tokio::test]
+async fn json_rpc_provider_rejects_initial_pruned_boundary_mismatch_without_code_fallback()
+-> Result<()> {
+    let block_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let address = "0x1111111111111111111111111111111111111111";
+    let primary_request_count = Arc::new(AtomicUsize::new(0));
+    let request_count = Arc::clone(&primary_request_count);
+    let (primary_url, primary_server) = spawn_json_rpc_server(Arc::new(move |body| {
+        request_count.fetch_add(1, Ordering::Relaxed);
+        json_rpc_error_response(body, -32603, "state at block #50 is pruned")
+    }))
+    .await?;
+    let fallback_request_count = Arc::new(AtomicUsize::new(0));
+    let request_count = Arc::clone(&fallback_request_count);
+    let (fallback_url, fallback_server) = spawn_json_rpc_server(Arc::new(move |_body| {
+        request_count.fetch_add(1, Ordering::Relaxed);
+        Value::Array(Vec::new())
+    }))
+    .await?;
+    let provider = JsonRpcProvider::new_with_code_fallback(
+        "ethereum-mainnet",
+        &primary_url,
+        reqwest::Url::parse(&fallback_url)?,
+    )?;
+
+    let error = provider
+        .fetch_code_observations_at_block_hashes(&[ProviderBlockCodeObservationRequest {
+            block_number: 42,
+            block_hash: block_hash.to_owned(),
+            addresses: vec![address.to_owned()],
+        }])
+        .await
+        .expect_err("a non-matching pruned boundary must preserve the initial primary error");
+
+    assert_eq!(
+        format!("{error:#}"),
+        "provider returned JSON-RPC error for eth_getCode: -32603: state at block #50 is pruned"
+    );
+    assert_eq!(primary_request_count.load(Ordering::Relaxed), 1);
+    assert_eq!(fallback_request_count.load(Ordering::Relaxed), 0);
+
+    primary_server.abort();
+    fallback_server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn json_rpc_provider_rejects_retried_pruned_boundary_mismatch_without_code_fallback()
+-> Result<()> {
+    let block_hash_42 = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let block_hash_43 = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let address_one = "0x1111111111111111111111111111111111111111";
+    let address_two = "0x2222222222222222222222222222222222222222";
+    let primary_request_count = Arc::new(AtomicUsize::new(0));
+    let request_count = Arc::clone(&primary_request_count);
+    let retry_block_hash = block_hash_43.to_owned();
+    let (primary_url, primary_server) = spawn_json_rpc_server(Arc::new(move |body| {
+        let attempt = request_count.fetch_add(1, Ordering::Relaxed);
+        let requests = body
+            .as_array()
+            .expect("primary code request must remain batched");
+        match attempt {
+            0 => {
+                assert_eq!(requests.len(), 2);
+                json_rpc_error_response(body, -32603, "state at block #43 is pruned")
+            }
+            1 => {
+                assert_eq!(requests.len(), 1);
+                assert_eq!(code_request_key(&requests[0]).1, retry_block_hash);
+                json_rpc_error_response(body, -32603, "state at block #50 is pruned")
+            }
+            _ => panic!("unexpected additional primary code request"),
+        }
+    }))
+    .await?;
+    let fallback_request_count = Arc::new(AtomicUsize::new(0));
+    let request_count = Arc::clone(&fallback_request_count);
+    let (fallback_url, fallback_server) = spawn_json_rpc_server(Arc::new(move |_body| {
+        request_count.fetch_add(1, Ordering::Relaxed);
+        Value::Array(Vec::new())
+    }))
+    .await?;
+    let provider = JsonRpcProvider::new_with_code_fallback(
+        "ethereum-mainnet",
+        &primary_url,
+        reqwest::Url::parse(&fallback_url)?,
+    )?;
+
+    let error = provider
+        .fetch_code_observations_at_block_hashes(&[
+            ProviderBlockCodeObservationRequest {
+                block_number: 42,
+                block_hash: block_hash_42.to_owned(),
+                addresses: vec![address_one.to_owned()],
+            },
+            ProviderBlockCodeObservationRequest {
+                block_number: 43,
+                block_hash: block_hash_43.to_owned(),
+                addresses: vec![address_two.to_owned()],
+            },
+        ])
+        .await
+        .expect_err("a non-matching pruned boundary on retry must preserve the primary error");
+
+    assert_eq!(
+        format!("{error:#}"),
+        "provider returned JSON-RPC error for eth_getCode: -32603: state at block #50 is pruned"
+    );
+    assert_eq!(primary_request_count.load(Ordering::Relaxed), 2);
+    assert_eq!(fallback_request_count.load(Ordering::Relaxed), 0);
+
+    primary_server.abort();
+    fallback_server.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn json_rpc_provider_does_not_use_code_fallback_for_transient_primary_error() -> Result<()> {
     let block_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let address = "0x1111111111111111111111111111111111111111";
