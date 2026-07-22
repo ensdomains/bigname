@@ -373,10 +373,10 @@
             }
 
             fn app_state(&self) -> AppState {
-                AppState {
-                    pool: self.pool.clone(),
-                    chain_rpc_urls: bigname_execution::ChainRpcUrls::default(),
-                }
+                AppState::new(
+                    self.pool.clone(),
+                    bigname_execution::ChainRpcUrls::default(),
+                )
             }
 
             async fn insert_manifest(

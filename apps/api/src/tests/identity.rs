@@ -1732,6 +1732,8 @@ async fn indexing_status_degrades_without_chain_readiness_data() -> Result<()> {
     assert_eq!(response.status(), StatusCode::OK);
     let payload: Value = read_json(response).await?;
     assert_eq!(payload["data"]["status"], json!("degraded"));
+    assert_eq!(payload["data"]["pending_invalidation_count"], json!(0));
+    assert_eq!(payload["data"]["dead_letter_count"], json!(0));
     assert_eq!(
         payload["data"]["chains"]
             .as_object()
@@ -1755,7 +1757,6 @@ async fn indexing_status_degrades_for_chain_without_checkpoint() -> Result<()> {
     )
     .execute(&database.pool)
     .await?;
-
     let response = app_router(database.app_state())
         .oneshot(
             Request::builder()
@@ -1768,6 +1769,8 @@ async fn indexing_status_degrades_for_chain_without_checkpoint() -> Result<()> {
     assert_eq!(response.status(), StatusCode::OK);
     let payload: Value = read_json(response).await?;
     assert_eq!(payload["data"]["status"], json!("degraded"));
+    assert_eq!(payload["data"]["pending_invalidation_count"], json!(0));
+    assert_eq!(payload["data"]["dead_letter_count"], json!(0));
     assert_eq!(
         payload["data"]["chains"]["ethereum-mainnet"]["canonical_block"],
         Value::Null
@@ -1916,6 +1919,12 @@ async fn indexing_status_degrades_for_direct_pending_invalidations() -> Result<(
     assert_eq!(response.status(), StatusCode::OK);
     let payload: Value = read_json(response).await?;
     assert_eq!(payload["data"]["status"], json!("degraded"));
+    assert_eq!(payload["data"]["pending_invalidation_count"], json!(1));
+    assert_eq!(
+        payload["data"]["pending_invalidation_count_capped"],
+        json!(false)
+    );
+    assert_eq!(payload["data"]["dead_letter_count"], json!(0));
     assert_eq!(
         payload["data"]["chains"]["ethereum-mainnet"]["latest_projected_block"],
         json!(10)
@@ -1923,6 +1932,50 @@ async fn indexing_status_degrades_for_direct_pending_invalidations() -> Result<(
 
     database.cleanup().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn indexing_status_caps_the_pending_invalidation_count_with_an_explicit_marker() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    sqlx::query(
+        r#"
+        INSERT INTO projection_invalidations (
+            projection,
+            projection_key,
+            key_payload
+        )
+        SELECT
+            'name_current',
+            'bounded-status-' || sequence,
+            '{}'::jsonb
+        FROM generate_series(1, $1 + 1) AS sequence
+        "#,
+    )
+    .bind(bigname_storage::PENDING_INVALIDATION_COUNT_CAP)
+    .execute(&database.pool)
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/status")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(
+        payload["data"]["pending_invalidation_count"],
+        json!(bigname_storage::PENDING_INVALIDATION_COUNT_CAP)
+    );
+    assert_eq!(
+        payload["data"]["pending_invalidation_count_capped"],
+        json!(true)
+    );
+
+    database.cleanup().await
 }
 
 #[tokio::test]
@@ -2055,6 +2108,32 @@ async fn indexing_status_reports_projection_lag_by_chain() -> Result<()> {
     )
     .execute(&database.pool)
     .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO projection_invalidation_dead_letters (
+            projection,
+            projection_key,
+            generation,
+            attempt_count,
+            last_changed_at,
+            invalidated_at,
+            last_failure_reason,
+            last_failure_at
+        )
+        VALUES (
+            'name_current',
+            'dead-lettered-status.eth',
+            1,
+            5,
+            '2026-04-17T00:00:10Z',
+            '2026-04-17T00:00:10Z',
+            'status test failure',
+            '2026-04-17T00:00:10Z'
+        )
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
 
     let response = app_router(database.app_state())
         .oneshot(
@@ -2068,6 +2147,8 @@ async fn indexing_status_reports_projection_lag_by_chain() -> Result<()> {
     assert_eq!(response.status(), StatusCode::OK);
     let payload: Value = read_json(response).await?;
     assert_eq!(payload["data"]["status"], json!("stale"));
+    assert_eq!(payload["data"]["pending_invalidation_count"], json!(1));
+    assert_eq!(payload["data"]["dead_letter_count"], json!(1));
     assert_eq!(
         payload["data"]["chains"]["ethereum-mainnet"]["canonical_block"],
         json!(10)
@@ -2079,6 +2160,14 @@ async fn indexing_status_reports_projection_lag_by_chain() -> Result<()> {
     assert_eq!(
         payload["data"]["chains"]["ethereum-mainnet"]["projection_lag_blocks"],
         json!(1)
+    );
+    assert_eq!(
+        payload["data"]["chains"]["ethereum-mainnet"]["network_head_status"],
+        json!("unconfigured")
+    );
+    assert_eq!(
+        payload["data"]["chains"]["ethereum-mainnet"]["network_block"],
+        Value::Null
     );
     assert_eq!(
         payload["data"]["chains"]["ethereum-mainnet"]["projection_lag_seconds"],
@@ -2099,6 +2188,8 @@ async fn indexing_status_reports_projection_lag_by_chain() -> Result<()> {
     assert!(payload.get("page").is_none());
     assert_eq!(payload["meta"], json!({}));
     assert_eq!(payload["data"]["status"], json!("stale"));
+    assert_eq!(payload["data"]["pending_invalidation_count"], json!(1));
+    assert_eq!(payload["data"]["dead_letter_count"], json!(1));
 
     let chains = payload["data"]["chains"]
         .as_object()
@@ -2114,6 +2205,8 @@ async fn indexing_status_reports_projection_lag_by_chain() -> Result<()> {
     assert_eq!(chain.get("finalized_block"), Some(&json!(9)));
     assert_eq!(chain.get("lag_blocks"), Some(&json!(1)));
     assert_eq!(chain.get("lag_seconds"), Some(&json!(1)));
+    assert_eq!(chain.get("network_head_status"), Some(&json!("unconfigured")));
+    assert_eq!(chain.get("network_block"), Some(&Value::Null));
     assert_eq!(chain.get("status"), Some(&json!("stale")));
     assert!(chain.get("canonical_block").is_none());
     assert!(chain.get("latest_projected_block").is_none());
@@ -2121,7 +2214,76 @@ async fn indexing_status_reports_projection_lag_by_chain() -> Result<()> {
     sqlx::query("DELETE FROM projection_invalidations")
         .execute(&database.pool)
         .await?;
-    let response = app_router(database.app_state())
+    let chain_rpc_urls = bigname_execution::ChainRpcUrls::from_entries(&[
+        "ethereum-mainnet=http://status-provider.test".to_owned(),
+    ])?;
+    let ready_state = database.app_state_with_chain_rpc_urls(chain_rpc_urls);
+    ready_state
+        .status_freshness
+        .seed_success(
+            "ethereum-mainnet",
+            16,
+            OffsetDateTime::now_utc(),
+        )
+        .await;
+    let response = app_router(ready_state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/status")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("network-lag indexing status request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["data"]["status"], json!("stale"));
+    assert_eq!(
+        payload["data"]["chains"]["ethereum-mainnet"]["network_block"],
+        json!(16)
+    );
+    assert_eq!(
+        payload["data"]["chains"]["ethereum-mainnet"]["network_head_status"],
+        json!("fresh")
+    );
+    assert_eq!(
+        payload["data"]["chains"]["ethereum-mainnet"]["ingestion_lag_blocks"],
+        json!(6)
+    );
+    assert!(
+        payload["data"]["chains"]["ethereum-mainnet"]["ingestion_lag_seconds"]
+            .as_i64()
+            .is_some_and(|lag| lag > 60)
+    );
+
+    let response = app_router(ready_state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/v2/status")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("network-lag v2 indexing status request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["data"]["status"], json!("stale"));
+    assert_eq!(payload["data"]["chains"]["1"]["network_block"], json!(16));
+    assert_eq!(
+        payload["data"]["chains"]["1"]["ingestion_lag_blocks"],
+        json!(6)
+    );
+    assert_eq!(payload["data"]["chains"]["1"]["status"], json!("stale"));
+
+    ready_state
+        .status_freshness
+        .seed_success(
+            "ethereum-mainnet",
+            10,
+            OffsetDateTime::now_utc(),
+        )
+        .await;
+    let response = app_router(ready_state.clone())
         .oneshot(
             Request::builder()
                 .uri("/v1/status")
@@ -2133,6 +2295,8 @@ async fn indexing_status_reports_projection_lag_by_chain() -> Result<()> {
     assert_eq!(response.status(), StatusCode::OK);
     let payload: Value = read_json(response).await?;
     assert_eq!(payload["data"]["status"], json!("ready"));
+    assert_eq!(payload["data"]["pending_invalidation_count"], json!(0));
+    assert_eq!(payload["data"]["dead_letter_count"], json!(1));
     assert_eq!(
         payload["data"]["chains"]["ethereum-mainnet"]["latest_projected_block"],
         json!(10)
@@ -2141,6 +2305,35 @@ async fn indexing_status_reports_projection_lag_by_chain() -> Result<()> {
         payload["data"]["chains"]["ethereum-mainnet"]["projection_lag_blocks"],
         json!(0)
     );
+    assert_eq!(
+        payload["data"]["chains"]["ethereum-mainnet"]["network_head_status"],
+        json!("fresh")
+    );
+    assert_eq!(
+        payload["data"]["chains"]["ethereum-mainnet"]["ingestion_lag_blocks"],
+        json!(0)
+    );
+
+    let response = app_router(ready_state)
+        .oneshot(
+            Request::builder()
+                .uri("/v2/status")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("ready v2 indexing status request failed")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["data"]["status"], json!("ready"));
+    assert_eq!(payload["data"]["pending_invalidation_count"], json!(0));
+    assert_eq!(payload["data"]["dead_letter_count"], json!(1));
+    assert_eq!(payload["data"]["chains"]["1"]["network_block"], json!(10));
+    assert_eq!(
+        payload["data"]["chains"]["1"]["network_head_status"],
+        json!("fresh")
+    );
+    assert_eq!(payload["data"]["chains"]["1"]["ingestion_lag_blocks"], json!(0));
 
     database.cleanup().await?;
     Ok(())

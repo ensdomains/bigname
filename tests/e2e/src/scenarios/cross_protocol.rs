@@ -548,7 +548,7 @@ async fn base_reorg_leaves_ethereum_canonicality_untouched() -> Result<()> {
         eth_checkpoint_after, eth_checkpoint_before,
         "the ethereum checkpoint must not move during a Base-only reorg"
     );
-    let api = pipeline::ApiServer::start(&root, &db.url).await?;
+    let api = pipeline::ApiServer::start(&root, &db.url, &chain_rpc_urls).await?;
     let (status, steady) = api.get_json("/v1/names/ens/steady.eth").await?;
     assert_eq!(status, 200, "the ethereum name must still serve: {steady}");
     assert_eq!(

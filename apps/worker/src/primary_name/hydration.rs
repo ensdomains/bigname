@@ -6,14 +6,12 @@ use bigname_execution::{
     EnsReverseNameMulticallRequest, EnsReverseNameMulticallResult, MULTICALL3_ADDRESS,
     execute_ens_reverse_name_multicall, lookup_ens_forward_address_at_block,
 };
-use bigname_storage::{
-    ENS_LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESSES, ETHEREUM_MAINNET_CHAIN_ID,
-    normalize_evm_address,
-};
+use bigname_storage::{ENS_LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESSES, normalize_evm_address};
 use futures_util::{FutureExt, future::BoxFuture};
 use serde_json::{Value, json};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 
+use super::rebuild_heartbeat::{LoopHeartbeat, record_rebuild_progress, run_rebuild_phase};
 use super::{
     PrimaryNameLegacyReverseHydrationSummary,
     projection::{primary_name_row, primary_name_row_with_provenance_extensions},
@@ -28,10 +26,13 @@ mod invalidation;
 mod resolver_edge;
 #[path = "hydration/resolver_edge_query.rs"]
 mod resolver_edge_query;
+#[path = "hydration/triggers.rs"]
+mod triggers;
 use hydration_query::load_legacy_reverse_hydration_candidates;
 use invalidation::invalidate_changed_hydration_snapshots;
 use resolver_edge::hydrate_resolver_edge_candidates;
 use resolver_edge_query::load_legacy_reverse_resolver_edge_hydration_candidates;
+pub(super) use triggers::load_legacy_reverse_resolver_call_triggers;
 
 #[cfg(test)]
 const LEGACY_EVENT_SILENT_REVERSE_RESOLVER_ADDRESS: &str =
@@ -136,6 +137,10 @@ enum ReverseNameHydrationOutcome {
 }
 
 trait ReverseNameHydrationClient: Sync {
+    fn batch_size(&self) -> usize {
+        usize::MAX
+    }
+
     fn hydrate<'a>(
         &'a self,
         chain_id: &'a str,
@@ -158,6 +163,10 @@ struct MulticallReverseNameHydrationClient {
 }
 
 impl ReverseNameHydrationClient for MulticallReverseNameHydrationClient {
+    fn batch_size(&self) -> usize {
+        self.config.batch_size.max(1)
+    }
+
     fn hydrate<'a>(
         &'a self,
         chain_id: &'a str,
@@ -241,78 +250,20 @@ pub(super) async fn hydrate_legacy_reverse_resolver_primary_names(
         .await
 }
 
-pub(super) async fn load_legacy_reverse_resolver_call_triggers(
+pub(super) async fn hydrate_legacy_reverse_resolver_primary_names_with_heartbeat(
     pool: &PgPool,
-    config: &PrimaryNameLegacyReverseHydrationConfig,
-) -> Result<Vec<PrimaryNameLegacyReverseHydrationTrigger>> {
+    config: PrimaryNameLegacyReverseHydrationConfig,
+    loop_heartbeat: &mut LoopHeartbeat,
+) -> Result<PrimaryNameLegacyReverseHydrationSummary> {
     let resolver_addresses = normalize_resolver_addresses(&config.resolver_addresses);
-    if resolver_addresses.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let rows = sqlx::query(
-        r#"
-        WITH chain_positions AS (
-            SELECT
-                chain_id,
-                canonical_block_number AS hydration_block_number,
-                canonical_block_hash AS hydration_block_hash
-            FROM chain_checkpoints
-            WHERE chain_id = $2
-              AND canonical_block_number IS NOT NULL
-              AND canonical_block_hash IS NOT NULL
-        )
-        SELECT DISTINCT ON (LOWER(esc.resolver_address))
-            LOWER(esc.resolver_address) AS resolver_address,
-            esc.block_number,
-            esc.block_hash,
-            esc.transaction_hash,
-            esc.transaction_index
-        FROM event_silent_resolver_call_observations esc
-        JOIN chain_positions
-          ON chain_positions.chain_id = esc.chain_id
-         AND esc.block_number <= chain_positions.hydration_block_number
-        WHERE esc.chain_id = $2
-          AND LOWER(esc.resolver_address) = ANY($1::TEXT[])
-          AND esc.canonicality_state IN (
-              'canonical'::canonicality_state,
-              'safe'::canonicality_state,
-              'finalized'::canonicality_state
-          )
-        ORDER BY
-            LOWER(esc.resolver_address) ASC,
-            esc.block_number DESC,
-            esc.transaction_index DESC,
-            esc.transaction_hash DESC
-        "#,
+    let client = MulticallReverseNameHydrationClient { config };
+    hydrate_legacy_reverse_resolver_primary_names_with_client_inner(
+        pool,
+        &resolver_addresses,
+        &client,
+        Some(loop_heartbeat),
     )
-    .bind(&resolver_addresses)
-    .bind(ETHEREUM_MAINNET_CHAIN_ID)
-    .fetch_all(pool)
     .await
-    .context("failed to load latest legacy reverse-resolver direct-call triggers")?;
-
-    rows.into_iter()
-        .map(|row| {
-            Ok(PrimaryNameLegacyReverseHydrationTrigger {
-                resolver_address: row
-                    .try_get("resolver_address")
-                    .context("missing legacy reverse hydration trigger resolver_address")?,
-                block_number: row
-                    .try_get("block_number")
-                    .context("missing legacy reverse hydration trigger block_number")?,
-                block_hash: row
-                    .try_get("block_hash")
-                    .context("missing legacy reverse hydration trigger block_hash")?,
-                transaction_hash: row
-                    .try_get("transaction_hash")
-                    .context("missing legacy reverse hydration trigger transaction_hash")?,
-                transaction_index: row
-                    .try_get("transaction_index")
-                    .context("missing legacy reverse hydration trigger transaction_index")?,
-            })
-        })
-        .collect()
 }
 
 async fn hydrate_legacy_reverse_resolver_primary_names_with_client(
@@ -320,13 +271,39 @@ async fn hydrate_legacy_reverse_resolver_primary_names_with_client(
     resolver_addresses: &[String],
     client: &dyn ReverseNameHydrationClient,
 ) -> Result<PrimaryNameLegacyReverseHydrationSummary> {
+    hydrate_legacy_reverse_resolver_primary_names_with_client_inner(
+        pool,
+        resolver_addresses,
+        client,
+        None,
+    )
+    .await
+}
+
+async fn hydrate_legacy_reverse_resolver_primary_names_with_client_inner(
+    pool: &PgPool,
+    resolver_addresses: &[String],
+    client: &dyn ReverseNameHydrationClient,
+    mut loop_heartbeat: Option<&mut LoopHeartbeat>,
+) -> Result<PrimaryNameLegacyReverseHydrationSummary> {
     if resolver_addresses.is_empty() {
         return Ok(PrimaryNameLegacyReverseHydrationSummary::default());
     }
 
-    let candidates = load_legacy_reverse_hydration_candidates(pool, resolver_addresses).await?;
-    let resolver_edge_candidates =
-        load_legacy_reverse_resolver_edge_hydration_candidates(pool, resolver_addresses).await?;
+    let candidates = run_rebuild_phase(
+        pool,
+        &mut loop_heartbeat,
+        "primary_names_current.legacy_hydration.load_reverse_claim_candidates",
+        load_legacy_reverse_hydration_candidates(pool, resolver_addresses),
+    )
+    .await?;
+    let resolver_edge_candidates = run_rebuild_phase(
+        pool,
+        &mut loop_heartbeat,
+        "primary_names_current.legacy_hydration.load_resolver_edge_candidates",
+        load_legacy_reverse_resolver_edge_hydration_candidates(pool, resolver_addresses),
+    )
+    .await?;
     let mut summary = PrimaryNameLegacyReverseHydrationSummary {
         candidate_tuple_count: candidates.len() + resolver_edge_candidates.len(),
         ..PrimaryNameLegacyReverseHydrationSummary::default()
@@ -336,22 +313,24 @@ async fn hydrate_legacy_reverse_resolver_primary_names_with_client(
     }
 
     let mut snapshots = Vec::new();
-    for candidate in candidates
+    for (candidate_index, candidate) in candidates
         .iter()
         .filter(|candidate| candidate.hydration_target.is_none())
+        .enumerate()
     {
         let snapshot = baseline_snapshot(candidate)?;
         add_snapshot_status(&mut summary, &snapshot);
         snapshots.push(snapshot);
+        if candidate_index % LEGACY_REVERSE_HYDRATION_UPSERT_BATCH_SIZE == 0 {
+            record_rebuild_progress(pool, &mut loop_heartbeat).await;
+        }
     }
 
-    let calls_by_position = candidates.iter().enumerate().fold(
-        BTreeMap::<(String, i64, String), Vec<(usize, ReverseNameHydrationCall)>>::new(),
-        |mut by_position, (index, candidate)| {
-            let Some(target) = candidate.hydration_target.as_ref() else {
-                return by_position;
-            };
-            by_position
+    let mut calls_by_position =
+        BTreeMap::<(String, i64, String), Vec<(usize, ReverseNameHydrationCall)>>::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        if let Some(target) = candidate.hydration_target.as_ref() {
+            calls_by_position
                 .entry((
                     target.chain_id.clone(),
                     target.position.block_number,
@@ -365,86 +344,92 @@ async fn hydrate_legacy_reverse_resolver_primary_names_with_client(
                         reverse_node: target.reverse_node.clone(),
                     },
                 ));
-            by_position
-        },
-    );
+        }
+        if index % LEGACY_REVERSE_HYDRATION_UPSERT_BATCH_SIZE == 0 {
+            record_rebuild_progress(pool, &mut loop_heartbeat).await;
+        }
+    }
 
     for ((chain_id, block_number, block_hash), calls_with_refs) in calls_by_position {
         let position = ReverseNameHydrationChainPosition {
             block_number,
             block_hash,
         };
-        let calls = calls_with_refs
-            .iter()
-            .map(|(_, call)| call.clone())
-            .collect::<Vec<_>>();
-        summary.queried_tuple_count += calls.len();
-        let outcomes = match client.hydrate(&chain_id, &position, &calls).await {
-            Ok(outcomes) => outcomes,
-            Err(error) => {
-                summary.failed_lookup_count += calls.len();
-                tracing::warn!(
-                    service = "worker",
-                    projection = "primary_names_current",
-                    chain_id,
-                    error = %format!("{error:#}"),
-                    failed_lookup_count = calls.len(),
-                    "legacy reverse-resolver primary-name hydration batch failed"
-                );
-                for (candidate_index, _) in &calls_with_refs {
-                    let candidate = candidates.get(*candidate_index).context(
-                        "legacy reverse-resolver hydration candidate reference is out of bounds",
-                    )?;
-                    if candidate.has_existing_hydration {
-                        let snapshot = baseline_snapshot(candidate)?;
-                        add_snapshot_status(&mut summary, &snapshot);
-                        snapshots.push(snapshot);
+        for calls_chunk in calls_with_refs.chunks(client.batch_size().max(1)) {
+            let calls = calls_chunk
+                .iter()
+                .map(|(_, call)| call.clone())
+                .collect::<Vec<_>>();
+            summary.queried_tuple_count += calls.len();
+            let outcomes = match client.hydrate(&chain_id, &position, &calls).await {
+                Ok(outcomes) => outcomes,
+                Err(error) => {
+                    summary.failed_lookup_count += calls.len();
+                    tracing::warn!(
+                        service = "worker",
+                        projection = "primary_names_current",
+                        chain_id,
+                        error = %format!("{error:#}"),
+                        failed_lookup_count = calls.len(),
+                        "legacy reverse-resolver primary-name hydration batch failed"
+                    );
+                    for (candidate_index, _) in calls_chunk {
+                        let candidate = candidates.get(*candidate_index).context(
+                            "legacy reverse-resolver hydration candidate reference is out of bounds",
+                        )?;
+                        if candidate.has_existing_hydration {
+                            let snapshot = baseline_snapshot(candidate)?;
+                            add_snapshot_status(&mut summary, &snapshot);
+                            snapshots.push(snapshot);
+                        }
                     }
-                }
-                continue;
-            }
-        };
-        if outcomes.len() != calls_with_refs.len() {
-            anyhow::bail!(
-                "legacy reverse-resolver hydration provider returned {} outcomes for {} calls on {chain_id}",
-                outcomes.len(),
-                calls_with_refs.len()
-            );
-        }
-
-        for ((candidate_index, _), outcome) in calls_with_refs.iter().zip(outcomes) {
-            let candidate = candidates.get(*candidate_index).context(
-                "legacy reverse-resolver hydration candidate reference is out of bounds",
-            )?;
-            let target = candidate.hydration_target.as_ref().context(
-                "legacy reverse-resolver hydration candidate is missing hydration target",
-            )?;
-            let raw_name = match outcome {
-                ReverseNameHydrationOutcome::Success(value) => value,
-                ReverseNameHydrationOutcome::NotFound => String::new(),
-                ReverseNameHydrationOutcome::Failed(_) => {
-                    summary.failed_lookup_count += 1;
-                    if candidate.has_existing_hydration {
-                        let snapshot = baseline_snapshot(candidate)?;
-                        add_snapshot_status(&mut summary, &snapshot);
-                        snapshots.push(snapshot);
-                    }
+                    record_rebuild_progress(pool, &mut loop_heartbeat).await;
                     continue;
                 }
             };
-            let claim_observation = NameClaimObservation {
-                key: candidate.tuple.key.clone(),
-                raw_name: Some(raw_name),
-                primary_claim_source: target.primary_claim_source.clone(),
-            };
-            let hydration_provenance = hydration_provenance(target, &position);
-            let snapshot = primary_name_row_with_provenance_extensions(
-                &candidate.tuple,
-                Some(&claim_observation),
-                [(HYDRATION_PROVENANCE_KEY, hydration_provenance)],
-            )?;
-            add_snapshot_status(&mut summary, &snapshot);
-            snapshots.push(snapshot);
+            if outcomes.len() != calls_chunk.len() {
+                anyhow::bail!(
+                    "legacy reverse-resolver hydration provider returned {} outcomes for {} calls on {chain_id}",
+                    outcomes.len(),
+                    calls_chunk.len()
+                );
+            }
+
+            for ((candidate_index, _), outcome) in calls_chunk.iter().zip(outcomes) {
+                let candidate = candidates.get(*candidate_index).context(
+                    "legacy reverse-resolver hydration candidate reference is out of bounds",
+                )?;
+                let target = candidate.hydration_target.as_ref().context(
+                    "legacy reverse-resolver hydration candidate is missing hydration target",
+                )?;
+                let raw_name = match outcome {
+                    ReverseNameHydrationOutcome::Success(value) => value,
+                    ReverseNameHydrationOutcome::NotFound => String::new(),
+                    ReverseNameHydrationOutcome::Failed(_) => {
+                        summary.failed_lookup_count += 1;
+                        if candidate.has_existing_hydration {
+                            let snapshot = baseline_snapshot(candidate)?;
+                            add_snapshot_status(&mut summary, &snapshot);
+                            snapshots.push(snapshot);
+                        }
+                        continue;
+                    }
+                };
+                let claim_observation = NameClaimObservation {
+                    key: candidate.tuple.key.clone(),
+                    raw_name: Some(raw_name),
+                    primary_claim_source: target.primary_claim_source.clone(),
+                };
+                let hydration_provenance = hydration_provenance(target, &position);
+                let snapshot = primary_name_row_with_provenance_extensions(
+                    &candidate.tuple,
+                    Some(&claim_observation),
+                    [(HYDRATION_PROVENANCE_KEY, hydration_provenance)],
+                )?;
+                add_snapshot_status(&mut summary, &snapshot);
+                snapshots.push(snapshot);
+            }
+            record_rebuild_progress(pool, &mut loop_heartbeat).await;
         }
     }
 
@@ -454,22 +439,36 @@ async fn hydrate_legacy_reverse_resolver_primary_names_with_client(
         client,
         &mut summary,
         &mut snapshots,
+        &mut loop_heartbeat,
     )
     .await?;
 
-    summary.upserted_row_count = upsert_hydration_snapshots_in_batches(
+    summary.upserted_row_count = upsert_hydration_snapshots_in_batches_inner(
         pool,
         &snapshots,
         LEGACY_REVERSE_HYDRATION_UPSERT_BATCH_SIZE,
+        &mut loop_heartbeat,
     )
     .await?;
     Ok(summary)
 }
 
+#[cfg(test)]
 async fn upsert_hydration_snapshots_in_batches(
     pool: &PgPool,
     snapshots: &[bigname_storage::PrimaryNameCurrentSnapshot],
     batch_size: usize,
+) -> Result<usize> {
+    let mut loop_heartbeat = None;
+    upsert_hydration_snapshots_in_batches_inner(pool, snapshots, batch_size, &mut loop_heartbeat)
+        .await
+}
+
+async fn upsert_hydration_snapshots_in_batches_inner(
+    pool: &PgPool,
+    snapshots: &[bigname_storage::PrimaryNameCurrentSnapshot],
+    batch_size: usize,
+    loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
 ) -> Result<usize> {
     if snapshots.is_empty() {
         return Ok(0);
@@ -487,6 +486,7 @@ async fn upsert_hydration_snapshots_in_batches(
                 format!("failed to upsert legacy reverse hydration snapshot batch {batch_index}")
             })?
             .len();
+        record_rebuild_progress(pool, loop_heartbeat).await;
     }
     Ok(upserted_row_count)
 }

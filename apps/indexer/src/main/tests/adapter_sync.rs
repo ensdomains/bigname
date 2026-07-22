@@ -1482,13 +1482,49 @@ async fn sync_adapter_owned_raw_log_state_backfills_wrapper_authority_from_store
     let watched_plan = load_watched_chain_plan(database.pool()).await?;
     sync_adapter_owned_raw_log_state(database.pool(), &watched_plan).await?;
     sync_adapter_owned_raw_log_state(database.pool(), &watched_plan).await?;
-    sync_startup_adapter_owned_raw_log_state(
+    sqlx::query(
+        r#"
+        CREATE TABLE service_loop_heartbeats (
+            service_name TEXT NOT NULL,
+            instance_id TEXT NOT NULL,
+            scope_kind TEXT NOT NULL,
+            scope_id TEXT NOT NULL,
+            started_at TIMESTAMPTZ NOT NULL,
+            heartbeat_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (service_name, instance_id, scope_kind, scope_id)
+        )
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    let heartbeat_instance_id = "live-adapter-page-heartbeat-test";
+    bigname_storage::register_service_loop(
+        database.pool(),
+        bigname_storage::INDEXER_SERVICE_NAME,
+        heartbeat_instance_id,
+    )
+    .await?;
+    let heartbeat_chain_ids = watched_plan
+        .iter()
+        .map(|chain| chain.chain.clone())
+        .collect::<Vec<_>>();
+    let mut heartbeat = crate::run::startup_heartbeat::StartupHeartbeat::new(
+        heartbeat_instance_id.to_owned(),
+        tokio::time::Duration::ZERO,
+    );
+    sync_adapter_owned_raw_log_state_with_heartbeat(
         database.pool(),
         "test",
         &watched_plan,
         DEFAULT_STARTUP_DISCOVERY_PAGE_LOGS,
+        &mut heartbeat,
+        &heartbeat_chain_ids,
     )
     .await?;
+    assert!(
+        heartbeat.adapter_progress_count() > 0,
+        "a live full-family re-sync must heartbeat from inside checkpointed adapter work"
+    );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoints

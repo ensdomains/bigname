@@ -22,6 +22,7 @@ pub async fn sync_ens_v1_subregistry_discovery(
         None,
         checkpoint::PAGE_LIMIT,
         None,
+        &mut None,
     )
     .await
     .map(|(summary, _)| summary)
@@ -49,6 +50,7 @@ pub async fn sync_ens_v1_subregistry_discovery_through_block(
         None,
         checkpoint::PAGE_LIMIT,
         None,
+        &mut None,
     )
     .await
     .map(|(summary, _)| summary)
@@ -75,6 +77,7 @@ pub async fn sync_ens_v1_subregistry_discovery_through_block_with_expected_admis
         None,
         checkpoint::PAGE_LIMIT,
         None,
+        &mut None,
     )
     .await
     .map(|(summary, _)| summary)
@@ -99,6 +102,7 @@ impl EnsV1SubregistryDiscoverySyncSummary {
             None,
             checkpoint::PAGE_LIMIT,
             None,
+            &mut None,
         )
         .await
         .map(|(summary, _)| summary)
@@ -122,6 +126,7 @@ impl EnsV1SubregistryDiscoverySyncSummary {
             None,
             checkpoint::PAGE_LIMIT,
             None,
+            &mut None,
         )
         .await
         .map(|(summary, _)| summary)
@@ -144,6 +149,7 @@ impl EnsV1SubregistryDiscoverySyncSummary {
             None,
             checkpoint::PAGE_LIMIT,
             None,
+            &mut None,
         )
         .await
         .map(|(summary, _)| summary)

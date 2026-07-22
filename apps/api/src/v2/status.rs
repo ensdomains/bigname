@@ -6,11 +6,16 @@ use tracing::error;
 
 use crate::AppState;
 
-use super::{Envelope, Meta, NoQueryParams, OpsStatus, V2Error, V2Result, slug_to_numeric};
+use super::{
+    Envelope, Meta, NoQueryParams, OpsStatus, V2Error, V2Result, format_timestamp, slug_to_numeric,
+};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct StatusData {
     pub(crate) status: OpsStatus,
+    pub(crate) pending_invalidation_count: i64,
+    pub(crate) pending_invalidation_count_capped: bool,
+    pub(crate) dead_letter_count: i64,
     pub(crate) chains: BTreeMap<String, ChainStatus>,
 }
 
@@ -22,6 +27,12 @@ pub(crate) struct ChainStatus {
     pub(crate) finalized_block: Option<i64>,
     pub(crate) lag_blocks: Option<i64>,
     pub(crate) lag_seconds: Option<i64>,
+    pub(crate) network_block: Option<i64>,
+    pub(crate) network_head_observed_at: Option<String>,
+    pub(crate) network_head_age_seconds: Option<i64>,
+    pub(crate) network_head_status: String,
+    pub(crate) ingestion_lag_blocks: Option<i64>,
+    pub(crate) ingestion_lag_seconds: Option<i64>,
     pub(crate) status: OpsStatus,
 }
 
@@ -41,20 +52,36 @@ pub(crate) async fn get_status(
         })?;
 
     Ok(Json(Envelope {
-        data: build_status_data(&read)?,
+        data: build_status_data(&read, &state).await?,
         page: None,
         meta: Meta::default(),
     }))
 }
 
-fn build_status_data(read: &bigname_storage::IndexingStatusRead) -> V2Result<StatusData> {
+async fn build_status_data(
+    read: &bigname_storage::IndexingStatusRead,
+    state: &AppState,
+) -> V2Result<StatusData> {
     let mut chains = BTreeMap::new();
     for row in &read.chains {
-        chains.insert(status_chain_key(&row.chain_id)?, build_chain_status(row));
+        let chain_key = status_chain_key(&row.chain_id)?;
+        let network_head = state
+            .status_freshness
+            .compare(
+                &state.chain_rpc_urls,
+                &row.chain_id,
+                row.canonical_block,
+                row.canonical_timestamp,
+            )
+            .await;
+        chains.insert(chain_key, build_chain_status(row, network_head));
     }
 
     Ok(StatusData {
         status: root_status(chains.values(), read.has_unscoped_pending_invalidations),
+        pending_invalidation_count: read.pending_invalidation_count,
+        pending_invalidation_count_capped: read.pending_invalidation_count_capped,
+        dead_letter_count: read.dead_letter_count,
         chains,
     })
 }
@@ -69,7 +96,10 @@ fn status_chain_key(storage_chain_id: &str) -> V2Result<String> {
     Ok(numeric.to_string())
 }
 
-fn build_chain_status(row: &bigname_storage::IndexingStatusChainRow) -> ChainStatus {
+fn build_chain_status(
+    row: &bigname_storage::IndexingStatusChainRow,
+    network_head: crate::status_freshness::NetworkHeadComparison,
+) -> ChainStatus {
     let lag_blocks = row
         .canonical_block
         .zip(row.latest_projected_block)
@@ -78,7 +108,12 @@ fn build_chain_status(row: &bigname_storage::IndexingStatusChainRow) -> ChainSta
         .canonical_timestamp
         .zip(row.latest_projected_timestamp)
         .map(|(canonical, projected)| (canonical - projected).whole_seconds().max(0));
-    let status = chain_status(row.canonical_block, row.latest_projected_block, lag_blocks);
+    let status = chain_status(
+        row.canonical_block,
+        row.latest_projected_block,
+        lag_blocks,
+        &network_head,
+    );
 
     ChainStatus {
         latest_block: row.canonical_block,
@@ -87,6 +122,12 @@ fn build_chain_status(row: &bigname_storage::IndexingStatusChainRow) -> ChainSta
         finalized_block: row.finalized_block,
         lag_blocks,
         lag_seconds,
+        network_block: network_head.block,
+        network_head_observed_at: network_head.observed_at.map(format_timestamp),
+        network_head_age_seconds: network_head.age_seconds,
+        network_head_status: network_head.status.as_str().to_owned(),
+        ingestion_lag_blocks: network_head.ingestion_lag_blocks,
+        ingestion_lag_seconds: network_head.ingestion_lag_seconds,
         status,
     }
 }
@@ -95,11 +136,17 @@ fn chain_status(
     latest_block: Option<i64>,
     indexed_block: Option<i64>,
     lag_blocks: Option<i64>,
+    network_head: &crate::status_freshness::NetworkHeadComparison,
 ) -> OpsStatus {
-    match (latest_block, indexed_block, lag_blocks) {
-        (Some(_), Some(_), Some(0)) => OpsStatus::Ready,
-        (Some(_), Some(_), Some(_)) => OpsStatus::Stale,
-        _ => OpsStatus::Degraded,
+    match crate::status_freshness::status_readiness(
+        latest_block,
+        indexed_block,
+        lag_blocks,
+        network_head,
+    ) {
+        crate::status_freshness::StatusReadiness::Ready => OpsStatus::Ready,
+        crate::status_freshness::StatusReadiness::Degraded => OpsStatus::Degraded,
+        crate::status_freshness::StatusReadiness::Stale => OpsStatus::Stale,
     }
 }
 
@@ -133,12 +180,12 @@ mod tests {
         http::{Request, StatusCode},
         response::IntoResponse,
     };
-    use sqlx::types::time::OffsetDateTime;
+    use sqlx::{PgPool, types::time::OffsetDateTime};
 
     use super::*;
 
-    #[test]
-    fn status_data_maps_chains_by_numeric_chain_id_and_derives_chain_statuses() {
+    #[tokio::test]
+    async fn status_data_maps_chains_by_numeric_chain_id_and_derives_chain_statuses() {
         let read = bigname_storage::IndexingStatusRead {
             chains: vec![
                 row(
@@ -158,11 +205,41 @@ mod tests {
                 row("base-sepolia", Some(100), Some(95), Some(90), Some(80)),
             ],
             has_unscoped_pending_invalidations: false,
+            pending_invalidation_count: 7,
+            pending_invalidation_count_capped: false,
+            dead_letter_count: 2,
         };
+        let chain_rpc_urls = bigname_execution::ChainRpcUrls::from_entries(&[
+            "ethereum-mainnet=http://rpc.test".to_owned(),
+            "base-mainnet=http://rpc.test".to_owned(),
+            "base-sepolia=http://rpc.test".to_owned(),
+        ])
+        .expect("test RPC map must be valid");
+        let state = AppState::new(
+            PgPool::connect_lazy("postgres://bigname:bigname@127.0.0.1:5432/bigname")
+                .expect("status builder test does not use the database"),
+            chain_rpc_urls,
+        );
+        let observed_at = OffsetDateTime::now_utc();
+        for (chain_id, block) in [
+            (bigname_storage::ETHEREUM_MAINNET_CHAIN_ID, 100),
+            (bigname_storage::BASE_MAINNET_CHAIN_ID, 50),
+            ("base-sepolia", 100),
+        ] {
+            state
+                .status_freshness
+                .seed_success(chain_id, block, observed_at)
+                .await;
+        }
 
-        let data = build_status_data(&read).expect("known storage chain slugs must map");
+        let data = build_status_data(&read, &state)
+            .await
+            .expect("known storage chain slugs must map");
 
         assert_eq!(data.status, OpsStatus::Stale);
+        assert_eq!(data.pending_invalidation_count, 7);
+        assert!(!data.pending_invalidation_count_capped);
+        assert_eq!(data.dead_letter_count, 2);
         assert_eq!(
             data.chains.keys().collect::<Vec<_>>(),
             vec!["1", "8453", "84532"]
@@ -172,6 +249,10 @@ mod tests {
         assert_eq!(data.chains["1"].indexed_block, Some(100));
         assert_eq!(data.chains["1"].lag_blocks, Some(0));
         assert_eq!(data.chains["1"].lag_seconds, Some(0));
+        assert_eq!(data.chains["1"].network_block, Some(100));
+        assert_eq!(data.chains["1"].network_head_status, "fresh");
+        assert_eq!(data.chains["1"].ingestion_lag_blocks, Some(0));
+        assert_eq!(data.chains["1"].ingestion_lag_seconds, Some(0));
         assert_eq!(data.chains["8453"].status, OpsStatus::Degraded);
         assert_eq!(data.chains["8453"].lag_blocks, None);
         assert_eq!(data.chains["84532"].status, OpsStatus::Stale);
@@ -179,8 +260,8 @@ mod tests {
         assert_eq!(data.chains["84532"].lag_seconds, Some(50));
     }
 
-    #[test]
-    fn status_data_rejects_unmapped_storage_chain_slugs() {
+    #[tokio::test]
+    async fn status_data_rejects_unmapped_storage_chain_slugs() {
         let read = bigname_storage::IndexingStatusRead {
             chains: vec![row(
                 "future-mainnet",
@@ -190,9 +271,19 @@ mod tests {
                 Some(80),
             )],
             has_unscoped_pending_invalidations: false,
+            pending_invalidation_count: 0,
+            pending_invalidation_count_capped: false,
+            dead_letter_count: 0,
         };
+        let state = AppState::new(
+            PgPool::connect_lazy("postgres://bigname:bigname@127.0.0.1:5432/bigname")
+                .expect("status builder test does not use the database"),
+            bigname_execution::ChainRpcUrls::default(),
+        );
 
-        let error = build_status_data(&read).expect_err("unknown storage slug must fail loudly");
+        let error = build_status_data(&read, &state)
+            .await
+            .expect_err("unknown storage slug must fail loudly");
 
         assert_eq!(error.envelope().error.code, "internal_error");
     }
@@ -206,6 +297,12 @@ mod tests {
             finalized_block: Some(80),
             lag_blocks: Some(0),
             lag_seconds: Some(0),
+            network_block: Some(100),
+            network_head_observed_at: None,
+            network_head_age_seconds: Some(0),
+            network_head_status: "fresh".to_owned(),
+            ingestion_lag_blocks: Some(0),
+            ingestion_lag_seconds: Some(0),
             status: OpsStatus::Ready,
         };
         let degraded = ChainStatus {
@@ -215,6 +312,12 @@ mod tests {
             finalized_block: Some(80),
             lag_blocks: None,
             lag_seconds: None,
+            network_block: None,
+            network_head_observed_at: None,
+            network_head_age_seconds: None,
+            network_head_status: "unavailable".to_owned(),
+            ingestion_lag_blocks: None,
+            ingestion_lag_seconds: None,
             status: OpsStatus::Degraded,
         };
         let stale = ChainStatus {
@@ -224,6 +327,12 @@ mod tests {
             finalized_block: Some(80),
             lag_blocks: Some(1),
             lag_seconds: Some(10),
+            network_block: Some(100),
+            network_head_observed_at: None,
+            network_head_age_seconds: Some(0),
+            network_head_status: "fresh".to_owned(),
+            ingestion_lag_blocks: Some(0),
+            ingestion_lag_seconds: Some(0),
             status: OpsStatus::Stale,
         };
 

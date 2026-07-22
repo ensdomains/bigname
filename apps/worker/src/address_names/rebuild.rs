@@ -12,6 +12,10 @@ use futures_util::{TryStreamExt, pin_mut};
 use sqlx::PgPool;
 use tokio::task::JoinSet;
 
+use crate::primary_name::rebuild_heartbeat::{
+    LoopHeartbeat, record_rebuild_progress, run_rebuild_phase,
+};
+
 use super::{
     AddressNamesCurrentRebuildSummary,
     load::{
@@ -30,9 +34,25 @@ pub async fn rebuild_address_names_current(
     pool: &PgPool,
     address: Option<&str>,
 ) -> Result<AddressNamesCurrentRebuildSummary> {
+    rebuild_address_names_current_inner(pool, address, None).await
+}
+
+pub(crate) async fn rebuild_address_names_current_with_heartbeat(
+    pool: &PgPool,
+    address: Option<&str>,
+    loop_heartbeat: &mut LoopHeartbeat,
+) -> Result<AddressNamesCurrentRebuildSummary> {
+    rebuild_address_names_current_inner(pool, address, Some(loop_heartbeat)).await
+}
+
+async fn rebuild_address_names_current_inner(
+    pool: &PgPool,
+    address: Option<&str>,
+    loop_heartbeat: Option<&mut LoopHeartbeat>,
+) -> Result<AddressNamesCurrentRebuildSummary> {
     match address {
         Some(address) => rebuild_one_address(pool, address).await,
-        None => rebuild_all_addresses(pool).await,
+        None => rebuild_all_addresses(pool, loop_heartbeat).await,
     }
 }
 
@@ -83,8 +103,17 @@ pub async fn rebuild_address_names_current_logical_names(
     })
 }
 
-async fn rebuild_all_addresses(pool: &PgPool) -> Result<AddressNamesCurrentRebuildSummary> {
-    let rebuild = begin_address_names_current_full_rebuild(pool).await?;
+async fn rebuild_all_addresses(
+    pool: &PgPool,
+    mut loop_heartbeat: Option<&mut LoopHeartbeat>,
+) -> Result<AddressNamesCurrentRebuildSummary> {
+    let rebuild = run_rebuild_phase(
+        pool,
+        &mut loop_heartbeat,
+        "address_names_current.prepare",
+        begin_address_names_current_full_rebuild(pool),
+    )
+    .await?;
     let deleted_row_count = rebuild.previous_row_count();
     tracing::info!(
         projection = "address_names_current",
@@ -92,7 +121,7 @@ async fn rebuild_all_addresses(pool: &PgPool) -> Result<AddressNamesCurrentRebui
         "address_names_current full rebuild staging started"
     );
 
-    let staged = match stage_all_address_rows(pool, &rebuild).await {
+    let staged = match stage_all_address_rows(pool, &rebuild, &mut loop_heartbeat).await {
         Ok(staged) => staged,
         Err(error) => {
             if let Err(drop_error) = drop_address_names_current_full_rebuild(pool, &rebuild).await {
@@ -106,22 +135,26 @@ async fn rebuild_all_addresses(pool: &PgPool) -> Result<AddressNamesCurrentRebui
         }
     };
 
-    let (_deleted_row_count, published_row_count) =
-        match publish_address_names_current_full_rebuild(pool, &rebuild).await {
-            Ok(published) => published,
-            Err(error) => {
-                if let Err(drop_error) =
-                    drop_address_names_current_full_rebuild(pool, &rebuild).await
-                {
-                    tracing::warn!(
-                        projection = "address_names_current",
-                        error = %drop_error,
-                        "failed to drop address_names_current full rebuild staging table after publish error"
-                    );
-                }
-                return Err(error);
+    let (_deleted_row_count, published_row_count) = match run_rebuild_phase(
+        pool,
+        &mut loop_heartbeat,
+        "address_names_current.publish",
+        publish_address_names_current_full_rebuild(pool, &rebuild),
+    )
+    .await
+    {
+        Ok(published) => published,
+        Err(error) => {
+            if let Err(drop_error) = drop_address_names_current_full_rebuild(pool, &rebuild).await {
+                tracing::warn!(
+                    projection = "address_names_current",
+                    error = %drop_error,
+                    "failed to drop address_names_current full rebuild staging table after publish error"
+                );
             }
-        };
+            return Err(error);
+        }
+    };
     if let Err(error) = drop_address_names_current_full_rebuild(pool, &rebuild).await {
         tracing::warn!(
             projection = "address_names_current",
@@ -136,7 +169,13 @@ async fn rebuild_all_addresses(pool: &PgPool) -> Result<AddressNamesCurrentRebui
         "address_names_current full rebuild published projection and refreshed identity sidecars"
     );
 
-    let requested_address_count = count_address_names_current_addresses(pool).await?;
+    let requested_address_count = run_rebuild_phase(
+        pool,
+        &mut loop_heartbeat,
+        "address_names_current.count_published_addresses",
+        count_address_names_current_addresses(pool),
+    )
+    .await?;
 
     Ok(AddressNamesCurrentRebuildSummary {
         requested_address_count,
@@ -152,6 +191,7 @@ struct AddressNamesCurrentStagingSummary {
 async fn stage_all_address_rows(
     pool: &PgPool,
     rebuild: &AddressNamesCurrentFullRebuild,
+    loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
 ) -> Result<AddressNamesCurrentStagingSummary> {
     let mut queued_binding_count = 0usize;
     let mut completed_binding_count = 0usize;
@@ -173,6 +213,7 @@ async fn stage_all_address_rows(
     while let Some(result) = tasks.join_next().await {
         completed_binding_count += 1;
         let binding_rows = result??;
+        record_rebuild_progress(pool, loop_heartbeat).await;
         rows.extend(binding_rows);
 
         if rows.len() >= ADDRESS_NAMES_CURRENT_REBUILD_BATCH_SIZE {

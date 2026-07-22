@@ -800,6 +800,75 @@
         ],
         "type": "object"
       },
+      "HealthLoop": {
+        "properties": {
+          "heartbeat_age_seconds": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "heartbeat_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_age_seconds": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "phase": {
+            "description": "Named worker rebuild phase when the loop is inside a monolithic operation governed by its separately configurable maximum age; null for normal loop progress.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "started_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "enum": [
+              "running",
+              "stale",
+              "not_started",
+              "unavailable"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "phase",
+          "started_at",
+          "heartbeat_at",
+          "heartbeat_age_seconds",
+          "max_age_seconds"
+        ],
+        "type": "object"
+      },
+      "HealthLoops": {
+        "properties": {
+          "indexer": {
+            "$ref": "#/components/schemas/HealthLoop"
+          },
+          "worker": {
+            "$ref": "#/components/schemas/HealthLoop"
+          }
+        },
+        "required": [
+          "indexer",
+          "worker"
+        ],
+        "type": "object"
+      },
       "HealthProcess": {
         "properties": {
           "status": {
@@ -825,11 +894,22 @@
       },
       "HealthResponse": {
         "properties": {
+          "api_status": {
+            "description": "API-local readiness: ready when this process is serving and its database reachability query succeeds; independent of indexer and worker loop state.",
+            "enum": [
+              "ready",
+              "degraded"
+            ],
+            "type": "string"
+          },
           "database": {
             "$ref": "#/components/schemas/HealthDatabase"
           },
           "identity": {
             "$ref": "#/components/schemas/HealthIdentity"
+          },
+          "loops": {
+            "$ref": "#/components/schemas/HealthLoops"
           },
           "process": {
             "$ref": "#/components/schemas/HealthProcess"
@@ -838,6 +918,11 @@
             "type": "string"
           },
           "status": {
+            "description": "Aggregate database, indexer-loop, and worker-loop health for status consumers.",
+            "enum": [
+              "ready",
+              "degraded"
+            ],
             "type": "string"
           }
         },
@@ -845,8 +930,10 @@
           "service",
           "identity",
           "status",
+          "api_status",
           "process",
-          "database"
+          "database",
+          "loops"
         ],
         "type": "object"
       },
@@ -1103,6 +1190,20 @@
                     "null"
                   ]
                 },
+                "ingestion_lag_blocks": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "ingestion_lag_seconds": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
                 "latest_projected_block": {
                   "type": [
                     "integer",
@@ -1115,6 +1216,37 @@
                     "string",
                     "null"
                   ]
+                },
+                "network_block": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "network_head_age_seconds": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "network_head_observed_at": {
+                  "format": "date-time",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "network_head_status": {
+                  "enum": [
+                    "fresh",
+                    "stale",
+                    "unavailable",
+                    "pending",
+                    "unconfigured"
+                  ],
+                  "type": "string"
                 },
                 "projection_lag_blocks": {
                   "type": [
@@ -1142,11 +1274,31 @@
                 "latest_projected_block",
                 "latest_projected_timestamp",
                 "projection_lag_blocks",
-                "projection_lag_seconds"
+                "projection_lag_seconds",
+                "network_block",
+                "network_head_observed_at",
+                "network_head_age_seconds",
+                "network_head_status",
+                "ingestion_lag_blocks",
+                "ingestion_lag_seconds"
               ],
               "type": "object"
             },
             "type": "object"
+          },
+          "dead_letter_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "pending_invalidation_count": {
+            "description": "Exact live queue row count when pending_invalidation_count_capped is false. When capped is true, this field equals the cap and the queue contains at least one additional row.",
+            "maximum": 10000,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "pending_invalidation_count_capped": {
+            "description": "True when the bounded status query stopped after observing more rows than pending_invalidation_count reports.",
+            "type": "boolean"
           },
           "status": {
             "enum": [
@@ -1159,6 +1311,9 @@
         },
         "required": [
           "status",
+          "pending_invalidation_count",
+          "pending_invalidation_count_capped",
+          "dead_letter_count",
           "chains"
         ],
         "type": "object"

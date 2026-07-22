@@ -12,6 +12,7 @@ pub(super) struct AuthorityMaterialization {
 }
 
 const IDENTITY_MATERIALIZATION_FLUSH_BATCH_SIZE: usize = 10_000;
+const MATERIALIZATION_PROGRESS_HISTORY_INTERVAL: usize = 100;
 
 pub(super) struct AuthorityIdentityBuffers {
     token_lineages: Vec<TokenLineage>,
@@ -67,23 +68,32 @@ impl AuthorityIdentityBuffers {
         }
     }
 
-    async fn flush_if_needed(&mut self, pool: &PgPool) -> Result<()> {
+    async fn flush_if_needed(
+        &mut self,
+        pool: &PgPool,
+        startup_progress: &mut Option<&mut dyn StartupAdapterProgress>,
+    ) -> Result<()> {
         if self.token_lineages.len() >= IDENTITY_MATERIALIZATION_FLUSH_BATCH_SIZE
             || self.resources.len() >= IDENTITY_MATERIALIZATION_FLUSH_BATCH_SIZE
             || self.surfaces.len() >= IDENTITY_MATERIALIZATION_FLUSH_BATCH_SIZE
         {
-            self.flush(pool).await?;
+            self.flush(pool, startup_progress).await?;
         }
         Ok(())
     }
 
-    async fn flush(&mut self, pool: &PgPool) -> Result<()> {
+    async fn flush(
+        &mut self,
+        pool: &PgPool,
+        startup_progress: &mut Option<&mut dyn StartupAdapterProgress>,
+    ) -> Result<()> {
         if !self.token_lineages.is_empty() {
             let started = Instant::now();
             upsert_token_lineages_without_snapshots(pool, &self.token_lineages).await?;
             self.token_lineages_upsert_ms += started.elapsed().as_millis();
             self.token_lineage_count += self.token_lineages.len();
             self.token_lineages.clear();
+            record_startup_adapter_progress(pool, startup_progress).await?;
         }
         if !self.resources.is_empty() {
             let started = Instant::now();
@@ -91,6 +101,7 @@ impl AuthorityIdentityBuffers {
             self.resources_upsert_ms += started.elapsed().as_millis();
             self.resource_count += self.resources.len();
             self.resources.clear();
+            record_startup_adapter_progress(pool, startup_progress).await?;
         }
         if !self.surfaces.is_empty() {
             let started = Instant::now();
@@ -98,6 +109,7 @@ impl AuthorityIdentityBuffers {
             self.surfaces_upsert_ms += started.elapsed().as_millis();
             self.surface_count += self.surfaces.len();
             self.surfaces.clear();
+            record_startup_adapter_progress(pool, startup_progress).await?;
         }
         Ok(())
     }
@@ -109,12 +121,18 @@ pub(super) async fn materialize_authority_histories(
     head_ref: &BoundaryRef,
     histories: BTreeMap<String, NameHistory>,
     reverse_histories: BTreeMap<String, ReverseClaimSourceHistory>,
+    startup_progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<AuthorityMaterialization> {
     let mut identity = AuthorityIdentityBuffers::new();
     let mut bindings = Vec::<SurfaceBinding>::new();
     let mut events = Vec::<NormalizedEvent>::new();
 
-    for history in histories.into_values() {
+    for (history_index, history) in histories.into_values().enumerate() {
+        if history_index > 0
+            && history_index.is_multiple_of(MATERIALIZATION_PROGRESS_HISTORY_INTERVAL)
+        {
+            record_startup_adapter_progress(pool, startup_progress).await?;
+        }
         let Some(name) = history.name.clone() else {
             continue;
         };
@@ -260,12 +278,19 @@ pub(super) async fn materialize_authority_histories(
             );
         }
         events.extend(finalized.events);
-        identity.flush_if_needed(pool).await?;
+        identity.flush_if_needed(pool, startup_progress).await?;
     }
-    for history in reverse_histories.into_values() {
+    record_startup_adapter_progress(pool, startup_progress).await?;
+    for (history_index, history) in reverse_histories.into_values().enumerate() {
+        if history_index > 0
+            && history_index.is_multiple_of(MATERIALIZATION_PROGRESS_HISTORY_INTERVAL)
+        {
+            record_startup_adapter_progress(pool, startup_progress).await?;
+        }
         events.extend(history.events);
     }
-    identity.flush(pool).await?;
+    record_startup_adapter_progress(pool, startup_progress).await?;
+    identity.flush(pool, startup_progress).await?;
 
     Ok(AuthorityMaterialization {
         token_lineage_count: identity.token_lineage_count,

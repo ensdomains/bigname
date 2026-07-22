@@ -46,6 +46,7 @@ mod pagination;
 mod query;
 mod routes;
 mod state;
+mod status_freshness;
 mod types;
 mod v2;
 
@@ -87,7 +88,7 @@ async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Serve(args) => {
             init_tracing("bigname-api");
-            serve(args).await
+            serve(*args).await
         }
         Command::PrintOpenapi => {
             print!("{}", render_openapi_document());

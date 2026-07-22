@@ -229,7 +229,13 @@ Lookup primitives serve the partner latency path and current indexing status:
 
 The lookup route uses the common record shape and in-band per-result statuses.
 `GET /v2/status` is the only route with the ops status vocabulary
-`ready`, `degraded`, `stale`.
+`ready`, `degraded`, `stale`. It exposes the live invalidation count exactly
+through 10,000, marks larger queues with
+`pending_invalidation_count_capped=true`, and reports the dead-letter count plus
+cached network-head comparison evidence. Provider refresh runs
+asynchronously under a timeout and cache TTL, so the route never waits for a
+provider. A failed latest refresh degrades readiness immediately while keeping
+the last successful head comparison visible as cached evidence.
 
 ### Tier 2: Product Reads
 

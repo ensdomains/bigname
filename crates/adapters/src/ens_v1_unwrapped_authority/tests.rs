@@ -21,6 +21,18 @@ use super::*;
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 const BASE_NATIVE_COIN_TYPE: &str = "2147492101";
 
+#[derive(Default)]
+struct CountingStartupAdapterProgress {
+    record_count: usize,
+}
+
+impl crate::StartupAdapterProgress for CountingStartupAdapterProgress {
+    fn record<'a>(&'a mut self, _pool: &'a PgPool) -> crate::StartupAdapterProgressFuture<'a> {
+        self.record_count += 1;
+        Box::pin(async { Ok(()) })
+    }
+}
+
 struct TestDatabase {
     admin_pool: PgPool,
     pool: PgPool,
@@ -4522,13 +4534,20 @@ async fn sync_ens_v1_unwrapped_authority_persists_registrar_identity_rows_idempo
     assert_eq!(second.total_normalized_event_count, 5);
 
     let startup_checkpoint = crate::StartupAdapterCheckpointContext::new("test-startup", 42)?;
-    let startup = sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit(
-        database.pool(),
-        "ethereum-mainnet",
-        &startup_checkpoint,
-        100_000,
-    )
-    .await?;
+    let mut startup_progress = CountingStartupAdapterProgress::default();
+    let startup =
+        sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit_and_progress(
+            database.pool(),
+            "ethereum-mainnet",
+            &startup_checkpoint,
+            100_000,
+            &mut startup_progress,
+        )
+        .await?;
+    assert!(
+        startup_progress.record_count > 2,
+        "the checkpoint stream and authority materialization must both report startup progress"
+    );
     assert_eq!(startup.scanned_log_count, second.scanned_log_count);
     assert_eq!(startup.matched_log_count, second.matched_log_count);
     assert_eq!(

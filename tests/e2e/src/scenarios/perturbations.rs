@@ -294,7 +294,7 @@ async fn rich_chain_live_reorg_converges_to_winning_branch() -> Result<()> {
         "losing block {losing_hash} should retain orphaned raw logs"
     );
 
-    let reorg_run = support::serve_existing_db(db, scratch).await?;
+    let reorg_run = support::serve_existing_db(db, scratch, &anvil).await?;
     assert_exact_resolver(&reorg_run, replacement_resolver.address).await?;
     let reorg_snapshots = chain_snapshots(&reorg_run, &chain).await?;
 

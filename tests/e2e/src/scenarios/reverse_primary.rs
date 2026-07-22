@@ -26,8 +26,8 @@ fn assert_declared_success(body: &Value, expected_name: &str) {
     );
 }
 
-/// Reverse claims are declared candidates. With no execution RPC configured,
-/// `mode=declared` omits verified state and `mode=both` keeps verification
+/// Reverse claims are declared candidates. `mode=declared` omits verified
+/// state, while `mode=both` keeps a claim without matching forward resolution
 /// separated as `not_found`.
 #[tokio::test]
 async fn reverse_claim_set_changed_then_cleared_tracks_declared_candidate() -> Result<()> {
@@ -65,7 +65,7 @@ async fn reverse_claim_set_changed_then_cleared_tracks_declared_candidate() -> R
     assert_eq!(
         pointer(&both, "/verified_state/verified_primary_name/status"),
         "not_found",
-        "without execution readback, verified primary state should remain absent/not_found; body: {both}"
+        "a reverse claim without matching forward resolution should remain absent/not_found; body: {both}"
     );
     first.db.cleanup().await?;
 

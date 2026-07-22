@@ -26,8 +26,8 @@ pub use block_derived_normalized_events::{
     sync_block_derived_normalized_events_with_scanned_log_count,
 };
 pub use checkpoint_context::{
-    ReplayAdapterCheckpointContext, StartupAdapterCheckpointContext,
-    clear_startup_adapter_checkpoints,
+    ReplayAdapterCheckpointContext, StartupAdapterCheckpointContext, StartupAdapterProgress,
+    StartupAdapterProgressFuture, clear_startup_adapter_checkpoints,
 };
 pub use ens_v1_reverse_claim::{
     EnsV1ReverseClaimKindSyncSummary, EnsV1ReverseClaimSyncSummary, sync_ens_v1_reverse_claim,
@@ -40,6 +40,7 @@ pub use ens_v1_subregistry_discovery::{
     sync_ens_v1_subregistry_discovery_with_replay_checkpoint,
     sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit,
     sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit,
+    sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit_and_progress,
 };
 pub use ens_v1_unwrapped_authority::{
     EnsV1TextRecordChange, EnsV1UnwrappedAuthoritySyncSummary, ResolverProfileEventReconciliation,
@@ -48,6 +49,7 @@ pub use ens_v1_unwrapped_authority::{
     reconcile_resolver_profile_events, sync_ens_v1_unwrapped_authority,
     sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limit,
     sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit,
+    sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit_and_progress,
 };
 pub use ens_v2_permissions::{
     EnsV2PermissionsKindSyncSummary, EnsV2PermissionsSyncSummary, sync_ens_v2_permissions,

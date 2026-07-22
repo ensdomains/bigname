@@ -12,6 +12,8 @@ use bigname_execution::ChainRpcUrls;
 use sqlx::PgPool;
 use tracing::info;
 
+use crate::primary_name::rebuild_heartbeat::LoopHeartbeat;
+
 pub use hydration::RecordInventoryTextHydrationConfig;
 pub use types::{RecordInventoryCurrentRebuildSummary, RecordInventoryTextHydrationSummary};
 
@@ -22,12 +24,36 @@ pub async fn rebuild_record_inventory_current(
     projection::rebuild_record_inventory_current(pool, resource_id).await
 }
 
+pub(crate) async fn rebuild_record_inventory_current_with_heartbeat(
+    pool: &PgPool,
+    resource_id: Option<&str>,
+    loop_heartbeat: &mut LoopHeartbeat,
+) -> Result<RecordInventoryCurrentRebuildSummary> {
+    projection::rebuild_record_inventory_current_with_heartbeat(pool, resource_id, loop_heartbeat)
+        .await
+}
+
 pub async fn hydrate_record_inventory_text_values(
     pool: &PgPool,
     resource_id: Option<&str>,
     config: RecordInventoryTextHydrationConfig,
 ) -> Result<RecordInventoryTextHydrationSummary> {
     hydration::hydrate_record_inventory_text_values(pool, resource_id, config).await
+}
+
+pub(crate) async fn hydrate_record_inventory_text_values_with_heartbeat(
+    pool: &PgPool,
+    resource_id: Option<&str>,
+    config: RecordInventoryTextHydrationConfig,
+    loop_heartbeat: &mut LoopHeartbeat,
+) -> Result<RecordInventoryTextHydrationSummary> {
+    hydration::hydrate_record_inventory_text_values_with_heartbeat(
+        pool,
+        resource_id,
+        config,
+        loop_heartbeat,
+    )
+    .await
 }
 
 impl RecordInventoryTextHydrationConfig {

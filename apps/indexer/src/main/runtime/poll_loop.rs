@@ -9,8 +9,9 @@ use crate::reconciliation::{
 };
 use crate::replay::deployment_profile_from_manifest_root;
 use crate::resolver_profile_convergence::drain_resolver_profile_input_changes;
+use crate::run::startup_heartbeat::StartupHeartbeat;
 
-use super::adapter_sync::sync_adapter_owned_raw_log_state;
+use super::adapter_sync::sync_adapter_owned_raw_log_state_with_heartbeat;
 use super::intake::{
     IntakeChainTask, intake_runtime_state, sync_intake_chain_tasks,
     validate_provider_registry_for_intake_tasks, watched_chain_plan_state,
@@ -30,10 +31,9 @@ mod discovery_refresh;
 #[path = "poll_loop/replay_handoff.rs"]
 mod replay_handoff;
 
-#[cfg(not(test))]
-use discovery_refresh::refresh_discovery_watch_state;
 #[cfg(test)]
 pub(crate) use discovery_refresh::refresh_discovery_watch_state;
+use discovery_refresh::refresh_discovery_watch_state_with_heartbeat;
 #[cfg(test)]
 pub(crate) use replay_handoff::{
     ReplayHandoffLatchStatus, install_replay_handoff_before_latch_test_hook,
@@ -45,12 +45,14 @@ use replay_handoff::{
 #[expect(clippy::too_many_arguments)]
 pub(crate) async fn run_poll_loop(
     pool: &sqlx::PgPool,
+    heartbeat: &mut StartupHeartbeat,
     manifests_root: PathBuf,
     mut manifest_runtime_state: ManifestRuntimeState,
     mut intake_chain_tasks: Vec<IntakeChainTask>,
     initial_watched_plan_admission_epochs: BTreeMap<String, i64>,
     provider_registry: &ProviderRegistry,
     poll_interval_secs: u64,
+    adapter_sync_page_logs: usize,
     runtime_watch_scope: RuntimeWatchScope,
     adapter_sync_on_manifest_refresh: bool,
     adapter_sync_on_live_poll: bool,
@@ -80,6 +82,12 @@ pub(crate) async fn run_poll_loop(
                 return Ok(());
             }
             _ = interval.tick() => {
+                let heartbeat_chains = intake_chain_tasks
+                    .iter()
+                    .map(|task| task.chain.clone())
+                    .collect::<Vec<_>>();
+                heartbeat.record(pool, &heartbeat_chains).await?;
+
                 match load_manifest_repository(&manifests_root) {
                     Ok(manifest_repository) => {
                         let manifest_summary = manifest_repository.summary().clone();
@@ -125,9 +133,13 @@ pub(crate) async fn run_poll_loop(
 
                                     if adapter_sync_on_manifest_refresh
                                         && (manifest_state_changed || watched_plan_changed)
-                                        && let Err(error) = sync_adapter_owned_raw_log_state(
+                                        && let Err(error) = sync_adapter_owned_raw_log_state_with_heartbeat(
                                             pool,
+                                            &deployment_profile,
                                             &next_manifest_runtime_state.watched_chain_plan,
+                                            adapter_sync_page_logs,
+                                            heartbeat,
+                                            &heartbeat_chains,
                                         )
                                         .await
                                     {
@@ -481,7 +493,11 @@ pub(crate) async fn run_poll_loop(
                 }
 
                 if discovery_refresh_enabled || effective_adapter_sync_on_live_poll {
-                    refresh_discovery_watch_state(
+                    let heartbeat_chains = intake_chain_tasks
+                        .iter()
+                        .map(|task| task.chain.clone())
+                        .collect::<Vec<_>>();
+                    refresh_discovery_watch_state_with_heartbeat(
                         pool,
                         provider_registry,
                         &mut manifest_runtime_state,
@@ -489,6 +505,10 @@ pub(crate) async fn run_poll_loop(
                         resync_adapter_owned_state_on_discovery_refresh,
                         resolver_profile_convergence_enabled,
                         &mut watched_plan_admission_epochs,
+                        &deployment_profile,
+                        adapter_sync_page_logs,
+                        heartbeat,
+                        &heartbeat_chains,
                     )
                     .await?;
                 }

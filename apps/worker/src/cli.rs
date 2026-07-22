@@ -44,6 +44,8 @@ pub(crate) struct RunArgs {
         default_value_t = 5_u64
     )]
     pub(crate) poll_interval_secs: u64,
+    #[arg(long, env = "BIGNAME_HEARTBEAT_INSTANCE_ID")]
+    pub(crate) heartbeat_instance_id: Option<String>,
     #[arg(
         long = "chain-rpc-url",
         env = "BIGNAME_WORKER_CHAIN_RPC_URLS",
@@ -86,6 +88,20 @@ pub(crate) struct RunArgs {
 pub(crate) struct HealthcheckArgs {
     #[command(flatten)]
     pub(crate) database: DatabaseConfig,
+    #[arg(long, env = "BIGNAME_HEARTBEAT_INSTANCE_ID")]
+    pub(crate) heartbeat_instance_id: Option<String>,
+    #[arg(
+        long,
+        env = "BIGNAME_WORKER_HEARTBEAT_MAX_AGE_SECS",
+        default_value_t = 20_i64
+    )]
+    pub(crate) heartbeat_max_age_secs: i64,
+    #[arg(
+        long,
+        env = "BIGNAME_WORKER_REBUILD_PHASE_MAX_AGE_SECS",
+        default_value_t = bigname_storage::DEFAULT_WORKER_REBUILD_PHASE_MAX_AGE_SECS
+    )]
+    pub(crate) rebuild_phase_max_age_secs: i64,
 }
 
 #[derive(Args, Debug)]

@@ -1,6 +1,8 @@
 use super::resolver_profile_reconciliation::ResolverProfileReplayContext;
 use super::*;
-use crate::checkpoint_context::AdapterCheckpointContext;
+use crate::checkpoint_context::{
+    AdapterCheckpointContext, StartupAdapterProgress, record_startup_adapter_progress,
+};
 use anyhow::ensure;
 
 mod apply;
@@ -32,6 +34,7 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
     replay_checkpoint: Option<&AdapterCheckpointContext>,
     replay_max_raw_logs_per_page: Option<usize>,
     resolver_profile_replay: Option<&mut ResolverProfileReplayContext>,
+    mut startup_progress: Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<EnsV1UnwrappedAuthoritySyncSummary> {
     let source_scope = source_scope.map(normalized_authority_source_scope_targets);
     let total_started = Instant::now();
@@ -324,6 +327,7 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
                         &flushed_events,
                     )
                     .await?;
+                record_startup_adapter_progress(pool, &mut startup_progress).await?;
                 tracing::info!(
                     service = "adapters",
                     adapter = DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
@@ -369,6 +373,7 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
             checkpoint
                 .mark_stream_complete(pool, total_scanned_log_count, matched_log_count)
                 .await?;
+            record_startup_adapter_progress(pool, &mut startup_progress).await?;
         }
         scanned_log_count = total_scanned_log_count;
         apply_ms = stream_apply_started.elapsed().as_millis();
@@ -533,6 +538,7 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
         reverse_histories,
         flushed_events,
         active_replay_checkpoint: &mut active_replay_checkpoint,
+        startup_progress,
         pre_timings: PreMaterializationTimings {
             active_emitters_ms,
             raw_log_load_ms,

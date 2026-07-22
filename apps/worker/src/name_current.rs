@@ -48,6 +48,10 @@ use types::RelevantEvent;
 #[cfg(test)]
 use uuid::Uuid;
 
+use crate::primary_name::rebuild_heartbeat::{
+    LoopHeartbeat, record_rebuild_progress, run_rebuild_phase,
+};
+
 const ENS_NAMESPACE: &str = "ens";
 const BASENAMES_NAMESPACE: &str = "basenames";
 const ENS_V1_AUTHORITY_DERIVATION_KIND: &str = "ens_v1_unwrapped_authority";
@@ -115,14 +119,39 @@ pub async fn rebuild_name_current(
     pool: &PgPool,
     logical_name_id: Option<&str>,
 ) -> Result<NameCurrentRebuildSummary> {
+    rebuild_name_current_inner(pool, logical_name_id, None).await
+}
+
+pub(crate) async fn rebuild_name_current_with_heartbeat(
+    pool: &PgPool,
+    logical_name_id: Option<&str>,
+    loop_heartbeat: &mut LoopHeartbeat,
+) -> Result<NameCurrentRebuildSummary> {
+    rebuild_name_current_inner(pool, logical_name_id, Some(loop_heartbeat)).await
+}
+
+async fn rebuild_name_current_inner(
+    pool: &PgPool,
+    logical_name_id: Option<&str>,
+    loop_heartbeat: Option<&mut LoopHeartbeat>,
+) -> Result<NameCurrentRebuildSummary> {
     match logical_name_id {
         Some(logical_name_id) => rebuild_one_name_current(pool, logical_name_id).await,
-        None => rebuild_all_name_current(pool).await,
+        None => rebuild_all_name_current(pool, loop_heartbeat).await,
     }
 }
 
-async fn rebuild_all_name_current(pool: &PgPool) -> Result<NameCurrentRebuildSummary> {
-    let names = load_canonical_name_surfaces(pool).await?;
+async fn rebuild_all_name_current(
+    pool: &PgPool,
+    mut loop_heartbeat: Option<&mut LoopHeartbeat>,
+) -> Result<NameCurrentRebuildSummary> {
+    let names = run_rebuild_phase(
+        pool,
+        &mut loop_heartbeat,
+        "name_current.load_inputs",
+        load_canonical_name_surfaces(pool),
+    )
+    .await?;
     let requested_name_count = names.len();
     let mut replacement = NameCurrentReplacement::begin(pool).await?;
     let mut rows = Vec::with_capacity(NAME_CURRENT_REBUILD_STAGE_BATCH_SIZE);
@@ -140,6 +169,7 @@ async fn rebuild_all_name_current(pool: &PgPool) -> Result<NameCurrentRebuildSum
     while let Some(result) = tasks.join_next().await {
         rows.push(result??);
         completed_name_count += 1;
+        record_rebuild_progress(pool, &mut loop_heartbeat).await;
         if rows.len() >= NAME_CURRENT_REBUILD_STAGE_BATCH_SIZE {
             replacement.stage_rows(&rows).await?;
             rows.clear();
@@ -163,7 +193,13 @@ async fn rebuild_all_name_current(pool: &PgPool) -> Result<NameCurrentRebuildSum
         rows.clear();
     }
     let upserted_row_count = replacement.staged_row_count();
-    let (published_row_count, deleted_row_count) = replacement.publish().await?;
+    let (published_row_count, deleted_row_count) = run_rebuild_phase(
+        pool,
+        &mut loop_heartbeat,
+        "name_current.publish",
+        replacement.publish(),
+    )
+    .await?;
     tracing::info!(
         projection = "name_current",
         requested_name_count,

@@ -9,6 +9,16 @@ pub(crate) async fn healthcheck(args: HealthcheckArgs) -> Result<()> {
     let pool = bigname_storage::connect(&args.database).await?;
     verify_database_reachable(&pool).await?;
     verify_migrations_current(&pool).await?;
+    let instance_id =
+        bigname_storage::resolve_service_instance_id(args.heartbeat_instance_id.as_deref())?;
+    bigname_storage::ensure_service_loop_heartbeat_recent_with_phase(
+        &pool,
+        bigname_storage::WORKER_SERVICE_NAME,
+        &instance_id,
+        args.heartbeat_max_age_secs,
+        args.rebuild_phase_max_age_secs,
+    )
+    .await?;
     println!("ok");
     Ok(())
 }
@@ -104,6 +114,9 @@ mod tests {
         match cli.command {
             Command::Healthcheck(args) => {
                 assert_eq!(args.database.max_connections, 10);
+                assert_eq!(args.heartbeat_instance_id, None);
+                assert_eq!(args.heartbeat_max_age_secs, 20);
+                assert_eq!(args.rebuild_phase_max_age_secs, 43_200);
             }
             other => panic!("expected healthcheck command, got {other:?}"),
         }
@@ -117,8 +130,17 @@ mod tests {
             "failed to apply migrations for worker healthcheck test",
         )
         .await?;
+        bigname_storage::register_service_loop(
+            database.pool(),
+            bigname_storage::WORKER_SERVICE_NAME,
+            "worker-healthcheck-test",
+        )
+        .await?;
         let result = healthcheck(HealthcheckArgs {
             database: database_config(&database)?,
+            heartbeat_instance_id: Some("worker-healthcheck-test".to_owned()),
+            heartbeat_max_age_secs: 20,
+            rebuild_phase_max_age_secs: 43_200,
         })
         .await;
         database.cleanup().await?;
@@ -133,6 +155,9 @@ mod tests {
         .await?;
         let error = healthcheck(HealthcheckArgs {
             database: database_config(&database)?,
+            heartbeat_instance_id: Some("worker-healthcheck-unmigrated".to_owned()),
+            heartbeat_max_age_secs: 20,
+            rebuild_phase_max_age_secs: 43_200,
         })
         .await
         .expect_err("unmigrated database must fail healthcheck");
@@ -145,5 +170,133 @@ mod tests {
             "unexpected error: {error:#}"
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn healthcheck_distinguishes_missing_and_stale_loop_heartbeats() -> Result<()> {
+        let database = bigname_test_support::TestDatabase::create_migrated(
+            bigname_test_support::TestDatabaseConfig::new("bigname_worker_healthcheck_heartbeat"),
+            &bigname_storage::MIGRATOR,
+            "failed to apply migrations for worker heartbeat healthcheck test",
+        )
+        .await?;
+
+        let missing_error = healthcheck(HealthcheckArgs {
+            database: database_config(&database)?,
+            heartbeat_instance_id: Some("missing-worker".to_owned()),
+            heartbeat_max_age_secs: 20,
+            rebuild_phase_max_age_secs: 43_200,
+        })
+        .await
+        .expect_err("a worker loop that never started must fail healthcheck");
+        assert!(
+            missing_error.to_string().contains("never started"),
+            "unexpected error: {missing_error:#}"
+        );
+
+        bigname_storage::register_service_loop(
+            database.pool(),
+            bigname_storage::WORKER_SERVICE_NAME,
+            "stale-worker",
+        )
+        .await?;
+        sqlx::query(
+            r#"
+            UPDATE service_loop_heartbeats
+            SET started_at = clock_timestamp() - INTERVAL '2 minutes',
+                heartbeat_at = clock_timestamp() - INTERVAL '1 minute'
+            WHERE service_name = 'worker'
+              AND instance_id = 'stale-worker'
+            "#,
+        )
+        .execute(database.pool())
+        .await?;
+        let stale_error = healthcheck(HealthcheckArgs {
+            database: database_config(&database)?,
+            heartbeat_instance_id: Some("stale-worker".to_owned()),
+            heartbeat_max_age_secs: 20,
+            rebuild_phase_max_age_secs: 43_200,
+        })
+        .await
+        .expect_err("a wedged worker loop must fail healthcheck");
+        assert!(
+            stale_error.to_string().contains("stopped or wedged"),
+            "unexpected error: {stale_error:#}"
+        );
+
+        database.cleanup().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn healthcheck_uses_the_distinct_rebuild_phase_age_limit() -> Result<()> {
+        let database = bigname_test_support::TestDatabase::create_migrated(
+            bigname_test_support::TestDatabaseConfig::new(
+                "bigname_worker_healthcheck_rebuild_phase",
+            ),
+            &bigname_storage::MIGRATOR,
+            "failed to apply migrations for worker phase healthcheck test",
+        )
+        .await?;
+        bigname_storage::register_service_loop(
+            database.pool(),
+            bigname_storage::WORKER_SERVICE_NAME,
+            "phase-worker",
+        )
+        .await?;
+        bigname_storage::begin_service_loop_phase(
+            database.pool(),
+            bigname_storage::WORKER_SERVICE_NAME,
+            "phase-worker",
+            "name_current.publish",
+        )
+        .await?;
+        sqlx::query(
+            r#"
+            UPDATE service_loop_heartbeats
+            SET started_at = clock_timestamp() - INTERVAL '2 minutes',
+                heartbeat_at = clock_timestamp() - INTERVAL '1 minute'
+            WHERE service_name = 'worker'
+              AND instance_id = 'phase-worker'
+              AND scope_kind = 'process'
+            "#,
+        )
+        .execute(database.pool())
+        .await?;
+
+        healthcheck(HealthcheckArgs {
+            database: database_config(&database)?,
+            heartbeat_instance_id: Some("phase-worker".to_owned()),
+            heartbeat_max_age_secs: 20,
+            rebuild_phase_max_age_secs: 120,
+        })
+        .await?;
+
+        sqlx::query(
+            r#"
+            UPDATE service_loop_heartbeats
+            SET started_at = clock_timestamp() - INTERVAL '2 minutes',
+                heartbeat_at = clock_timestamp() - INTERVAL '1 minute'
+            WHERE service_name = 'worker'
+              AND instance_id = 'phase-worker'
+              AND scope_kind = 'phase'
+            "#,
+        )
+        .execute(database.pool())
+        .await?;
+        let stale_error = healthcheck(HealthcheckArgs {
+            database: database_config(&database)?,
+            heartbeat_instance_id: Some("phase-worker".to_owned()),
+            heartbeat_max_age_secs: 20,
+            rebuild_phase_max_age_secs: 20,
+        })
+        .await
+        .expect_err("a rebuild phase older than its own limit must fail healthcheck");
+        assert!(
+            stale_error.to_string().contains("name_current.publish"),
+            "unexpected error: {stale_error:#}"
+        );
+
+        database.cleanup().await
     }
 }

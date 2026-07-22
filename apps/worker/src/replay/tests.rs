@@ -1,6 +1,6 @@
 mod support;
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -110,6 +110,57 @@ fn all_current_projection_json_summary_has_frozen_shape_order_counts_and_totals(
     assert_eq!(value["totals"]["upserted"].as_u64(), Some(10));
     assert_eq!(value["totals"]["deleted"].as_u64(), Some(0));
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn automatic_replay_refreshes_worker_heartbeat_between_projection_steps() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    seed_replay_inputs(database.pool()).await?;
+    let instance_id = "automatic-replay-heartbeat-test";
+    bigname_storage::register_service_loop(
+        database.pool(),
+        bigname_storage::WORKER_SERVICE_NAME,
+        instance_id,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE service_loop_heartbeats
+        SET started_at = clock_timestamp() - INTERVAL '2 minutes',
+            heartbeat_at = clock_timestamp() - INTERVAL '1 minute'
+        WHERE service_name = 'worker'
+          AND instance_id = $1
+        "#,
+    )
+    .bind(instance_id)
+    .execute(database.pool())
+    .await?;
+
+    let mut heartbeat = crate::primary_name::rebuild_heartbeat::LoopHeartbeat::new(
+        instance_id.to_owned(),
+        Duration::ZERO,
+    );
+    rebuild_pending_all_current_projections_with_heartbeat(
+        database.pool(),
+        Some(108),
+        None,
+        None,
+        &mut heartbeat,
+    )
+    .await?;
+
+    let heartbeat = bigname_storage::load_service_loop_heartbeat(
+        database.pool(),
+        bigname_storage::WORKER_SERVICE_NAME,
+        instance_id,
+    )
+    .await?
+    .context("automatic replay must retain its worker heartbeat")?;
+    assert!(
+        heartbeat.age_seconds <= 1,
+        "projection-step progress must refresh the worker heartbeat"
+    );
     Ok(())
 }
 

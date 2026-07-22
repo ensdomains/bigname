@@ -25,6 +25,8 @@ Environment:
   BIGNAME_SMOKE_CADDY_IMAGE       Caddy image, default caddy:2-alpine.
   BIGNAME_SMOKE_INTERNAL_REQUEST_TIMEOUT_SECS
                                    Internal request timeout, default 60.
+  BIGNAME_SMOKE_EXPECTED_HEALTH_STATUS
+                                   Expected /healthz status, 200 (default) or 503.
 USAGE
 }
 
@@ -87,6 +89,7 @@ internal_api_url="${BIGNAME_SMOKE_INTERNAL_API_URL:-http://127.0.0.1:3000}"
 public_edge_url="${BIGNAME_SMOKE_PUBLIC_EDGE_URL:-http://127.0.0.1:3001}"
 caddy_image="${BIGNAME_SMOKE_CADDY_IMAGE:-caddy:2-alpine}"
 internal_request_timeout_secs="${BIGNAME_SMOKE_INTERNAL_REQUEST_TIMEOUT_SECS:-60}"
+expected_health_status="${BIGNAME_SMOKE_EXPECTED_HEALTH_STATUS:-200}"
 internal_api_url="${internal_api_url%/}"
 public_edge_url="${public_edge_url%/}"
 smoke_tmp="$(mktemp -d -t bigname-public-edge-smoke.XXXXXX)"
@@ -96,6 +99,11 @@ if ! [[ "$internal_request_timeout_secs" =~ ^[1-9][0-9]{0,3}$ ]] ||
   [ "$internal_request_timeout_secs" -gt 3600 ]; then
   fail "BIGNAME_SMOKE_INTERNAL_REQUEST_TIMEOUT_SECS must be an integer from 1 to 3600"
 fi
+
+case "$expected_health_status" in
+  200|503) ;;
+  *) fail "BIGNAME_SMOKE_EXPECTED_HEALTH_STATUS must be 200 or 503" ;;
+esac
 
 loopback_http_port() {
   local url="$1"
@@ -261,7 +269,7 @@ unknown_path='/public-edge-smoke-unknown'
 manager_origin='https://app.ens.dev'
 
 log "proving denied API routes exist on the internal listener"
-assert_status internal-health 200 GET "${internal_api_url}/healthz" ''
+assert_status internal-health "$expected_health_status" GET "${internal_api_url}/healthz" ''
 assert_status internal-v2-status 200 GET "${internal_api_url}/v2/status" ''
 assert_status internal-v2-lookup 200 POST "${internal_api_url}/v2/lookup" "$v2_lookup_body"
 assert_status internal-v2-diagnostic 200 GET "${internal_api_url}${diagnostic_path}" ''

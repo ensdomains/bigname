@@ -32,6 +32,7 @@ mod resolution_support;
 mod resolver;
 mod resolver_profile_authority_journal;
 mod resolver_profile_input_changes;
+mod service_heartbeats;
 mod snapshot_selection;
 pub mod sql_row;
 mod stored_lineage_coverage;
@@ -167,11 +168,12 @@ pub use identity::{
 pub use identity_facade::{
     IdentityAddressRelationRow, IdentityNameCurrentRow, IdentityNameRecordRow,
     IdentityPrimaryNameSnapshot, IdentityRecordInventoryRow, IndexingStatusChainRow,
-    IndexingStatusRead, ReverseIdentityCursor, ReverseIdentityFeedGroup, ReverseIdentityFeedInput,
-    ReverseIdentityFeedRecordRow, ReverseIdentityGroup, ReverseIdentityRecordRow,
-    ReverseIdentityRoles, ReverseIdentityStorageInput, load_identity_name_feed_records_by_names,
-    load_identity_records_by_names, load_indexing_status, load_reverse_identity_feed_records,
-    load_reverse_identity_records,
+    IndexingStatusRead, PENDING_INVALIDATION_COUNT_CAP, ReverseIdentityCursor,
+    ReverseIdentityFeedGroup, ReverseIdentityFeedInput, ReverseIdentityFeedRecordRow,
+    ReverseIdentityGroup, ReverseIdentityRecordRow, ReverseIdentityRoles,
+    ReverseIdentityStorageInput, load_expected_status_chain_ids,
+    load_identity_name_feed_records_by_names, load_identity_records_by_names, load_indexing_status,
+    load_reverse_identity_feed_records, load_reverse_identity_records,
 };
 pub use label_preimages::{
     LabelPreimage, LabelPreimageImportSummary, backfill_label_preimages_from_existing_facts,
@@ -316,6 +318,14 @@ pub use resolver_profile_input_changes::{
     acknowledge_resolver_profile_input_changes, enqueue_resolver_profile_reconciliations,
     load_pending_resolver_profile_input_changes,
     load_pending_resolver_profile_input_changes_excluding,
+};
+pub use service_heartbeats::{
+    DEFAULT_WORKER_REBUILD_PHASE_MAX_AGE_SECS, INDEXER_SERVICE_NAME, ServiceLoopHeartbeat,
+    ServiceLoopPhaseHeartbeat, WORKER_SERVICE_NAME, begin_service_loop_phase,
+    deregister_service_loop, ensure_service_loop_heartbeat_recent,
+    ensure_service_loop_heartbeat_recent_with_phase, finish_service_loop_phase,
+    load_preferred_service_loop_heartbeats, load_service_loop_heartbeat,
+    record_service_loop_heartbeat, register_service_loop, resolve_service_instance_id,
 };
 pub use snapshot_selection::{
     ChainPosition, ChainPositions, SelectedSnapshot, SnapshotAt, SnapshotConsistency,

@@ -525,7 +525,7 @@ async fn silently_short_logs_are_contained_until_refetch_then_match_control() ->
         "the correct refetch did not retain both formerly omitted logs"
     );
     pipeline::worker_replay_all_current_projections(&repo_root(), &db.url).await?;
-    let faulted = support::serve_existing_db(db, scratch).await?;
+    let faulted = support::serve_existing_db(db, scratch, &anvil).await?;
     let faulted_snapshots = support::route_snapshots(&faulted, &fixture.subjects()).await?;
 
     let control =
@@ -646,7 +646,7 @@ async fn transient_provider_faults_and_partial_receipts_recover_to_control() -> 
         "recovered live poll did not retain the target receipt"
     );
     pipeline::worker_replay_all_current_projections(&repo_root(), &db.url).await?;
-    let faulted = support::serve_existing_db(db, scratch).await?;
+    let faulted = support::serve_existing_db(db, scratch, &anvil).await?;
     let subjects = perturb::RouteSnapshotSubjects::new(
         [name],
         [format!("{owner:#x}"), format!("{record_target:#x}")],

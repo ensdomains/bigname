@@ -6,8 +6,9 @@ configured PostgreSQL database, local pinned upstream refs, generated OpenAPI
 artifact consistency, migration idempotence, the conformance ownership table for
 published OpenAPI paths, runs focused reorg chaos, capability, and
 resolver-profile conformance guards, runs the live manifest-drift audit with
-worker-owned alert observation persistence, inspects the runtime [watch plan](../glossary.md), and
-checks the API process readiness endpoint from a prebuilt local binary. It does
+worker-owned alert observation persistence, inspects the runtime [watch
+plan](../glossary.md), and checks the API health contract from a prebuilt local
+binary. It does
 not perform the production rollback, deploy, contact external RPC providers,
 contact GitHub or Fly, or validate a remote production target.
 
@@ -41,7 +42,7 @@ scripts/rollback-smoke --help
   reorg chaos and dynamic resolver-profile conformance guards need a local
   PostgreSQL server where they can create, migrate, and drop temporary test
   databases; migrations, the manifest-drift audit and inspection path, runtime
-  watch-plan inspection, and readiness all use the configured database even
+  watch-plan inspection, and API health all use the configured database even
   when `--no-network` is passed.
 - The checked-in migration that creates `manifest_alert_observations` must have
   run before manifest-drift smoke checks can persist or read alert observations.
@@ -53,9 +54,9 @@ scripts/rollback-smoke --help
 - `BIGNAME_SMOKE_API_HEALTH_URL` is reachable from the operator host. By
   default it is derived from `BIGNAME_SMOKE_API_BIND_ADDR` as
   `http://<bind_addr>/healthz`.
-- The readiness check builds `bigname-api` before starting the probe window,
+- The health-contract check builds `bigname-api` before starting the probe window,
   then runs the compiled binary from Cargo's local target directory directly.
-  Slow local compilation therefore fails or completes before readiness polling
+  Slow local compilation therefore fails or completes before health polling
   begins; the 30 one-second probes measure server startup and health only.
 - For `--no-network`, Cargo dependencies must already be cached locally.
 
@@ -102,11 +103,16 @@ The script loads `.env` when it exists, then uses the environment values above.
 11. Runs `cargo run --locked -p bigname-worker -- inspect watch-plan --json`
    against the configured database as a read-only runtime watch-plan inspection.
 12. Runs `cargo build --locked -p bigname-api --bin bigname-api` so API compile
-   time is outside the readiness probe window.
+   time is outside the health probe window.
 13. Starts the compiled `bigname-api serve --bind-addr
    <BIGNAME_SMOKE_API_BIND_ADDR>` binary directly from Cargo's local target
-   directory and probes `/healthz` until it returns `200` with
-   `"status":"ready"`.
+   directory and probes `/healthz`. A database with live indexer and worker
+   loops must return `200` with `"status":"ready"`. The standalone smoke API
+   also accepts `200` only when `api_status` is `ready`, aggregate `status` is
+   `degraded`, the API process is running, the database is reachable, and each
+   loop is `running` or `not_started`. `not_started` is the explicit standalone
+   exception. A `stale` loop has a persisted heartbeat row and fails the gate,
+   as does `unavailable`.
 
 With `--no-network`, the script also sets `CARGO_NET_OFFLINE=true`, passes
 `--offline` to Cargo, and rejects non-loopback smoke bind or health URLs. The
@@ -162,7 +168,8 @@ A passing gate means:
   from the configured local database;
 - the API binary builds locally from the rollback checkout;
 - the API process can start from that built binary; and
-- the unversioned readiness endpoint reports ready against that database.
+- `/healthz` reports either full readiness with live service loops or the
+  documented API-local-ready standalone state caused only by absent loops.
 
 ## Failure Criteria
 
@@ -213,12 +220,13 @@ Any non-zero exit blocks automatic rollback promotion until triaged.
   the rollback checkout until database reachability, manifest/discovery state, or
   the inspection command failure is triaged.
 - API prebuild failure: the local `bigname-api` binary could not be built before
-  readiness probing. Do not promote the rollback checkout until the compile
+  health probing. Do not promote the rollback checkout until the compile
   failure or missing offline cache is triaged.
-- Readiness failure: the rollback API did not stay up or `/healthz` did not
-  report ready after the binary was built and started directly. Do not treat the
-  rollback as service-restoring until the API logs and database reachability
-  explain the failure.
+- Health-contract failure: the rollback API did not stay up, the database was
+  unreachable, loop liveness could not be read, or `/healthz` returned neither
+  full readiness nor the documented standalone degraded state. Do not treat
+  the rollback as service-restoring until the API logs and database/loop
+  evidence explain the failure.
 - No-network failure: the gate was not fully local, the bind or health URL was
   not loopback, or Cargo could not build from its local cache. Fix the operator
   environment before treating it as a rollback-candidate failure.
@@ -249,7 +257,7 @@ state that represent the rolled-back service when local access is available. A
 passing local gate is not a substitute for production health checks; it confirms
 only the local migration, artifact, pinned-ref, reorg chaos, conformance-owner,
 capability-cutover, dynamic resolver-profile, manifest-drift audit persistence,
-watch-plan inspection, API prebuild, and readiness behaviors covered above.
+watch-plan inspection, API prebuild, and health-contract behaviors covered above.
 
 Do not use this gate as proof of external integration health. It intentionally
 does not exercise deploy commands, external RPC, GitHub, Fly, or remote
@@ -269,10 +277,10 @@ conformance guard, double migration idempotence check, the no-Postgres OpenAPI
 conformance-owner guard, focused capability cutover evidence guard, focused
 dynamic resolver-profile conformance guard, live manifest-drift audit with
 worker-owned alert persistence, runtime watch-plan inspection, and local API
-prebuild plus readiness. It uses loopback-only smoke URLs, offline Cargo
+prebuild plus health-contract checks. It uses loopback-only smoke URLs, offline Cargo
 execution, the checked-out `.refs/` state, and the configured local PostgreSQL
 server/database for reorg chaos and dynamic resolver-profile temporary
 databases, migrations, manifest-drift audit, watch-plan inspection, API
-prebuild, and readiness. A CI failure has the same rollback-blocking meaning as
+prebuild, and health-contract checks. A CI failure has the same rollback-blocking meaning as
 a local non-zero exit, except that missing cached dependencies are a CI
 environment issue rather than a product regression.

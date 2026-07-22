@@ -577,6 +577,8 @@ fn rewrite_openapi_components(source: &str) -> String {
     );
     schemas.insert("HealthProcess".to_owned(), health_process_schema());
     schemas.insert("HealthDatabase".to_owned(), health_database_schema());
+    schemas.insert("HealthLoop".to_owned(), health_loop_schema());
+    schemas.insert("HealthLoops".to_owned(), health_loops_schema());
     schemas.insert(
         "HealthResponse".to_owned(),
         health_response_schema(),

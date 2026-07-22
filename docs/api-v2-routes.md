@@ -8,7 +8,8 @@ error shape live in [`api-v2.md`](api-v2.md).
 Routes below use the `/v2` development prefix. At the switch, the prefix
 becomes `/v1`; no permanent public `/v2` prefix ships.
 
-`GET /healthz`, `GET /`, `GET /docs`, and `GET /openapi.json` remain
+`GET /healthz` remains the unversioned operator health contract outside the
+versioned product routes. `GET /`, `GET /docs`, and `GET /openapi.json` remain
 non-contract helpers.
 
 ## Shared Route Rules
@@ -79,7 +80,10 @@ Field ownership:
   names collection inside one resolver overview object.
 - Ops status containers are route-local: `/v2/status` owns `chains`,
   `latest_block`, `indexed_block`, `safe_block`, `finalized_block`,
-  `lag_blocks`, and `lag_seconds`.
+  `lag_blocks`, `lag_seconds`, `pending_invalidation_count`,
+  `pending_invalidation_count_capped`, `dead_letter_count`, `network_block`, `network_head_observed_at`,
+  `network_head_age_seconds`, `network_head_status`,
+  `ingestion_lag_blocks`, and `ingestion_lag_seconds`.
 - Diagnostic-only field names are route-local to diagnostics unless they are
   already dictionary fields. Diagnostics may use pipeline vocabulary because
   their tier is explicitly separate from product reads.
@@ -136,12 +140,28 @@ Field ownership:
 - Purpose: per-chain indexing readiness.
 - Request parameters: none.
 - Response shape: `data.status` plus `data.chains`, keyed by `chain_id`.
-  Each chain entry carries `latest_block`, `indexed_block`, `safe_block`,
-  `finalized_block`, `lag_blocks`, `lag_seconds`, and route-local ops
-  `status`.
+  `data.pending_invalidation_count` reports live queued work exactly through
+  10,000. `data.pending_invalidation_count_capped=true` means the bounded query
+  observed at least 10,001 rows and reports 10,000 instead of scanning the
+  remaining queue. `data.dead_letter_count` reports terminal invalidation failures. Each chain
+  entry carries `latest_block`, `indexed_block`, `safe_block`,
+  `finalized_block`, `lag_blocks`, `lag_seconds`, `network_block`,
+  `network_head_observed_at`, `network_head_age_seconds`,
+  `network_head_status`, `ingestion_lag_blocks`, `ingestion_lag_seconds`, and
+  route-local ops `status`.
 - Pagination behavior: none.
 - Status semantics: route-local ops `status` is `ready`, `degraded`, or
-  `stale`. This is the only non-result `status` enum in `v2`.
+  `stale`. This is the only non-result `status` enum in `v2`. Projection lag
+  or a fresh provider comparison beyond either configured ingestion-lag
+  threshold is `stale`. Missing stored readiness or a provider observation
+  whose `network_head_status` is `stale`, `unavailable`, `pending`, or
+  `unconfigured` is `degraded` when its projection is current. Positive
+  projection lag takes precedence and is `stale`; `network_head_status` still
+  reports the provider state. The provider head is refreshed asynchronously
+  under a timeout and cache TTL; this route reads only the cache and never
+  waits for provider I/O. If the latest refresh fails after a successful one,
+  `network_head_status` becomes `unavailable` immediately while the last head,
+  observation time, age, and lag values remain as cached evidence.
 - Replaces (v1): `GET /v1/status`.
 
 ## Tier 2: Product Reads

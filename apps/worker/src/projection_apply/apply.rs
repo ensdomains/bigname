@@ -7,7 +7,8 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::{
-    address_names, children, name_current, permissions, primary_name, record_inventory, resolver,
+    address_names, children, name_current, permissions, primary_name,
+    primary_name::rebuild_heartbeat::LoopHeartbeat, record_inventory, resolver,
 };
 
 use super::{
@@ -43,10 +44,35 @@ pub(super) struct ClaimedInvalidation {
     pub(super) attempt_count: i64,
 }
 
+#[cfg(test)]
 pub(super) async fn apply_pending_invalidations(
     pool: &PgPool,
     batch_limit: i64,
     text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
+) -> Result<ProjectionInvalidationApplySummary> {
+    apply_pending_invalidations_inner(pool, batch_limit, text_hydration_config, None).await
+}
+
+pub(super) async fn apply_pending_invalidations_with_heartbeat(
+    pool: &PgPool,
+    batch_limit: i64,
+    text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
+    loop_heartbeat: &mut LoopHeartbeat,
+) -> Result<ProjectionInvalidationApplySummary> {
+    apply_pending_invalidations_inner(
+        pool,
+        batch_limit,
+        text_hydration_config,
+        Some(loop_heartbeat),
+    )
+    .await
+}
+
+async fn apply_pending_invalidations_inner(
+    pool: &PgPool,
+    batch_limit: i64,
+    text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
+    mut loop_heartbeat: Option<&mut LoopHeartbeat>,
 ) -> Result<ProjectionInvalidationApplySummary> {
     if batch_limit <= 0 {
         bail!("projection apply batch limit must be positive, got {batch_limit}");
@@ -89,6 +115,7 @@ pub(super) async fn apply_pending_invalidations(
                 let unlock = release_invalidation_apply_locks(&mut locks).await;
                 finish?;
                 unlock?;
+                record_loop_progress(pool, &mut loop_heartbeat).await;
                 continue;
             }
 
@@ -118,6 +145,7 @@ pub(super) async fn apply_pending_invalidations(
             let unlock = release_invalidation_apply_locks(&mut locks).await;
             finish?;
             unlock?;
+            record_loop_progress(pool, &mut loop_heartbeat).await;
         }
 
         Ok(summary)
@@ -125,6 +153,12 @@ pub(super) async fn apply_pending_invalidations(
     .await;
     stop_claim_heartbeats(heartbeats).await;
     result
+}
+
+async fn record_loop_progress(pool: &PgPool, loop_heartbeat: &mut Option<&mut LoopHeartbeat>) {
+    if let Some(loop_heartbeat) = loop_heartbeat.as_deref_mut() {
+        loop_heartbeat.record_if_due(pool).await;
+    }
 }
 
 fn drain_address_names_group(

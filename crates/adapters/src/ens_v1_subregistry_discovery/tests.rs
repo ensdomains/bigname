@@ -34,6 +34,31 @@ use super::{
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
 const TEST_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
+#[derive(Default)]
+struct CountingStartupAdapterProgress {
+    record_count: usize,
+    completed_record_count: usize,
+}
+
+impl StartupAdapterProgress for CountingStartupAdapterProgress {
+    fn record<'a>(&'a mut self, pool: &'a PgPool) -> crate::StartupAdapterProgressFuture<'a> {
+        self.record_count += 1;
+        Box::pin(async move {
+            let status = sqlx::query_scalar::<_, String>(
+                "SELECT status FROM normalized_replay_adapter_checkpoints \
+                 WHERE adapter = 'ens_v1_subregistry_discovery' \
+                 ORDER BY updated_at DESC LIMIT 1",
+            )
+            .fetch_optional(pool)
+            .await?;
+            if status.as_deref() == Some("completed") {
+                self.completed_record_count += 1;
+            }
+            Ok(())
+        })
+    }
+}
+
 struct TestDir {
     path: PathBuf,
 }
@@ -826,13 +851,23 @@ async fn startup_checkpointed_subregistry_matches_uncheckpointed_edges_and_event
 
     sync_ens_v1_subregistry_discovery(expected_database.pool(), chain).await?;
     let startup_checkpoint = StartupAdapterCheckpointContext::new("test", 43)?;
-    sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit(
+    let mut startup_progress = CountingStartupAdapterProgress::default();
+    sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit_and_progress(
         startup_database.pool(),
         chain,
         &startup_checkpoint,
         1,
+        &mut startup_progress,
     )
     .await?;
+    assert!(
+        startup_progress.record_count > 3,
+        "checkpoint ingestion and the paged reconciliation/event finalization must repeatedly report startup progress"
+    );
+    assert!(
+        startup_progress.completed_record_count > 0,
+        "the completed finalization boundary must report startup progress"
+    );
 
     assert_eq!(
         load_subregistry_discovery_outputs(startup_database.pool()).await?,

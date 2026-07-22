@@ -1,6 +1,7 @@
 use super::*;
 use anyhow::{Context, Result};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+use tokio::time::{Duration, sleep};
 
 async fn test_database() -> Result<TestDatabase> {
     TestDatabase::create_migrated(
@@ -25,6 +26,197 @@ fn ready_status() -> ProjectionReplayReadiness {
         missing_projection_index_count: 0,
         normalized_replay_max_target_block: Some(42),
     }
+}
+
+#[tokio::test]
+async fn graceful_shutdown_removes_the_active_worker_phase() -> Result<()> {
+    let database = test_database().await?;
+    let instance_id = "graceful-shutdown-phase-test";
+    bigname_storage::register_service_loop(
+        database.pool(),
+        bigname_storage::WORKER_SERVICE_NAME,
+        instance_id,
+    )
+    .await?;
+    bigname_storage::begin_service_loop_phase(
+        database.pool(),
+        bigname_storage::WORKER_SERVICE_NAME,
+        instance_id,
+        "name_current.publish",
+    )
+    .await?;
+
+    shutdown::run_until_shutdown(
+        database.pool(),
+        instance_id,
+        std::future::pending::<Result<()>>(),
+        std::future::ready(Ok(())),
+    )
+    .await?;
+
+    let heartbeat_result = bigname_storage::record_service_loop_heartbeat(
+        database.pool(),
+        bigname_storage::WORKER_SERVICE_NAME,
+        instance_id,
+        &[],
+    )
+    .await;
+    assert!(
+        heartbeat_result.is_err(),
+        "a deregistered loop must not recreate its process row"
+    );
+
+    let (process_count, phase_count) = sqlx::query_as::<_, (i64, i64)>(
+        r#"
+        SELECT
+            COUNT(*) FILTER (WHERE scope_kind = 'process')::BIGINT,
+            COUNT(*) FILTER (WHERE scope_kind = 'phase')::BIGINT
+        FROM service_loop_heartbeats
+        WHERE service_name = 'worker'
+          AND instance_id = $1
+        "#,
+    )
+    .bind(instance_id)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        process_count, 0,
+        "graceful shutdown must deregister the loop"
+    );
+    assert_eq!(phase_count, 0, "graceful shutdown must not orphan a phase");
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn graceful_shutdown_cannot_leave_a_concurrently_inserted_phase() -> Result<()> {
+    let database = test_database().await?;
+    let instance_id = "graceful-shutdown-phase-race-test";
+    bigname_storage::register_service_loop(
+        database.pool(),
+        bigname_storage::WORKER_SERVICE_NAME,
+        instance_id,
+    )
+    .await?;
+    bigname_storage::begin_service_loop_phase(
+        database.pool(),
+        bigname_storage::WORKER_SERVICE_NAME,
+        instance_id,
+        "name_current.publish",
+    )
+    .await?;
+
+    let mut phase_lock = database.pool().begin().await?;
+    sqlx::query(
+        r#"
+        SELECT 1
+        FROM service_loop_heartbeats
+        WHERE service_name = 'worker'
+          AND instance_id = $1
+          AND scope_kind = 'phase'
+        FOR UPDATE
+        "#,
+    )
+    .bind(instance_id)
+    .fetch_one(&mut *phase_lock)
+    .await?;
+
+    let shutdown_pool = database.pool().clone();
+    let shutdown_task = tokio::spawn(async move {
+        shutdown::run_until_shutdown(
+            &shutdown_pool,
+            instance_id,
+            std::future::pending::<Result<()>>(),
+            std::future::ready(Ok(())),
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let cleanup_is_waiting = sqlx::query_scalar::<_, bool>(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_stat_activity
+                    WHERE datname = current_database()
+                      AND pid <> pg_backend_pid()
+                      AND query LIKE '%DELETE FROM service_loop_heartbeats%'
+                      AND wait_event_type = 'Lock'
+                )
+                "#,
+            )
+            .fetch_one(database.pool())
+            .await?;
+            if cleanup_is_waiting {
+                return Ok::<_, anyhow::Error>(());
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("shutdown phase cleanup did not reach the locked row")??;
+
+    let phase_writer_pool = database.pool().clone();
+    let phase_writer = tokio::spawn(async move {
+        bigname_storage::begin_service_loop_phase(
+            &phase_writer_pool,
+            bigname_storage::WORKER_SERVICE_NAME,
+            instance_id,
+            "resolver_current.publish",
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let phase_writer_is_waiting = sqlx::query_scalar::<_, bool>(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_stat_activity
+                    WHERE datname = current_database()
+                      AND pid <> pg_backend_pid()
+                      AND query LIKE '%begin_service_loop_phase_registration_fence%'
+                      AND wait_event_type = 'Lock'
+                )
+                "#,
+            )
+            .fetch_one(database.pool())
+            .await?;
+            if phase_writer_is_waiting {
+                return Ok::<_, anyhow::Error>(());
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("concurrent phase writer did not reach the locked row")??;
+
+    phase_lock.commit().await?;
+    shutdown_task.await??;
+    let phase_writer_result = phase_writer.await?;
+    assert!(
+        phase_writer_result.is_err(),
+        "a deregistered loop must reject a concurrent phase writer"
+    );
+
+    let phase_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM service_loop_heartbeats
+        WHERE service_name = 'worker'
+          AND instance_id = $1
+          AND scope_kind = 'phase'
+        "#,
+    )
+    .bind(instance_id)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        phase_count, 0,
+        "graceful shutdown must fence concurrent phase writers before cleanup"
+    );
+
+    database.cleanup().await
 }
 
 #[test]

@@ -7,6 +7,7 @@ use tokio::task::JoinSet;
 use tracing::info;
 
 use crate::provider::ChainProvider;
+use crate::run::startup_heartbeat::StartupHeartbeat;
 
 use super::{
     BackfillJobRunConfig, BackfillJobRunOutcome, BackfillTopicPlan, CoinbaseSqlBackfillConfig,
@@ -17,7 +18,7 @@ use super::{
         create_hash_pinned_backfill_job_with_ranges, effective_coinbase_sql_adapter_sync_mode,
         ensure_coinbase_sql_registry_range_start_is_replay_safe,
         refreshed_backfill_lease_expires_at, run_reserved_coinbase_sql_backfill_range,
-        run_reserved_hash_pinned_backfill_range, validate_hash_pinned_chunk_blocks,
+        run_reserved_hash_pinned_backfill_range_with_progress, validate_hash_pinned_chunk_blocks,
     },
 };
 
@@ -25,9 +26,53 @@ pub(crate) async fn run_resumable_hash_pinned_backfill_job_concurrently(
     pool: &sqlx::PgPool,
     source_plan: &WatchedSourceSelectorPlan,
     provider: &ChainProvider,
+    config: BackfillJobRunConfig,
+    ranges: Vec<BackfillRangeSpec>,
+    worker_count: usize,
+) -> Result<BackfillJobRunOutcome> {
+    run_resumable_hash_pinned_backfill_job_concurrently_inner(
+        pool,
+        source_plan,
+        provider,
+        config,
+        ranges,
+        worker_count,
+        None,
+    )
+    .await
+}
+
+#[expect(clippy::too_many_arguments)]
+pub(crate) async fn run_resumable_hash_pinned_backfill_job_concurrently_with_heartbeat(
+    pool: &sqlx::PgPool,
+    source_plan: &WatchedSourceSelectorPlan,
+    provider: &ChainProvider,
+    config: BackfillJobRunConfig,
+    ranges: Vec<BackfillRangeSpec>,
+    worker_count: usize,
+    heartbeat: &mut StartupHeartbeat,
+    heartbeat_chain_ids: &[String],
+) -> Result<BackfillJobRunOutcome> {
+    run_resumable_hash_pinned_backfill_job_concurrently_inner(
+        pool,
+        source_plan,
+        provider,
+        config,
+        ranges,
+        worker_count,
+        Some((heartbeat, heartbeat_chain_ids)),
+    )
+    .await
+}
+
+async fn run_resumable_hash_pinned_backfill_job_concurrently_inner(
+    pool: &sqlx::PgPool,
+    source_plan: &WatchedSourceSelectorPlan,
+    provider: &ChainProvider,
     mut config: BackfillJobRunConfig,
     ranges: Vec<BackfillRangeSpec>,
     worker_count: usize,
+    mut heartbeat: Option<(&mut StartupHeartbeat, &[String])>,
 ) -> Result<BackfillJobRunOutcome> {
     if worker_count == 0 {
         bail!("hash-pinned backfill worker count must be positive");
@@ -71,11 +116,13 @@ pub(crate) async fn run_resumable_hash_pinned_backfill_job_concurrently(
     );
 
     let mut workers = JoinSet::new();
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
     let backfill_job_id = record.job.backfill_job_id;
     for worker_index in 0..active_worker_count {
         let pool = pool.clone();
         let source_plan = source_plan.clone();
         let provider = provider.clone();
+        let progress_tx = progress_tx.clone();
         let mut worker_config = config.clone();
         worker_config.lease_owner = format!("{}:worker-{worker_index}", config.lease_owner);
         worker_config.lease_token = format!("{}:worker-{worker_index}", config.lease_token);
@@ -97,13 +144,14 @@ pub(crate) async fn run_resumable_hash_pinned_backfill_job_concurrently(
                 };
 
                 outcome.reserved_range_count += 1;
-                run_reserved_hash_pinned_backfill_range(
+                run_reserved_hash_pinned_backfill_range_with_progress(
                     &pool,
                     &source_plan,
                     &provider,
                     &worker_config,
                     &reserved_range,
                     &mut outcome,
+                    &progress_tx,
                 )
                 .await?;
                 outcome.completed_range_count += 1;
@@ -112,8 +160,25 @@ pub(crate) async fn run_resumable_hash_pinned_backfill_job_concurrently(
             Ok::<_, anyhow::Error>(outcome)
         });
     }
+    drop(progress_tx);
 
-    while let Some(result) = workers.join_next().await {
+    let mut progress_open = true;
+    while !workers.is_empty() {
+        let result = tokio::select! {
+            progress = progress_rx.recv(), if progress_open => {
+                match progress {
+                    Some(()) => {
+                        if let Some((heartbeat, chain_ids)) = heartbeat.as_mut() {
+                            heartbeat.record_if_due(pool, chain_ids).await?;
+                        }
+                    }
+                    None => progress_open = false,
+                }
+                continue;
+            }
+            result = workers.join_next() => result
+                .expect("hash-pinned backfill worker set must be non-empty"),
+        };
         let worker_outcome = match result {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(error)) => {
