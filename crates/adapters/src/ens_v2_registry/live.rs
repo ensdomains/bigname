@@ -320,6 +320,7 @@ async fn sync_ens_v2_registry_resource_surface_live_poll_locked(
                 true,
                 false,
                 Some(closure_proof.discovery_admission_epoch),
+                None,
             )
             .await
         }
@@ -337,6 +338,7 @@ async fn sync_ens_v2_registry_resource_surface_live_poll_locked(
             true,
             true,
             Some(closure_proof.discovery_admission_epoch),
+            None,
         )
         .await
     };

@@ -149,6 +149,8 @@ Field ownership:
   `network_head_observed_at`, `network_head_age_seconds`,
   `network_head_status`, `ingestion_lag_blocks`, `ingestion_lag_seconds`, and
   route-local ops `status`.
+- `lag_blocks` and `lag_seconds` are independently nonnegative. Each field
+  clamps its own canonical-versus-projected difference at `0`.
 - Pagination behavior: none.
 - Status semantics: route-local ops `status` is `ready`, `degraded`, or
   `stale`. This is the only non-result `status` enum in `v2`. Projection lag

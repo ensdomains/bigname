@@ -5,7 +5,14 @@ use sqlx::PgPool;
 
 use crate::adapter_manifest::load_required_active_manifest_event_topic0s_by_signature;
 use crate::ens_v2_common::ActiveEmitter;
-use crate::normalized_event_support::upsert_normalized_events_with_counts;
+use crate::{
+    checkpoint_context::StartupAdapterProgress,
+    normalized_event_support::{
+        upsert_normalized_events_in_chunks_with_counts_and_progress,
+        upsert_normalized_events_with_counts,
+    },
+    startup_progress::{STARTUP_ADAPTER_PROGRESS_PAGE_ROWS, record_processed_row_progress},
+};
 
 mod constants;
 mod decode;
@@ -43,7 +50,7 @@ impl EnsV2ResolverSyncSummary {
         chain: &str,
         block_hashes: &[String],
     ) -> Result<Self> {
-        sync_ens_v2_resolver_with_scope(pool, chain, true, block_hashes, None, None).await
+        sync_ens_v2_resolver_with_scope(pool, chain, true, block_hashes, None, None, None).await
     }
 
     pub async fn sync_for_block_hashes_with_source_scope(
@@ -52,13 +59,29 @@ impl EnsV2ResolverSyncSummary {
         block_hashes: &[String],
         source_scope: &[(String, String, i64, i64)],
     ) -> Result<Self> {
-        sync_ens_v2_resolver_with_scope(pool, chain, true, block_hashes, Some(source_scope), None)
-            .await
+        sync_ens_v2_resolver_with_scope(
+            pool,
+            chain,
+            true,
+            block_hashes,
+            Some(source_scope),
+            None,
+            None,
+        )
+        .await
     }
 }
 
 pub async fn sync_ens_v2_resolver(pool: &PgPool, chain: &str) -> Result<EnsV2ResolverSyncSummary> {
-    sync_ens_v2_resolver_with_scope(pool, chain, false, &[], None, None).await
+    sync_ens_v2_resolver_with_scope(pool, chain, false, &[], None, None, None).await
+}
+
+pub async fn sync_ens_v2_resolver_with_progress(
+    pool: &PgPool,
+    chain: &str,
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<EnsV2ResolverSyncSummary> {
+    sync_ens_v2_resolver_with_scope(pool, chain, false, &[], None, None, Some(progress)).await
 }
 
 pub async fn sync_ens_v2_resolver_through_block(
@@ -66,7 +89,16 @@ pub async fn sync_ens_v2_resolver_through_block(
     chain: &str,
     target_block_number: i64,
 ) -> Result<EnsV2ResolverSyncSummary> {
-    sync_ens_v2_resolver_with_scope(pool, chain, false, &[], None, Some(target_block_number)).await
+    sync_ens_v2_resolver_with_scope(
+        pool,
+        chain,
+        false,
+        &[],
+        None,
+        Some(target_block_number),
+        None,
+    )
+    .await
 }
 
 async fn sync_ens_v2_resolver_with_scope(
@@ -76,6 +108,7 @@ async fn sync_ens_v2_resolver_with_scope(
     block_hashes: &[String],
     source_scope: Option<&[(String, String, i64, i64)]>,
     max_block_number: Option<i64>,
+    mut progress: Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<EnsV2ResolverSyncSummary> {
     let mut active_emitters = load_active_emitters(pool, chain).await?;
     if let Some(source_scope) = source_scope {
@@ -104,6 +137,7 @@ async fn sync_ens_v2_resolver_with_scope(
         block_hashes,
         source_scope,
         max_block_number,
+        &mut progress,
     )
     .await?;
     let scanned_log_count = raw_logs.len();
@@ -113,15 +147,29 @@ async fn sync_ens_v2_resolver_with_scope(
 
     let mut matched_log_count = 0usize;
     let mut events = Vec::new();
-    for raw_log in &raw_logs {
+    for (index, raw_log) in raw_logs.iter().enumerate() {
         let Some(observation) = build_resolver_observation(raw_log, &event_topics)? else {
+            record_processed_row_progress(pool, &mut progress, index + 1, raw_logs.len()).await?;
             continue;
         };
         matched_log_count += 1;
         events.extend(build_resolver_events(pool, raw_log, observation).await?);
+        record_processed_row_progress(pool, &mut progress, index + 1, raw_logs.len()).await?;
     }
 
-    let counts = upsert_normalized_events_with_counts(pool, &events, "ENSv2 resolver").await?;
+    let counts = match progress {
+        Some(progress) => {
+            upsert_normalized_events_in_chunks_with_counts_and_progress(
+                pool,
+                &events,
+                "ENSv2 resolver",
+                STARTUP_ADAPTER_PROGRESS_PAGE_ROWS,
+                Some(progress),
+            )
+            .await?
+        }
+        None => upsert_normalized_events_with_counts(pool, &events, "ENSv2 resolver").await?,
+    };
     let (total_synced_count, total_inserted_count, by_kind) = counts.into_parts_by_kind(
         |synced_count, inserted_count| EnsV2ResolverKindSyncSummary {
             synced_count,

@@ -19,6 +19,7 @@ mod evm_abi;
 mod manifest_normalized_events;
 mod normalized_event_support;
 mod registry_migration_cache;
+mod startup_progress;
 
 pub use block_derived_normalized_events::{
     BlockDerivedNormalizedEventKindSyncSummary, BlockDerivedNormalizedEventSyncSummary,
@@ -31,7 +32,7 @@ pub use checkpoint_context::{
 };
 pub use ens_v1_reverse_claim::{
     EnsV1ReverseClaimKindSyncSummary, EnsV1ReverseClaimSyncSummary, sync_ens_v1_reverse_claim,
-    sync_ens_v1_reverse_claim_range,
+    sync_ens_v1_reverse_claim_range, sync_ens_v1_reverse_claim_with_progress,
 };
 pub use ens_v1_subregistry_discovery::{
     EnsV1SubregistryDiscoverySyncSummary, sync_ens_v1_subregistry_discovery,
@@ -53,11 +54,11 @@ pub use ens_v1_unwrapped_authority::{
 };
 pub use ens_v2_permissions::{
     EnsV2PermissionsKindSyncSummary, EnsV2PermissionsSyncSummary, sync_ens_v2_permissions,
-    sync_ens_v2_permissions_through_block,
+    sync_ens_v2_permissions_through_block, sync_ens_v2_permissions_with_progress,
 };
 pub use ens_v2_registrar::{
     EnsV2RegistrarKindSyncSummary, EnsV2RegistrarSyncSummary, sync_ens_v2_registrar,
-    sync_ens_v2_registrar_through_block,
+    sync_ens_v2_registrar_through_block, sync_ens_v2_registrar_with_progress,
 };
 pub use ens_v2_registry::{
     EnsV2MissingCoverage, EnsV2RegistryResourceSurfaceSyncSummary, ens_v2_missing_coverage,
@@ -65,10 +66,11 @@ pub use ens_v2_registry::{
     record_ens_v2_live_selected_raw_log_coverage, sync_ens_v2_registry_resource_surface,
     sync_ens_v2_registry_resource_surface_live_poll,
     sync_ens_v2_registry_resource_surface_through_block,
+    sync_ens_v2_registry_resource_surface_with_progress,
 };
 pub use ens_v2_resolver::{
     EnsV2ResolverKindSyncSummary, EnsV2ResolverSyncSummary, sync_ens_v2_resolver,
-    sync_ens_v2_resolver_through_block,
+    sync_ens_v2_resolver_through_block, sync_ens_v2_resolver_with_progress,
 };
 pub use manifest_normalized_events::{
     ManifestNormalizedEventKindSyncSummary, ManifestNormalizedEventSyncSummary,
