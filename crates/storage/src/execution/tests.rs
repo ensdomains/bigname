@@ -355,6 +355,83 @@ fn execution_outcome_variant(
     outcome
 }
 
+fn route_local_primary_execution_pair(
+    execution_trace_id: Uuid,
+    address: &str,
+    block_number: i64,
+) -> (ExecutionTrace, ExecutionOutcome) {
+    let request_key = verified_primary_request_key(address, "60");
+    let block_hash = format!("0xroute{block_number:x}");
+    let requested_chain_positions = json!([{
+        "chain_id": "ethereum-mainnet",
+        "block_number": block_number,
+        "block_hash": block_hash,
+    }]);
+    let boundary = json!({
+        "boundary_kind": SELECTED_CHECKPOINT_BOUNDARY_KIND,
+        "chain_position": {
+            "chain_id": "ethereum-mainnet",
+            "block_number": block_number,
+            "block_hash": block_hash,
+            "timestamp": "2026-07-22T00:00:00Z",
+        }
+    });
+    let manifest_versions = json!([{
+        "source_family": "ens_execution",
+        "manifest_version": 1,
+    }]);
+    let mut trace = execution_trace_variant(execution_trace_id, &request_key, 1_717_173_000);
+    trace.request_type = "verified_primary_name".to_owned();
+    trace.chain_context = json!({
+        "requested_positions": requested_chain_positions.clone(),
+    });
+    trace.manifest_context = json!({
+        "manifest_versions": manifest_versions.clone(),
+    });
+    trace.final_payload = Some(json!({
+        "verified_primary_name": {
+            "status": "not_found",
+        }
+    }));
+    trace.request_metadata = json!({
+        "normalized_address": address,
+        "namespace": "ens",
+        "coin_type": "60",
+        "route_local_claim": {
+            "status": "not_found",
+        },
+        "forward_call_attempted": false,
+        "cache_identity": {
+            "requested_chain_positions": requested_chain_positions.clone(),
+            "manifest_versions": manifest_versions.clone(),
+            "topology_version_boundary": boundary.clone(),
+            "record_version_boundary": boundary.clone(),
+        },
+    });
+    let outcome = ExecutionOutcome {
+        cache_key: ExecutionCacheKey {
+            request_key,
+            requested_chain_positions,
+            manifest_versions,
+            topology_version_boundary: boundary.clone(),
+            record_version_boundary: boundary,
+        },
+        execution_trace_id,
+        request_type: "verified_primary_name".to_owned(),
+        namespace: "ens".to_owned(),
+        outcome_payload: Some(json!({
+            "verified_primary_name": {
+                "status": "not_found",
+            }
+        })),
+        failure_payload: None,
+        finished_at: trace
+            .finished_at
+            .expect("route-local primary-name test trace must finish"),
+    };
+    (trace, outcome)
+}
+
 fn verified_primary_request_key(address: &str, coin_type: &str) -> String {
     format!("ens:{}:{coin_type}", address.to_ascii_lowercase())
 }
@@ -2808,6 +2885,110 @@ async fn reorg_invalidation_fails_closed_for_verified_outcome_without_block_hash
             .len(),
         2,
         "verified primary-name trace steps stay durable after fail-closed cache invalidation"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn prunes_route_local_primary_name_execution_in_bounded_checkpoint_batches() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    sqlx::query(
+        r#"
+        INSERT INTO chain_checkpoints (
+            chain_id,
+            canonical_block_hash,
+            canonical_block_number
+        )
+        VALUES ('ethereum-mainnet', '0xhead', 100)
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    let old_first = route_local_primary_execution_pair(
+        Uuid::from_u128(0x0e7ec7ace0000000000000000000c001),
+        "0x0000000000000000000000000000000000000001",
+        10,
+    );
+    let old_second = route_local_primary_execution_pair(
+        Uuid::from_u128(0x0e7ec7ace0000000000000000000c002),
+        "0x0000000000000000000000000000000000000002",
+        20,
+    );
+    let retained = route_local_primary_execution_pair(
+        Uuid::from_u128(0x0e7ec7ace0000000000000000000c003),
+        "0x0000000000000000000000000000000000000003",
+        95,
+    );
+    for (trace, outcome) in [&old_first, &old_second, &retained] {
+        insert_trace_and_outcome(&database, trace, outcome).await?;
+    }
+    let old_orphan = route_local_primary_execution_pair(
+        Uuid::from_u128(0x0e7ec7ace0000000000000000000c005),
+        "0x0000000000000000000000000000000000000005",
+        15,
+    );
+    upsert_execution_trace(database.pool(), &old_orphan.0).await?;
+
+    let (materialized_trace, mut materialized_outcome) = route_local_primary_execution_pair(
+        Uuid::from_u128(0x0e7ec7ace0000000000000000000c004),
+        "0x0000000000000000000000000000000000000004",
+        5,
+    );
+    materialized_outcome.cache_key.topology_version_boundary = version_boundary(
+        "ens:materialized.eth",
+        Uuid::from_u128(0x0e7ec7ace0000000000000000000c104),
+        Some(4),
+        Some("ResolverChanged"),
+        5,
+        "0xmaterialized",
+        "2026-07-22T00:00:00Z",
+    );
+    materialized_outcome.cache_key.record_version_boundary = materialized_outcome
+        .cache_key
+        .topology_version_boundary
+        .clone();
+    insert_trace_and_outcome(&database, &materialized_trace, &materialized_outcome).await?;
+
+    let first_summary = prune_route_local_primary_name_execution(database.pool(), 10, 1).await?;
+    assert_eq!(first_summary.head_block_number, Some(100));
+    assert_eq!(first_summary.cutoff_block_number, Some(90));
+    assert_eq!(first_summary.deleted_outcome_count, 1);
+    assert_eq!(first_summary.deleted_trace_count, 2);
+    assert!(
+        load_execution_trace(database.pool(), old_first.0.execution_trace_id)
+            .await?
+            .is_none(),
+        "pruning a route-local outcome must cascade through its trace steps"
+    );
+    assert!(
+        load_execution_trace(database.pool(), old_orphan.0.execution_trace_id)
+            .await?
+            .is_none(),
+        "pruning must delete old route-local traces orphaned by outcome replacement"
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &old_second.1.cache_key)
+            .await?
+            .is_some(),
+        "one pruning pass must respect its bounded batch size"
+    );
+
+    let second_summary = prune_route_local_primary_name_execution(database.pool(), 10, 10).await?;
+    assert_eq!(second_summary.deleted_outcome_count, 1);
+    assert_eq!(second_summary.deleted_trace_count, 1);
+    assert!(
+        load_execution_outcome(database.pool(), &retained.1.cache_key)
+            .await?
+            .is_some(),
+        "the configured checkpoint window must remain reusable"
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &materialized_outcome.cache_key)
+            .await?
+            .is_some(),
+        "pruning must not delete materialized primary-name outcomes"
     );
 
     database.cleanup().await

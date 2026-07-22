@@ -150,6 +150,61 @@ async fn spawn_primary_name_mock_rpc(
     Ok((url, handle))
 }
 
+async fn spawn_primary_name_transport_recovery_rpc()
+-> Result<(String, tokio::task::JoinHandle<Result<Vec<Value>>>)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("failed to bind recovering mock primary-name RPC listener")?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let handle = tokio::spawn(async move {
+        let mut requests = Vec::new();
+
+        let (mut dropped_socket, _) = listener
+            .accept()
+            .await
+            .context("failed to accept dropped mock primary-name RPC request")?;
+        requests.push(read_primary_name_mock_rpc_request(&mut dropped_socket).await?);
+        drop(dropped_socket);
+
+        for response_result in [
+            json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+            primary_name_reverse_name_response("taytems.eth"),
+            primary_name_universal_resolver_addr60_response(
+                "0x8e8db5ccef88cca9d624701db544989c996e3216",
+            ),
+        ] {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .context("failed to accept recovered mock primary-name RPC request")?;
+            requests.push(read_primary_name_mock_rpc_request(&mut socket).await?);
+            write_primary_name_mock_rpc_response(&mut socket, response_result).await?;
+        }
+
+        Ok(requests)
+    });
+
+    Ok((url, handle))
+}
+
+async fn spawn_hanging_primary_name_rpc()
+-> Result<(String, tokio::task::JoinHandle<Result<()>>)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("failed to bind hanging mock primary-name RPC listener")?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let handle = tokio::spawn(async move {
+        let (mut socket, _) = listener
+            .accept()
+            .await
+            .context("failed to accept hanging mock primary-name RPC request")?;
+        read_primary_name_mock_rpc_request(&mut socket).await?;
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        Ok(())
+    });
+    Ok((url, handle))
+}
+
 async fn spawn_primary_name_mock_rpc_with_last_response_gate(
     responses: Vec<Value>,
 ) -> Result<(
@@ -757,10 +812,38 @@ async fn get_primary_names_verifies_default_tuple_miss_with_on_demand_rpc() -> R
             .disable_statement_logging(),
     )
     .await?;
+    let mut unrelated_projection_write = projection_pool.begin().await?;
+    bigname_storage::lock_primary_name_tuple_in_transaction(
+        &mut unrelated_projection_write,
+        "0x0000000000000000000000000000000000000def",
+        "ens",
+        "60",
+    )
+    .await?;
+    let unrelated_lock_state = database.app_state();
+    let unrelated_lock_response = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        app_router(unrelated_lock_state).oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x8e8db5ccef88cca9d624701db544989c996e3216?mode=both")
+                .body(Body::empty())
+                .expect("request must build"),
+        ),
+    )
+    .await
+    .context("unrelated primary-name tuple lock must not block route-local readback")?
+    .context("unrelated-lock primary-name readback request failed")?;
+    unrelated_projection_write.commit().await?;
+    assert_eq!(unrelated_lock_response.status(), StatusCode::OK);
+
     let mut projection_write = projection_pool.begin().await?;
-    sqlx::query("LOCK TABLE primary_names_current IN ROW EXCLUSIVE MODE")
-        .execute(&mut *projection_write)
-        .await?;
+    bigname_storage::lock_primary_name_tuple_in_transaction(
+        &mut projection_write,
+        "0x8e8db5ccef88cca9d624701db544989c996e3216",
+        "ens",
+        "60",
+    )
+    .await?;
     let readback_state = database.app_state();
     let mut readback_task = tokio::spawn(async move {
         app_router(readback_state)
@@ -795,9 +878,13 @@ async fn get_primary_names_verifies_default_tuple_miss_with_on_demand_rpc() -> R
     assert_eq!(second_payload, payload);
 
     let mut projection_insert = projection_pool.begin().await?;
-    sqlx::query("LOCK TABLE primary_names_current IN ROW EXCLUSIVE MODE")
-        .execute(&mut *projection_insert)
-        .await?;
+    bigname_storage::lock_primary_name_tuple_in_transaction(
+        &mut projection_insert,
+        "0x8e8db5ccef88cca9d624701db544989c996e3216",
+        "ens",
+        "60",
+    )
+    .await?;
     let raced_readback_state = database.app_state();
     let mut raced_readback_task = tokio::spawn(async move {
         app_router(raced_readback_state)
@@ -875,7 +962,10 @@ async fn get_primary_names_verifies_default_tuple_miss_with_on_demand_rpc() -> R
     )
     .fetch_one(&database.pool)
     .await?;
-    assert_eq!(persisted_outcome_count, 1);
+    assert_eq!(
+        persisted_outcome_count, 0,
+        "the projection write must invalidate the route-local outcome after winning the fence"
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -930,9 +1020,13 @@ async fn get_primary_names_serves_projection_that_wins_route_local_persistence_f
     .context("route-local primary-name RPC last-call signal dropped")?;
 
     let mut projection_insert = projection_pool.begin().await?;
-    sqlx::query("LOCK TABLE primary_names_current IN ROW EXCLUSIVE MODE")
-        .execute(&mut *projection_insert)
-        .await?;
+    bigname_storage::lock_primary_name_tuple_in_transaction(
+        &mut projection_insert,
+        "0x8e8db5ccef88cca9d624701db544989c996e3216",
+        "ens",
+        "60",
+    )
+    .await?;
     assert!(
         release_last_rpc_response.send(()).is_ok(),
         "route-local primary-name request dropped before its final RPC response"
@@ -1517,6 +1611,247 @@ async fn get_primary_names_does_not_conflate_tuple_miss_provider_failure_with_no
         })
     );
 
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_primary_names_does_not_persist_transient_transport_error_and_retries()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
+    let (rpc_url, rpc_handle) = spawn_primary_name_transport_recovery_rpc().await?;
+    let chain_rpc_urls = bigname_execution::ChainRpcUrls::from_entries(&[format!(
+        "ethereum-mainnet={rpc_url}"
+    )])?
+    .with_http_timeouts(
+        std::time::Duration::from_millis(100),
+        std::time::Duration::from_secs(1),
+    )?;
+    let uri = "/v1/primary-names/0x8e8db5ccef88cca9d624701db544989c996e3216?mode=both";
+
+    let first_response = app_router(
+        database.app_state_with_chain_rpc_urls(chain_rpc_urls.clone()),
+    )
+    .oneshot(
+        Request::builder()
+            .uri(uri)
+            .body(Body::empty())
+            .expect("request must build"),
+    )
+    .await
+    .context("transient-failure primary-name request failed")?;
+    assert_eq!(first_response.status(), StatusCode::CONFLICT);
+
+    let persisted_after_failure = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM execution_cache_outcomes
+        WHERE request_type = 'verified_primary_name'
+          AND namespace = 'ens'
+          AND request_key = 'ens:0x8e8db5ccef88cca9d624701db544989c996e3216:60'
+        "#,
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(persisted_after_failure, 0);
+    let persisted_trace_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM execution_traces
+        WHERE request_type = 'verified_primary_name'
+          AND namespace = 'ens'
+          AND request_key = 'ens:0x8e8db5ccef88cca9d624701db544989c996e3216:60'
+        "#,
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(
+        persisted_trace_count, 0,
+        "non-timeout transport failures must abort before trace persistence"
+    );
+
+    let recovered_response = app_router(database.app_state_with_chain_rpc_urls(chain_rpc_urls))
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("recovered primary-name retry failed")?;
+    assert_eq!(recovered_response.status(), StatusCode::OK);
+    let recovered_payload: PrimaryNameResponse = read_json(recovered_response).await?;
+    assert_eq!(
+        primary_name_verified_state_without_provenance(&recovered_payload)["verified_primary_name"]
+            ["status"],
+        json!("success")
+    );
+    assert_persisted_primary_name_fallback_metadata(&recovered_payload);
+    assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 4);
+
+    let persisted_after_retry = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM execution_cache_outcomes
+        WHERE request_type = 'verified_primary_name'
+          AND namespace = 'ens'
+          AND request_key = 'ens:0x8e8db5ccef88cca9d624701db544989c996e3216:60'
+        "#,
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(persisted_after_retry, 1);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_primary_names_persists_configured_transport_timeout_in_band() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
+    let (rpc_url, rpc_handle) = spawn_hanging_primary_name_rpc().await?;
+    let chain_rpc_urls = bigname_execution::ChainRpcUrls::from_entries(&[format!(
+        "ethereum-mainnet={rpc_url}"
+    )])?
+    .with_http_timeouts(
+        std::time::Duration::from_millis(10),
+        std::time::Duration::from_millis(25),
+    )?;
+
+    let response = app_router(database.app_state_with_chain_rpc_urls(chain_rpc_urls))
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x8e8db5ccef88cca9d624701db544989c996e3216?mode=both")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("timed-out primary-name request failed")?;
+    rpc_handle.abort();
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: PrimaryNameResponse = read_json(response).await?;
+    assert_eq!(
+        primary_name_verified_state_without_provenance(&payload)["verified_primary_name"],
+        json!({
+            "status": "execution_failed",
+            "failure_reason": "resolver_call_failed",
+        })
+    );
+    assert_persisted_primary_name_fallback_metadata(&payload);
+
+    let persisted_outcome_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM execution_cache_outcomes
+        WHERE request_type = 'verified_primary_name'
+          AND namespace = 'ens'
+          AND request_key = 'ens:0x8e8db5ccef88cca9d624701db544989c996e3216:60'
+        "#,
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(persisted_outcome_count, 1);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn primary_name_readback_treats_concurrent_route_cache_pruning_as_a_miss() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
+    let address = "0x8e8db5ccef88cca9d624701db544989c996e3216";
+    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
+        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+        primary_name_reverse_name_response("taytems.eth"),
+        primary_name_universal_resolver_addr60_response(address),
+    ])
+    .await?;
+    let chain_rpc_urls =
+        bigname_execution::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
+    let response = app_router(database.app_state_with_chain_rpc_urls(chain_rpc_urls))
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/primary-names/{address}?mode=both"))
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(join_primary_name_mock_rpc_requests(rpc_handle).await?.len(), 3);
+
+    let selected_snapshot = SelectedSnapshot {
+        chain_positions: ChainPositions::from_value(&primary_name_fallback_chain_positions())?,
+        consistency: SnapshotConsistency::Head,
+    };
+    let database_url = std::env::var("BIGNAME_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .unwrap_or_else(|_| default_database_url().to_owned());
+    let prune_pool = PgPool::connect_with(
+        PgConnectOptions::from_str(&database_url)?
+            .database(&database.database_name)
+            .disable_statement_logging(),
+    )
+    .await?;
+    let (_hook_guard, hook_control) =
+        support_primary_name_lookup::test_hooks::install(&database.pool).await?;
+    let readback_pool = database.pool.clone();
+    let readback_task = tokio::spawn(async move {
+        load_persisted_primary_name_route_fallback_readback(
+            &readback_pool,
+            address,
+            "ens",
+            "60",
+            &selected_snapshot,
+        )
+        .await
+    });
+    hook_control.wait_until_reached().await;
+
+    sqlx::query(
+        r#"
+        UPDATE chain_checkpoints
+        SET canonical_block_number = 21100003
+        WHERE chain_id = 'ethereum-mainnet'
+        "#,
+    )
+    .execute(&prune_pool)
+    .await?;
+    let summary = bigname_storage::prune_route_local_primary_name_execution(
+        &prune_pool,
+        1,
+        10,
+    )
+    .await?;
+    assert_eq!(summary.deleted_outcome_count, 1);
+    assert_eq!(summary.deleted_trace_count, 1);
+    hook_control.resume().await;
+
+    let readback = readback_task
+        .await
+        .context("primary-name pruning readback task panicked")?
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "concurrent primary-name pruning returned {} {}: {}",
+                error.status,
+                error.code,
+                error.message
+            )
+        })?;
+    assert!(
+        readback.is_none(),
+        "a concurrently pruned route-local artifact must be treated as a cache miss"
+    );
+
+    prune_pool.close().await;
     database.cleanup().await?;
     Ok(())
 }

@@ -3,14 +3,18 @@ use bigname_storage::{
     PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot,
     VERIFIED_PRIMARY_NAME_INVALIDATION_KEY, VERIFIED_PRIMARY_NAME_LOOKUP_KEY,
     VERIFIED_PRIMARY_NAME_REQUEST_TYPE, delete_primary_name_current_in_transaction,
-    load_primary_name_current_snapshot_for_update_in_transaction, normalize_evm_address,
+    load_primary_name_current_snapshot_for_update_in_transaction,
+    lock_primary_name_tuple_in_transaction, lock_primary_names_current_replacement_in_transaction,
+    normalize_evm_address, publish_primary_names_current_full_rebuild_in_transaction,
     upsert_primary_name_current_snapshots_in_transaction, verified_primary_name_claim_hooks,
 };
 use futures_util::{TryStreamExt, pin_mut};
 use serde_json::{Map, Value, json};
-use sqlx::{PgConnection, PgPool};
+use sqlx::{Connection, PgPool, Postgres, Transaction};
 
-use super::rebuild_heartbeat::{LoopHeartbeat, record_rebuild_progress, run_rebuild_phase};
+use super::rebuild_heartbeat::{
+    LoopHeartbeat, record_rebuild_progress, run_rebuild_phase, run_rebuild_phases,
+};
 
 #[allow(clippy::duplicate_mod)]
 #[path = "../staged_rebuild.rs"]
@@ -21,47 +25,8 @@ use staged_rebuild::{
 };
 
 #[cfg(test)]
-pub(crate) mod test_hooks {
-    use std::sync::Arc;
-
-    use anyhow::Result;
-    use bigname_test_support::{
-        ScopedTestHookGuard, ScopedTestHookRegistry, current_test_database,
-    };
-    use sqlx::PgPool;
-
-    pub(crate) type TargetedRebuildAfterInvalidationHook =
-        Arc<dyn Fn(&str, &str, &str) + Send + Sync + 'static>;
-
-    static TARGETED_REBUILD_AFTER_INVALIDATION_HOOKS: ScopedTestHookRegistry<
-        String,
-        TargetedRebuildAfterInvalidationHook,
-    > = ScopedTestHookRegistry::new();
-
-    pub(crate) async fn install_targeted_rebuild_after_invalidation_hook(
-        pool: &PgPool,
-        hook: TargetedRebuildAfterInvalidationHook,
-    ) -> Result<ScopedTestHookGuard<String, TargetedRebuildAfterInvalidationHook>> {
-        let database = current_database(pool).await?;
-        Ok(TARGETED_REBUILD_AFTER_INVALIDATION_HOOKS.install(database, hook))
-    }
-
-    pub(super) fn run_targeted_rebuild_after_invalidation_hook(
-        database: &str,
-        address: &str,
-        namespace: &str,
-        coin_type: &str,
-    ) {
-        let hook = TARGETED_REBUILD_AFTER_INVALIDATION_HOOKS.get_cloned(&database.to_owned());
-        if let Some(hook) = hook {
-            hook(address, namespace, coin_type);
-        }
-    }
-
-    pub(super) async fn current_database(pool: &PgPool) -> Result<String> {
-        current_test_database(pool).await
-    }
-}
+#[path = "projection/test_hooks.rs"]
+pub(crate) mod test_hooks;
 
 use super::{
     PrimaryNamesCurrentRebuildSummary,
@@ -116,6 +81,8 @@ async fn rebuild_all_primary_names(
     pool: &PgPool,
     mut loop_heartbeat: Option<&mut LoopHeartbeat>,
 ) -> Result<PrimaryNamesCurrentRebuildSummary> {
+    #[cfg(test)]
+    let test_database = test_hooks::current_database(pool).await?;
     let mut conn = pool
         .acquire()
         .await
@@ -166,21 +133,48 @@ async fn rebuild_all_primary_names(
             stage_primary_names_current_snapshots(&mut conn, &stage_table, &projections).await?
                 as usize;
     }
-    run_rebuild_phase(
+    // Both long-operation phase markers are established before the replacement
+    // transaction starts and cleared after it commits. This preserves the
+    // invalidation and publication liveness evidence without writing a
+    // heartbeat while the replacement advisory lock is held.
+    let (_deleted_row_count, published_row_count) = run_rebuild_phases(
         pool,
         &mut loop_heartbeat,
-        "primary_names_current.invalidate_execution_cache",
-        invalidate_full_rebuild_verified_primary_name_claim_changes(&mut conn, &stage_table),
-    )
-    .await?;
-    // Publish through the trigger-disabled path: the per-row identity-feed
-    // triggers take one advisory lock per address and exhaust the lock table
-    // at full-rebuild scale; the sidecars are rebuilt in bulk instead.
-    let (_deleted_row_count, published_row_count) = run_rebuild_phase(
-        pool,
-        &mut loop_heartbeat,
-        "primary_names_current.publish",
-        bigname_storage::publish_primary_names_current_full_rebuild(&mut conn, &stage_table),
+        &[
+            "primary_names_current.invalidate_execution_cache",
+            "primary_names_current.publish",
+        ],
+        async {
+            let mut transaction = conn.begin().await.context(
+                "failed to open primary_names_current full-rebuild publication transaction",
+            )?;
+            // Full replacement takes the global advisory lock before
+            // invalidation. Tuple readers and writers first join the shared
+            // side of this fence, so no verified outcome can be persisted
+            // between invalidation and publication.
+            lock_primary_names_current_replacement_in_transaction(&mut transaction).await?;
+            invalidate_full_rebuild_verified_primary_name_claim_changes(
+                &mut transaction,
+                &stage_table,
+            )
+            .await?;
+            #[cfg(test)]
+            test_hooks::run_full_rebuild_after_invalidation_hook(&test_database);
+            // Publish through the trigger-disabled path: the per-row
+            // identity-feed triggers take one advisory lock per address and
+            // exhaust the lock table at full-rebuild scale; the sidecars are
+            // rebuilt in bulk instead.
+            let published = publish_primary_names_current_full_rebuild_in_transaction(
+                &mut transaction,
+                &stage_table,
+            )
+            .await?;
+            transaction
+                .commit()
+                .await
+                .context("failed to commit primary_names_current full-rebuild publication")?;
+            Ok(published)
+        },
     )
     .await?;
     drop_stage_table(&mut conn, &stage_table).await?;
@@ -225,6 +219,16 @@ async fn rebuild_one_primary_name(
                 target.address, target.namespace, target.coin_type
             )
         })?;
+    // Route-local persistence and readback take this same tuple lock. Taking it
+    // before the projection read keeps invalidation plus publication ordered
+    // with a fallback decision for this tuple only.
+    lock_primary_name_tuple_in_transaction(
+        &mut transaction,
+        &target.address,
+        &target.namespace,
+        &target.coin_type,
+    )
+    .await?;
     let previous_row = load_primary_name_current_snapshot_for_update_in_transaction(
         &mut transaction,
         &target.address,
@@ -317,7 +321,7 @@ async fn rebuild_one_primary_name(
 }
 
 async fn invalidate_full_rebuild_verified_primary_name_claim_changes(
-    conn: &mut PgConnection,
+    transaction: &mut Transaction<'_, Postgres>,
     stage_table: &str,
 ) -> Result<u64> {
     let result = sqlx::query(&format!(
@@ -361,7 +365,7 @@ async fn invalidate_full_rebuild_verified_primary_name_claim_changes(
         "#
     ))
     .bind(VERIFIED_PRIMARY_NAME_REQUEST_TYPE)
-    .execute(conn)
+    .execute(&mut **transaction)
     .await
     .with_context(|| {
         format!(

@@ -29,7 +29,7 @@ mod resolver_edge_query;
 #[path = "hydration/triggers.rs"]
 mod triggers;
 use hydration_query::load_legacy_reverse_hydration_candidates;
-use invalidation::invalidate_changed_hydration_snapshots;
+use invalidation::upsert_changed_hydration_snapshots;
 use resolver_edge::hydrate_resolver_edge_candidates;
 use resolver_edge_query::load_legacy_reverse_resolver_edge_hydration_candidates;
 pub(super) use triggers::load_legacy_reverse_resolver_call_triggers;
@@ -479,8 +479,7 @@ async fn upsert_hydration_snapshots_in_batches_inner(
 
     let mut upserted_row_count = 0usize;
     for (batch_index, chunk) in snapshots.chunks(batch_size).enumerate() {
-        invalidate_changed_hydration_snapshots(pool, chunk).await?;
-        upserted_row_count += bigname_storage::upsert_primary_name_current_snapshots(pool, chunk)
+        upserted_row_count += upsert_changed_hydration_snapshots(pool, chunk)
             .await
             .with_context(|| {
                 format!("failed to upsert legacy reverse hydration snapshot batch {batch_index}")
@@ -558,3 +557,6 @@ fn normalize_node(node: &str) -> String {
 #[cfg(test)]
 #[path = "hydration/tests.rs"]
 mod hydration_tests;
+#[cfg(test)]
+#[path = "hydration/test_hooks.rs"]
+pub(crate) mod test_hooks;

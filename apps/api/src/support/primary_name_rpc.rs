@@ -46,6 +46,9 @@ pub(super) async fn load_on_demand_primary_name_claim(
                 error = %error.message(),
                 "on-demand primary-name reverse lookup failed"
             );
+            if error.is_transport_failure() && !error.is_configured_timeout() {
+                return Err(transient_primary_name_transport_error(address));
+            }
             return Ok(OnDemandPrimaryNameClaimRead {
                 claim: OnDemandPrimaryNameClaimState::Unavailable,
                 evidence,
@@ -145,6 +148,9 @@ pub(super) async fn load_on_demand_primary_name_verification(
                 error = %error.message(),
                 "on-demand primary-name forward verification failed"
             );
+            if error.is_transport_failure() && !error.is_configured_timeout() {
+                return Err(transient_primary_name_transport_error(address));
+            }
             return Ok(OnDemandPrimaryNameVerificationRead {
                 verification: OnDemandPrimaryNameVerificationState::Verified(json!({
                     "status": "execution_failed",
@@ -198,4 +204,14 @@ fn on_demand_primary_name_ref(namespace: &str, normalized_name: &str) -> ApiResu
         "canonical_display_name": normalized_name,
         "namehash": namehash,
     }))
+}
+
+fn transient_primary_name_transport_error(address: &str) -> ApiError {
+    ApiError {
+        status: StatusCode::CONFLICT,
+        code: "stale",
+        message: format!(
+            "verified primary-name execution must be retried for address {address}"
+        ),
+    }
 }

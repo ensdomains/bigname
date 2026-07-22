@@ -49,11 +49,15 @@ pub(super) async fn load_persisted_primary_name_route_fallback_readback(
             "failed to load persisted verified primary-name outcome for address {address}"
         ))
     })?;
-    // A missing tuple cannot be row-locked. Use the same short table-level
-    // fence as route-local persistence so projection writes cannot cross the
-    // absence check and trace readback as two different database states.
-    sqlx::query("LOCK TABLE primary_names_current IN SHARE MODE")
-        .execute(&mut *transaction)
+    // A missing tuple cannot be row-locked. The projection writer takes this
+    // same tuple lock before it observes or changes the row, so the absence
+    // check and trace readback cannot straddle its commit.
+    bigname_storage::lock_primary_name_tuple_in_transaction(
+        &mut transaction,
+        address,
+        namespace,
+        coin_type,
+    )
         .await
         .map_err(|load_error| {
             error!(
@@ -62,7 +66,7 @@ pub(super) async fn load_persisted_primary_name_route_fallback_readback(
                 namespace = %namespace,
                 coin_type = %coin_type,
                 error = ?load_error,
-                "failed to lock route-local primary-name readback fence"
+                "failed to lock route-local primary-name readback tuple"
             );
             ApiError::internal_error(format!(
                 "failed to load persisted verified primary-name outcome for address {address}"

@@ -21,6 +21,8 @@ mod bootstrap_replay;
 mod primary_hydration;
 #[path = "automatic_projection_replay/primary_hydration_loop.rs"]
 mod primary_hydration_loop;
+#[path = "automatic_projection_replay/primary_name_cache_pruning.rs"]
+mod primary_name_cache_pruning;
 #[path = "automatic_projection_replay/shutdown.rs"]
 mod shutdown;
 
@@ -85,6 +87,9 @@ pub(crate) async fn run_worker(args: RunArgs) -> Result<()> {
         automatic_projection_replay = true,
         record_inventory_text_hydration = text_hydration_config.is_some(),
         primary_name_legacy_reverse_hydration = primary_hydration_config.is_some(),
+        primary_name_route_cache_retention_checkpoints =
+            args.primary_name_route_cache_retention_checkpoints,
+        primary_name_route_cache_prune_batch_size = args.primary_name_route_cache_prune_batch_size,
         "worker booted"
     );
 
@@ -94,6 +99,13 @@ pub(crate) async fn run_worker(args: RunArgs) -> Result<()> {
         &heartbeat_instance_id,
     )
     .await?;
+
+    primary_name_cache_pruning::spawn(
+        pool.clone(),
+        args.poll_interval_secs,
+        args.primary_name_route_cache_retention_checkpoints,
+        args.primary_name_route_cache_prune_batch_size,
+    );
 
     let replay_pool = pool.clone();
     let replay_heartbeat_instance_id = heartbeat_instance_id.clone();

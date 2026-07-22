@@ -12,7 +12,9 @@ use bigname_storage::{
     ExecutionOutcome, ExecutionTrace, ExecutionTraceStep, NormalizedEvent, PrimaryNameClaimStatus,
     PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot, VERIFIED_PRIMARY_NAME_REQUEST_TYPE,
     default_database_url, load_execution_outcome, load_primary_name_current_snapshot,
-    upsert_execution_outcome, upsert_execution_trace, upsert_normalized_events,
+    load_primary_name_current_snapshot_for_update_in_transaction, upsert_execution_outcome,
+    upsert_execution_outcome_in_transaction, upsert_execution_trace, upsert_normalized_events,
+    upsert_primary_name_current_snapshots,
 };
 use futures_util::{FutureExt, future::BoxFuture};
 use serde_json::{Value, json};
@@ -474,6 +476,87 @@ async fn hydration_claim_change_invalidates_verified_primary_outcome() -> Result
             .await?
             .is_none(),
         "hydration claim changes must invalidate stale verified-primary outcomes"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn hydration_serializes_invalidation_and_claim_publish_with_verified_primary_producer()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000aaa";
+    let old_snapshot = PrimaryNameCurrentSnapshot {
+        row: PrimaryNameCurrentRow {
+            address: address.to_owned(),
+            namespace: ENS_NAMESPACE.to_owned(),
+            coin_type: "60".to_owned(),
+            claim_status: PrimaryNameClaimStatus::Success,
+            raw_claim_name: None,
+            claim_provenance: json!({"version": "old"}),
+        },
+        normalized_claim_name: Some("alice.eth".to_owned()),
+        claim_name_is_normalized: true,
+    };
+    let mut hydrated_snapshot = old_snapshot.clone();
+    hydrated_snapshot.normalized_claim_name = Some("hydrated.eth".to_owned());
+    hydrated_snapshot.row.claim_provenance = json!({"version": "hydrated"});
+    upsert_primary_name_current_snapshots(database.pool(), std::slice::from_ref(&old_snapshot))
+        .await?;
+
+    let outcome = seed_verified_primary_outcome(
+        database.pool(),
+        Uuid::from_u128(0x0e7ec7ace00000000000000000000111),
+        address,
+        "60",
+    )
+    .await?;
+    let (_hook_guard, hook_control) = test_hooks::install(database.pool()).await?;
+
+    let hydration_pool = database.pool().clone();
+    let hydration_task = tokio::spawn(async move {
+        upsert_hydration_snapshots_in_batches(&hydration_pool, &[hydrated_snapshot], 1).await
+    });
+    hook_control.wait_until_reached().await;
+
+    let producer_pool = database.pool().clone();
+    let producer_outcome = outcome.clone();
+    let mut producer_task = tokio::spawn(async move {
+        let mut transaction = producer_pool.begin().await?;
+        let anchor = load_primary_name_current_snapshot_for_update_in_transaction(
+            &mut transaction,
+            address,
+            ENS_NAMESPACE,
+            "60",
+        )
+        .await?;
+        let persisted = if anchor.as_ref() == Some(&old_snapshot) {
+            upsert_execution_outcome_in_transaction(&mut transaction, &producer_outcome).await?;
+            true
+        } else {
+            false
+        };
+        transaction.commit().await?;
+        Ok::<_, anyhow::Error>(persisted)
+    });
+    let early_producer =
+        tokio::time::timeout(std::time::Duration::from_millis(250), &mut producer_task).await;
+
+    hook_control.resume().await;
+    assert_eq!(hydration_task.await??, 1);
+    let producer_persisted = match early_producer {
+        Ok(result) => result??,
+        Err(_) => producer_task.await??,
+    };
+    assert!(
+        !producer_persisted,
+        "verified-primary producer must revalidate after hydration publishes the changed claim"
+    );
+    assert_eq!(
+        load_execution_outcome(database.pool(), &outcome.cache_key).await?,
+        None,
+        "hydration must not leave an outcome persisted inside its invalidation/publication gap"
     );
 
     database.cleanup().await?;

@@ -18,7 +18,7 @@ pub async fn load_execution_outcome(
 ) -> Result<Option<ExecutionOutcome>> {
     let execution_cache_key = execution_cache_key_storage_key(cache_key)
         .context("failed to derive execution cache key")?;
-    load_execution_outcome_row_internal(pool, &execution_cache_key).await
+    load_execution_outcome_row_internal(pool, &execution_cache_key, false).await
 }
 
 /// Load the newest persisted resolution execution outcome for the selected
@@ -141,22 +141,36 @@ pub async fn upsert_execution_outcome_in_transaction(
         .context("failed to derive execution cache key for execution outcome upsert")?;
 
     if let Some(existing) =
-        load_execution_outcome_row_internal(&mut **transaction, &execution_cache_key).await?
+        load_execution_outcome_row_internal(&mut **transaction, &execution_cache_key, false).await?
     {
         ensure_execution_outcome_identity_matches(&existing, &normalized, &execution_cache_key)?;
     }
 
     upsert_execution_outcome_row(&mut *transaction, &normalized, &execution_cache_key).await?;
 
-    let snapshot = load_execution_outcome_row_internal(&mut **transaction, &execution_cache_key)
-        .await?
-        .with_context(|| {
-            format!(
-                "failed to reload execution outcome for cache key {execution_cache_key} after upsert"
-            )
-        })?;
+    let snapshot = load_execution_outcome_row_internal(
+        &mut **transaction,
+        &execution_cache_key,
+        false,
+    )
+    .await?
+    .with_context(|| {
+        format!(
+            "failed to reload execution outcome for cache key {execution_cache_key} after upsert"
+        )
+    })?;
 
     Ok(snapshot)
+}
+
+/// Load and row-lock one cached outcome inside a caller-owned transaction.
+pub async fn load_execution_outcome_for_update_in_transaction(
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    cache_key: &ExecutionCacheKey,
+) -> Result<Option<ExecutionOutcome>> {
+    let execution_cache_key = execution_cache_key_storage_key(cache_key)
+        .context("failed to derive execution cache key")?;
+    load_execution_outcome_row_internal(&mut **transaction, &execution_cache_key, true).await
 }
 
 pub(super) async fn load_execution_outcomes_for_scope_internal<'e, E>(
@@ -299,11 +313,13 @@ async fn upsert_execution_outcome_row(
 async fn load_execution_outcome_row_internal<'e, E>(
     executor: E,
     execution_cache_key: &str,
+    for_update: bool,
 ) -> Result<Option<ExecutionOutcome>>
 where
     E: Executor<'e, Database = Postgres>,
 {
-    let row = sqlx::query(
+    let lock_clause = if for_update { "FOR UPDATE" } else { "" };
+    let query = format!(
         r#"
         SELECT
             execution_cache_key,
@@ -320,14 +336,16 @@ where
             finished_at
         FROM execution_cache_outcomes
         WHERE execution_cache_key = $1
-        "#,
-    )
-    .bind(execution_cache_key)
-    .fetch_optional(executor)
-    .await
-    .with_context(|| {
-        format!("failed to load execution outcome for cache key {execution_cache_key}")
-    })?;
+        {lock_clause}
+        "#
+    );
+    let row = sqlx::query(&query)
+        .bind(execution_cache_key)
+        .fetch_optional(executor)
+        .await
+        .with_context(|| {
+            format!("failed to load execution outcome for cache key {execution_cache_key}")
+        })?;
 
     row.map(decode_execution_outcome_row).transpose()
 }

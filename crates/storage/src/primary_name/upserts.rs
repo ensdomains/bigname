@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use sqlx::{PgPool, Postgres};
 
+use super::lock::lock_primary_name_tuple_in_transaction;
 use super::rows::decode_primary_name_current_snapshot;
 use super::types::{PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot, normalize_address};
 use super::validation::validate_primary_name_current_snapshot;
@@ -81,6 +82,13 @@ pub async fn upsert_primary_name_current_snapshots_in_transaction(
     let mut persisted = vec![None; snapshots.len()];
     for (input_index, snapshot) in ordered_snapshots {
         validate_primary_name_current_snapshot(snapshot)?;
+        lock_primary_name_tuple_in_transaction(
+            transaction,
+            &snapshot.row.address,
+            &snapshot.row.namespace,
+            &snapshot.row.coin_type,
+        )
+        .await?;
         persisted[input_index] = Some(
             upsert_primary_name_current_snapshot(transaction, snapshot)
                 .await

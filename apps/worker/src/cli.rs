@@ -47,6 +47,20 @@ pub(crate) struct RunArgs {
     #[arg(long, env = "BIGNAME_HEARTBEAT_INSTANCE_ID")]
     pub(crate) heartbeat_instance_id: Option<String>,
     #[arg(
+        long,
+        env = "BIGNAME_WORKER_PRIMARY_NAME_ROUTE_CACHE_RETENTION_CHECKPOINTS",
+        default_value_t = 50_000_i64,
+        value_parser = parse_positive_i64,
+    )]
+    pub(crate) primary_name_route_cache_retention_checkpoints: i64,
+    #[arg(
+        long,
+        env = "BIGNAME_WORKER_PRIMARY_NAME_ROUTE_CACHE_PRUNE_BATCH_SIZE",
+        default_value_t = 5_000_i64,
+        value_parser = parse_positive_i64,
+    )]
+    pub(crate) primary_name_route_cache_prune_batch_size: i64,
+    #[arg(
         long = "chain-rpc-url",
         env = "BIGNAME_WORKER_CHAIN_RPC_URLS",
         value_delimiter = ','

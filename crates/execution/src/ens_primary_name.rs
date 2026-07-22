@@ -16,6 +16,9 @@ const ENS_REGISTRY_RESOLVER_SELECTOR: &str = "0x0178b8bf";
 const ENS_REVERSE_NAME_SELECTOR: &str = "0x691f3431";
 const ENS_UNIVERSAL_RESOLVER_RESOLVE_SELECTOR: &str = "0x9061b923";
 
+#[path = "ens_primary_name/error.rs"]
+mod error;
+pub use error::{OnDemandEnsPrimaryNameError, OnDemandEnsPrimaryNameErrorKind};
 #[path = "ens_primary_name/route_fallback.rs"]
 mod route_fallback;
 pub(crate) use route_fallback::validate_route_local_ens_primary_name_execution;
@@ -82,93 +85,6 @@ pub struct OnDemandEnsPrimaryNameVerification {
     pub resolved_address: Option<String>,
     pub evidence: OnDemandEnsPrimaryNameExecutionEvidence,
 }
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OnDemandEnsPrimaryNameErrorKind {
-    Configuration,
-    Execution,
-}
-
-#[derive(Debug)]
-pub struct OnDemandEnsPrimaryNameError {
-    kind: OnDemandEnsPrimaryNameErrorKind,
-    message: String,
-    plain_execution_revert: bool,
-    offchain_lookup_required: bool,
-    evidence: OnDemandEnsPrimaryNameExecutionEvidence,
-}
-
-impl OnDemandEnsPrimaryNameError {
-    fn configuration(message: impl Into<String>) -> Self {
-        Self {
-            kind: OnDemandEnsPrimaryNameErrorKind::Configuration,
-            message: message.into(),
-            plain_execution_revert: false,
-            offchain_lookup_required: false,
-            evidence: OnDemandEnsPrimaryNameExecutionEvidence::default(),
-        }
-    }
-
-    fn execution(message: impl Into<String>) -> Self {
-        Self::execution_with_rpc_flags(message, false, false)
-    }
-
-    fn execution_with_rpc_flags(
-        message: impl Into<String>,
-        plain_execution_revert: bool,
-        offchain_lookup_required: bool,
-    ) -> Self {
-        Self {
-            kind: OnDemandEnsPrimaryNameErrorKind::Execution,
-            message: message.into(),
-            plain_execution_revert,
-            offchain_lookup_required,
-            evidence: OnDemandEnsPrimaryNameExecutionEvidence::default(),
-        }
-    }
-
-    pub const fn kind(&self) -> OnDemandEnsPrimaryNameErrorKind {
-        self.kind
-    }
-
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-
-    pub const fn is_plain_execution_revert(&self) -> bool {
-        self.plain_execution_revert
-    }
-
-    pub const fn is_offchain_lookup_required(&self) -> bool {
-        self.offchain_lookup_required
-    }
-
-    pub fn evidence(&self) -> &OnDemandEnsPrimaryNameExecutionEvidence {
-        &self.evidence
-    }
-
-    fn with_evidence(mut self, evidence: OnDemandEnsPrimaryNameExecutionEvidence) -> Self {
-        self.evidence = evidence;
-        self
-    }
-
-    #[doc(hidden)]
-    pub fn synthetic_execution_rpc_error_for_tests(
-        message: impl Into<String>,
-        plain_execution_revert: bool,
-        offchain_lookup_required: bool,
-    ) -> Self {
-        Self::execution_with_rpc_flags(message, plain_execution_revert, offchain_lookup_required)
-    }
-}
-
-impl std::fmt::Display for OnDemandEnsPrimaryNameError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{}", self.message)
-    }
-}
-
-impl std::error::Error for OnDemandEnsPrimaryNameError {}
 
 pub async fn lookup_ens_reverse_primary_name(
     request: OnDemandEnsPrimaryNameRequest<'_>,
@@ -483,22 +399,25 @@ async fn eth_call_result_with_block_selector(
     calldata: &[u8],
     block_selector: Value,
 ) -> std::result::Result<JsonRpcCallResult, OnDemandEnsPrimaryNameError> {
-    rpc.call(
-        "eth_call",
-        vec![
-            json!({
-                "to": to,
-                "data": hex_string(calldata),
-            }),
-            block_selector,
-        ],
-    )
-    .await
-    .map_err(|error| {
-        OnDemandEnsPrimaryNameError::execution(format!(
-            "failed to execute ENS primary-name RPC call: {error}"
-        ))
-    })
+    match rpc
+        .call(
+            "eth_call",
+            vec![
+                json!({
+                    "to": to,
+                    "data": hex_string(calldata),
+                }),
+                block_selector,
+            ],
+        )
+        .await
+    {
+        Ok(result) => Ok(result),
+        Err(error) => Err(OnDemandEnsPrimaryNameError::transport(
+            format!("failed to execute ENS primary-name RPC call: {error}"),
+            rpc.is_configured_timeout(&error),
+        )),
+    }
 }
 
 fn decode_eth_call_result(

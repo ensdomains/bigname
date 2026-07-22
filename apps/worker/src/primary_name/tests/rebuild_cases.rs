@@ -13,7 +13,9 @@ use bigname_storage::{
     CanonicalityState, ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, ExecutionTraceStep,
     NormalizedEvent, PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot,
     load_execution_outcome, load_primary_name_current, load_primary_name_current_snapshot,
-    upsert_execution_outcome, upsert_execution_trace, upsert_normalized_events,
+    load_primary_name_current_snapshot_for_update_in_transaction,
+    lock_primary_name_tuple_in_transaction, upsert_execution_outcome,
+    upsert_execution_outcome_in_transaction, upsert_execution_trace, upsert_normalized_events,
     upsert_primary_name_current_rows, upsert_primary_name_current_snapshots,
 };
 use serde_json::{Value, json};
@@ -563,7 +565,6 @@ async fn targeted_rebuild_serializes_claim_publish_with_verified_primary_produce
             .expect("producer result receiver must stay open");
     });
     let early_producer_result = producer_rx.recv_timeout(Duration::from_secs(2)).ok();
-
     {
         let (lock, condvar) = &*hook_state;
         let mut state = lock
@@ -590,7 +591,6 @@ async fn targeted_rebuild_serializes_claim_publish_with_verified_primary_produce
     producer_thread
         .join()
         .map_err(|_| anyhow::anyhow!("verified-primary producer test thread panicked"))?;
-
     assert!(
         producer_result.is_err()
             || load_execution_outcome(database.pool(), &stale_cache_key)
@@ -751,6 +751,185 @@ async fn full_rebuild_invalidates_changed_verified_primary_cache_without_touchin
     assert_eq!(
         load_execution_outcome(database.pool(), &sibling_outcome.cache_key).await?,
         Some(sibling_outcome)
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn full_rebuild_serializes_invalidation_and_publish_with_verified_primary_producer()
+-> Result<()> {
+    struct HookState {
+        reached: bool,
+        release: bool,
+    }
+
+    let database = TestDatabase::new_with_max_connections(12).await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    upsert_normalized_events(
+        database.pool(),
+        &[
+            reverse_changed_event(
+                "full-reverse-serialize",
+                address,
+                "60",
+                330,
+                0,
+                CanonicalityState::Canonical,
+            ),
+            reverse_linked_name_event(
+                "full-record-serialize-old",
+                address,
+                "60",
+                Some("alice.eth"),
+                331,
+                0,
+                CanonicalityState::Canonical,
+            ),
+        ],
+    )
+    .await?;
+    rebuild_primary_names_current(database.pool(), None, None, None).await?;
+
+    let old_snapshot = load_primary_name_current_snapshot(database.pool(), address, "ens", "60")
+        .await?
+        .expect("full rebuild serialization setup must publish the old claim");
+    let stale_outcome = seed_verified_primary_outcome(
+        &database,
+        Uuid::from_u128(0x5e7100000000000000000000000200a1),
+        address,
+        "60",
+        1_717_180_201,
+    )
+    .await?;
+    upsert_normalized_events(
+        database.pool(),
+        &[reverse_linked_name_event(
+            "full-record-serialize-new",
+            address,
+            "60",
+            Some("bob.eth"),
+            332,
+            0,
+            CanonicalityState::Canonical,
+        )],
+    )
+    .await?;
+
+    let hook_state = Arc::new((
+        Mutex::new(HookState {
+            reached: false,
+            release: false,
+        }),
+        Condvar::new(),
+    ));
+    let hook_state_for_hook = Arc::clone(&hook_state);
+    let _hook_guard = test_hooks::install_full_rebuild_after_invalidation_hook(
+        database.pool(),
+        Arc::new(move || {
+            let (lock, condvar) = &*hook_state_for_hook;
+            let mut state = lock.lock().expect("full rebuild hook state mutex poisoned");
+            state.reached = true;
+            condvar.notify_all();
+            while !state.release {
+                state = condvar
+                    .wait(state)
+                    .expect("full rebuild hook state mutex poisoned while waiting");
+            }
+        }),
+    )
+    .await?;
+
+    let worker_pool = database.pool().clone();
+    let worker_thread = std::thread::spawn(move || -> Result<PrimaryNamesCurrentRebuildSummary> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("failed to build full primary-name rebuild test runtime")?;
+        runtime
+            .block_on(rebuild_primary_names_current(
+                &worker_pool,
+                None,
+                None,
+                None,
+            ))
+            .context("full primary-name rebuild failed in serialization test")
+    });
+
+    let hook_state_for_wait = Arc::clone(&hook_state);
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let (lock, condvar) = &*hook_state_for_wait;
+        let mut state = lock.lock().expect("full rebuild hook state mutex poisoned");
+        while !state.reached {
+            state = condvar
+                .wait(state)
+                .expect("full rebuild hook state mutex poisoned while waiting");
+        }
+        Ok(())
+    })
+    .await
+    .context("full rebuild hook wait task panicked")??;
+
+    let stale_cache_key = stale_outcome.cache_key.clone();
+    let producer_pool = database.pool().clone();
+    let mut producer_task = tokio::spawn(async move {
+        let mut transaction = producer_pool.begin().await?;
+        lock_primary_name_tuple_in_transaction(&mut transaction, address, "ens", "60").await?;
+        let anchor = load_primary_name_current_snapshot_for_update_in_transaction(
+            &mut transaction,
+            address,
+            "ens",
+            "60",
+        )
+        .await?;
+        let persisted = if anchor.as_ref() == Some(&old_snapshot) {
+            upsert_execution_outcome_in_transaction(&mut transaction, &stale_outcome).await?;
+            true
+        } else {
+            false
+        };
+        transaction.commit().await?;
+        Ok::<_, anyhow::Error>(persisted)
+    });
+    let early_producer = tokio::time::timeout(Duration::from_millis(250), &mut producer_task).await;
+
+    {
+        let (lock, condvar) = &*hook_state;
+        let mut state = lock.lock().expect("full rebuild hook state mutex poisoned");
+        state.release = true;
+        condvar.notify_all();
+    }
+    let worker_summary = tokio::task::spawn_blocking(move || {
+        worker_thread
+            .join()
+            .map_err(|_| anyhow::anyhow!("full primary-name rebuild test thread panicked"))?
+    })
+    .await
+    .context("full primary-name rebuild join task panicked")??;
+    assert_eq!(worker_summary.upserted_row_count, 1);
+    let producer_was_blocked = early_producer.is_err();
+    let producer_persisted = match early_producer {
+        Ok(result) => result??,
+        Err(_) => producer_task.await??,
+    };
+    assert!(
+        producer_was_blocked,
+        "verified-primary producer must wait for full-rebuild invalidation and publication"
+    );
+    assert!(
+        !producer_persisted,
+        "verified-primary producer must revalidate after full rebuild publishes the changed claim"
+    );
+    assert_eq!(
+        load_execution_outcome(database.pool(), &stale_cache_key).await?,
+        None,
+        "full claim replacement must not leave a stale verified-primary outcome"
+    );
+    assert_eq!(
+        load_primary_name_current_snapshot(database.pool(), address, "ens", "60")
+            .await?
+            .and_then(|snapshot| snapshot.normalized_claim_name),
+        Some("bob.eth".to_owned())
     );
 
     database.cleanup().await

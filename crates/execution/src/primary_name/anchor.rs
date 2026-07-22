@@ -1,5 +1,8 @@
 use anyhow::{Context, Result, bail};
-use bigname_storage::{PrimaryNameClaimStatus, load_primary_name_current_snapshot};
+use bigname_storage::{
+    PrimaryNameClaimStatus, load_primary_name_current_snapshot,
+    lock_primary_name_tuple_in_transaction,
+};
 use sqlx::{PgPool, Postgres, Transaction};
 
 use super::context::verified_primary_context_label;
@@ -68,6 +71,17 @@ pub(crate) async fn ensure_primary_name_anchor_matches_in_transaction(
     verified_primary_name: &VerifiedPrimaryNameSection,
 ) -> Result<()> {
     let context = verified_primary_context_label(&tuple.namespace)?;
+    // Join the same tuple/full-replacement fence used by projection writers
+    // before row-locking the materialized anchor. This keeps full-rebuild
+    // invalidation plus publication indivisible from verified persistence.
+    lock_primary_name_tuple_in_transaction(
+        transaction,
+        &tuple.normalized_address,
+        &tuple.namespace,
+        &tuple.coin_type,
+    )
+    .await
+    .context("failed to lock materialized primary-name persistence tuple")?;
     let Some(anchor) = sqlx::query_as::<_, LockedPrimaryNameAnchor>(
         r#"
         SELECT claim_status, normalized_claim_name, claim_name_is_normalized
@@ -113,13 +127,17 @@ pub(crate) async fn ensure_primary_name_anchor_absent_in_transaction(
     tuple: &VerifiedPrimaryNameTuple,
 ) -> Result<()> {
     let context = verified_primary_context_label(&tuple.namespace)?;
-    // PostgreSQL cannot row-lock a tuple that does not exist. Hold a short SHARE
-    // table lock so projection inserts/updates wait until the absence check and
-    // execution trace commit as one serialized decision.
-    sqlx::query("LOCK TABLE primary_names_current IN SHARE MODE")
-        .execute(&mut **transaction)
-        .await
-        .context("failed to lock primary_names_current for route-local persistence")?;
+    // A missing row cannot be row-locked. The projection writer takes this
+    // same tuple lock before it observes or changes the row, so absence and
+    // route-local persistence remain one serialized decision.
+    lock_primary_name_tuple_in_transaction(
+        transaction,
+        &tuple.normalized_address,
+        &tuple.namespace,
+        &tuple.coin_type,
+    )
+    .await
+    .context("failed to lock route-local primary-name persistence tuple")?;
     let anchor_exists = sqlx::query_scalar::<_, bool>(
         r#"
         SELECT EXISTS (
