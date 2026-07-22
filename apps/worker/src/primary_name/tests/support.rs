@@ -25,6 +25,7 @@ static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 pub(super) struct TestDatabase {
     admin_pool: PgPool,
     pool: PgPool,
+    connect_options: PgConnectOptions,
     database_name: String,
 }
 
@@ -57,9 +58,10 @@ impl TestDatabase {
             .await
             .with_context(|| format!("failed to create test database {database_name}"))?;
 
+        let connect_options = base_options.database(&database_name);
         let pool = PgPoolOptions::new()
             .max_connections(max_connections)
-            .connect_with(base_options.database(&database_name))
+            .connect_with(connect_options.clone())
             .await
             .context("failed to connect worker primary_names_current test pool")?;
 
@@ -71,12 +73,25 @@ impl TestDatabase {
         Ok(Self {
             admin_pool,
             pool,
+            connect_options,
             database_name,
         })
     }
 
     pub(super) fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    // sqlx connections register IO with the runtime driver current at creation;
+    // pooled connections shared across the test's helper runtimes lose wakeups
+    // when the owning runtime blocks (mpsc recv_timeout on the current_thread
+    // test runtime) or error once it is dropped. Serialization tests that run
+    // rebuild/producer work on dedicated threads take a lazily-connecting pool
+    // per thread so every connection lives and dies with its runtime.
+    pub(super) fn independent_pool(&self, max_connections: u32) -> PgPool {
+        PgPoolOptions::new()
+            .max_connections(max_connections)
+            .connect_lazy_with(self.connect_options.clone())
     }
 
     pub(super) async fn cleanup(self) -> Result<()> {
