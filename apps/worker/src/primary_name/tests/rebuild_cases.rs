@@ -584,8 +584,11 @@ async fn targeted_rebuild_serializes_claim_publish_with_verified_primary_produce
     assert_eq!(worker_summary.upserted_row_count, 1);
     let producer_result = match early_producer_result {
         Some(result) => result,
+        // Liveness bound only; generous because parallel test setup runs CREATE INDEX
+        // CONCURRENTLY migrations that wait out this test's deliberately paused transaction,
+        // starving the runner (flaked at 5s in CI).
         None => producer_rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(Duration::from_secs(60))
             .context("producer did not finish after targeted rebuild publish")?,
     };
     producer_thread
