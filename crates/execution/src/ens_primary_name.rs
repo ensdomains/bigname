@@ -239,7 +239,7 @@ fn primary_name_rpc(
             "primary-name RPC provider for {ETHEREUM_MAINNET_CHAIN_ID} is not configured; set BIGNAME_API_CHAIN_RPC_URLS={ETHEREUM_MAINNET_CHAIN_ID}=<url>"
         )));
     };
-    JsonRpcHttpClient::new(provider_url).map_err(|error| {
+    JsonRpcHttpClient::new_for_rpc_urls(provider_url, chain_rpc_urls).map_err(|error| {
         OnDemandEnsPrimaryNameError::configuration(format!(
             "primary-name RPC provider for {ETHEREUM_MAINNET_CHAIN_ID} is invalid: {error}"
         ))

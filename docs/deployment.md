@@ -165,12 +165,17 @@ missing from execution storage, the API executes them against the selected
 exact-name snapshot, persists the trace/outcome, and then returns the result.
 With no `at` or `chain_positions` selector, that target is `consistency=head` at
 the latest stored Ethereum checkpoint, not provider latest. Missing API provider
-configuration or a provider that cannot serve the selected block must fail
-closed; v1 returns `409 stale`, while v2 product routes return their documented
-in-band `status=stale`/`failure_reason` envelope. Neither generation may fall
-back to declared record cache for verified values. The indexer RPC setting and
-Reth DB source settings do not satisfy this API live-execution provider
-requirement by themselves.
+configuration or a JSON-RPC response recognized as unable to serve the selected
+block must fail closed; v1 returns `409 stale`, while v2 product routes return
+their documented in-band `status=stale`/`failure_reason` envelope. For on-demand
+verified record resolution, expiration of an API-configured provider connect or
+total-response deadline instead returns and persists the affected selector's
+in-band execution-failure class. Other record-resolution transport failures,
+including DNS, TLS, and connection-reset errors, abort without persisting an
+outcome so the next read retries. Neither generation may fall back to declared
+record cache for verified values. The indexer RPC setting and Reth DB source
+settings do not satisfy this API live-execution provider requirement by
+themselves.
 
 When `GET /v1/primary-names/{address}` defaults to
 `namespace=ens&coin_type=60` and the persisted tuple is missing, a configured
@@ -186,6 +191,50 @@ outcome before responding; an identical request at the same selected checkpoint
 can reuse that trace without another provider call. Forward-verification
 provider failure after a reverse claim likewise returns
 `verified_primary_name.status=execution_failed`.
+
+### API bounds for public undrain
+
+Every API route is covered by the request deadline. `/healthz` bypasses the
+shared HTTP load-shed ceiling and uses a separate health ceiling. Its `SELECT 1`
+runs on a persistent one-connection readiness pool instead of the request pool,
+and the entire database check is limited to two seconds. Consequently both
+HTTP-concurrency saturation and exhaustion of the request database pool are
+answered within the compose probe's five-second window: a healthy but busy
+process still returns `200` with `status="ready"`, while a failed or timed-out
+readiness connection returns `503` with `status="degraded"`. The database
+round-trip is retained deliberately so a process that cannot reach PostgreSQL
+does not report ready. The separate health ceiling prevents unbounded probe
+work. The status routes retain global admission because their aggregate
+database query can be expensive under backlog. Requests whose route and
+source/mode can initiate verified execution also pass through a separate
+concurrency ceiling and, when enabled, a client token bucket keyed by an IPv4
+address or IPv6 `/64` before handler work starts. Configure the API service with
+these values before public undrain; binary defaults remain generous for
+development and test workloads. The readiness connection is additional to the
+primary-pool limit set by `BIGNAME_DATABASE_MAX_CONNECTIONS`.
+
+| Environment variable | Binary default | Undrain starting value |
+| --- | ---: | ---: |
+| `BIGNAME_API_REQUEST_TIMEOUT_MS` | `30000` | `30000` |
+| `BIGNAME_API_DB_STATEMENT_TIMEOUT_MS` | `25000` | `25000` |
+| `BIGNAME_API_MAX_IN_FLIGHT` | `1024` | `256` |
+| `BIGNAME_API_HEALTH_MAX_IN_FLIGHT` | `4` | `4` |
+| `BIGNAME_API_VERIFIED_EXECUTION_MAX_IN_FLIGHT` | `128` | `16` |
+| `BIGNAME_API_RPC_CONNECT_TIMEOUT_MS` | `2000` | `2000` |
+| `BIGNAME_API_RPC_TIMEOUT_MS` | `8000` | `8000` |
+| `BIGNAME_API_VERIFIED_RATE_LIMIT_PER_SECOND` | `0` (off) | `1` |
+| `BIGNAME_API_VERIFIED_RATE_LIMIT_BURST` | `10` | `5` |
+| `BIGNAME_API_VERIFIED_RATE_LIMIT_MAX_CLIENTS` | `65536` | `65536` |
+| `BIGNAME_API_TRUST_X_FORWARDED_FOR` | `false` | `true` |
+
+The binary leaves IP rate limiting off because there is no authenticated stable
+client identifier and shared addresses are common. The public-undrain values
+enable it as an operational starting policy. Forwarded client addresses are
+ignored unless `BIGNAME_API_TRUST_X_FORWARDED_FOR=true`; the undrain example may
+enable that trust because it binds the host-published API port to `127.0.0.1`
+and sends public traffic through Caddy. See
+[`production.md`](production.md#api-request-bounds) for response codes,
+fallback identity behavior, and tuning guidance.
 
 The worker may use the same provider shape for projection-owned ENSv1 text
 hydration, configured as

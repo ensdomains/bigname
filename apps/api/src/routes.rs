@@ -35,6 +35,7 @@ pub(crate) struct ApiRouteErrorResponses {
     pub(crate) include_not_found: bool,
     pub(crate) bad_request_description: Option<&'static str>,
     pub(crate) include_conflict: bool,
+    pub(crate) include_rate_limit: bool,
 }
 
 impl ApiRouteDefinition {
@@ -63,6 +64,10 @@ impl ApiRouteDefinition {
             path,
             contract: Some(contract),
         }
+    }
+
+    pub(crate) const fn bypasses_global_load_shed(self) -> bool {
+        matches!(self.id, ApiRouteId::Health)
     }
 }
 
@@ -99,6 +104,7 @@ impl ApiRouteErrorResponses {
             include_not_found,
             bad_request_description: None,
             include_conflict: false,
+            include_rate_limit: false,
         }
     }
 
@@ -108,6 +114,7 @@ impl ApiRouteErrorResponses {
             include_not_found: true,
             bad_request_description: Some("Invalid snapshot selector"),
             include_conflict: true,
+            include_rate_limit: false,
         }
     }
 
@@ -117,7 +124,13 @@ impl ApiRouteErrorResponses {
             include_not_found,
             bad_request_description: None,
             include_conflict: true,
+            include_rate_limit: false,
         }
+    }
+
+    const fn verified_execution(mut self) -> Self {
+        self.include_rate_limit = true;
+        self
     }
 }
 
@@ -222,7 +235,7 @@ pub(crate) const API_ROUTE_DEFINITIONS: &[ApiRouteDefinition] = &[
             "Resolution",
             PRIMARY_NAMES_PARAMETERS,
             "PrimaryNameResponse",
-            ApiRouteErrorResponses::conflict(true),
+            ApiRouteErrorResponses::conflict(true).verified_execution(),
         ),
     ),
     ApiRouteDefinition::public_get(
@@ -306,7 +319,7 @@ pub(crate) const API_ROUTE_DEFINITIONS: &[ApiRouteDefinition] = &[
             "Resolution",
             NAME_RECORDS_PARAMETERS,
             "CompactNameRecordsResponse",
-            ApiRouteErrorResponses::new(true, true),
+            ApiRouteErrorResponses::new(true, true).verified_execution(),
         ),
     ),
     ApiRouteDefinition::public_get(
@@ -342,7 +355,7 @@ pub(crate) const API_ROUTE_DEFINITIONS: &[ApiRouteDefinition] = &[
             "Names",
             NAME_PROFILE_PARAMETERS,
             "NameProfileResponse",
-            ApiRouteErrorResponses::conflict(true),
+            ApiRouteErrorResponses::conflict(true).verified_execution(),
         ),
     ),
     ApiRouteDefinition::public_get(

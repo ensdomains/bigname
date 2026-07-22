@@ -38,6 +38,7 @@ use sqlx::{
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+mod bounds;
 mod cli;
 mod errors;
 mod graphql;
@@ -49,6 +50,7 @@ mod types;
 mod v2;
 
 use crate::{
+    bounds::ApiBoundsConfig,
     cli::*,
     errors::{ApiError, ApiResult},
     pagination::{

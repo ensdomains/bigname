@@ -23,7 +23,7 @@ const NAME_PROFILE_MODE_QUERY: ApiRouteParameter = ApiRouteParameter::query(
 );
 const TEXTS_QUERY: ApiRouteParameter = ApiRouteParameter::csv_query(
     "texts",
-    "Requested text record keys.",
+    "Requested text record keys. Across texts, coin_types, avatar, and content_hash, modes that can use verified execution accept at most 200 explicit selectors.",
     ApiParameterSchema::String,
 );
 const KNOWN_TEXT_KEYS_QUERY: ApiRouteParameter = ApiRouteParameter::query(
@@ -43,7 +43,7 @@ const CONTENT_HASH_QUERY: ApiRouteParameter = ApiRouteParameter::query(
 );
 const COIN_TYPES_QUERY: ApiRouteParameter = ApiRouteParameter::csv_query(
     "coin_types",
-    "Requested textual coin-type selector keys; decimal addr coin types are canonicalized as unsigned 64-bit decimal text before duplicate detection, and exact or canonical duplicates are invalid input.",
+    "Requested textual coin-type selector keys; decimal addr coin types are canonicalized as unsigned 64-bit decimal text before duplicate detection, and exact or canonical duplicates are invalid input. Across texts, coin_types, avatar, and content_hash, modes that can use verified execution accept at most 200 explicit selectors.",
     ApiParameterSchema::String,
 );
 const RECORDS_INCLUDE_DECLARED_QUERY: ApiRouteParameter = ApiRouteParameter::csv_query(

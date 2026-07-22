@@ -68,7 +68,7 @@ pub async fn execute_ens_reverse_name_multicall(
     let rpc_url = rpc_urls
         .url_for(chain_id)
         .with_context(|| format!("missing chain RPC URL for {chain_id}"))?;
-    let rpc = JsonRpcHttpClient::new(rpc_url)?;
+    let rpc = JsonRpcHttpClient::new_for_rpc_urls(rpc_url, rpc_urls)?;
     let multicall3 = parse_address(multicall3_address, "multicall3")?;
     let calls = requests
         .iter()

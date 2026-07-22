@@ -154,11 +154,13 @@ pub async fn execute_ens_universal_resolver_verified_resolution(
             "verified resolution RPC provider for {ETHEREUM_MAINNET_CHAIN_ID} is not configured; set BIGNAME_API_CHAIN_RPC_URLS={ETHEREUM_MAINNET_CHAIN_ID}=<url>"
         )));
     };
-    let rpc = JsonRpcHttpClient::new(provider_url).map_err(|error| {
+    let rpc = JsonRpcHttpClient::new_for_rpc_urls(provider_url, request.chain_rpc_urls).map_err(
+        |error| {
         OnDemandEnsResolutionError::configuration(format!(
             "verified resolution RPC provider for {ETHEREUM_MAINNET_CHAIN_ID} is invalid: {error}"
         ))
-    })?;
+    },
+    )?;
 
     let built = build_on_demand_request(
         request.row,

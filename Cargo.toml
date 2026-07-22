@@ -40,7 +40,7 @@ ens-normalize = "0.1.1"
 serde = { version = "1.0.228", features = ["derive"] }
 futures-util = "0.3.31"
 sqlx = { version = "0.8.6", default-features = false, features = ["macros", "migrate", "postgres", "runtime-tokio-rustls", "uuid"] }
-tokio = { version = "1.48.0", features = ["macros", "net", "rt-multi-thread", "signal"] }
+tokio = { version = "1.48.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt", "json"] }
 uuid = { version = "1.18.1", features = ["serde", "v4"] }

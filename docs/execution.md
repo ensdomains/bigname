@@ -17,7 +17,7 @@ Every step is attributable in provenance. One request may cover multiple explici
 
 Before persisting a selector-local result as a supported, cache-eligible outcome, execution reloads from storage the manifest versions, the same declared topology snapshot the mixed route would serve, and any [resolver-profile](glossary.md) [admission](glossary.md) state required by the participating resolver-local fact families. The namespace support class is derived from those stored inputs, not from transient trace shape. If revalidation cannot re-establish a frozen supported class, audit material may persist but supported-outcome persistence fails closed.
 
-Unsupported record families surface explicit `status=unsupported`; they never silently degrade to declared cache values. Supported requests that cannot produce a trustworthy answer return `status=execution_failed` with a typed `failure_reason`; plain resolver reverts are `resolver_call_reverted`, malformed return data is `resolver_return_data_malformed`, and unclassified provider-side call errors remain `resolver_call_failed`.
+Unsupported record families surface explicit `status=unsupported`; they never silently degrade to declared cache values. Supported requests that cannot produce a trustworthy answer return `status=execution_failed` with a typed `failure_reason`; plain resolver reverts are `resolver_call_reverted`, malformed return data is `resolver_return_data_malformed`, and unclassified provider-side JSON-RPC response errors remain `resolver_call_failed`. Cache-eligible in-band failures are limited to completed JSON-RPC responses, malformed successful response payloads, and expiration of the API's configured provider connect or total-response deadline. A JSON-RPC response recognized as unable to serve the selected block and any non-timeout transport failure abort before trace or outcome persistence.
 
 ### Namespaces and entrypoints
 
@@ -59,11 +59,18 @@ Live-execution rules:
   latest, a newer checkpoint, or a different snapshot mid-request
 - the API Ethereum RPC provider must be configured
   (`BIGNAME_API_CHAIN_RPC_URLS=ethereum-mainnet=<url>`) and able to serve the
-  selected Ethereum block; missing configuration or provider unavailability
-  fails closed rather than falling back to declared cache. `v1` routes surface
-  that as `409 stale`; `v2` product routes keep the successful envelope and
-  report in-band `status=stale` with `failure_reason` on the affected verified
-  record section.
+  selected Ethereum block; missing configuration or a JSON-RPC response
+  recognized as unable to serve that block fails closed rather than falling
+  back to declared cache. `v1` routes surface that as `409 stale`; `v2`
+  product routes keep the successful envelope and report in-band
+  `status=stale` with `failure_reason` on the affected verified record section.
+  Expiration of the provider connect or total-response deadline instead
+  produces and persists the existing selector-local
+  `execution_failed`/`resolver_call_failed` result, bounded by
+  `BIGNAME_API_RPC_CONNECT_TIMEOUT_MS` and `BIGNAME_API_RPC_TIMEOUT_MS`.
+  Non-timeout transport failures such as DNS resolution, TLS negotiation, or a
+  connection reset abort without persisting a trace or outcome, so a later
+  read retries the provider.
 - unsupported selector families and unsupported verified [path classes](glossary.md) stay
   selector-local `status=unsupported`; on-demand execution does not widen the
   support boundary
@@ -72,11 +79,12 @@ Live-execution rules:
 The compact records routes `GET /v1/names/{namespace}/{name}/records` and
 `GET /v2/names/{name}/records` use the same supported-selector boundary and
 selected stored snapshot as the profile routes. When either route needs
-on-demand ENS verified values, it executes against that snapshot, persists the
-trace and outcome, and fails closed when the provider cannot serve the selected
-block: `v1` returns `409 stale`, while `v2` reports in-band `status=stale` on
-the affected key or flat record. It never targets provider `latest`
-independently of the selected snapshot.
+on-demand ENS verified values, it executes against that snapshot and persists
+the trace and outcome. A JSON-RPC selected-block rejection returns `409 stale`
+in `v1` and in-band `status=stale` in `v2`; expiration of a configured API
+transport deadline is persisted as an in-band `execution_failed` result for the
+affected selector. Other transport failures abort before persistence. It never
+targets provider `latest` independently of the selected snapshot.
 
 ### Namespace inference
 

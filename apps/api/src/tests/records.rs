@@ -1,3 +1,50 @@
+#[test]
+fn verified_compact_records_reject_more_than_200_explicit_selectors() {
+    let query = NameRecordsQuery {
+        mode: Some("verified".to_owned()),
+        texts: Some(
+            (0..201)
+                .map(|index| format!("key-{index}"))
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+        ..NameRecordsQuery::default()
+    };
+
+    let error = parse_compact_name_records_request(
+        &query,
+        CompactNameRecordsDefaultMode::Declared,
+    )
+    .expect_err("201 explicit verified selectors must be rejected");
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error.code, "invalid_input");
+    assert_eq!(
+        error.message,
+        "explicit record request must contain at most 200 selectors when mode can use verified execution"
+    );
+}
+
+#[test]
+fn verified_compact_records_accept_exactly_200_explicit_selectors() {
+    let query = NameRecordsQuery {
+        mode: Some("auto".to_owned()),
+        texts: Some(
+            (0..199)
+                .map(|index| format!("key-{index}"))
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+        coin_types: Some("60".to_owned()),
+        ..NameRecordsQuery::default()
+    };
+
+    assert!(
+        parse_compact_name_records_request(&query, CompactNameRecordsDefaultMode::Declared)
+            .is_ok(),
+        "200 explicit verified selectors must be accepted"
+    );
+}
+
 #[tokio::test]
 async fn get_name_records_returns_declared_compact_summary() -> Result<()> {
     let database = TestDatabase::new_with_schemas(false, true).await?;

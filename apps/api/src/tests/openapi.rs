@@ -240,6 +240,55 @@ fn openapi_document_publishes_only_shipped_routes() {
 }
 
 #[test]
+fn openapi_document_freezes_family_wide_request_bound_errors() {
+    let document = openapi_document();
+    for (path, path_item) in openapi_paths(&document) {
+        let operation = path_item
+            .as_object()
+            .and_then(|item| item.values().next())
+            .expect("published path must expose an operation");
+        assert_eq!(
+            openapi_response_description(operation, "408"),
+            "Request exceeded the configured time limit",
+            "missing request-timeout response on {path}"
+        );
+        assert_eq!(
+            openapi_response_description(operation, "503"),
+            "API is temporarily overloaded",
+            "missing overload response on {path}"
+        );
+    }
+
+    let rate_limited_paths = [
+        "/v1/primary-names/{address}",
+        "/v1/profiles/names/{name}",
+        "/v1/names/{namespace}/{name}/records",
+    ];
+    for path in rate_limited_paths {
+        assert_eq!(
+            openapi_response_description(openapi_operation(&document, path), "429"),
+            "Verified execution request rate limit exceeded"
+        );
+    }
+    for (path, path_item) in openapi_paths(&document) {
+        if rate_limited_paths.contains(&path.as_str()) {
+            continue;
+        }
+        let operation = path_item
+            .as_object()
+            .and_then(|item| item.values().next())
+            .expect("published path must expose an operation");
+        assert!(
+            operation
+                .get("responses")
+                .and_then(|responses| responses.get("429"))
+                .is_none(),
+            "non-execution route must not publish 429: {path}"
+        );
+    }
+}
+
+#[test]
 fn openapi_document_uses_package_version_and_freezes_health_identity() {
     let document = openapi_document();
 
