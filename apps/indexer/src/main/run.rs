@@ -120,41 +120,16 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         &mut startup_heartbeat,
     )
     .await?;
-    if run_mode.sync_adapter_after_startup_backfill {
-        info!(
-            service = "indexer",
-            adapter_sync_mode = adapter_sync_mode.as_str(),
-            effective_backfill_adapter_sync_mode =
-                run_mode.startup_backfill_adapter_sync_mode.as_str(),
-            "startup bootstrap backfill drained; syncing adapter-owned raw-log state before live polling"
-        );
-        sync_adapter_owned_raw_log_state_with_heartbeat(
-            &pool,
-            &deployment_profile,
-            &manifest_runtime_state.watched_chain_plan,
-            args.startup_discovery_page_logs,
-            &mut startup_heartbeat,
-            &startup_chain_ids,
-        )
-        .await?;
-    } else if run_mode.sync_discovery_adapters_after_startup_backfill {
-        info!(
-            service = "indexer",
-            adapter_sync_mode = adapter_sync_mode.as_str(),
-            effective_backfill_adapter_sync_mode =
-                run_mode.startup_backfill_adapter_sync_mode.as_str(),
-            "startup bootstrap backfill drained; syncing only discovery-materializing adapter families before the live-plan widen"
-        );
-        sync_discovery_adapter_owned_raw_log_state_with_heartbeat(
-            &pool,
-            &deployment_profile,
-            &manifest_runtime_state.watched_chain_plan,
-            args.startup_discovery_page_logs,
-            &mut startup_heartbeat,
-            &startup_chain_ids,
-        )
-        .await?;
-    }
+    sync_post_bootstrap_adapter_state_with_heartbeat(
+        &pool,
+        &deployment_profile,
+        &manifest_runtime_state.watched_chain_plan,
+        args.startup_discovery_page_logs,
+        &run_mode,
+        &mut startup_heartbeat,
+        &startup_chain_ids,
+    )
+    .await?;
 
     // Bootstrap backfill has drained, so the narrow bootstrap scope has served its purpose. Widen
     // before spawning replay catch-up: both reconcile `contract_instance_addresses`, and the widen
@@ -339,6 +314,53 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
     .await
 }
 
+async fn sync_post_bootstrap_adapter_state_with_heartbeat(
+    pool: &sqlx::PgPool,
+    deployment_profile: &str,
+    watched_chain_plan: &[bigname_manifests::WatchedChainPlan],
+    startup_discovery_page_logs: usize,
+    run_mode: &IndexerRunMode,
+    heartbeat: &mut StartupHeartbeat,
+    heartbeat_chain_ids: &[String],
+) -> Result<()> {
+    if run_mode.sync_adapter_after_startup_backfill {
+        info!(
+            service = "indexer",
+            adapter_sync_mode = run_mode.adapter_sync_mode.as_str(),
+            effective_backfill_adapter_sync_mode =
+                run_mode.startup_backfill_adapter_sync_mode.as_str(),
+            "startup bootstrap backfill drained; syncing adapter-owned raw-log state before live polling"
+        );
+        sync_adapter_owned_raw_log_state_with_heartbeat(
+            pool,
+            deployment_profile,
+            watched_chain_plan,
+            startup_discovery_page_logs,
+            heartbeat,
+            heartbeat_chain_ids,
+        )
+        .await?;
+    } else if run_mode.sync_discovery_adapters_after_startup_backfill {
+        info!(
+            service = "indexer",
+            adapter_sync_mode = run_mode.adapter_sync_mode.as_str(),
+            effective_backfill_adapter_sync_mode =
+                run_mode.startup_backfill_adapter_sync_mode.as_str(),
+            "startup bootstrap backfill drained; syncing only discovery-materializing adapter families before the live-plan widen"
+        );
+        sync_discovery_adapter_owned_raw_log_state_with_heartbeat(
+            pool,
+            deployment_profile,
+            watched_chain_plan,
+            startup_discovery_page_logs,
+            heartbeat,
+            heartbeat_chain_ids,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 async fn widen_to_live_watch_scope(
     pool: &sqlx::PgPool,
     run_mode: &IndexerRunMode,
@@ -379,4 +401,77 @@ async fn widen_to_live_watch_scope(
         live_intake_chain_tasks,
         watched_plan_admission_epochs,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Context;
+    use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn post_bootstrap_discovery_sync_records_page_progress() -> Result<()> {
+        let database = TestDatabase::create_migrated(
+            TestDatabaseConfig::new("bigname_indexer_post_bootstrap_heartbeat_test"),
+            &bigname_storage::MIGRATOR,
+            "failed to migrate post-bootstrap heartbeat test database",
+        )
+        .await?;
+        let instance_id = "post-bootstrap-page-progress-test";
+        bigname_storage::register_service_loop(
+            database.pool(),
+            bigname_storage::INDEXER_SERVICE_NAME,
+            instance_id,
+        )
+        .await?;
+        sqlx::query(
+            r#"
+            UPDATE service_loop_heartbeats
+            SET started_at = clock_timestamp() - INTERVAL '2 minutes',
+                heartbeat_at = clock_timestamp() - INTERVAL '1 minute'
+            WHERE service_name = 'indexer'
+              AND instance_id = $1
+            "#,
+        )
+        .bind(instance_id)
+        .execute(database.pool())
+        .await?;
+
+        let watched_chain_plan = vec![bigname_manifests::WatchedChainPlan {
+            chain: "ethereum-mainnet".to_owned(),
+            addresses: Vec::new(),
+            manifest_root_entry_count: 0,
+            manifest_contract_entry_count: 0,
+            discovery_edge_entry_count: 0,
+        }];
+        let chain_ids = vec!["ethereum-mainnet".to_owned()];
+        let mut heartbeat = StartupHeartbeat::new(instance_id.to_owned(), Duration::ZERO);
+        sync_post_bootstrap_adapter_state_with_heartbeat(
+            database.pool(),
+            "test",
+            &watched_chain_plan,
+            1,
+            &IndexerRunMode::new(BackfillAdapterSyncMode::Auto, false),
+            &mut heartbeat,
+            &chain_ids,
+        )
+        .await?;
+        assert!(
+            heartbeat.adapter_progress_count() > 0,
+            "the production post-bootstrap branch must forward page progress"
+        );
+        let heartbeat = bigname_storage::load_service_loop_heartbeat(
+            database.pool(),
+            bigname_storage::INDEXER_SERVICE_NAME,
+            instance_id,
+        )
+        .await?
+        .context("post-bootstrap sync must retain its registered heartbeat")?;
+        assert!(
+            heartbeat.age_seconds <= 1,
+            "page progress must refresh the post-bootstrap heartbeat"
+        );
+        database.cleanup().await
+    }
 }

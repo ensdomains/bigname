@@ -54,6 +54,7 @@ pub(crate) async fn seed_normalized_event_cursor_if_absent(
     Ok(inserted > 0)
 }
 
+#[cfg(test)]
 pub(super) async fn derive_normalized_event_invalidations(
     pool: &PgPool,
     batch_limit: i64,
