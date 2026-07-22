@@ -221,6 +221,37 @@ async fn insert_trace_and_outcome(
 }
 
 #[tokio::test]
+async fn claim_change_invalidation_uses_request_lookup_index() -> Result<()> {
+    const REQUEST_LOOKUP_INDEX: &str = "execution_cache_outcomes_request_lookup_idx";
+
+    let database = TestDatabase::new().await?;
+    let mut transaction = database.pool().begin().await?;
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("SET LOCAL enable_bitmapscan = off")
+        .execute(&mut *transaction)
+        .await?;
+    let explain_sql =
+        format!("EXPLAIN (FORMAT TEXT) {VERIFIED_PRIMARY_NAME_CLAIM_CHANGE_DELETE_SQL}");
+    let plan = sqlx::query_scalar::<_, String>(&explain_sql)
+        .bind(VERIFIED_PRIMARY_NAME_REQUEST_TYPE)
+        .bind("ens")
+        .bind("ens:0x0000000000000000000000000000000000000001:60")
+        .fetch_all(&mut *transaction)
+        .await?
+        .join("\n");
+    eprintln!("worker claim-change invalidation plan:\n{plan}");
+    assert!(
+        plan.contains(&format!("Index Scan using {REQUEST_LOOKUP_INDEX}")),
+        "worker claim-change invalidation must use its request lookup index:\n{plan}"
+    );
+
+    transaction.rollback().await?;
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn manifest_invalidation_wrapper_deletes_only_verified_resolution_targets() -> Result<()> {
     let database = TestDatabase::new().await?;
 

@@ -153,8 +153,7 @@ fn primary_name_route_fallback_is_eligible(
     lookup_state: &PrimaryNameLookupState,
 ) -> bool {
     (mode.includes_declared() || mode.includes_verified())
-        && namespace == bigname_storage::ENS_NAMESPACE
-        && coin_type == "60"
+        && bigname_storage::primary_name_fallback::contains(namespace, coin_type)
         && matches!(lookup_state.tuple_state, PrimaryNameTupleState::TupleMissing)
 }
 
@@ -162,7 +161,7 @@ async fn resolve_ens_primary_name_fallback_snapshot(pool: &PgPool) -> ApiResult<
     let scope = SnapshotSelectionScope::new(
         vec![SnapshotPositionRequirement::new(
             "ethereum",
-            bigname_storage::ETHEREUM_MAINNET_CHAIN_ID,
+            bigname_storage::primary_name_fallback::CHAIN_ID,
         )],
         Some("ethereum".to_owned()),
     )
@@ -316,16 +315,16 @@ fn route_local_claim_for_persistence(
 async fn load_ens_execution_manifest_versions(pool: &PgPool) -> ApiResult<JsonValue> {
     let manifest = bigname_manifests::load_execution_owner_manifest_version(
         pool,
-        bigname_storage::ENS_NAMESPACE,
+        bigname_storage::primary_name_fallback::NAMESPACE,
         bigname_execution::ENS_EXECUTION_SOURCE_FAMILY,
-        bigname_execution::ETHEREUM_MAINNET_CHAIN_ID,
+        bigname_storage::primary_name_fallback::CHAIN_ID,
         "ens_v1",
     )
         .await
         .map_err(|load_error| {
             error!(
                 service = "api",
-                namespace = bigname_storage::ENS_NAMESPACE,
+                namespace = bigname_storage::primary_name_fallback::NAMESPACE,
                 error = ?load_error,
                 "failed to load ENS execution manifest versions for primary-name persistence"
             );

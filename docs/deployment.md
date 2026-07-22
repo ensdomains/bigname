@@ -89,8 +89,20 @@ make a preceding-release projection writer join the new per-tuple fence and
 repeat invalidation after a changed write; an overlap that would reverse the
 old writer's table/advisory lock order aborts that projection transaction with
 retryable SQLSTATE `40001`. The two retention indexes are separate
-no-transaction `CREATE INDEX CONCURRENTLY` migrations, so their builds do not
-hold execution-table writes behind a transactional `SHARE` lock.
+no-transaction `CREATE INDEX CONCURRENTLY` migrations, as is the tuple-
+invalidation lookup index, so their builds do not hold execution-table writes
+behind a transactional `SHARE` lock.
+
+The two compatibility triggers are temporary rolling-upgrade support. Once the
+fleet is fully upgraded and no writer from before the #233 primary-name
+hardening release can run, including from a rollback image,
+`primary_names_current_tuple_fence_before_write` and
+`primary_names_current_cache_invalidation_after_write` can be removed. The
+follow-up release must first remove those trigger names from the full-rebuild
+writer's disable/enable list. During that deployment, stop every worker that
+still references the compatibility triggers, apply a checked-in migration that
+drops both triggers, and then start only the upgraded workers. Do not remove the
+triggers manually or add the code change or drop migration to this rollout.
 
 ### Resolver-profile replay after an upgrade or compaction
 

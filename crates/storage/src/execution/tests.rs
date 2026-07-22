@@ -2931,6 +2931,28 @@ async fn prunes_route_local_primary_name_execution_in_bounded_checkpoint_batches
     );
     upsert_execution_trace(database.pool(), &old_orphan.0).await?;
 
+    let (mut other_coin_trace, mut other_coin_outcome) = route_local_primary_execution_pair(
+        Uuid::from_u128(0x0e7ec7ace0000000000000000000c006),
+        "0x0000000000000000000000000000000000000006",
+        12,
+    );
+    let other_coin_request_key =
+        verified_primary_request_key("0x0000000000000000000000000000000000000006", "2147483658");
+    other_coin_trace.request_key = other_coin_request_key.clone();
+    other_coin_trace.request_metadata["coin_type"] = json!("2147483658");
+    other_coin_outcome.cache_key.request_key = other_coin_request_key;
+    insert_trace_and_outcome(&database, &other_coin_trace, &other_coin_outcome).await?;
+
+    let (mut other_coin_orphan, _) = route_local_primary_execution_pair(
+        Uuid::from_u128(0x0e7ec7ace0000000000000000000c007),
+        "0x0000000000000000000000000000000000000007",
+        13,
+    );
+    other_coin_orphan.request_key =
+        verified_primary_request_key("0x0000000000000000000000000000000000000007", "2147483658");
+    other_coin_orphan.request_metadata["coin_type"] = json!("2147483658");
+    upsert_execution_trace(database.pool(), &other_coin_orphan).await?;
+
     let (materialized_trace, mut materialized_outcome) = route_local_primary_execution_pair(
         Uuid::from_u128(0x0e7ec7ace0000000000000000000c004),
         "0x0000000000000000000000000000000000000004",
@@ -2990,6 +3012,68 @@ async fn prunes_route_local_primary_name_execution_in_bounded_checkpoint_batches
             .is_some(),
         "pruning must not delete materialized primary-name outcomes"
     );
+    assert!(
+        load_execution_outcome(database.pool(), &other_coin_outcome.cache_key)
+            .await?
+            .is_some(),
+        "outcome pruning must stay inside the fallback coin-type domain"
+    );
+    assert!(
+        load_execution_trace(database.pool(), other_coin_orphan.execution_trace_id)
+            .await?
+            .is_some(),
+        "orphan-trace pruning must stay inside the same fallback coin-type domain"
+    );
 
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn route_local_primary_name_pruning_uses_retention_indexes() -> Result<()> {
+    const OUTCOME_RETENTION_INDEX: &str = "execution_cache_outcomes_route_primary_checkpoint_idx";
+    const TRACE_RETENTION_INDEX: &str = "execution_traces_route_primary_checkpoint_idx";
+
+    let database = TestDatabase::new().await?;
+    let mut transaction = database.pool().begin().await?;
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("SET LOCAL enable_bitmapscan = off")
+        .execute(&mut *transaction)
+        .await?;
+
+    let outcome_explain = format!(
+        "EXPLAIN (FORMAT TEXT) {}",
+        super::pruning::route_local_primary_name_outcome_candidates_sql()
+    );
+    let outcome_plan = sqlx::query_scalar::<_, String>(&outcome_explain)
+        .bind(90_i64)
+        .bind(500_i64)
+        .fetch_all(&mut *transaction)
+        .await?
+        .join("\n");
+    eprintln!("route-local primary-name outcome pruning plan:\n{outcome_plan}");
+    assert!(
+        outcome_plan.contains(&format!("Index Scan using {OUTCOME_RETENTION_INDEX}")),
+        "outcome pruning must use its checkpoint retention index:\n{outcome_plan}"
+    );
+
+    let trace_explain = format!(
+        "EXPLAIN (FORMAT TEXT) {}",
+        super::pruning::route_local_primary_name_orphan_trace_candidates_sql()
+    );
+    let trace_plan = sqlx::query_scalar::<_, String>(&trace_explain)
+        .bind(90_i64)
+        .bind(500_i64)
+        .fetch_all(&mut *transaction)
+        .await?
+        .join("\n");
+    eprintln!("route-local primary-name orphan-trace pruning plan:\n{trace_plan}");
+    assert!(
+        trace_plan.contains(&format!("Index Scan using {TRACE_RETENTION_INDEX}")),
+        "orphan-trace pruning must use its checkpoint retention index:\n{trace_plan}"
+    );
+
+    transaction.rollback().await?;
     database.cleanup().await
 }

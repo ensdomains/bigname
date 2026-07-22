@@ -594,6 +594,27 @@ fn primary_name_route_retention_indexes_use_concurrent_migrations() {
     }
 }
 
+#[test]
+fn primary_name_request_lookup_index_precedes_compatibility_triggers() {
+    let lookup_index = crate::MIGRATOR
+        .iter()
+        .find(|migration| {
+            migration
+                .sql
+                .contains("CREATE INDEX CONCURRENTLY IF NOT EXISTS execution_cache_outcomes_request_lookup_idx")
+        })
+        .expect("primary-name request lookup index migration is registered");
+    let compatibility_triggers = crate::MIGRATOR
+        .iter()
+        .find(|migration| migration.version == 20260722120000)
+        .expect("primary-name compatibility trigger migration is registered");
+
+    assert!(
+        lookup_index.version < compatibility_triggers.version,
+        "the request lookup index must be installed before compatibility triggers can issue tuple invalidations"
+    );
+}
+
 #[tokio::test]
 async fn rejects_non_normalized_claim_name_sources() -> Result<()> {
     let database = TestDatabase::new().await?;

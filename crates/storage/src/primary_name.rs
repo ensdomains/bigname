@@ -1,3 +1,4 @@
+pub mod fallback;
 mod full_rebuild;
 mod hooks;
 mod lock;
