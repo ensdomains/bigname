@@ -393,6 +393,28 @@ pub async fn connect_with_application_name_and_statement_timeout(
     connect_inner(config, Some(application_name), Some(statement_timeout)).await
 }
 
+/// Open a named, single-connection pool reserved for a bounded readiness check.
+pub async fn connect_reserved_readiness_pool(
+    config: &DatabaseConfig,
+    application_name: &str,
+    check_timeout: Duration,
+) -> Result<PgPool> {
+    ensure!(
+        !check_timeout.is_zero(),
+        "PostgreSQL readiness check timeout must be greater than zero"
+    );
+    let options = connect_options(config, Some(application_name), Some(check_timeout))?;
+    PgPoolOptions::new()
+        .min_connections(1)
+        .max_connections(1)
+        .acquire_timeout(check_timeout)
+        .idle_timeout(None)
+        .max_lifetime(None)
+        .connect_with(options)
+        .await
+        .context("failed to connect reserved PostgreSQL readiness pool")
+}
+
 /// Open a named PostgreSQL pool and hold the shared operational guard that
 /// prevents the Base normalized-event correction from running concurrently.
 pub async fn connect_with_base_normalized_rederive_writer_guard(
@@ -415,6 +437,19 @@ async fn connect_inner(
     application_name: Option<&str>,
     statement_timeout: Option<Duration>,
 ) -> Result<PgPool> {
+    let options = connect_options(config, application_name, statement_timeout)?;
+    PgPoolOptions::new()
+        .max_connections(config.max_connections)
+        .connect_with(options)
+        .await
+        .context("failed to connect to PostgreSQL")
+}
+
+fn connect_options(
+    config: &DatabaseConfig,
+    application_name: Option<&str>,
+    statement_timeout: Option<Duration>,
+) -> Result<PgConnectOptions> {
     let database_url = config
         .database_url
         .clone()
@@ -432,11 +467,7 @@ async fn connect_inner(
             format!("{}ms", statement_timeout.as_millis()),
         )]);
     }
-    PgPoolOptions::new()
-        .max_connections(config.max_connections)
-        .connect_with(options)
-        .await
-        .context("failed to connect to PostgreSQL")
+    Ok(options)
 }
 
 /// Apply all checked-in migrations.

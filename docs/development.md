@@ -135,8 +135,10 @@ The API process exposes `GET /healthz` on the same bind address as
 `cargo api -- serve` and `./scripts/dev-up`. The default local address is
 `http://127.0.0.1:3000/healthz`.
 
-`/healthz` is an unversioned operator endpoint. The production public edge
-exposes it for readiness checks, but it is not part of the versioned `/v1` read
+`/healthz` is an unversioned operator endpoint. The production compose probe
+connects to `127.0.0.1` inside the API container even though the process listens
+on its configured bind address (`0.0.0.0:3000` by default in compose); the
+public Caddy edge does not expose it. It is not part of the versioned `/v1` read
 API and should not be treated as a consumer compatibility surface.
 
 The response's `identity` object describes the binary's compatibility inputs:

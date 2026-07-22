@@ -16,7 +16,7 @@ mod openapi {
     }
 
     #[cfg(test)]
-    pub(super) use server::{app_router, openapi_document};
+    pub(super) use server::{app_router, app_router_with_health_pool, openapi_document};
     pub(super) use server::{render_openapi_document, serve};
 }
 

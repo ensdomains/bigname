@@ -13,8 +13,7 @@ Public traffic terminates at Caddy, defined by `docker-compose.public.yml` and
 The public edge exposes an explicit allowlisted subset of the routes served by
 the `bigname-api` process:
 
-- Helpers: `GET` and `HEAD` on `/`, `/docs`, `/docs/`, `/openapi.json`, and
-  `/healthz`.
+- Helpers: `GET` and `HEAD` on `/`, `/docs`, `/docs/`, and `/openapi.json`.
 - REST: the operations published by `/openapi.json`. At the edge this is
   `GET` and `HEAD` on `/v1/*`, `POST /v1/identity:lookup`, and the
   `OPTIONS /v1/identity:lookup` browser preflight.
@@ -42,6 +41,11 @@ retaining it beyond that point requires an explicit decision to support the SDL
 independently.
 
 Requests outside these method and path matcher groups return `404` at the edge.
+In particular, Caddy does not expose `/healthz`; the compose probe reaches it
+at `127.0.0.1` inside the API container, while the process listens on its
+configured bind address (`0.0.0.0:3000` by default in compose). This narrows the
+helper allowlist introduced by #203 and prevents public traffic from competing
+for the health-specific concurrency ceiling.
 The API remains responsible for rejecting unknown paths or unsupported methods
 inside an admitted matcher such as `GET /v1/*`. In particular, `/v2/*` is
 internal parity and cutover staging and [never ships as a public
@@ -77,7 +81,7 @@ recommended starting point before the public edge is undrained.
 | Environment variable | Default | Undrain starting value | Mechanism |
 | --- | ---: | ---: | --- |
 | `BIGNAME_API_REQUEST_TIMEOUT_MS` | `30000` | `30000` | Whole-request deadline on every REST, GraphQL, docs, status, and health route; returns `408 request_timeout`. |
-| `BIGNAME_API_DB_STATEMENT_TIMEOUT_MS` | `25000` | `25000` | PostgreSQL `statement_timeout` applied to every API pool connection. |
+| `BIGNAME_API_DB_STATEMENT_TIMEOUT_MS` | `25000` | `25000` | PostgreSQL `statement_timeout` applied to primary API request-pool connections. The readiness pool has a fixed two-second check limit. |
 | `BIGNAME_API_MAX_IN_FLIGHT` | `1024` | `256` | Shared process-wide in-flight ceiling; excess work is load-shed as `503 overloaded`. `/healthz` bypasses it. |
 | `BIGNAME_API_HEALTH_MAX_IN_FLIGHT` | `4` | `4` | Independent in-flight ceiling reserved for `/healthz`; excess health work is load-shed as `503 overloaded`. |
 | `BIGNAME_API_VERIFIED_EXECUTION_MAX_IN_FLIGHT` | `128` | `16` | Separate ceiling for requests that can initiate verified resolution or primary-name fallback; it must be lower than the global ceiling. |
@@ -115,13 +119,19 @@ only after status no longer depends on that expensive query.
 The RPC deadlines are shorter than the whole-request deadline. A hung provider
 therefore becomes the route's existing in-band execution-failure result rather
 than consuming an API request indefinitely. The request deadline remains a
-backstop on `/healthz`, `/v1/status`, and `/v2/status`. Those routes remain
-bounded by the API-pool statement timeout. `/healthz` alone bypasses the
-process-wide concurrency limiter and load shedding so the container readiness
-signal remains available during global saturation; its independent ceiling
-prevents direct health traffic from creating unbounded work. The status routes
-retain global admission because their aggregate database query can be expensive
-under backlog.
+backstop on `/healthz`, `/v1/status`, and `/v2/status`; the status routes remain
+bounded by the primary API pool's statement timeout. `/healthz` alone bypasses
+the process-wide concurrency limiter and load shedding, and its `SELECT 1` uses
+a persistent one-connection readiness pool with a two-second check limit. This
+connection is additional to `BIGNAME_DATABASE_MAX_CONNECTIONS`. HTTP-concurrency
+saturation and exhaustion of the primary API pool therefore cannot queue the
+probe past the compose healthcheck's five-second window: a healthy but busy
+process returns `200` with `status="ready"`. A readiness connection failure or
+timeout instead returns `503` with `status="degraded"`, preserving the database
+reachability check for a genuinely unavailable PostgreSQL server. The
+health-specific ceiling prevents unbounded probe work. The status routes retain
+global admission because their aggregate database query can be expensive under
+backlog.
 
 For a temporary HTTP-only deployment before DNS is ready, set:
 

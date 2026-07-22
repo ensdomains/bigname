@@ -19,7 +19,7 @@
 
 	@helpers {
 		method GET HEAD
-		path / /docs /docs/ /openapi.json /healthz
+		path / /docs /docs/ /openapi.json
 	}
 
 	@v1_reads {

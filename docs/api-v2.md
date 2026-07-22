@@ -394,9 +394,13 @@ Rules:
   `408` responses.
 - Every route has a whole-request deadline. `/healthz`, `/v1/status`, and
   `/v2/status` retain that deadline as their final backstop. `/healthz` bypasses
-  the process-wide concurrency limiter and load shedding but uses a small
-  independent health ceiling; the status routes retain global admission because
-  their aggregate database query is not a liveness probe.
+  the process-wide concurrency limiter and load shedding, uses a reserved
+  one-connection database pool with a two-second check limit, and has a small
+  independent health ceiling. HTTP-concurrency saturation and request-pool
+  exhaustion therefore do not queue the probe; a failed or timed-out readiness
+  connection reports the database as unreachable. The status routes retain
+  global admission because their aggregate database query is not a liveness
+  probe.
 - The verified-execution rate limit, when enabled, and all in-flight ceilings
   reject work before it waits for execution capacity. The rate-limit key is an
   IPv4 address or IPv6 `/64`; `/healthz` passes only through the health-specific

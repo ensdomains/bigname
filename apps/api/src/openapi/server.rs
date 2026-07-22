@@ -7,7 +7,8 @@ use tracing::info;
 
 use crate::{
     API_ROUTE_DEFINITIONS, ApiBoundsConfig, AppState, BUILD_SHA, Router, SOFTWARE_VERSION, ServeArgs,
-    shutdown_signal, warm_compact_records_route_sql_path,
+    HEALTH_DATABASE_CHECK_TIMEOUT, HealthDatabasePool, shutdown_signal,
+    warm_compact_records_route_sql_path,
 };
 
 use super::schemas::openapi_components;
@@ -23,6 +24,12 @@ pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
         args.bounds.db_statement_timeout(),
     )
     .await?;
+    let health_pool = bigname_storage::connect_reserved_readiness_pool(
+        &args.database,
+        "bigname-api-health",
+        HEALTH_DATABASE_CHECK_TIMEOUT,
+    )
+    .await?;
     let chain_rpc_urls = args.effective_chain_rpc_urls()?;
     let state = AppState {
         pool,
@@ -31,7 +38,7 @@ pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
     warm_compact_records_route_sql_path(&state, args.database.max_connections)
         .await
         .context("failed to warm compact records route SQL path")?;
-    let router = app_router_with_bounds(state, &args.bounds);
+    let router = app_router_with_bounds(state, health_pool, &args.bounds);
     let listener = tokio::net::TcpListener::bind(args.bind_addr)
         .await
         .context("failed to bind the API listener")?;
@@ -46,6 +53,8 @@ pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
         permissions_current_publication_version = bigname_storage::PERMISSIONS_CURRENT_PUBLICATION_VERSION,
         request_timeout_ms = args.bounds.request_timeout_ms,
         db_statement_timeout_ms = args.bounds.db_statement_timeout_ms,
+        health_database_check_timeout_ms = HEALTH_DATABASE_CHECK_TIMEOUT.as_millis(),
+        health_database_reserved_connections = 1,
         max_in_flight = args.bounds.max_in_flight,
         health_max_in_flight = args.bounds.health_max_in_flight,
         verified_execution_max_in_flight = args.bounds.verified_execution_max_in_flight,
@@ -67,10 +76,20 @@ pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
 
 #[cfg(test)]
 pub(crate) fn app_router(state: AppState) -> Router {
-    app_router_with_bounds(state, &ApiBoundsConfig::default())
+    let health_pool = state.pool.clone();
+    app_router_with_bounds(state, health_pool, &ApiBoundsConfig::default())
 }
 
-fn app_router_with_bounds(state: AppState, bounds: &ApiBoundsConfig) -> Router {
+#[cfg(test)]
+pub(crate) fn app_router_with_health_pool(state: AppState, health_pool: sqlx::PgPool) -> Router {
+    app_router_with_bounds(state, health_pool, &ApiBoundsConfig::default())
+}
+
+fn app_router_with_bounds(
+    state: AppState,
+    health_pool: sqlx::PgPool,
+    bounds: &ApiBoundsConfig,
+) -> Router {
     let bounded_router = API_ROUTE_DEFINITIONS
         .iter()
         .copied()
@@ -88,6 +107,7 @@ fn app_router_with_bounds(state: AppState, bounds: &ApiBoundsConfig) -> Router {
         .copied()
         .filter(|route| route.bypasses_global_load_shed())
         .fold(Router::new(), |router, route| route.register(router))
+        .layer(axum::Extension(HealthDatabasePool(health_pool)))
         .with_state(state);
     // The API is read-only public data served cross-origin to browser clients (the ENS Manager
     // dev build, deployed on a different origin). Permissive CORS — wildcard origin, no

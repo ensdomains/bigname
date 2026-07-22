@@ -9,7 +9,7 @@ usage() {
 Usage: scripts/public-edge-smoke [--start-caddy] [--no-network]
 
 Checks the public Caddy allowlist against a running bigname API:
-  - allowed helper, v1 REST, GraphQL POST, and browser preflight requests
+  - allowed documentation helpers, v1 REST, GraphQL POST, and browser preflight requests
   - denied v2, GraphiQL, and unknown-path requests
   - direct internal success for every denied route that exists in the API
 
@@ -261,6 +261,7 @@ unknown_path='/public-edge-smoke-unknown'
 manager_origin='https://app.ens.dev'
 
 log "proving denied API routes exist on the internal listener"
+assert_status internal-health 200 GET "${internal_api_url}/healthz" ''
 assert_status internal-v2-status 200 GET "${internal_api_url}/v2/status" ''
 assert_status internal-v2-lookup 200 POST "${internal_api_url}/v2/lookup" "$v2_lookup_body"
 assert_status internal-v2-diagnostic 200 GET "${internal_api_url}${diagnostic_path}" ''
@@ -299,7 +300,7 @@ if [ "$start_caddy" -eq 1 ]; then
   caddy_started=1
 
   for _attempt in $(seq 1 30); do
-    request caddy-readiness GET "${public_edge_url}/healthz" '' 2>/dev/null || true
+    request caddy-readiness GET "${public_edge_url}/" '' 2>/dev/null || true
     if [ "$last_status" = "200" ]; then
       break
     fi
@@ -316,7 +317,6 @@ assert_status public-root 200 GET "${public_edge_url}/" ''
 assert_status public-docs 200 GET "${public_edge_url}/docs" ''
 assert_status public-docs-slash 200 GET "${public_edge_url}/docs/" ''
 assert_status public-docs-head 200 HEAD "${public_edge_url}/docs" ''
-assert_status public-health 200 GET "${public_edge_url}/healthz" ''
 assert_status public-openapi 200 GET "${public_edge_url}/openapi.json" ''
 assert_status public-v1-get 200 GET "${public_edge_url}/v1/namespaces/ens" ''
 assert_status public-v1-head 200 HEAD "${public_edge_url}/v1/namespaces/ens" ''
@@ -334,6 +334,7 @@ assert_status public-graphql-preflight 200 OPTIONS "${public_edge_url}/graphql" 
 assert_preflight_headers public-graphql-preflight
 
 log "checking public default-deny behavior"
+assert_status public-health 404 GET "${public_edge_url}/healthz" ''
 assert_status public-v2-status 404 GET "${public_edge_url}/v2/status" ''
 assert_status public-v2-lookup 404 POST "${public_edge_url}/v2/lookup" "$v2_lookup_body"
 assert_status public-v2-diagnostic 404 GET "${public_edge_url}${diagnostic_path}" ''

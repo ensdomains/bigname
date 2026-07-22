@@ -10,9 +10,12 @@ Use these sets when choosing a public route:
 | --- | --- | --- |
 | Native slim identity | `POST /v1/identity:lookup`, `GET /v1/status` | partner-1 style feeds, profile aggregation, and shadow comparison. Feed rendering should use `profile=feed`, which is backed by compact count/identity [sidecars](glossary.md). |
 | Canonical product reads | `/v1/names*`, `/v1/profiles/names/*`, `/v1/addresses/{address}/names`, `/v1/primary-names*`, `/v1/resources/{resource_id}/permissions`, `/v1/events` | first-party app, explorer, and public API integrations that want the bigname contract. |
-| Metadata/control plane | `/v1/namespaces/*`, `/v1/manifests/*`, `/healthz` | manifest, namespace, and process/database readiness introspection. |
+| Metadata/control plane | `/v1/namespaces/*`, `/v1/manifests/*` | manifest and namespace introspection. |
 | Diagnostics/provenance | `/v1/coverage/*`, `/v1/explain/*` | debugging completeness, support, derivation, persisted execution, and audit paths. |
 | Specialist adjuncts | `/v1/roles`, `/v1/names/*/roles`, `/v1/resources/lookup`, `/v1/history/*`, `/v1/resolvers/*/overview` | supported routes for specialist views and narrow adjuncts. Prefer the canonical product reads above when they satisfy the use case. |
+
+`/healthz` is an internal operator readiness endpoint, not a public consumer
+route. The production Caddy edge does not expose it.
 
 ## Capability matrix
 

@@ -41,7 +41,7 @@ use self::{
         coverage_current, explain_authority_control_current, explain_surface_binding_current,
         name_current,
     },
-    handler_health::health,
+    handler_health::{HEALTH_DATABASE_CHECK_TIMEOUT, HealthDatabasePool, health},
     handler_history::{address_history, name_history, resource_history},
     handler_namespaces::{namespace_manifests, namespace_metadata},
     handler_permissions_support::{

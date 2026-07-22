@@ -191,15 +191,23 @@ provider failure after a reverse claim likewise returns
 ### API bounds for public undrain
 
 Every API route is covered by the request deadline. `/healthz` bypasses the
-shared load-shed ceiling and uses a separate reserved ceiling so container
-readiness remains visible during global saturation without allowing unbounded
-health work. The status routes retain global admission because their aggregate
+shared HTTP load-shed ceiling and uses a separate health ceiling. Its `SELECT 1`
+runs on a persistent one-connection readiness pool instead of the request pool,
+and the entire database check is limited to two seconds. Consequently both
+HTTP-concurrency saturation and exhaustion of the request database pool are
+answered within the compose probe's five-second window: a healthy but busy
+process still returns `200` with `status="ready"`, while a failed or timed-out
+readiness connection returns `503` with `status="degraded"`. The database
+round-trip is retained deliberately so a process that cannot reach PostgreSQL
+does not report ready. The separate health ceiling prevents unbounded probe
+work. The status routes retain global admission because their aggregate
 database query can be expensive under backlog. Requests whose route and
 source/mode can initiate verified execution also pass through a separate
 concurrency ceiling and, when enabled, a client token bucket keyed by an IPv4
 address or IPv6 `/64` before handler work starts. Configure the API service with
 these values before public undrain; binary defaults remain generous for
-development and test workloads.
+development and test workloads. The readiness connection is additional to the
+primary-pool limit set by `BIGNAME_DATABASE_MAX_CONNECTIONS`.
 
 | Environment variable | Binary default | Undrain starting value |
 | --- | ---: | ---: |

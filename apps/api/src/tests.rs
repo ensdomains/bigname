@@ -52,6 +52,103 @@ async fn healthz_reports_ready_when_database_is_reachable() -> Result<()> {
 }
 
 #[tokio::test]
+async fn healthz_returns_ready_within_probe_window_when_request_pool_is_exhausted() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let request_pool = bigname_storage::connect_with_application_name_and_statement_timeout(
+        &database.database_config(2)?,
+        "bigname-api-exhausted-pool-test",
+        std::time::Duration::from_secs(25),
+    )
+    .await?;
+    let health_pool = bigname_storage::connect_reserved_readiness_pool(
+        &database.database_config(2)?,
+        "bigname-api-health-exhausted-pool-test",
+        HEALTH_DATABASE_CHECK_TIMEOUT,
+    )
+    .await?;
+    let state = AppState {
+        pool: request_pool.clone(),
+        chain_rpc_urls: bigname_execution::ChainRpcUrls::default(),
+    };
+
+    let mut held_connections = Vec::new();
+    for _ in 0..request_pool.options().get_max_connections() {
+        held_connections.push(request_pool.acquire().await?);
+    }
+    assert_eq!(request_pool.num_idle(), 0);
+
+    let started = tokio::time::Instant::now();
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        openapi::app_router_with_health_pool(state, health_pool.clone()).oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    )
+    .await
+    .context("health request exceeded the compose probe's five-second window")??;
+    let elapsed = started.elapsed();
+
+    assert!(elapsed < std::time::Duration::from_secs(5));
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload.get("status"), Some(&json!("ready")));
+    assert_eq!(payload["database"]["status"], json!("reachable"));
+    assert_eq!(payload["database"]["reachable"], json!(true));
+
+    drop(held_connections);
+    request_pool.close().await;
+    health_pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn healthz_reports_degraded_within_probe_window_when_health_pool_is_exhausted() -> Result<()>
+{
+    let database = TestDatabase::new_migrated().await?;
+    let database_url = database
+        .database_config(1)?
+        .database_url
+        .context("health pool test database URL must be configured")?;
+    let health_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(10))
+        .connect(&database_url)
+        .await?;
+    let held_health_connection = health_pool.acquire().await?;
+
+    let started = tokio::time::Instant::now();
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        openapi::app_router_with_health_pool(database.app_state(), health_pool.clone()).oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    )
+    .await
+    .context("timed-out database check exceeded the compose probe's five-second window")??;
+    let elapsed = started.elapsed();
+
+    assert!(elapsed >= std::time::Duration::from_millis(1_900));
+    assert!(elapsed < std::time::Duration::from_secs(5));
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload.get("status"), Some(&json!("degraded")));
+    assert_eq!(payload["database"]["status"], json!("unreachable"));
+    assert_eq!(payload["database"]["reachable"], json!(false));
+
+    drop(held_health_connection);
+    health_pool.close().await;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn healthz_reports_degraded_when_database_is_unreachable() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let state = database.app_state();
