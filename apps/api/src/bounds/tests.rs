@@ -1,7 +1,7 @@
 use axum::{
     Router,
     body::{Body, to_bytes},
-    http::Request as HttpRequest,
+    http::{Method, Request as HttpRequest, Uri},
     routing::get,
 };
 use serde_json::{Value, json};
@@ -59,14 +59,35 @@ fn verified_request_classifier_covers_live_execution_modes() {
         ("/v1/profiles/names/alice.eth?mode=declared", false),
         ("/v1/names/ens/alice.eth/records?mode=auto", true),
         ("/v1/names/ens/alice.eth/records?mode=%20auto%20", true),
+        (
+            "/v1/names/ens/alice.eth/records?mode=auto&include=resolver_address",
+            false,
+        ),
+        (
+            "/v1/names/ens/alice.eth/records?mode=auto&include=known_text_keys",
+            false,
+        ),
+        (
+            "/v1/names/ens/alice.eth/records?mode=auto&include=avatar",
+            true,
+        ),
+        (
+            "/v1/names/ens/alice.eth/records?mode=auto&texts=description",
+            true,
+        ),
         ("/v1/names/ens/alice.eth/records?mode=declared", false),
         ("/v2/addresses/0x01/primary-name", true),
         ("/v2/addresses/0x01/primary-name?source=indexed", true),
         ("/v2/names/alice.eth?source=ver%69fied", true),
         ("/v2/names/alice.eth?source=%20verified%20", true),
         ("/v2/names/alice.eth?source=auto", false),
-        ("/v2/names/alice.eth/records?source=auto", true),
-        ("/v2/names/alice.eth/records?source=%20auto%20", true),
+        ("/v2/names/alice.eth/records?source=auto", false),
+        ("/v2/names/alice.eth/records?source=%20auto%20", false),
+        ("/v2/names/alice.eth/records?source=auto&keys=%20%20", false),
+        (
+            "/v2/names/alice.eth/records?source=auto&keys=addr%3A60",
+            true,
+        ),
         ("/v2/diagnostics/names/alice.eth/records", true),
         ("/v2/diagnostics/names/alice.eth/execution", false),
     ];
@@ -411,6 +432,119 @@ async fn verified_concurrency_limit_is_separate_from_cheap_requests() {
         .await
         .expect("first task must join")
         .expect("first request must complete");
+}
+
+#[tokio::test]
+async fn empty_auto_records_bypass_verified_concurrency_admission() {
+    let config = test_config();
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let handler = {
+        let started = started.clone();
+        let release = release.clone();
+        move |uri: Uri| {
+            let started = started.clone();
+            let release = release.clone();
+            async move {
+                if uri.query().is_some_and(|query| query.contains("hold=true")) {
+                    started.notify_one();
+                    release.notified().await;
+                }
+                "ok"
+            }
+        }
+    };
+    let app = apply_request_bounds(
+        Router::new()
+            .route("/v1/names/{namespace}/{name}/records", get(handler.clone()))
+            .route("/v2/names/{name}/records", get(handler)),
+        Router::new(),
+        &config,
+    );
+
+    let held = tokio::spawn(app.clone().oneshot(request(
+        "/v1/names/ens/alice.eth/records?mode=auto&avatar=true&hold=true",
+    )));
+    started.notified().await;
+
+    for uri in [
+        "/v1/names/ens/alice.eth/records?mode=auto&include=resolver_address",
+        "/v2/names/alice.eth/records?source=auto",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request(uri))
+            .await
+            .expect("empty auto records request must complete");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "unexpected status for {uri}"
+        );
+    }
+
+    let overloaded = app
+        .clone()
+        .oneshot(request(
+            "/v2/names/alice.eth/records?source=auto&keys=addr:60",
+        ))
+        .await
+        .expect("non-empty auto records request must complete");
+    assert_error(overloaded, StatusCode::SERVICE_UNAVAILABLE, "overloaded").await;
+
+    release.notify_waiters();
+    held.await
+        .expect("held task must join")
+        .expect("held request must complete");
+}
+
+#[tokio::test]
+async fn empty_auto_records_do_not_consume_verified_rate_limit_tokens() {
+    let mut config = test_config();
+    config.verified_rate_limit_per_second = 1;
+    let app = apply_request_bounds(
+        Router::new()
+            .route(
+                "/v1/names/{namespace}/{name}/records",
+                get(|| async { "ok" }),
+            )
+            .route("/v2/names/{name}/records", get(|| async { "ok" })),
+        Router::new(),
+        &config,
+    );
+
+    let first = app
+        .clone()
+        .oneshot(request(
+            "/v1/names/ens/alice.eth/records?mode=auto&avatar=true",
+        ))
+        .await
+        .expect("first non-empty auto records request must complete");
+    assert_eq!(first.status(), StatusCode::OK);
+
+    for uri in [
+        "/v1/names/ens/alice.eth/records?mode=auto&include=resolver_address",
+        "/v2/names/alice.eth/records?source=auto&keys=",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request(uri))
+            .await
+            .expect("empty auto records request must complete");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "unexpected status for {uri}"
+        );
+    }
+
+    let limited = app
+        .oneshot(request(
+            "/v2/names/alice.eth/records?source=auto&keys=addr:60",
+        ))
+        .await
+        .expect("second non-empty auto records request must complete");
+    assert_error(limited, StatusCode::TOO_MANY_REQUESTS, "rate_limited").await;
 }
 
 #[tokio::test]

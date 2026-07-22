@@ -92,6 +92,10 @@ recommended starting point before the public edge is undrained.
 | `BIGNAME_API_VERIFIED_RATE_LIMIT_MAX_CLIENTS` | `65536` | `65536` | In-memory client-bucket ceiling per API process. |
 | `BIGNAME_API_TRUST_X_FORWARDED_FOR` | `false` | `true` | Whether the client-IP key may use the rightmost valid `X-Forwarded-For` address instead of the TCP peer. |
 
+The API process attaches its two RPC deadlines when it constructs its execution
+provider configuration. Worker projection RPC clients do not read these API
+variables and retain their previous behavior with no client-level timeout.
+
 Rate limiting is off in the binary by default because the public contract has
 no authenticated or otherwise stable client identity, and IP addresses may be
 shared or rotate. Before undraining, set the recommended nonzero rate and burst

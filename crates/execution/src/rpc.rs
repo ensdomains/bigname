@@ -4,22 +4,12 @@ use alloy_json_rpc::{
     Id, Request as JsonRpcRequest, RequestPacket, ResponsePacket, ResponsePayload,
 };
 use alloy_transport_http::Http;
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail, ensure};
 use reqwest::Url;
 use serde_json::Value;
 use tower::Service;
 
-const RPC_CONNECT_TIMEOUT_ENV: &str = "BIGNAME_API_RPC_CONNECT_TIMEOUT_MS";
-const RPC_TOTAL_TIMEOUT_ENV: &str = "BIGNAME_API_RPC_TIMEOUT_MS";
-const DEFAULT_RPC_CONNECT_TIMEOUT_MS: u64 = 2_000;
-const DEFAULT_RPC_TOTAL_TIMEOUT_MS: u64 = 8_000;
-
-static JSON_RPC_HTTP_CLIENT: LazyLock<std::result::Result<reqwest::Client, String>> =
-    LazyLock::new(|| {
-        RpcHttpTimeouts::from_env()
-            .and_then(build_json_rpc_http_client)
-            .map_err(|error| error.to_string())
-    });
+static JSON_RPC_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RpcHttpTimeouts {
@@ -28,37 +18,20 @@ struct RpcHttpTimeouts {
 }
 
 impl RpcHttpTimeouts {
-    fn from_env() -> Result<Self> {
-        Self::from_millis(
-            timeout_millis_from_env(RPC_CONNECT_TIMEOUT_ENV, DEFAULT_RPC_CONNECT_TIMEOUT_MS)?,
-            timeout_millis_from_env(RPC_TOTAL_TIMEOUT_ENV, DEFAULT_RPC_TOTAL_TIMEOUT_MS)?,
-        )
-    }
-
-    fn from_millis(connect: u64, total: u64) -> Result<Self> {
-        if connect == 0 {
-            bail!("{RPC_CONNECT_TIMEOUT_ENV} must be greater than zero");
-        }
-        if total == 0 {
-            bail!("{RPC_TOTAL_TIMEOUT_ENV} must be greater than zero");
-        }
-        if connect > total {
-            bail!("{RPC_CONNECT_TIMEOUT_ENV} must not exceed {RPC_TOTAL_TIMEOUT_ENV}");
-        }
-        Ok(Self {
-            connect: Duration::from_millis(connect),
-            total: Duration::from_millis(total),
-        })
-    }
-}
-
-fn timeout_millis_from_env(name: &str, default: u64) -> Result<u64> {
-    match std::env::var(name) {
-        Ok(value) => value
-            .parse::<u64>()
-            .with_context(|| format!("{name} must be an integer number of milliseconds")),
-        Err(std::env::VarError::NotPresent) => Ok(default),
-        Err(error) => Err(anyhow!(error)).with_context(|| format!("failed to read {name}")),
+    fn new(connect: Duration, total: Duration) -> Result<Self> {
+        ensure!(
+            !connect.is_zero(),
+            "RPC connect timeout must be greater than zero"
+        );
+        ensure!(
+            !total.is_zero(),
+            "RPC total timeout must be greater than zero"
+        );
+        ensure!(
+            connect <= total,
+            "RPC connect timeout must not exceed RPC total timeout"
+        );
+        Ok(Self { connect, total })
     }
 }
 
@@ -70,16 +43,33 @@ fn build_json_rpc_http_client(timeouts: RpcHttpTimeouts) -> Result<reqwest::Clie
         .context("failed to configure execution JSON-RPC HTTP client")
 }
 
-pub fn validate_rpc_http_client_config() -> Result<()> {
-    JSON_RPC_HTTP_CLIENT
-        .as_ref()
-        .map(|_| ())
-        .map_err(|error| anyhow!(error.clone()))
+#[derive(Clone)]
+struct ConfiguredRpcHttpClient {
+    client: reqwest::Client,
+    timeouts: RpcHttpTimeouts,
 }
+
+impl std::fmt::Debug for ConfiguredRpcHttpClient {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ConfiguredRpcHttpClient")
+            .field("timeouts", &self.timeouts)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for ConfiguredRpcHttpClient {
+    fn eq(&self, other: &Self) -> bool {
+        self.timeouts == other.timeouts
+    }
+}
+
+impl Eq for ConfiguredRpcHttpClient {}
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ChainRpcUrls {
     urls: BTreeMap<String, String>,
+    configured_http_client: Option<ConfiguredRpcHttpClient>,
 }
 
 impl ChainRpcUrls {
@@ -105,7 +95,10 @@ impl ChainRpcUrls {
             }
         }
 
-        Ok(Self { urls })
+        Ok(Self {
+            urls,
+            configured_http_client: None,
+        })
     }
 
     pub fn from_comma_delimited(value: &str) -> Result<Self> {
@@ -119,11 +112,25 @@ impl ChainRpcUrls {
     pub fn url_for(&self, chain_id: &str) -> Option<&str> {
         self.urls.get(chain_id).map(String::as_str)
     }
+
+    pub fn with_http_timeouts(
+        mut self,
+        connect_timeout: Duration,
+        total_timeout: Duration,
+    ) -> Result<Self> {
+        let timeouts = RpcHttpTimeouts::new(connect_timeout, total_timeout)?;
+        self.configured_http_client = Some(ConfiguredRpcHttpClient {
+            client: build_json_rpc_http_client(timeouts)?,
+            timeouts,
+        });
+        Ok(self)
+    }
 }
 
 #[derive(Clone)]
 pub(crate) struct JsonRpcHttpClient {
     transport: Http<reqwest::Client>,
+    has_configured_timeouts: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -142,14 +149,21 @@ pub(crate) struct JsonRpcCallError {
 
 impl JsonRpcHttpClient {
     pub(crate) fn new(endpoint: &str) -> Result<Self> {
-        let client = JSON_RPC_HTTP_CLIENT
-            .as_ref()
-            .map_err(|error| anyhow!(error.clone()))?
-            .clone();
-        Self::with_client(endpoint, client)
+        Self::with_client(endpoint, JSON_RPC_HTTP_CLIENT.clone(), false)
     }
 
-    fn with_client(endpoint: &str, client: reqwest::Client) -> Result<Self> {
+    pub(crate) fn new_for_rpc_urls(endpoint: &str, rpc_urls: &ChainRpcUrls) -> Result<Self> {
+        match &rpc_urls.configured_http_client {
+            Some(config) => Self::with_client(endpoint, config.client.clone(), true),
+            None => Self::new(endpoint),
+        }
+    }
+
+    fn with_client(
+        endpoint: &str,
+        client: reqwest::Client,
+        has_configured_timeouts: bool,
+    ) -> Result<Self> {
         let endpoint = endpoint
             .parse::<Url>()
             .with_context(|| format!("failed to parse RPC endpoint {endpoint}"))?;
@@ -161,6 +175,7 @@ impl JsonRpcHttpClient {
 
         Ok(Self {
             transport: Http::with_client(client, endpoint),
+            has_configured_timeouts,
         })
     }
 
@@ -170,13 +185,18 @@ impl JsonRpcHttpClient {
         connect_timeout: Duration,
         total_timeout: Duration,
     ) -> Result<Self> {
-        let connect_ms = u64::try_from(connect_timeout.as_millis())
-            .context("test RPC connect timeout does not fit u64 milliseconds")?;
-        let total_ms = u64::try_from(total_timeout.as_millis())
-            .context("test RPC total timeout does not fit u64 milliseconds")?;
         let client =
-            build_json_rpc_http_client(RpcHttpTimeouts::from_millis(connect_ms, total_ms)?)?;
-        Self::with_client(endpoint, client)
+            build_json_rpc_http_client(RpcHttpTimeouts::new(connect_timeout, total_timeout)?)?;
+        Self::with_client(endpoint, client, true)
+    }
+
+    pub(crate) fn is_configured_timeout(&self, error: &anyhow::Error) -> bool {
+        self.has_configured_timeouts
+            && error.chain().any(|cause| {
+                cause
+                    .downcast_ref::<reqwest::Error>()
+                    .is_some_and(reqwest::Error::is_timeout)
+            })
     }
 
     pub(crate) async fn call(&self, method: &str, params: Vec<Value>) -> Result<JsonRpcCallResult> {
@@ -236,6 +256,8 @@ fn raw_value_to_json(value: &serde_json::value::RawValue) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     use super::*;
 
     #[test]
@@ -246,15 +268,65 @@ mod tests {
 
     #[test]
     fn rpc_timeout_configuration_rejects_zero_and_inverted_values() {
-        assert!(RpcHttpTimeouts::from_millis(0, 8_000).is_err());
-        assert!(RpcHttpTimeouts::from_millis(2_000, 0).is_err());
-        assert!(RpcHttpTimeouts::from_millis(8_001, 8_000).is_err());
+        assert!(RpcHttpTimeouts::new(Duration::ZERO, Duration::from_secs(8)).is_err());
+        assert!(RpcHttpTimeouts::new(Duration::from_secs(2), Duration::ZERO).is_err());
+        assert!(
+            RpcHttpTimeouts::new(Duration::from_millis(8_001), Duration::from_secs(8)).is_err()
+        );
         assert_eq!(
-            RpcHttpTimeouts::from_millis(2_000, 8_000).expect("timeouts must parse"),
+            RpcHttpTimeouts::new(Duration::from_secs(2), Duration::from_secs(8))
+                .expect("timeouts must parse"),
             RpcHttpTimeouts {
                 connect: Duration::from_secs(2),
                 total: Duration::from_secs(8),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn worker_style_rpc_client_is_unaffected_by_api_timeout_config() -> Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let server = tokio::spawn(async move {
+            let mut connections = Vec::new();
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await?;
+                connections.push(tokio::spawn(async move {
+                    let mut request = [0_u8; 2048];
+                    let bytes_read = socket.read(&mut request).await?;
+                    ensure!(bytes_read > 0, "mock RPC request closed before sending data");
+                    tokio::time::sleep(Duration::from_millis(75)).await;
+                    let body = r#"{"jsonrpc":"2.0","id":1,"result":"0x"}"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    Ok::<_, anyhow::Error>(())
+                }));
+            }
+            for connection in connections {
+                connection.await??;
+            }
+            Ok::<_, anyhow::Error>(())
+        });
+
+        let worker_rpc_urls = ChainRpcUrls::from_entries(&[format!("test={endpoint}")])?;
+        let api_rpc_urls = worker_rpc_urls
+            .clone()
+            .with_http_timeouts(Duration::from_millis(10), Duration::from_millis(25))?;
+        let api_rpc = JsonRpcHttpClient::new_for_rpc_urls(&endpoint, &api_rpc_urls)?;
+        let worker_rpc = JsonRpcHttpClient::new_for_rpc_urls(&endpoint, &worker_rpc_urls)?;
+
+        let api_error = api_rpc
+            .call("eth_call", vec![])
+            .await
+            .expect_err("API-configured RPC client must enforce its deadline");
+        assert!(api_rpc.is_configured_timeout(&api_error));
+
+        let worker_result = worker_rpc.call("eth_call", vec![]).await?;
+        assert_eq!(worker_result.result, Ok(Value::String("0x".to_owned())));
+        server.await??;
+        Ok(())
     }
 }

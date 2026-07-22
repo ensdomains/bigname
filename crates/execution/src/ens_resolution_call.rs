@@ -111,7 +111,7 @@ pub(super) async fn execute_record_call(
         .await
     {
         Ok(result) => result,
-        Err(_) => {
+        Err(error) if rpc.is_configured_timeout(&error) => {
             return Ok(SelectorCall {
                 status: SelectorStatus::ExecutionFailed {
                     failure_reason: "resolver_call_failed",
@@ -127,6 +127,7 @@ pub(super) async fn execute_record_call(
                 latency_ms: elapsed_latency_ms(started),
             });
         }
+        Err(error) => return Err(error),
     };
     let result = if use_latest_block_tag {
         match &result.result {

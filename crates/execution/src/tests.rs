@@ -80,6 +80,59 @@ async fn spawn_resolution_mock_rpc(
     Ok((url, handle))
 }
 
+async fn spawn_resolution_transport_recovery_rpc()
+-> Result<(String, JoinHandle<Result<Vec<Value>>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("failed to bind resolution transport recovery RPC listener")?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let handle = tokio::spawn(async move {
+        let mut requests = Vec::new();
+
+        let (mut transient_socket, _) = listener
+            .accept()
+            .await
+            .context("failed to accept transient resolution RPC request")?;
+        requests.push(read_mock_http_json_body(&mut transient_socket).await?);
+        drop(transient_socket);
+
+        let (mut recovered_socket, _) = listener
+            .accept()
+            .await
+            .context("failed to accept recovered resolution RPC request")?;
+        requests.push(read_mock_http_json_body(&mut recovered_socket).await?);
+        write_mock_json_rpc_error(
+            &mut recovered_socket,
+            ResolutionMockRpcResponse {
+                code: 3,
+                message: "execution reverted",
+            },
+        )
+        .await?;
+        Ok(requests)
+    });
+
+    Ok((url, handle))
+}
+
+async fn spawn_hanging_resolution_rpc() -> Result<(String, JoinHandle<Result<()>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("failed to bind hanging resolution RPC listener")?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let handle = tokio::spawn(async move {
+        let (mut socket, _) = listener
+            .accept()
+            .await
+            .context("failed to accept hanging resolution RPC request")?;
+        read_mock_http_json_body(&mut socket).await?;
+        std::future::pending::<()>().await;
+        Ok(())
+    });
+
+    Ok((url, handle))
+}
+
 async fn read_mock_http_json_body(socket: &mut tokio::net::TcpStream) -> Result<Value> {
     let mut buffer = Vec::new();
     let mut scratch = [0_u8; 1024];
@@ -3306,6 +3359,143 @@ async fn on_demand_all_failed_persists_typed_failure_payloads() -> Result<()> {
             .and_then(|payload| payload.get("failure_reason")),
         Some(&json!("resolver_call_reverted"))
     );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn on_demand_transient_transport_error_is_not_persisted_and_next_attempt_retries()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let seed_request = success_request();
+    seed_supported_resolution_storage(&database, &seed_request).await?;
+    let resource_id = boundary_resource_id(&seed_request.outcome.cache_key.record_version_boundary);
+    let row = bigname_storage::load_name_current(database.pool(), "ens:alice.eth")
+        .await?
+        .context("transport recovery test must load name_current row")?;
+    let record_inventory_row = bigname_storage::load_record_inventory_current(
+        database.pool(),
+        resource_id,
+        &seed_request.outcome.cache_key.record_version_boundary,
+    )
+    .await?
+    .context("transport recovery test must load record_inventory_current row")?;
+    let (rpc_url, handle) = spawn_resolution_transport_recovery_rpc().await?;
+    let rpc_url = format!("{rpc_url}/rpc?api_key=round4-secret");
+    let chain_rpc_urls =
+        ChainRpcUrls::from_entries(&[format!("{ETHEREUM_MAINNET_CHAIN_ID}={rpc_url}")])?
+            .with_http_timeouts(Duration::from_millis(100), Duration::from_secs(1))?;
+    let records = vec![EnsResolutionRecord::new(
+        "addr:60",
+        "addr",
+        Some("60".to_owned()),
+    )];
+    let request = || OnDemandEnsResolutionRequest {
+        row: &row,
+        records: &records,
+        record_inventory_row: Some(&record_inventory_row),
+        chain_positions: row.chain_positions.clone(),
+        chain_rpc_urls: &chain_rpc_urls,
+        use_latest_block_tag: false,
+        persist_execution: true,
+    };
+
+    let error = execute_ens_universal_resolver_verified_resolution(database.pool(), request())
+        .await
+        .expect_err("connection close must abort on-demand execution before persistence");
+    assert_eq!(error.kind(), OnDemandEnsResolutionErrorKind::Configuration);
+    assert!(
+        error
+            .message()
+            .contains("failed to execute on-demand ENS verified resolution RPC call"),
+        "unexpected transport error: {error}"
+    );
+    assert!(
+        !error.message().contains("round4-secret"),
+        "transport error must not disclose RPC URL credentials: {error}"
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &seed_request.outcome.cache_key)
+            .await?
+            .is_none(),
+        "transient transport failure must not persist an execution outcome"
+    );
+
+    let recovered_outcome =
+        execute_ens_universal_resolver_verified_resolution(database.pool(), request())
+            .await
+            .context("the next read must retry after the provider recovers")?;
+    assert_eq!(join_resolution_mock_requests(handle).await?.len(), 2);
+    assert_eq!(
+        recovered_outcome
+            .failure_payload
+            .as_ref()
+            .and_then(|payload| payload.get("failure_reason")),
+        Some(&json!("resolver_call_reverted"))
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &recovered_outcome.cache_key)
+            .await?
+            .is_some(),
+        "the recovered retry must persist its provider result"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn on_demand_configured_transport_timeout_remains_persisted_in_band_failure() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let seed_request = success_request();
+    seed_supported_resolution_storage(&database, &seed_request).await?;
+    let resource_id = boundary_resource_id(&seed_request.outcome.cache_key.record_version_boundary);
+    let row = bigname_storage::load_name_current(database.pool(), "ens:alice.eth")
+        .await?
+        .context("timeout persistence test must load name_current row")?;
+    let record_inventory_row = bigname_storage::load_record_inventory_current(
+        database.pool(),
+        resource_id,
+        &seed_request.outcome.cache_key.record_version_boundary,
+    )
+    .await?
+    .context("timeout persistence test must load record_inventory_current row")?;
+    let (rpc_url, handle) = spawn_hanging_resolution_rpc().await?;
+    let chain_rpc_urls =
+        ChainRpcUrls::from_entries(&[format!("{ETHEREUM_MAINNET_CHAIN_ID}={rpc_url}")])?
+            .with_http_timeouts(Duration::from_millis(10), Duration::from_millis(25))?;
+    let records = vec![EnsResolutionRecord::new(
+        "addr:60",
+        "addr",
+        Some("60".to_owned()),
+    )];
+
+    let outcome = execute_ens_universal_resolver_verified_resolution(
+        database.pool(),
+        OnDemandEnsResolutionRequest {
+            row: &row,
+            records: &records,
+            record_inventory_row: Some(&record_inventory_row),
+            chain_positions: row.chain_positions.clone(),
+            chain_rpc_urls: &chain_rpc_urls,
+            use_latest_block_tag: false,
+            persist_execution: true,
+        },
+    )
+    .await
+    .context("configured timeout must remain an in-band execution result")?;
+    handle.abort();
+
+    assert_eq!(
+        outcome
+            .failure_payload
+            .as_ref()
+            .and_then(|payload| payload.get("failure_reason")),
+        Some(&json!("resolver_call_failed"))
+    );
+    let persisted = load_execution_outcome(database.pool(), &outcome.cache_key)
+        .await?
+        .context("configured timeout outcome must persist")?;
+    assert_eq!(persisted.execution_trace_id, outcome.execution_trace_id);
 
     database.cleanup().await
 }

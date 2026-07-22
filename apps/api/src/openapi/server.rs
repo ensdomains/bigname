@@ -17,7 +17,7 @@ const OPENAPI_DOCS_HTML: &str = include_str!("docs.html");
 
 pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
     args.bounds.validate()?;
-    bigname_execution::validate_rpc_http_client_config()?;
+    let chain_rpc_urls = args.effective_chain_rpc_urls()?;
     let pool = bigname_storage::connect_with_application_name_and_statement_timeout(
         &args.database,
         "bigname-api",
@@ -30,7 +30,6 @@ pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
         HEALTH_DATABASE_CHECK_TIMEOUT,
     )
     .await?;
-    let chain_rpc_urls = args.effective_chain_rpc_urls()?;
     let state = AppState {
         pool,
         chain_rpc_urls,
@@ -58,6 +57,8 @@ pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
         max_in_flight = args.bounds.max_in_flight,
         health_max_in_flight = args.bounds.health_max_in_flight,
         verified_execution_max_in_flight = args.bounds.verified_execution_max_in_flight,
+        rpc_connect_timeout_ms = args.rpc_connect_timeout_ms,
+        rpc_timeout_ms = args.rpc_timeout_ms,
         verified_rate_limit_per_second = args.bounds.verified_rate_limit_per_second,
         verified_rate_limit_burst = args.bounds.verified_rate_limit_burst,
         verified_rate_limit_max_clients = args.bounds.verified_rate_limit_max_clients,

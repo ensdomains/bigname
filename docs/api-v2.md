@@ -387,11 +387,14 @@ Uniform mapping:
 Rules:
 
 - `unsupported` is `422`.
-- Verified-execution failures surface as `status: "failed"` on the affected
-  section with `failure_reason`, or as `stale` when the RPC provider cannot
-  serve the selected block. Provider connect and response timeouts use this
-  existing in-band execution-failure behavior; they are not whole-request
-  `408` responses.
+- Verified record-resolution failures surface as `status: "failed"` on the
+  affected section with `failure_reason`, or as `stale` when the RPC provider
+  cannot serve the selected block. Provider connect and response timeouts for
+  that path use the existing in-band execution-failure behavior; they are not
+  whole-request `408` responses. Other provider transport failures during
+  verified record resolution surface as `stale` and do not cache an execution
+  outcome. The primary-name route keeps its separately documented in-band
+  provider-failure and verified-mode persistence behavior.
 - Every route has a whole-request deadline. `/healthz`, `/v1/status`, and
   `/v2/status` retain that deadline as their final backstop. `/healthz` bypasses
   the process-wide concurrency limiter and load shedding, uses a reserved
@@ -404,7 +407,8 @@ Rules:
 - The verified-execution rate limit, when enabled, and all in-flight ceilings
   reject work before it waits for execution capacity. The rate-limit key is an
   IPv4 address or IPv6 `/64`; `/healthz` passes only through the health-specific
-  ceiling.
+  ceiling. `GET /v2/names/{name}/records?source=auto` with omitted or empty
+  `keys` is an indexed read and does not enter verified-execution admission.
 - Single-resource GETs return `404 not_found` when no answer exists.
 - Collections return `200` with empty `data`.
 - Batch lookup results carry in-band `status` per input; a batch never returns

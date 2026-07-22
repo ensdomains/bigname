@@ -167,11 +167,15 @@ With no `at` or `chain_positions` selector, that target is `consistency=head` at
 the latest stored Ethereum checkpoint, not provider latest. Missing API provider
 configuration or a JSON-RPC response recognized as unable to serve the selected
 block must fail closed; v1 returns `409 stale`, while v2 product routes return
-their documented in-band `status=stale`/`failure_reason` envelope. Provider
-transport timeouts instead return the affected route's in-band execution-failure
-class. Neither generation may fall back to declared record cache for verified
-values. The indexer RPC setting and Reth DB source settings do not satisfy this
-API live-execution provider requirement by themselves.
+their documented in-band `status=stale`/`failure_reason` envelope. For on-demand
+verified record resolution, expiration of an API-configured provider connect or
+total-response deadline instead returns and persists the affected selector's
+in-band execution-failure class. Other record-resolution transport failures,
+including DNS, TLS, and connection-reset errors, abort without persisting an
+outcome so the next read retries. Neither generation may fall back to declared
+record cache for verified values. The indexer RPC setting and Reth DB source
+settings do not satisfy this API live-execution provider requirement by
+themselves.
 
 When `GET /v1/primary-names/{address}` defaults to
 `namespace=ens&coin_type=60` and the persisted tuple is missing, a configured
