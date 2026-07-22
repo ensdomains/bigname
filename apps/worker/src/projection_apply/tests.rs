@@ -7,12 +7,20 @@ use sqlx::{Row, types::time::OffsetDateTime};
 use uuid::Uuid;
 
 use super::{
+    NORMALIZED_EVENT_DERIVE_BATCH_LIMIT, NORMALIZED_EVENT_DERIVE_PROGRESS_LIMIT,
     derive::{
         capture_normalized_event_change_watermark, derive_normalized_event_invalidations,
         derive_normalized_event_invalidations_through,
     },
-    has_primary_hydration_blocking_work,
+    derive_once, has_primary_hydration_blocking_work,
 };
+
+const DIFFERENTIAL_CHANGE_COUNT: i64 = NORMALIZED_EVENT_DERIVE_PROGRESS_LIMIT * 2 + 2;
+const ACROSS_UNITS_KEY: &str = "ens:differential-across-units.eth";
+const FIRST_UNIT_ONLY_KEY: &str = "ens:differential-first-unit.eth";
+const SECOND_UNIT_ONLY_KEY: &str = "ens:differential-second-unit.eth";
+const FIRST_BOUNDARY_KEY: &str = "ens:differential-first-boundary.eth";
+const SECOND_BOUNDARY_KEY: &str = "ens:differential-second-boundary.eth";
 
 async fn test_database() -> Result<TestDatabase> {
     TestDatabase::create_migrated(
@@ -344,6 +352,84 @@ async fn derives_key_scoped_invalidations_from_normalized_event_changes() -> Res
         "address_names_current",
         "0x0000000000000000000000000000000000000ddd:ens:alice.eth"
     ));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn split_derive_matches_single_batch_invalidation_end_state() -> Result<()> {
+    let database = test_database().await?;
+    seed_derive_differential_fixture(&database).await?;
+
+    let across_units_range = (
+        fixture_change_id(&database, 1).await?,
+        fixture_change_id(&database, DIFFERENTIAL_CHANGE_COUNT).await?,
+    );
+    let first_unit_range = (
+        fixture_change_id(&database, 50).await?,
+        fixture_change_id(&database, 200).await?,
+    );
+    let second_unit_range = (
+        fixture_change_id(&database, 300).await?,
+        fixture_change_id(&database, 450).await?,
+    );
+    let first_boundary_range = (
+        fixture_change_id(&database, NORMALIZED_EVENT_DERIVE_PROGRESS_LIMIT).await?,
+        fixture_change_id(&database, NORMALIZED_EVENT_DERIVE_PROGRESS_LIMIT + 1).await?,
+    );
+    let second_boundary_range = (
+        fixture_change_id(&database, NORMALIZED_EVENT_DERIVE_PROGRESS_LIMIT * 2).await?,
+        fixture_change_id(&database, NORMALIZED_EVENT_DERIVE_PROGRESS_LIMIT * 2 + 1).await?,
+    );
+
+    let single_batch =
+        derive_normalized_event_invalidations(database.pool(), NORMALIZED_EVENT_DERIVE_BATCH_LIMIT)
+            .await?;
+    assert_eq!(single_batch.scanned_event_count, DIFFERENTIAL_CHANGE_COUNT);
+    assert_eq!(load_apply_cursor(&database).await?, across_units_range.1);
+    let single_batch_rows = load_stable_invalidation_rows(&database).await?;
+    assert_invalidation_range(&single_batch_rows, ACROSS_UNITS_KEY, across_units_range);
+    assert_invalidation_range(&single_batch_rows, FIRST_UNIT_ONLY_KEY, first_unit_range);
+    assert_invalidation_range(&single_batch_rows, SECOND_UNIT_ONLY_KEY, second_unit_range);
+    assert_invalidation_range(&single_batch_rows, FIRST_BOUNDARY_KEY, first_boundary_range);
+    assert_invalidation_range(
+        &single_batch_rows,
+        SECOND_BOUNDARY_KEY,
+        second_boundary_range,
+    );
+    assert_eq!(
+        invalidation_generation(&database, "name_current", ACROSS_UNITS_KEY).await?,
+        0
+    );
+
+    reset_derive_output(&database).await?;
+
+    let split = derive_once(database.pool()).await?;
+    assert_eq!(split.scanned_event_count, DIFFERENTIAL_CHANGE_COUNT);
+    assert_eq!(load_apply_cursor(&database).await?, across_units_range.1);
+    let split_rows = load_stable_invalidation_rows(&database).await?;
+    assert_stable_invalidation_rows_eq(&single_batch_rows, &split_rows);
+
+    assert_eq!(
+        invalidation_generation(&database, "name_current", ACROSS_UNITS_KEY).await?,
+        2
+    );
+    assert_eq!(
+        invalidation_generation(&database, "name_current", FIRST_BOUNDARY_KEY).await?,
+        1
+    );
+    assert_eq!(
+        invalidation_generation(&database, "name_current", SECOND_BOUNDARY_KEY).await?,
+        1
+    );
+    assert_eq!(
+        invalidation_generation(&database, "name_current", FIRST_UNIT_ONLY_KEY).await?,
+        0
+    );
+    assert_eq!(
+        invalidation_generation(&database, "name_current", SECOND_UNIT_ONLY_KEY).await?,
+        0
+    );
 
     database.cleanup().await
 }
@@ -2013,6 +2099,162 @@ async fn primary_hydration_blocking_work_detects_active_claimed_invalidations() 
     );
 
     database.cleanup().await
+}
+
+async fn seed_derive_differential_fixture(database: &TestDatabase) -> Result<()> {
+    let observed_at = timestamp(1_800_000_400);
+    for position in 1..=DIFFERENTIAL_CHANGE_COUNT {
+        let event_identity = fixture_event_identity(position);
+        let logical_name_id = match position {
+            1 | 275 | DIFFERENTIAL_CHANGE_COUNT => ACROSS_UNITS_KEY.to_owned(),
+            50 | 200 => FIRST_UNIT_ONLY_KEY.to_owned(),
+            250 | 251 => FIRST_BOUNDARY_KEY.to_owned(),
+            300 | 450 => SECOND_UNIT_ONLY_KEY.to_owned(),
+            500 | 501 => SECOND_BOUNDARY_KEY.to_owned(),
+            _ => format!("ens:differential-{position}.eth"),
+        };
+        insert_event(
+            database,
+            EventSeed {
+                event_identity: &event_identity,
+                namespace: "ens",
+                logical_name_id: Some(&logical_name_id),
+                resource_id: None,
+                event_kind: "DifferentialChange",
+                source_family: "test",
+                derivation_kind: "projection_apply_differential_test",
+                chain_id: None,
+                block_number: None,
+                block_hash: None,
+                before_state: json!({}),
+                after_state: json!({}),
+                observed_at,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+fn fixture_event_identity(position: i64) -> String {
+    format!("projection-apply:differential-{position}")
+}
+
+async fn fixture_change_id(database: &TestDatabase, position: i64) -> Result<i64> {
+    let event_identity = fixture_event_identity(position);
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT change.change_id
+        FROM projection_normalized_event_changes change
+        JOIN normalized_events event
+          ON event.normalized_event_id = change.normalized_event_id
+        WHERE event.event_identity = $1
+        "#,
+    )
+    .bind(&event_identity)
+    .fetch_one(database.pool())
+    .await
+    .with_context(|| format!("failed to load projection change for {event_identity}"))
+}
+
+async fn reset_derive_output(database: &TestDatabase) -> Result<()> {
+    let mut transaction = database.pool().begin().await?;
+    sqlx::query("DELETE FROM projection_invalidations")
+        .execute(&mut *transaction)
+        .await
+        .context("failed to reset differential projection invalidations")?;
+    sqlx::query(
+        r#"
+        UPDATE projection_apply_cursors
+        SET last_change_id = 0,
+            updated_at = now()
+        WHERE cursor_name = 'normalized_events_to_projection_invalidations'
+        "#,
+    )
+    .execute(&mut *transaction)
+    .await
+    .context("failed to reset differential projection apply cursor")?;
+    transaction
+        .commit()
+        .await
+        .context("failed to commit differential derive reset")
+}
+
+#[derive(Debug, Eq, PartialEq, sqlx::FromRow)]
+struct StableProjectionInvalidationRow {
+    projection: String,
+    projection_key: String,
+    key_payload: Value,
+    first_change_id: Option<i64>,
+    last_change_id: Option<i64>,
+    first_normalized_event_id: Option<i64>,
+    last_normalized_event_id: Option<i64>,
+    last_changed_at: OffsetDateTime,
+    claim_token: Option<Uuid>,
+    claimed_at: Option<OffsetDateTime>,
+    attempt_count: i64,
+    last_failure_reason: Option<String>,
+    last_failure_at: Option<OffsetDateTime>,
+    state: String,
+}
+
+async fn load_stable_invalidation_rows(
+    database: &TestDatabase,
+) -> Result<Vec<StableProjectionInvalidationRow>> {
+    sqlx::query_as::<_, StableProjectionInvalidationRow>(
+        r#"
+        SELECT
+            projection,
+            projection_key,
+            key_payload,
+            first_change_id,
+            last_change_id,
+            first_normalized_event_id,
+            last_normalized_event_id,
+            last_changed_at,
+            claim_token,
+            claimed_at,
+            attempt_count,
+            last_failure_reason,
+            last_failure_at,
+            state::TEXT AS state
+        FROM projection_invalidations
+        ORDER BY projection, projection_key
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await
+    .context("failed to load stable projection invalidation rows")
+}
+
+fn assert_invalidation_range(
+    invalidations: &[StableProjectionInvalidationRow],
+    projection_key: &str,
+    expected_range: (i64, i64),
+) {
+    let invalidation = invalidations
+        .iter()
+        .find(|row| row.projection == "name_current" && row.projection_key == projection_key)
+        .unwrap_or_else(|| panic!("missing name_current invalidation for {projection_key}"));
+    assert_eq!(
+        (invalidation.first_change_id, invalidation.last_change_id),
+        (Some(expected_range.0), Some(expected_range.1)),
+        "unexpected merged change range for {projection_key}"
+    );
+}
+
+fn assert_stable_invalidation_rows_eq(
+    expected: &[StableProjectionInvalidationRow],
+    actual: &[StableProjectionInvalidationRow],
+) {
+    assert_eq!(actual.len(), expected.len());
+    for (expected, actual) in expected.iter().zip(actual) {
+        assert_eq!(
+            actual, expected,
+            "stable invalidation row differs for {}:{}",
+            expected.projection, expected.projection_key
+        );
+    }
 }
 
 fn has_key(invalidations: &[(String, String)], projection: &str, projection_key: &str) -> bool {
