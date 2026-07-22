@@ -27,23 +27,7 @@ pub(crate) async fn sync_adapter_owned_raw_log_state(
         .await
 }
 
-#[cfg(test)]
-pub(crate) async fn sync_startup_adapter_owned_raw_log_state(
-    pool: &sqlx::PgPool,
-    deployment_profile: &str,
-    watched_chain_plan: &[WatchedChainPlan],
-    startup_discovery_page_logs: usize,
-) -> Result<()> {
-    sync_adapter_owned_raw_log_state_with_startup_context(
-        pool,
-        watched_chain_plan,
-        Some((deployment_profile, startup_discovery_page_logs)),
-        None,
-    )
-    .await
-}
-
-pub(crate) async fn sync_startup_adapter_owned_raw_log_state_with_heartbeat(
+pub(crate) async fn sync_adapter_owned_raw_log_state_with_heartbeat(
     pool: &sqlx::PgPool,
     deployment_profile: &str,
     watched_chain_plan: &[WatchedChainPlan],

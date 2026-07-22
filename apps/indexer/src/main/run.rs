@@ -21,8 +21,8 @@ use crate::{
         ensure_manifest_root_ready, intake_runtime_state, load_manifest_repository,
         log_intake_chain_tasks, log_manifest_runtime_state, log_manifest_summary,
         log_provider_registry, log_watched_chain_plan, manifest_normalized_event_kind_count,
-        run_poll_loop, sync_discovery_adapter_owned_raw_log_state_with_heartbeat,
-        sync_intake_chain_tasks, sync_startup_adapter_owned_raw_log_state_with_heartbeat,
+        run_poll_loop, sync_adapter_owned_raw_log_state_with_heartbeat,
+        sync_discovery_adapter_owned_raw_log_state_with_heartbeat, sync_intake_chain_tasks,
         validate_provider_registry_for_intake_tasks, watched_chain_plan_state,
         widen_runtime_state_to_live_watch_scope_with_admission_epochs,
     },
@@ -74,7 +74,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         .record(&pool, &bootstrap_chain_ids)
         .await?;
     if run_mode.sync_adapter_before_startup_backfill {
-        sync_startup_adapter_owned_raw_log_state_with_heartbeat(
+        sync_adapter_owned_raw_log_state_with_heartbeat(
             &pool,
             &deployment_profile,
             &manifest_runtime_state.watched_chain_plan,
@@ -128,7 +128,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
                 run_mode.startup_backfill_adapter_sync_mode.as_str(),
             "startup bootstrap backfill drained; syncing adapter-owned raw-log state before live polling"
         );
-        sync_startup_adapter_owned_raw_log_state_with_heartbeat(
+        sync_adapter_owned_raw_log_state_with_heartbeat(
             &pool,
             &deployment_profile,
             &manifest_runtime_state.watched_chain_plan,
@@ -312,13 +312,14 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
 
     run_poll_loop(
         &pool,
-        &heartbeat_instance_id,
+        &mut startup_heartbeat,
         args.manifests_root,
         manifest_runtime_state,
         intake_chain_tasks,
         watched_plan_admission_epochs,
         &provider_registry,
         args.poll_interval_secs,
+        args.startup_discovery_page_logs,
         run_mode.live_watch_scope,
         run_mode.broad_runtime_refresh_enabled,
         run_mode.live_poll_adapter_sync_enabled,

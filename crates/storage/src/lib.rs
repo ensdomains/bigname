@@ -322,8 +322,9 @@ pub use resolver_profile_input_changes::{
 pub use service_heartbeats::{
     DEFAULT_WORKER_REBUILD_PHASE_MAX_AGE_SECS, INDEXER_SERVICE_NAME, ServiceLoopHeartbeat,
     ServiceLoopPhaseHeartbeat, WORKER_SERVICE_NAME, begin_service_loop_phase,
-    ensure_service_loop_heartbeat_recent, ensure_service_loop_heartbeat_recent_with_phase,
-    finish_service_loop_phase, load_preferred_service_loop_heartbeats, load_service_loop_heartbeat,
+    deregister_service_loop, ensure_service_loop_heartbeat_recent,
+    ensure_service_loop_heartbeat_recent_with_phase, finish_service_loop_phase,
+    load_preferred_service_loop_heartbeats, load_service_loop_heartbeat,
     record_service_loop_heartbeat, register_service_loop, resolve_service_instance_id,
 };
 pub use snapshot_selection::{

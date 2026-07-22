@@ -63,6 +63,11 @@ intervals. Worker rebuild operations with no safe inner batch boundary use a
 named phase row and the independently tunable
 `BIGNAME_WORKER_REBUILD_PHASE_MAX_AGE_SECS` (default 43,200); set the matching
 API interpretation with `BIGNAME_API_WORKER_REBUILD_PHASE_MAX_AGE_SECS`.
+`docker-compose.server.yml` maps stable per-service instance IDs from
+`BIGNAME_INDEXER_HEARTBEAT_INSTANCE_ID` and
+`BIGNAME_WORKER_HEARTBEAT_INSTANCE_ID`, defaulting to `indexer` and `worker`.
+This lets a recreated single-writer service retire unfinished non-process
+heartbeat rows from the prior container during registration.
 During rolling upgrades, running `migrate` before recreating old
 service containers can therefore mark those old indexer/worker containers
 unhealthy until they are replaced with the matching image; treat that as
@@ -105,8 +110,9 @@ worker-rolling-compatible upgrade. Deployment automation must drain public API
 traffic, stop every old worker, and confirm no old worker process remains before
 starting any worker from the new image. Start one new worker, wait until every
 current projection family has a marker for the new replay version and
-`projection_invalidations` is empty, and only then start or undrain the API and
-the remaining new workers. Indexers may continue ingesting while workers are
+`projection_invalidations` is empty, and only then start or undrain the API.
+The supported deployment has one active worker; do not overlap old and new
+workers during this handoff. Indexers may continue ingesting while workers are
 stopped; their durable changes will be consumed after replay handoff.
 
 Replay version 9 is such an upgrade: it forces the full permission cutover that
@@ -634,8 +640,9 @@ the configured chunk as their execution unit. The startup adapter pass then
 advances that same heartbeat after checkpoint stream pages and bounded
 discovery, identity, binding, and normalized-event finalization batches, so a
 large materialization stays live without a free-running timer masking a stuck
-operation. Raw-only sparse backfill also caps
-each materialized push with
+operation. Live manifest and discovery refresh adapter passes use the same
+checkpoint-page callbacks and family-boundary beats. Raw-only sparse backfill
+also caps each materialized push with
 `BIGNAME_INDEXER_HASH_PINNED_BACKFILL_MAX_LOGS_PER_PUSH` so dense log spans are
 split before transaction and receipt fetch/persist work. The older
 `BIGNAME_INDEXER_HASH_PINNED_BACKFILL_MAX_LOGS_PER_RANGE` name is still accepted

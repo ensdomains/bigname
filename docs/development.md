@@ -184,11 +184,16 @@ PostgreSQL pool. `api_status` is API-local readiness: because the handler is
 serving by definition, it is `ready` exactly when that query succeeds, and the
 HTTP status follows this field. Aggregate `status` additionally requires both
 service loops and may therefore be `degraded` in an HTTP 200 response.
-The API prefers any replica with a currently healthy normal heartbeat or
-long-operation phase, using the newest stale evidence only when none is
-healthy. The indexer and worker `healthcheck` subcommands instead validate the process row for their own
-`BIGNAME_HEARTBEAT_INSTANCE_ID`, which defaults to the container `HOSTNAME`,
-and fail when the row is absent or older than the service-specific
+The API prefers the retained service instance with a currently healthy normal
+heartbeat or long-operation phase, using the newest stale evidence only when
+none is healthy. A deployment runs one active writer for each service; process
+rows retained across a restart make that selection robust during the handoff
+without authorizing concurrent workers. The indexer and worker `healthcheck`
+subcommands instead validate the process row for their own
+`BIGNAME_HEARTBEAT_INSTANCE_ID`. Local binaries fall
+back to `HOSTNAME`; the server compose file pins stable `indexer` and `worker`
+identities so a recreated container refreshes the same process row. The checks
+fail when the row is absent or older than the service-specific
 `BIGNAME_INDEXER_HEARTBEAT_MAX_AGE_SECS` or
 `BIGNAME_WORKER_HEARTBEAT_MAX_AGE_SECS` limit. This distinguishes a loop that
 never registered from one that registered and then stopped advancing. Worker
@@ -197,14 +202,20 @@ progress boundaries; the indexer registers before startup bootstrap and
 refreshes after completed hash-pinned progress units of at most 32 blocks
 inside the configured checkpoint chunk, then after completed startup adapter
 checkpoint stream pages and bounded discovery, identity, binding, and
-normalized-event finalization batches. A free-running heartbeat task does not
+normalized-event finalization batches. Live manifest and discovery refresh
+adapter passes reuse those checkpoint-page callbacks and family-boundary beats.
+A free-running heartbeat task does not
 keep a stuck operation healthy. Worker rebuilds refresh at their
 existing projection batch boundaries. A monolithic worker SQL or hydration
 operation instead sets `loops.worker.phase` and uses
 `BIGNAME_API_WORKER_REBUILD_PHASE_MAX_AGE_SECS` (default 43,200) in the API and
 `BIGNAME_WORKER_REBUILD_PHASE_MAX_AGE_SECS` in the worker container check. The
-named phase is removed when normal bounded progress resumes; if the process
-dies inside it, the retained phase becomes `stale` at that separate limit.
+named phase is removed when normal bounded progress resumes; graceful shutdown
+deregisters the instance, fencing further phase writes and removing all of its
+heartbeat rows before exit. Registering a new single-writer worker retires a
+dead predecessor's phase. If the process exits without either cleanup path and
+no replacement registers, the retained phase becomes `stale` at that separate
+limit.
 Failure to persist the phase start aborts that rebuild attempt before its
 monolithic operation begins; ordinary bounded-progress beat failures still
 warn and retry at the next progress boundary.

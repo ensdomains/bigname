@@ -21,6 +21,8 @@ mod bootstrap_replay;
 mod primary_hydration;
 #[path = "automatic_projection_replay/primary_hydration_loop.rs"]
 mod primary_hydration_loop;
+#[path = "automatic_projection_replay/shutdown.rs"]
+mod shutdown;
 
 #[cfg(test)]
 use bootstrap_replay::replay_all_current_projections_when_ready;
@@ -93,21 +95,21 @@ pub(crate) async fn run_worker(args: RunArgs) -> Result<()> {
     )
     .await?;
 
-    tokio::select! {
-        result = run_automatic_current_projection_replay(
-            pool,
-            heartbeat_instance_id,
+    let replay_pool = pool.clone();
+    let replay_heartbeat_instance_id = heartbeat_instance_id.clone();
+    shutdown::run_until_shutdown(
+        &pool,
+        &heartbeat_instance_id,
+        run_automatic_current_projection_replay(
+            replay_pool,
+            replay_heartbeat_instance_id,
             args.poll_interval_secs,
             text_hydration_config,
             primary_hydration_config,
-        ) => result?,
-        signal = tokio::signal::ctrl_c() => {
-            signal.context("failed to listen for shutdown signal")?;
-        }
-    }
-
-    info!(service = "worker", "shutdown signal received");
-    Ok(())
+        ),
+        shutdown::shutdown_signal(),
+    )
+    .await
 }
 
 pub(crate) async fn run_automatic_current_projection_replay(
