@@ -378,7 +378,10 @@ Status requests only read that in-memory cache, so a slow provider cannot hold
 the route open. The mapping is load-bearing for status readiness: API startup
 compares it with every expected status chain, emits a warning naming omissions,
 and leaves each omitted chain `unconfigured` and aggregate readiness
-`degraded`.
+`degraded` when its projection is current. If that chain also has positive
+`lag_blocks`, the known projection lag takes precedence and aggregate readiness
+is `stale`; `network_head_status` still reports the omitted provider as
+`unconfigured`.
 
 ## `GET /v1/names`
 

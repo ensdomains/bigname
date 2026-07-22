@@ -155,7 +155,9 @@ Field ownership:
   or a fresh provider comparison beyond either configured ingestion-lag
   threshold is `stale`. Missing stored readiness or a provider observation
   whose `network_head_status` is `stale`, `unavailable`, `pending`, or
-  `unconfigured` is `degraded`. The provider head is refreshed asynchronously
+  `unconfigured` is `degraded` when its projection is current. Positive
+  projection lag takes precedence and is `stale`; `network_head_status` still
+  reports the provider state. The provider head is refreshed asynchronously
   under a timeout and cache TTL; this route reads only the cache and never
   waits for provider I/O. If the latest refresh fails after a successful one,
   `network_head_status` becomes `unavailable` immediately while the last head,

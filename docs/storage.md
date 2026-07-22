@@ -497,7 +497,9 @@ The API process is otherwise read-only against storage.
 main-loop tick advances `heartbeat_at` for that row. The indexer registers this
 row immediately after opening its database pool, before startup bootstrap, and
 advances the process plus deduplicated chain rows after completed hash-pinned
-bootstrap progress units of at most 32 blocks, without changing the configured
+bootstrap progress units of at most 32 blocks and after completed startup
+adapter checkpoint stream pages and bounded discovery, identity, binding, and
+normalized-event finalization batches. This does not change the configured
 1,024-block default checkpoint boundary for non-startup backfills. The worker
 advances the process row after bounded
 [projection](glossary.md) rebuild batches and projection-apply units. This

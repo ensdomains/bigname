@@ -192,7 +192,9 @@ never registered from one that registered and then stopped advancing. Worker
 bootstrap replay and projection apply refresh the process row only at actual
 progress boundaries; the indexer registers before startup bootstrap and
 refreshes after completed hash-pinned progress units of at most 32 blocks
-inside the configured checkpoint chunk. A free-running heartbeat task does not
+inside the configured checkpoint chunk, then after completed startup adapter
+checkpoint stream pages and bounded discovery, identity, binding, and
+normalized-event finalization batches. A free-running heartbeat task does not
 keep a stuck operation healthy. Worker rebuilds refresh at their
 existing projection batch boundaries. A monolithic worker SQL or hydration
 operation instead sets `loops.worker.phase` and uses

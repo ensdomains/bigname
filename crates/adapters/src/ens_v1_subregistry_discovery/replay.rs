@@ -2,7 +2,7 @@ use anyhow::{Context, Result, ensure};
 use bigname_storage::acquire_raw_log_staging_read_guard;
 use sqlx::PgPool;
 
-use crate::checkpoint_context::AdapterCheckpointContext;
+use crate::checkpoint_context::{AdapterCheckpointContext, StartupAdapterProgress};
 
 use super::{
     DiscoveryEdgeMutation, EnsV1SubregistryDiscoverySyncSummary, ReplayAdapterCheckpointContext,
@@ -45,6 +45,7 @@ pub async fn sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_li
         &checkpoint,
         max_raw_logs_per_page,
         None,
+        None,
     )
     .await
 }
@@ -55,6 +56,7 @@ pub(super) async fn sync_ens_v1_subregistry_discovery_with_checkpoint_context(
     checkpoint: &AdapterCheckpointContext,
     max_raw_logs_per_page: usize,
     progress_log_every_pages: Option<usize>,
+    mut startup_progress: Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<EnsV1SubregistryDiscoverySyncSummary> {
     ensure!(
         max_raw_logs_per_page > 0,
@@ -84,6 +86,7 @@ pub(super) async fn sync_ens_v1_subregistry_discovery_with_checkpoint_context(
             Some(&checkpoint),
             checkpoint_page_limit,
             progress_log_every_pages,
+            &mut startup_progress,
         )
         .await?;
         if !repeat_checkpoint_replay {

@@ -190,6 +190,7 @@ pub(super) async fn stage_streamed_observations(
                 "failed to stage streamed discovery observations (the page source must yield \
                  latest-per-key observations with unique observation keys)",
             )?;
+            source.record_progress().await?;
         }
     }
 
@@ -203,6 +204,7 @@ pub(super) async fn stage_streamed_observations(
     .await
     .context("failed to index the streamed reconcile observation temp table")?;
     analyze_temp_table(&mut *executor, "reconcile_observations").await?;
+    source.record_progress().await?;
 
     Ok(StagedStreamedObservations {
         staged_observation_count,

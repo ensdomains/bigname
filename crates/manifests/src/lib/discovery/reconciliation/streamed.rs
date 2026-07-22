@@ -82,6 +82,13 @@ pub trait DiscoveryObservationPageSource {
         after_key: Option<&str>,
         limit: i64,
     ) -> impl Future<Output = Result<Vec<(String, DiscoveryObservation)>>> + Send;
+
+    /// Report a completed bounded reconciliation unit. The default is a
+    /// no-op; operational callers can use it to keep liveness tied to actual
+    /// streamed progress without a detached timer.
+    fn record_progress(&self) -> impl Future<Output = Result<()>> + Send {
+        async { Ok(()) }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -185,12 +192,14 @@ pub(crate) async fn reconcile_discovery_observations_streamed_with_options(
         Some(discovery_source),
     )
     .await?;
-    run_streamed_admission_walk(transaction.as_mut(), &admission_state, &options).await?;
+    source.record_progress().await?;
+    run_streamed_admission_walk(transaction.as_mut(), &admission_state, &options, source).await?;
 
     // Everything below diffs against the pre-mutation edge snapshot, exactly
     // like the in-memory reconcile computes its whole plan from one
     // `load_active_reconciled_discovery_edges` read before mutating.
     materialize_streamed_insert_candidates(transaction.as_mut(), discovery_source).await?;
+    source.record_progress().await?;
     let insert_candidate_count =
         count_temp_rows(transaction.as_mut(), "reconcile_insert_candidates").await?;
     let deactivation_candidate_count =
@@ -233,6 +242,7 @@ pub(crate) async fn reconcile_discovery_observations_streamed_with_options(
         load_streamed_deactivation_candidates(transaction.as_mut(), discovery_source).await?;
     let candidate_observations =
         load_streamed_observations_for_keys(transaction.as_mut(), &deactivation_candidates).await?;
+    source.record_progress().await?;
     let direct_terminal_states_by_key = observation_terminal_states(&candidate_observations)?;
     let observations_by_key = candidate_observations
         .iter()
@@ -270,6 +280,7 @@ pub(crate) async fn reconcile_discovery_observations_streamed_with_options(
         &mut retained_newer_edge_ids,
     )
     .await?;
+    source.record_progress().await?;
     // Chronology rule 2: a desired edge with a newer non-orphaned successor
     // for the same assignment start is materialized as a closed historical
     // epoch and the successor is retained.
@@ -281,6 +292,7 @@ pub(crate) async fn reconcile_discovery_observations_streamed_with_options(
         &mut retained_newer_edge_ids,
     )
     .await?;
+    source.record_progress().await?;
     let historical_row_ids = historical_edges
         .iter()
         .map(|(desired_row_id, _, _)| *desired_row_id)
@@ -347,7 +359,11 @@ pub(crate) async fn reconcile_discovery_observations_streamed_with_options(
 
     let mut deactivated_edge_count = 0;
     let mut mutated_chains = BTreeSet::new();
-    for candidate in &deactivation_candidates {
+    for (candidate_index, candidate) in deactivation_candidates.iter().enumerate() {
+        if candidate_index > 0 && candidate_index.is_multiple_of(options.mutation_batch_size.max(1))
+        {
+            source.record_progress().await?;
+        }
         if retained_newer_edge_ids.contains(&candidate.discovery_edge_id) {
             continue;
         }
@@ -370,6 +386,7 @@ pub(crate) async fn reconcile_discovery_observations_streamed_with_options(
             deactivated_edge_count += 1;
         }
     }
+    source.record_progress().await?;
 
     let mut inserted_edge_count = 0;
     let mut after_row_id = 0i64;
@@ -396,6 +413,7 @@ pub(crate) async fn reconcile_discovery_observations_streamed_with_options(
         let edge_insert = insert_reconciled_discovery_edges(transaction.as_mut(), &batch).await?;
         inserted_edge_count += edge_insert.inserted_count + edge_insert.reactivated_count;
         mutated_chains.extend(batch.iter().map(|edge| edge.chain.clone()));
+        source.record_progress().await?;
     }
 
     let mut historical_edges = historical_edges
@@ -410,6 +428,7 @@ pub(crate) async fn reconcile_discovery_observations_streamed_with_options(
         .collect::<Vec<_>>();
     let historical_edge_reconciliation =
         reconcile_historical_discovery_edges(transaction.as_mut(), &historical_edge_refs).await?;
+    source.record_progress().await?;
     inserted_edge_count += historical_edge_reconciliation.inserted_count;
     if historical_edge_reconciliation.inserted_count > 0
         || historical_edge_reconciliation.updated_count > 0
@@ -422,6 +441,7 @@ pub(crate) async fn reconcile_discovery_observations_streamed_with_options(
         || deactivated_edge_count > 0
     {
         reconcile_active_contract_instance_addresses(transaction.as_mut()).await?;
+        source.record_progress().await?;
     }
     let active_edge_count =
         load_active_reconciled_discovery_edge_count(transaction.as_mut(), discovery_source).await?;
@@ -430,11 +450,13 @@ pub(crate) async fn reconcile_discovery_observations_streamed_with_options(
         .context("failed to count streamed admitted discovery edges")?;
     let admission_epoch_bump_count = mutated_chains.len();
     bump_discovery_admission_epochs(transaction.as_mut(), &mutated_chains).await?;
+    source.record_progress().await?;
 
     transaction
         .commit()
         .await
         .context("failed to commit streamed discovery-edge reconciliation transaction")?;
+    source.record_progress().await?;
 
     Ok(DiscoveryReconciliationSummary {
         active_edge_count,

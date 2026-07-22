@@ -2,7 +2,7 @@ use anyhow::Result;
 use sqlx::PgPool;
 
 use super::{
-    EnsV1SubregistryDiscoverySyncSummary, StartupAdapterCheckpointContext,
+    EnsV1SubregistryDiscoverySyncSummary, StartupAdapterCheckpointContext, StartupAdapterProgress,
     checkpoint::SubregistryReplayCheckpoint, loader::RegistryRawLogPosition,
     replay::sync_ens_v1_subregistry_discovery_with_checkpoint_context,
 };
@@ -22,6 +22,26 @@ pub async fn sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_l
         &checkpoint,
         max_raw_logs_per_page,
         Some(STARTUP_PROGRESS_LOG_EVERY_PAGES),
+        None,
+    )
+    .await
+}
+
+pub async fn sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit_and_progress(
+    pool: &PgPool,
+    chain: &str,
+    checkpoint: &StartupAdapterCheckpointContext,
+    max_raw_logs_per_page: usize,
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<EnsV1SubregistryDiscoverySyncSummary> {
+    let checkpoint = checkpoint.adapter_context(pool, chain).await?;
+    sync_ens_v1_subregistry_discovery_with_checkpoint_context(
+        pool,
+        chain,
+        &checkpoint,
+        max_raw_logs_per_page,
+        Some(STARTUP_PROGRESS_LOG_EVERY_PAGES),
+        Some(progress),
     )
     .await
 }

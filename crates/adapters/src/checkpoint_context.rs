@@ -1,3 +1,5 @@
+use std::{future::Future, pin::Pin};
+
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -8,6 +10,22 @@ const STARTUP_CHECKPOINT_CURSOR_KIND: &str = "startup_adapter_owned_raw_log_stat
 const STARTUP_DISCOVERY_ADMISSION_EPOCH_FIELD: &str = "startup_discovery_admission_epoch";
 const STARTUP_CHECKPOINT_ADAPTERS: [&str; 2] =
     ["ens_v1_subregistry_discovery", "ens_v1_unwrapped_authority"];
+
+pub type StartupAdapterProgressFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+
+pub trait StartupAdapterProgress: Send {
+    fn record<'a>(&'a mut self, pool: &'a PgPool) -> StartupAdapterProgressFuture<'a>;
+}
+
+pub(crate) async fn record_startup_adapter_progress(
+    pool: &PgPool,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<()> {
+    if let Some(progress) = progress.as_deref_mut() {
+        progress.record(pool).await?;
+    }
+    Ok(())
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReplayAdapterCheckpointContext {

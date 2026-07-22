@@ -35,6 +35,8 @@ const ACTIVE_INDEX_BUILDS_QUERY: &str = r#"
     WHERE datname = current_database()
 "#;
 
+type SharedLoopHeartbeat = Arc<Mutex<heartbeat::LoopHeartbeat>>;
+
 pub(crate) fn all_current_projections_database_config(
     mut database: DatabaseConfig,
 ) -> DatabaseConfig {
@@ -122,10 +124,13 @@ pub(crate) async fn run_automatic_current_projection_replay(
     let mut projection_derivation_started = false;
     let projection_apply_generation = Arc::new(AtomicU64::new(0));
     let projection_apply_hydration_lock = Arc::new(Mutex::new(()));
-    let mut loop_heartbeat = heartbeat::LoopHeartbeat::new(heartbeat_instance_id, poll_interval);
+    let loop_heartbeat = Arc::new(Mutex::new(heartbeat::LoopHeartbeat::new(
+        heartbeat_instance_id,
+        poll_interval,
+    )));
 
     loop {
-        loop_heartbeat.record_if_due(&pool).await;
+        record_loop_heartbeat_if_due(&pool, &loop_heartbeat).await;
 
         let mut progressed = false;
         if !bootstrap_completed {
@@ -152,14 +157,17 @@ pub(crate) async fn run_automatic_current_projection_replay(
         }
 
         if !bootstrap_completed {
-            match replay_all_current_projections_when_ready_with_heartbeat(
-                &pool,
-                text_hydration_config.as_ref(),
-                primary_hydration_config.as_ref(),
-                &mut loop_heartbeat,
-            )
-            .await
-            {
+            let replay_result = {
+                let mut loop_heartbeat = loop_heartbeat.lock().await;
+                replay_all_current_projections_when_ready_with_heartbeat(
+                    &pool,
+                    text_hydration_config.as_ref(),
+                    primary_hydration_config.as_ref(),
+                    &mut loop_heartbeat,
+                )
+                .await
+            };
+            match replay_result {
                 Ok(true) => {
                     bootstrap_completed = true;
                     progressed = true;
@@ -174,7 +182,7 @@ pub(crate) async fn run_automatic_current_projection_replay(
                     );
                 }
             }
-            loop_heartbeat.record_if_due(&pool).await;
+            record_loop_heartbeat_if_due(&pool, &loop_heartbeat).await;
         }
 
         if bootstrap_completed {
@@ -195,6 +203,7 @@ pub(crate) async fn run_automatic_current_projection_replay(
                 if let Some(config) = primary_hydration_config.take() {
                     primary_hydration_loop::spawn(
                         pool.clone(),
+                        Arc::clone(&loop_heartbeat),
                         poll_interval_secs,
                         config,
                         Arc::clone(&projection_apply_generation),
@@ -205,12 +214,16 @@ pub(crate) async fn run_automatic_current_projection_replay(
             }
 
             if hydration_schedule.run_text_hydration {
-                match hydrate_record_inventory_text_values_after_bootstrap(
-                    &pool,
-                    text_hydration_config.as_ref(),
-                )
-                .await
-                {
+                let hydration_result = {
+                    let mut loop_heartbeat = loop_heartbeat.lock().await;
+                    hydrate_record_inventory_text_values_after_bootstrap(
+                        &pool,
+                        text_hydration_config.as_ref(),
+                        &mut loop_heartbeat,
+                    )
+                    .await
+                };
+                match hydration_result {
                     Ok(()) => {
                         bootstrap_text_hydration_completed = true;
                         progressed = true;
@@ -224,17 +237,20 @@ pub(crate) async fn run_automatic_current_projection_replay(
                         );
                     }
                 }
-                loop_heartbeat.record_if_due(&pool).await;
+                record_loop_heartbeat_if_due(&pool, &loop_heartbeat).await;
             }
 
             let _apply_hydration_guard = projection_apply_hydration_lock.lock().await;
-            match projection_apply::run_once(
-                &pool,
-                text_hydration_config.as_ref(),
-                &mut loop_heartbeat,
-            )
-            .await
-            {
+            let apply_result = {
+                let mut loop_heartbeat = loop_heartbeat.lock().await;
+                projection_apply::run_once(
+                    &pool,
+                    text_hydration_config.as_ref(),
+                    &mut loop_heartbeat,
+                )
+                .await
+            };
+            match apply_result {
                 Ok(summary) => {
                     let apply_progressed = summary.made_progress();
                     if apply_progressed {
@@ -251,13 +267,17 @@ pub(crate) async fn run_automatic_current_projection_replay(
                     );
                 }
             }
-            loop_heartbeat.record_if_due(&pool).await;
+            record_loop_heartbeat_if_due(&pool, &loop_heartbeat).await;
         }
 
         if !progressed {
             sleep(poll_interval).await;
         }
     }
+}
+
+async fn record_loop_heartbeat_if_due(pool: &PgPool, loop_heartbeat: &SharedLoopHeartbeat) {
+    loop_heartbeat.lock().await.record_if_due(pool).await;
 }
 
 fn spawn_continuous_projection_invalidation_derivation(pool: PgPool, poll_interval_secs: u64) {
@@ -324,12 +344,18 @@ fn bootstrap_hydration_schedule(
 async fn hydrate_record_inventory_text_values_after_bootstrap(
     pool: &PgPool,
     text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
+    loop_heartbeat: &mut heartbeat::LoopHeartbeat,
 ) -> Result<()> {
     let Some(config) = text_hydration_config else {
         return Ok(());
     };
-    let summary =
-        record_inventory::hydrate_record_inventory_text_values(pool, None, config.clone()).await?;
+    let summary = record_inventory::hydrate_record_inventory_text_values_with_heartbeat(
+        pool,
+        None,
+        config.clone(),
+        loop_heartbeat,
+    )
+    .await?;
     record_inventory::log_text_hydration_summary(None, &summary);
     Ok(())
 }

@@ -14,11 +14,11 @@ use super::super::super::provenance::is_zero_address;
 use super::super::super::types::{AdmittedDiscoveryEdge, ReconciledDiscoveryEdgeSpec};
 use super::super::bulk::insert_pending_contract_instance_seeds;
 use super::super::walk::DiscoveryAdmissionWalk;
-use super::StreamedDiscoveryReconciliationOptions;
 use super::staging::{
     STREAMED_OBSERVATION_COLUMNS, STREAMED_OBSERVATION_COLUMNS_QUALIFIED, StreamedObservationRow,
     analyze_temp_table, streamed_observation_from_row,
 };
+use super::{DiscoveryObservationPageSource, StreamedDiscoveryReconciliationOptions};
 use crate::normalize_address;
 
 /// Fixed-point admission walk over the staged observations. Pass 1 pages the
@@ -39,6 +39,7 @@ pub(super) async fn run_streamed_admission_walk(
     executor: &mut PgConnection,
     admission_state: &DiscoveryAdmissionState,
     options: &StreamedDiscoveryReconciliationOptions,
+    progress: &impl DiscoveryObservationPageSource,
 ) -> Result<()> {
     let mut walk = DiscoveryAdmissionWalk::new(admission_state);
     let mut desired_buffer = Vec::<ReconciledDiscoveryEdgeSpec>::new();
@@ -78,8 +79,10 @@ pub(super) async fn run_streamed_admission_walk(
             &mut admitted_buffer,
             &mut pending_derived_keys,
             options,
+            progress,
         )
         .await?;
+        progress.record_progress().await?;
     }
 
     while !pending_derived_keys.is_empty() {
@@ -123,20 +126,26 @@ pub(super) async fn run_streamed_admission_walk(
                 &mut admitted_buffer,
                 &mut pending_derived_keys,
                 options,
+                progress,
             )
             .await?;
+            progress.record_progress().await?;
         }
     }
 
     flush_desired_edge_buffer(&mut *executor, &mut desired_buffer).await?;
+    progress.record_progress().await?;
     flush_admitted_edge_buffer(&mut *executor, &mut admitted_buffer).await?;
+    progress.record_progress().await?;
     insert_pending_contract_instance_seeds(
         &mut *executor,
         &walk.into_sorted_pending_contract_instance_seeds(),
     )
     .await?;
+    progress.record_progress().await?;
     analyze_temp_table(&mut *executor, "reconcile_desired_edges").await?;
     analyze_temp_table(&mut *executor, "reconcile_admitted_edges").await?;
+    progress.record_progress().await?;
     Ok(())
 }
 
@@ -150,6 +159,7 @@ async fn admit_streamed_observation_page(
     admitted_buffer: &mut Vec<AdmittedDiscoveryEdge>,
     pending_derived_keys: &mut BTreeSet<(String, String)>,
     options: &StreamedDiscoveryReconciliationOptions,
+    progress: &impl DiscoveryObservationPageSource,
 ) -> Result<()> {
     // Resolve the page's target addresses through the same query and
     // first-row-wins fold the full known-address load uses, scoped to one
@@ -190,9 +200,11 @@ async fn admit_streamed_observation_page(
         }
         if desired_buffer.len() >= options.mutation_batch_size {
             flush_desired_edge_buffer(&mut *executor, desired_buffer).await?;
+            progress.record_progress().await?;
         }
         if admitted_buffer.len() >= options.mutation_batch_size {
             flush_admitted_edge_buffer(&mut *executor, admitted_buffer).await?;
+            progress.record_progress().await?;
         }
     }
     Ok(())

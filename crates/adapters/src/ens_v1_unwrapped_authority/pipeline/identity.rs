@@ -93,8 +93,39 @@ pub(super) async fn ensure_binding_authority_identity_rows(
 pub(super) async fn close_binding_overlaps(
     pool: &PgPool,
     bindings: &[SurfaceBinding],
+    startup_progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<(usize, u128)> {
     let started = Instant::now();
-    let count = close_weaker_overlapping_existing_surface_bindings(pool, bindings).await?;
+    if startup_progress.is_none() {
+        let count = close_weaker_overlapping_existing_surface_bindings(pool, bindings).await?;
+        return Ok((count, started.elapsed().as_millis()));
+    }
+
+    let mut count = 0usize;
+    let mut batch_start = 0usize;
+    while batch_start < bindings.len() {
+        let mut batch_end = batch_start;
+        for _ in 0..1_000 {
+            let Some(logical_name_id) = bindings
+                .get(batch_end)
+                .map(|binding| binding.logical_name_id.as_str())
+            else {
+                break;
+            };
+            while bindings
+                .get(batch_end)
+                .is_some_and(|binding| binding.logical_name_id == logical_name_id)
+            {
+                batch_end += 1;
+            }
+        }
+        count += close_weaker_overlapping_existing_surface_bindings(
+            pool,
+            &bindings[batch_start..batch_end],
+        )
+        .await?;
+        record_startup_adapter_progress(pool, startup_progress).await?;
+        batch_start = batch_end;
+    }
     Ok((count, started.elapsed().as_millis()))
 }

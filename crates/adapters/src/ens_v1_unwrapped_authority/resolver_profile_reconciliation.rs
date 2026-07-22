@@ -171,6 +171,7 @@ impl ResolverProfileEventReconciliation {
             None,
             None,
             Some(&mut replay_context),
+            None,
         )
         .await?;
         summary.scanned_log_count = replay.scanned_log_count;
