@@ -1751,6 +1751,7 @@ dependencies = [
  "bigname-test-support",
  "bytes",
  "clap",
+ "futures-util",
  "jsonwebtoken",
  "reqwest 0.13.2",
  "reth-ethereum",

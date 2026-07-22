@@ -14,21 +14,29 @@ where
     Work: Future<Output = Result<()>>,
     Shutdown: Future<Output = Result<()>>,
 {
-    tokio::select! {
-        result = work => return result,
-        signal = shutdown => {
-            signal?;
-        }
-    }
+    let (result, shutdown_received) = tokio::select! {
+        result = work => (result, false),
+        signal = shutdown => (signal, true),
+    };
 
-    bigname_storage::deregister_service_loop(
+    let deregistration = bigname_storage::deregister_service_loop(
         pool,
         bigname_storage::WORKER_SERVICE_NAME,
         heartbeat_instance_id,
     )
-    .await?;
-    info!(service = "worker", "shutdown signal received");
-    Ok(())
+    .await;
+    if let Err(deregistration_error) = deregistration {
+        return match result {
+            Ok(()) => Err(deregistration_error),
+            Err(work_error) => Err(work_error.context(format!(
+                "failed to deregister worker service loop after the parent loop stopped: {deregistration_error:#}"
+            ))),
+        };
+    }
+    if shutdown_received && result.is_ok() {
+        info!(service = "worker", "shutdown signal received");
+    }
+    result
 }
 
 #[cfg(unix)]

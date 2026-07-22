@@ -17,6 +17,8 @@ use crate::{cli::RunArgs, primary_name, projection_apply, record_inventory, repl
 
 #[path = "automatic_projection_replay/bootstrap_replay.rs"]
 mod bootstrap_replay;
+#[path = "automatic_projection_replay/invalidation_derive_loop.rs"]
+mod invalidation_derive_loop;
 #[path = "automatic_projection_replay/primary_hydration.rs"]
 mod primary_hydration;
 #[path = "automatic_projection_replay/primary_hydration_loop.rs"]
@@ -25,6 +27,8 @@ mod primary_hydration_loop;
 mod primary_name_cache_pruning;
 #[path = "automatic_projection_replay/shutdown.rs"]
 mod shutdown;
+#[path = "automatic_projection_replay/subtask_supervision.rs"]
+mod subtask_supervision;
 
 #[cfg(test)]
 use bootstrap_replay::replay_all_current_projections_when_ready;
@@ -129,7 +133,28 @@ pub(crate) async fn run_automatic_current_projection_replay(
     heartbeat_instance_id: String,
     poll_interval_secs: u64,
     text_hydration_config: Option<record_inventory::RecordInventoryTextHydrationConfig>,
+    primary_hydration_config: Option<primary_name::PrimaryNameLegacyReverseHydrationConfig>,
+) -> Result<()> {
+    let (subtasks, monitor) = subtask_supervision::channel("worker");
+    monitor
+        .run(run_automatic_current_projection_replay_loop(
+            pool,
+            heartbeat_instance_id,
+            poll_interval_secs,
+            text_hydration_config,
+            primary_hydration_config,
+            subtasks,
+        ))
+        .await
+}
+
+async fn run_automatic_current_projection_replay_loop(
+    pool: PgPool,
+    heartbeat_instance_id: String,
+    poll_interval_secs: u64,
+    text_hydration_config: Option<record_inventory::RecordInventoryTextHydrationConfig>,
     mut primary_hydration_config: Option<primary_name::PrimaryNameLegacyReverseHydrationConfig>,
+    subtasks: subtask_supervision::SubtaskSpawner,
 ) -> Result<()> {
     let poll_interval = Duration::from_secs(poll_interval_secs.max(1));
     let mut bootstrap_completed = false;
@@ -201,10 +226,7 @@ pub(crate) async fn run_automatic_current_projection_replay(
 
         if bootstrap_completed {
             if !projection_derivation_started {
-                spawn_continuous_projection_invalidation_derivation(
-                    pool.clone(),
-                    poll_interval_secs,
-                );
+                invalidation_derive_loop::spawn(&subtasks, pool.clone(), poll_interval_secs)?;
                 projection_derivation_started = true;
             }
 
@@ -216,13 +238,14 @@ pub(crate) async fn run_automatic_current_projection_replay(
             if hydration_schedule.start_primary_hydration {
                 if let Some(config) = primary_hydration_config.take() {
                     primary_hydration_loop::spawn(
+                        &subtasks,
                         pool.clone(),
                         Arc::clone(&loop_heartbeat),
                         poll_interval_secs,
                         config,
                         Arc::clone(&projection_apply_generation),
                         Arc::clone(&projection_apply_hydration_lock),
-                    );
+                    )?;
                 }
                 primary_hydration_started = true;
             }
@@ -292,51 +315,6 @@ pub(crate) async fn run_automatic_current_projection_replay(
 
 async fn record_loop_heartbeat_if_due(pool: &PgPool, loop_heartbeat: &SharedLoopHeartbeat) {
     loop_heartbeat.lock().await.record_if_due(pool).await;
-}
-
-fn spawn_continuous_projection_invalidation_derivation(pool: PgPool, poll_interval_secs: u64) {
-    tokio::spawn(async move {
-        run_continuous_projection_invalidation_derivation(pool, poll_interval_secs).await;
-    });
-}
-
-async fn run_continuous_projection_invalidation_derivation(pool: PgPool, poll_interval_secs: u64) {
-    let poll_interval = Duration::from_secs(poll_interval_secs.max(1));
-    info!(
-        service = "worker",
-        projection_apply = true,
-        "continuous projection invalidation derive loop started"
-    );
-
-    loop {
-        let mut progressed = false;
-        match projection_apply::derive_once(&pool).await {
-            Ok(summary) => {
-                progressed = summary.scanned_event_count > 0;
-                if progressed {
-                    info!(
-                        service = "worker",
-                        projection_apply = true,
-                        scanned_event_count = summary.scanned_event_count,
-                        enqueued_invalidation_count = summary.enqueued_invalidation_count,
-                        "continuous projection invalidation derive iteration completed"
-                    );
-                }
-            }
-            Err(error) => {
-                warn!(
-                    service = "worker",
-                    projection_apply = true,
-                    error = %format!("{error:#}"),
-                    "continuous projection invalidation derive iteration failed"
-                );
-            }
-        }
-
-        if !progressed {
-            sleep(poll_interval).await;
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
