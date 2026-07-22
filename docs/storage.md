@@ -503,8 +503,16 @@ immediately after opening its database pool, before startup bootstrap, and
 advances the process plus deduplicated chain rows after completed hash-pinned
 bootstrap progress units of at most 32 blocks and after completed startup
 adapter checkpoint stream pages and bounded discovery, identity, binding, and
-normalized-event finalization batches. Live manifest and discovery refreshes
-reuse those checkpoint-page progress callbacks and family-boundary beats. This
+normalized-event finalization batches. The startup ENSv1 reverse-claim and
+ENSv2 registry, registrar, resolver, and permission passes additionally
+advance liveness after each completed 1,000-row raw-log load and processing
+page. Their batchable final writes use the same 1,000-row progress boundary:
+normalized events for every family, permission resources, and ENSv2 registry
+token lineages, resources, name surfaces, and surface bindings. ENSv2 registry
+discovery reconciliation, event hydration, and binding normalization retain
+their existing single-call boundaries and advance liveness before and after
+each call. Live manifest and discovery refreshes reuse the checkpoint-page
+progress callbacks and family-boundary beats. This
 does not change the configured 1,024-block default checkpoint boundary for
 non-startup backfills. The worker
 advances the process row after bounded

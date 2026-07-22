@@ -344,6 +344,11 @@ Response:
 
 Uses active/shadow `manifest_versions` to include chains expected by the loaded profile, plus `chain_checkpoints`, retained `chain_lineage`, `projection_normalized_event_changes`, `projection_apply_cursors`, and `projection_invalidations` where available. Fields stay `null` when the deployment has not yet retained the corresponding operational metadata. If no chain readiness data exists for an expected chain, or if pending direct invalidations cannot be tied to a normalized-event chain position, `status` is `degraded`. If any expected chain has unapplied normalized-event changes beyond the projection-apply cursor, `status` is `stale` and the lag fields identify the affected chain.
 
+`projection_lag_blocks` and `projection_lag_seconds` are independently
+nonnegative. Each field clamps its own canonical-versus-projected difference at
+`0`, so a regressed block head cannot publish negative block lag and a regressed
+timestamp cannot publish negative time lag.
+
 `pending_invalidation_count` is an exact live [projection](glossary.md)
 invalidation-queue row count through 10,000. The status query reads at most
 10,001 queue rows: if it observes more than the reported cap, the response is

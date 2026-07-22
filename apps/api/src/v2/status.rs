@@ -103,7 +103,7 @@ fn build_chain_status(
     let lag_blocks = row
         .canonical_block
         .zip(row.latest_projected_block)
-        .map(|(canonical, projected)| canonical.saturating_sub(projected));
+        .map(|(canonical, projected)| canonical.saturating_sub(projected).max(0));
     let lag_seconds = row
         .canonical_timestamp
         .zip(row.latest_projected_timestamp)
@@ -286,6 +286,33 @@ mod tests {
             .expect_err("unknown storage slug must fail loudly");
 
         assert_eq!(error.envelope().error.code, "internal_error");
+    }
+
+    #[test]
+    fn regressed_canonical_head_clamps_v2_lag_to_zero() {
+        let row = row(
+            bigname_storage::ETHEREUM_MAINNET_CHAIN_ID,
+            Some(99),
+            Some(100),
+            Some(90),
+            Some(80),
+        );
+        let status = build_chain_status(
+            &row,
+            crate::status_freshness::NetworkHeadComparison {
+                status: crate::status_freshness::NetworkHeadStatus::Fresh,
+                block: Some(99),
+                observed_at: None,
+                age_seconds: Some(0),
+                ingestion_lag_blocks: Some(0),
+                ingestion_lag_seconds: Some(0),
+                data_is_stale: false,
+            },
+        );
+
+        assert_eq!(status.lag_blocks, Some(0));
+        assert_eq!(status.lag_seconds, Some(0));
+        assert_eq!(status.status, OpsStatus::Ready);
     }
 
     #[test]

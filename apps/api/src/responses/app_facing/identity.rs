@@ -88,7 +88,7 @@ pub(crate) async fn build_indexing_status_response(
         let projection_lag_blocks = row
             .canonical_block
             .zip(row.latest_projected_block)
-            .map(|(canonical, projected)| canonical.saturating_sub(projected));
+            .map(|(canonical, projected)| canonical.saturating_sub(projected).max(0));
         let projection_lag_seconds = row
             .canonical_timestamp
             .zip(row.latest_projected_timestamp)
@@ -277,4 +277,42 @@ fn identity_as_of_timestamp(record: &bigname_storage::IdentityNameRecordRow) -> 
         .max()
         .map(format_timestamp)
         .unwrap_or_else(|| format_timestamp(OffsetDateTime::now_utc()))
+}
+
+#[cfg(test)]
+mod indexing_status_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn regressed_canonical_head_clamps_v1_projection_lag_to_zero() {
+        let canonical_at = OffsetDateTime::from_unix_timestamp(990)
+            .expect("test canonical timestamp must be valid");
+        let projected_at = OffsetDateTime::from_unix_timestamp(1_000)
+            .expect("test projection timestamp must be valid");
+        let read = bigname_storage::IndexingStatusRead {
+            chains: vec![bigname_storage::IndexingStatusChainRow {
+                chain_id: bigname_storage::ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
+                canonical_block: Some(99),
+                safe_block: Some(90),
+                finalized_block: Some(80),
+                canonical_timestamp: Some(canonical_at),
+                latest_projected_block: Some(100),
+                latest_projected_timestamp: Some(projected_at),
+            }],
+            has_unscoped_pending_invalidations: false,
+            pending_invalidation_count: 0,
+            pending_invalidation_count_capped: false,
+            dead_letter_count: 0,
+        };
+        let state = AppState::new(
+            PgPool::connect_lazy("postgres://bigname:bigname@127.0.0.1:5432/bigname")
+                .expect("status builder test does not use the database"),
+            bigname_execution::ChainRpcUrls::default(),
+        );
+
+        let response = build_indexing_status_response(&read, &state).await;
+        let chain = &response.chains[bigname_storage::ETHEREUM_MAINNET_CHAIN_ID];
+        assert_eq!(chain.projection_lag_blocks, Some(0));
+        assert_eq!(chain.projection_lag_seconds, Some(0));
+    }
 }

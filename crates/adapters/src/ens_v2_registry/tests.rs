@@ -384,6 +384,7 @@ async fn ens_v2_resumed_replay_does_not_reseed_a_removed_manifest_suffix() -> Re
         true,
         false,
         None,
+        None,
     )
     .await?;
     assert_eq!(
@@ -405,6 +406,7 @@ async fn ens_v2_resumed_replay_does_not_reseed_a_removed_manifest_suffix() -> Re
         Some(RegistryReplayState::default()),
         true,
         false,
+        None,
         None,
     )
     .await?;

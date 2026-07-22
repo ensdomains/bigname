@@ -65,14 +65,24 @@ async fn sync_adapter_owned_raw_log_state_with_startup_context(
             )),
             None => None,
         };
-        let summary = bigname_adapters::sync_ens_v1_reverse_claim(pool, &chain.chain)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to sync ENSv1 reverse claim from stored raw logs for chain {}",
-                    chain.chain
+        let summary = match startup_heartbeat.as_mut() {
+            Some((heartbeat, chain_ids)) => {
+                let mut progress = StartupAdapterHeartbeat::new(heartbeat, chain_ids);
+                bigname_adapters::sync_ens_v1_reverse_claim_with_progress(
+                    pool,
+                    &chain.chain,
+                    &mut progress,
                 )
-            })?;
+                .await
+            }
+            None => bigname_adapters::sync_ens_v1_reverse_claim(pool, &chain.chain).await,
+        }
+        .with_context(|| {
+            format!(
+                "failed to sync ENSv1 reverse claim from stored raw logs for chain {}",
+                chain.chain
+            )
+        })?;
         log_ens_v1_reverse_claim_sync_summary(&chain.chain, &summary);
         record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
 
@@ -144,47 +154,89 @@ async fn sync_adapter_owned_raw_log_state_with_startup_context(
         log_ens_v1_unwrapped_authority_sync_summary(&chain.chain, &summary);
         record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
 
-        let summary = bigname_adapters::sync_ens_v2_registry_resource_surface(pool, &chain.chain)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to sync ENSv2 registry resource/surface state from stored raw logs for chain {}",
-                    chain.chain
+        let summary = match startup_heartbeat.as_mut() {
+            Some((heartbeat, chain_ids)) => {
+                let mut progress = StartupAdapterHeartbeat::new(heartbeat, chain_ids);
+                bigname_adapters::sync_ens_v2_registry_resource_surface_with_progress(
+                    pool,
+                    &chain.chain,
+                    &mut progress,
                 )
-            })?;
+                .await
+            }
+            None => {
+                bigname_adapters::sync_ens_v2_registry_resource_surface(pool, &chain.chain).await
+            }
+        }
+        .with_context(|| {
+            format!(
+                "failed to sync ENSv2 registry resource/surface state from stored raw logs for chain {}",
+                chain.chain
+            )
+        })?;
         log_ens_v2_registry_resource_surface_sync_summary(&chain.chain, &summary);
         record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
 
-        let summary = bigname_adapters::sync_ens_v2_registrar(pool, &chain.chain)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to sync ENSv2 registrar state from stored raw logs for chain {}",
-                    chain.chain
+        let summary = match startup_heartbeat.as_mut() {
+            Some((heartbeat, chain_ids)) => {
+                let mut progress = StartupAdapterHeartbeat::new(heartbeat, chain_ids);
+                bigname_adapters::sync_ens_v2_registrar_with_progress(
+                    pool,
+                    &chain.chain,
+                    &mut progress,
                 )
-            })?;
+                .await
+            }
+            None => bigname_adapters::sync_ens_v2_registrar(pool, &chain.chain).await,
+        }
+        .with_context(|| {
+            format!(
+                "failed to sync ENSv2 registrar state from stored raw logs for chain {}",
+                chain.chain
+            )
+        })?;
         log_ens_v2_registrar_sync_summary(&chain.chain, &summary);
         record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
 
-        let summary = bigname_adapters::sync_ens_v2_resolver(pool, &chain.chain)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to sync ENSv2 resolver state from stored raw logs for chain {}",
-                    chain.chain
+        let summary = match startup_heartbeat.as_mut() {
+            Some((heartbeat, chain_ids)) => {
+                let mut progress = StartupAdapterHeartbeat::new(heartbeat, chain_ids);
+                bigname_adapters::sync_ens_v2_resolver_with_progress(
+                    pool,
+                    &chain.chain,
+                    &mut progress,
                 )
-            })?;
+                .await
+            }
+            None => bigname_adapters::sync_ens_v2_resolver(pool, &chain.chain).await,
+        }
+        .with_context(|| {
+            format!(
+                "failed to sync ENSv2 resolver state from stored raw logs for chain {}",
+                chain.chain
+            )
+        })?;
         log_ens_v2_resolver_sync_summary(&chain.chain, &summary);
         record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
 
-        let summary = bigname_adapters::sync_ens_v2_permissions(pool, &chain.chain)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to sync ENSv2 permissions state from stored raw logs for chain {}",
-                    chain.chain
+        let summary = match startup_heartbeat.as_mut() {
+            Some((heartbeat, chain_ids)) => {
+                let mut progress = StartupAdapterHeartbeat::new(heartbeat, chain_ids);
+                bigname_adapters::sync_ens_v2_permissions_with_progress(
+                    pool,
+                    &chain.chain,
+                    &mut progress,
                 )
-            })?;
+                .await
+            }
+            None => bigname_adapters::sync_ens_v2_permissions(pool, &chain.chain).await,
+        }
+        .with_context(|| {
+            format!(
+                "failed to sync ENSv2 permissions state from stored raw logs for chain {}",
+                chain.chain
+            )
+        })?;
         log_ens_v2_permissions_sync_summary(&chain.chain, &summary);
         record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
 
@@ -282,14 +334,26 @@ async fn sync_discovery_adapter_owned_raw_log_state_inner(
         log_ens_v1_subregistry_discovery_sync_summary(&chain.chain, &summary);
         record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
 
-        let summary = bigname_adapters::sync_ens_v2_registry_resource_surface(pool, &chain.chain)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to sync ENSv2 registry discovery from stored raw logs for chain {}",
-                    chain.chain
+        let summary = match startup_heartbeat.as_mut() {
+            Some((heartbeat, chain_ids)) => {
+                let mut progress = StartupAdapterHeartbeat::new(heartbeat, chain_ids);
+                bigname_adapters::sync_ens_v2_registry_resource_surface_with_progress(
+                    pool,
+                    &chain.chain,
+                    &mut progress,
                 )
-            })?;
+                .await
+            }
+            None => {
+                bigname_adapters::sync_ens_v2_registry_resource_surface(pool, &chain.chain).await
+            }
+        }
+        .with_context(|| {
+            format!(
+                "failed to sync ENSv2 registry discovery from stored raw logs for chain {}",
+                chain.chain
+            )
+        })?;
         log_ens_v2_registry_resource_surface_sync_summary(&chain.chain, &summary);
         record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
         completed_startup_checkpoints.push((chain.chain.clone(), startup_checkpoint));

@@ -31,6 +31,20 @@ struct TestReverseClaimConfig<'a> {
     file_path: &'a str,
 }
 
+#[derive(Default)]
+struct CountingStartupProgress {
+    record_count: usize,
+}
+
+impl StartupAdapterProgress for CountingStartupProgress {
+    fn record<'a>(&'a mut self, _pool: &'a PgPool) -> crate::StartupAdapterProgressFuture<'a> {
+        Box::pin(async move {
+            self.record_count += 1;
+            Ok(())
+        })
+    }
+}
+
 impl TestDatabase {
     async fn new() -> Result<Self> {
         let database_url = std::env::var("BIGNAME_DATABASE_URL")
@@ -633,7 +647,14 @@ async fn run_idempotence_case(config: TestReverseClaimConfig<'_>) -> Result<()> 
         );
     }
 
-    let second = sync_ens_v1_reverse_claim(database.pool(), config.chain).await?;
+    let mut progress = CountingStartupProgress::default();
+    let second =
+        sync_ens_v1_reverse_claim_with_progress(database.pool(), config.chain, &mut progress)
+            .await?;
+    assert!(
+        progress.record_count >= 4,
+        "reverse sync must report completed raw-log, decoding, identity-count, and persistence pages"
+    );
     assert_eq!(second.scanned_log_count, 1);
     assert_eq!(second.matched_log_count, 1);
     assert_eq!(second.total_synced_count, expected_event_count);
@@ -803,6 +824,98 @@ async fn sync_ens_v1_reverse_claim_is_idempotent_for_basenames_base_primary() ->
         file_path: "manifests/basenames/basenames_base_primary/v1.toml",
     })
     .await
+}
+
+#[tokio::test]
+async fn startup_reverse_raw_log_loader_beats_after_each_completed_page() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let emitter = "0x00000000000000000000000000000000000000aa";
+    let block_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let manifest_id = insert_manifest_version(
+        database.pool(),
+        ManifestVersionSeed {
+            manifest_version: 1,
+            namespace: "ens",
+            source_family: SOURCE_FAMILY_ENS_V1_REVERSE_L1,
+            chain,
+            deployment_epoch: "ens_v1",
+            rollout_status: "active",
+            file_path: "manifests/ens/ens_v1_reverse_l1/v1.toml",
+        },
+    )
+    .await?;
+    let contract_instance_id = Uuid::new_v4();
+    insert_contract_instance(database.pool(), chain, contract_instance_id).await?;
+    insert_manifest_contract_instance(database.pool(), manifest_id, contract_instance_id, emitter)
+        .await?;
+    insert_contract_instance_address(
+        database.pool(),
+        chain,
+        contract_instance_id,
+        emitter,
+        manifest_id,
+    )
+    .await?;
+    upsert_raw_blocks(
+        database.pool(),
+        &[RawBlock {
+            chain_id: chain.to_owned(),
+            block_hash: block_hash.to_owned(),
+            parent_hash: None,
+            block_number: 42,
+            block_timestamp: OffsetDateTime::UNIX_EPOCH,
+            logs_bloom: None,
+            transactions_root: None,
+            receipts_root: None,
+            state_root: None,
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+    let raw_logs = (0..=STARTUP_ADAPTER_PROGRESS_PAGE_ROWS)
+        .map(|log_index| RawLog {
+            chain_id: chain.to_owned(),
+            block_hash: block_hash.to_owned(),
+            block_number: 42,
+            transaction_hash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_owned(),
+            transaction_index: 0,
+            log_index: i64::try_from(log_index).expect("test log index must fit in i64"),
+            emitting_address: emitter.to_owned(),
+            topics: Vec::new(),
+            data: Vec::new(),
+            canonicality_state: CanonicalityState::Canonical,
+        })
+        .collect::<Vec<_>>();
+    upsert_raw_logs(database.pool(), &raw_logs).await?;
+
+    let active_emitters = load_active_emitters(database.pool(), chain).await?;
+    let mut counter = CountingStartupProgress::default();
+    let loaded = {
+        let mut progress = Some(&mut counter as &mut dyn StartupAdapterProgress);
+        raw_logs::load_reverse_raw_logs(
+            database.pool(),
+            chain,
+            &active_emitters,
+            false,
+            &[],
+            None,
+            &mut progress,
+        )
+        .await?
+    };
+
+    assert_eq!(loaded.len(), STARTUP_ADAPTER_PROGRESS_PAGE_ROWS + 1);
+    assert_eq!(loaded.first().map(|row| row.log_index), Some(0));
+    assert_eq!(
+        loaded.last().map(|row| row.log_index),
+        Some(i64::try_from(STARTUP_ADAPTER_PROGRESS_PAGE_ROWS)?)
+    );
+    assert_eq!(counter.record_count, 2);
+
+    database.cleanup().await
 }
 
 #[tokio::test]
