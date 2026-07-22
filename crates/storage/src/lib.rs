@@ -128,11 +128,13 @@ pub use children::{
 pub use evm_primitives::{ens_namehash_label_bytes, normalize_evm_address, normalize_evm_b256};
 pub use execution::{
     ExecutionBoundaryInvalidation, ExecutionCacheKey, ExecutionManifestInvalidation,
-    ExecutionOutcome, ExecutionOutcomeInvalidationSummary, ExecutionTrace,
-    ExecutionTraceInspection, ExecutionTraceStep, SELECTED_CHECKPOINT_BOUNDARY_KIND,
-    invalidate_execution_outcomes_for_manifest_version,
+    ExecutionOutcome, ExecutionOutcomeInvalidationProgress,
+    ExecutionOutcomeInvalidationProgressFuture, ExecutionOutcomeInvalidationSummary,
+    ExecutionTrace, ExecutionTraceInspection, ExecutionTraceStep,
+    SELECTED_CHECKPOINT_BOUNDARY_KIND, invalidate_execution_outcomes_for_manifest_version,
     invalidate_execution_outcomes_for_manifest_version_and_request_key,
     invalidate_execution_outcomes_for_orphaned_blocks,
+    invalidate_execution_outcomes_for_orphaned_blocks_with_progress,
     invalidate_execution_outcomes_for_record_boundary,
     invalidate_execution_outcomes_for_record_boundary_and_request_key,
     invalidate_execution_outcomes_for_topology_boundary,
@@ -308,7 +310,9 @@ pub use resolver::{
 pub use resolver_profile_authority_journal::{
     RESOLVER_PROFILE_AUTHORITY_JOURNAL_ENTRY_BATCH_SIZE, ResolverProfileAuthorityJournal,
     ResolverProfileAuthorityJournalAdvance, ResolverProfileAuthorityJournalAdvanceSummary,
-    ResolverProfileAuthorityJournalEntry, begin_resolver_profile_authority_journal_advance,
+    ResolverProfileAuthorityJournalEntry, ResolverProfileAuthorityJournalProgress,
+    ResolverProfileAuthorityJournalProgressFuture,
+    begin_resolver_profile_authority_journal_advance,
     load_resolver_profile_authority_entries_for_targets,
     load_resolver_profile_authority_family_target_page, load_resolver_profile_authority_journal,
     resolver_profile_authority_entry_key,

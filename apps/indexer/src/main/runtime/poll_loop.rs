@@ -5,15 +5,15 @@ use tracing::{info, warn};
 
 use crate::provider::{ProviderBlock, ProviderRegistry};
 use crate::reconciliation::{
-    ChainCoverageFrontiers, HeaderAuditMode, poll_provider_heads_with_adapter_sync,
+    ChainCoverageFrontiers, HeaderAuditMode, poll_provider_heads_with_adapter_sync_and_progress,
 };
 use crate::replay::deployment_profile_from_manifest_root;
-use crate::resolver_profile_convergence::drain_resolver_profile_input_changes;
-use crate::run::startup_heartbeat::StartupHeartbeat;
+use crate::resolver_profile_convergence::drain_resolver_profile_input_changes_with_progress;
+use crate::run::startup_heartbeat::{StartupAdapterHeartbeat, StartupHeartbeat};
 
 use super::adapter_sync::sync_adapter_owned_raw_log_state_with_heartbeat;
 use super::intake::{
-    IntakeChainTask, intake_runtime_state, sync_intake_chain_tasks,
+    IntakeChainTask, intake_runtime_state, sync_intake_chain_tasks_with_progress,
     validate_provider_registry_for_intake_tasks, watched_chain_plan_state,
 };
 use super::logging::{
@@ -21,10 +21,14 @@ use super::logging::{
     log_manifest_summary, log_provider_registry, log_watched_chain_plan,
 };
 use super::manifest::{
-    ManifestRuntimeState, RuntimeWatchScope, build_manifest_runtime_state_for_repository_refresh,
-    ensure_manifest_root_ready, load_manifest_repository,
+    ManifestRuntimeState, RuntimeWatchScope,
+    build_manifest_runtime_state_for_repository_refresh_with_progress, ensure_manifest_root_ready,
+    load_manifest_repository,
 };
-use super::refresh::{refresh_intake_chain_tasks, refresh_manifest_normalized_events_from_storage};
+use super::refresh::{
+    refresh_intake_chain_tasks_with_progress,
+    refresh_manifest_normalized_events_from_storage_with_progress,
+};
 
 #[path = "poll_loop/discovery_refresh.rs"]
 mod discovery_refresh;
@@ -116,14 +120,21 @@ pub(crate) async fn run_poll_loop(
                                 "failed to reload repository manifests; keeping last successful runtime state"
                             );
                         } else {
-                            match build_manifest_runtime_state_for_repository_refresh(
-                                pool,
-                                &manifest_repository,
-                                runtime_watch_scope,
-                                adapter_sync_on_manifest_refresh,
-                            )
-                            .await
-                            {
+                            let refresh_result = {
+                                let mut progress = StartupAdapterHeartbeat::new(
+                                    heartbeat,
+                                    &heartbeat_chains,
+                                );
+                                build_manifest_runtime_state_for_repository_refresh_with_progress(
+                                    pool,
+                                    &manifest_repository,
+                                    runtime_watch_scope,
+                                    adapter_sync_on_manifest_refresh,
+                                    &mut progress,
+                                )
+                                .await
+                            };
+                            match refresh_result {
                                 Ok(next_manifest_runtime_state) => {
                                     let manifest_state_changed =
                                         next_manifest_runtime_state != manifest_runtime_state;
@@ -168,11 +179,21 @@ pub(crate) async fn run_poll_loop(
                                         adapter_sync_on_manifest_refresh,
                                         live_poll_adapter_sync_restored_after_replay,
                                     )
-                                        && !discovery_refresh::resolver_profile_drain_succeeded(
-                                            drain_resolver_profile_input_changes(pool).await,
-                                            "timer",
-                                            "repository_manifest_reload",
-                                        )
+                                        && !{
+                                            let mut progress = StartupAdapterHeartbeat::new(
+                                                heartbeat,
+                                                &heartbeat_chains,
+                                            );
+                                            discovery_refresh::resolver_profile_drain_succeeded(
+                                                drain_resolver_profile_input_changes_with_progress(
+                                                    pool,
+                                                    &mut progress,
+                                                )
+                                                .await,
+                                                "timer",
+                                                "repository_manifest_reload",
+                                            )
+                                        }
                                     {
                                         continue;
                                     }
@@ -206,12 +227,19 @@ pub(crate) async fn run_poll_loop(
                                     }
 
                                     if watched_plan_changed {
-                                        match sync_intake_chain_tasks(
-                                            pool,
-                                            &next_manifest_runtime_state.watched_chain_plan,
-                                        )
-                                        .await
-                                        {
+                                        let next_tasks_result = {
+                                            let mut progress = StartupAdapterHeartbeat::new(
+                                                heartbeat,
+                                                &heartbeat_chains,
+                                            );
+                                            sync_intake_chain_tasks_with_progress(
+                                                pool,
+                                                &next_manifest_runtime_state.watched_chain_plan,
+                                                &mut progress,
+                                            )
+                                            .await
+                                        };
+                                        match next_tasks_result {
                                             Ok(next_tasks) => {
                                                 validate_provider_registry_for_intake_tasks(
                                                     &next_tasks,
@@ -333,13 +361,18 @@ pub(crate) async fn run_poll_loop(
                     }
                 }
 
-                match refresh_intake_chain_tasks(
-                    pool,
-                    &intake_chain_tasks,
-                    &manifest_runtime_state.watched_chain_plan,
-                )
-                .await
-                {
+                let intake_refresh_result = {
+                    let mut progress =
+                        StartupAdapterHeartbeat::new(heartbeat, &heartbeat_chains);
+                    refresh_intake_chain_tasks_with_progress(
+                        pool,
+                        &intake_chain_tasks,
+                        &manifest_runtime_state.watched_chain_plan,
+                        &mut progress,
+                    )
+                    .await
+                };
+                match intake_refresh_result {
                     Ok(Some(next_tasks)) => {
                         let previous_state = intake_runtime_state(&intake_chain_tasks);
                         let next_state = intake_runtime_state(&next_tasks);
@@ -417,6 +450,9 @@ pub(crate) async fn run_poll_loop(
                         &event_silent_reverse_resolver_addresses,
                         coverage_frontiers,
                         &latched_bootstrap_finalized_heads,
+                        adapter_sync_page_logs,
+                        heartbeat,
+                        &heartbeat_chains,
                     )
                     .await?;
                     if !effective_adapter_sync_on_live_poll {
@@ -427,26 +463,37 @@ pub(crate) async fn run_poll_loop(
                 let loaded_plan_admission_epochs = watched_plan_admission_epochs
                     .as_ref()
                     .context("live watch plan is missing its loaded admission-epoch snapshot")?;
-                poll_provider_heads_with_adapter_sync(
-                    pool,
-                    &mut intake_chain_tasks,
-                    provider_registry,
-                    &deployment_profile,
-                    loaded_plan_admission_epochs,
-                    effective_adapter_sync_on_live_poll,
-                    header_audit_mode,
-                    &event_silent_reverse_resolver_addresses,
-                    coverage_frontiers,
-                    &latched_bootstrap_finalized_heads,
-                )
-                .await?;
+                {
+                    let mut progress =
+                        StartupAdapterHeartbeat::new(heartbeat, &heartbeat_chains);
+                    poll_provider_heads_with_adapter_sync_and_progress(
+                        pool,
+                        &mut intake_chain_tasks,
+                        provider_registry,
+                        &deployment_profile,
+                        loaded_plan_admission_epochs,
+                        effective_adapter_sync_on_live_poll,
+                        header_audit_mode,
+                        &event_silent_reverse_resolver_addresses,
+                        coverage_frontiers,
+                        &latched_bootstrap_finalized_heads,
+                        &mut progress,
+                    )
+                    .await?;
+                }
 
                 if manifest_observation_refresh_enabled {
-                    match refresh_manifest_normalized_events_from_storage(
-                        pool,
-                        &manifest_runtime_state,
-                    )
-                    .await
+                    let refresh_result = {
+                        let mut progress =
+                            StartupAdapterHeartbeat::new(heartbeat, &heartbeat_chains);
+                        refresh_manifest_normalized_events_from_storage_with_progress(
+                            pool,
+                            &manifest_runtime_state,
+                            &mut progress,
+                        )
+                        .await
+                    };
+                    match refresh_result
                     {
                         Ok(Some(next_manifest_runtime_state)) => {
                             info!(

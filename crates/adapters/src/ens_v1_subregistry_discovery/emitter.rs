@@ -26,8 +26,8 @@ pub(super) async fn emit_registry_changed_events(
     pool: &PgPool,
     latest_assignments: &BTreeMap<String, ObservedRegistryAssignment>,
     discovery_sources: &[String],
+    startup_progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<RegistryChangedEventEmitSummary> {
-    let mut startup_progress = None;
     let discovery_sources = discovery_sources
         .iter()
         .map(String::as_str)
@@ -46,7 +46,7 @@ pub(super) async fn emit_registry_changed_events(
                 &assignments,
                 &mut events,
                 &mut summary,
-                &mut startup_progress,
+                startup_progress,
             )
             .await?;
             assignments.clear();
@@ -57,10 +57,10 @@ pub(super) async fn emit_registry_changed_events(
         &assignments,
         &mut events,
         &mut summary,
-        &mut startup_progress,
+        startup_progress,
     )
     .await?;
-    flush_registry_changed_events(pool, &mut events, &mut summary, &mut startup_progress).await?;
+    flush_registry_changed_events(pool, &mut events, &mut summary, startup_progress).await?;
     Ok(summary)
 }
 

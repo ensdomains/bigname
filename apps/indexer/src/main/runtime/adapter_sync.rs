@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use bigname_manifests::WatchedChainPlan;
 
 use crate::{
-    resolver_profile_convergence::journal_resolver_profile_authority,
+    resolver_profile_convergence::{
+        journal_resolver_profile_authority, journal_resolver_profile_authority_with_progress,
+    },
     run::startup_heartbeat::{StartupAdapterHeartbeat, StartupHeartbeat},
 };
 
@@ -54,7 +56,7 @@ async fn sync_adapter_owned_raw_log_state_with_startup_context(
     record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
     // Broad startup/timer passes also recover any prior discovery transaction
     // that committed before its caller could journal the epoch change.
-    journal_resolver_profile_authority(pool).await?;
+    journal_resolver_profile_authority_with_optional_progress(pool, &mut startup_heartbeat).await?;
     let mut completed_startup_checkpoints = Vec::new();
     for chain in watched_chain_plan {
         let startup_checkpoint = match startup_context {
@@ -65,14 +67,24 @@ async fn sync_adapter_owned_raw_log_state_with_startup_context(
             )),
             None => None,
         };
-        let summary = bigname_adapters::sync_ens_v1_reverse_claim(pool, &chain.chain)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to sync ENSv1 reverse claim from stored raw logs for chain {}",
-                    chain.chain
+        let summary = match startup_heartbeat.as_mut() {
+            Some((heartbeat, chain_ids)) => {
+                let mut progress = StartupAdapterHeartbeat::new(heartbeat, chain_ids);
+                bigname_adapters::sync_ens_v1_reverse_claim_with_progress(
+                    pool,
+                    &chain.chain,
+                    &mut progress,
                 )
-            })?;
+                .await
+            }
+            None => bigname_adapters::sync_ens_v1_reverse_claim(pool, &chain.chain).await,
+        }
+        .with_context(|| {
+            format!(
+                "failed to sync ENSv1 reverse claim from stored raw logs for chain {}",
+                chain.chain
+            )
+        })?;
         log_ens_v1_reverse_claim_sync_summary(&chain.chain, &summary);
         record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
 
@@ -193,7 +205,7 @@ async fn sync_adapter_owned_raw_log_state_with_startup_context(
         }
     }
 
-    journal_resolver_profile_authority(pool).await?;
+    journal_resolver_profile_authority_with_optional_progress(pool, &mut startup_heartbeat).await?;
     clear_completed_startup_adapter_checkpoints(pool, &completed_startup_checkpoints).await?;
     record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
     Ok(())
@@ -246,7 +258,7 @@ async fn sync_discovery_adapter_owned_raw_log_state_inner(
     mut startup_heartbeat: Option<(&mut StartupHeartbeat, &[String])>,
 ) -> Result<()> {
     record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
-    journal_resolver_profile_authority(pool).await?;
+    journal_resolver_profile_authority_with_optional_progress(pool, &mut startup_heartbeat).await?;
     let mut completed_startup_checkpoints = Vec::new();
     for chain in watched_chain_plan {
         let startup_checkpoint =
@@ -294,7 +306,7 @@ async fn sync_discovery_adapter_owned_raw_log_state_inner(
         record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
         completed_startup_checkpoints.push((chain.chain.clone(), startup_checkpoint));
     }
-    journal_resolver_profile_authority(pool).await?;
+    journal_resolver_profile_authority_with_optional_progress(pool, &mut startup_heartbeat).await?;
     clear_completed_startup_adapter_checkpoints(pool, &completed_startup_checkpoints).await?;
     record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
     Ok(())
@@ -310,6 +322,22 @@ async fn record_startup_sync_progress(
     Ok(())
 }
 
+async fn journal_resolver_profile_authority_with_optional_progress(
+    pool: &sqlx::PgPool,
+    startup_heartbeat: &mut Option<(&mut StartupHeartbeat, &[String])>,
+) -> Result<()> {
+    match startup_heartbeat.as_mut() {
+        Some((heartbeat, chain_ids)) => {
+            let mut progress = StartupAdapterHeartbeat::new(heartbeat, chain_ids);
+            journal_resolver_profile_authority_with_progress(pool, &mut progress).await?;
+        }
+        None => {
+            journal_resolver_profile_authority(pool).await?;
+        }
+    }
+    Ok(())
+}
+
 async fn load_startup_adapter_checkpoint_context(
     pool: &sqlx::PgPool,
     deployment_profile: &str,
@@ -317,26 +345,28 @@ async fn load_startup_adapter_checkpoint_context(
 ) -> Result<bigname_adapters::StartupAdapterCheckpointContext> {
     let target_block_number = sqlx::query_scalar::<_, Option<i64>>(
         r#"
-        SELECT MAX(block_number)::BIGINT
-        FROM (
-            SELECT block_number
-            FROM chain_lineage
-            WHERE chain_id = $1
-              AND canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
-            UNION ALL
-            SELECT block_number
-            FROM raw_logs
-            WHERE chain_id = $1
-              AND canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
-        ) AS startup_adapter_inputs
+        SELECT GREATEST(
+            (
+                SELECT MAX(block_number)::BIGINT
+                FROM chain_lineage
+                WHERE chain_id = $1
+                  AND canonicality_state IN (
+                      'canonical'::canonicality_state,
+                      'safe'::canonicality_state,
+                      'finalized'::canonicality_state
+                  )
+            ),
+            (
+                SELECT MAX(block_number)::BIGINT
+                FROM raw_logs
+                WHERE chain_id = $1
+                  AND canonicality_state IN (
+                      'canonical'::canonicality_state,
+                      'safe'::canonicality_state,
+                      'finalized'::canonicality_state
+                  )
+            )
+        )
         "#,
     )
     .bind(chain)

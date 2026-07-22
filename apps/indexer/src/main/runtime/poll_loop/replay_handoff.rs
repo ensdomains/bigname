@@ -8,13 +8,15 @@ use crate::normalized_replay_catchup::normalized_replay_cursors_complete;
 use crate::provider::{ProviderBlock, ProviderRegistry};
 use crate::reconciliation::{
     BacklogHandoffStatus, ChainCoverageFrontiers, HeaderAuditMode,
-    poll_provider_heads_with_adapter_sync, sync_live_adapter_backlog_after_normalized_replay,
+    poll_provider_heads_with_adapter_sync_and_progress,
+    sync_live_adapter_backlog_after_normalized_replay_with_progress,
     validate_chain_handoff_while_guarded,
 };
+use crate::run::startup_heartbeat::{StartupAdapterHeartbeat, StartupHeartbeat};
 
 use super::super::intake::IntakeChainTask;
 use super::super::manifest::ManifestRuntimeState;
-use super::discovery_refresh::refresh_discovery_watch_state;
+use super::discovery_refresh::refresh_discovery_watch_state_with_heartbeat;
 
 fn resolver_profile_convergence_before_handoff() -> bool {
     false
@@ -122,12 +124,15 @@ pub(super) async fn poll_replay_ready_chains_raw_only(
     event_silent_reverse_resolver_addresses: &[String],
     coverage_frontiers: &ChainCoverageFrontiers,
     latched_bootstrap_finalized_heads: &BTreeMap<String, ProviderBlock>,
+    adapter_sync_page_logs: usize,
+    heartbeat: &mut StartupHeartbeat,
+    heartbeat_chain_ids: &[String],
 ) -> Result<()> {
     if raw_poll_chains.is_empty() {
         return Ok(());
     }
 
-    if !refresh_discovery_watch_state(
+    if !refresh_discovery_watch_state_with_heartbeat(
         pool,
         provider_registry,
         manifest_runtime_state,
@@ -135,6 +140,10 @@ pub(super) async fn poll_replay_ready_chains_raw_only(
         false,
         resolver_profile_convergence_before_handoff(),
         watched_plan_admission_epochs,
+        deployment_profile,
+        adapter_sync_page_logs,
+        heartbeat,
+        heartbeat_chain_ids,
     )
     .await?
     {
@@ -149,19 +158,23 @@ pub(super) async fn poll_replay_ready_chains_raw_only(
     let loaded_plan_admission_epochs = watched_plan_admission_epochs
         .as_ref()
         .context("replay-ready watch plan is missing its loaded admission-epoch snapshot")?;
-    poll_provider_heads_with_adapter_sync(
-        pool,
-        &mut scoped_tasks,
-        provider_registry,
-        deployment_profile,
-        loaded_plan_admission_epochs,
-        false,
-        header_audit_mode,
-        event_silent_reverse_resolver_addresses,
-        coverage_frontiers,
-        latched_bootstrap_finalized_heads,
-    )
-    .await?;
+    {
+        let mut progress = StartupAdapterHeartbeat::new(heartbeat, heartbeat_chain_ids);
+        poll_provider_heads_with_adapter_sync_and_progress(
+            pool,
+            &mut scoped_tasks,
+            provider_registry,
+            deployment_profile,
+            loaded_plan_admission_epochs,
+            false,
+            header_audit_mode,
+            event_silent_reverse_resolver_addresses,
+            coverage_frontiers,
+            latched_bootstrap_finalized_heads,
+            &mut progress,
+        )
+        .await?;
+    }
 
     let mut updated_tasks = scoped_tasks
         .into_iter()
@@ -190,6 +203,9 @@ pub(super) async fn renew_live_poll_adapter_sync_permit(
     event_silent_reverse_resolver_addresses: &[String],
     coverage_frontiers: &ChainCoverageFrontiers,
     latched_bootstrap_finalized_heads: &BTreeMap<String, ProviderBlock>,
+    adapter_sync_page_logs: usize,
+    heartbeat: &mut StartupHeartbeat,
+    heartbeat_chain_ids: &[String],
 ) -> Result<bool> {
     let handoff_was_previously_latched = *live_adapter_sync_latched;
     *live_adapter_sync_latched = false;
@@ -208,18 +224,25 @@ pub(super) async fn renew_live_poll_adapter_sync_permit(
             event_silent_reverse_resolver_addresses,
             coverage_frontiers,
             latched_bootstrap_finalized_heads,
+            adapter_sync_page_logs,
+            heartbeat,
+            heartbeat_chain_ids,
         )
         .await?;
         return Ok(false);
     }
 
-    let backlog_summary = match sync_live_adapter_backlog_after_normalized_replay(
-        pool,
-        deployment_profile,
-        provider_configured_chains,
-    )
-    .await
-    {
+    let backlog_result = {
+        let mut progress = StartupAdapterHeartbeat::new(heartbeat, heartbeat_chain_ids);
+        sync_live_adapter_backlog_after_normalized_replay_with_progress(
+            pool,
+            deployment_profile,
+            provider_configured_chains,
+            &mut progress,
+        )
+        .await
+    };
+    let backlog_summary = match backlog_result {
         Ok(summary) if summary.awaiting_replay_chain_count == 0 => summary,
         Ok(summary) => {
             warn!(
@@ -249,7 +272,7 @@ pub(super) async fn renew_live_poll_adapter_sync_permit(
         *forced_handoff_plan_reload_complete,
         watched_plan_admission_epochs,
     );
-    if !refresh_discovery_watch_state(
+    if !refresh_discovery_watch_state_with_heartbeat(
         pool,
         provider_registry,
         manifest_runtime_state,
@@ -257,6 +280,10 @@ pub(super) async fn renew_live_poll_adapter_sync_permit(
         false,
         resolver_profile_convergence_before_handoff(),
         watched_plan_admission_epochs,
+        deployment_profile,
+        adapter_sync_page_logs,
+        heartbeat,
+        heartbeat_chain_ids,
     )
     .await?
     {

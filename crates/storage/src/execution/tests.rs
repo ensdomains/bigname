@@ -19,6 +19,23 @@ use crate::{
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Default)]
+struct CountingExecutionInvalidationProgress {
+    count: usize,
+}
+
+impl ExecutionOutcomeInvalidationProgress for CountingExecutionInvalidationProgress {
+    fn record<'a>(
+        &'a mut self,
+        _pool: &'a PgPool,
+    ) -> ExecutionOutcomeInvalidationProgressFuture<'a> {
+        Box::pin(async move {
+            self.count += 1;
+            Ok(())
+        })
+    }
+}
+
 #[test]
 fn migration_prunes_noncanonical_addr_selector_execution_artifacts() {
     let migration = include_str!(
@@ -2542,8 +2559,17 @@ async fn invalidates_verified_execution_outcomes_for_orphaned_block_dependencies
     }]);
     insert_trace_and_outcome(&database, &out_of_scope_trace, &out_of_scope_outcome).await?;
 
-    let summary = invalidate_execution_outcomes_for_orphaned_blocks(database.pool()).await?;
+    let mut progress = CountingExecutionInvalidationProgress::default();
+    let summary = invalidate_execution_outcomes_for_orphaned_blocks_with_progress(
+        database.pool(),
+        &mut progress,
+    )
+    .await?;
     assert_eq!(summary.deleted_outcome_count, 3);
+    assert!(
+        progress.count >= 4,
+        "reorg invalidation must report completed orphan-identity and cache-candidate pages"
+    );
 
     assert_eq!(
         load_execution_outcome(database.pool(), &requested_outcome.cache_key).await?,

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, future::Future, pin::Pin};
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
@@ -21,6 +21,14 @@ use super::{
 const REORG_INVALIDATION_BATCH_SIZE: i64 = 500;
 #[cfg(test)]
 const REORG_INVALIDATION_BATCH_SIZE: i64 = 2;
+
+pub type ExecutionOutcomeInvalidationProgressFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+
+pub trait ExecutionOutcomeInvalidationProgress: Send {
+    fn record<'a>(&'a mut self, pool: &'a PgPool)
+    -> ExecutionOutcomeInvalidationProgressFuture<'a>;
+}
 
 #[derive(Clone, Debug)]
 struct ExecutionOutcomeReorgInvalidationCandidate {
@@ -181,12 +189,40 @@ pub async fn invalidate_execution_outcomes_for_record_boundary_and_request_key(
 pub async fn invalidate_execution_outcomes_for_orphaned_blocks(
     pool: &PgPool,
 ) -> Result<ExecutionOutcomeInvalidationSummary> {
+    invalidate_execution_outcomes_for_orphaned_blocks_inner(pool, &mut None).await
+}
+
+pub async fn invalidate_execution_outcomes_for_orphaned_blocks_with_progress(
+    pool: &PgPool,
+    progress: &mut dyn ExecutionOutcomeInvalidationProgress,
+) -> Result<ExecutionOutcomeInvalidationSummary> {
+    invalidate_execution_outcomes_for_orphaned_blocks_inner(pool, &mut Some(progress)).await
+}
+
+async fn invalidate_execution_outcomes_for_orphaned_blocks_inner(
+    pool: &PgPool,
+    progress: &mut Option<&mut dyn ExecutionOutcomeInvalidationProgress>,
+) -> Result<ExecutionOutcomeInvalidationSummary> {
     let mut transaction = pool
         .begin()
         .await
         .context("failed to open transaction for execution reorg invalidation")?;
 
-    let orphaned_blocks = load_orphaned_block_dependencies_internal(&mut *transaction).await?;
+    let mut orphaned_blocks = BTreeSet::new();
+    let mut after_orphaned_block = None::<(String, String)>;
+    loop {
+        let block_page = load_orphaned_block_dependency_batch_internal(
+            &mut *transaction,
+            after_orphaned_block.as_ref(),
+        )
+        .await?;
+        let Some(last_block) = block_page.last().cloned() else {
+            break;
+        };
+        after_orphaned_block = Some(last_block);
+        orphaned_blocks.extend(block_page);
+        record_reorg_invalidation_progress(pool, progress).await?;
+    }
     let mut deleted_outcome_count = 0;
     let mut last_seen_cache_key = None;
     loop {
@@ -224,6 +260,7 @@ pub async fn invalidate_execution_outcomes_for_orphaned_blocks(
 
         deleted_outcome_count +=
             delete_execution_outcomes_by_keys(&mut transaction, &cache_keys).await?;
+        record_reorg_invalidation_progress(pool, progress).await?;
     }
 
     transaction
@@ -234,6 +271,16 @@ pub async fn invalidate_execution_outcomes_for_orphaned_blocks(
     Ok(ExecutionOutcomeInvalidationSummary {
         deleted_outcome_count,
     })
+}
+
+async fn record_reorg_invalidation_progress(
+    pool: &PgPool,
+    progress: &mut Option<&mut dyn ExecutionOutcomeInvalidationProgress>,
+) -> Result<()> {
+    if let Some(progress) = progress.as_deref_mut() {
+        progress.record(pool).await?;
+    }
+    Ok(())
 }
 
 impl ExecutionManifestInvalidation {
@@ -421,9 +468,10 @@ where
         .collect()
 }
 
-async fn load_orphaned_block_dependencies_internal<'e, E>(
+async fn load_orphaned_block_dependency_batch_internal<'e, E>(
     executor: E,
-) -> Result<BTreeSet<(String, String)>>
+    after: Option<&(String, String)>,
+) -> Result<Vec<(String, String)>>
 where
     E: Executor<'e, Database = Postgres>,
 {
@@ -432,9 +480,14 @@ where
         SELECT chain_id, block_hash
         FROM chain_lineage
         WHERE canonicality_state = 'orphaned'::canonicality_state
+          AND ($1::TEXT IS NULL OR (chain_id, block_hash) > ($1, $2))
         ORDER BY chain_id, block_hash
+        LIMIT $3
         "#,
     )
+    .bind(after.map(|(chain, _)| chain))
+    .bind(after.map(|(_, block_hash)| block_hash))
+    .bind(REORG_INVALIDATION_BATCH_SIZE)
     .fetch_all(executor)
     .await
     .context("failed to load orphaned block identities for execution reorg invalidation")?;

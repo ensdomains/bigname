@@ -156,3 +156,12 @@ AND watched.historical_eligible
 pub(super) fn with_watched_intervals(query_body: &str) -> String {
     format!("WITH\n{WATCHED_INTERVALS_CTES}\n{query_body}")
 }
+
+/// Stream the two disjoint source kinds without forcing PostgreSQL to
+/// materialize and sort the multi-million-row union before returning its
+/// first row. The progress-aware caller restores exact `UNION` deduplication
+/// in a sorted set while rows arrive.
+pub(super) fn with_streaming_watched_intervals(query_body: &str) -> String {
+    let streaming_ctes = WATCHED_INTERVALS_CTES.replacen("\n    UNION\n", "\n    UNION ALL\n", 1);
+    format!("WITH\n{streaming_ctes}\n{query_body}")
+}

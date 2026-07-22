@@ -2,11 +2,12 @@
 mod code_hashes;
 
 use anyhow::{Context, Result};
+use futures_util::TryStreamExt;
 use sqlx::{PgPool, Row};
 
 use crate::{
     MANIFEST_PROXY_IMPLEMENTATION_DISCOVERY_SOURCE, MANIFEST_PROXY_IMPLEMENTATION_EDGE_KIND,
-    normalize_address,
+    ManifestRuntimeProgress, normalize_address,
 };
 
 use super::types::{
@@ -17,7 +18,10 @@ use super::types::{
 pub use code_hashes::{
     load_manifest_code_hash_observations,
     load_manifest_code_hash_observations_for_watched_contracts,
+    load_manifest_code_hash_observations_with_progress,
 };
+
+const MANIFEST_DRIFT_PROGRESS_ROWS: usize = 1_000;
 
 pub async fn load_manifest_drift_inputs(pool: &PgPool) -> Result<ManifestDriftInputs> {
     Ok(ManifestDriftInputs {
@@ -26,6 +30,29 @@ pub async fn load_manifest_drift_inputs(pool: &PgPool) -> Result<ManifestDriftIn
         proxy_implementation_edges: load_manifest_proxy_implementation_drift_edges(pool).await?,
         code_hash_observations: load_manifest_code_hash_observations(pool).await?,
         normalized_manifest_events: load_manifest_normalized_event_inputs(pool).await?,
+    })
+}
+
+pub async fn load_manifest_drift_inputs_with_progress(
+    pool: &PgPool,
+    progress: &mut dyn ManifestRuntimeProgress,
+) -> Result<ManifestDriftInputs> {
+    let active_manifests = load_manifest_drift_active_manifests(pool).await?;
+    progress.record(pool).await?;
+    let declared_contracts = load_manifest_declared_contract_drift_inputs(pool).await?;
+    progress.record(pool).await?;
+    let proxy_implementation_edges = load_manifest_proxy_implementation_drift_edges(pool).await?;
+    progress.record(pool).await?;
+    let code_hash_observations =
+        load_manifest_code_hash_observations_with_progress(pool, progress).await?;
+    let normalized_manifest_events =
+        load_manifest_normalized_event_inputs_with_progress(pool, progress).await?;
+    Ok(ManifestDriftInputs {
+        active_manifests,
+        declared_contracts,
+        proxy_implementation_edges,
+        code_hash_observations,
+        normalized_manifest_events,
     })
 }
 
@@ -302,7 +329,21 @@ pub async fn load_manifest_proxy_implementation_drift_edges(
 pub async fn load_manifest_normalized_event_inputs(
     pool: &PgPool,
 ) -> Result<Vec<ManifestNormalizedEventInput>> {
-    let rows = sqlx::query(
+    load_manifest_normalized_event_inputs_inner(pool, None).await
+}
+
+async fn load_manifest_normalized_event_inputs_with_progress(
+    pool: &PgPool,
+    progress: &mut dyn ManifestRuntimeProgress,
+) -> Result<Vec<ManifestNormalizedEventInput>> {
+    load_manifest_normalized_event_inputs_inner(pool, Some(progress)).await
+}
+
+async fn load_manifest_normalized_event_inputs_inner(
+    pool: &PgPool,
+    mut progress: Option<&mut dyn ManifestRuntimeProgress>,
+) -> Result<Vec<ManifestNormalizedEventInput>> {
+    let mut rows = sqlx::query(
         r#"
         SELECT
             normalized_event_id,
@@ -334,71 +375,83 @@ pub async fn load_manifest_normalized_event_inputs(
         ORDER BY namespace, source_family, manifest_version, event_kind, normalized_event_id
         "#,
     )
-    .fetch_all(pool)
-    .await
-    .context("failed to load manifest normalized-event inputs")?;
-
-    rows.into_iter()
-        .map(|row| {
-            let manifest_version = row
-                .try_get::<i64, _>("manifest_version")
-                .context("failed to read manifest event manifest_version")?;
-            Ok(ManifestNormalizedEventInput {
-                normalized_event_id: row
-                    .try_get("normalized_event_id")
-                    .context("failed to read normalized_event_id")?,
-                event_identity: row
-                    .try_get("event_identity")
-                    .context("failed to read event_identity")?,
-                namespace: row
-                    .try_get("namespace")
-                    .context("failed to read manifest event namespace")?,
-                logical_name_id: row
-                    .try_get("logical_name_id")
-                    .context("failed to read logical_name_id")?,
-                resource_id: row
-                    .try_get("resource_id")
-                    .context("failed to read resource_id")?,
-                event_kind: row
-                    .try_get("event_kind")
-                    .context("failed to read event_kind")?,
-                source_family: row
-                    .try_get("source_family")
-                    .context("failed to read manifest event source_family")?,
-                manifest_version: u64::try_from(manifest_version)
-                    .context("manifest_version must be non-negative")?,
-                source_manifest_id: row
-                    .try_get("source_manifest_id")
-                    .context("failed to read source_manifest_id")?,
-                chain_id: row.try_get("chain_id").context("failed to read chain_id")?,
-                block_number: row
-                    .try_get("block_number")
-                    .context("failed to read block_number")?,
-                block_hash: row
-                    .try_get("block_hash")
-                    .context("failed to read block_hash")?,
-                transaction_hash: row
-                    .try_get("transaction_hash")
-                    .context("failed to read transaction_hash")?,
-                log_index: row
-                    .try_get("log_index")
-                    .context("failed to read log_index")?,
-                raw_fact_ref: row
-                    .try_get("raw_fact_ref")
-                    .context("failed to read raw_fact_ref")?,
-                derivation_kind: row
-                    .try_get("derivation_kind")
-                    .context("failed to read derivation_kind")?,
-                canonicality_state: row
-                    .try_get("canonicality_state")
-                    .context("failed to read manifest event canonicality_state")?,
-                before_state: row
-                    .try_get("before_state")
-                    .context("failed to read before_state")?,
-                after_state: row
-                    .try_get("after_state")
-                    .context("failed to read after_state")?,
-            })
-        })
-        .collect()
+    .fetch(pool);
+    let mut inputs = Vec::new();
+    while let Some(row) = rows
+        .try_next()
+        .await
+        .context("failed to stream manifest normalized-event inputs")?
+    {
+        let manifest_version = row
+            .try_get::<i64, _>("manifest_version")
+            .context("failed to read manifest event manifest_version")?;
+        inputs.push(ManifestNormalizedEventInput {
+            normalized_event_id: row
+                .try_get("normalized_event_id")
+                .context("failed to read normalized_event_id")?,
+            event_identity: row
+                .try_get("event_identity")
+                .context("failed to read event_identity")?,
+            namespace: row
+                .try_get("namespace")
+                .context("failed to read manifest event namespace")?,
+            logical_name_id: row
+                .try_get("logical_name_id")
+                .context("failed to read logical_name_id")?,
+            resource_id: row
+                .try_get("resource_id")
+                .context("failed to read resource_id")?,
+            event_kind: row
+                .try_get("event_kind")
+                .context("failed to read event_kind")?,
+            source_family: row
+                .try_get("source_family")
+                .context("failed to read manifest event source_family")?,
+            manifest_version: u64::try_from(manifest_version)
+                .context("manifest_version must be non-negative")?,
+            source_manifest_id: row
+                .try_get("source_manifest_id")
+                .context("failed to read source_manifest_id")?,
+            chain_id: row.try_get("chain_id").context("failed to read chain_id")?,
+            block_number: row
+                .try_get("block_number")
+                .context("failed to read block_number")?,
+            block_hash: row
+                .try_get("block_hash")
+                .context("failed to read block_hash")?,
+            transaction_hash: row
+                .try_get("transaction_hash")
+                .context("failed to read transaction_hash")?,
+            log_index: row
+                .try_get("log_index")
+                .context("failed to read log_index")?,
+            raw_fact_ref: row
+                .try_get("raw_fact_ref")
+                .context("failed to read raw_fact_ref")?,
+            derivation_kind: row
+                .try_get("derivation_kind")
+                .context("failed to read derivation_kind")?,
+            canonicality_state: row
+                .try_get("canonicality_state")
+                .context("failed to read manifest event canonicality_state")?,
+            before_state: row
+                .try_get("before_state")
+                .context("failed to read before_state")?,
+            after_state: row
+                .try_get("after_state")
+                .context("failed to read after_state")?,
+        });
+        if inputs.len().is_multiple_of(MANIFEST_DRIFT_PROGRESS_ROWS)
+            && let Some(progress) = progress.as_deref_mut()
+        {
+            progress.record(pool).await?;
+        }
+    }
+    if !inputs.is_empty()
+        && !inputs.len().is_multiple_of(MANIFEST_DRIFT_PROGRESS_ROWS)
+        && let Some(progress) = &mut progress
+    {
+        progress.record(pool).await?;
+    }
+    Ok(inputs)
 }

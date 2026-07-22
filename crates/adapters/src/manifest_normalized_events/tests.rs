@@ -22,10 +22,25 @@ use super::{
         DERIVATION_KIND_MANIFEST_SYNC, EVENT_KIND_CAPABILITY_CHANGED,
         EVENT_KIND_PROXY_IMPLEMENTATION_CHANGED, EVENT_KIND_SOURCE_MANIFEST_UPDATED,
     },
-    sync_manifest_normalized_events,
+    sync_manifest_normalized_events, sync_manifest_normalized_events_with_progress,
 };
+use bigname_manifests::{ManifestRuntimeProgress, ManifestRuntimeProgressFuture};
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Default)]
+struct CountingManifestProgress {
+    count: usize,
+}
+
+impl ManifestRuntimeProgress for CountingManifestProgress {
+    fn record<'a>(&'a mut self, _pool: &'a PgPool) -> ManifestRuntimeProgressFuture<'a> {
+        Box::pin(async move {
+            self.count += 1;
+            Ok(())
+        })
+    }
+}
 
 struct TestDatabase {
     admin_pool: PgPool,
@@ -422,7 +437,13 @@ async fn sync_manifest_normalized_events_is_idempotent() -> Result<()> {
         ])
     );
 
-    let second_summary = sync_manifest_normalized_events(database.pool()).await?;
+    let mut progress = CountingManifestProgress::default();
+    let second_summary =
+        sync_manifest_normalized_events_with_progress(database.pool(), &mut progress).await?;
+    assert!(
+        progress.count >= 8,
+        "manifest observation refresh must report completed input and per-kind persistence units"
+    );
     assert_eq!(second_summary.total_synced_count, 4);
     assert_eq!(second_summary.total_inserted_count, 0);
     assert_eq!(

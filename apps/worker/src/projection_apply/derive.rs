@@ -2,7 +2,10 @@ use anyhow::{Context, Result, bail};
 use sqlx::{PgPool, Postgres, Transaction};
 
 use super::{NORMALIZED_EVENT_CURSOR, NormalizedEventChangeCursor};
+use crate::primary_name::rebuild_heartbeat::LoopHeartbeat;
 use crate::projection_apply::derive_queries::{INVALIDATION_QUERY_PREFIXES, UPSERT_SUFFIX};
+
+const INVALIDATION_DERIVE_PROGRESS_CHANGES: i64 = 500;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ProjectionInvalidationDeriveSummary {
@@ -54,6 +57,7 @@ pub(crate) async fn seed_normalized_event_cursor_if_absent(
     Ok(inserted > 0)
 }
 
+#[cfg(test)]
 pub(super) async fn derive_normalized_event_invalidations(
     pool: &PgPool,
     batch_limit: i64,
@@ -63,7 +67,27 @@ pub(super) async fn derive_normalized_event_invalidations(
     }
 
     let complete_upper = capture_normalized_event_change_watermark(pool).await?;
-    derive_normalized_event_invalidations_through(pool, batch_limit, complete_upper).await
+    derive_normalized_event_invalidations_through_inner(pool, batch_limit, complete_upper, None)
+        .await
+}
+
+pub(super) async fn derive_normalized_event_invalidations_with_heartbeat(
+    pool: &PgPool,
+    batch_limit: i64,
+    loop_heartbeat: &mut LoopHeartbeat,
+) -> Result<ProjectionInvalidationDeriveSummary> {
+    if batch_limit <= 0 {
+        bail!("projection apply derive batch limit must be positive, got {batch_limit}");
+    }
+
+    let complete_upper = capture_normalized_event_change_watermark(pool).await?;
+    derive_normalized_event_invalidations_through_inner(
+        pool,
+        batch_limit,
+        complete_upper,
+        Some(loop_heartbeat),
+    )
+    .await
 }
 
 pub(crate) async fn capture_normalized_event_change_watermark(
@@ -78,10 +102,21 @@ pub(crate) async fn capture_normalized_event_change_watermark(
     .map(|change_id| NormalizedEventChangeCursor { change_id })
 }
 
+#[cfg(test)]
 pub(super) async fn derive_normalized_event_invalidations_through(
     pool: &PgPool,
     batch_limit: i64,
     complete_upper: NormalizedEventChangeCursor,
+) -> Result<ProjectionInvalidationDeriveSummary> {
+    derive_normalized_event_invalidations_through_inner(pool, batch_limit, complete_upper, None)
+        .await
+}
+
+async fn derive_normalized_event_invalidations_through_inner(
+    pool: &PgPool,
+    batch_limit: i64,
+    complete_upper: NormalizedEventChangeCursor,
+    mut loop_heartbeat: Option<&mut LoopHeartbeat>,
 ) -> Result<ProjectionInvalidationDeriveSummary> {
     if batch_limit <= 0 {
         bail!("projection apply derive batch limit must be positive, got {batch_limit}");
@@ -102,14 +137,32 @@ pub(super) async fn derive_normalized_event_invalidations_through(
         return Ok(ProjectionInvalidationDeriveSummary::default());
     };
 
-    let scanned_event_count = count_changes(&mut transaction, lower, upper).await?;
+    let mut scanned_event_count = 0;
     let mut enqueued_invalidation_count = 0u64;
-    for query_prefix in INVALIDATION_QUERY_PREFIXES {
-        let query = format!("{query_prefix}{UPSERT_SUFFIX}");
-        enqueued_invalidation_count +=
-            enqueue_invalidations(&mut transaction, &query, lower, upper).await?;
+    let mut progress_lower = lower;
+    while progress_lower.change_id < upper.change_id {
+        let progress_upper = load_batch_watermark(
+            &mut transaction,
+            progress_lower,
+            upper,
+            INVALIDATION_DERIVE_PROGRESS_CHANGES,
+        )
+        .await?
+        .context("projection invalidation progress range unexpectedly had no changes")?;
+        scanned_event_count +=
+            count_changes(&mut transaction, progress_lower, progress_upper).await?;
+        record_derivation_progress(pool, &mut loop_heartbeat).await;
+        for query_prefix in INVALIDATION_QUERY_PREFIXES {
+            let query = format!("{query_prefix}{UPSERT_SUFFIX}");
+            enqueued_invalidation_count +=
+                enqueue_invalidations(&mut transaction, &query, progress_lower, progress_upper)
+                    .await?;
+            record_derivation_progress(pool, &mut loop_heartbeat).await;
+        }
+        progress_lower = progress_upper;
     }
     store_cursor(&mut transaction, upper).await?;
+    record_derivation_progress(pool, &mut loop_heartbeat).await;
     transaction
         .commit()
         .await
@@ -119,6 +172,15 @@ pub(super) async fn derive_normalized_event_invalidations_through(
         scanned_event_count,
         enqueued_invalidation_count,
     })
+}
+
+async fn record_derivation_progress(
+    pool: &PgPool,
+    loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
+) {
+    if let Some(loop_heartbeat) = loop_heartbeat.as_deref_mut() {
+        loop_heartbeat.record_if_due(pool).await;
+    }
 }
 
 async fn load_cursor(

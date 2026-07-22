@@ -9,9 +9,13 @@ use bigname_manifests::{
     ManifestSyncStatus, ManifestSyncSummary, WatchedChainPlan, WatchedContractSummary,
     load_manifest_declared_watched_chain_plan, load_manifest_declared_watched_contract_summary,
     load_watched_contract_summary_and_chain_plan,
+    load_watched_contract_summary_and_chain_plan_with_progress,
 };
 
-use crate::resolver_profile_convergence::journal_resolver_profile_authority;
+use crate::resolver_profile_convergence::{
+    journal_resolver_profile_authority, journal_resolver_profile_authority_with_progress,
+};
+use crate::run::startup_heartbeat::StartupAdapterHeartbeat;
 
 pub(crate) fn load_manifest_repository(manifests_root: &Path) -> Result<ManifestRepository> {
     bigname_manifests::load_repository(manifests_root).with_context(|| {
@@ -83,12 +87,50 @@ pub(crate) async fn build_manifest_runtime_state_with_watch_scope(
     manifest_repository: &ManifestRepository,
     watch_scope: RuntimeWatchScope,
 ) -> Result<ManifestRuntimeState> {
+    build_manifest_runtime_state_with_watch_scope_inner(
+        pool,
+        manifest_repository,
+        watch_scope,
+        &mut None,
+    )
+    .await
+}
+
+pub(crate) async fn build_manifest_runtime_state_with_watch_scope_and_progress(
+    pool: &sqlx::PgPool,
+    manifest_repository: &ManifestRepository,
+    watch_scope: RuntimeWatchScope,
+    progress: &mut StartupAdapterHeartbeat<'_>,
+) -> Result<ManifestRuntimeState> {
+    build_manifest_runtime_state_with_watch_scope_inner(
+        pool,
+        manifest_repository,
+        watch_scope,
+        &mut Some(progress),
+    )
+    .await
+}
+
+async fn build_manifest_runtime_state_with_watch_scope_inner(
+    pool: &sqlx::PgPool,
+    manifest_repository: &ManifestRepository,
+    watch_scope: RuntimeWatchScope,
+    progress: &mut Option<&mut StartupAdapterHeartbeat<'_>>,
+) -> Result<ManifestRuntimeState> {
     let manifest_summary = manifest_repository.summary().clone();
     let sync_summary =
-        sync_repository_or_load_stored_for_pending_rederive(pool, manifest_repository).await?;
+        sync_repository_or_load_stored_for_pending_rederive(pool, manifest_repository, progress)
+            .await?;
     // Repository sync is the manifest-authority mutation boundary. Journal
     // its resolver-profile effects before any later bootstrap work can fail.
-    journal_resolver_profile_authority(pool).await?;
+    match progress.as_deref_mut() {
+        Some(progress) => {
+            journal_resolver_profile_authority_with_progress(pool, progress).await?;
+        }
+        None => {
+            journal_resolver_profile_authority(pool).await?;
+        }
+    }
     let (
         sync_summary,
         discovery_admission,
@@ -97,14 +139,27 @@ pub(crate) async fn build_manifest_runtime_state_with_watch_scope(
         watched_chain_plan,
     ) = match watch_scope {
         RuntimeWatchScope::ActiveWatchedChain => {
-            let admission_state = bigname_manifests::load_discovery_admission_state(pool).await?;
+            let admission_state = match progress.as_deref_mut() {
+                Some(progress) => {
+                    bigname_manifests::load_discovery_admission_state_with_progress(pool, progress)
+                        .await?
+                }
+                None => bigname_manifests::load_discovery_admission_state(pool).await?,
+            };
             verify_stored_manifest_state(&sync_summary, &admission_state)?;
             let (watched_contract_summary, watched_chain_plan) =
-                load_watched_contract_summary_and_chain_plan(pool).await?;
+                load_active_watched_plan(pool, progress).await?;
+            let manifest_normalized_event_summary = match progress.as_deref_mut() {
+                Some(progress) => {
+                    bigname_adapters::sync_manifest_normalized_events_with_progress(pool, progress)
+                        .await?
+                }
+                None => bigname_adapters::sync_manifest_normalized_events(pool).await?,
+            };
             (
                 sync_summary,
                 discovery_admission_snapshot(&admission_state),
-                bigname_adapters::sync_manifest_normalized_events(pool).await?,
+                manifest_normalized_event_summary,
                 watched_contract_summary,
                 watched_chain_plan,
             )
@@ -137,38 +192,96 @@ pub(crate) async fn build_manifest_runtime_state_with_watch_scope(
 /// (`inline`) runtime refresh may also emit manifest-derived normalized
 /// events. Non-inline modes build through the declared-only read/write scope,
 /// then widen the in-memory plan from stored discovery without adapter writes.
+#[allow(dead_code)]
 pub(crate) async fn build_manifest_runtime_state_for_repository_refresh(
     pool: &sqlx::PgPool,
     manifest_repository: &ManifestRepository,
     runtime_watch_scope: RuntimeWatchScope,
     broad_runtime_refresh_enabled: bool,
 ) -> Result<ManifestRuntimeState> {
+    build_manifest_runtime_state_for_repository_refresh_inner(
+        pool,
+        manifest_repository,
+        runtime_watch_scope,
+        broad_runtime_refresh_enabled,
+        &mut None,
+    )
+    .await
+}
+
+pub(crate) async fn build_manifest_runtime_state_for_repository_refresh_with_progress(
+    pool: &sqlx::PgPool,
+    manifest_repository: &ManifestRepository,
+    runtime_watch_scope: RuntimeWatchScope,
+    broad_runtime_refresh_enabled: bool,
+    progress: &mut StartupAdapterHeartbeat<'_>,
+) -> Result<ManifestRuntimeState> {
+    build_manifest_runtime_state_for_repository_refresh_inner(
+        pool,
+        manifest_repository,
+        runtime_watch_scope,
+        broad_runtime_refresh_enabled,
+        &mut Some(progress),
+    )
+    .await
+}
+
+async fn build_manifest_runtime_state_for_repository_refresh_inner(
+    pool: &sqlx::PgPool,
+    manifest_repository: &ManifestRepository,
+    runtime_watch_scope: RuntimeWatchScope,
+    broad_runtime_refresh_enabled: bool,
+    progress: &mut Option<&mut StartupAdapterHeartbeat<'_>>,
+) -> Result<ManifestRuntimeState> {
     let build_scope = if broad_runtime_refresh_enabled {
         runtime_watch_scope
     } else {
         RuntimeWatchScope::ManifestDeclaredOnly
     };
-    let mut state =
-        build_manifest_runtime_state_with_watch_scope(pool, manifest_repository, build_scope)
-            .await?;
+    let mut state = build_manifest_runtime_state_with_watch_scope_inner(
+        pool,
+        manifest_repository,
+        build_scope,
+        progress,
+    )
+    .await?;
     if build_scope != runtime_watch_scope {
         let (watched_contract_summary, watched_chain_plan) =
-            load_watched_contract_summary_and_chain_plan(pool).await?;
+            load_active_watched_plan(pool, progress).await?;
         state.watched_contract_summary = watched_contract_summary;
         state.watched_chain_plan = watched_chain_plan;
     }
     Ok(state)
 }
 
+async fn load_active_watched_plan(
+    pool: &sqlx::PgPool,
+    progress: &mut Option<&mut StartupAdapterHeartbeat<'_>>,
+) -> Result<(WatchedContractSummary, Vec<WatchedChainPlan>)> {
+    match progress.as_deref_mut() {
+        Some(progress) => {
+            load_watched_contract_summary_and_chain_plan_with_progress(pool, progress).await
+        }
+        None => load_watched_contract_summary_and_chain_plan(pool).await,
+    }
+}
+
 async fn sync_repository_or_load_stored_for_pending_rederive(
     pool: &sqlx::PgPool,
     manifest_repository: &ManifestRepository,
+    progress: &mut Option<&mut StartupAdapterHeartbeat<'_>>,
 ) -> Result<ManifestSyncSummary> {
     if bigname_storage::base_normalized_rederive_manifest_sync_pending_replay(pool).await? {
         return load_stored_manifest_sync_summary_for_pending_rederive(pool).await;
     }
 
-    bigname_manifests::sync_repository(pool, manifest_repository).await
+    match progress.as_deref_mut() {
+        Some(progress) => {
+            bigname_manifests::sync_repository_with_progress(pool, manifest_repository, progress)
+                .await
+        }
+        None => bigname_manifests::sync_repository(pool, manifest_repository).await,
+    }
 }
 
 async fn load_stored_manifest_sync_summary_for_pending_rederive(

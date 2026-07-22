@@ -503,12 +503,45 @@ immediately after opening its database pool, before startup bootstrap, and
 advances the process plus deduplicated chain rows after completed hash-pinned
 bootstrap progress units of at most 32 blocks and after completed startup
 adapter checkpoint stream pages and bounded discovery, identity, binding, and
-normalized-event finalization batches. Live manifest and discovery refreshes
-reuse those checkpoint-page progress callbacks and family-boundary beats. This
+normalized-event finalization batches. The post-bootstrap ENSv1 reverse pass
+also advances liveness after each 1,000 streamed raw logs, decoded logs,
+existing-event identity page, and normalized-event upsert page. Resolver-profile
+authority journaling and convergence advance it after completed authority,
+target, replay, and invalidation pages. Manifest repository sync and active
+watch-plan loading use the same callback after each bounded discovery-edge or
+active-address stream page, stale-edge reconciliation page, and plan-build
+page, plus each 10,000-address chunk copied into the intake runtime plan. Live
+chain intake advances it only after completed block-header,
+1,000-row raw-fact persistence chunks, code-observation chunks, at-most-32-block
+non-reorg adapter chunks, adapter families, and coverage-publication units.
+Winning-branch repair advances it after each lineage block, each losing-block
+raw-fact, normalized-event, and identity repair, and each 500-row execution-cache
+dependency or outcome page. Target-bounded ENSv1/Basenames registry repair
+advances it after each 10,000-log retained-input page and each bounded streamed
+discovery reconciliation, active-address, and normalized-event unit. Manifest
+observation refresh streams large code-hash and normalized-event inputs in
+1,000-row units, persists generated events in 1,000-row units, and loads active
+discovery parents and historical contract addresses in 1,000-row primary-key
+pages. The four broad ENSv2 startup family scans (`ens_v2_registry_resource_surface`,
+`ens_v2_registrar`, `ens_v2_resolver`, and `ens_v2_permissions`) remain explicitly
+tracked by follow-up #224 for replay-safe checkpoint/page boundaries; they are
+admitted by the Sepolia ENSv2 deployment rather than the mainnet production
+manifests, so they are not a reachable mainnet stale-heartbeat path.
+The post-replay live-adapter backlog advances it after each completed adapter
+family and published cursor page; live manifest and discovery refreshes reuse
+the same progress callbacks. This
 does not change the configured 1,024-block default checkpoint boundary for
 non-startup backfills. The worker
 advances the process row after bounded
-[projection](glossary.md) rebuild batches and projection-apply units. This
+[projection](glossary.md) rebuild batches and projection-apply units. Invalidation
+derivation keeps the at-most-5,000-change cursor transaction atomic while
+splitting its projection-family SQL into at-most-500-change subranges and
+advances liveness after each completed family/subrange. Invalidation apply
+threads the same progress handle into targeted projection work: fan-out keys
+advance after completed query, build, persistence, or cleanup pages (including
+500-row child upserts, 1,000-row child cleanup scans, and per-binding address
+work), and the outer apply loop advances after each completed claimed key or
+bounded address group. This
 keeps long, actively progressing work live without using a detached timer that
 could mask a stuck operation. A missing
 process-scoped row therefore means that instance's loop never registered or
@@ -528,12 +561,12 @@ Full worker rebuild heartbeat routes are explicit:
 | Rebuild step | Bounded progress heartbeat | Named monolithic phases |
 | --- | --- | --- |
 | `name_current` | each completed name task; staged writes remain in 2,000-row batches | `name_current.load_inputs`, `name_current.publish` |
-| `children_current` | each completed declared-child source; staged writes remain in 2,000-row batches | `children_current.count_existing`, `children_current.publish`, `children_current.count_published_parents` |
+| `children_current` | each completed declared-child source; staged writes remain in 2,000-row batches; targeted fan-out uses 500-row upserts and 1,000-row cleanup scans | `children_current.count_existing`, `children_current.publish`, `children_current.count_published_parents`, `children_current.target_load` |
 | `permissions_current` | each completed resource task; staged writes remain in 2,000-row batches | `permissions_current.count_existing`, `permissions_current.publish` |
-| `record_inventory_current` | each completed resource task, staged in 500-row batches; text hydration also beats after each bounded 500-row page | `record_inventory_current.count_existing`, `record_inventory_current.publish` |
+| `record_inventory_current` | each completed resource task, staged in 500-row batches; text hydration also beats after each configured provider-call batch and each persisted result row | `record_inventory_current.count_existing`, `record_inventory_current.publish` |
 | `resolver_current` | each completed resolver target; staged writes remain in 1,000-row batches | `resolver_current.load_profile`, `resolver_current.load_targets`, `resolver_current.count_existing`, `resolver_current.publish` |
 | `address_names_current` | each completed surface binding; staged writes remain in 2,000-row batches | `address_names_current.prepare`, `address_names_current.publish`, `address_names_current.count_published_addresses` |
-| `primary_names_current` | each streamed tuple; legacy hydration beats during 1,000-candidate planning, configured provider batches, resolver-edge batches, and 1,000-row upserts | `primary_names_current.count_existing`, `primary_names_current.invalidate_execution_cache`, `primary_names_current.publish`, `primary_names_current.legacy_hydration.load_reverse_claim_candidates`, `primary_names_current.legacy_hydration.load_resolver_edge_candidates` |
+| `primary_names_current` | each streamed tuple; legacy hydration beats during 1,000-candidate planning, configured reverse-name provider batches, each resolver-edge forward confirmation, and 1,000-row upserts | `primary_names_current.count_existing`, `primary_names_current.invalidate_execution_cache`, `primary_names_current.publish`, `primary_names_current.legacy_hydration.load_reverse_claim_candidates`, `primary_names_current.legacy_hydration.load_resolver_edge_candidates` |
 
 A named phase is a distinct `scope_kind='phase'` row for the worker instance.
 Its `heartbeat_at` is the phase start rather than a free-running timer, so a

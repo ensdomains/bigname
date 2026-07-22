@@ -35,7 +35,7 @@ const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 pub use discovery::*;
 pub use model::*;
 pub use repository::load_repository;
-pub use sync::sync_repository;
+pub use sync::{sync_repository, sync_repository_with_progress};
 pub use views::*;
 
 pub(crate) use managed_edges::{

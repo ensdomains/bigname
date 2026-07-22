@@ -1,4 +1,5 @@
 use anyhow::Result;
+use bigname_adapters::StartupAdapterProgress;
 use bigname_storage::{
     CanonicalityState, ChainLineageBlock, CheckpointBlockRef, chain_lineage_contains_ancestor,
     load_chain_lineage_block, load_chain_lineage_canonical_child_path,
@@ -56,6 +57,7 @@ pub(super) async fn reconcile_large_checkpoint_gap_from_stored_lineage(
     latest_head: &ProviderBlock,
     stored_anchor_candidates: &[ProviderBlock],
     coverage_frontiers: &ChainCoverageFrontiers,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<StoredLineagePromotion> {
     if latest_head.block_number <= current_canonical_number {
         return Ok(StoredLineagePromotion::NotApplicable);
@@ -71,6 +73,7 @@ pub(super) async fn reconcile_large_checkpoint_gap_from_stored_lineage(
         chain,
         current_canonical_number,
         stored_anchor_candidates,
+        progress,
     )
     .await?
     else {
@@ -89,6 +92,7 @@ pub(super) async fn reconcile_large_checkpoint_gap_from_stored_lineage(
         batch_blocks,
     )
     .await?;
+    record_progress(pool, progress).await?;
     if path.len() != batch_blocks {
         return Ok(StoredLineagePromotion::Refused(format!(
             "canonical gap of {live_gap_blocks} blocks for chain {chain} exceeds live gap fill limit {MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS}; stored lineage path from checkpoint {} is incomplete or has duplicate canonical children before the stored safe/finalized anchor {}; rerun hash-pinned backfill for the missing range and retry",
@@ -103,6 +107,7 @@ pub(super) async fn reconcile_large_checkpoint_gap_from_stored_lineage(
         coverage_frontiers,
         stored_anchor.block_number,
         admission_epoch,
+        progress,
     )
     .await
     {
@@ -139,6 +144,7 @@ pub(super) async fn reconcile_large_checkpoint_gap_from_stored_lineage(
         let provider_targets = provider
             .fetch_block_hashes_by_numbers(&[target.block_number])
             .await?;
+        record_progress(pool, progress).await?;
         let Some(provider_target) = provider_targets
             .iter()
             .find(|block| block.block_number == target.block_number)
@@ -199,6 +205,7 @@ async fn select_stored_promotion_anchor(
     chain: &str,
     current_canonical_number: i64,
     candidates: &[ProviderBlock],
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<Option<(ChainLineageBlock, String)>> {
     let max_candidate_height = candidates
         .iter()
@@ -213,6 +220,7 @@ async fn select_stored_promotion_anchor(
         let resolved = provider
             .fetch_block_hashes_by_numbers(&[stored_frontier.block_number])
             .await?;
+        record_progress(pool, progress).await?;
         if let Some(provider_block) = resolved
             .iter()
             .find(|block| block.block_number == stored_frontier.block_number)
@@ -255,10 +263,21 @@ async fn select_stored_promotion_anchor(
                 break;
             }
             cursor = parent;
+            record_progress(pool, progress).await?;
         }
     }
 
     Ok(None)
+}
+
+async fn record_progress(
+    pool: &sqlx::PgPool,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<()> {
+    if let Some(progress) = progress.as_deref_mut() {
+        progress.record(pool).await?;
+    }
+    Ok(())
 }
 
 fn stored_anchor_is_canonical(state: CanonicalityState) -> bool {

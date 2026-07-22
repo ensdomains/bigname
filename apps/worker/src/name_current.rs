@@ -136,7 +136,9 @@ async fn rebuild_name_current_inner(
     loop_heartbeat: Option<&mut LoopHeartbeat>,
 ) -> Result<NameCurrentRebuildSummary> {
     match logical_name_id {
-        Some(logical_name_id) => rebuild_one_name_current(pool, logical_name_id).await,
+        Some(logical_name_id) => {
+            rebuild_one_name_current(pool, logical_name_id, loop_heartbeat).await
+        }
         None => rebuild_all_name_current(pool, loop_heartbeat).await,
     }
 }
@@ -228,18 +230,22 @@ fn spawn_name_current_rebuild_task(
 async fn rebuild_one_name_current(
     pool: &PgPool,
     logical_name_id: &str,
+    mut loop_heartbeat: Option<&mut LoopHeartbeat>,
 ) -> Result<NameCurrentRebuildSummary> {
     let Some(name) = load_canonical_name_surface(pool, logical_name_id).await? else {
         let deleted_row_count = delete_name_current(pool, logical_name_id).await?;
+        record_rebuild_progress(pool, &mut loop_heartbeat).await;
         return Ok(NameCurrentRebuildSummary {
             requested_name_count: 1,
             upserted_row_count: 0,
             deleted_row_count,
         });
     };
+    record_rebuild_progress(pool, &mut loop_heartbeat).await;
 
-    let row = build_name_current_row(pool, &name).await?;
+    let row = build_name_current_row_inner(pool, &name, &mut loop_heartbeat).await?;
     let upserted_row_count = upsert_name_current_rows(pool, &[row]).await?.len();
+    record_rebuild_progress(pool, &mut loop_heartbeat).await;
     Ok(NameCurrentRebuildSummary {
         requested_name_count: 1,
         upserted_row_count,
@@ -248,13 +254,26 @@ async fn rebuild_one_name_current(
 }
 
 async fn build_name_current_row(pool: &PgPool, name: &NameSurfaceSeed) -> Result<NameCurrentRow> {
+    build_name_current_row_inner(pool, name, &mut None).await
+}
+
+async fn build_name_current_row_inner(
+    pool: &PgPool,
+    name: &NameSurfaceSeed,
+    loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
+) -> Result<NameCurrentRow> {
     let current_binding = load_current_binding_context(pool, &name.logical_name_id).await?;
+    record_rebuild_progress(pool, loop_heartbeat).await;
     let events = load_relevant_events(pool, name, current_binding.as_ref()).await?;
+    record_rebuild_progress(pool, loop_heartbeat).await;
     let history_heads = load_history_heads(pool, &name.logical_name_id).await?;
+    record_rebuild_progress(pool, loop_heartbeat).await;
     let basenames_execution_manifest =
         load_active_basenames_execution_manifest(pool, &name.namespace).await?;
+    record_rebuild_progress(pool, loop_heartbeat).await;
     let wildcard_source_context =
         load_wildcard_source_context(pool, name, current_binding.as_ref()).await?;
+    record_rebuild_progress(pool, loop_heartbeat).await;
     let supplemental_chain_observations = load_supplemental_chain_observations(
         pool,
         name,
@@ -265,6 +284,7 @@ async fn build_name_current_row(pool: &PgPool, name: &NameSurfaceSeed) -> Result
         basenames_execution_manifest.as_ref(),
     )
     .await?;
+    record_rebuild_progress(pool, loop_heartbeat).await;
     let mut facts = project_facts(&events, current_binding.as_ref(), &history_heads)?;
     // created_at is the first observation of this name. Supplemental observations
     // can come from parent wildcard names or Basenames transport lineage.

@@ -31,6 +31,20 @@ struct TestReverseClaimConfig<'a> {
     file_path: &'a str,
 }
 
+#[derive(Default)]
+struct CountingStartupProgress {
+    record_count: usize,
+}
+
+impl StartupAdapterProgress for CountingStartupProgress {
+    fn record<'a>(&'a mut self, _pool: &'a PgPool) -> crate::StartupAdapterProgressFuture<'a> {
+        Box::pin(async move {
+            self.record_count += 1;
+            Ok(())
+        })
+    }
+}
+
 impl TestDatabase {
     async fn new() -> Result<Self> {
         let database_url = std::env::var("BIGNAME_DATABASE_URL")
@@ -633,7 +647,14 @@ async fn run_idempotence_case(config: TestReverseClaimConfig<'_>) -> Result<()> 
         );
     }
 
-    let second = sync_ens_v1_reverse_claim(database.pool(), config.chain).await?;
+    let mut progress = CountingStartupProgress::default();
+    let second =
+        sync_ens_v1_reverse_claim_with_progress(database.pool(), config.chain, &mut progress)
+            .await?;
+    assert!(
+        progress.record_count >= 4,
+        "reverse sync must report completed raw-log loading, decoding, identity-count, and persistence units"
+    );
     assert_eq!(second.scanned_log_count, 1);
     assert_eq!(second.matched_log_count, 1);
     assert_eq!(second.total_synced_count, expected_event_count);

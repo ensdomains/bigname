@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 const COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD: usize = 10_000;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct WatchedContract {
     pub chain: String,
     pub source_family: String,

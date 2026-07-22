@@ -1971,6 +1971,21 @@ async fn silent_winning_reorg_removes_losing_legacy_registry_discovery_authority
 async fn assert_silent_winning_reorg_removes_losing_legacy_registry_discovery_authority(
     fixture: LegacyRegistrySilentReorgFixture,
 ) -> Result<()> {
+    #[derive(Default)]
+    struct CountingProgress(usize);
+
+    impl bigname_adapters::StartupAdapterProgress for CountingProgress {
+        fn record<'a>(
+            &'a mut self,
+            _pool: &'a PgPool,
+        ) -> bigname_adapters::StartupAdapterProgressFuture<'a> {
+            Box::pin(async move {
+                self.0 += 1;
+                Ok(())
+            })
+        }
+    }
+
     let database = TestDatabase::new().await?;
     create_ops_catchup_backfill_job_tables(database.pool()).await?;
 
@@ -2134,17 +2149,23 @@ async fn assert_silent_winning_reorg_removes_losing_legacy_registry_discovery_au
     .bind(stale_epoch)
     .execute(database.pool())
     .await?;
-    let epoch_drift_error = bigname_adapters::sync_ens_v1_subregistry_discovery_through_block_with_expected_admission_epoch(
+    let mut progress = CountingProgress::default();
+    let epoch_drift_error = bigname_adapters::sync_ens_v1_subregistry_discovery_through_block_with_expected_admission_epoch_and_progress(
         database.pool(),
         fixture.chain,
         20,
         stale_epoch,
+        &mut progress,
     )
     .await
     .expect_err("legacy registry reconciliation must reject a stale admission epoch");
     assert!(
         format!("{epoch_drift_error:#}").contains("discovery admission epoch changed"),
         "epoch-drift refusal must be explicit: {epoch_drift_error:#}"
+    );
+    assert!(
+        progress.0 > 0,
+        "target-bounded registry replay must report completed work before its writer fence"
     );
 
     let watched_plan = load_watched_chain_plan(database.pool()).await?;

@@ -81,14 +81,17 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
                 && replay_checkpoint.is_none(),
             "resolver-profile replay cannot be combined with another restricted or checkpointed authority scope"
         );
-        return sync_resolver_profile_stream(ResolverProfileStreamInput {
-            pool,
-            chain,
-            raw_log_active_emitters: &raw_log_active_emitters,
-            generic_resolver_event_sources: &generic_resolver_event_sources,
-            event_topics: &event_topics,
-            replay,
-        })
+        return sync_resolver_profile_stream(
+            ResolverProfileStreamInput {
+                pool,
+                chain,
+                raw_log_active_emitters: &raw_log_active_emitters,
+                generic_resolver_event_sources: &generic_resolver_event_sources,
+                event_topics: &event_topics,
+                replay,
+            },
+            &mut startup_progress,
+        )
         .await;
     }
     let max_raw_logs_per_page = replay_max_raw_logs_per_page

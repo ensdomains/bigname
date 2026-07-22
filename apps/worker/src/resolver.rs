@@ -22,7 +22,7 @@ mod summary_json;
 mod target_loading;
 
 use profile::ResolverProfileGate;
-use summary_json::build_resolver_current_row;
+use summary_json::{build_resolver_current_row, build_resolver_current_row_with_progress};
 use target_loading::{
     ResolverTarget, count_current_binding_candidate_pairs, load_target_resolvers,
     normalize_resolver_address,
@@ -103,7 +103,7 @@ async fn rebuild_resolver_current_inner(
 ) -> Result<ResolverCurrentRebuildSummary> {
     match (chain_id, resolver_address) {
         (Some(chain_id), Some(resolver_address)) => {
-            rebuild_one_resolver(pool, chain_id, resolver_address).await
+            rebuild_one_resolver(pool, chain_id, resolver_address, loop_heartbeat).await
         }
         (None, None) => rebuild_all_resolvers(pool, loop_heartbeat).await,
         _ => bail!(
@@ -230,6 +230,7 @@ async fn rebuild_one_resolver(
     pool: &PgPool,
     chain_id: &str,
     resolver_address: &str,
+    mut loop_heartbeat: Option<&mut LoopHeartbeat>,
 ) -> Result<ResolverCurrentRebuildSummary> {
     let resolver_address = normalize_resolver_address(resolver_address);
     let target = ResolverTarget {
@@ -242,10 +243,16 @@ async fn rebuild_one_resolver(
         enumerate_bindings: should_enumerate_targeted_resolver_bindings(pool, &target).await?,
         ..target
     };
+    record_rebuild_progress(pool, &mut loop_heartbeat).await;
     let profile_gate = ResolverProfileGate::load_for_target(pool, &target).await?;
-    let Some(row) = build_resolver_current_row(pool, &profile_gate, &target).await? else {
+    record_rebuild_progress(pool, &mut loop_heartbeat).await;
+    let Some(row) =
+        build_resolver_current_row_with_progress(pool, &profile_gate, &target, &mut loop_heartbeat)
+            .await?
+    else {
         let deleted_row_count =
             delete_resolver_current(pool, &target.chain_id, &target.resolver_address).await?;
+        record_rebuild_progress(pool, &mut loop_heartbeat).await;
         return Ok(ResolverCurrentRebuildSummary {
             requested_resolver_count: 1,
             upserted_row_count: 0,
@@ -254,6 +261,7 @@ async fn rebuild_one_resolver(
     };
 
     let upserted_row_count = upsert_resolver_current_rows(pool, &[row]).await?.len();
+    record_rebuild_progress(pool, &mut loop_heartbeat).await;
     Ok(ResolverCurrentRebuildSummary {
         requested_resolver_count: 1,
         upserted_row_count,

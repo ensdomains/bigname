@@ -148,10 +148,11 @@ pub(super) async fn hydrate_resolver_edge_candidates(
                     delete_existing_resolver_edge_row(pool, candidate, summary).await?;
                     continue;
                 }
-                let address = match client
+                let forward_result = client
                     .lookup_forward_address(&chain_id, &position, &normalized_name)
-                    .await
-                {
+                    .await;
+                record_rebuild_progress(pool, loop_heartbeat).await;
+                let address = match forward_result {
                     Ok(Some(address)) => address,
                     Ok(None) => {
                         delete_existing_resolver_edge_row(pool, candidate, summary).await?;

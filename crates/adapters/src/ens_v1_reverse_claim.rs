@@ -3,7 +3,13 @@ use std::collections::{BTreeMap, HashSet};
 use anyhow::Result;
 use sqlx::PgPool;
 
-use crate::normalized_event_support::upsert_normalized_events_in_chunks_with_counts;
+use crate::{
+    checkpoint_context::{StartupAdapterProgress, record_startup_adapter_progress},
+    normalized_event_support::{
+        upsert_normalized_events_in_chunks_with_counts,
+        upsert_normalized_events_in_chunks_with_counts_and_progress,
+    },
+};
 
 mod active_emitters;
 mod events;
@@ -34,6 +40,8 @@ const EVENT_KIND_RECORD_CHANGED: &str = "RecordChanged";
 const ENS_NATIVE_COIN_TYPE: &str = "60";
 const BASE_NATIVE_COIN_TYPE: &str = "2147492101";
 const CONTRACT_ROLE_REVERSE_REGISTRAR: &str = "reverse_registrar";
+const REVERSE_BUILD_PROGRESS_LOGS: usize = 1_000;
+const REVERSE_PERSIST_PROGRESS_EVENTS: usize = 1_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnsV1ReverseClaimSyncSummary {
@@ -56,7 +64,7 @@ impl EnsV1ReverseClaimSyncSummary {
         chain: &str,
         block_hashes: &[String],
     ) -> Result<Self> {
-        sync_ens_v1_reverse_claim_with_scope(pool, chain, true, block_hashes, None).await
+        sync_ens_v1_reverse_claim_with_scope(pool, chain, true, block_hashes, None, None).await
     }
 
     pub async fn sync_for_block_hashes_with_source_scope(
@@ -65,8 +73,15 @@ impl EnsV1ReverseClaimSyncSummary {
         block_hashes: &[String],
         source_scope: &[(String, String, i64, i64)],
     ) -> Result<Self> {
-        sync_ens_v1_reverse_claim_with_scope(pool, chain, true, block_hashes, Some(source_scope))
-            .await
+        sync_ens_v1_reverse_claim_with_scope(
+            pool,
+            chain,
+            true,
+            block_hashes,
+            Some(source_scope),
+            None,
+        )
+        .await
     }
 }
 
@@ -74,7 +89,15 @@ pub async fn sync_ens_v1_reverse_claim(
     pool: &PgPool,
     chain: &str,
 ) -> Result<EnsV1ReverseClaimSyncSummary> {
-    sync_ens_v1_reverse_claim_with_scope(pool, chain, false, &[], None).await
+    sync_ens_v1_reverse_claim_with_scope(pool, chain, false, &[], None, None).await
+}
+
+pub async fn sync_ens_v1_reverse_claim_with_progress(
+    pool: &PgPool,
+    chain: &str,
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<EnsV1ReverseClaimSyncSummary> {
+    sync_ens_v1_reverse_claim_with_scope(pool, chain, false, &[], None, Some(progress)).await
 }
 
 pub async fn sync_ens_v1_reverse_claim_range(
@@ -88,7 +111,7 @@ pub async fn sync_ens_v1_reverse_claim_range(
         .into_iter()
         .map(|emitter| (emitter.source_family, emitter.address, from_block, to_block))
         .collect::<Vec<_>>();
-    sync_ens_v1_reverse_claim_with_scope(pool, chain, false, &[], Some(&source_scope)).await
+    sync_ens_v1_reverse_claim_with_scope(pool, chain, false, &[], Some(&source_scope), None).await
 }
 
 async fn sync_ens_v1_reverse_claim_with_scope(
@@ -97,6 +120,7 @@ async fn sync_ens_v1_reverse_claim_with_scope(
     restrict_to_block_hashes: bool,
     block_hashes: &[String],
     source_scope: Option<&[(String, String, i64, i64)]>,
+    mut progress: Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<EnsV1ReverseClaimSyncSummary> {
     let mut active_emitters = load_active_emitters(pool, chain).await?;
     if let Some(source_scope) = source_scope {
@@ -119,6 +143,7 @@ async fn sync_ens_v1_reverse_claim_with_scope(
         restrict_to_block_hashes,
         block_hashes,
         source_scope,
+        &mut progress,
     )
     .await?;
     let scanned_log_count = raw_logs.len();
@@ -134,18 +159,23 @@ async fn sync_ens_v1_reverse_claim_with_scope(
 
     let mut matched_log_refs = HashSet::new();
     let mut events = Vec::new();
-    for raw_log in &raw_logs {
+    for (index, raw_log) in raw_logs.iter().enumerate() {
         let built_events = build_reverse_changed_events(raw_log)?;
-        if built_events.is_empty() {
-            continue;
+        if !built_events.is_empty() {
+            matched_log_refs.insert((
+                raw_log.chain_id.clone(),
+                raw_log.block_hash.clone(),
+                raw_log.transaction_hash.clone(),
+                raw_log.log_index,
+            ));
+            events.extend(built_events);
         }
-        matched_log_refs.insert((
-            raw_log.chain_id.clone(),
-            raw_log.block_hash.clone(),
-            raw_log.transaction_hash.clone(),
-            raw_log.log_index,
-        ));
-        events.extend(built_events);
+        if (index + 1) % REVERSE_BUILD_PROGRESS_LOGS == 0 {
+            record_startup_adapter_progress(pool, &mut progress).await?;
+        }
+    }
+    if raw_logs.len() % REVERSE_BUILD_PROGRESS_LOGS != 0 {
+        record_startup_adapter_progress(pool, &mut progress).await?;
     }
 
     if events.is_empty() {
@@ -158,13 +188,27 @@ async fn sync_ens_v1_reverse_claim_with_scope(
         });
     }
 
-    let counts = upsert_normalized_events_in_chunks_with_counts(
-        pool,
-        &events,
-        "ENSv1 reverse normalized-event",
-        10_000,
-    )
-    .await?;
+    let counts = match progress {
+        Some(progress) => {
+            upsert_normalized_events_in_chunks_with_counts_and_progress(
+                pool,
+                &events,
+                "ENSv1 reverse normalized-event",
+                REVERSE_PERSIST_PROGRESS_EVENTS,
+                Some(progress),
+            )
+            .await?
+        }
+        None => {
+            upsert_normalized_events_in_chunks_with_counts(
+                pool,
+                &events,
+                "ENSv1 reverse normalized-event",
+                10_000,
+            )
+            .await?
+        }
+    };
     let (total_synced_count, total_inserted_count, by_kind) =
         counts.into_parts_by_kind(|synced_count, inserted_count| {
             EnsV1ReverseClaimKindSyncSummary {

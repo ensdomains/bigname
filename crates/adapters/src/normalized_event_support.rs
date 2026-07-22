@@ -8,6 +8,8 @@ use bigname_storage::{NormalizedEvent, upsert_normalized_events};
 use sqlx::PgPool;
 use tracing::info;
 
+use crate::checkpoint_context::{StartupAdapterProgress, record_startup_adapter_progress};
+
 pub(crate) struct NormalizedEventSyncCounts {
     pub(crate) synced_by_kind: BTreeMap<String, usize>,
     pub(crate) inserted_by_kind: BTreeMap<String, usize>,
@@ -105,13 +107,45 @@ pub(crate) async fn upsert_normalized_events_in_chunks_with_counts(
     adapter_label: &str,
     chunk_size: usize,
 ) -> Result<NormalizedEventSyncCounts> {
+    upsert_normalized_events_in_chunks_with_counts_and_progress(
+        pool,
+        events,
+        adapter_label,
+        chunk_size,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn upsert_normalized_events_in_chunks_with_counts_and_progress(
+    pool: &PgPool,
+    events: &[NormalizedEvent],
+    adapter_label: &str,
+    chunk_size: usize,
+    mut progress: Option<&mut dyn StartupAdapterProgress>,
+) -> Result<NormalizedEventSyncCounts> {
     if chunk_size == 0 {
         bail!("normalized event upsert chunk size must be positive");
     }
 
     let total_started = Instant::now();
     let count_started = Instant::now();
-    let counts = count_normalized_event_sync(pool, events, adapter_label).await?;
+    let mut existing_event_identities = HashSet::new();
+    for chunk in events.chunks(chunk_size) {
+        existing_event_identities.extend(
+            load_existing_event_identities(pool, chunk, adapter_label)
+                .await?
+                .into_iter(),
+        );
+        record_startup_adapter_progress(pool, &mut progress).await?;
+    }
+    let inserted_by_kind = count_inserted_events_by_kind(events, &existing_event_identities);
+    let counts = NormalizedEventSyncCounts {
+        synced_by_kind: count_events_by_kind(events),
+        total_synced_count: events.len(),
+        total_inserted_count: inserted_by_kind.values().sum(),
+        inserted_by_kind,
+    };
     let count_existing_ms = count_started.elapsed().as_millis();
     let total_synced_count = counts.total_synced_count;
     let total_inserted_count = counts.total_inserted_count;
@@ -124,6 +158,7 @@ pub(crate) async fn upsert_normalized_events_in_chunks_with_counts(
         let upsert_started = Instant::now();
         upsert_normalized_events(pool, chunk).await?;
         upsert_ms += upsert_started.elapsed().as_millis();
+        record_startup_adapter_progress(pool, &mut progress).await?;
     }
     info!(
         service = "adapters",

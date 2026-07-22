@@ -9,6 +9,8 @@ pub(crate) struct LoopHeartbeat {
     instance_id: String,
     interval: Duration,
     last_recorded_at: Option<Instant>,
+    #[cfg(test)]
+    progress_record_count: usize,
 }
 
 impl LoopHeartbeat {
@@ -17,6 +19,8 @@ impl LoopHeartbeat {
             instance_id,
             interval,
             last_recorded_at: None,
+            #[cfg(test)]
+            progress_record_count: 0,
         }
     }
 
@@ -33,7 +37,13 @@ impl LoopHeartbeat {
         )
         .await;
         match result {
-            Ok(()) => self.last_recorded_at = Some(Instant::now()),
+            Ok(()) => {
+                self.last_recorded_at = Some(Instant::now());
+                #[cfg(test)]
+                {
+                    self.progress_record_count += 1;
+                }
+            }
             Err(error) => warn!(
                 service = "worker",
                 heartbeat_instance_id = %self.instance_id,
@@ -95,6 +105,11 @@ impl LoopHeartbeat {
         self.last_recorded_at
             .map(|recorded_at| recorded_at.elapsed() >= self.interval)
             .unwrap_or(true)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn progress_record_count(&self) -> usize {
+        self.progress_record_count
     }
 }
 

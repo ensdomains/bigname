@@ -15,7 +15,10 @@ mod journal;
 #[cfg(test)]
 use journal::journal_resolver_profile_authority_attempt;
 pub(crate) use journal::{
-    journal_resolver_profile_authority, journal_resolver_profile_authority_if_epoch_changed,
+    ResolverProfileAuthorityJournalSummary, journal_resolver_profile_authority,
+    journal_resolver_profile_authority_if_epoch_changed,
+    journal_resolver_profile_authority_if_epoch_changed_with_progress,
+    journal_resolver_profile_authority_with_progress,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]

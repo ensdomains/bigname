@@ -8,6 +8,7 @@ mod source_graph;
 pub(crate) use active_addresses::{
     reconcile_active_contract_instance_addresses,
     reconcile_active_contract_instance_addresses_for_ids,
+    reconcile_active_contract_instance_addresses_with_mutations_and_progress,
 };
 pub(crate) use children::replace_manifest_children;
-pub(crate) use source_graph::reconcile_manifest_source_graph;
+pub(crate) use source_graph::reconcile_manifest_source_graph_with_progress;

@@ -55,8 +55,7 @@ pub(crate) async fn run_once(
     text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
     loop_heartbeat: &mut LoopHeartbeat,
 ) -> Result<ProjectionApplyIterationSummary> {
-    let derived = derive_once(pool).await?;
-    loop_heartbeat.record_if_due(pool).await;
+    let derived = derive_once_with_heartbeat(pool, loop_heartbeat).await?;
     let applied = apply::apply_pending_invalidations_with_heartbeat(
         pool,
         PROJECTION_APPLY_BATCH_LIMIT,
@@ -89,10 +88,23 @@ pub(crate) async fn run_once(
     Ok(summary)
 }
 
+#[cfg(test)]
 pub(crate) async fn derive_once(
     pool: &PgPool,
 ) -> Result<derive::ProjectionInvalidationDeriveSummary> {
     derive::derive_normalized_event_invalidations(pool, NORMALIZED_EVENT_DERIVE_BATCH_LIMIT).await
+}
+
+pub(crate) async fn derive_once_with_heartbeat(
+    pool: &PgPool,
+    loop_heartbeat: &mut LoopHeartbeat,
+) -> Result<derive::ProjectionInvalidationDeriveSummary> {
+    derive::derive_normalized_event_invalidations_with_heartbeat(
+        pool,
+        NORMALIZED_EVENT_DERIVE_BATCH_LIMIT,
+        loop_heartbeat,
+    )
+    .await
 }
 
 pub(crate) async fn has_primary_hydration_blocking_work(pool: &PgPool) -> Result<bool> {

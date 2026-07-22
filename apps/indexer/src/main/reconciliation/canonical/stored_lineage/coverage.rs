@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 use anyhow::Result;
+use bigname_adapters::StartupAdapterProgress;
 use bigname_manifests::{
     RequiredWatchedTuple, UncoveredWatchedTuple,
     find_uncovered_required_watched_tuples_in_transaction,
@@ -174,6 +175,7 @@ pub(super) async fn stored_path_has_required_raw_fact_coverage(
     coverage_frontiers: &ChainCoverageFrontiers,
     verify_ahead_through_block: i64,
     discovery_admission_epoch: i64,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> std::result::Result<(), String> {
     if path.is_empty() {
         return Ok(());
@@ -211,6 +213,7 @@ pub(super) async fn stored_path_has_required_raw_fact_coverage(
         path_through,
         verify_ahead_through_block,
         discovery_admission_epoch,
+        progress,
     )
     .await?;
 
@@ -244,6 +247,7 @@ async fn ensure_verified_coverage_frontier(
     required_through: i64,
     verify_ahead_through_block: i64,
     discovery_admission_epoch: i64,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> std::result::Result<(), String> {
     let verify_ahead_through_block = verify_ahead_through_block.max(required_through);
     let optimistic = ensure_verified_coverage_frontier_through(
@@ -256,6 +260,7 @@ async fn ensure_verified_coverage_frontier(
         required_through,
         verify_ahead_through_block,
         discovery_admission_epoch,
+        progress,
     )
     .await;
     match optimistic {
@@ -271,6 +276,7 @@ async fn ensure_verified_coverage_frontier(
                 required_through,
                 required_through,
                 discovery_admission_epoch,
+                progress,
             )
             .await
         }
@@ -289,6 +295,7 @@ async fn ensure_verified_coverage_frontier_through(
     required_through: i64,
     verify_ahead_through_block: i64,
     discovery_admission_epoch: i64,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> std::result::Result<(), String> {
     let current_topics = frontier::canonical_topic_sets(current_topic0s_by_family);
     let mut cas_conflicts = 0;
@@ -370,6 +377,7 @@ async fn ensure_verified_coverage_frontier_through(
         )
         .await
         .map_err(|error| error.to_string())?;
+        record_progress(pool, progress).await?;
         super::topic_drift::materialize_topic_evidence_in_transaction(
             guard.connection_mut(),
             chain,
@@ -379,6 +387,7 @@ async fn ensure_verified_coverage_frontier_through(
             None,
         )
         .await?;
+        record_progress(pool, progress).await?;
 
         let mut cursor = None;
         loop {
@@ -393,6 +402,7 @@ async fn ensure_verified_coverage_frontier_through(
             .await
             .map_err(|error| error.to_string())?;
             verify_requirements(guard.connection_mut(), chain, &page.requirements).await?;
+            record_progress(pool, progress).await?;
             cursor = page.next_cursor;
             if cursor.is_none() {
                 break;
@@ -424,11 +434,25 @@ async fn ensure_verified_coverage_frontier_through(
                 }
             }
         }
+        record_progress(pool, progress).await?;
     }
 
     Err(format!(
         "stored-lineage coverage frontier for chain {chain} could not reach required block {required_through} within {MAX_PUBLICATIONS_PER_PROMOTION} bounded publications"
     ))
+}
+
+async fn record_progress(
+    pool: &sqlx::PgPool,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> std::result::Result<(), String> {
+    if let Some(progress) = progress.as_deref_mut() {
+        progress
+            .record(pool)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 async fn verify_requirements(

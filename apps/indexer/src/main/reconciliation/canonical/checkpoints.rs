@@ -1,4 +1,5 @@
 use anyhow::Result;
+use bigname_adapters::StartupAdapterProgress;
 use bigname_storage::{
     CanonicalityState, CheckpointBlockRef, chain_lineage_contains_ancestor,
     load_chain_lineage_block, upsert_chain_lineage_blocks_recanonicalizing_orphaned,
@@ -23,6 +24,7 @@ pub(super) async fn fill_checkpoint_ancestor_path(
     heads: &ProviderHeadSnapshot,
     canonical: &CanonicalReconciliation,
     header_audit_mode: HeaderAuditMode,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<usize> {
     let Some(canonical_update) = &canonical.canonical else {
         return Ok(0);
@@ -73,9 +75,20 @@ pub(super) async fn fill_checkpoint_ancestor_path(
             )],
         )
         .await?;
+        record_progress(pool, progress).await?;
     }
 
     Ok(fetched_parent_count)
+}
+
+async fn record_progress(
+    pool: &sqlx::PgPool,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<()> {
+    if let Some(progress) = progress.as_deref_mut() {
+        progress.record(pool).await?;
+    }
+    Ok(())
 }
 
 pub(super) async fn checkpoint_update_for_head(

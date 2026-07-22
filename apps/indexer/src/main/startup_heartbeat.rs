@@ -39,6 +39,21 @@ impl bigname_adapters::StartupAdapterProgress for StartupAdapterHeartbeat<'_> {
     }
 }
 
+impl bigname_manifests::ManifestRuntimeProgress for StartupAdapterHeartbeat<'_> {
+    fn record<'a>(
+        &'a mut self,
+        pool: &'a PgPool,
+    ) -> bigname_manifests::ManifestRuntimeProgressFuture<'a> {
+        Box::pin(async move {
+            #[cfg(test)]
+            {
+                self.heartbeat.adapter_progress_count += 1;
+            }
+            self.heartbeat.record_if_due(pool, self.chain_ids).await
+        })
+    }
+}
+
 impl StartupHeartbeat {
     pub(crate) fn new(instance_id: String, interval: Duration) -> Self {
         Self {

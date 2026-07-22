@@ -6,8 +6,9 @@ use tracing::{info, warn};
 use crate::provider::ProviderRegistry;
 use crate::resolver_profile_convergence::{
     ResolverProfileConvergenceSummary, drain_resolver_profile_input_changes,
+    drain_resolver_profile_input_changes_with_progress,
 };
-use crate::run::startup_heartbeat::StartupHeartbeat;
+use crate::run::startup_heartbeat::{StartupAdapterHeartbeat, StartupHeartbeat};
 
 use super::super::adapter_sync::sync_adapter_owned_raw_log_state_with_heartbeat;
 use super::super::intake::{
@@ -19,7 +20,10 @@ use super::super::logging::{
     log_watched_contract_summary,
 };
 use super::super::manifest::ManifestRuntimeState;
-use super::super::refresh::refresh_runtime_state_from_stored_discovery_when_epochs_move;
+use super::super::refresh::{
+    refresh_runtime_state_from_stored_discovery_when_epochs_move,
+    refresh_runtime_state_from_stored_discovery_when_epochs_move_with_progress,
+};
 
 /// Timer-driven stored-discovery refresh of the runtime watch state. A
 /// successful refresh replaces the manifest runtime state and intake tasks in
@@ -40,6 +44,7 @@ use super::super::refresh::refresh_runtime_state_from_stored_discovery_when_epoc
 /// `resolver_profile_convergence_enabled` is false for raw-only operation, so
 /// reloading a stored plan cannot drain adapter-owned resolver-profile work in
 /// a mode that explicitly defers those writes.
+#[cfg(test)]
 pub(crate) async fn refresh_discovery_watch_state(
     pool: &sqlx::PgPool,
     provider_registry: &ProviderRegistry,
@@ -105,18 +110,19 @@ async fn refresh_discovery_watch_state_inner(
     sync_adapter_state_before_refresh: bool,
     resolver_profile_convergence_enabled: bool,
     last_admission_epochs: &mut Option<BTreeMap<String, i64>>,
-    adapter_sync_heartbeat: Option<AdapterSyncHeartbeat<'_>>,
+    mut adapter_sync_heartbeat: Option<AdapterSyncHeartbeat<'_>>,
 ) -> Result<bool> {
     // The whole-corpus re-derivation must run before the sentinel read: it is
     // what materializes new edges (and bumps epochs) on the broad-refresh path.
     let adapter_sync_result: Result<()> = if sync_adapter_state_before_refresh {
         let (deployment_profile, page_logs, heartbeat, chain_ids) = adapter_sync_heartbeat
+            .as_mut()
             .context("discovery adapter refresh requires a live loop heartbeat")?;
         sync_adapter_owned_raw_log_state_with_heartbeat(
             pool,
             deployment_profile,
             &manifest_runtime_state.watched_chain_plan,
-            page_logs,
+            *page_logs,
             heartbeat,
             chain_ids,
         )
@@ -125,25 +131,39 @@ async fn refresh_discovery_watch_state_inner(
         Ok(())
     };
     let refreshed_state = match adapter_sync_result {
-        Ok(()) => {
-            refresh_runtime_state_from_stored_discovery_when_epochs_move(
-                pool,
-                manifest_runtime_state,
-                last_admission_epochs.as_ref(),
-            )
-            .await
-        }
+        Ok(()) => match adapter_sync_heartbeat.as_mut() {
+            Some((_, _, heartbeat, chain_ids)) => {
+                let mut progress = StartupAdapterHeartbeat::new(heartbeat, chain_ids);
+                refresh_runtime_state_from_stored_discovery_when_epochs_move_with_progress(
+                    pool,
+                    manifest_runtime_state,
+                    last_admission_epochs.as_ref(),
+                    &mut progress,
+                )
+                .await
+            }
+            None => {
+                refresh_runtime_state_from_stored_discovery_when_epochs_move(
+                    pool,
+                    manifest_runtime_state,
+                    last_admission_epochs.as_ref(),
+                )
+                .await
+            }
+        },
         Err(error) => Err(error),
     };
-    if refreshed_state.is_ok()
-        && resolver_profile_convergence_enabled
-        && !resolver_profile_drain_succeeded(
-            drain_resolver_profile_input_changes(pool).await,
-            "timer",
-            "stored_discovery_state",
-        )
-    {
-        return Ok(false);
+    if refreshed_state.is_ok() && resolver_profile_convergence_enabled {
+        let drain_result = match adapter_sync_heartbeat.as_mut() {
+            Some((_, _, heartbeat, chain_ids)) => {
+                let mut progress = StartupAdapterHeartbeat::new(heartbeat, chain_ids);
+                drain_resolver_profile_input_changes_with_progress(pool, &mut progress).await
+            }
+            None => drain_resolver_profile_input_changes(pool).await,
+        };
+        if !resolver_profile_drain_succeeded(drain_result, "timer", "stored_discovery_state") {
+            return Ok(false);
+        }
     }
     match refreshed_state {
         Ok(Some(refresh)) => {

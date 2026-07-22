@@ -10,9 +10,11 @@ use super::{
     derive::{
         capture_normalized_event_change_watermark, derive_normalized_event_invalidations,
         derive_normalized_event_invalidations_through,
+        derive_normalized_event_invalidations_with_heartbeat,
     },
     has_primary_hydration_blocking_work,
 };
+use crate::primary_name::rebuild_heartbeat::LoopHeartbeat;
 
 async fn test_database() -> Result<TestDatabase> {
     TestDatabase::create_migrated(
@@ -202,9 +204,27 @@ async fn derives_key_scoped_invalidations_from_normalized_event_changes() -> Res
     )
     .await?;
 
-    let summary = derive_normalized_event_invalidations(database.pool(), 100).await?;
+    let heartbeat_instance_id = "projection-derive-progress-test";
+    bigname_storage::register_service_loop(
+        database.pool(),
+        bigname_storage::WORKER_SERVICE_NAME,
+        heartbeat_instance_id,
+    )
+    .await?;
+    let mut loop_heartbeat = LoopHeartbeat::new(heartbeat_instance_id.to_owned(), Duration::ZERO);
+    let summary = derive_normalized_event_invalidations_with_heartbeat(
+        database.pool(),
+        100,
+        &mut loop_heartbeat,
+    )
+    .await?;
     assert_eq!(summary.scanned_event_count, 7);
     assert!(summary.enqueued_invalidation_count >= 10);
+    assert!(
+        loop_heartbeat.progress_record_count()
+            >= super::derive_queries::INVALIDATION_QUERY_PREFIXES.len(),
+        "a derive batch must heartbeat between its projection-family SQL passes"
+    );
 
     let invalidations = load_invalidations(&database).await?;
     assert!(has_key(&invalidations, "name_current", "ens:alice.eth"));

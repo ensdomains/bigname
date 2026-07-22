@@ -11,6 +11,7 @@ alloy-primitives.workspace = true
 anyhow.workspace = true
 bigname-domain.workspace = true
 bigname-storage.workspace = true
+futures-util.workspace = true
 serde.workspace = true
 serde_json = "1.0.145"
 sqlx.workspace = true

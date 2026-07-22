@@ -1,4 +1,5 @@
 use anyhow::Result;
+use bigname_adapters::StartupAdapterProgress;
 use bigname_storage::{
     CanonicalityState,
     upsert_chain_lineage_blocks_without_snapshots_recanonicalizing_orphaned as upsert_recanonicalized_lineage_blocks_without_snapshots,
@@ -12,6 +13,9 @@ use super::super::{
 };
 use super::{MAX_LIVE_CONTIGUOUS_GAP_FILL_BLOCKS, MAX_PARENT_FETCH_DEPTH};
 
+const LIVE_GAP_PROGRESS_BLOCKS: usize = 32;
+
+#[expect(clippy::too_many_arguments)]
 pub(super) async fn reconcile_contiguous_checkpoint_gap(
     pool: &sqlx::PgPool,
     provider: &(impl ChainProviderOps + ?Sized),
@@ -20,6 +24,7 @@ pub(super) async fn reconcile_contiguous_checkpoint_gap(
     current_canonical_number: i64,
     latest_head: &ProviderBlock,
     header_audit_mode: HeaderAuditMode,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<Option<CanonicalReconciliation>> {
     if latest_head.block_number <= current_canonical_number {
         return Ok(None);
@@ -34,9 +39,15 @@ pub(super) async fn reconcile_contiguous_checkpoint_gap(
 
     let block_numbers =
         ((current_canonical_number + 1)..=latest_head.block_number).collect::<Vec<_>>();
-    let resolved_blocks = provider
-        .fetch_block_hashes_by_numbers(&block_numbers)
-        .await?;
+    let mut resolved_blocks = Vec::with_capacity(block_numbers.len());
+    for block_number_chunk in block_numbers.chunks(LIVE_GAP_PROGRESS_BLOCKS) {
+        resolved_blocks.extend(
+            provider
+                .fetch_block_hashes_by_numbers(block_number_chunk)
+                .await?,
+        );
+        record_progress(pool, progress).await?;
+    }
     if resolved_blocks
         .last()
         .map(|block| block.block_hash.as_str())
@@ -45,9 +56,15 @@ pub(super) async fn reconcile_contiguous_checkpoint_gap(
         return Ok(None);
     }
 
-    let mut path = provider
-        .fetch_block_headers_by_hashes(&resolved_blocks)
-        .await?;
+    let mut path = Vec::with_capacity(resolved_blocks.len());
+    for resolved_block_chunk in resolved_blocks.chunks(LIVE_GAP_PROGRESS_BLOCKS) {
+        path.extend(
+            provider
+                .fetch_block_headers_by_hashes(resolved_block_chunk)
+                .await?,
+        );
+        record_progress(pool, progress).await?;
+    }
     let first_parent_hash = path.first().and_then(|block| block.parent_hash.as_deref());
     if first_parent_hash != Some(current_canonical_hash) {
         return Ok(None);
@@ -70,7 +87,10 @@ pub(super) async fn reconcile_contiguous_checkpoint_gap(
             )
         })
         .collect::<Vec<_>>();
-    upsert_recanonicalized_lineage_blocks_without_snapshots(pool, &lineage_blocks).await?;
+    for lineage_chunk in lineage_blocks.chunks(LIVE_GAP_PROGRESS_BLOCKS) {
+        upsert_recanonicalized_lineage_blocks_without_snapshots(pool, lineage_chunk).await?;
+        record_progress(pool, progress).await?;
+    }
 
     let status = if path.len() == 1 {
         CanonicalReconciliationStatus::Appended
@@ -88,4 +108,14 @@ pub(super) async fn reconcile_contiguous_checkpoint_gap(
         reconciled_blocks: path,
         raw_orphan_stop_before_hash: None,
     }))
+}
+
+async fn record_progress(
+    pool: &sqlx::PgPool,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<()> {
+    if let Some(progress) = progress.as_deref_mut() {
+        progress.record(pool).await?;
+    }
+    Ok(())
 }

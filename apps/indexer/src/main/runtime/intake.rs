@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
-use bigname_manifests::WatchedChainPlan;
+use bigname_manifests::{ManifestRuntimeProgress, WatchedChainPlan};
 use bigname_storage::{ChainCheckpoint, sync_chain_checkpoints};
 
 use crate::provider::ProviderRegistry;
+
+const INTAKE_ADDRESS_CLONE_PROGRESS_SIZE: usize = 10_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WatchedChainPlanState {
@@ -195,6 +197,22 @@ pub(crate) async fn sync_intake_chain_tasks(
     pool: &sqlx::PgPool,
     watched_chain_plan: &[WatchedChainPlan],
 ) -> Result<Vec<IntakeChainTask>> {
+    sync_intake_chain_tasks_inner(pool, watched_chain_plan, &mut None).await
+}
+
+pub(crate) async fn sync_intake_chain_tasks_with_progress(
+    pool: &sqlx::PgPool,
+    watched_chain_plan: &[WatchedChainPlan],
+    progress: &mut dyn ManifestRuntimeProgress,
+) -> Result<Vec<IntakeChainTask>> {
+    sync_intake_chain_tasks_inner(pool, watched_chain_plan, &mut Some(progress)).await
+}
+
+async fn sync_intake_chain_tasks_inner(
+    pool: &sqlx::PgPool,
+    watched_chain_plan: &[WatchedChainPlan],
+    progress: &mut Option<&mut dyn ManifestRuntimeProgress>,
+) -> Result<Vec<IntakeChainTask>> {
     let chain_ids = watched_chain_plan
         .iter()
         .map(|chain| chain.chain.clone())
@@ -213,9 +231,16 @@ pub(crate) async fn sync_intake_chain_tasks(
                 chain.chain
             )
         })?;
+        let mut addresses = Vec::with_capacity(chain.addresses.len());
+        for address_chunk in chain.addresses.chunks(INTAKE_ADDRESS_CLONE_PROGRESS_SIZE) {
+            addresses.extend_from_slice(address_chunk);
+            if let Some(progress) = progress.as_deref_mut() {
+                progress.record(pool).await?;
+            }
+        }
         tasks.push(IntakeChainTask {
             chain: chain.chain.clone(),
-            addresses: chain.addresses.clone(),
+            addresses,
             manifest_root_entry_count: chain.manifest_root_entry_count,
             manifest_contract_entry_count: chain.manifest_contract_entry_count,
             discovery_edge_entry_count: chain.discovery_edge_entry_count,

@@ -6,6 +6,7 @@ use bigname_storage::{RawLogStagingReadGuard, acquire_raw_log_staging_read_guard
 use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder, types::Uuid};
 
 use super::{ResolverEmitterReplayRange, ResolverProfileEventReconciliationSummary};
+use crate::checkpoint_context::{StartupAdapterProgress, record_startup_adapter_progress};
 
 const TARGET_BATCH_SIZE: usize = 1_000;
 
@@ -115,9 +116,12 @@ impl ResolverProfileEventReconciliation {
         Ok(())
     }
 
-    pub(super) async fn prepare(&mut self) -> Result<PreparedResolverProfileEventReconciliation> {
+    pub(super) async fn prepare(
+        &mut self,
+        progress: &mut Option<&mut dyn StartupAdapterProgress>,
+    ) -> Result<PreparedResolverProfileEventReconciliation> {
         let (resolver_address_count, resolver_address_set_digest) =
-            load_target_metadata(&self.pool, self.run_id).await?;
+            load_target_metadata(&self.pool, self.run_id, progress).await?;
         ensure!(
             resolver_address_count > 0,
             "resolver-profile reconciliation must stage at least one target"
@@ -233,7 +237,11 @@ fn normalized_resolver_addresses(resolver_addresses: &[String]) -> Result<Vec<St
     Ok(normalized.into_iter().collect())
 }
 
-async fn load_target_metadata(pool: &PgPool, run_id: Uuid) -> Result<(usize, String)> {
+async fn load_target_metadata(
+    pool: &PgPool,
+    run_id: Uuid,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<(usize, String)> {
     let mut after = None::<String>;
     let mut count = 0usize;
     let mut digest = Keccak256::new();
@@ -265,6 +273,7 @@ async fn load_target_metadata(pool: &PgPool, run_id: Uuid) -> Result<(usize, Str
             digest.update(address.as_bytes());
             count += 1;
         }
+        record_startup_adapter_progress(pool, progress).await?;
     }
     Ok((count, format!("{:#x}", digest.finalize())))
 }

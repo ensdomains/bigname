@@ -31,12 +31,13 @@ pub use checkpoint_context::{
 };
 pub use ens_v1_reverse_claim::{
     EnsV1ReverseClaimKindSyncSummary, EnsV1ReverseClaimSyncSummary, sync_ens_v1_reverse_claim,
-    sync_ens_v1_reverse_claim_range,
+    sync_ens_v1_reverse_claim_range, sync_ens_v1_reverse_claim_with_progress,
 };
 pub use ens_v1_subregistry_discovery::{
     EnsV1SubregistryDiscoverySyncSummary, sync_ens_v1_subregistry_discovery,
     sync_ens_v1_subregistry_discovery_through_block,
     sync_ens_v1_subregistry_discovery_through_block_with_expected_admission_epoch,
+    sync_ens_v1_subregistry_discovery_through_block_with_expected_admission_epoch_and_progress,
     sync_ens_v1_subregistry_discovery_with_replay_checkpoint,
     sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit,
     sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit,
@@ -72,7 +73,7 @@ pub use ens_v2_resolver::{
 };
 pub use manifest_normalized_events::{
     ManifestNormalizedEventKindSyncSummary, ManifestNormalizedEventSyncSummary,
-    sync_manifest_normalized_events,
+    sync_manifest_normalized_events, sync_manifest_normalized_events_with_progress,
 };
 
 pub async fn clear_replay_adapter_checkpoints(

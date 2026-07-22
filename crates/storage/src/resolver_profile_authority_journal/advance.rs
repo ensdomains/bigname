@@ -1,3 +1,5 @@
+use std::{future::Future, pin::Pin};
+
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder, Transaction};
@@ -15,6 +17,25 @@ mod diff;
 mod mutations;
 
 const RESOLVER_PROFILE_AUTHORITY_TARGET_BATCH_SIZE: usize = 1_000;
+const RESOLVER_PROFILE_AUTHORITY_INTERNAL_PAGE_SIZE: usize = 1_000;
+
+pub type ResolverProfileAuthorityJournalProgressFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+
+/// Reports completed, bounded work inside an authority-journal transaction.
+/// Implementations must not publish progress independently of these calls.
+pub trait ResolverProfileAuthorityJournalProgress: Send {
+    fn record(&mut self) -> ResolverProfileAuthorityJournalProgressFuture<'_>;
+}
+
+async fn record_journal_progress(
+    progress: &mut Option<&mut dyn ResolverProfileAuthorityJournalProgress>,
+) -> Result<()> {
+    if let Some(progress) = progress.as_deref_mut() {
+        progress.record().await?;
+    }
+    Ok(())
+}
 
 #[derive(Clone, Copy)]
 pub(super) struct ResolverProfileAuthorityJournalBatchSizes {
@@ -138,11 +159,76 @@ impl ResolverProfileAuthorityJournalAdvance {
         Ok(count)
     }
 
+    /// Start a caller-driven, bounded changed-entry scan. This lets a runtime
+    /// publish liveness only after each completed key page without changing
+    /// the transaction-scoped diff semantics.
+    pub async fn begin_staged_entry_diff(&mut self) -> Result<()> {
+        ensure!(
+            self.changed_entry_count.is_none(),
+            "resolver-profile authority entry diff is already complete"
+        );
+        diff::create_changed_entry_table(&mut self.transaction).await
+    }
+
+    pub async fn materialize_staged_entry_diff_page(
+        &mut self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Option<(String, i64)>> {
+        ensure!(
+            limit > 0,
+            "resolver-profile authority diff page limit must be positive"
+        );
+        ensure!(
+            self.changed_entry_count.is_none(),
+            "resolver-profile authority entry diff is already complete"
+        );
+        diff::materialize_changed_entry_key_page(
+            &mut self.transaction,
+            RESOLVER_PROFILE_AUTHORITY_JOURNAL_KEY,
+            after,
+            limit,
+        )
+        .await
+    }
+
+    pub async fn finish_staged_entry_diff(&mut self, count: i64) -> Result<i64> {
+        ensure!(
+            count >= 0,
+            "resolver-profile authority diff count must not be negative"
+        );
+        ensure!(
+            self.changed_entry_count.is_none(),
+            "resolver-profile authority entry diff is already complete"
+        );
+        diff::finish_changed_entry_keys(&mut self.transaction).await?;
+        self.changed_entry_count = Some(count);
+        self.summary.changed_entry_count = count;
+        Ok(count)
+    }
+
     /// Queue the staged diff, apply exact entry mutations in bounded
     /// statements, and finally compare-and-set the journal header.
     pub async fn publish(
+        self,
+        discovery_epoch_snapshot: &Value,
+    ) -> Result<Option<ResolverProfileAuthorityJournalAdvanceSummary>> {
+        self.publish_inner(discovery_epoch_snapshot, None).await
+    }
+
+    pub async fn publish_with_progress(
+        self,
+        discovery_epoch_snapshot: &Value,
+        progress: &mut dyn ResolverProfileAuthorityJournalProgress,
+    ) -> Result<Option<ResolverProfileAuthorityJournalAdvanceSummary>> {
+        self.publish_inner(discovery_epoch_snapshot, Some(progress))
+            .await
+    }
+
+    async fn publish_inner(
         mut self,
         discovery_epoch_snapshot: &Value,
+        mut progress: Option<&mut dyn ResolverProfileAuthorityJournalProgress>,
     ) -> Result<Option<ResolverProfileAuthorityJournalAdvanceSummary>> {
         validate_journal_header(self.expected_revision, discovery_epoch_snapshot)?;
         let changed_entry_count = self.staged_entry_diff_count().await?;
@@ -150,15 +236,17 @@ impl ResolverProfileAuthorityJournalAdvance {
             diff::materialize_reconciliation_targets(
                 &mut self.transaction,
                 RESOLVER_PROFILE_AUTHORITY_JOURNAL_KEY,
+                &mut progress,
             )
             .await?;
-            self.enqueue_reconciliation_targets().await?;
+            self.enqueue_reconciliation_targets(&mut progress).await?;
         }
 
         let mutation_summary = mutations::apply_entry_diff(
             &mut self.transaction,
             RESOLVER_PROFILE_AUTHORITY_JOURNAL_KEY,
             self.batch_sizes.entry_mutation,
+            &mut progress,
         )
         .await?;
         self.summary.upserted_entry_count = mutation_summary.upserted_entry_count;
@@ -207,7 +295,10 @@ impl ResolverProfileAuthorityJournalAdvance {
             .context("failed to roll back resolver-profile authority journal capture")
     }
 
-    async fn enqueue_reconciliation_targets(&mut self) -> Result<()> {
+    async fn enqueue_reconciliation_targets(
+        &mut self,
+        progress: &mut Option<&mut dyn ResolverProfileAuthorityJournalProgress>,
+    ) -> Result<()> {
         let mut after = None::<(String, String)>;
         loop {
             let page = diff::load_reconciliation_target_page(
@@ -229,6 +320,7 @@ impl ResolverProfileAuthorityJournalAdvance {
             self.summary.target_enqueue_statement_count += 1;
             self.summary.max_target_enqueue_batch_size =
                 self.summary.max_target_enqueue_batch_size.max(page.len());
+            record_journal_progress(progress).await?;
         }
     }
 }

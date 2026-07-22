@@ -10,9 +10,30 @@ use super::types::{
     DiscoveryObservation, StoredActiveContract, StoredActiveRoot, StoredDiscoveryRule,
 };
 use crate::{
-    PROPAGATED_ROLE_PROVENANCE_FIELD, REACHABLE_FROM_ROOT_ADMISSION, ZERO_ADDRESS,
-    normalize_address,
+    ManifestRuntimeProgress, PROPAGATED_ROLE_PROVENANCE_FIELD, REACHABLE_FROM_ROOT_ADMISSION,
+    ZERO_ADDRESS, normalize_address,
 };
+
+#[path = "loading/progress.rs"]
+mod progress;
+
+use super::reconciliation::DiscoveryObservationPageSource;
+use progress::{
+    AdmissionLoadProgress, AdmissionStateProgress, AdmissionStateProgressFuture,
+    load_active_discovered_parent_rows_with_progress,
+    load_known_contract_instance_addresses_with_progress,
+};
+
+struct PageSourceAdmissionProgress<'a, Source>(&'a Source);
+
+impl<Source> AdmissionStateProgress for PageSourceAdmissionProgress<'_, Source>
+where
+    Source: DiscoveryObservationPageSource + Sync,
+{
+    fn record(&mut self) -> AdmissionStateProgressFuture<'_> {
+        Box::pin(async move { self.0.record_progress().await })
+    }
+}
 
 struct DiscoveryAdmissionScope {
     active_contract_chains: Vec<String>,
@@ -40,7 +61,27 @@ pub async fn load_discovery_admission_state(pool: &PgPool) -> Result<DiscoveryAd
         .acquire()
         .await
         .context("failed to acquire connection for discovery admission state loading")?;
-    load_discovery_admission_state_inner(&mut connection, None, None, KnownAddressLoad::All).await
+    load_discovery_admission_state_inner(&mut connection, None, None, KnownAddressLoad::All, None)
+        .await
+}
+
+pub async fn load_discovery_admission_state_with_progress(
+    pool: &PgPool,
+    progress: &mut dyn ManifestRuntimeProgress,
+) -> Result<DiscoveryAdmissionState> {
+    let mut connection = pool
+        .acquire()
+        .await
+        .context("failed to acquire connection for discovery admission state loading")?;
+    let mut progress = AdmissionLoadProgress::new(pool, progress);
+    load_discovery_admission_state_inner(
+        &mut connection,
+        None,
+        None,
+        KnownAddressLoad::All,
+        Some(&mut progress),
+    )
+    .await
 }
 
 pub(super) async fn load_discovery_admission_state_with_excluded_source(
@@ -52,6 +93,7 @@ pub(super) async fn load_discovery_admission_state_with_excluded_source(
         excluded_discovery_source,
         None,
         KnownAddressLoad::All,
+        None,
     )
     .await
 }
@@ -71,12 +113,15 @@ pub(super) async fn load_discovery_admission_state_with_excluded_source(
 pub(super) async fn load_streamed_discovery_admission_state_with_excluded_source(
     executor: &mut PgConnection,
     excluded_discovery_source: Option<&str>,
+    source: &(impl DiscoveryObservationPageSource + Sync),
 ) -> Result<DiscoveryAdmissionState> {
+    let mut progress = PageSourceAdmissionProgress(source);
     load_discovery_admission_state_inner(
         executor,
         excluded_discovery_source,
         None,
         KnownAddressLoad::Skip,
+        Some(&mut progress),
     )
     .await
 }
@@ -113,6 +158,7 @@ pub(super) async fn load_scoped_discovery_admission_state_with_excluded_source(
             known_address_addresses,
         }),
         KnownAddressLoad::Scoped,
+        None,
     )
     .await
 }
@@ -122,6 +168,7 @@ async fn load_discovery_admission_state_inner(
     excluded_discovery_source: Option<&str>,
     scope: Option<DiscoveryAdmissionScope>,
     known_address_load: KnownAddressLoad,
+    mut progress: Option<&mut dyn AdmissionStateProgress>,
 ) -> Result<DiscoveryAdmissionState> {
     let (
         scoped,
@@ -146,6 +193,9 @@ async fn load_discovery_admission_state_inner(
     .fetch_one(&mut *executor)
     .await
     .context("failed to count active manifest versions")? as usize;
+    if let Some(progress) = progress.as_deref_mut() {
+        progress.record().await?;
+    }
 
     let active_root_rows = sqlx::query(
         r#"
@@ -162,6 +212,9 @@ async fn load_discovery_admission_state_inner(
     .fetch_all(&mut *executor)
     .await
     .context("failed to load active manifest roots")?;
+    if let Some(progress) = progress.as_deref_mut() {
+        progress.record().await?;
+    }
 
     let active_contract_rows = sqlx::query(
         r#"
@@ -178,6 +231,9 @@ async fn load_discovery_admission_state_inner(
     .fetch_all(&mut *executor)
     .await
     .context("failed to load active manifest contracts")?;
+    if let Some(progress) = progress.as_deref_mut() {
+        progress.record().await?;
+    }
 
     // Scoped ordered replay may use earlier edges from the same source as
     // ancestry, including edges inserted earlier in the current transaction.
@@ -227,6 +283,15 @@ async fn load_discovery_admission_state_inner(
         .bind(&active_contract_scope_addresses)
         .fetch_all(&mut *executor)
         .await
+        .context("failed to load active transitive discovery parents")?
+    } else if let Some(progress) = progress.as_deref_mut() {
+        load_active_discovered_parent_rows_with_progress(
+            executor,
+            excluded_discovery_source,
+            progress,
+        )
+        .await
+        .context("failed to load active transitive discovery parents")?
     } else {
         sqlx::query(
             r#"
@@ -262,8 +327,8 @@ async fn load_discovery_admission_state_inner(
         .bind(TRANSITIVE_DISCOVERY_EDGE_KIND)
         .fetch_all(&mut *executor)
         .await
-    }
-    .context("failed to load active transitive discovery parents")?;
+        .context("failed to load active transitive discovery parents")?
+    };
 
     let active_rule_rows = sqlx::query(
         r#"
@@ -276,8 +341,18 @@ async fn load_discovery_admission_state_inner(
     .fetch_all(&mut *executor)
     .await
     .context("failed to load active discovery rules")?;
+    if let Some(progress) = progress.as_deref_mut() {
+        progress.record().await?;
+    }
 
     let known_contract_instances_by_address = match known_address_load {
+        KnownAddressLoad::All if progress.is_some() => {
+            load_known_contract_instance_addresses_with_progress(
+                executor,
+                progress.take().expect("progress checked above"),
+            )
+            .await?
+        }
         KnownAddressLoad::All => {
             // The contract_instance_id tiebreak keeps the per-key winner
             // deterministic when an address has only deactivated rows with

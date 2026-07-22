@@ -18,7 +18,10 @@ use super::{constants::*, types::RecordInventoryTextHydrationSummary};
 
 #[path = "hydration/chain_positions.rs"]
 mod chain_positions;
+#[path = "hydration/outcomes.rs"]
+mod outcomes;
 use chain_positions::{TextHydrationChainPosition, load_text_hydration_chain_positions};
+use outcomes::apply_text_hydration_outcomes;
 
 const DEFAULT_TEXT_HYDRATION_BATCH_SIZE: usize = 250;
 const DEFAULT_TEXT_HYDRATION_ROW_BATCH_SIZE: i64 = 500;
@@ -67,6 +70,10 @@ enum TextHydrationOutcome {
 }
 
 trait TextHydrationClient: Sync {
+    fn batch_size(&self) -> usize {
+        usize::MAX
+    }
+
     fn hydrate<'a>(
         &'a self,
         chain_id: &'a str,
@@ -80,6 +87,10 @@ struct MulticallTextHydrationClient {
 }
 
 impl TextHydrationClient for MulticallTextHydrationClient {
+    fn batch_size(&self) -> usize {
+        self.config.batch_size.max(1)
+    }
+
     fn hydrate<'a>(
         &'a self,
         chain_id: &'a str,
@@ -266,54 +277,31 @@ async fn hydrate_record_inventory_text_values_with_client_inner(
             let position = chain_positions
                 .get(&chain_id)
                 .with_context(|| format!("missing text hydration chain position for {chain_id}"))?;
-            let calls = calls_with_refs
-                .iter()
-                .map(|(_, call)| call.clone())
-                .collect::<Vec<_>>();
-            let outcomes = client
-                .hydrate(&chain_id, position, &calls)
-                .await
-                .with_context(|| format!("failed to hydrate ENS text records on {chain_id}"))?;
-            if outcomes.len() != calls_with_refs.len() {
-                anyhow::bail!(
-                    "text hydration provider returned {} outcomes for {} calls on {chain_id}",
-                    outcomes.len(),
-                    calls_with_refs.len()
-                );
-            }
-
-            for ((call_ref, _), outcome) in calls_with_refs.iter().zip(outcomes) {
-                let row = rows
-                    .get_mut(call_ref.row_index)
-                    .context("text hydration row reference is out of bounds")?;
-                let entries = row
-                    .entries
-                    .as_array_mut()
-                    .context("record_inventory_current.entries must be an array")?;
-                let entry = entries
-                    .get_mut(call_ref.entry_index)
-                    .context("text hydration entry reference is out of bounds")?;
-
-                match outcome {
-                    TextHydrationOutcome::Success(value) => {
-                        set_entry_success(entry, value);
-                        changed_rows.insert(call_ref.row_index);
-                        summary.hydrated_entry_count += 1;
-                    }
-                    TextHydrationOutcome::NotFound => {
-                        set_entry_not_found(entry);
-                        changed_rows.insert(call_ref.row_index);
-                        summary.not_found_entry_count += 1;
-                    }
-                    TextHydrationOutcome::Failed(message)
-                        if text_hydration_failure_is_skippable(&message) =>
-                    {
-                        summary.skipped_entry_count += 1;
-                    }
-                    TextHydrationOutcome::Failed(_) => {
-                        summary.failed_entry_count += 1;
-                    }
+            for calls_chunk in calls_with_refs.chunks(client.batch_size().max(1)) {
+                let calls = calls_chunk
+                    .iter()
+                    .map(|(_, call)| call.clone())
+                    .collect::<Vec<_>>();
+                let outcomes = client
+                    .hydrate(&chain_id, position, &calls)
+                    .await
+                    .with_context(|| format!("failed to hydrate ENS text records on {chain_id}"))?;
+                if outcomes.len() != calls_chunk.len() {
+                    anyhow::bail!(
+                        "text hydration provider returned {} outcomes for {} calls on {chain_id}",
+                        outcomes.len(),
+                        calls_chunk.len()
+                    );
                 }
+
+                apply_text_hydration_outcomes(
+                    &mut rows,
+                    calls_chunk,
+                    outcomes,
+                    &mut changed_rows,
+                    &mut summary,
+                )?;
+                record_rebuild_progress(pool, &mut loop_heartbeat).await;
             }
         }
 
@@ -323,8 +311,8 @@ async fn hydrate_record_inventory_text_values_with_client_inner(
                 .context("changed text hydration row reference is out of bounds")?;
             update_record_inventory_entries(pool, row).await?;
             summary.updated_row_count += 1;
+            record_rebuild_progress(pool, &mut loop_heartbeat).await;
         }
-        record_rebuild_progress(pool, &mut loop_heartbeat).await;
     }
 
     Ok(summary)

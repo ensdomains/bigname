@@ -7,8 +7,7 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::{
-    address_names, children, name_current, permissions, primary_name,
-    primary_name::rebuild_heartbeat::LoopHeartbeat, record_inventory, resolver,
+    address_names, name_current, primary_name::rebuild_heartbeat::LoopHeartbeat, record_inventory,
 };
 
 use super::{
@@ -20,9 +19,11 @@ use super::{
 };
 
 mod claim;
+mod dispatch;
 #[cfg(test)]
 use claim::refresh_claimed_invalidation_claim;
 use claim::{claim_pending_invalidations, spawn_claim_heartbeats, stop_claim_heartbeats};
+use dispatch::apply_one;
 
 const NAME_CURRENT_SINGLE_APPLY_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_PROJECTION_INVALIDATION_ATTEMPTS: i64 = 5;
@@ -92,7 +93,7 @@ async fn apply_pending_invalidations_inner(
                 let group = drain_address_names_group(&mut invalidations);
                 let group_len = group.len();
                 let mut locks = acquire_invalidation_apply_locks(pool, &group).await?;
-                let result = apply_address_names_group(pool, &group).await;
+                let result = apply_address_names_group(pool, &group, &mut loop_heartbeat).await;
                 let finish = async {
                     ensure_invalidation_apply_locks_alive(&mut locks).await?;
                     match result {
@@ -123,9 +124,15 @@ async fn apply_pending_invalidations_inner(
             let mut locks =
                 acquire_invalidation_apply_locks(pool, std::slice::from_ref(&invalidation)).await?;
             let result = if invalidation.projection == "name_current" {
-                apply_name_current_single(pool, &invalidation).await
+                apply_name_current_single(pool, &invalidation, &mut loop_heartbeat).await
             } else {
-                apply_one(pool, &invalidation, text_hydration_config).await
+                apply_one(
+                    pool,
+                    &invalidation,
+                    text_hydration_config,
+                    &mut loop_heartbeat,
+                )
+                .await
             };
             let finish = async {
                 ensure_invalidation_apply_locks_alive(&mut locks).await?;
@@ -184,6 +191,7 @@ fn drain_address_names_group(
 async fn apply_address_names_group(
     pool: &PgPool,
     invalidations: &[ClaimedInvalidation],
+    loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
 ) -> Result<()> {
     let Some(first) = invalidations.first() else {
         return Ok(());
@@ -192,7 +200,19 @@ async fn apply_address_names_group(
     if invalidations.iter().any(|invalidation| {
         optional_payload_str(&invalidation.key_payload, "logical_name_id").is_none()
     }) {
-        address_names::rebuild_address_names_current(pool, Some(address)).await?;
+        match loop_heartbeat.as_deref_mut() {
+            Some(loop_heartbeat) => {
+                address_names::rebuild_address_names_current_with_heartbeat(
+                    pool,
+                    Some(address),
+                    loop_heartbeat,
+                )
+                .await?;
+            }
+            None => {
+                address_names::rebuild_address_names_current(pool, Some(address)).await?;
+            }
+        }
         return Ok(());
     }
 
@@ -203,8 +223,25 @@ async fn apply_address_names_group(
         .into_iter()
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    address_names::rebuild_address_names_current_logical_names(pool, address, &logical_name_ids)
-        .await?;
+    match loop_heartbeat.as_deref_mut() {
+        Some(loop_heartbeat) => {
+            address_names::rebuild_address_names_current_logical_names_with_heartbeat(
+                pool,
+                address,
+                &logical_name_ids,
+                loop_heartbeat,
+            )
+            .await?;
+        }
+        None => {
+            address_names::rebuild_address_names_current_logical_names(
+                pool,
+                address,
+                &logical_name_ids,
+            )
+            .await?;
+        }
+    }
     Ok(())
 }
 
@@ -217,13 +254,29 @@ fn address_names_invalidation_address(invalidation: &ClaimedInvalidation) -> Res
 async fn apply_name_current_single(
     pool: &PgPool,
     invalidation: &ClaimedInvalidation,
+    loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
 ) -> Result<()> {
-    timeout(
-        NAME_CURRENT_SINGLE_APPLY_TIMEOUT,
-        name_current::rebuild_name_current(pool, Some(&invalidation.projection_key)),
-    )
-    .await
-    .with_context(|| {
+    let result = match loop_heartbeat.as_deref_mut() {
+        Some(loop_heartbeat) => {
+            timeout(
+                NAME_CURRENT_SINGLE_APPLY_TIMEOUT,
+                name_current::rebuild_name_current_with_heartbeat(
+                    pool,
+                    Some(&invalidation.projection_key),
+                    loop_heartbeat,
+                ),
+            )
+            .await
+        }
+        None => {
+            timeout(
+                NAME_CURRENT_SINGLE_APPLY_TIMEOUT,
+                name_current::rebuild_name_current(pool, Some(&invalidation.projection_key)),
+            )
+            .await
+        }
+    };
+    result.with_context(|| {
         format!(
             "timed out applying name_current invalidation {}",
             invalidation.projection_key
@@ -262,84 +315,6 @@ fn claimed_invalidation_apply_key(invalidation: &ClaimedInvalidation) -> (u16, u
         namespace_rank,
         invalidation.projection_key.as_str(),
     )
-}
-
-async fn apply_one(
-    pool: &PgPool,
-    invalidation: &ClaimedInvalidation,
-    text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
-) -> Result<()> {
-    match invalidation.projection.as_str() {
-        "name_current" => {
-            name_current::rebuild_name_current(pool, Some(&invalidation.projection_key)).await?;
-        }
-        "children_current" => {
-            children::rebuild_children_current(pool, Some(&invalidation.projection_key)).await?;
-        }
-        "permissions_current" => {
-            permissions::rebuild_permissions_current(pool, Some(&invalidation.projection_key))
-                .await?;
-        }
-        "record_inventory_current" => {
-            record_inventory::rebuild_record_inventory_current(
-                pool,
-                Some(&invalidation.projection_key),
-            )
-            .await?;
-            if let Some(config) = text_hydration_config {
-                let hydration_summary = record_inventory::hydrate_record_inventory_text_values(
-                    pool,
-                    Some(&invalidation.projection_key),
-                    config.clone(),
-                )
-                .await?;
-                record_inventory::log_text_hydration_summary(
-                    Some(&invalidation.projection_key),
-                    &hydration_summary,
-                );
-            }
-        }
-        "resolver_current" => {
-            let chain_id = payload_str(&invalidation.key_payload, "chain_id")?;
-            let resolver_address = payload_str(&invalidation.key_payload, "resolver_address")?;
-            resolver::rebuild_resolver_current(pool, Some(chain_id), Some(resolver_address))
-                .await?;
-        }
-        "address_names_current" => {
-            if let Some(logical_name_id) =
-                optional_payload_str(&invalidation.key_payload, "logical_name_id")
-            {
-                let address = payload_str(&invalidation.key_payload, "address")?;
-                address_names::rebuild_address_names_current_logical_name(
-                    pool,
-                    address,
-                    logical_name_id,
-                )
-                .await?;
-            } else {
-                address_names::rebuild_address_names_current(
-                    pool,
-                    Some(&invalidation.projection_key),
-                )
-                .await?;
-            }
-        }
-        "primary_names_current" => {
-            let address = payload_str(&invalidation.key_payload, "address")?;
-            let namespace = payload_str(&invalidation.key_payload, "namespace")?;
-            let coin_type = payload_str(&invalidation.key_payload, "coin_type")?;
-            primary_name::rebuild_primary_names_current(
-                pool,
-                Some(address),
-                Some(namespace),
-                Some(coin_type),
-            )
-            .await?;
-        }
-        projection => bail!("unsupported projection invalidation family {projection}"),
-    }
-
-    Ok(())
 }
 
 fn payload_str<'a>(payload: &'a Value, field: &str) -> Result<&'a str> {

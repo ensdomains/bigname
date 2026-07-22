@@ -21,6 +21,20 @@ use super::*;
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 const TEST_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
+#[derive(Default)]
+struct CountingManifestProgress {
+    count: usize,
+}
+
+impl ManifestRuntimeProgress for CountingManifestProgress {
+    fn record<'a>(&'a mut self, _pool: &'a PgPool) -> ManifestRuntimeProgressFuture<'a> {
+        Box::pin(async move {
+            self.count += 1;
+            Ok(())
+        })
+    }
+}
+
 struct TestDir {
     path: PathBuf,
 }
@@ -2293,6 +2307,35 @@ fn checked_in_ens_v2_public_resolver_boundary_separates_watch_from_profile_admis
 }
 
 #[tokio::test]
+async fn progress_aware_manifest_sync_and_watch_plan_preserve_results() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let repository = load_repository(checked_in_manifest_root("manifests/mainnet"))?;
+    let mut sync_progress = CountingManifestProgress::default();
+    let progress_summary =
+        sync_repository_with_progress(database.pool(), &repository, &mut sync_progress).await?;
+    assert_eq!(progress_summary.status, ManifestSyncStatus::Synced);
+    assert!(
+        sync_progress.count > 0,
+        "manifest graph synchronization must expose completed progress units"
+    );
+
+    let expected = load_watched_contract_summary_and_chain_plan(database.pool()).await?;
+    let mut plan_progress = CountingManifestProgress::default();
+    let observed = load_watched_contract_summary_and_chain_plan_with_progress(
+        database.pool(),
+        &mut plan_progress,
+    )
+    .await?;
+    assert_eq!(observed, expected);
+    assert!(
+        plan_progress.count >= 2,
+        "watch-plan streaming and in-memory construction must each expose progress"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn ens_v2_public_resolver_discovery_is_watch_only_without_profile_capabilities() -> Result<()>
 {
     let database = TestDatabase::new().await?;
@@ -2769,7 +2812,14 @@ async fn syncing_sepolia_profile_replaces_main_profile_without_mixing() -> Resul
     assert_eq!(watched_summary.manifest_contract_count, 3);
     assert_eq!(watched_summary.discovery_edge_count, 0);
 
-    let admission_state = load_discovery_admission_state(database.pool()).await?;
+    let mut admission_progress = CountingManifestProgress::default();
+    let admission_state =
+        load_discovery_admission_state_with_progress(database.pool(), &mut admission_progress)
+            .await?;
+    assert!(
+        admission_progress.count >= 5,
+        "admission loading must report completed manifest and address-loading units"
+    );
     assert_eq!(admission_state.active_manifest_count, 4);
     assert_eq!(admission_state.active_root_count, 3);
     assert_eq!(admission_state.active_contract_count, 3);

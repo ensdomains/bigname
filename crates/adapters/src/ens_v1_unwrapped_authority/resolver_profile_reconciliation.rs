@@ -1,4 +1,5 @@
 use super::*;
+use crate::checkpoint_context::StartupAdapterProgress;
 use anyhow::ensure;
 use sqlx::Postgres;
 
@@ -96,7 +97,7 @@ pub(super) async fn reconcile_resolver_profile_events_with_log_limit(
     let mut reconciliation = begin_resolver_profile_event_reconciliation(pool, chain).await?;
     reconciliation.stage_addresses(resolver_addresses).await?;
     reconciliation
-        .reconcile_with_log_limit(max_raw_logs_per_page)
+        .reconcile_with_log_limit(max_raw_logs_per_page, None)
         .await?
         .finish()
         .await
@@ -114,19 +115,28 @@ impl ResolverProfileEventReconciliation {
     /// staged. The returned publication retains the exact target set until the
     /// indexer durably publishes its projection invalidations.
     pub async fn reconcile(self) -> Result<ResolverProfileEventReconciliationPublication> {
-        self.reconcile_with_log_limit(DEFAULT_REPLAY_MAX_RAW_LOGS_PER_PAGE)
+        self.reconcile_with_log_limit(DEFAULT_REPLAY_MAX_RAW_LOGS_PER_PAGE, None)
+            .await
+    }
+
+    pub async fn reconcile_with_progress(
+        self,
+        progress: &mut dyn StartupAdapterProgress,
+    ) -> Result<ResolverProfileEventReconciliationPublication> {
+        self.reconcile_with_log_limit(DEFAULT_REPLAY_MAX_RAW_LOGS_PER_PAGE, Some(progress))
             .await
     }
 
     async fn reconcile_with_log_limit(
         mut self,
         max_raw_logs_per_page: usize,
+        mut progress: Option<&mut dyn StartupAdapterProgress>,
     ) -> Result<ResolverProfileEventReconciliationPublication> {
         ensure!(
             max_raw_logs_per_page > 0,
             "resolver profile reconciliation max logs per page must be positive"
         );
-        let prepared = self.prepare().await?;
+        let prepared = self.prepare(&mut progress).await?;
         let targets::ResolverProfileEventReconciliation {
             pool,
             chain,
@@ -171,7 +181,7 @@ impl ResolverProfileEventReconciliation {
             None,
             None,
             Some(&mut replay_context),
-            None,
+            progress,
         )
         .await?;
         summary.scanned_log_count = replay.scanned_log_count;

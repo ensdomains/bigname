@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, ensure};
+use bigname_adapters::StartupAdapterProgress;
 use serde_json::Value;
 use sqlx::{Connection, PgConnection, Postgres, QueryBuilder};
 use uuid::Uuid;
@@ -11,6 +12,24 @@ pub(super) async fn stage_resolver_profile_projection_invalidations(
     pool: &sqlx::PgPool,
     run_id: Uuid,
     chain: &str,
+) -> Result<()> {
+    stage_resolver_profile_projection_invalidations_inner(pool, run_id, chain, None).await
+}
+
+pub(super) async fn stage_resolver_profile_projection_invalidations_with_progress(
+    pool: &sqlx::PgPool,
+    run_id: Uuid,
+    chain: &str,
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<()> {
+    stage_resolver_profile_projection_invalidations_inner(pool, run_id, chain, Some(progress)).await
+}
+
+async fn stage_resolver_profile_projection_invalidations_inner(
+    pool: &sqlx::PgPool,
+    run_id: Uuid,
+    chain: &str,
+    mut progress: Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<()> {
     let cursor_name = format!("resolver_profile_invalidations_{}", run_id.simple());
     let declare_cursor = invalidation_cursor_sql(run_id, &cursor_name);
@@ -35,8 +54,14 @@ pub(super) async fn stage_resolver_profile_projection_invalidations(
         .await
         .context("failed to materialize resolver-profile invalidation cursor")?;
 
-    let capture_result =
-        stage_invalidation_cursor_pages(connection.as_mut(), &cursor_name, chain).await;
+    let capture_result = stage_invalidation_cursor_pages(
+        pool,
+        connection.as_mut(),
+        &cursor_name,
+        chain,
+        &mut progress,
+    )
+    .await;
     let close_result = sqlx::query(&format!("CLOSE {cursor_name}"))
         .execute(connection.as_mut())
         .await
@@ -149,9 +174,11 @@ fn invalidation_cursor_sql(run_id: Uuid, cursor_name: &str) -> String {
 }
 
 async fn stage_invalidation_cursor_pages(
+    pool: &sqlx::PgPool,
     connection: &mut PgConnection,
     cursor_name: &str,
     chain: &str,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<()> {
     loop {
         let rows = sqlx::query_as::<_, (String, String, String, Value)>(&format!(
@@ -188,6 +215,7 @@ async fn stage_invalidation_cursor_pages(
             .with_context(|| {
                 format!("failed to stage resolver-profile projection invalidation page on {chain}")
             })?;
+        record_progress(pool, progress).await?;
     }
 }
 
@@ -196,6 +224,28 @@ async fn stage_invalidation_cursor_pages(
 pub(super) async fn publish_resolver_profile_projection_invalidations(
     connection: &mut PgConnection,
     chain: &str,
+) -> Result<u64> {
+    publish_resolver_profile_projection_invalidations_inner(connection, chain, None).await
+}
+
+pub(super) async fn publish_resolver_profile_projection_invalidations_with_progress(
+    pool: &sqlx::PgPool,
+    connection: &mut PgConnection,
+    chain: &str,
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<u64> {
+    publish_resolver_profile_projection_invalidations_inner(
+        connection,
+        chain,
+        Some((pool, progress)),
+    )
+    .await
+}
+
+async fn publish_resolver_profile_projection_invalidations_inner(
+    connection: &mut PgConnection,
+    chain: &str,
+    mut progress: Option<(&sqlx::PgPool, &mut dyn StartupAdapterProgress)>,
 ) -> Result<u64> {
     let mut published_count = 0u64;
     loop {
@@ -258,5 +308,18 @@ pub(super) async fn publish_resolver_profile_projection_invalidations(
         published_count = published_count
             .checked_add(u64::try_from(page_count)?)
             .context("resolver-profile invalidation count overflowed u64")?;
+        if let Some((pool, progress)) = progress.as_mut() {
+            progress.record(pool).await?;
+        }
     }
+}
+
+async fn record_progress(
+    pool: &sqlx::PgPool,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<()> {
+    if let Some(progress) = progress.as_deref_mut() {
+        progress.record(pool).await?;
+    }
+    Ok(())
 }

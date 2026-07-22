@@ -14,6 +14,8 @@
 
 #[path = "streamed/diff.rs"]
 mod diff;
+#[path = "streamed/guard.rs"]
+mod guard;
 #[path = "streamed/staging.rs"]
 mod staging;
 #[path = "streamed/walk_pages.rs"]
@@ -22,7 +24,7 @@ mod walk_pages;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use sqlx::PgPool;
 
 use super::super::admission_epoch::{
@@ -42,12 +44,19 @@ use super::existing::{
 use super::full::protects_non_orphaned_newer_edge;
 use super::support::{lock_discovery_reconciliation, observation_terminal_states};
 use super::{compare_reconciled_discovery_edge_specs, safe_deactivation_terminal};
-use crate::reconcile_active_contract_instance_addresses;
+use crate::{
+    FullDiscoveryReconciliationOptions, ManifestRuntimeProgress, ManifestRuntimeProgressFuture,
+    managed_edges::reconcile_active_contract_instance_addresses_with_mutations_and_progress,
+};
 
 use self::diff::{
     collect_same_assignment_retained_edges, collect_streamed_historical_edges,
     count_streamed_deactivation_candidates, load_streamed_deactivation_candidates,
     load_streamed_insert_candidate_page, materialize_streamed_insert_candidates,
+};
+use self::guard::{
+    DISCOVERY_FULL_RECONCILE_MAX_DEACTIVATIONS_ENV, default_max_deactivation_candidates,
+    default_max_deactivations, max_deactivations_override_from_env,
 };
 use self::staging::{
     count_temp_rows, create_streamed_reconcile_temp_tables, load_streamed_observations_for_keys,
@@ -58,11 +67,6 @@ use self::walk_pages::run_streamed_admission_walk;
 /// Environment override for the streamed reconcile's deactivation guard.
 /// Holds the maximum number of deactivation candidates permitted before the
 /// reconcile aborts (replacing the default `max(10_000, 1%)` bound).
-pub const DISCOVERY_FULL_RECONCILE_MAX_DEACTIVATIONS_ENV: &str =
-    "BIGNAME_INDEXER_DISCOVERY_FULL_RECONCILE_MAX_DEACTIVATIONS";
-
-const DEACTIVATION_GUARD_FLOOR: usize = 10_000;
-const CANDIDATE_LOAD_CAP_FLOOR: usize = 100_000;
 const DEFAULT_OBSERVATION_PAGE_LIMIT: i64 = 10_000;
 const DEFAULT_MUTATION_BATCH_SIZE: usize = 1_000;
 
@@ -88,6 +92,17 @@ pub trait DiscoveryObservationPageSource {
     /// streamed progress without a detached timer.
     fn record_progress(&self) -> impl Future<Output = Result<()>> + Send {
         async { Ok(()) }
+    }
+}
+
+struct PageSourceManifestProgress<'a, Source>(&'a Source);
+
+impl<Source> ManifestRuntimeProgress for PageSourceManifestProgress<'_, Source>
+where
+    Source: DiscoveryObservationPageSource + Sync,
+{
+    fn record<'a>(&'a mut self, _pool: &'a PgPool) -> ManifestRuntimeProgressFuture<'a> {
+        Box::pin(async move { self.0.record_progress().await })
     }
 }
 
@@ -140,22 +155,70 @@ impl Default for StreamedDiscoveryReconciliationOptions {
 pub async fn reconcile_discovery_observations_streamed(
     pool: &PgPool,
     discovery_source: &str,
-    source: &impl DiscoveryObservationPageSource,
+    source: &(impl DiscoveryObservationPageSource + Sync),
 ) -> Result<DiscoveryReconciliationSummary> {
     let options = StreamedDiscoveryReconciliationOptions {
         max_deactivations_override: max_deactivations_override_from_env()?,
         ..StreamedDiscoveryReconciliationOptions::default()
     };
-    reconcile_discovery_observations_streamed_with_options(pool, discovery_source, source, options)
-        .await
+    reconcile_discovery_observations_streamed_inner(
+        pool,
+        discovery_source,
+        source,
+        options,
+        FullDiscoveryReconciliationOptions::default(),
+    )
+    .await
 }
 
+pub async fn reconcile_discovery_observations_streamed_with_full_options(
+    pool: &PgPool,
+    discovery_source: &str,
+    source: &(impl DiscoveryObservationPageSource + Sync),
+    full_options: FullDiscoveryReconciliationOptions<'_>,
+) -> Result<DiscoveryReconciliationSummary> {
+    let options = StreamedDiscoveryReconciliationOptions {
+        max_deactivations_override: max_deactivations_override_from_env()?,
+        ..StreamedDiscoveryReconciliationOptions::default()
+    };
+    reconcile_discovery_observations_streamed_inner(
+        pool,
+        discovery_source,
+        source,
+        options,
+        full_options,
+    )
+    .await
+}
+
+#[cfg(test)]
 pub(crate) async fn reconcile_discovery_observations_streamed_with_options(
     pool: &PgPool,
     discovery_source: &str,
-    source: &impl DiscoveryObservationPageSource,
+    source: &(impl DiscoveryObservationPageSource + Sync),
     options: StreamedDiscoveryReconciliationOptions,
 ) -> Result<DiscoveryReconciliationSummary> {
+    reconcile_discovery_observations_streamed_inner(
+        pool,
+        discovery_source,
+        source,
+        options,
+        FullDiscoveryReconciliationOptions::default(),
+    )
+    .await
+}
+
+async fn reconcile_discovery_observations_streamed_inner(
+    pool: &PgPool,
+    discovery_source: &str,
+    source: &(impl DiscoveryObservationPageSource + Sync),
+    options: StreamedDiscoveryReconciliationOptions,
+    full_options: FullDiscoveryReconciliationOptions<'_>,
+) -> Result<DiscoveryReconciliationSummary> {
+    let through_block_number = full_options.through_block_number;
+    let expected_admission_epoch = full_options
+        .expected_admission_epoch
+        .map(|expected| (expected.chain, expected.epoch));
     let mut transaction = pool
         .begin()
         .await
@@ -185,11 +248,35 @@ pub(crate) async fn reconcile_discovery_observations_streamed_with_options(
         load_active_reconciled_discovery_edge_chains(transaction.as_mut(), discovery_source)
             .await?,
     );
+    if let Some((chain, _)) = expected_admission_epoch {
+        candidate_chains.insert(chain.to_owned());
+    }
     fence_discovery_admission_epoch_writes(transaction.as_mut(), &candidate_chains).await?;
+    if let Some((chain, expected_epoch)) = expected_admission_epoch {
+        ensure!(
+            candidate_chains.iter().all(|candidate| candidate == chain),
+            "discovery source {discovery_source} expected epoch fence for {chain} cannot reconcile observations from another chain"
+        );
+        let current_epoch = sqlx::query_scalar::<_, i64>(
+            "SELECT epoch FROM discovery_admission_epochs WHERE chain_id = $1",
+        )
+        .bind(chain)
+        .fetch_optional(transaction.as_mut())
+        .await
+        .with_context(|| {
+            format!("failed to read discovery admission epoch for {chain} under the writer fence")
+        })?
+        .unwrap_or(0);
+        ensure!(
+            current_epoch == expected_epoch,
+            "discovery admission epoch changed before full-source reconciliation for {chain}: expected {expected_epoch}, observed {current_epoch}"
+        );
+    }
 
     let admission_state = load_streamed_discovery_admission_state_with_excluded_source(
         transaction.as_mut(),
         Some(discovery_source),
+        source,
     )
     .await?;
     source.record_progress().await?;
@@ -324,7 +411,7 @@ pub(crate) async fn reconcile_discovery_observations_streamed_with_options(
                 && !protects_non_orphaned_newer_edge(
                     candidate,
                     deactivation_terminal_states_by_key.get(&candidate.spec.observation_key),
-                    None,
+                    through_block_number,
                 )
         })
         .count();
@@ -369,7 +456,7 @@ pub(crate) async fn reconcile_discovery_observations_streamed_with_options(
         }
         let terminal_state =
             deactivation_terminal_states_by_key.get(&candidate.spec.observation_key);
-        if protects_non_orphaned_newer_edge(candidate, terminal_state, None) {
+        if protects_non_orphaned_newer_edge(candidate, terminal_state, through_block_number) {
             continue;
         }
         let terminal_state = terminal_state
@@ -440,8 +527,14 @@ pub(crate) async fn reconcile_discovery_observations_streamed_with_options(
         || historical_edge_reconciliation.updated_count > 0
         || deactivated_edge_count > 0
     {
-        reconcile_active_contract_instance_addresses(transaction.as_mut()).await?;
-        source.record_progress().await?;
+        let mut callback = PageSourceManifestProgress(source);
+        let mut progress: Option<&mut dyn ManifestRuntimeProgress> = Some(&mut callback);
+        reconcile_active_contract_instance_addresses_with_mutations_and_progress(
+            transaction.as_mut(),
+            pool,
+            &mut progress,
+        )
+        .await?;
     }
     let active_edge_count =
         load_active_reconciled_discovery_edge_count(transaction.as_mut(), discovery_source).await?;
@@ -467,84 +560,4 @@ pub(crate) async fn reconcile_discovery_observations_streamed_with_options(
         // Intentionally empty; see the function documentation.
         admitted_edges: Vec::new(),
     })
-}
-
-/// Default precise deactivation guard bound: a verified full-closure
-/// finalize must be a near-no-op, so anything beyond `max(10_000, 1%)` of
-/// the source's active edges aborts instead of silently rewriting the
-/// source.
-fn default_max_deactivations(active_edge_count: usize) -> usize {
-    DEACTIVATION_GUARD_FLOOR.max(active_edge_count / 100)
-}
-
-/// Default coarse cap on how many deactivation candidates may be loaded
-/// into memory for chronology and cascade resolution: `max(100_000, 10%)`
-/// of the source's active edges bounds the only diff-sized allocation the
-/// streamed reconcile makes.
-fn default_max_deactivation_candidates(active_edge_count: usize) -> usize {
-    CANDIDATE_LOAD_CAP_FLOOR.max(active_edge_count / 10)
-}
-
-/// Thin, untested-by-design environment read; every sibling test that
-/// exercises guard behavior goes through the explicit options override, so
-/// nothing in this binary mutates the process-global variable. The parsing
-/// itself is the pure function below.
-fn max_deactivations_override_from_env() -> Result<Option<usize>> {
-    match std::env::var(DISCOVERY_FULL_RECONCILE_MAX_DEACTIVATIONS_ENV) {
-        Ok(value) => parse_max_deactivations_override(Some(&value)),
-        Err(std::env::VarError::NotPresent) => parse_max_deactivations_override(None),
-        Err(error) => Err(error).context(format!(
-            "failed to read {DISCOVERY_FULL_RECONCILE_MAX_DEACTIVATIONS_ENV}"
-        )),
-    }
-}
-
-fn parse_max_deactivations_override(value: Option<&str>) -> Result<Option<usize>> {
-    match value {
-        None => Ok(None),
-        Some(value) => value
-            .trim()
-            .parse::<usize>()
-            .map(Some)
-            .with_context(|| format!(
-                "failed to parse {DISCOVERY_FULL_RECONCILE_MAX_DEACTIVATIONS_ENV} as a deactivation count: {value:?}"
-            )),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_deactivation_guard_uses_floor_and_percentage() {
-        assert_eq!(default_max_deactivations(0), 10_000);
-        assert_eq!(default_max_deactivations(500_000), 10_000);
-        assert_eq!(default_max_deactivations(7_620_084), 76_200);
-    }
-
-    #[test]
-    fn default_candidate_load_cap_uses_floor_and_percentage() {
-        assert_eq!(default_max_deactivation_candidates(0), 100_000);
-        assert_eq!(default_max_deactivation_candidates(500_000), 100_000);
-        assert_eq!(default_max_deactivation_candidates(7_620_084), 762_008);
-    }
-
-    #[test]
-    fn deactivation_guard_override_parses_or_rejects() {
-        assert_eq!(
-            parse_max_deactivations_override(None).expect("no value must read as no override"),
-            None
-        );
-        assert_eq!(
-            parse_max_deactivations_override(Some("123456")).expect("numeric override must parse"),
-            Some(123_456)
-        );
-        assert_eq!(
-            parse_max_deactivations_override(Some(" 42 "))
-                .expect("surrounding whitespace is trimmed"),
-            Some(42)
-        );
-        assert!(parse_max_deactivations_override(Some("not-a-count")).is_err());
-    }
 }

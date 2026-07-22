@@ -14,17 +14,19 @@ use crate::{
     provider_configuration::ProviderSourceArgs,
     reconciliation::HeaderAuditMode,
     replay::deployment_profile_from_manifest_root,
-    resolver_profile_convergence::drain_resolver_profile_input_changes,
+    resolver_profile_convergence::drain_resolver_profile_input_changes_with_progress,
     run_mode::IndexerRunMode,
     runtime::{
-        IntakeChainTask, ManifestRuntimeState, build_manifest_runtime_state_with_watch_scope,
-        ensure_manifest_root_ready, intake_runtime_state, load_manifest_repository,
-        log_intake_chain_tasks, log_manifest_runtime_state, log_manifest_summary,
-        log_provider_registry, log_watched_chain_plan, manifest_normalized_event_kind_count,
-        run_poll_loop, sync_adapter_owned_raw_log_state_with_heartbeat,
-        sync_discovery_adapter_owned_raw_log_state_with_heartbeat, sync_intake_chain_tasks,
-        validate_provider_registry_for_intake_tasks, watched_chain_plan_state,
-        widen_runtime_state_to_live_watch_scope_with_admission_epochs,
+        IntakeChainTask, ManifestRuntimeState,
+        build_manifest_runtime_state_with_watch_scope_and_progress, ensure_manifest_root_ready,
+        intake_runtime_state, load_manifest_repository, log_intake_chain_tasks,
+        log_manifest_runtime_state, log_manifest_summary, log_provider_registry,
+        log_watched_chain_plan, manifest_normalized_event_kind_count, run_poll_loop,
+        sync_adapter_owned_raw_log_state_with_heartbeat,
+        sync_discovery_adapter_owned_raw_log_state_with_heartbeat,
+        sync_intake_chain_tasks_with_progress, validate_provider_registry_for_intake_tasks,
+        watched_chain_plan_state,
+        widen_runtime_state_to_live_watch_scope_with_admission_epochs_and_progress,
     },
 };
 
@@ -59,12 +61,17 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
     let header_audit_mode =
         HeaderAuditMode::from_retain_audit_fields(args.retain_header_audit_fields);
     let run_mode = IndexerRunMode::new(adapter_sync_mode, args.normalized_replay_catchup_enabled);
-    let manifest_runtime_state = build_manifest_runtime_state_with_watch_scope(
-        &pool,
-        &manifest_repository,
-        run_mode.bootstrap_watch_scope,
-    )
-    .await?;
+    let manifest_runtime_state = {
+        let mut progress =
+            startup_heartbeat::StartupAdapterHeartbeat::new(&mut startup_heartbeat, &[]);
+        build_manifest_runtime_state_with_watch_scope_and_progress(
+            &pool,
+            &manifest_repository,
+            run_mode.bootstrap_watch_scope,
+            &mut progress,
+        )
+        .await?
+    };
     let bootstrap_chain_ids = manifest_runtime_state
         .watched_chain_plan
         .iter()
@@ -93,8 +100,16 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
     }
     log_manifest_runtime_state(&manifest_runtime_state);
     log_watched_chain_plan("startup", &manifest_runtime_state.watched_chain_plan);
-    let intake_chain_tasks =
-        sync_intake_chain_tasks(&pool, &manifest_runtime_state.watched_chain_plan).await?;
+    let intake_chain_tasks = {
+        let mut progress =
+            startup_heartbeat::StartupAdapterHeartbeat::new(&mut startup_heartbeat, &[]);
+        sync_intake_chain_tasks_with_progress(
+            &pool,
+            &manifest_runtime_state.watched_chain_plan,
+            &mut progress,
+        )
+        .await?
+    };
     let startup_chain_ids = intake_chain_tasks
         .iter()
         .map(|task| task.chain.clone())
@@ -166,6 +181,8 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
             &run_mode,
             &manifest_runtime_state,
             &provider_registry,
+            &mut startup_heartbeat,
+            &startup_chain_ids,
         )
         .await?;
     let live_chain_ids = intake_chain_tasks
@@ -176,7 +193,11 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
     if adapter_sync_mode != BackfillAdapterSyncMode::RawOnly
         && !run_mode.normalized_replay_catchup_enabled
     {
-        drain_resolver_profile_input_changes(&pool).await?;
+        let mut progress = startup_heartbeat::StartupAdapterHeartbeat::new(
+            &mut startup_heartbeat,
+            &live_chain_ids,
+        );
+        drain_resolver_profile_input_changes_with_progress(&pool, &mut progress).await?;
     }
     if run_mode.normalized_replay_catchup_enabled {
         let catchup_config = NormalizedReplayCatchupConfig::new(
@@ -344,6 +365,8 @@ async fn widen_to_live_watch_scope(
     run_mode: &IndexerRunMode,
     manifest_runtime_state: &ManifestRuntimeState,
     provider_registry: &ProviderRegistry,
+    heartbeat: &mut StartupHeartbeat,
+    heartbeat_chain_ids: &[String],
 ) -> Result<(
     ManifestRuntimeState,
     Vec<IntakeChainTask>,
@@ -353,11 +376,26 @@ async fn widen_to_live_watch_scope(
     // the post-bootstrap adapter-owned sync may have materialized new discovery edges, and this
     // reload is what carries them into the live plan.
     let previous_watch_state = watched_chain_plan_state(&manifest_runtime_state.watched_chain_plan);
-    let (live_manifest_runtime_state, watched_plan_admission_epochs) =
-        widen_runtime_state_to_live_watch_scope_with_admission_epochs(pool, manifest_runtime_state)
-            .await?;
-    let live_intake_chain_tasks =
-        sync_intake_chain_tasks(pool, &live_manifest_runtime_state.watched_chain_plan).await?;
+    let (live_manifest_runtime_state, watched_plan_admission_epochs) = {
+        let mut progress =
+            startup_heartbeat::StartupAdapterHeartbeat::new(heartbeat, heartbeat_chain_ids);
+        widen_runtime_state_to_live_watch_scope_with_admission_epochs_and_progress(
+            pool,
+            manifest_runtime_state,
+            &mut progress,
+        )
+        .await?
+    };
+    let live_intake_chain_tasks = {
+        let mut progress =
+            startup_heartbeat::StartupAdapterHeartbeat::new(heartbeat, heartbeat_chain_ids);
+        sync_intake_chain_tasks_with_progress(
+            pool,
+            &live_manifest_runtime_state.watched_chain_plan,
+            &mut progress,
+        )
+        .await?
+    };
     validate_provider_registry_for_intake_tasks(&live_intake_chain_tasks, provider_registry)?;
 
     let live_watch_state =

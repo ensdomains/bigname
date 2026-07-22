@@ -10,9 +10,12 @@ use crate::{
 };
 
 use super::{
-    load_historical_watched_contracts_by_chain, load_manifest_declared_watched_contracts,
-    load_watched_contracts, load_watched_contracts_by_source_family,
+    ManifestRuntimeProgress, load_historical_watched_contracts_by_chain,
+    load_manifest_declared_watched_contracts, load_watched_contracts,
+    load_watched_contracts_by_source_family, load_watched_contracts_with_progress,
 };
+
+const WATCHED_PLAN_BUILD_PROGRESS_ROWS: usize = 10_000;
 
 pub fn summarize_watched_contracts(
     watched_contracts: &[WatchedContract],
@@ -369,6 +372,85 @@ pub async fn load_watched_contract_summary_and_chain_plan(
     Ok((
         summarize_watched_contracts(&watched_contracts),
         plan_watched_contracts(&watched_contracts),
+    ))
+}
+
+pub async fn load_watched_contract_summary_and_chain_plan_with_progress(
+    pool: &sqlx::PgPool,
+    progress: &mut dyn ManifestRuntimeProgress,
+) -> Result<(WatchedContractSummary, Vec<WatchedChainPlan>)> {
+    #[derive(Default)]
+    struct ChainAccumulator {
+        addresses: BTreeSet<String>,
+        manifest_root_entry_count: usize,
+        manifest_contract_entry_count: usize,
+        discovery_edge_entry_count: usize,
+    }
+
+    let watched_contracts = load_watched_contracts_with_progress(pool, progress).await?;
+    let source_entry_count = watched_contracts.len();
+    let mut manifest_root_count = 0usize;
+    let mut manifest_contract_count = 0usize;
+    let mut discovery_edge_count = 0usize;
+    let mut accumulators = BTreeMap::<String, ChainAccumulator>::new();
+    for (index, watched_contract) in watched_contracts.into_iter().enumerate() {
+        let accumulator = accumulators.entry(watched_contract.chain).or_default();
+        accumulator.addresses.insert(watched_contract.address);
+        match watched_contract.source {
+            WatchedContractSource::ManifestRoot => {
+                manifest_root_count += 1;
+                accumulator.manifest_root_entry_count += 1;
+            }
+            WatchedContractSource::ManifestContract => {
+                manifest_contract_count += 1;
+                accumulator.manifest_contract_entry_count += 1;
+            }
+            WatchedContractSource::DiscoveryEdge => {
+                discovery_edge_count += 1;
+                accumulator.discovery_edge_entry_count += 1;
+            }
+        }
+        if (index + 1) % WATCHED_PLAN_BUILD_PROGRESS_ROWS == 0 {
+            progress.record(pool).await?;
+        }
+    }
+    if source_entry_count > 0 && source_entry_count % WATCHED_PLAN_BUILD_PROGRESS_ROWS != 0 {
+        progress.record(pool).await?;
+    }
+
+    let unique_contract_count = accumulators
+        .values()
+        .map(|accumulator| accumulator.addresses.len())
+        .sum();
+    let mut chain_summaries = Vec::with_capacity(accumulators.len());
+    let mut chain_plans = Vec::with_capacity(accumulators.len());
+    for (chain, accumulator) in accumulators {
+        chain_summaries.push(WatchedContractChainSummary {
+            chain: chain.clone(),
+            unique_contract_count: accumulator.addresses.len(),
+            manifest_root_count: accumulator.manifest_root_entry_count,
+            manifest_contract_count: accumulator.manifest_contract_entry_count,
+            discovery_edge_count: accumulator.discovery_edge_entry_count,
+        });
+        chain_plans.push(WatchedChainPlan {
+            chain,
+            addresses: accumulator.addresses.into_iter().collect(),
+            manifest_root_entry_count: accumulator.manifest_root_entry_count,
+            manifest_contract_entry_count: accumulator.manifest_contract_entry_count,
+            discovery_edge_entry_count: accumulator.discovery_edge_entry_count,
+        });
+    }
+
+    Ok((
+        WatchedContractSummary {
+            unique_contract_count,
+            source_entry_count,
+            manifest_root_count,
+            manifest_contract_count,
+            discovery_edge_count,
+            chains: chain_summaries,
+        },
+        chain_plans,
     ))
 }
 

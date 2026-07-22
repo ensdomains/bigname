@@ -1,10 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use anyhow::{Context, Result};
 use bigname_storage::{
-    CanonicalityState, ChildrenCurrentRow, delete_children_current,
-    load_canonical_declared_child_sources, load_raw_block, stream_canonical_declared_child_sources,
-    upsert_children_current_rows,
+    CanonicalityState, ChildrenCurrentRow, load_canonical_declared_child_sources, load_raw_block,
+    stream_canonical_declared_child_sources, upsert_children_current_rows,
 };
 use futures_util::{TryStreamExt, pin_mut};
 use serde_json::{Value, json};
@@ -27,6 +26,8 @@ use staged_rebuild::{
 const DECLARED_SURFACE_CLASS: &str = "declared";
 const CHILDREN_CURRENT_DERIVATION_KIND: &str = "children_current_rebuild";
 const CHILDREN_CURRENT_REBUILD_BATCH_SIZE: usize = 2_000;
+const CHILDREN_CURRENT_TARGETED_BATCH_SIZE: usize = 500;
+const CHILDREN_CURRENT_TARGETED_CLEANUP_PAGE_SIZE: i64 = 1_000;
 const CHILDREN_CURRENT_BLOCK_CACHE_LIMIT: usize = 4_096;
 const CHILDREN_CURRENT_REBUILD_CONCURRENCY: usize = 8;
 
@@ -58,7 +59,9 @@ async fn rebuild_children_current_inner(
     loop_heartbeat: Option<&mut LoopHeartbeat>,
 ) -> Result<ChildrenCurrentRebuildSummary> {
     match parent_logical_name_id {
-        Some(parent_logical_name_id) => rebuild_one_parent(pool, parent_logical_name_id).await,
+        Some(parent_logical_name_id) => {
+            rebuild_one_parent(pool, parent_logical_name_id, loop_heartbeat).await
+        }
         None => rebuild_all_parents(pool, loop_heartbeat).await,
     }
 }
@@ -179,12 +182,28 @@ fn spawn_children_rebuild_task(
 async fn rebuild_one_parent(
     pool: &PgPool,
     parent_logical_name_id: &str,
+    mut loop_heartbeat: Option<&mut LoopHeartbeat>,
 ) -> Result<ChildrenCurrentRebuildSummary> {
-    let sources = load_canonical_declared_child_sources(pool, Some(parent_logical_name_id)).await?;
-    let rows = build_children_rows(pool, &sources).await?;
-    let upserted_row_count = upsert_children_current_rows(pool, &rows).await?.len();
-    let deleted_row_count =
-        delete_stale_children_current_rows_for_parent(pool, parent_logical_name_id, &rows).await?;
+    let sources = run_rebuild_phase(
+        pool,
+        &mut loop_heartbeat,
+        "children_current.target_load",
+        load_canonical_declared_child_sources(pool, Some(parent_logical_name_id)),
+    )
+    .await?;
+    let rows = build_children_rows(pool, &sources, &mut loop_heartbeat).await?;
+    let mut upserted_row_count = 0usize;
+    for chunk in rows.chunks(CHILDREN_CURRENT_TARGETED_BATCH_SIZE) {
+        upserted_row_count += upsert_children_current_rows(pool, chunk).await?.len();
+        record_rebuild_progress(pool, &mut loop_heartbeat).await;
+    }
+    let deleted_row_count = delete_stale_children_current_rows_for_parent(
+        pool,
+        parent_logical_name_id,
+        &rows,
+        &mut loop_heartbeat,
+    )
+    .await?;
 
     Ok(ChildrenCurrentRebuildSummary {
         requested_parent_count: 1,
@@ -196,12 +215,14 @@ async fn rebuild_one_parent(
 async fn build_children_rows(
     pool: &PgPool,
     sources: &[bigname_storage::DeclaredChildEventSource],
+    loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
 ) -> Result<Vec<ChildrenCurrentRow>> {
     let mut block_cache = BTreeMap::new();
     let mut rows = Vec::with_capacity(sources.len());
 
     for source in sources {
         rows.push(build_children_row(pool, source, &mut block_cache).await?);
+        record_rebuild_progress(pool, loop_heartbeat).await;
     }
 
     Ok(rows)
@@ -211,39 +232,70 @@ async fn delete_stale_children_current_rows_for_parent(
     pool: &PgPool,
     parent_logical_name_id: &str,
     rows: &[ChildrenCurrentRow],
+    loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
 ) -> Result<u64> {
-    if rows.is_empty() {
-        return delete_children_current(pool, parent_logical_name_id).await;
-    }
-
-    let child_logical_name_ids = rows
+    let replacement_ids = rows
         .iter()
-        .map(|row| row.child_logical_name_id.clone())
-        .collect::<Vec<_>>();
-
-    sqlx::query(
-        r#"
-        DELETE FROM children_current current
-        WHERE current.parent_logical_name_id = $1
-          AND current.surface_class = $2
-          AND NOT EXISTS (
-            SELECT 1
-            FROM UNNEST($3::TEXT[]) AS replacement(child_logical_name_id)
-            WHERE replacement.child_logical_name_id = current.child_logical_name_id
-          )
-        "#,
-    )
-    .bind(parent_logical_name_id)
-    .bind(DECLARED_SURFACE_CLASS)
-    .bind(&child_logical_name_ids)
-    .execute(pool)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to delete stale children_current rows for parent_logical_name_id {parent_logical_name_id}"
+        .map(|row| row.child_logical_name_id.as_str())
+        .collect::<HashSet<_>>();
+    let mut cursor = None::<String>;
+    let mut deleted_row_count = 0u64;
+    loop {
+        let page = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT child_logical_name_id
+            FROM children_current
+            WHERE parent_logical_name_id = $1
+              AND surface_class = $2
+              AND ($3::TEXT IS NULL OR child_logical_name_id > $3)
+            ORDER BY child_logical_name_id
+            LIMIT $4
+            "#,
         )
-    })
-    .map(|result| result.rows_affected())
+        .bind(parent_logical_name_id)
+        .bind(DECLARED_SURFACE_CLASS)
+        .bind(cursor.as_deref())
+        .bind(CHILDREN_CURRENT_TARGETED_CLEANUP_PAGE_SIZE)
+        .fetch_all(pool)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to scan stale children_current rows for parent_logical_name_id {parent_logical_name_id}"
+            )
+        })?;
+        let Some(last_id) = page.last().cloned() else {
+            break;
+        };
+        let stale_ids = page
+            .iter()
+            .filter(|child_id| !replacement_ids.contains(child_id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !stale_ids.is_empty() {
+            deleted_row_count += sqlx::query(
+                r#"
+                DELETE FROM children_current
+                WHERE parent_logical_name_id = $1
+                  AND surface_class = $2
+                  AND child_logical_name_id = ANY($3::TEXT[])
+                "#,
+            )
+            .bind(parent_logical_name_id)
+            .bind(DECLARED_SURFACE_CLASS)
+            .bind(&stale_ids)
+            .execute(pool)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to delete stale children_current page for parent_logical_name_id {parent_logical_name_id}"
+                )
+            })?
+            .rows_affected();
+        }
+        cursor = Some(last_id);
+        record_rebuild_progress(pool, loop_heartbeat).await;
+    }
+    Ok(deleted_row_count)
 }
 
 async fn build_children_row(

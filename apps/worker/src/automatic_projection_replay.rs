@@ -191,6 +191,7 @@ pub(crate) async fn run_automatic_current_projection_replay(
             if !projection_derivation_started {
                 spawn_continuous_projection_invalidation_derivation(
                     pool.clone(),
+                    Arc::clone(&loop_heartbeat),
                     poll_interval_secs,
                 );
                 projection_derivation_started = true;
@@ -282,13 +283,22 @@ async fn record_loop_heartbeat_if_due(pool: &PgPool, loop_heartbeat: &SharedLoop
     loop_heartbeat.lock().await.record_if_due(pool).await;
 }
 
-fn spawn_continuous_projection_invalidation_derivation(pool: PgPool, poll_interval_secs: u64) {
+fn spawn_continuous_projection_invalidation_derivation(
+    pool: PgPool,
+    loop_heartbeat: SharedLoopHeartbeat,
+    poll_interval_secs: u64,
+) {
     tokio::spawn(async move {
-        run_continuous_projection_invalidation_derivation(pool, poll_interval_secs).await;
+        run_continuous_projection_invalidation_derivation(pool, loop_heartbeat, poll_interval_secs)
+            .await;
     });
 }
 
-async fn run_continuous_projection_invalidation_derivation(pool: PgPool, poll_interval_secs: u64) {
+async fn run_continuous_projection_invalidation_derivation(
+    pool: PgPool,
+    loop_heartbeat: SharedLoopHeartbeat,
+    poll_interval_secs: u64,
+) {
     let poll_interval = Duration::from_secs(poll_interval_secs.max(1));
     info!(
         service = "worker",
@@ -298,7 +308,11 @@ async fn run_continuous_projection_invalidation_derivation(pool: PgPool, poll_in
 
     loop {
         let mut progressed = false;
-        match projection_apply::derive_once(&pool).await {
+        let derive_result = {
+            let mut loop_heartbeat = loop_heartbeat.lock().await;
+            projection_apply::derive_once_with_heartbeat(&pool, &mut loop_heartbeat).await
+        };
+        match derive_result {
             Ok(summary) => {
                 progressed = summary.scanned_event_count > 0;
                 if progressed {

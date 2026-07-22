@@ -1,7 +1,10 @@
 use anyhow::{Context, Result};
 use tracing::info;
 
-use super::sync_live_adapter_state_from_persisted_raw_payloads;
+use super::{
+    sync_live_adapter_state_from_persisted_raw_payloads,
+    sync_live_adapter_state_from_persisted_raw_payloads_with_progress,
+};
 
 #[path = "backlog/cursor.rs"]
 mod cursor;
@@ -28,10 +31,41 @@ pub(crate) struct LiveAdapterBacklogSyncSummary {
     pub(crate) normalized_event_inserted_count: usize,
 }
 
+#[cfg(test)]
 pub(crate) async fn sync_live_adapter_backlog_after_normalized_replay(
     pool: &sqlx::PgPool,
     deployment_profile: &str,
     chains: &[String],
+) -> Result<LiveAdapterBacklogSyncSummary> {
+    sync_live_adapter_backlog_after_normalized_replay_inner(
+        pool,
+        deployment_profile,
+        chains,
+        &mut None,
+    )
+    .await
+}
+
+pub(crate) async fn sync_live_adapter_backlog_after_normalized_replay_with_progress(
+    pool: &sqlx::PgPool,
+    deployment_profile: &str,
+    chains: &[String],
+    progress: &mut dyn bigname_adapters::StartupAdapterProgress,
+) -> Result<LiveAdapterBacklogSyncSummary> {
+    sync_live_adapter_backlog_after_normalized_replay_inner(
+        pool,
+        deployment_profile,
+        chains,
+        &mut Some(progress),
+    )
+    .await
+}
+
+async fn sync_live_adapter_backlog_after_normalized_replay_inner(
+    pool: &sqlx::PgPool,
+    deployment_profile: &str,
+    chains: &[String],
+    progress: &mut Option<&mut dyn bigname_adapters::StartupAdapterProgress>,
 ) -> Result<LiveAdapterBacklogSyncSummary> {
     let mut aggregate = LiveAdapterBacklogSyncSummary::default();
 
@@ -95,11 +129,12 @@ pub(crate) async fn sync_live_adapter_backlog_after_normalized_replay(
                 block_hash_count = hashes.len(),
                 "post-replay live raw payload adapter backlog page selected"
             );
-            let summary = sync_live_adapter_state_from_persisted_raw_payloads(
+            let summary = sync_backlog_page(
                 pool,
                 deployment_profile,
                 chain,
                 &hashes,
+                progress,
             )
             .await
                 .with_context(|| {
@@ -129,6 +164,7 @@ pub(crate) async fn sync_live_adapter_backlog_after_normalized_replay(
                     aggregate.matched_log_count += summary.matched_log_count;
                     aggregate.normalized_event_synced_count += summary.total_synced_count;
                     aggregate.normalized_event_inserted_count += summary.total_inserted_count;
+                    record_backlog_progress(pool, progress).await?;
                 }
                 BacklogCursorPublication::Retry(next_cursor) => {
                     cursor = next_cursor;
@@ -161,4 +197,46 @@ pub(crate) async fn sync_live_adapter_backlog_after_normalized_replay(
     }
 
     Ok(aggregate)
+}
+
+async fn sync_backlog_page(
+    pool: &sqlx::PgPool,
+    deployment_profile: &str,
+    chain: &str,
+    hashes: &[String],
+    progress: &mut Option<&mut dyn bigname_adapters::StartupAdapterProgress>,
+) -> Result<super::super::types::PersistedRawPayloadAdapterSyncSummary> {
+    match progress.as_mut() {
+        Some(progress) => {
+            let mut page_progress =
+                Some(&mut **progress as &mut dyn bigname_adapters::StartupAdapterProgress);
+            sync_live_adapter_state_from_persisted_raw_payloads_with_progress(
+                pool,
+                deployment_profile,
+                chain,
+                hashes,
+                &mut page_progress,
+            )
+            .await
+        }
+        None => {
+            sync_live_adapter_state_from_persisted_raw_payloads(
+                pool,
+                deployment_profile,
+                chain,
+                hashes,
+            )
+            .await
+        }
+    }
+}
+
+async fn record_backlog_progress(
+    pool: &sqlx::PgPool,
+    progress: &mut Option<&mut dyn bigname_adapters::StartupAdapterProgress>,
+) -> Result<()> {
+    if let Some(progress) = progress.as_mut() {
+        progress.record(pool).await?;
+    }
+    Ok(())
 }
