@@ -504,7 +504,7 @@ async fn targeted_rebuild_serializes_claim_publish_with_verified_primary_produce
     )
     .await?;
 
-    let worker_pool = database.pool().clone();
+    let worker_pool = database.independent_pool(2);
     let worker_address = address.to_owned();
     let worker_thread = std::thread::spawn(move || -> Result<PrimaryNamesCurrentRebuildSummary> {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -545,7 +545,7 @@ async fn targeted_rebuild_serializes_claim_publish_with_verified_primary_produce
     );
     let stale_cache_key = stale_request.outcome.cache_key.clone();
     let (producer_tx, producer_rx) = mpsc::channel();
-    let producer_pool = database.pool().clone();
+    let producer_pool = database.independent_pool(2);
     let producer_thread = std::thread::spawn(move || {
         let result = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -584,9 +584,10 @@ async fn targeted_rebuild_serializes_claim_publish_with_verified_primary_produce
     assert_eq!(worker_summary.upserted_row_count, 1);
     let producer_result = match early_producer_result {
         Some(result) => result,
-        // Liveness bound only; generous because parallel test setup runs CREATE INDEX
-        // CONCURRENTLY migrations that wait out this test's deliberately paused transaction,
-        // starving the runner (flaked at 5s in CI).
+        // Liveness bound only. Blocking here parks this runtime's IO driver, which is
+        // safe only because every helper thread runs on its own pool (independent_pool)
+        // — a connection registered to this runtime must never carry another thread's
+        // in-flight query while we wait.
         None => producer_rx
             .recv_timeout(Duration::from_secs(60))
             .context("producer did not finish after targeted rebuild publish")?,
@@ -843,7 +844,7 @@ async fn full_rebuild_serializes_invalidation_and_publish_with_verified_primary_
     )
     .await?;
 
-    let worker_pool = database.pool().clone();
+    let worker_pool = database.independent_pool(4);
     let worker_thread = std::thread::spawn(move || -> Result<PrimaryNamesCurrentRebuildSummary> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
