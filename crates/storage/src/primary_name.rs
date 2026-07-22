@@ -1,13 +1,21 @@
+pub mod fallback;
 mod full_rebuild;
 mod hooks;
+mod lock;
 mod reads;
 mod rows;
 mod types;
 mod upserts;
 mod validation;
 
-pub use full_rebuild::publish_primary_names_current_full_rebuild;
+pub use full_rebuild::{
+    publish_primary_names_current_full_rebuild,
+    publish_primary_names_current_full_rebuild_in_transaction,
+};
 pub use hooks::verified_primary_name_claim_hooks;
+pub use lock::{
+    lock_primary_name_tuple_in_transaction, lock_primary_names_current_replacement_in_transaction,
+};
 pub use reads::{
     clear_primary_names_current, delete_primary_name_current,
     delete_primary_name_current_in_transaction, load_primary_name_current,

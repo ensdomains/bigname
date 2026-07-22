@@ -7,7 +7,7 @@ Persistence boundaries for [raw facts](glossary.md), identity, [normalized event
 - Durable raw facts are immutable. Evictable payload-cache entries and non-audit raw-log staging rows lose their system-of-record status once the replay contract that retained them is satisfied.
 - Projections are disposable and rebuildable from canonical raw facts plus normalized events.
 - Canonicality is explicit, never inferred from "latest row wins."
-- Execution traces and steps are durable audit artifacts; cache outcomes are reusable only while their dependencies remain canonical.
+- Execution traces and steps are durable audit artifacts except for the bounded ENS/60 missing-tuple route described under execution storage; cache outcomes are reusable only while their dependencies remain canonical.
 - One write owner per storage family.
 
 ## Corrections
@@ -1313,6 +1313,23 @@ the row remains absent and the route selects the same checkpoint. A route-local
 trace is never admitted through the materialized-row fence, and a materialized
 trace is never admitted through the missing-row fence.
 
+Unlike resolution-on-demand, which starts from an indexed name row, the ENS/60
+missing-tuple route accepts any syntactically valid Ethereum address. Addresses
+that never acquire a projected primary-name claim therefore create a much wider
+persistence domain. The worker bounds that storage: on each normal poll it
+deletes at most
+`BIGNAME_WORKER_PRIMARY_NAME_ROUTE_CACHE_PRUNE_BATCH_SIZE` outcomes whose two
+boundary fields use `selected_checkpoint` and whose Ethereum checkpoint is
+more than
+`BIGNAME_WORKER_PRIMARY_NAME_ROUTE_CACHE_RETENTION_CHECKPOINTS` blocks behind
+the stored canonical checkpoint. The defaults retain 50,000 checkpoints and
+delete at most 5,000 outcomes per poll. Deleting the outcome also deletes its
+otherwise-unreferenced route-local trace and steps. A second independently
+bounded batch removes old route-local traces already orphaned by same-identity
+outcome replacement. Materialized primary-name outcomes and all other execution
+traces remain outside this cleanup. A later request for an evicted address
+executes against the then-current stored checkpoint.
+
 Because the missing tuple owns no projected name surface or backing resource,
 its `topology_version_boundary` and `record_version_boundary` JSON fields both
 use `{boundary_kind: "selected_checkpoint", chain_position}`. That internal
@@ -1321,11 +1338,39 @@ timestamp without inventing a `logical_name_id`, `resource_id`, or normalized
 event. Materialized outcomes continue to use the ordinary projected
 `VersionBoundary` shape.
 
-Because PostgreSQL cannot row-lock an absent tuple, route-local persistence and
-readback hold a short `SHARE` lock on `primary_names_current` while they check
-absence and write or read the execution rows in the same transaction. Projection
-inserts and updates wait at that boundary, so a response cannot combine a
-missing-row decision with a trace read from the other side of a projection write.
+Because PostgreSQL cannot row-lock an absent tuple, route-local persistence,
+route-local readback, and the projection writer take the same
+transaction-scoped PostgreSQL advisory lock derived from the normalized
+`(current_database, address, namespace, coin_type)` identity. Including the
+database keeps independent bigname databases on one PostgreSQL cluster from
+sharing a fence. The projection writer takes the lock before reading the old
+row and holds it through cache invalidation and projection commit. If fallback
+persistence commits first, the later projection writer invalidates that outcome
+before publishing the row; if projection publication commits first, fallback
+persistence or readback observes the row and stops. Different tuples use
+different locks and do not serialize. Full projection replacement uses an
+exclusive database-scoped maintenance advisory lock while tuple operations join
+that maintenance boundary in shared mode, avoiding an unbounded set of tuple
+locks during a rebuild.
+
+The migration that introduces this protocol also installs projection-table
+write triggers for rolling-version compatibility. A writer from the preceding
+release is forced onto the same tuple/maintenance keys before its DML becomes
+visible, and a changed legacy write repeats verified-primary invalidation after
+it acquires the fence. Because a legacy writer obtains its PostgreSQL table lock
+before a row trigger can run, a conflicting advisory lock returns SQLSTATE
+`40001` instead of waiting with the reversed lock order; the projection loop
+retries the rolled-back write. Legacy full replacements are recognized by their
+disabled bulk-publication sidecar triggers, take the maintenance fence, and
+conservatively invalidate verified-primary outcomes once. Updated writers take
+the advisory lock before their table lock and keep the narrower exact-change
+invalidation path.
+
+For an identical verified-primary cache identity, a stored `success` outcome
+wins over a later `execution_failed` attempt; the failed attempt does not write
+an unreferenced trace. A configured API RPC timeout remains an in-band durable
+failure. Other RPC transport failures, such as connection, DNS, or TLS errors,
+abort before trace or outcome persistence so the next request retries.
 
 Exact block-anchored `raw_call_snapshots` used by verified resolution stay in
 the intake-owned `raw_*` family. Execution persistence, including the API

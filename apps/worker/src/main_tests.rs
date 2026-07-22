@@ -59,6 +59,18 @@ fn replay_all_current_projections_cli_is_available() {
 }
 
 #[test]
+fn worker_run_uses_bounded_primary_name_route_cache_defaults() {
+    let cli = Cli::parse_from(["bigname-worker", "run"]);
+    match cli.command {
+        Command::Run(args) => {
+            assert_eq!(args.primary_name_route_cache_retention_checkpoints, 50_000);
+            assert_eq!(args.primary_name_route_cache_prune_batch_size, 5_000);
+        }
+        other => panic!("expected run command, got {other:?}"),
+    }
+}
+
+#[test]
 fn replay_all_current_projections_json_flag_is_available() {
     let cli = Cli::parse_from([
         "bigname-worker",

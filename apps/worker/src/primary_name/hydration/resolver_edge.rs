@@ -36,18 +36,9 @@ pub(super) async fn hydrate_resolver_edge_candidates(
         .filter(|candidate| candidate.hydration_target.is_none())
     {
         if let Some(existing_key) = &candidate.existing_key {
-            super::invalidation::invalidate_verified_primary_name_hydration_delete(
-                pool,
-                existing_key,
-            )
-            .await?;
-            summary.deleted_row_count += bigname_storage::delete_primary_name_current(
-                pool,
-                &existing_key.address,
-                &existing_key.namespace,
-                &existing_key.coin_type,
-            )
-            .await?;
+            summary.deleted_row_count +=
+                super::invalidation::delete_verified_primary_name_hydration_row(pool, existing_key)
+                    .await?;
             record_rebuild_progress(pool, loop_heartbeat).await;
         }
     }
@@ -216,15 +207,8 @@ async fn delete_existing_resolver_edge_row(
     let Some(existing_key) = &candidate.existing_key else {
         return Ok(());
     };
-    super::invalidation::invalidate_verified_primary_name_hydration_delete(pool, existing_key)
-        .await?;
-    summary.deleted_row_count += bigname_storage::delete_primary_name_current(
-        pool,
-        &existing_key.address,
-        &existing_key.namespace,
-        &existing_key.coin_type,
-    )
-    .await?;
+    summary.deleted_row_count +=
+        super::invalidation::delete_verified_primary_name_hydration_row(pool, existing_key).await?;
     Ok(())
 }
 

@@ -297,7 +297,9 @@ is re-registered mints a new lineage.
 
 **Verified execution / execution trace** — running actual resolution calls and
 persisting a durable step-by-step audit record (entrypoint, calls, CCIP steps,
-proofs, result). Traces are permanent; only cache reusability expires. A
+proofs, result). Traces are permanent except for the bounded ENS/60
+missing-tuple retention rule in [`storage.md`](storage.md#execution-storage);
+otherwise only cache reusability expires. A
 persisted outcome is reused only while its request tuple, selected chain
 positions, manifest versions, topology boundary, and record boundary still
 match; reorgs and manifest, resolver, topology, record, or primary-claim

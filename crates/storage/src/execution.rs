@@ -2,6 +2,7 @@ mod decode;
 mod invalidation;
 mod keying;
 mod outcome;
+mod pruning;
 mod snapshot_match;
 mod trace;
 mod trace_rows;
@@ -18,9 +19,11 @@ pub use invalidation::{
     invalidate_execution_outcomes_for_topology_boundary_and_request_key,
 };
 pub use outcome::{
-    load_execution_outcome, load_resolution_execution_outcome_at_snapshot,
-    upsert_execution_outcome, upsert_execution_outcome_in_transaction,
+    load_execution_outcome, load_execution_outcome_for_update_in_transaction,
+    load_resolution_execution_outcome_at_snapshot, upsert_execution_outcome,
+    upsert_execution_outcome_in_transaction,
 };
+pub use pruning::{PrimaryNameRouteCachePruneSummary, prune_route_local_primary_name_execution};
 pub use trace::{
     load_execution_trace, load_execution_trace_from_connection, load_execution_trace_inspection,
     upsert_execution_trace, upsert_execution_trace_in_transaction,

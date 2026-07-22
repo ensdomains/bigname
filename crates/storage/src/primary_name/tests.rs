@@ -9,6 +9,7 @@ use sqlx::{
     PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
+use tokio::time::{Duration, timeout};
 
 use super::*;
 use crate::default_database_url;
@@ -80,6 +81,38 @@ impl TestDatabase {
         self.admin_pool.close().await;
         Ok(())
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn advisory_fences_are_scoped_to_the_current_database() -> Result<()> {
+    let first_database = TestDatabase::new().await?;
+    let second_database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+
+    let mut first_fence = first_database.pool().begin().await?;
+    lock_primary_name_tuple_in_transaction(&mut first_fence, address, "ens", "60").await?;
+
+    let mut second_tuple_fence = second_database.pool().begin().await?;
+    timeout(
+        Duration::from_millis(250),
+        lock_primary_name_tuple_in_transaction(&mut second_tuple_fence, address, "ens", "60"),
+    )
+    .await
+    .context("the same tuple in another database must not share an advisory fence")??;
+    second_tuple_fence.commit().await?;
+
+    let mut second_replacement_fence = second_database.pool().begin().await?;
+    timeout(
+        Duration::from_millis(250),
+        lock_primary_names_current_replacement_in_transaction(&mut second_replacement_fence),
+    )
+    .await
+    .context("another database's tuple work must not block the replacement fence")??;
+    second_replacement_fence.commit().await?;
+
+    first_fence.commit().await?;
+    first_database.cleanup().await?;
+    second_database.cleanup().await
 }
 
 #[tokio::test]
@@ -301,6 +334,285 @@ async fn batch_upsert_preserves_input_order_after_sorted_locking() -> Result<()>
     assert_eq!(inserted, input);
 
     database.cleanup().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_projection_writes_join_the_tuple_fence_without_serializing_other_tuples()
+-> Result<()> {
+    async fn insert_legacy_projection_row(
+        pool: &PgPool,
+        address: &str,
+    ) -> std::result::Result<u64, sqlx::Error> {
+        sqlx::query(
+            r#"
+            INSERT INTO primary_names_current (
+                address,
+                coin_type,
+                namespace,
+                claim_status,
+                raw_claim_name,
+                normalized_claim_name,
+                claim_name_is_normalized,
+                claim_provenance
+            )
+            VALUES ($1, '60', 'ens', 'success', NULL, 'alice.eth', TRUE, '{}'::jsonb)
+            "#,
+        )
+        .bind(address)
+        .execute(pool)
+        .await
+        .map(|result| result.rows_affected())
+    }
+
+    let database = TestDatabase::new().await?;
+    let fenced_address = "0x0000000000000000000000000000000000000abc";
+    let unrelated_address = "0x0000000000000000000000000000000000000def";
+    let request_key = format!("ens:{fenced_address}:60");
+    let execution_trace_id = uuid::Uuid::from_u128(0x21700000000000000000000000000001);
+    sqlx::query(
+        r#"
+        INSERT INTO execution_traces (
+            execution_trace_id,
+            request_type,
+            request_key,
+            namespace,
+            chain_context,
+            manifest_context,
+            final_payload,
+            request_metadata,
+            finished_at
+        )
+        VALUES (
+            $1,
+            'verified_primary_name',
+            $2,
+            'ens',
+            '{"ethereum": {"block_number": 1}}'::jsonb,
+            '{"ens_v1": 1}'::jsonb,
+            '{"verified_primary_name": {"status": "success"}}'::jsonb,
+            '{}'::jsonb,
+            now()
+        )
+        "#,
+    )
+    .bind(execution_trace_id)
+    .bind(&request_key)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO execution_cache_outcomes (
+            execution_cache_key,
+            request_key,
+            requested_chain_positions,
+            manifest_versions,
+            topology_version_boundary,
+            record_version_boundary,
+            execution_trace_id,
+            request_type,
+            namespace,
+            outcome_payload,
+            finished_at
+        )
+        VALUES (
+            'legacy-fence-outcome',
+            $1,
+            '[{"chain_id": "ethereum-mainnet"}]'::jsonb,
+            '[{"source_family": "ens_v1_registry_l1", "manifest_version": 1}]'::jsonb,
+            '{"boundary_kind": "selected_checkpoint"}'::jsonb,
+            '{"boundary_kind": "selected_checkpoint"}'::jsonb,
+            $2,
+            'verified_primary_name',
+            'ens',
+            '{"verified_primary_name": {"status": "success"}}'::jsonb,
+            now()
+        )
+        "#,
+    )
+    .bind(&request_key)
+    .bind(execution_trace_id)
+    .execute(database.pool())
+    .await?;
+    let mut fence = database.pool().begin().await?;
+    lock_primary_name_tuple_in_transaction(&mut fence, fenced_address, "ens", "60").await?;
+
+    timeout(
+        Duration::from_millis(250),
+        insert_legacy_projection_row(database.pool(), unrelated_address),
+    )
+    .await
+    .context("an unrelated legacy projection write must not wait for the tuple fence")??;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM execution_cache_outcomes WHERE execution_cache_key = 'legacy-fence-outcome'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "a distinct-tuple write must not invalidate the fenced tuple"
+    );
+
+    let error = timeout(
+        Duration::from_millis(250),
+        insert_legacy_projection_row(database.pool(), fenced_address),
+    )
+    .await
+    .context("a conflicting legacy projection write must fail without waiting")?
+    .expect_err("a legacy writer must not cross a new API tuple fence");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::code)
+            .as_deref(),
+        Some("40001")
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM execution_cache_outcomes WHERE execution_cache_key = 'legacy-fence-outcome'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "the rejected legacy write must roll back its invalidation"
+    );
+
+    fence.commit().await?;
+    insert_legacy_projection_row(database.pool(), fenced_address).await?;
+    assert!(
+        load_primary_name_current(database.pool(), fenced_address, "ens", "60")
+            .await?
+            .is_some()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM execution_cache_outcomes WHERE execution_cache_key = 'legacy-fence-outcome'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "the retried legacy writer must invalidate after acquiring the tuple fence"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_full_replacement_aborts_instead_of_crossing_or_deadlocking_a_tuple_fence()
+-> Result<()> {
+    async fn run_legacy_replacement(
+        pool: &PgPool,
+        address: &str,
+    ) -> std::result::Result<(), sqlx::Error> {
+        let mut transaction = pool.begin().await?;
+        for trigger in [
+            "primary_names_current_identity_feed_after_claim_update",
+            "primary_names_current_identity_feed_after_insert_delete",
+        ] {
+            sqlx::query(&format!(
+                "ALTER TABLE primary_names_current DISABLE TRIGGER {trigger}"
+            ))
+            .execute(&mut *transaction)
+            .await?;
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO primary_names_current (
+                address,
+                coin_type,
+                namespace,
+                claim_status,
+                raw_claim_name,
+                normalized_claim_name,
+                claim_name_is_normalized,
+                claim_provenance
+            )
+            VALUES ($1, '60', 'ens', 'success', NULL, 'legacy.eth', TRUE, '{}'::jsonb)
+            "#,
+        )
+        .bind(address)
+        .execute(&mut *transaction)
+        .await?;
+        for trigger in [
+            "primary_names_current_identity_feed_after_claim_update",
+            "primary_names_current_identity_feed_after_insert_delete",
+        ] {
+            sqlx::query(&format!(
+                "ALTER TABLE primary_names_current ENABLE TRIGGER {trigger}"
+            ))
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await
+    }
+
+    let database = TestDatabase::new().await?;
+    let address = "0x0000000000000000000000000000000000000abc";
+    let mut fence = database.pool().begin().await?;
+    lock_primary_name_tuple_in_transaction(&mut fence, address, "ens", "60").await?;
+
+    let error = timeout(
+        Duration::from_millis(250),
+        run_legacy_replacement(database.pool(), address),
+    )
+    .await
+    .context("a legacy full replacement must fail without deadlocking")?
+    .expect_err("a legacy full replacement must not cross a tuple fence");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::code)
+            .as_deref(),
+        Some("40001")
+    );
+
+    fence.commit().await?;
+    run_legacy_replacement(database.pool(), address).await?;
+    assert!(
+        load_primary_name_current(database.pool(), address, "ens", "60")
+            .await?
+            .is_some()
+    );
+
+    database.cleanup().await
+}
+
+#[test]
+fn primary_name_route_retention_indexes_use_concurrent_migrations() {
+    for version in [20260722120100, 20260722120200] {
+        let migration = crate::MIGRATOR
+            .iter()
+            .find(|migration| migration.version == version)
+            .expect("primary-name route retention index migration is registered");
+        assert!(
+            migration.no_tx,
+            "retention index migration {version} must not hold a DDL transaction"
+        );
+        assert!(
+            migration.sql.contains("CREATE INDEX CONCURRENTLY"),
+            "retention index migration {version} must not block execution-table writes"
+        );
+    }
+}
+
+#[test]
+fn primary_name_request_lookup_index_precedes_compatibility_triggers() {
+    let lookup_index = crate::MIGRATOR
+        .iter()
+        .find(|migration| {
+            migration
+                .sql
+                .contains("CREATE INDEX CONCURRENTLY IF NOT EXISTS execution_cache_outcomes_request_lookup_idx")
+        })
+        .expect("primary-name request lookup index migration is registered");
+    let compatibility_triggers = crate::MIGRATOR
+        .iter()
+        .find(|migration| migration.version == 20260722120000)
+        .expect("primary-name compatibility trigger migration is registered");
+
+    assert!(
+        lookup_index.version < compatibility_triggers.version,
+        "the request lookup index must be installed before compatibility triggers can issue tuple invalidations"
+    );
 }
 
 #[tokio::test]

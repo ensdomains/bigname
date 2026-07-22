@@ -399,8 +399,10 @@ Rules:
   that path use the existing in-band execution-failure behavior; they are not
   whole-request `408` responses. Other provider transport failures during
   verified record resolution surface as `stale` and do not cache an execution
-  outcome. The primary-name route keeps its separately documented in-band
-  provider-failure and verified-mode persistence behavior.
+  outcome. The ENS/60 primary-name fallback uses the same transport split:
+  configured provider timeouts remain persisted in-band failures, while DNS,
+  TLS, connection-reset, and other non-timeout transport failures return
+  whole-request `409 stale` before persistence.
 - Every route has a whole-request deadline. `/healthz`, `/v1/status`, and
   `/v2/status` retain that deadline as their final backstop. `/healthz` bypasses
   the process-wide concurrency limiter and load shedding, uses a reserved

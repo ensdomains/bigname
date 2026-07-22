@@ -33,6 +33,24 @@ async fn normalized_event_index_definitions(pool: &PgPool) -> Result<BTreeMap<St
     Ok(definitions)
 }
 
+async fn required_runtime_index_definitions(pool: &PgPool) -> Result<BTreeMap<String, String>> {
+    let mut definitions = BTreeMap::new();
+    for index in REQUIRED_RUNTIME_INDEXES {
+        let definition = sqlx::query_scalar::<_, String>("SELECT pg_get_indexdef(to_regclass($1))")
+            .bind(index.name)
+            .fetch_one(pool)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to inspect migrated required runtime index definition {}",
+                    index.name
+                )
+            })?;
+        definitions.insert(index.name.to_owned(), definition);
+    }
+    Ok(definitions)
+}
+
 #[test]
 fn migration_error_has_priority_over_guard_release_error() {
     let error = prioritize_operation_error::<()>(
@@ -102,13 +120,19 @@ async fn runtime_rebuild_matches_all_migrated_deferred_index_definitions() -> Re
 }
 
 #[tokio::test]
-async fn migrate_repairs_unready_watch_lookup_indexes() -> Result<()> {
+async fn migrate_repairs_missing_and_unready_required_runtime_indexes() -> Result<()> {
     let database = test_database().await?;
-    for index in [
-        ACTIVE_CONTRACT_ADDRESS_INDEX,
-        HISTORICAL_CONTRACT_ADDRESS_INDEX,
-        NON_ORPHANED_RAW_CODE_LOWER_ADDRESS_INDEX,
-    ] {
+    let migrated_definitions = required_runtime_index_definitions(database.pool()).await?;
+    sqlx::query(&format!(
+        "DROP INDEX {}",
+        EXECUTION_CACHE_OUTCOMES_REQUEST_LOOKUP_INDEX
+    ))
+    .execute(database.pool())
+    .await?;
+    for index in REQUIRED_RUNTIME_INDEXES
+        .iter()
+        .filter(|index| index.name != EXECUTION_CACHE_OUTCOMES_REQUEST_LOOKUP_INDEX)
+    {
         sqlx::query(
             r#"
             UPDATE pg_index
@@ -117,76 +141,37 @@ async fn migrate_repairs_unready_watch_lookup_indexes() -> Result<()> {
             WHERE indexrelid = to_regclass($1)
             "#,
         )
-        .bind(index)
+        .bind(index.name)
         .execute(database.pool())
         .await?;
     }
-    let ready = |index: &'static str, table: &'static str| {
-        let pool = database.pool();
-        async move {
-            sqlx::query_scalar::<_, bool>(
-                r#"
-                SELECT COALESCE((
-                    SELECT indisvalid AND indisready
-                    FROM pg_index
-                    WHERE indexrelid = to_regclass($1)
-                      AND indrelid = to_regclass($2)
-                ), FALSE)
-                "#,
-            )
-            .bind(index)
-            .bind(table)
-            .fetch_one(pool)
-            .await
+    {
+        let mut connection = database.pool().acquire().await?;
+        for index in REQUIRED_RUNTIME_INDEXES {
+            assert!(
+                !required_index_ready(&mut connection, index.name, index.table).await?,
+                "test setup must make required index {} missing or unready",
+                index.name
+            );
         }
-    };
-    assert!(
-        !ready(
-            ACTIVE_CONTRACT_ADDRESS_INDEX,
-            "public.contract_instance_addresses"
-        )
-        .await?
-    );
-    assert!(
-        !ready(
-            HISTORICAL_CONTRACT_ADDRESS_INDEX,
-            "public.contract_instance_addresses"
-        )
-        .await?
-    );
-    assert!(
-        !ready(
-            NON_ORPHANED_RAW_CODE_LOWER_ADDRESS_INDEX,
-            "public.raw_code_hashes"
-        )
-        .await?
-    );
+    }
 
     crate::migrate(database.pool()).await?;
 
-    assert!(
-        ready(
-            ACTIVE_CONTRACT_ADDRESS_INDEX,
-            "public.contract_instance_addresses"
-        )
-        .await?,
-        "migrate must repair the unready active index"
-    );
-    assert!(
-        ready(
-            HISTORICAL_CONTRACT_ADDRESS_INDEX,
-            "public.contract_instance_addresses"
-        )
-        .await?,
-        "migrate must repair the unready historical index"
-    );
-    assert!(
-        ready(
-            NON_ORPHANED_RAW_CODE_LOWER_ADDRESS_INDEX,
-            "public.raw_code_hashes"
-        )
-        .await?,
-        "migrate must repair the unready raw-code baseline index"
+    {
+        let mut connection = database.pool().acquire().await?;
+        for index in REQUIRED_RUNTIME_INDEXES {
+            assert!(
+                required_index_ready(&mut connection, index.name, index.table).await?,
+                "migrate must repair required runtime index {}",
+                index.name
+            );
+        }
+    }
+    assert_eq!(
+        required_runtime_index_definitions(database.pool()).await?,
+        migrated_definitions,
+        "runtime recovery descriptors must recreate the checked-in migration definitions"
     );
     database.cleanup().await?;
     Ok(())
@@ -253,6 +238,44 @@ async fn watched_address_lookup_indexes_cover_active_and_historical_rows() -> Re
     assert!(
         raw_code_plan.contains(NON_ORPHANED_RAW_CODE_LOWER_ADDRESS_INDEX),
         "raw-code baseline lookup must use its expression index:\n{raw_code_plan}"
+    );
+
+    transaction.rollback().await?;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn compat_trigger_tuple_invalidation_uses_request_lookup_index() -> Result<()> {
+    let database = test_database().await?;
+    let mut transaction = database.pool().begin().await?;
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("SET LOCAL enable_bitmapscan = off")
+        .execute(&mut *transaction)
+        .await?;
+
+    let plan = sqlx::query_scalar::<_, String>(
+        r#"
+        EXPLAIN (FORMAT TEXT)
+        DELETE FROM execution_cache_outcomes AS outcome
+        WHERE outcome.request_type = 'verified_primary_name'
+          AND outcome.namespace = $1
+          AND outcome.request_key = $2
+        "#,
+    )
+    .bind("ens")
+    .bind("ens:0x0000000000000000000000000000000000000001:60")
+    .fetch_all(&mut *transaction)
+    .await?
+    .join("\n");
+    eprintln!("compat trigger tuple invalidation plan:\n{plan}");
+    assert!(
+        plan.contains(&format!(
+            "Index Scan using {EXECUTION_CACHE_OUTCOMES_REQUEST_LOOKUP_INDEX}"
+        )),
+        "compat trigger tuple invalidation must use its request lookup index:\n{plan}"
     );
 
     transaction.rollback().await?;

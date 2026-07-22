@@ -84,6 +84,26 @@ interval, cache TTL, and ingestion block/time limits with the
 `BIGNAME_API_STATUS_PROVIDER_*` and `BIGNAME_API_STATUS_MAX_*` variables in
 `.env.server.example`; the default maximum block lag is 30.
 
+The primary-name hardening migration is safe in that ordering. Database triggers
+make a preceding-release projection writer join the new per-tuple fence and
+repeat invalidation after a changed write; an overlap that would reverse the
+old writer's table/advisory lock order aborts that projection transaction with
+retryable SQLSTATE `40001`. The two retention indexes are separate
+no-transaction `CREATE INDEX CONCURRENTLY` migrations, as is the tuple-
+invalidation lookup index, so their builds do not hold execution-table writes
+behind a transactional `SHARE` lock.
+
+The two compatibility triggers are temporary rolling-upgrade support. Once the
+fleet is fully upgraded and no writer from before the #233 primary-name
+hardening release can run, including from a rollback image,
+`primary_names_current_tuple_fence_before_write` and
+`primary_names_current_cache_invalidation_after_write` can be removed. The
+follow-up release must first remove those trigger names from the full-rebuild
+writer's disable/enable list. During that deployment, stop every worker that
+still references the compatibility triggers, apply a checked-in migration that
+drops both triggers, and then start only the upgraded workers. Do not remove the
+triggers manually or add the code change or drop migration to this rollout.
+
 ### Resolver-profile replay after an upgrade or compaction
 
 The raw-log retention migration marks every pre-existing chain as generation
@@ -219,13 +239,26 @@ latest stored checkpoint and, in verified modes, validate the claimed name's
 `addr:60` value through the ENS Universal Resolver at that same block hash. A
 zero resolver, empty name, wrong namespace, unnormalizable reverse name, or
 empty forward `addr` is a supported fallback miss. Missing provider
-configuration or reverse-provider failure returns the route's execution-failure
-class instead of being reported as `not_found`. In verified modes, the API
+configuration, a completed reverse-provider JSON-RPC failure, a malformed
+response, or a configured provider timeout returns the route's in-band
+execution-failure class instead of being reported as `not_found`. In verified modes, the API
 persists the reverse result, normalization gate, optional forward call, and
 outcome before responding; an identical request at the same selected checkpoint
 can reuse that trace without another provider call. Forward-verification
-provider failure after a reverse claim likewise returns
-`verified_primary_name.status=execution_failed`.
+completed JSON-RPC failure, malformed response, or configured timeout after a
+reverse claim likewise returns `verified_primary_name.status=execution_failed`.
+A configured RPC deadline that
+expires remains a persisted in-band execution failure; DNS, TLS, connection
+reset, and other non-timeout transport failures abort before persistence so the
+next request retries. On a freshly migrated database with no stored Ethereum
+checkpoint, an eligible tuple-miss request returns `409 stale` until indexing
+publishes its first checkpoint.
+
+The worker bounds route-local primary-name execution storage with
+`BIGNAME_WORKER_PRIMARY_NAME_ROUTE_CACHE_RETENTION_CHECKPOINTS` (default
+`50000`) and
+`BIGNAME_WORKER_PRIMARY_NAME_ROUTE_CACHE_PRUNE_BATCH_SIZE` (default `5000`).
+See [`storage.md`](storage.md#execution-storage) for the exact cleanup scope.
 
 ### API bounds for public undrain
 

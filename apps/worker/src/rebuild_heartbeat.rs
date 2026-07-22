@@ -58,6 +58,33 @@ impl LoopHeartbeat {
         result
     }
 
+    async fn run_phases<T, Fut>(
+        &mut self,
+        pool: &PgPool,
+        phases: &[&'static str],
+        future: Fut,
+    ) -> Result<T>
+    where
+        Fut: Future<Output = Result<T>>,
+    {
+        let mut started_phases = Vec::with_capacity(phases.len());
+        for &phase in phases {
+            if let Err(error) = self.begin_phase(pool, phase).await {
+                for &started_phase in started_phases.iter().rev() {
+                    self.finish_phase(pool, started_phase).await;
+                }
+                return Err(error);
+            }
+            started_phases.push(phase);
+        }
+
+        let result = future.await;
+        for &phase in started_phases.iter().rev() {
+            self.finish_phase(pool, phase).await;
+        }
+        result
+    }
+
     async fn begin_phase(&mut self, pool: &PgPool, phase: &'static str) -> Result<()> {
         bigname_storage::begin_service_loop_phase(
             pool,
@@ -118,6 +145,22 @@ where
 {
     if let Some(loop_heartbeat) = loop_heartbeat.as_deref_mut() {
         loop_heartbeat.run_phase(pool, phase, future).await
+    } else {
+        future.await
+    }
+}
+
+pub(crate) async fn run_rebuild_phases<T, Fut>(
+    pool: &PgPool,
+    loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
+    phases: &[&'static str],
+    future: Fut,
+) -> Result<T>
+where
+    Fut: Future<Output = Result<T>>,
+{
+    if let Some(loop_heartbeat) = loop_heartbeat.as_deref_mut() {
+        loop_heartbeat.run_phases(pool, phases, future).await
     } else {
         future.await
     }

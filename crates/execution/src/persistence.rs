@@ -1,7 +1,8 @@
 use anyhow::{Context, Result, bail};
 use bigname_storage::{
     ExecutionCacheKey, ExecutionOutcome, ExecutionTrace, RawCallSnapshot, load_execution_outcome,
-    load_execution_trace, load_primary_name_current_snapshot,
+    load_execution_outcome_for_update_in_transaction, load_execution_trace,
+    load_execution_trace_from_connection, load_primary_name_current_snapshot,
     upsert_execution_outcome_in_transaction, upsert_execution_trace_in_transaction,
     upsert_raw_call_snapshots_in_transaction,
 };
@@ -303,6 +304,41 @@ pub async fn persist_ens_verified_primary_name(
     }
     #[cfg(test)]
     test_hooks::run_verified_primary_post_anchor_check_hook(request.trace.execution_trace_id);
+
+    if validated.verified_primary_name.status
+        == crate::primary_name::VerifiedPrimaryNameStatus::ExecutionFailed
+        && let Some(existing_outcome) = load_execution_outcome_for_update_in_transaction(
+            &mut transaction,
+            &request.outcome.cache_key,
+        )
+        .await?
+    {
+        let existing_trace = load_execution_trace_from_connection(
+            &mut transaction,
+            existing_outcome.execution_trace_id,
+        )
+        .await?
+        .with_context(|| {
+            format!(
+                "persisted {context} success guard is missing execution trace {}",
+                existing_outcome.execution_trace_id
+            )
+        })?;
+        let existing =
+            validate_verified_primary_trace_and_outcome(&existing_trace, &existing_outcome)?;
+        if existing.verified_primary_name.status
+            == crate::primary_name::VerifiedPrimaryNameStatus::Success
+        {
+            transaction
+                .commit()
+                .await
+                .with_context(|| format!("failed to commit {context} success preservation"))?;
+            return Ok(PersistedVerifiedPrimaryNameIdentity {
+                execution_trace_id: existing_outcome.execution_trace_id,
+                cache_key: existing_outcome.cache_key,
+            });
+        }
+    }
 
     // Validation requires request_metadata.cache_identity to mirror the outcome cache key; the
     // trace write carries that full identity for API readback.

@@ -15,6 +15,12 @@ use uuid::Uuid;
 const VERIFIED_RESOLUTION_REQUEST_TYPE: &str = "verified_resolution";
 const VERIFIED_PRIMARY_NAME_REQUEST_TYPE: &str =
     bigname_storage::VERIFIED_PRIMARY_NAME_REQUEST_TYPE;
+const VERIFIED_PRIMARY_NAME_CLAIM_CHANGE_DELETE_SQL: &str = r#"
+        DELETE FROM execution_cache_outcomes
+        WHERE request_type = $1
+          AND namespace = $2
+          AND request_key = $3
+        "#;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedResolutionManifestInvalidation {
@@ -159,50 +165,13 @@ pub async fn invalidate_verified_primary_name_record_boundary(
     .await
 }
 
-pub async fn invalidate_verified_primary_name_claim_change(
-    pool: &PgPool,
-    namespace: &str,
-    request_key: &str,
-) -> Result<ExecutionOutcomeInvalidationSummary> {
-    validate_claim_change_scope(namespace, request_key)?;
-    let result = sqlx::query(
-        r#"
-        DELETE FROM execution_cache_outcomes
-        WHERE request_type = $1
-          AND namespace = $2
-          AND request_key = $3
-        "#,
-    )
-    .bind(VERIFIED_PRIMARY_NAME_REQUEST_TYPE)
-    .bind(namespace)
-    .bind(request_key)
-    .execute(pool)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to invalidate verified primary-name outcome for namespace {namespace} request_key {request_key}"
-        )
-    })?;
-
-    Ok(ExecutionOutcomeInvalidationSummary {
-        deleted_outcome_count: result.rows_affected(),
-    })
-}
-
 pub async fn invalidate_verified_primary_name_claim_change_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     namespace: &str,
     request_key: &str,
 ) -> Result<ExecutionOutcomeInvalidationSummary> {
     validate_claim_change_scope(namespace, request_key)?;
-    let result = sqlx::query(
-        r#"
-        DELETE FROM execution_cache_outcomes
-        WHERE request_type = $1
-          AND namespace = $2
-          AND request_key = $3
-        "#,
-    )
+    let result = sqlx::query(VERIFIED_PRIMARY_NAME_CLAIM_CHANGE_DELETE_SQL)
     .bind(VERIFIED_PRIMARY_NAME_REQUEST_TYPE)
     .bind(namespace)
     .bind(request_key)

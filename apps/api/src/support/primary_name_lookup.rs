@@ -2,6 +2,12 @@ use super::*;
 
 const PERSISTED_PRIMARY_NAME_VERIFIED_READBACK_SCAN_LIMIT: i64 = 16;
 
+#[cfg(test)]
+#[path = "primary_name_lookup/test_hooks.rs"]
+pub(crate) mod test_hooks;
+#[path = "primary_name_lookup/trace_reference.rs"]
+mod trace_reference;
+
 pub(super) enum PrimaryNameVerifiedReadbackFence<'a> {
     ProjectedClaim,
     RouteLocalFallback(&'a SelectedSnapshot),
@@ -325,6 +331,9 @@ pub(super) async fn load_persisted_primary_name_verified_readback_from_connectio
             )));
         }
 
+        #[cfg(test)]
+        test_hooks::run(connection).await?;
+
         let trace = load_execution_trace_from_connection(connection, outcome.execution_trace_id)
             .await
             .map_err(|load_error| {
@@ -340,20 +349,14 @@ pub(super) async fn load_persisted_primary_name_verified_readback_from_connectio
                 ApiError::internal_error(format!(
                     "failed to load persisted verified primary-name trace for address {address}"
                 ))
-            })?
-            .ok_or_else(|| {
-                error!(
-                    service = "api",
-                    address = %address,
-                    namespace = %namespace,
-                    coin_type = %coin_type,
-                    execution_trace_id = %outcome.execution_trace_id,
-                    "persisted verified primary-name trace missing"
-                );
-                ApiError::internal_error(format!(
-                    "persisted verified primary-name trace missing for address {address}"
-                ))
             })?;
+        let Some(trace) = trace_reference::retain_trace_if_still_referenced(
+            connection, trace, &outcome, address, namespace, coin_type,
+        )
+        .await?
+        else {
+            continue;
+        };
 
         if !persisted_verified_primary_name_cache_identity_is_current(
             &trace, &outcome, address, namespace, coin_type,

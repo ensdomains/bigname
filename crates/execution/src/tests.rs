@@ -4946,6 +4946,28 @@ fn route_local_verified_primary_success_request() -> Result<PersistEnsVerifiedPr
     })
 }
 
+fn route_local_verified_primary_execution_failed_request()
+-> Result<PersistEnsVerifiedPrimaryNameRequest> {
+    build_on_demand_ens_verified_primary_name_request(BuildOnDemandEnsVerifiedPrimaryNameRequest {
+        normalized_address: "0x00000000000000000000000000000000000000af",
+        claim: &RouteLocalEnsPrimaryNameClaim::ExecutionFailed {
+            failure_reason: "resolver_call_failed".to_owned(),
+        },
+        verified_primary_name: json!({
+            "status": "execution_failed",
+            "failure_reason": "resolver_call_failed",
+        }),
+        block_number: 21_000_000,
+        block_hash: "0xabc123",
+        block_timestamp: "2024-06-01T00:00:17Z",
+        manifest_versions: manifest_versions(),
+        forward_call_attempted: false,
+        reverse_latency_ms: 7,
+        forward_latency_ms: None,
+        execution_evidence: &OnDemandEnsPrimaryNameExecutionEvidence::default(),
+    })
+}
+
 fn verified_primary_mismatch_request() -> PersistEnsVerifiedPrimaryNameRequest {
     verified_primary_request(
         Uuid::from_u128(0x0e7ec7ace00000000000000000000022),
@@ -5661,6 +5683,39 @@ async fn persists_route_local_verified_primary_without_projection_anchor() -> Re
 }
 
 #[tokio::test]
+async fn route_local_verified_primary_failure_does_not_overwrite_identical_success() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let success = route_local_verified_primary_success_request()?;
+    let failure = route_local_verified_primary_execution_failed_request()?;
+    assert_eq!(failure.outcome.cache_key, success.outcome.cache_key);
+
+    let persisted_success = persist_ens_verified_primary_name(database.pool(), &success).await?;
+    let persisted_failure = persist_ens_verified_primary_name(database.pool(), &failure).await?;
+    assert_eq!(persisted_failure, persisted_success);
+
+    let loaded = load_execution_outcome(database.pool(), &success.outcome.cache_key)
+        .await?
+        .expect("successful route-local outcome must remain cached");
+    assert_eq!(loaded.execution_trace_id, success.trace.execution_trace_id);
+    assert_eq!(
+        loaded
+            .outcome_payload
+            .as_ref()
+            .and_then(|payload| payload.pointer("/verified_primary_name/status"))
+            .and_then(Value::as_str),
+        Some("success")
+    );
+    assert!(
+        load_execution_trace(database.pool(), failure.trace.execution_trace_id)
+            .await?
+            .is_none(),
+        "discarded failure must not leave an unreferenced trace"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn rejects_route_local_verified_primary_when_projection_anchor_exists() -> Result<()> {
     let database = TestDatabase::new().await?;
     let request = route_local_verified_primary_success_request()?;
@@ -5751,6 +5806,27 @@ async fn serializes_route_local_missing_anchor_fence_with_projection_insert() ->
     .await
     .context("route-local anchor hook wait task panicked")??;
 
+    let unrelated_pool = database.pool().clone();
+    let mut unrelated_insert_task = tokio::spawn(async move {
+        upsert_primary_name_current_snapshots(
+            &unrelated_pool,
+            &[PrimaryNameCurrentSnapshot {
+                row: primary_name_anchor_row_for_namespace(
+                    ENS_NAMESPACE,
+                    "0x00000000000000000000000000000000000000b0",
+                    "60",
+                    PrimaryNameClaimStatus::Success,
+                ),
+                normalized_claim_name: Some("other.eth".to_owned()),
+                claim_name_is_normalized: true,
+            }],
+        )
+        .await
+    });
+    let early_unrelated_insert =
+        timeout(Duration::from_millis(250), &mut unrelated_insert_task).await;
+    let unrelated_insert_was_not_blocked = early_unrelated_insert.is_ok();
+
     let insert_pool = database.pool().clone();
     let mut insert_task = tokio::spawn(async move {
         upsert_primary_name_current_snapshots(
@@ -5784,6 +5860,15 @@ async fn serializes_route_local_missing_anchor_fence_with_projection_insert() ->
         .await
         .context("route-local persistence task panicked")?;
     persist_result?;
+    let unrelated_insert = match early_unrelated_insert {
+        Ok(insert_result) => {
+            insert_result.context("unrelated projection insert task panicked")??
+        }
+        Err(_) => unrelated_insert_task
+            .await
+            .context("blocked unrelated projection insert task panicked")??,
+    };
+    assert_eq!(unrelated_insert.len(), 1);
     match early_insert {
         Ok(insert_result) => insert_result.context("projection insert task panicked")??,
         Err(_) => insert_task
@@ -5791,6 +5876,10 @@ async fn serializes_route_local_missing_anchor_fence_with_projection_insert() ->
             .context("blocked projection insert task panicked")??,
     };
 
+    assert!(
+        unrelated_insert_was_not_blocked,
+        "an unrelated projection tuple must not wait for the fallback fence"
+    );
     assert!(
         insert_was_blocked,
         "projection insert must wait while route-local persistence holds its missing-anchor fence"
