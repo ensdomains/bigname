@@ -1,9 +1,13 @@
+use std::future::Future;
+
 use anyhow::Result;
 use tokio::time::Duration;
 use tracing::info;
 
 #[path = "startup_heartbeat.rs"]
 pub(crate) mod startup_heartbeat;
+#[path = "run/subtask_supervision.rs"]
+mod subtask_supervision;
 
 use crate::{
     backfill::BackfillAdapterSyncMode,
@@ -29,6 +33,8 @@ use crate::{
 };
 
 use startup_heartbeat::StartupHeartbeat;
+
+const NORMALIZED_REPLAY_CATCHUP_SUBTASK: &str = "normalized_replay_catchup";
 
 pub(crate) async fn run(args: RunArgs) -> Result<()> {
     let heartbeat_instance_id =
@@ -153,6 +159,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
     {
         drain_resolver_profile_input_changes(&pool).await?;
     }
+    let (subtasks, subtask_monitor) = subtask_supervision::channel("indexer");
     if run_mode.normalized_replay_catchup_enabled {
         let catchup_config = NormalizedReplayCatchupConfig::new(
             deployment_profile.clone(),
@@ -167,22 +174,15 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         .with_defer_projection_indexes(args.normalized_replay_defer_projection_indexes);
         let catchup_pool = pool.clone();
         let catchup_provider_registry = provider_registry.clone();
-        tokio::spawn(async move {
-            if let Err(error) = run_normalized_replay_catchup(
+        spawn_normalized_replay_catchup(
+            &subtasks,
+            run_normalized_replay_catchup(
                 catchup_pool,
                 catchup_config,
                 catchup_provider_registry,
                 header_audit_mode,
-            )
-            .await
-            {
-                tracing::warn!(
-                    service = "indexer",
-                    error = ?error,
-                    "automatic normalized-event replay catch-up task exited"
-                );
-            }
-        });
+            ),
+        )?;
     }
 
     let watched_chain_plan_state =
@@ -285,33 +285,44 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         "indexer booted"
     );
 
-    run_poll_loop(
-        &pool,
-        &mut startup_heartbeat,
-        args.manifests_root,
-        manifest_runtime_state,
-        intake_chain_tasks,
-        watched_plan_admission_epochs,
-        &provider_registry,
-        args.poll_interval_secs,
-        args.startup_discovery_page_logs,
-        run_mode.live_watch_scope,
-        run_mode.broad_runtime_refresh_enabled,
-        run_mode.live_poll_adapter_sync_enabled,
-        run_mode.live_poll_adapter_sync_after_normalized_replay_catchup,
-        run_mode.broad_runtime_refresh_enabled,
-        run_mode.discovery_refresh_enabled,
-        run_mode.resolver_profile_convergence_enabled,
-        run_mode.broad_runtime_refresh_enabled,
-        header_audit_mode,
-        args.event_silent_reverse_resolver_addresses,
-        bootstrap_backfill_outcome.latched_finalized_heads,
-        // Process-lifetime verified-coverage frontier: deep-gap promotion
-        // verifies fact coverage in large chunks once, then every poll cycle
-        // is an O(1) in-memory check.
-        &crate::reconciliation::ChainCoverageFrontiers::default(),
-    )
-    .await
+    subtask_monitor
+        .run(run_poll_loop(
+            &pool,
+            &mut startup_heartbeat,
+            args.manifests_root,
+            manifest_runtime_state,
+            intake_chain_tasks,
+            watched_plan_admission_epochs,
+            &provider_registry,
+            args.poll_interval_secs,
+            args.startup_discovery_page_logs,
+            run_mode.live_watch_scope,
+            run_mode.broad_runtime_refresh_enabled,
+            run_mode.live_poll_adapter_sync_enabled,
+            run_mode.live_poll_adapter_sync_after_normalized_replay_catchup,
+            run_mode.broad_runtime_refresh_enabled,
+            run_mode.discovery_refresh_enabled,
+            run_mode.resolver_profile_convergence_enabled,
+            run_mode.broad_runtime_refresh_enabled,
+            header_audit_mode,
+            args.event_silent_reverse_resolver_addresses,
+            bootstrap_backfill_outcome.latched_finalized_heads,
+            // Process-lifetime verified-coverage frontier: deep-gap promotion
+            // verifies fact coverage in large chunks once, then every poll cycle
+            // is an O(1) in-memory check.
+            &crate::reconciliation::ChainCoverageFrontiers::default(),
+        ))
+        .await
+}
+
+fn spawn_normalized_replay_catchup<Subtask>(
+    subtasks: &subtask_supervision::SubtaskSpawner,
+    subtask: Subtask,
+) -> Result<()>
+where
+    Subtask: Future<Output = Result<()>> + Send + 'static,
+{
+    subtasks.spawn(NORMALIZED_REPLAY_CATCHUP_SUBTASK, subtask)
 }
 
 async fn sync_post_bootstrap_adapter_state_with_heartbeat(
@@ -475,3 +486,7 @@ mod tests {
         database.cleanup().await
     }
 }
+
+#[cfg(test)]
+#[path = "run/subtask_tests.rs"]
+mod subtask_tests;

@@ -8,18 +8,19 @@ use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
 use tracing::{info, warn};
 
-use super::{SharedLoopHeartbeat, primary_hydration};
+use super::{SharedLoopHeartbeat, primary_hydration, subtask_supervision::SubtaskSpawner};
 use crate::{primary_name, projection_apply};
 
 pub(super) fn spawn(
+    subtasks: &SubtaskSpawner,
     pool: PgPool,
     loop_heartbeat: SharedLoopHeartbeat,
     poll_interval_secs: u64,
     config: primary_name::PrimaryNameLegacyReverseHydrationConfig,
     projection_apply_generation: Arc<AtomicU64>,
     projection_apply_hydration_lock: Arc<Mutex<()>>,
-) {
-    tokio::spawn(async move {
+) -> anyhow::Result<()> {
+    subtasks.spawn("primary_name_legacy_reverse_hydration", async move {
         run(
             pool,
             loop_heartbeat,
@@ -29,7 +30,8 @@ pub(super) fn spawn(
             projection_apply_hydration_lock,
         )
         .await;
-    });
+        Ok(())
+    })
 }
 
 async fn run(
