@@ -88,7 +88,7 @@ async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Serve(args) => {
             init_tracing("bigname-api");
-            serve(args).await
+            serve(*args).await
         }
         Command::PrintOpenapi => {
             print!("{}", render_openapi_document());

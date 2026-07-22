@@ -19,7 +19,7 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Command {
-    Serve(ServeArgs),
+    Serve(Box<ServeArgs>),
     PrintOpenapi,
 }
 
