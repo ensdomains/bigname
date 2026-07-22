@@ -89,17 +89,23 @@ async fn comparison_distinguishes_probe_states_and_applies_both_lag_thresholds()
         StatusReadiness::Degraded
     );
 
+    let unconfigured = freshness
+        .compare(
+            &ChainRpcUrls::default(),
+            "ethereum-mainnet",
+            Some(100),
+            None,
+        )
+        .await;
+    assert_eq!(unconfigured.status, NetworkHeadStatus::Unconfigured);
     assert_eq!(
-        freshness
-            .compare(
-                &ChainRpcUrls::default(),
-                "ethereum-mainnet",
-                Some(100),
-                None
-            )
-            .await
-            .status,
-        NetworkHeadStatus::Unconfigured
+        status_readiness(Some(100), Some(100), Some(0), &unconfigured),
+        StatusReadiness::Degraded
+    );
+    assert_eq!(
+        status_readiness(Some(100), Some(99), Some(1), &unconfigured),
+        StatusReadiness::Stale,
+        "known projection lag must not be masked by an unconfigured provider"
     );
     Ok(())
 }

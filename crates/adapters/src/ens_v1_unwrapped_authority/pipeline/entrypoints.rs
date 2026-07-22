@@ -1,6 +1,7 @@
 use super::*;
 use crate::checkpoint_context::{
     AdapterCheckpointContext, ReplayAdapterCheckpointContext, StartupAdapterCheckpointContext,
+    StartupAdapterProgress,
 };
 
 pub async fn sync_ens_v1_unwrapped_authority(
@@ -12,6 +13,7 @@ pub async fn sync_ens_v1_unwrapped_authority(
         chain,
         false,
         &[],
+        None,
         None,
         None,
         None,
@@ -32,6 +34,7 @@ pub async fn sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limi
         chain,
         &AdapterCheckpointContext::for_replay(checkpoint),
         max_raw_logs_per_page,
+        None,
     )
     .await
 }
@@ -48,6 +51,25 @@ pub async fn sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_lim
         chain,
         &checkpoint,
         max_raw_logs_per_page,
+        None,
+    )
+    .await
+}
+
+pub async fn sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit_and_progress(
+    pool: &PgPool,
+    chain: &str,
+    checkpoint: &StartupAdapterCheckpointContext,
+    max_raw_logs_per_page: usize,
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<EnsV1UnwrappedAuthoritySyncSummary> {
+    let checkpoint = checkpoint.adapter_context(pool, chain).await?;
+    sync_ens_v1_unwrapped_authority_with_checkpoint_context(
+        pool,
+        chain,
+        &checkpoint,
+        max_raw_logs_per_page,
+        Some(progress),
     )
     .await
 }
@@ -57,6 +79,7 @@ async fn sync_ens_v1_unwrapped_authority_with_checkpoint_context(
     chain: &str,
     checkpoint: &AdapterCheckpointContext,
     max_raw_logs_per_page: usize,
+    startup_progress: Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<EnsV1UnwrappedAuthoritySyncSummary> {
     let raw_log_guard = acquire_raw_log_staging_read_guard(pool, chain).await?;
     let summary = sync_ens_v1_unwrapped_authority_with_scope(
@@ -69,6 +92,7 @@ async fn sync_ens_v1_unwrapped_authority_with_checkpoint_context(
         Some(checkpoint),
         Some(max_raw_logs_per_page),
         None,
+        startup_progress,
     )
     .await?;
     raw_log_guard.release().await?;
@@ -86,6 +110,7 @@ impl EnsV1UnwrappedAuthoritySyncSummary {
             chain,
             true,
             block_hashes,
+            None,
             None,
             None,
             None,
@@ -111,6 +136,7 @@ impl EnsV1UnwrappedAuthoritySyncSummary {
             None,
             None,
             None,
+            None,
         )
         .await
     }
@@ -129,6 +155,7 @@ impl EnsV1UnwrappedAuthoritySyncSummary {
             block_hashes,
             Some(transaction_hashes),
             Some(source_scope),
+            None,
             None,
             None,
             None,

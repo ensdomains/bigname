@@ -630,7 +630,11 @@ round trips during long historical bootstrap, while also increasing the amount
 of range work retried after a failed chunk. During automatic startup only, each
 configured chunk is executed as progress units of at most 32 blocks and the
 indexer heartbeat advances after each completed unit; manual backfills retain
-the configured chunk as their execution unit. Raw-only sparse backfill also caps
+the configured chunk as their execution unit. The startup adapter pass then
+advances that same heartbeat after checkpoint stream pages and bounded
+discovery, identity, binding, and normalized-event finalization batches, so a
+large materialization stays live without a free-running timer masking a stuck
+operation. Raw-only sparse backfill also caps
 each materialized push with
 `BIGNAME_INDEXER_HASH_PINNED_BACKFILL_MAX_LOGS_PER_PUSH` so dense log spans are
 split before transaction and receipt fetch/persist work. The older

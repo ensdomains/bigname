@@ -1,7 +1,7 @@
 use anyhow::Result;
 use sqlx::PgPool;
 
-use crate::primary_name;
+use crate::primary_name::{self, rebuild_heartbeat::LoopHeartbeat};
 
 pub(super) type LegacyReverseHydrationTriggerState =
     Option<Vec<primary_name::PrimaryNameLegacyReverseHydrationTrigger>>;
@@ -10,6 +10,7 @@ pub(super) async fn hydrate_after_bootstrap(
     pool: &PgPool,
     primary_hydration_config: Option<&primary_name::PrimaryNameLegacyReverseHydrationConfig>,
     last_trigger: &mut LegacyReverseHydrationTriggerState,
+    loop_heartbeat: &mut LoopHeartbeat,
 ) -> Result<primary_name::PrimaryNameLegacyReverseHydrationSummary> {
     let trigger_before = match primary_hydration_config {
         Some(config) => {
@@ -17,7 +18,7 @@ pub(super) async fn hydrate_after_bootstrap(
         }
         None => Vec::new(),
     };
-    let summary = hydrate(pool, primary_hydration_config).await?;
+    let summary = hydrate(pool, primary_hydration_config, loop_heartbeat).await?;
     if primary_hydration_config.is_some() && hydration_cause_consumed(&summary) {
         *last_trigger = Some(trigger_before);
     }
@@ -29,6 +30,7 @@ pub(super) async fn hydrate_if_projection_changed_or_triggered(
     primary_hydration_config: Option<&primary_name::PrimaryNameLegacyReverseHydrationConfig>,
     last_trigger: &mut LegacyReverseHydrationTriggerState,
     projection_apply_changed: &mut bool,
+    loop_heartbeat: &mut LoopHeartbeat,
 ) -> Result<primary_name::PrimaryNameLegacyReverseHydrationSummary> {
     let Some(config) = primary_hydration_config else {
         return Ok(primary_name::PrimaryNameLegacyReverseHydrationSummary::default());
@@ -39,7 +41,7 @@ pub(super) async fn hydrate_if_projection_changed_or_triggered(
         return Ok(primary_name::PrimaryNameLegacyReverseHydrationSummary::default());
     }
 
-    let summary = hydrate(pool, Some(config)).await?;
+    let summary = hydrate(pool, Some(config), loop_heartbeat).await?;
     if hydration_cause_consumed(&summary) {
         *last_trigger = Some(current_trigger);
         *projection_apply_changed = false;
@@ -50,12 +52,17 @@ pub(super) async fn hydrate_if_projection_changed_or_triggered(
 async fn hydrate(
     pool: &PgPool,
     primary_hydration_config: Option<&primary_name::PrimaryNameLegacyReverseHydrationConfig>,
+    loop_heartbeat: &mut LoopHeartbeat,
 ) -> Result<primary_name::PrimaryNameLegacyReverseHydrationSummary> {
     let Some(config) = primary_hydration_config else {
         return Ok(primary_name::PrimaryNameLegacyReverseHydrationSummary::default());
     };
-    let summary =
-        primary_name::hydrate_legacy_reverse_resolver_primary_names(pool, config.clone()).await?;
+    let summary = primary_name::hydrate_legacy_reverse_resolver_primary_names_with_heartbeat(
+        pool,
+        config.clone(),
+        loop_heartbeat,
+    )
+    .await?;
     if summary.candidate_tuple_count > 0 || summary.failed_lookup_count > 0 {
         primary_name::log_legacy_reverse_hydration_summary(&summary);
     }

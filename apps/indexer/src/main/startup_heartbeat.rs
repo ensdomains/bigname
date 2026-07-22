@@ -8,6 +8,29 @@ pub(crate) struct StartupHeartbeat {
     last_recorded_at: Instant,
 }
 
+pub(crate) struct StartupAdapterHeartbeat<'a> {
+    heartbeat: &'a mut StartupHeartbeat,
+    chain_ids: &'a [String],
+}
+
+impl<'a> StartupAdapterHeartbeat<'a> {
+    pub(crate) fn new(heartbeat: &'a mut StartupHeartbeat, chain_ids: &'a [String]) -> Self {
+        Self {
+            heartbeat,
+            chain_ids,
+        }
+    }
+}
+
+impl bigname_adapters::StartupAdapterProgress for StartupAdapterHeartbeat<'_> {
+    fn record<'a>(
+        &'a mut self,
+        pool: &'a PgPool,
+    ) -> bigname_adapters::StartupAdapterProgressFuture<'a> {
+        Box::pin(async move { self.heartbeat.record_if_due(pool, self.chain_ids).await })
+    }
+}
+
 impl StartupHeartbeat {
     pub(crate) fn new(instance_id: String, interval: Duration) -> Self {
         Self {
@@ -73,12 +96,9 @@ mod tests {
 
         let mut heartbeat =
             StartupHeartbeat::new("bootstrap-test".to_owned(), Duration::from_secs(0));
-        heartbeat
-            .record_if_due(
-                database.pool(),
-                &["ethereum-mainnet".to_owned(), "ethereum-mainnet".to_owned()],
-            )
-            .await?;
+        let chain_ids = vec!["ethereum-mainnet".to_owned(), "ethereum-mainnet".to_owned()];
+        let mut progress = StartupAdapterHeartbeat::new(&mut heartbeat, &chain_ids);
+        bigname_adapters::StartupAdapterProgress::record(&mut progress, database.pool()).await?;
 
         let observed = bigname_storage::load_service_loop_heartbeat(
             database.pool(),

@@ -1,4 +1,5 @@
 use super::*;
+use crate::checkpoint_context::{StartupAdapterProgress, record_startup_adapter_progress};
 use crate::ens_v1_unwrapped_authority::event_persistence::pin_existing_event_manifest_provenance;
 
 pub(super) const ITEM_KIND_STARTUP_PENDING_EVENT: &str = "startup_pending_normalized_event";
@@ -57,6 +58,7 @@ impl UnwrappedAuthorityReplayCheckpoint {
         &mut self,
         pool: &PgPool,
         staged_events: &mut UnwrappedAuthorityReplayFlushedEvents,
+        startup_progress: &mut Option<&mut dyn StartupAdapterProgress>,
     ) -> Result<usize> {
         ensure!(
             self.is_startup(),
@@ -170,6 +172,7 @@ impl UnwrappedAuthorityReplayCheckpoint {
 
             staged_events.inserted_count = next_inserted_count;
             published_count += events.len();
+            record_startup_adapter_progress(pool, startup_progress).await?;
         }
         self.flushed_events = staged_events.clone();
         Ok(published_count)

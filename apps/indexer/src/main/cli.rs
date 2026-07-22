@@ -35,6 +35,11 @@ use crate::repair::{
 };
 use crate::runtime::DEFAULT_STARTUP_DISCOVERY_PAGE_LOGS;
 
+#[path = "cli/healthcheck.rs"]
+mod healthcheck_args;
+
+pub(crate) use healthcheck_args::HealthcheckArgs;
+
 fn parse_positive_usize(value: &str) -> Result<usize, String> {
     let value = value.parse::<usize>().map_err(|error| error.to_string())?;
     let maximum = usize::try_from(i64::MAX - 1).unwrap_or(usize::MAX);
@@ -175,26 +180,6 @@ pub(crate) struct RunArgs {
         default_value_t = false
     )]
     pub(crate) retain_header_audit_fields: bool,
-}
-
-#[derive(Args, Debug)]
-pub(crate) struct HealthcheckArgs {
-    #[command(flatten)]
-    pub(crate) database: DatabaseConfig,
-    #[arg(
-        long,
-        env = "BIGNAME_INDEXER_MANIFESTS_ROOT",
-        default_value = "manifests/mainnet"
-    )]
-    pub(crate) manifests_root: PathBuf,
-    #[arg(long, env = "BIGNAME_HEARTBEAT_INSTANCE_ID")]
-    pub(crate) heartbeat_instance_id: Option<String>,
-    #[arg(
-        long,
-        env = "BIGNAME_INDEXER_HEARTBEAT_MAX_AGE_SECS",
-        default_value_t = 20_i64
-    )]
-    pub(crate) heartbeat_max_age_secs: i64,
 }
 
 #[derive(Args, Debug)]
