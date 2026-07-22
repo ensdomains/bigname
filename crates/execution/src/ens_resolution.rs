@@ -268,7 +268,9 @@ async fn build_on_demand_request(
             &selector_call,
             &block,
         ));
-        if let Some(summary) = &selector_call.ccip_summary {
+        if let Some(summary) = &selector_call.ccip_summary
+            && summary.failure_payload.is_none()
+        {
             for payload in &summary.step_payloads {
                 steps.push(ccip_step(steps.len() as i64, payload, &block));
             }
@@ -420,10 +422,14 @@ fn call_step(
         "calldata": call.universal_calldata,
     });
     if let Some(summary) = &call.ccip_summary {
-        payload["ccip_read"] = json!({
+        let mut ccip_read = json!({
             "gateway_count": summary.gateway_digests.len(),
             "steps": summary.step_payloads.clone(),
         });
+        if let Some(failure) = &summary.failure_payload {
+            ccip_read["failure"] = failure.clone();
+        }
+        payload["ccip_read"] = ccip_read;
     }
     ExecutionTraceStep {
         step_index,

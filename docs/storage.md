@@ -1376,9 +1376,14 @@ invalidation path.
 
 For an identical verified-primary cache identity, a stored `success` outcome
 wins over a later `execution_failed` attempt; the failed attempt does not write
-an unreferenced trace. A configured API RPC timeout remains an in-band durable
-failure. Other RPC transport failures, such as connection, DNS, or TLS errors,
-abort before trace or outcome persistence so the next request retries.
+an unreferenced trace. On both on-demand execution paths, configured API RPC
+timeouts remain in-band durable failures, and other RPC transport failures, such
+as connection, DNS, or TLS errors, abort before trace or outcome persistence so
+the next request retries. The CCIP-Read gateway leg follows the same split —
+configured gateway-client timeouts durable in-band, other gateway transport
+failures abort-before-persistence — and is reachable only from execution that
+follows CCIP-Read, which today is the ENS/60 primary-name fallback; record-route
+verified reads execute block-pinned without a gateway leg.
 
 Exact block-anchored `raw_call_snapshots` used by verified resolution stay in
 the intake-owned `raw_*` family. Execution persistence, including the API

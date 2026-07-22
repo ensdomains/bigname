@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use anyhow::Context;
 use bigname_storage::ENS_NAMESPACE;
 use sqlx::types::time::OffsetDateTime;
 
@@ -51,6 +52,58 @@ async fn rpc_transport_timeout_is_an_in_band_selector_failure() -> Result<()> {
     assert!(selector_call.raw_call_snapshot.is_none());
     assert!(selector_call.request_hash.is_none());
     assert!(selector_call.response_hash.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn followable_offchain_lookup_with_gateway_success_still_returns_selector_value() -> Result<()>
+{
+    use alloy_primitives::{Address, Bytes};
+    use alloy_sol_types::SolValue;
+
+    let (gateway_url, gateway) = spawn_test_gateway().await?;
+    let universal_resolver = ENS_UNIVERSAL_RESOLVER_ADDRESS.parse::<Address>()?;
+    let selector_return = ("ipfs://avatar".to_owned(),).abi_encode_params();
+    let callback_return =
+        (Bytes::from(selector_return), Address::repeat_byte(0x22)).abi_encode_params();
+    let (rpc_url, rpc) = spawn_ccip_test_rpc(
+        encoded_offchain_lookup_error_with(universal_resolver, format!("{gateway_url}/{{data}}")),
+        crate::ens_resolution_abi::hex_string(&callback_return),
+    )
+    .await?;
+    let client = JsonRpcHttpClient::new(&rpc_url)?;
+    let row = test_name_current_row();
+    let record = EnsResolutionRecord::new("avatar", "text", Some("avatar".to_owned()));
+
+    let selector_call = execute_record_call(
+        &row,
+        &record,
+        b"\x05alice\x03eth\x00",
+        [0_u8; 32],
+        &ExecutionBlock {
+            chain_id: ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
+            block_number: 21_000_000,
+            block_hash: "0xabc123".to_owned(),
+        },
+        &client,
+        true,
+    )
+    .await?;
+
+    let verified_query = selector_call.verified_query(Uuid::from_u128(1));
+    assert_eq!(
+        verified_query["value"]["value"],
+        json!("ipfs://avatar"),
+        "unexpected verified query: {verified_query}"
+    );
+    let summary = selector_call
+        .ccip_summary
+        .context("successful gateway follow must retain CCIP evidence")?;
+    assert_eq!(summary.gateway_digests.len(), 1);
+    assert_eq!(summary.step_payloads.len(), 1);
+    assert!(summary.failure_payload.is_none());
+    gateway.await??;
+    rpc.await??;
     Ok(())
 }
 
@@ -277,7 +330,14 @@ fn test_name_current_row() -> NameCurrentRow {
 }
 
 fn encoded_offchain_lookup_error() -> String {
-    use alloy_primitives::{Address, Bytes};
+    encoded_offchain_lookup_error_with(
+        alloy_primitives::Address::repeat_byte(0x11),
+        "https://gateway.example/{data}".to_owned(),
+    )
+}
+
+fn encoded_offchain_lookup_error_with(sender: alloy_primitives::Address, url: String) -> String {
+    use alloy_primitives::{Bytes, FixedBytes};
     use alloy_sol_types::{SolError, sol};
 
     sol! {
@@ -293,12 +353,103 @@ fn encoded_offchain_lookup_error() -> String {
 
     crate::ens_resolution_abi::hex_string(
         &OffchainLookup {
-            sender: Address::repeat_byte(0x11),
-            urls: vec!["https://gateway.example/{data}".to_owned()],
+            sender,
+            urls: vec![url],
             callData: Bytes::copy_from_slice(&[0xab, 0xcd]),
-            callbackFunction: alloy_primitives::FixedBytes::from(&[0x12, 0x34, 0x56, 0x78]),
+            callbackFunction: FixedBytes::from([0x12, 0x34, 0x56, 0x78]),
             extraData: Bytes::copy_from_slice(&[0xef]),
         }
         .abi_encode(),
     )
+}
+
+async fn spawn_test_gateway() -> Result<(String, tokio::task::JoinHandle<Result<()>>)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let handle = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await?;
+        read_test_http_request(&mut socket).await?;
+        write_test_http_response(&mut socket, br#"{"data":"0xabcd"}"#).await
+    });
+    Ok((url, handle))
+}
+
+async fn spawn_ccip_test_rpc(
+    offchain_lookup: String,
+    callback_result: String,
+) -> Result<(String, tokio::task::JoinHandle<Result<()>>)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let handle = tokio::spawn(async move {
+        for body in [
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {
+                    "code": 3,
+                    "message": "execution reverted",
+                    "data": offchain_lookup,
+                }
+            }),
+            json!({ "jsonrpc": "2.0", "id": 1, "result": callback_result }),
+        ] {
+            let (mut socket, _) = listener.accept().await?;
+            read_test_http_request(&mut socket).await?;
+            write_test_http_response(&mut socket, body.to_string().as_bytes()).await?;
+        }
+        Ok(())
+    });
+    Ok((url, handle))
+}
+
+async fn read_test_http_request(socket: &mut tokio::net::TcpStream) -> Result<()> {
+    use tokio::io::AsyncReadExt;
+
+    let mut buffer = Vec::new();
+    let mut scratch = [0_u8; 1024];
+    let (body_start, content_length) = loop {
+        let bytes_read = socket.read(&mut scratch).await?;
+        if bytes_read == 0 {
+            bail!("test HTTP request closed before headers finished");
+        }
+        buffer.extend_from_slice(&scratch[..bytes_read]);
+        if let Some(position) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+            let body_start = position + 4;
+            let headers = std::str::from_utf8(&buffer[..body_start])?;
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>())
+                })
+                .transpose()?
+                .unwrap_or(0);
+            break (body_start, content_length);
+        }
+    };
+    while buffer.len() < body_start + content_length {
+        let bytes_read = socket.read(&mut scratch).await?;
+        if bytes_read == 0 {
+            bail!("test HTTP request closed before body finished");
+        }
+        buffer.extend_from_slice(&scratch[..bytes_read]);
+    }
+    Ok(())
+}
+
+async fn write_test_http_response(socket: &mut tokio::net::TcpStream, body: &[u8]) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    socket
+        .write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await?;
+    socket.write_all(body).await?;
+    Ok(())
 }

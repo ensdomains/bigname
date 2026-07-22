@@ -53,6 +53,7 @@ mod abi {
 pub(crate) struct CcipReadSummary {
     pub(crate) gateway_digests: Vec<String>,
     pub(crate) step_payloads: Vec<Value>,
+    pub(crate) failure_payload: Option<Value>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -77,12 +78,17 @@ struct BatchGatewayRequest {
     data: Vec<u8>,
 }
 
+#[path = "ens_resolution_ccip/error.rs"]
+mod error;
+pub(crate) use error::CcipReadError;
+use error::{gateway_transport_classification, retain_gateway_transport_error};
+
 pub(crate) async fn follow_ccip_read(
     rpc: &JsonRpcHttpClient,
     error: &JsonRpcCallError,
     block_selector: &Value,
     expected_sender: &str,
-) -> Result<Option<CcipReadOutcome>> {
+) -> std::result::Result<Option<CcipReadOutcome>, CcipReadError> {
     let Some(mut lookup) = offchain_lookup_from_rpc_error(error)? else {
         return Ok(None);
     };
@@ -93,14 +99,38 @@ pub(crate) async fn follow_ccip_read(
     for redirect_index in 0..MAX_CCIP_REDIRECTS {
         validate_offchain_lookup_sender(&lookup, &expected_sender)?;
         let started = Instant::now();
-        let gateway_response = fetch_ccip_gateway_response(&lookup)
-            .await
-            .with_context(|| {
-                format!(
+        let gateway_response = match fetch_ccip_gateway_response(&lookup).await {
+            Ok(response) => response,
+            Err(error) => {
+                let error = error.context(format!(
                     "failed to complete CCIP-Read gateway request at redirect {}",
                     redirect_index + 1
-                )
-            })?;
+                ));
+                let Some(configured_timeout) = gateway_transport_classification(&error) else {
+                    return Err(error.into());
+                };
+                let failure_payload = json!({
+                    "sender": lookup.sender,
+                    "gateway_count": lookup.urls.len(),
+                    "used_local_batch_gateway": lookup
+                        .urls
+                        .iter()
+                        .any(|url| url.eq_ignore_ascii_case(LOCAL_BATCH_GATEWAY_URL)),
+                    "transport_failure": true,
+                    "configured_timeout": configured_timeout,
+                    "latency_ms": elapsed_latency_ms(started),
+                });
+                return Err(CcipReadError::gateway_transport(
+                    error,
+                    configured_timeout,
+                    CcipReadSummary {
+                        gateway_digests,
+                        step_payloads,
+                        failure_payload: Some(failure_payload),
+                    },
+                ));
+            }
+        };
         let callback_calldata = ccip_callback_calldata(
             lookup.callback_function,
             &gateway_response.body,
@@ -140,11 +170,12 @@ pub(crate) async fn follow_ccip_read(
             summary: CcipReadSummary {
                 gateway_digests,
                 step_payloads,
+                failure_payload: None,
             },
         }));
     }
 
-    bail!("CCIP-Read exceeded maximum redirect depth");
+    Err(anyhow::anyhow!("CCIP-Read exceeded maximum redirect depth").into())
 }
 
 fn elapsed_latency_ms(started: Instant) -> i64 {
@@ -184,6 +215,7 @@ async fn fetch_ccip_gateway_response(lookup: &OffchainLookup) -> Result<GatewayF
         let mut failures = Vec::with_capacity(results.len());
         let mut responses = Vec::with_capacity(results.len());
         let mut gateway_digests = Vec::new();
+        let mut transport_error = None;
         for result in results {
             match result {
                 Ok(response) => {
@@ -191,13 +223,19 @@ async fn fetch_ccip_gateway_response(lookup: &OffchainLookup) -> Result<GatewayF
                     gateway_digests.extend(response.gateway_digests);
                     responses.push(response.body);
                 }
-                Err(error) => {
-                    failures.push(true);
-                    responses.push(abi_error_string(&format!(
-                        "CCIP gateway request failed: {error}"
-                    )));
-                }
+                Err(error) => match retain_gateway_transport_error(&mut transport_error, error) {
+                    Ok(()) => {}
+                    Err(error) => {
+                        failures.push(true);
+                        responses.push(abi_error_string(&format!(
+                            "CCIP gateway request failed: {error}"
+                        )));
+                    }
+                },
             }
+        }
+        if let Some((_, error)) = transport_error {
+            return Err(error);
         }
 
         return Ok(GatewayFetchResult {
@@ -223,6 +261,7 @@ async fn fetch_standard_gateway_response(
 ) -> Result<GatewayFetchResult> {
     let data = hex_string(call_data);
     let mut last_error = None;
+    let mut transport_error = None;
     for url in urls
         .iter()
         .filter(|url| !url.eq_ignore_ascii_case(LOCAL_BATCH_GATEWAY_URL))
@@ -246,15 +285,24 @@ async fn fetch_standard_gateway_response(
                     .downcast_ref::<GatewayHttpStatusError>()
                     .is_some_and(GatewayHttpStatusError::is_client_error) =>
             {
-                return Err(error);
+                return match transport_error {
+                    Some((_, transport_error)) => Err(transport_error),
+                    None => Err(error),
+                };
             }
-            Err(error) => last_error = Some(error),
+            Err(error) => match retain_gateway_transport_error(&mut transport_error, error) {
+                Ok(()) => {}
+                Err(error) => last_error = Some(error),
+            },
         }
     }
 
-    match last_error {
-        Some(error) => Err(error),
-        None => bail!("CCIP-Read supplied no usable HTTP gateway URL"),
+    if let Some((_, error)) = transport_error {
+        Err(error)
+    } else if let Some(error) = last_error {
+        Err(error)
+    } else {
+        bail!("CCIP-Read supplied no usable HTTP gateway URL")
     }
 }
 

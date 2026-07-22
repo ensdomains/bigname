@@ -29,5 +29,6 @@ bigname-manifests.workspace = true
 bigname-storage.workspace = true
 
 [dev-dependencies]
+alloy-sol-types.workspace = true
 bigname-test-support.workspace = true
 futures-util.workspace = true

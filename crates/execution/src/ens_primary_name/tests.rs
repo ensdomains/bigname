@@ -216,6 +216,38 @@ fn encoded_local_batch_offchain_lookup_error() -> String {
     )
 }
 
+fn encoded_standard_offchain_lookup_error(url: String) -> String {
+    let sender = ENS_UNIVERSAL_RESOLVER_ADDRESS
+        .parse::<Address>()
+        .expect("Universal Resolver address must parse");
+    hex_string(
+        &ccip_test_abi::OffchainLookup {
+            sender,
+            urls: vec![url],
+            callData: Bytes::copy_from_slice(&[0xab, 0xcd]),
+            callbackFunction: FixedBytes::from([0x12, 0x34, 0x56, 0x78]),
+            extraData: Bytes::copy_from_slice(&[0xef]),
+        }
+        .abi_encode(),
+    )
+}
+
+async fn spawn_hanging_ccip_gateway() -> Result<(String, JoinHandle<Result<()>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("failed to bind hanging CCIP gateway")?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let handle = tokio::spawn(async move {
+        let (_socket, _) = listener
+            .accept()
+            .await
+            .context("failed to accept hanging CCIP gateway request")?;
+        std::future::pending::<()>().await;
+        Ok(())
+    });
+    Ok((url, handle))
+}
+
 #[test]
 fn builds_expected_reverse_node() {
     let node = reverse_node("0x8e8db5ccef88cca9d624701db544989c996e3216")
@@ -535,6 +567,43 @@ async fn verified_primary_name_exposes_ccip_trace_evidence() -> Result<()> {
 }
 
 #[tokio::test]
+async fn primary_name_gateway_timeout_is_configured_transport_with_evidence() -> Result<()> {
+    let (gateway_url, gateway) = spawn_hanging_ccip_gateway().await?;
+    let (rpc_url, rpc) = spawn_mock_rpc_responses(vec![MockRpcResponse::Error {
+        code: 3,
+        message: "execution reverted".to_owned(),
+        data: json!(encoded_standard_offchain_lookup_error(format!(
+            "{gateway_url}/{{data}}"
+        ))),
+    }])
+    .await?;
+    let chain_rpc_urls =
+        ChainRpcUrls::from_entries(&[format!("{ETHEREUM_MAINNET_CHAIN_ID}={rpc_url}")])?;
+
+    let error = lookup_ens_forward_address_at_block(EnsForwardAddressLookupRequest {
+        normalized_name: "taytems.eth",
+        chain_rpc_urls: &chain_rpc_urls,
+        block_number: 123,
+        block_hash: TEST_BLOCK_HASH,
+        follow_ccip_read: true,
+    })
+    .await
+    .expect_err("configured gateway timeout must remain an in-band transport failure");
+    gateway.abort();
+
+    assert!(error.is_transport_failure());
+    assert!(error.is_configured_timeout());
+    assert_eq!(error.evidence().contracts_called.len(), 1);
+    assert_eq!(error.evidence().ccip_step_payloads.len(), 1);
+    assert_eq!(
+        error.evidence().ccip_step_payloads[0]["configured_timeout"],
+        json!(true)
+    );
+    assert_eq!(join_requests(rpc).await?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn primary_name_configuration_failure_records_no_contract_call() {
     let error = lookup_ens_reverse_primary_name(OnDemandEnsPrimaryNameRequest {
         normalized_address: "0x8e8db5ccef88cca9d624701db544989c996e3216",
@@ -548,7 +617,7 @@ async fn primary_name_configuration_failure_records_no_contract_call() {
 }
 
 #[tokio::test]
-async fn lookup_ens_forward_address_at_block_classifies_plain_revert() -> Result<()> {
+async fn ccip_following_lookup_keeps_ok_none_plain_revert_behavior() -> Result<()> {
     let (rpc_url, handle) = spawn_mock_rpc_responses(vec![MockRpcResponse::Error {
         code: 3,
         message: "execution reverted".to_owned(),
@@ -563,7 +632,7 @@ async fn lookup_ens_forward_address_at_block_classifies_plain_revert() -> Result
         chain_rpc_urls: &chain_rpc_urls,
         block_number: 123,
         block_hash: TEST_BLOCK_HASH,
-        follow_ccip_read: false,
+        follow_ccip_read: true,
     })
     .await
     .expect_err("plain Universal Resolver revert must fail closed");

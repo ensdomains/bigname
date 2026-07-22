@@ -194,6 +194,219 @@ async fn malformed_gateway_bodies_retry_later_urls() -> Result<()> {
 }
 
 #[tokio::test]
+async fn gateway_connect_failure_is_transport_tagged_with_failure_evidence() -> Result<()> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let unavailable_gateway = format!("http://{}", listener.local_addr()?);
+    drop(listener);
+    let rpc = JsonRpcHttpClient::new("http://127.0.0.1:9")?;
+    let sender = Address::repeat_byte(0x11);
+
+    let error = follow_ccip_read(
+        &rpc,
+        &JsonRpcCallError {
+            code: Some(3),
+            message: "execution reverted".to_owned(),
+            data: Some(json!(encoded_offchain_lookup_error_with(
+                sender,
+                vec![format!("{unavailable_gateway}/{{data}}")],
+            ))),
+        },
+        &json!("latest"),
+        &format_address(sender),
+    )
+    .await
+    .expect_err("gateway connection failure must remain distinguishable from Ok(None)");
+
+    assert!(error.is_gateway_transport_failure());
+    assert!(!error.is_configured_timeout());
+    let failure = error
+        .summary()
+        .and_then(|summary| summary.failure_payload.as_ref())
+        .context("gateway transport error must carry failure evidence")?;
+    assert_eq!(failure["transport_failure"], json!(true));
+    assert_eq!(failure["configured_timeout"], json!(false));
+    assert!(!error.to_string().contains(&unavailable_gateway));
+    Ok(())
+}
+
+#[tokio::test]
+async fn earlier_gateway_connect_failure_is_not_hidden_by_later_server_error() -> Result<()> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let unavailable_gateway = format!("http://{}", listener.local_addr()?);
+    drop(listener);
+    let (server_error_gateway, server_error_handle) =
+        spawn_gateway_response(500, b"gateway unavailable").await?;
+    let rpc = JsonRpcHttpClient::new("http://127.0.0.1:9")?;
+    let sender = Address::repeat_byte(0x11);
+
+    let error = follow_ccip_read(
+        &rpc,
+        &JsonRpcCallError {
+            code: Some(3),
+            message: "execution reverted".to_owned(),
+            data: Some(json!(encoded_offchain_lookup_error_with(
+                sender,
+                vec![
+                    format!("{unavailable_gateway}/{{data}}"),
+                    format!("{server_error_gateway}/{{data}}"),
+                ],
+            ))),
+        },
+        &json!("latest"),
+        &format_address(sender),
+    )
+    .await
+    .expect_err("an earlier gateway transport failure must survive later gateway errors");
+
+    assert!(error.is_gateway_transport_failure());
+    assert!(!error.is_configured_timeout());
+    assert_eq!(
+        join_gateway_request(server_error_handle).await?.method,
+        "GET"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn earlier_gateway_connect_failure_is_not_hidden_by_later_client_error() -> Result<()> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let unavailable_gateway = format!("http://{}", listener.local_addr()?);
+    drop(listener);
+    let (client_error_gateway, client_error_handle) =
+        spawn_gateway_response(400, b"bad request").await?;
+    let rpc = JsonRpcHttpClient::new("http://127.0.0.1:9")?;
+    let sender = Address::repeat_byte(0x11);
+
+    let error = follow_ccip_read(
+        &rpc,
+        &JsonRpcCallError {
+            code: Some(3),
+            message: "execution reverted".to_owned(),
+            data: Some(json!(encoded_offchain_lookup_error_with(
+                sender,
+                vec![
+                    format!("{unavailable_gateway}/{{data}}"),
+                    format!("{client_error_gateway}/{{data}}"),
+                ],
+            ))),
+        },
+        &json!("latest"),
+        &format_address(sender),
+    )
+    .await
+    .expect_err("an earlier gateway transport failure must survive a terminal client error");
+
+    assert!(error.is_gateway_transport_failure());
+    assert!(!error.is_configured_timeout());
+    assert_eq!(
+        join_gateway_request(client_error_handle).await?.method,
+        "GET"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn configured_gateway_timeout_is_transport_tagged_for_durable_handling() -> Result<()> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let gateway_url = format!("http://{}", listener.local_addr()?);
+    let gateway = tokio::spawn(async move {
+        let (_socket, _) = listener.accept().await?;
+        std::future::pending::<()>().await;
+        Ok::<_, anyhow::Error>(())
+    });
+    let rpc = JsonRpcHttpClient::new("http://127.0.0.1:9")?;
+    let sender = Address::repeat_byte(0x11);
+
+    let error = follow_ccip_read(
+        &rpc,
+        &JsonRpcCallError {
+            code: Some(3),
+            message: "execution reverted".to_owned(),
+            data: Some(json!(encoded_offchain_lookup_error_with(
+                sender,
+                vec![format!("{gateway_url}/{{data}}")],
+            ))),
+        },
+        &json!("latest"),
+        &format_address(sender),
+    )
+    .await
+    .expect_err("configured gateway deadline must surface as a tagged timeout");
+    gateway.abort();
+
+    assert!(error.is_gateway_transport_failure());
+    assert!(error.is_configured_timeout());
+    assert_eq!(
+        error
+            .summary()
+            .and_then(|summary| summary.failure_payload.as_ref())
+            .and_then(|failure| failure.get("configured_timeout")),
+        Some(&json!(true))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn batch_connect_failure_takes_precedence_over_earlier_timeout() -> Result<()> {
+    let timeout_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let timeout_gateway = format!("http://{}", timeout_listener.local_addr()?);
+    let timeout_handle = tokio::spawn(async move {
+        let (_socket, _) = timeout_listener.accept().await?;
+        std::future::pending::<()>().await;
+        Ok::<_, anyhow::Error>(())
+    });
+    let connect_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let unavailable_gateway = format!("http://{}", connect_listener.local_addr()?);
+    drop(connect_listener);
+    let rpc = JsonRpcHttpClient::new("http://127.0.0.1:9")?;
+    let sender = Address::repeat_byte(0x11);
+    let batch_query = abi::queryCall {
+        requests: vec![
+            abi::Request {
+                sender,
+                urls: vec![format!("{timeout_gateway}/{{data}}")],
+                data: Bytes::copy_from_slice(&[0xab]),
+            },
+            abi::Request {
+                sender,
+                urls: vec![format!("{unavailable_gateway}/{{data}}")],
+                data: Bytes::copy_from_slice(&[0xcd]),
+            },
+        ],
+    }
+    .abi_encode();
+
+    let error = follow_ccip_read(
+        &rpc,
+        &JsonRpcCallError {
+            code: Some(3),
+            message: "execution reverted".to_owned(),
+            data: Some(json!(hex_string(
+                &abi::OffchainLookup {
+                    sender,
+                    urls: vec![LOCAL_BATCH_GATEWAY_URL.to_owned()],
+                    callData: Bytes::from(batch_query),
+                    callbackFunction: alloy_primitives::FixedBytes::from(
+                        &[0x12, 0x34, 0x56, 0x78,]
+                    ),
+                    extraData: Bytes::copy_from_slice(&[0xef]),
+                }
+                .abi_encode(),
+            ))),
+        },
+        &json!("latest"),
+        &format_address(sender),
+    )
+    .await
+    .expect_err("a batch connection failure must make the aggregate failure retryable");
+    timeout_handle.abort();
+
+    assert!(error.is_gateway_transport_failure());
+    assert!(!error.is_configured_timeout());
+    Ok(())
+}
+
+#[tokio::test]
 async fn offchain_lookup_sender_mismatch_is_rejected_before_callback() -> Result<()> {
     let (rpc_url, _handle) = spawn_json_rpc_result(json!("0x")).await?;
     let rpc = JsonRpcHttpClient::new(&rpc_url)?;
@@ -220,10 +433,17 @@ async fn offchain_lookup_sender_mismatch_is_rejected_before_callback() -> Result
 }
 
 fn encoded_offchain_lookup_error() -> String {
+    encoded_offchain_lookup_error_with(
+        Address::repeat_byte(0x11),
+        vec!["https://gateway.example/{data}".to_owned()],
+    )
+}
+
+fn encoded_offchain_lookup_error_with(sender: Address, urls: Vec<String>) -> String {
     hex_string(
         &abi::OffchainLookup {
-            sender: Address::repeat_byte(0x11),
-            urls: vec!["https://gateway.example/{data}".to_owned()],
+            sender,
+            urls,
             callData: Bytes::copy_from_slice(&[0xab, 0xcd]),
             callbackFunction: alloy_primitives::FixedBytes::from(&[0x12, 0x34, 0x56, 0x78]),
             extraData: Bytes::copy_from_slice(&[0xef]),
