@@ -590,15 +590,24 @@ route inventory or a claim that every protocol transition is covered.
   catch-up. Route snapshots and all normalized-event rows are exact. The full
   equality arm also requires the receipt-reconstructed finalized registrar
   `PreimageObserved` for `catchupeq.eth` to exist identically in both corpora,
-  so equality cannot pass if both paths omit the event. The result is certified
-  for the current corpus only: one finalized ENSv1 `.eth` registration with
-  addr/text records and a registry-only child. Wrapper events, reverse/primary
-  claims, renewals, expiry/grace, ENSv2, Basenames/multi-chain, non-finalized
-  spans, and reorged history are not yet exercised; follow-up issue #202 tracks
-  the corpus extension. The ENSv2-specific cases in #161 are not exercised
-  here. The shared baseline span contributes no detection power for catch-up
-  omissions because both corpora's baseline is live-derived; the catch-up
-  re-replay is identity-idempotent via `ON CONFLICT DO NOTHING`.
+  so equality cannot pass if both paths omit the event.
+- `catchup_equivalence::automatic_catchup_matches_live_wrapper_reverse_outputs`
+  — exercises two finalized ENSv1 registrations across the same live-versus-
+  catch-up boundary. The fixture registers, wraps, and sets fuses on one name,
+  then registers, wraps, unwraps, and emits a reverse/primary-name claim for the
+  other. The test asserts Full equality for route snapshots and normalized-event
+  rows over those events, including stable chain/address provenance for contract
+  instances.
+  The full equality arm also requires receipt-reconstructed registrar
+  `PreimageObserved` rows for both names, so equal omission cannot pass.
+  Together, the catch-up scenarios cover finalized ENSv1 registration,
+  resolver records, registry children, wrapper transitions, fuse changes,
+  unwraps, and reverse/primary-name claims. Renewals, expiry/grace, ENSv2,
+  Basenames/multi-chain, non-finalized spans, and reorged history remain outside
+  this corpus; the ENSv2-specific cases in #161 are also not exercised. The
+  shared baseline span contributes no detection power for catch-up omissions
+  because both corpora's baseline is live-derived; the catch-up re-replay is
+  identity-idempotent via `ON CONFLICT DO NOTHING`.
 - `cross_protocol::composed_mainnet_profile_serves_both_protocols_without_leakage`
   — ingests a generated structural mirror of the currently checked-in mainnet
   families (ENSv1 ethereum + Basenames base + the L1 Basenames

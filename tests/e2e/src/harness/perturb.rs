@@ -232,7 +232,7 @@ async fn normalized_event_rows(
     // chain/address identity; every other normalized-event field remains in
     // the comparison, including resource ids, manifest ids, raw-fact refs,
     // positions, before-state, and after-state.
-    let contract_instances = contract_instance_keys(pool).await?;
+    let contract_instances = contract_instance_stable_keys(pool).await?;
     let mut normalized = Vec::with_capacity(rows.len());
     for row in rows {
         let mut row: Value = serde_json::from_str(&row)?;
@@ -243,7 +243,9 @@ async fn normalized_event_rows(
     Ok(normalized)
 }
 
-async fn contract_instance_keys(pool: &sqlx::PgPool) -> Result<BTreeMap<String, String>> {
+pub async fn contract_instance_stable_keys(
+    pool: &sqlx::PgPool,
+) -> Result<BTreeMap<String, String>> {
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT DISTINCT ON (contract_instance_id) \
             contract_instance_id::TEXT, \
