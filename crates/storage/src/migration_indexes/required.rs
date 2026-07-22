@@ -8,6 +8,8 @@ pub(super) const NON_ORPHANED_RAW_CODE_LOWER_ADDRESS_INDEX: &str =
     "raw_code_hashes_non_orphaned_lower_address_idx";
 pub(super) const EXECUTION_CACHE_OUTCOMES_REQUEST_LOOKUP_INDEX: &str =
     "execution_cache_outcomes_request_lookup_idx";
+pub(super) const DISCOVERY_EDGES_DEACTIVATED_IDENTITY_INDEX: &str =
+    "discovery_edges_deactivated_identity_idx";
 const PRIMARY_NAME_ROUTE_OUTCOME_RETENTION_INDEX: &str =
     "execution_cache_outcomes_route_primary_checkpoint_idx";
 const PRIMARY_NAME_ROUTE_TRACE_RETENTION_INDEX: &str =
@@ -48,6 +50,15 @@ pub(super) const REQUIRED_RUNTIME_INDEXES: &[RequiredIndexDescriptor] = &[
         create_concurrently_sql: r#"
             CREATE INDEX CONCURRENTLY IF NOT EXISTS execution_cache_outcomes_request_lookup_idx
             ON public.execution_cache_outcomes (request_type, namespace, request_key)
+        "#,
+    },
+    RequiredIndexDescriptor {
+        name: DISCOVERY_EDGES_DEACTIVATED_IDENTITY_INDEX,
+        table: "public.discovery_edges",
+        create_concurrently_sql: r#"
+            CREATE INDEX CONCURRENTLY IF NOT EXISTS discovery_edges_deactivated_identity_idx
+            ON public.discovery_edges (chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id, discovery_source)
+            WHERE deactivated_at IS NOT NULL
         "#,
     },
     RequiredIndexDescriptor {
