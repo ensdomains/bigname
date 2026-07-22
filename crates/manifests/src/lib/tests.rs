@@ -93,6 +93,10 @@ struct TestDatabase {
 
 impl TestDatabase {
     async fn new() -> Result<Self> {
+        Self::new_with_seqscans_disabled(false).await
+    }
+
+    async fn new_with_seqscans_disabled(disable_seqscans: bool) -> Result<Self> {
         let database_url = std::env::var("BIGNAME_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| default_database_url().to_owned());
@@ -121,9 +125,13 @@ impl TestDatabase {
             .await
             .with_context(|| format!("failed to create test database {database_name}"))?;
 
+        let mut database_options = base_options.database(&database_name);
+        if disable_seqscans {
+            database_options = database_options.options([("enable_seqscan", "off")]);
+        }
         let pool = PgPoolOptions::new()
             .max_connections(5)
-            .connect_with(base_options.database(&database_name))
+            .connect_with(database_options)
             .await
             .context("failed to connect manifest integration test pool")?;
 
@@ -8950,8 +8958,15 @@ struct StreamedParityFixture {
 }
 
 async fn setup_streamed_parity_database(fixture: &StreamedParityFixture) -> Result<TestDatabase> {
+    setup_streamed_parity_database_with_seqscans_disabled(fixture, false).await
+}
+
+async fn setup_streamed_parity_database_with_seqscans_disabled(
+    fixture: &StreamedParityFixture,
+    disable_seqscans: bool,
+) -> Result<TestDatabase> {
     let test_dir = TestDir::new()?;
-    let database = TestDatabase::new().await?;
+    let database = TestDatabase::new_with_seqscans_disabled(disable_seqscans).await?;
     test_dir.write_manifest(
         "ens",
         "ens_v1_registry_l1",
@@ -8976,8 +8991,20 @@ async fn assert_streamed_reconciliation_parity(
     DiscoveryReconciliationSummary,
     Vec<CanonicalDiscoveryEdgeRow>,
 )> {
+    assert_streamed_reconciliation_parity_with_seqscans_disabled(fixture, false).await
+}
+
+async fn assert_streamed_reconciliation_parity_with_seqscans_disabled(
+    fixture: StreamedParityFixture,
+    disable_streamed_seqscans: bool,
+) -> Result<(
+    DiscoveryReconciliationSummary,
+    Vec<CanonicalDiscoveryEdgeRow>,
+)> {
     let in_memory_database = setup_streamed_parity_database(&fixture).await?;
-    let streamed_database = setup_streamed_parity_database(&fixture).await?;
+    let streamed_database =
+        setup_streamed_parity_database_with_seqscans_disabled(&fixture, disable_streamed_seqscans)
+            .await?;
 
     let in_memory_summary = reconcile_discovery_observations(
         in_memory_database.pool(),
@@ -9348,6 +9375,95 @@ async fn streamed_reconciliation_parity_derived_contract_recursion() -> Result<(
     assert_eq!(summary.inserted_edge_count, 2);
     assert_eq!(summary.active_edge_count, 2);
     assert_eq!(edges.len(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn streamed_reconciliation_parity_derived_round_spans_multiple_pages() -> Result<()> {
+    // Every child key sorts before its parent key, so the main pass skips the
+    // children before deriving their parents. Owner A has three children,
+    // forcing its derived round across two non-empty pages at the limit of 2.
+    // Owner B's interleaved child makes an address-index scan observably differ
+    // from the required global observation-key order at the page boundary.
+    let observations = vec![
+        streamed_parity_observation(
+            "k-0-a-child-a",
+            STREAMED_PARITY_OWNER_A,
+            STREAMED_PARITY_OWNER_C,
+            "subregistry",
+            11,
+            0,
+            1,
+        ),
+        streamed_parity_observation(
+            "k-0-b-child",
+            STREAMED_PARITY_OWNER_B,
+            STREAMED_PARITY_OWNER_C,
+            "subregistry",
+            12,
+            0,
+            2,
+        ),
+        streamed_parity_observation(
+            "k-0-c-child-b",
+            STREAMED_PARITY_OWNER_A,
+            STREAMED_PARITY_RESOLVER,
+            "subregistry",
+            13,
+            0,
+            3,
+        ),
+        streamed_parity_observation(
+            "k-0-d-child-c",
+            STREAMED_PARITY_OWNER_A,
+            STREAMED_PARITY_STRANGER,
+            "subregistry",
+            14,
+            0,
+            4,
+        ),
+        streamed_parity_observation(
+            "k-1-parent-a",
+            STREAMED_PARITY_REGISTRY,
+            STREAMED_PARITY_OWNER_A,
+            "subregistry",
+            10,
+            0,
+            1,
+        ),
+        streamed_parity_observation(
+            "k-1-parent-b",
+            STREAMED_PARITY_REGISTRY,
+            STREAMED_PARITY_OWNER_B,
+            "subregistry",
+            10,
+            0,
+            2,
+        ),
+    ];
+    let owner_a_child_count = observations
+        .iter()
+        .filter(|observation| observation.from_address == STREAMED_PARITY_OWNER_A)
+        .count();
+    assert_eq!(owner_a_child_count, 3);
+    assert_eq!(
+        owner_a_child_count.div_ceil(2),
+        2,
+        "owner A alone must require two non-empty derived pages"
+    );
+
+    let (summary, edges) = assert_streamed_reconciliation_parity_with_seqscans_disabled(
+        StreamedParityFixture {
+            seed_observation_sets: Vec::new(),
+            observations,
+        },
+        true,
+    )
+    .await?;
+
+    assert_eq!(summary.inserted_edge_count, 6);
+    assert_eq!(summary.active_edge_count, 6);
+    assert_eq!(edges.len(), 6);
     Ok(())
 }
 
