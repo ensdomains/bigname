@@ -7,8 +7,9 @@ use crate::provider::ProviderRegistry;
 use crate::resolver_profile_convergence::{
     ResolverProfileConvergenceSummary, drain_resolver_profile_input_changes,
 };
+use crate::run::startup_heartbeat::StartupHeartbeat;
 
-use super::super::adapter_sync::sync_adapter_owned_raw_log_state;
+use super::super::adapter_sync::sync_adapter_owned_raw_log_state_with_heartbeat;
 use super::super::intake::{
     IntakeChainTask, intake_runtime_state, validate_provider_registry_for_intake_tasks,
     watched_chain_plan_state,
@@ -48,10 +49,78 @@ pub(crate) async fn refresh_discovery_watch_state(
     resolver_profile_convergence_enabled: bool,
     last_admission_epochs: &mut Option<BTreeMap<String, i64>>,
 ) -> Result<bool> {
+    refresh_discovery_watch_state_inner(
+        pool,
+        provider_registry,
+        manifest_runtime_state,
+        intake_chain_tasks,
+        sync_adapter_state_before_refresh,
+        resolver_profile_convergence_enabled,
+        last_admission_epochs,
+        None,
+    )
+    .await
+}
+
+#[expect(clippy::too_many_arguments)]
+pub(crate) async fn refresh_discovery_watch_state_with_heartbeat(
+    pool: &sqlx::PgPool,
+    provider_registry: &ProviderRegistry,
+    manifest_runtime_state: &mut ManifestRuntimeState,
+    intake_chain_tasks: &mut Vec<IntakeChainTask>,
+    sync_adapter_state_before_refresh: bool,
+    resolver_profile_convergence_enabled: bool,
+    last_admission_epochs: &mut Option<BTreeMap<String, i64>>,
+    deployment_profile: &str,
+    adapter_sync_page_logs: usize,
+    heartbeat: &mut StartupHeartbeat,
+    heartbeat_chain_ids: &[String],
+) -> Result<bool> {
+    refresh_discovery_watch_state_inner(
+        pool,
+        provider_registry,
+        manifest_runtime_state,
+        intake_chain_tasks,
+        sync_adapter_state_before_refresh,
+        resolver_profile_convergence_enabled,
+        last_admission_epochs,
+        Some((
+            deployment_profile,
+            adapter_sync_page_logs,
+            heartbeat,
+            heartbeat_chain_ids,
+        )),
+    )
+    .await
+}
+
+type AdapterSyncHeartbeat<'a> = (&'a str, usize, &'a mut StartupHeartbeat, &'a [String]);
+
+#[expect(clippy::too_many_arguments)]
+async fn refresh_discovery_watch_state_inner(
+    pool: &sqlx::PgPool,
+    provider_registry: &ProviderRegistry,
+    manifest_runtime_state: &mut ManifestRuntimeState,
+    intake_chain_tasks: &mut Vec<IntakeChainTask>,
+    sync_adapter_state_before_refresh: bool,
+    resolver_profile_convergence_enabled: bool,
+    last_admission_epochs: &mut Option<BTreeMap<String, i64>>,
+    adapter_sync_heartbeat: Option<AdapterSyncHeartbeat<'_>>,
+) -> Result<bool> {
     // The whole-corpus re-derivation must run before the sentinel read: it is
     // what materializes new edges (and bumps epochs) on the broad-refresh path.
     let adapter_sync_result: Result<()> = if sync_adapter_state_before_refresh {
-        sync_adapter_owned_raw_log_state(pool, &manifest_runtime_state.watched_chain_plan).await
+        let (deployment_profile, page_logs, heartbeat, chain_ids) = adapter_sync_heartbeat
+            .context("discovery adapter refresh requires a live loop heartbeat")?;
+        sync_adapter_owned_raw_log_state_with_heartbeat(
+            pool,
+            deployment_profile,
+            &manifest_runtime_state.watched_chain_plan,
+            page_logs,
+            heartbeat,
+            chain_ids,
+        )
+        .await
     } else {
         Ok(())
     };

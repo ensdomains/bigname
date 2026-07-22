@@ -19,15 +19,13 @@ pub(crate) const BUILD_SHA: &str = match option_env!("BIGNAME_BUILD_SHA") {
     None => "unknown",
 };
 
+#[cfg(test)]
+pub(crate) use adapter_sync::sync_discovery_adapter_owned_raw_log_state;
 #[allow(unused_imports)]
 pub(crate) use adapter_sync::{
     DEFAULT_STARTUP_DISCOVERY_PAGE_LOGS, sync_adapter_owned_raw_log_state,
+    sync_adapter_owned_raw_log_state_with_heartbeat,
     sync_discovery_adapter_owned_raw_log_state_with_heartbeat,
-    sync_startup_adapter_owned_raw_log_state_with_heartbeat,
-};
-#[cfg(test)]
-pub(crate) use adapter_sync::{
-    sync_discovery_adapter_owned_raw_log_state, sync_startup_adapter_owned_raw_log_state,
 };
 #[allow(unused_imports)]
 pub(crate) use intake::{

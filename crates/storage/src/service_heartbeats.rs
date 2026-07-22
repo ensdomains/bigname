@@ -64,7 +64,6 @@ pub async fn register_service_loop(
         WITH retired_scopes AS (
             DELETE FROM service_loop_heartbeats
             WHERE service_name = $1
-              AND instance_id = $2
               AND scope_kind <> 'process'
         ),
         observed AS (
@@ -128,13 +127,23 @@ pub async fn record_service_loop_heartbeat(
         scope_ids.push(chain_id);
     }
 
-    sqlx::query(
+    let recorded = sqlx::query(
         r#"
-        WITH retired_phases AS (
+        WITH registered_process AS MATERIALIZED (
+            /* service_loop_heartbeat_registration_fence */ SELECT scope_id
+            FROM service_loop_heartbeats
+            WHERE service_name = $1
+              AND instance_id = $2
+              AND scope_kind = 'process'
+              AND scope_id = 'process'
+            FOR UPDATE
+        ),
+        retired_phases AS (
             DELETE FROM service_loop_heartbeats
             WHERE service_name = $1
               AND instance_id = $2
               AND scope_kind = 'phase'
+              AND EXISTS (SELECT 1 FROM registered_process)
         ),
         observed AS (
             SELECT clock_timestamp() AS observed_at
@@ -156,6 +165,7 @@ pub async fn record_service_loop_heartbeat(
             observed.observed_at
         FROM UNNEST($3::TEXT[], $4::TEXT[]) AS scope(scope_kind, scope_id)
         CROSS JOIN observed
+        CROSS JOIN registered_process
         ON CONFLICT (service_name, instance_id, scope_kind, scope_id)
         DO UPDATE SET heartbeat_at = EXCLUDED.heartbeat_at
         "#,
@@ -169,6 +179,9 @@ pub async fn record_service_loop_heartbeat(
     .with_context(|| {
         format!("failed to record {service_name} service loop heartbeat for {instance_id}")
     })?;
+    if recorded.rows_affected() == 0 {
+        bail!("{service_name} service loop heartbeat for {instance_id} is not registered");
+    }
 
     Ok(())
 }
@@ -182,30 +195,37 @@ pub async fn begin_service_loop_phase(
     validate_identity(service_name, instance_id)?;
     validate_phase(service_name, phase)?;
 
-    sqlx::query(
+    let recorded = sqlx::query(
         r#"
-        WITH retired_phases AS (
+        WITH registered_process AS MATERIALIZED (
+            /* begin_service_loop_phase_registration_fence */ SELECT scope_id
+            FROM service_loop_heartbeats
+            WHERE service_name = $1
+              AND instance_id = $2
+              AND scope_kind = 'process'
+              AND scope_id = 'process'
+            FOR UPDATE
+        ),
+        retired_phases AS (
             DELETE FROM service_loop_heartbeats
             WHERE service_name = $1
               AND instance_id = $2
               AND scope_kind = 'phase'
+              AND EXISTS (SELECT 1 FROM registered_process)
         ),
         observed AS (
             SELECT clock_timestamp() AS observed_at
         ),
         process_heartbeat AS (
-            INSERT INTO service_loop_heartbeats (
-                service_name,
-                instance_id,
-                scope_kind,
-                scope_id,
-                started_at,
-                heartbeat_at
-            )
-            SELECT $1, $2, 'process', 'process', observed_at, observed_at
+            UPDATE service_loop_heartbeats
+            SET heartbeat_at = observed.observed_at
             FROM observed
-            ON CONFLICT (service_name, instance_id, scope_kind, scope_id)
-            DO UPDATE SET heartbeat_at = EXCLUDED.heartbeat_at
+            WHERE service_name = $1
+              AND instance_id = $2
+              AND scope_kind = 'process'
+              AND scope_id = 'process'
+              AND EXISTS (SELECT 1 FROM registered_process)
+            RETURNING service_loop_heartbeats.scope_id
         )
         INSERT INTO service_loop_heartbeats (
             service_name,
@@ -217,6 +237,7 @@ pub async fn begin_service_loop_phase(
         )
         SELECT $1, $2, 'phase', $3, observed_at, observed_at
         FROM observed
+        CROSS JOIN process_heartbeat
         ON CONFLICT (service_name, instance_id, scope_kind, scope_id)
         DO UPDATE SET
             started_at = EXCLUDED.started_at,
@@ -234,6 +255,9 @@ pub async fn begin_service_loop_phase(
             phase.trim()
         )
     })?;
+    if recorded.rows_affected() == 0 {
+        bail!("{service_name} service loop heartbeat for {instance_id} is not registered");
+    }
 
     Ok(())
 }
@@ -275,6 +299,44 @@ pub async fn finish_service_loop_phase(
             phase.trim()
         )
     })?;
+
+    Ok(())
+}
+
+pub async fn deregister_service_loop(
+    pool: &PgPool,
+    service_name: &str,
+    instance_id: &str,
+) -> Result<()> {
+    validate_identity(service_name, instance_id)?;
+    if service_name != WORKER_SERVICE_NAME {
+        bail!("only the worker service may deregister its service loop");
+    }
+
+    let mut transaction = pool
+        .begin()
+        .await
+        .with_context(|| format!("failed to begin {service_name} loop deregistration"))?;
+    sqlx::query("DELETE FROM service_loop_heartbeats WHERE service_name = $1 AND instance_id = $2 AND scope_kind = 'process' AND scope_id = 'process'")
+    .bind(service_name)
+    .bind(instance_id)
+    .execute(&mut *transaction)
+    .await
+    .with_context(|| {
+        format!("failed to fence {service_name} service loop writers for {instance_id}")
+    })?;
+    sqlx::query("DELETE FROM service_loop_heartbeats WHERE service_name = $1 AND instance_id = $2")
+        .bind(service_name)
+        .bind(instance_id)
+        .execute(&mut *transaction)
+        .await
+        .with_context(|| {
+            format!("failed to clear {service_name} service loop rows for {instance_id}")
+        })?;
+    transaction
+        .commit()
+        .await
+        .with_context(|| format!("failed to commit {service_name} loop deregistration"))?;
 
     Ok(())
 }

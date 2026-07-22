@@ -224,27 +224,94 @@ async fn healthz_uses_the_worker_phase_threshold_during_monolithic_rebuild_work(
 }
 
 #[tokio::test]
-async fn healthz_prefers_a_healthy_worker_phase_over_a_newer_stale_replica() -> Result<()> {
+async fn healthz_reaps_a_dead_worker_phase_when_a_replacement_registers() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    register_ready_health_loops(&database).await?;
+    bigname_storage::register_service_loop(
+        &database.pool,
+        bigname_storage::INDEXER_SERVICE_NAME,
+        "api-health-indexer",
+    )
+    .await?;
+    bigname_storage::register_service_loop(
+        &database.pool,
+        bigname_storage::WORKER_SERVICE_NAME,
+        "dead-mid-phase-worker",
+    )
+    .await?;
     bigname_storage::begin_service_loop_phase(
         &database.pool,
         bigname_storage::WORKER_SERVICE_NAME,
-        "api-health-worker",
-        "resolver_current.publish",
+        "dead-mid-phase-worker",
+        "name_current.publish",
     )
     .await?;
     sqlx::query(
         r#"
         UPDATE service_loop_heartbeats
-        SET started_at = clock_timestamp() - INTERVAL '3 hours',
-            heartbeat_at = clock_timestamp() - INTERVAL '2 hours'
+        SET started_at = clock_timestamp() - INTERVAL '2 minutes',
+            heartbeat_at = clock_timestamp() - INTERVAL '1 minute'
         WHERE service_name = 'worker'
-          AND instance_id = 'api-health-worker'
+          AND instance_id = 'dead-mid-phase-worker'
         "#,
     )
     .execute(&database.pool)
     .await?;
+
+    bigname_storage::register_service_loop(
+        &database.pool,
+        bigname_storage::WORKER_SERVICE_NAME,
+        "replacement-worker",
+    )
+    .await?;
+    let orphaned_phase_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM service_loop_heartbeats
+        WHERE service_name = 'worker'
+          AND instance_id = 'dead-mid-phase-worker'
+          AND scope_kind = 'phase'
+        "#,
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(
+        orphaned_phase_count, 0,
+        "replacement registration must reap the dead predecessor's phase"
+    );
+
+    sqlx::query(
+        r#"
+        UPDATE service_loop_heartbeats
+        SET started_at = clock_timestamp() - INTERVAL '2 minutes',
+            heartbeat_at = clock_timestamp() - INTERVAL '1 minute'
+        WHERE service_name = 'worker'
+          AND scope_kind = 'process'
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["status"], json!("degraded"));
+    assert_eq!(payload["loops"]["worker"]["status"], json!("stale"));
+    assert_eq!(payload["loops"]["worker"]["phase"], Value::Null);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn healthz_prefers_a_healthy_worker_phase_over_a_newer_stale_replica() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    register_ready_health_loops(&database).await?;
 
     bigname_storage::register_service_loop(
         &database.pool,
@@ -259,6 +326,25 @@ async fn healthz_prefers_a_healthy_worker_phase_over_a_newer_stale_replica() -> 
             heartbeat_at = clock_timestamp() - INTERVAL '1 hour'
         WHERE service_name = 'worker'
           AND instance_id = 'newer-stale-worker'
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+
+    bigname_storage::begin_service_loop_phase(
+        &database.pool,
+        bigname_storage::WORKER_SERVICE_NAME,
+        "api-health-worker",
+        "resolver_current.publish",
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE service_loop_heartbeats
+        SET started_at = clock_timestamp() - INTERVAL '3 hours',
+            heartbeat_at = clock_timestamp() - INTERVAL '2 hours'
+        WHERE service_name = 'worker'
+          AND instance_id = 'api-health-worker'
         "#,
     )
     .execute(&database.pool)

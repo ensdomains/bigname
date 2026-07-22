@@ -6,6 +6,8 @@ pub(crate) struct StartupHeartbeat {
     instance_id: String,
     interval: Duration,
     last_recorded_at: Instant,
+    #[cfg(test)]
+    adapter_progress_count: usize,
 }
 
 pub(crate) struct StartupAdapterHeartbeat<'a> {
@@ -27,7 +29,13 @@ impl bigname_adapters::StartupAdapterProgress for StartupAdapterHeartbeat<'_> {
         &'a mut self,
         pool: &'a PgPool,
     ) -> bigname_adapters::StartupAdapterProgressFuture<'a> {
-        Box::pin(async move { self.heartbeat.record_if_due(pool, self.chain_ids).await })
+        Box::pin(async move {
+            #[cfg(test)]
+            {
+                self.heartbeat.adapter_progress_count += 1;
+            }
+            self.heartbeat.record_if_due(pool, self.chain_ids).await
+        })
     }
 }
 
@@ -37,7 +45,14 @@ impl StartupHeartbeat {
             instance_id,
             interval,
             last_recorded_at: Instant::now(),
+            #[cfg(test)]
+            adapter_progress_count: 0,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn adapter_progress_count(&self) -> usize {
+        self.adapter_progress_count
     }
 
     pub(crate) async fn record_if_due(
