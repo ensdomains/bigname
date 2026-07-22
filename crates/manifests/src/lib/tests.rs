@@ -287,6 +287,38 @@ admission = "reachable_from_root"
     )
 }
 
+fn attribution_manifest_contents(
+    namespace: &str,
+    source_family: &str,
+    address: &str,
+    start_block: Option<u64>,
+) -> String {
+    let start_block = start_block
+        .map(|start_block| format!("start_block = {start_block}\n"))
+        .unwrap_or_default();
+    format!(
+        r#"
+manifest_version = 1
+namespace = "{namespace}"
+source_family = "{source_family}"
+chain = "ethereum-mainnet"
+deployment_epoch = "attribution_test"
+rollout_status = "active"
+normalizer_version = "ensip15@ens-normalize-0.1.1"
+roots = []
+discovery_rules = []
+
+[capability_flags]
+
+[[contracts]]
+role = "shared_emitter"
+address = "{address}"
+proxy_kind = "none"
+{start_block}
+"#
+    )
+}
+
 fn simple_contract_start_block_manifest_contents() -> String {
     r#"
 manifest_version = 1
@@ -1942,6 +1974,72 @@ proxy_kind = "none"
             .contains("duplicates contract role registry"),
         "unexpected error: {error:#}"
     );
+
+    Ok(())
+}
+
+#[test]
+fn allows_equal_rank_overlap_between_non_preimage_source_families() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let shared_address = "0xde9049636F4a1dfE0a64d1bFe3155C0A14C54F31";
+    for source_family in ["basenames_l1_compat", "basenames_execution"] {
+        test_dir.write_manifest(
+            "basenames",
+            source_family,
+            "v1",
+            &attribution_manifest_contents("basenames", source_family, shared_address, None),
+        )?;
+    }
+
+    let repository = load_repository(&test_dir.path)?;
+    assert_eq!(repository.manifests().len(), 2);
+
+    Ok(())
+}
+
+#[test]
+fn rejects_equal_rank_overlap_involving_preimage_source_family() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let shared_address = "0x00000000000000000000000000000000000000AA";
+    test_dir.write_manifest(
+        "ens",
+        "ens_v1_registrar_l1",
+        "v1",
+        &attribution_manifest_contents("ens", "ens_v1_registrar_l1", shared_address, Some(100)),
+    )?;
+    test_dir.write_manifest(
+        "basenames",
+        "basenames_execution",
+        "v1",
+        &attribution_manifest_contents(
+            "basenames",
+            "basenames_execution",
+            &shared_address.to_ascii_lowercase(),
+            Some(200),
+        ),
+    )?;
+
+    let error = load_repository(&test_dir.path)
+        .expect_err("equal-rank overlap involving a preimage source must fail");
+    let message = error.to_string();
+    assert!(
+        message.contains("could assign one block-derived preimage log to two sources"),
+        "error must identify the unsafe attribution: {error:#}"
+    );
+    for detail in [
+        "ethereum-mainnet",
+        "0x00000000000000000000000000000000000000aa",
+        "source family ens_v1_registrar_l1 contract role shared_emitter",
+        "source family basenames_execution contract role shared_emitter",
+        "both manifest contract declarations (runtime priority 1)",
+        "open-ended intervals overlapping from block 200",
+        "remove one overlapping declaration or mark one manifest version non-active",
+    ] {
+        assert!(
+            message.contains(detail),
+            "error must contain {detail:?}: {error:#}"
+        );
+    }
 
     Ok(())
 }
