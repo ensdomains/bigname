@@ -65,6 +65,10 @@ impl ApiRouteDefinition {
             contract: Some(contract),
         }
     }
+
+    pub(crate) const fn bypasses_global_load_shed(self) -> bool {
+        matches!(self.id, ApiRouteId::Health)
+    }
 }
 
 impl ApiRouteContract {

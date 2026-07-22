@@ -190,18 +190,23 @@ provider failure after a reverse claim likewise returns
 
 ### API bounds for public undrain
 
-Every API route is covered by the request deadline and shared load-shed
-ceiling. Requests whose route and source/mode can initiate verified execution
-also pass through a separate concurrency ceiling and, when enabled, a
-per-client-IP token bucket before handler work starts. Configure the API service
-with these values before public undrain; binary defaults remain generous for
+Every API route is covered by the request deadline. `/healthz` bypasses the
+shared load-shed ceiling and uses a separate reserved ceiling so container
+readiness remains visible during global saturation without allowing unbounded
+health work. The status routes retain global admission because their aggregate
+database query can be expensive under backlog. Requests whose route and
+source/mode can initiate verified execution also pass through a separate
+concurrency ceiling and, when enabled, a client token bucket keyed by an IPv4
+address or IPv6 `/64` before handler work starts. Configure the API service with
+these values before public undrain; binary defaults remain generous for
 development and test workloads.
 
 | Environment variable | Binary default | Undrain starting value |
 | --- | ---: | ---: |
 | `BIGNAME_API_REQUEST_TIMEOUT_MS` | `30000` | `30000` |
-| `BIGNAME_API_DB_STATEMENT_TIMEOUT_MS` | `25000` | `5000` |
+| `BIGNAME_API_DB_STATEMENT_TIMEOUT_MS` | `25000` | `25000` |
 | `BIGNAME_API_MAX_IN_FLIGHT` | `1024` | `256` |
+| `BIGNAME_API_HEALTH_MAX_IN_FLIGHT` | `4` | `4` |
 | `BIGNAME_API_VERIFIED_EXECUTION_MAX_IN_FLIGHT` | `128` | `16` |
 | `BIGNAME_API_RPC_CONNECT_TIMEOUT_MS` | `2000` | `2000` |
 | `BIGNAME_API_RPC_TIMEOUT_MS` | `8000` | `8000` |

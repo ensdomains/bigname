@@ -447,9 +447,9 @@ Rules:
 - A coherent selector that can't be served from current projections returns `409 stale`.
 - A selector whose supplied lineage, canonicality floor, or cross-chain reconciliation can't form one snapshot returns `409 conflict`.
 - Persisted-readback routes return their documented stale or not-found state when matching output is missing. Supported ENS verified selectors on the resolution and compact records routes instead execute on demand. An unconfigured provider or a JSON-RPC response recognized as unable to serve the selected block returns `409 stale`; a provider transport failure is an in-band selector execution failure.
-- Every route has a whole-request deadline. Exceeding it returns `408 request_timeout`; `/healthz` and `/v1/status` retain their bounded fast-path behavior, with this deadline as a final backstop.
-- Routes that can trigger verified execution may return `429 rate_limited` when the deployment's per-client-IP token bucket is enabled. The limit applies before execution starts and does not turn a provider failure into an HTTP error.
-- Exhausting either the process-wide in-flight ceiling or the separate verified-execution ceiling returns `503 overloaded` without waiting for capacity.
+- Every route has a whole-request deadline. Exceeding it returns `408 request_timeout`; `/healthz` bypasses the process-wide concurrency limiter and load shedding so readiness remains available during global saturation, while a small independent health ceiling prevents unbounded work and retains the deadline as a final backstop. `/v1/status` retains the process-wide ceiling because its aggregate database query is not a liveness probe.
+- Routes that can trigger verified execution may return `429 rate_limited` when the deployment's client token bucket is enabled. IPv4 addresses are individual keys and IPv6 addresses are grouped by `/64`. The limit applies before execution starts and does not turn a provider failure into an HTTP error.
+- Exhausting the process-wide, health-specific, or verified-execution in-flight ceiling returns `503 overloaded` without waiting for capacity. `/healthz` passes only through the health-specific ceiling.
 - A verified-resolution provider connect or response timeout is an execution result: the affected selector returns the existing in-band `execution_failed` class. Primary-name provider timeouts likewise use that route's existing in-band execution-failure class. They are distinct from the whole-request `408` backstop.
 
 ## Subgraph-compatible GraphQL endpoint

@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -26,6 +29,7 @@ use crate::ApiError;
 const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_DB_STATEMENT_TIMEOUT_MS: u64 = 25_000;
 const DEFAULT_MAX_IN_FLIGHT: usize = 1_024;
+const DEFAULT_HEALTH_MAX_IN_FLIGHT: usize = 4;
 const DEFAULT_VERIFIED_MAX_IN_FLIGHT: usize = 128;
 const DEFAULT_RATE_LIMIT_BURST: u32 = 10;
 const DEFAULT_RATE_LIMIT_MAX_CLIENTS: usize = 65_536;
@@ -50,6 +54,12 @@ pub(crate) struct ApiBoundsConfig {
         default_value_t = DEFAULT_MAX_IN_FLIGHT
     )]
     pub(crate) max_in_flight: usize,
+    #[arg(
+        long,
+        env = "BIGNAME_API_HEALTH_MAX_IN_FLIGHT",
+        default_value_t = DEFAULT_HEALTH_MAX_IN_FLIGHT
+    )]
+    pub(crate) health_max_in_flight: usize,
     #[arg(
         long,
         env = "BIGNAME_API_VERIFIED_EXECUTION_MAX_IN_FLIGHT",
@@ -88,6 +98,7 @@ impl Default for ApiBoundsConfig {
             request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
             db_statement_timeout_ms: DEFAULT_DB_STATEMENT_TIMEOUT_MS,
             max_in_flight: DEFAULT_MAX_IN_FLIGHT,
+            health_max_in_flight: DEFAULT_HEALTH_MAX_IN_FLIGHT,
             verified_execution_max_in_flight: DEFAULT_VERIFIED_MAX_IN_FLIGHT,
             verified_rate_limit_per_second: 0,
             verified_rate_limit_burst: DEFAULT_RATE_LIMIT_BURST,
@@ -110,6 +121,10 @@ impl ApiBoundsConfig {
         ensure!(
             self.max_in_flight > 1,
             "BIGNAME_API_MAX_IN_FLIGHT must be greater than one"
+        );
+        ensure!(
+            self.health_max_in_flight > 0,
+            "BIGNAME_API_HEALTH_MAX_IN_FLIGHT must be greater than zero"
         );
         ensure!(
             self.verified_execution_max_in_flight > 0
@@ -138,23 +153,42 @@ impl ApiBoundsConfig {
     }
 }
 
-pub(crate) fn apply_request_bounds<S>(router: Router<S>, config: &ApiBoundsConfig) -> Router<S>
+pub(crate) fn apply_request_bounds<S>(
+    bounded_router: Router<S>,
+    health_router: Router<S>,
+    config: &ApiBoundsConfig,
+) -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
 {
     let verified_admission = VerifiedExecutionAdmission::new(config);
-    let global_bounds = ServiceBuilder::new()
+    let global_admission = ServiceBuilder::new()
         .layer(HandleErrorLayer::new(handle_global_bound_error))
         .layer(LoadShedLayer::new())
-        .layer(GlobalConcurrencyLimitLayer::new(config.max_in_flight))
+        .layer(GlobalConcurrencyLimitLayer::new(config.max_in_flight));
+    let health_admission = ServiceBuilder::new()
+        .layer(HandleErrorLayer::new(handle_global_bound_error))
+        .layer(LoadShedLayer::new())
+        .layer(GlobalConcurrencyLimitLayer::new(
+            config.health_max_in_flight,
+        ));
+    let request_timeout = ServiceBuilder::new()
+        .layer(HandleErrorLayer::new(handle_global_bound_error))
         .layer(TimeoutLayer::new(config.request_timeout()));
 
-    router
+    let bounded_router = bounded_router
         .layer(middleware::from_fn_with_state(
             verified_admission,
             enforce_verified_execution_bounds,
         ))
-        .layer(global_bounds)
+        .layer(global_admission);
+
+    health_router
+        .layer(health_admission)
+        // Keep the bounded router on the right so its fallback also remains behind global
+        // admission; only a matched health route may use the reserved health capacity.
+        .merge(bounded_router)
+        .layer(request_timeout)
 }
 
 async fn handle_global_bound_error(error: BoxError) -> Response {
@@ -206,14 +240,26 @@ async fn enforce_verified_execution_bounds(
         return next.run(request).await;
     }
 
-    if let Some(rate_limiter) = admission.rate_limiter.as_ref()
-        && !rate_limiter.allow(client_key(&request, admission.trust_x_forwarded_for))
-    {
-        return bound_error(
-            StatusCode::TOO_MANY_REQUESTS,
-            "rate_limited",
-            "verified execution request rate limit exceeded",
-        );
+    if let Some(rate_limiter) = admission.rate_limiter.as_ref() {
+        match rate_limiter.check(client_key(&request, admission.trust_x_forwarded_for)) {
+            RateLimitDecision::Allowed => {}
+            RateLimitDecision::Limited => return rate_limited_response(),
+            RateLimitDecision::TableFull {
+                tracked_clients,
+                rejection_count,
+            } => {
+                if should_log_table_full(rejection_count) {
+                    tracing::warn!(
+                        service = "api",
+                        tracked_clients,
+                        max_clients = rate_limiter.max_clients,
+                        rejection_count,
+                        "verified request rate limiter client table is full; rejecting new client"
+                    );
+                }
+                return rate_limited_response();
+            }
+        }
     }
 
     let Ok(permit) = admission.semaphore.clone().try_acquire_owned() else {
@@ -230,6 +276,18 @@ fn overloaded_response() -> Response {
         "overloaded",
         "API is temporarily overloaded",
     )
+}
+
+fn rate_limited_response() -> Response {
+    bound_error(
+        StatusCode::TOO_MANY_REQUESTS,
+        "rate_limited",
+        "verified execution request rate limit exceeded",
+    )
+}
+
+fn should_log_table_full(rejection_count: u64) -> bool {
+    rejection_count.is_power_of_two()
 }
 
 fn bound_error(status: StatusCode, code: &'static str, message: &'static str) -> Response {
@@ -317,8 +375,19 @@ fn client_key(request: &Request, trust_x_forwarded_for: bool) -> ClientKey {
                 .get::<ConnectInfo<SocketAddr>>()
                 .map(|connect_info| connect_info.0.ip())
         })
+        .map(normalize_client_ip)
         .map(ClientKey::Ip)
         .unwrap_or(ClientKey::Unidentified)
+}
+
+fn normalize_client_ip(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V4(address) => IpAddr::V4(address),
+        IpAddr::V6(address) => address
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or_else(|| IpAddr::V6((u128::from(address) & (u128::MAX << 64)).into())),
+    }
 }
 
 fn parse_forwarded_ip(value: &str) -> Option<IpAddr> {
@@ -334,6 +403,17 @@ struct ClientRateLimiter {
     burst: f64,
     max_clients: usize,
     buckets: Mutex<HashMap<ClientKey, TokenBucket>>,
+    table_full_rejections: AtomicU64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RateLimitDecision {
+    Allowed,
+    Limited,
+    TableFull {
+        tracked_clients: usize,
+        rejection_count: u64,
+    },
 }
 
 impl ClientRateLimiter {
@@ -343,10 +423,11 @@ impl ClientRateLimiter {
             burst: f64::from(burst),
             max_clients,
             buckets: Mutex::new(HashMap::new()),
+            table_full_rejections: AtomicU64::new(0),
         }
     }
 
-    fn allow(&self, client: ClientKey) -> bool {
+    fn check(&self, client: ClientKey) -> RateLimitDecision {
         let now = Instant::now();
         let mut buckets = self
             .buckets
@@ -354,7 +435,11 @@ impl ClientRateLimiter {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(bucket) = buckets.get_mut(&client) {
             bucket.refill(now, self.rate_per_second, self.burst);
-            return bucket.take();
+            return if bucket.take() {
+                RateLimitDecision::Allowed
+            } else {
+                RateLimitDecision::Limited
+            };
         }
 
         if buckets.len() >= self.max_clients {
@@ -362,11 +447,19 @@ impl ClientRateLimiter {
                 bucket.available(now, self.rate_per_second, self.burst) < self.burst
             });
             if buckets.len() >= self.max_clients {
-                return false;
+                let tracked_clients = buckets.len();
+                drop(buckets);
+                return RateLimitDecision::TableFull {
+                    tracked_clients,
+                    rejection_count: self
+                        .table_full_rejections
+                        .fetch_add(1, Ordering::Relaxed)
+                        .saturating_add(1),
+                };
             }
         }
         buckets.insert(client, TokenBucket::after_first_request(now, self.burst));
-        true
+        RateLimitDecision::Allowed
     }
 }
 

@@ -47,9 +47,11 @@ pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
         request_timeout_ms = args.bounds.request_timeout_ms,
         db_statement_timeout_ms = args.bounds.db_statement_timeout_ms,
         max_in_flight = args.bounds.max_in_flight,
+        health_max_in_flight = args.bounds.health_max_in_flight,
         verified_execution_max_in_flight = args.bounds.verified_execution_max_in_flight,
         verified_rate_limit_per_second = args.bounds.verified_rate_limit_per_second,
         verified_rate_limit_burst = args.bounds.verified_rate_limit_burst,
+        verified_rate_limit_max_clients = args.bounds.verified_rate_limit_max_clients,
         trust_x_forwarded_for = args.bounds.trust_x_forwarded_for,
         "API booted"
     );
@@ -69,9 +71,10 @@ pub(crate) fn app_router(state: AppState) -> Router {
 }
 
 fn app_router_with_bounds(state: AppState, bounds: &ApiBoundsConfig) -> Router {
-    let router = API_ROUTE_DEFINITIONS
+    let bounded_router = API_ROUTE_DEFINITIONS
         .iter()
         .copied()
+        .filter(|route| !route.bypasses_global_load_shed())
         .fold(Router::new(), |router, route| route.register(router))
         .route("/", get(openapi_docs))
         .route("/openapi.json", get(openapi_json))
@@ -79,15 +82,27 @@ fn app_router_with_bounds(state: AppState, bounds: &ApiBoundsConfig) -> Router {
         .route("/docs/", get(openapi_docs))
         .merge(crate::v2::router())
         .with_state(state.clone())
-        .merge(crate::graphql::graphql_routes(state));
+        .merge(crate::graphql::graphql_routes(state.clone()));
+    let health_router = API_ROUTE_DEFINITIONS
+        .iter()
+        .copied()
+        .filter(|route| route.bypasses_global_load_shed())
+        .fold(Router::new(), |router, route| route.register(router))
+        .with_state(state);
     // The API is read-only public data served cross-origin to browser clients (the ENS Manager
     // dev build, deployed on a different origin). Permissive CORS — wildcard origin, no
     // credentials — lets the browser read responses and answers the GraphQL POST preflight.
     // This is not access control: the endpoint is unauthenticated and reachable regardless;
     // CORS only governs whether browser JS on another origin may read the response.
     // Request bounds wrap CORS so even preflight responses pass through the family-wide backstop;
-    // bound errors add the same wildcard origin header directly.
-    crate::bounds::apply_request_bounds(router.layer(CorsLayer::permissive()), bounds)
+    // bound errors add the same wildcard origin header directly. Health uses reserved admission
+    // outside the global ceiling and retains the request-timeout backstop.
+    let cors = CorsLayer::permissive();
+    crate::bounds::apply_request_bounds(
+        bounded_router.layer(cors.clone()),
+        health_router.layer(cors),
+        bounds,
+    )
 }
 
 async fn openapi_json() -> Json<JsonValue> {

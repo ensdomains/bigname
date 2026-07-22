@@ -77,12 +77,13 @@ recommended starting point before the public edge is undrained.
 | Environment variable | Default | Undrain starting value | Mechanism |
 | --- | ---: | ---: | --- |
 | `BIGNAME_API_REQUEST_TIMEOUT_MS` | `30000` | `30000` | Whole-request deadline on every REST, GraphQL, docs, status, and health route; returns `408 request_timeout`. |
-| `BIGNAME_API_DB_STATEMENT_TIMEOUT_MS` | `25000` | `5000` | PostgreSQL `statement_timeout` applied to every API pool connection. |
-| `BIGNAME_API_MAX_IN_FLIGHT` | `1024` | `256` | Shared process-wide in-flight ceiling; excess work is load-shed as `503 overloaded`. |
+| `BIGNAME_API_DB_STATEMENT_TIMEOUT_MS` | `25000` | `25000` | PostgreSQL `statement_timeout` applied to every API pool connection. |
+| `BIGNAME_API_MAX_IN_FLIGHT` | `1024` | `256` | Shared process-wide in-flight ceiling; excess work is load-shed as `503 overloaded`. `/healthz` bypasses it. |
+| `BIGNAME_API_HEALTH_MAX_IN_FLIGHT` | `4` | `4` | Independent in-flight ceiling reserved for `/healthz`; excess health work is load-shed as `503 overloaded`. |
 | `BIGNAME_API_VERIFIED_EXECUTION_MAX_IN_FLIGHT` | `128` | `16` | Separate ceiling for requests that can initiate verified resolution or primary-name fallback; it must be lower than the global ceiling. |
 | `BIGNAME_API_RPC_CONNECT_TIMEOUT_MS` | `2000` | `2000` | Connect deadline for API-triggered execution JSON-RPC calls. |
 | `BIGNAME_API_RPC_TIMEOUT_MS` | `8000` | `8000` | Total deadline for each API-triggered execution JSON-RPC call. |
-| `BIGNAME_API_VERIFIED_RATE_LIMIT_PER_SECOND` | `0` (off) | `1` | Per-client-IP token refill rate for verified-execution-triggering routes; excess requests return `429 rate_limited`. |
+| `BIGNAME_API_VERIFIED_RATE_LIMIT_PER_SECOND` | `0` (off) | `1` | Per-client token refill rate for verified-execution-triggering routes, keyed by an IPv4 address or IPv6 `/64`; excess requests return `429 rate_limited`. |
 | `BIGNAME_API_VERIFIED_RATE_LIMIT_BURST` | `10` | `5` | Maximum tokens in each client bucket when rate limiting is enabled. |
 | `BIGNAME_API_VERIFIED_RATE_LIMIT_MAX_CLIENTS` | `65536` | `65536` | In-memory client-bucket ceiling per API process. |
 | `BIGNAME_API_TRUST_X_FORWARDED_FOR` | `false` | `true` | Whether the client-IP key may use the rightmost valid `X-Forwarded-For` address instead of the TCP peer. |
@@ -99,11 +100,28 @@ is absent it uses the TCP peer address; an unidentifiable request shares one
 fallback bucket. Never enable `BIGNAME_API_TRUST_X_FORWARDED_FOR` on a listener
 that untrusted clients can reach directly.
 
+When the client table remains full after reclaiming refilled buckets, unseen
+keys fail closed with `429 rate_limited`; logarithmically sampled warning logs
+report the rejection count without emitting one log line for every request.
+
+When the rate limiter is enabled behind Caddy, `BIGNAME_API_TRUST_X_FORWARDED_FOR`
+MUST be `true`; otherwise all clients share Caddy's single container-IP bucket
+and the intended per-client limit becomes an accidental global throttle.
+
+The undrain statement timeout remains `25000` because the current status query
+performs aggregate counts that can exceed five seconds under backlog. Lower it
+only after status no longer depends on that expensive query.
+
 The RPC deadlines are shorter than the whole-request deadline. A hung provider
 therefore becomes the route's existing in-band execution-failure result rather
 than consuming an API request indefinitely. The request deadline remains a
-backstop on `/healthz` and status routes; their normal guarantee comes from
-bounded database work and the API-pool statement timeout.
+backstop on `/healthz`, `/v1/status`, and `/v2/status`. Those routes remain
+bounded by the API-pool statement timeout. `/healthz` alone bypasses the
+process-wide concurrency limiter and load shedding so the container readiness
+signal remains available during global saturation; its independent ceiling
+prevents direct health traffic from creating unbounded work. The status routes
+retain global admission because their aggregate database query can be expensive
+under backlog.
 
 For a temporary HTTP-only deployment before DNS is ready, set:
 

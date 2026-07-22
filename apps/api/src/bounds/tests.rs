@@ -5,7 +5,7 @@ use axum::{
     routing::get,
 };
 use serde_json::{Value, json};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore};
 use tower::ServiceExt;
 
 use super::*;
@@ -15,6 +15,7 @@ fn test_config() -> ApiBoundsConfig {
         request_timeout_ms: 1_000,
         db_statement_timeout_ms: 900,
         max_in_flight: 4,
+        health_max_in_flight: 4,
         verified_execution_max_in_flight: 1,
         verified_rate_limit_per_second: 0,
         verified_rate_limit_burst: 1,
@@ -29,7 +30,20 @@ fn default_config_is_valid_and_keeps_rate_limiting_disabled() {
     config.validate().expect("default bounds must be valid");
     assert_eq!(config.request_timeout(), Duration::from_secs(30));
     assert_eq!(config.db_statement_timeout(), Duration::from_secs(25));
+    assert_eq!(config.health_max_in_flight, 4);
     assert_eq!(config.verified_rate_limit_per_second, 0);
+}
+
+#[test]
+fn health_is_the_only_route_that_bypasses_global_load_shedding() {
+    let bypass_paths = crate::API_ROUTE_DEFINITIONS
+        .iter()
+        .copied()
+        .filter(|route| route.bypasses_global_load_shed())
+        .map(|route| route.path)
+        .collect::<Vec<_>>();
+
+    assert_eq!(bypass_paths, vec!["/healthz"]);
 }
 
 #[test]
@@ -103,6 +117,26 @@ fn direct_peer_cannot_replace_rate_limit_key_with_a_forwarded_header() {
     );
 }
 
+#[test]
+fn ipv6_client_keys_are_bucketed_by_64_bit_prefix() {
+    let first = forwarded_request("/", "2001:db8:abcd:12::1");
+    let same_prefix = forwarded_request("/", "2001:db8:abcd:12::ffff");
+    let other_prefix = forwarded_request("/", "2001:db8:abcd:13::1");
+
+    assert_eq!(client_key(&first, true), client_key(&same_prefix, true));
+    assert_ne!(client_key(&first, true), client_key(&other_prefix, true));
+}
+
+#[test]
+fn ipv4_mapped_ipv6_client_keys_use_the_embedded_ipv4_address() {
+    let first = forwarded_request("/", "::ffff:203.0.113.1");
+    let second = forwarded_request("/", "::ffff:198.51.100.2");
+    let native = forwarded_request("/", "203.0.113.1");
+
+    assert_eq!(client_key(&first, true), client_key(&native, true));
+    assert_ne!(client_key(&first, true), client_key(&second, true));
+}
+
 #[tokio::test]
 async fn request_timeout_returns_json_error_envelope() {
     let mut config = test_config();
@@ -115,6 +149,7 @@ async fn request_timeout_returns_json_error_envelope() {
                 "late"
             }),
         ),
+        Router::new(),
         &config,
     );
 
@@ -122,6 +157,30 @@ async fn request_timeout_returns_json_error_envelope() {
         .oneshot(request("/slow"))
         .await
         .expect("bounded request must complete");
+
+    assert_error(response, StatusCode::REQUEST_TIMEOUT, "request_timeout").await;
+}
+
+#[tokio::test]
+async fn shed_bypass_routes_keep_the_request_timeout_backstop() {
+    let mut config = test_config();
+    config.request_timeout_ms = 5;
+    let app = apply_request_bounds(
+        Router::new(),
+        Router::new().route(
+            "/healthz",
+            get(|| async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                "late"
+            }),
+        ),
+        &config,
+    );
+
+    let response = app
+        .oneshot(request("/healthz"))
+        .await
+        .expect("bounded health request must complete");
 
     assert_error(response, StatusCode::REQUEST_TIMEOUT, "request_timeout").await;
 }
@@ -149,6 +208,7 @@ async fn global_concurrency_limit_sheds_with_json_error_envelope() {
                 }
             }),
         ),
+        Router::new(),
         &config,
     );
 
@@ -175,6 +235,133 @@ async fn global_concurrency_limit_sheds_with_json_error_envelope() {
 }
 
 #[tokio::test]
+async fn healthz_remains_ready_while_global_concurrency_is_saturated() {
+    let mut config = test_config();
+    config.max_in_flight = 2;
+    let (started, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let release = Arc::new(Notify::new());
+    let app = apply_request_bounds(
+        Router::new()
+            .route(
+                "/slow",
+                get({
+                    let started = started.clone();
+                    let release = release.clone();
+                    move || {
+                        let started = started.clone();
+                        let release = release.clone();
+                        async move {
+                            started.send(()).expect("test receiver must stay open");
+                            release.notified().await;
+                            "ok"
+                        }
+                    }
+                }),
+            )
+            .route("/v1/status", get(|| async { "visible" }))
+            .route("/v2/status", get(|| async { "visible" })),
+        Router::new().route(
+            "/healthz",
+            get(|| async { axum::Json(json!({ "status": "ready" })) }),
+        ),
+        &config,
+    );
+
+    let first = tokio::spawn(app.clone().oneshot(request("/slow")));
+    started_rx.recv().await.expect("first request must start");
+    let second = tokio::spawn(app.clone().oneshot(request("/slow")));
+    started_rx.recv().await.expect("second request must start");
+
+    let health = app
+        .clone()
+        .oneshot(request("/healthz"))
+        .await
+        .expect("health request must complete");
+    assert_eq!(health.status(), StatusCode::OK);
+    let body = to_bytes(health.into_body(), usize::MAX)
+        .await
+        .expect("health body must read");
+    let payload: Value = serde_json::from_slice(&body).expect("health body must be JSON");
+    assert_eq!(payload.get("status"), Some(&json!("ready")));
+    for uri in ["/v1/status", "/v2/status"] {
+        let status = app
+            .clone()
+            .oneshot(request(uri))
+            .await
+            .expect("status request must complete");
+        assert_error(status, StatusCode::SERVICE_UNAVAILABLE, "overloaded").await;
+    }
+    let unmatched = app
+        .clone()
+        .oneshot(request("/v1/not-a-route"))
+        .await
+        .expect("unmatched request must complete");
+    assert_error(unmatched, StatusCode::SERVICE_UNAVAILABLE, "overloaded").await;
+
+    release.notify_waiters();
+    first
+        .await
+        .expect("first task must join")
+        .expect("first request must complete");
+    second
+        .await
+        .expect("second task must join")
+        .expect("second request must complete");
+}
+
+#[tokio::test]
+async fn health_has_a_dedicated_concurrency_ceiling() {
+    let config = test_config();
+    let health_max_in_flight = config.health_max_in_flight;
+    let (started, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let release = Arc::new(Semaphore::new(0));
+    let app = apply_request_bounds(
+        Router::new(),
+        Router::new().route(
+            "/healthz",
+            get({
+                let started = started.clone();
+                let release = release.clone();
+                move || {
+                    let started = started.clone();
+                    let release = release.clone();
+                    async move {
+                        started.send(()).expect("test receiver must stay open");
+                        let permit = release.acquire().await.expect("semaphore must stay open");
+                        permit.forget();
+                        "ready"
+                    }
+                }
+            }),
+        ),
+        &config,
+    );
+
+    let mut in_flight = Vec::new();
+    for _ in 0..health_max_in_flight {
+        in_flight.push(tokio::spawn(app.clone().oneshot(request("/healthz"))));
+        started_rx.recv().await.expect("health request must start");
+    }
+    let shed = tokio::time::timeout(
+        Duration::from_millis(50),
+        app.clone().oneshot(request("/healthz")),
+    )
+    .await;
+
+    release.add_permits(health_max_in_flight + 1);
+    for request_task in in_flight {
+        request_task
+            .await
+            .expect("health task must join")
+            .expect("health request must complete");
+    }
+    let response = shed
+        .expect("health requests beyond the dedicated ceiling must shed")
+        .expect("shed health request must complete");
+    assert_error(response, StatusCode::SERVICE_UNAVAILABLE, "overloaded").await;
+}
+
+#[tokio::test]
 async fn verified_concurrency_limit_is_separate_from_cheap_requests() {
     let config = test_config();
     let started = Arc::new(Notify::new());
@@ -198,6 +385,7 @@ async fn verified_concurrency_limit_is_separate_from_cheap_requests() {
                 }),
             )
             .route("/cheap", get(|| async { "ok" })),
+        Router::new(),
         &config,
     );
 
@@ -232,6 +420,7 @@ async fn enabled_rate_limit_is_per_forwarded_client_ip() {
     config.trust_x_forwarded_for = true;
     let app = apply_request_bounds(
         Router::new().route("/v1/primary-names/{address}", get(|| async { "ok" })),
+        Router::new(),
         &config,
     );
 
@@ -263,6 +452,32 @@ async fn enabled_rate_limit_is_per_forwarded_client_ip() {
         .await
         .expect("other-client request must complete");
     assert_eq!(other_client.status(), StatusCode::OK);
+}
+
+#[test]
+fn full_rate_limit_table_fails_closed_with_an_observable_decision() {
+    let limiter = ClientRateLimiter::new(1, 2, 1);
+    let first = ClientKey::Ip("203.0.113.1".parse().expect("IP must parse"));
+    let second = ClientKey::Ip("203.0.113.2".parse().expect("IP must parse"));
+
+    assert_eq!(limiter.check(first), RateLimitDecision::Allowed);
+    assert_eq!(
+        limiter.check(second),
+        RateLimitDecision::TableFull {
+            tracked_clients: 1,
+            rejection_count: 1,
+        }
+    );
+    assert_eq!(
+        limiter.check(second),
+        RateLimitDecision::TableFull {
+            tracked_clients: 1,
+            rejection_count: 2,
+        }
+    );
+    assert!(should_log_table_full(1));
+    assert!(should_log_table_full(2));
+    assert!(!should_log_table_full(3));
 }
 
 fn request(uri: &str) -> HttpRequest<Body> {

@@ -380,8 +380,8 @@ Uniform mapping:
 | `stale` | 409 | coherent selector not yet served for the selected snapshot |
 | `conflict` | 409 | selector cannot form one canonical snapshot |
 | `request_timeout` | 408 | the whole request exceeded the configured deadline |
-| `rate_limited` | 429 | the enabled per-client-IP limit rejected a route that can trigger verified execution |
-| `overloaded` | 503 | the process-wide or verified-execution in-flight ceiling was exhausted |
+| `rate_limited` | 429 | the enabled client limit, keyed by an IPv4 address or IPv6 `/64`, rejected a route that can trigger verified execution |
+| `overloaded` | 503 | the process-wide, health-specific, or verified-execution in-flight ceiling was exhausted |
 | `internal_error` | 500 | unexpected failure |
 
 Rules:
@@ -393,10 +393,14 @@ Rules:
   existing in-band execution-failure behavior; they are not whole-request
   `408` responses.
 - Every route has a whole-request deadline. `/healthz`, `/v1/status`, and
-  `/v2/status` retain their bounded fast paths; the deadline is their final
-  backstop.
-- The verified-execution rate limit, when enabled, and both in-flight ceilings
-  reject work before it waits for execution capacity.
+  `/v2/status` retain that deadline as their final backstop. `/healthz` bypasses
+  the process-wide concurrency limiter and load shedding but uses a small
+  independent health ceiling; the status routes retain global admission because
+  their aggregate database query is not a liveness probe.
+- The verified-execution rate limit, when enabled, and all in-flight ceilings
+  reject work before it waits for execution capacity. The rate-limit key is an
+  IPv4 address or IPv6 `/64`; `/healthz` passes only through the health-specific
+  ceiling.
 - Single-resource GETs return `404 not_found` when no answer exists.
 - Collections return `200` with empty `data`.
 - Batch lookup results carry in-band `status` per input; a batch never returns
