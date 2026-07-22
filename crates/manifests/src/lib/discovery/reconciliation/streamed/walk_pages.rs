@@ -17,7 +17,7 @@ use super::super::walk::DiscoveryAdmissionWalk;
 use super::StreamedDiscoveryReconciliationOptions;
 use super::staging::{
     STREAMED_OBSERVATION_COLUMNS, STREAMED_OBSERVATION_COLUMNS_QUALIFIED, StreamedObservationRow,
-    analyze_temp_table, streamed_observation_from_row,
+    analyze_temp_table, stage_streamed_derived_contract_keys, streamed_observation_from_row,
 };
 use crate::normalize_address;
 
@@ -82,30 +82,18 @@ pub(super) async fn run_streamed_admission_walk(
         .await?;
     }
 
+    let derived_observation_page_query =
+        derived_observation_page_query(options.observation_page_limit);
     while !pending_derived_keys.is_empty() {
         let round_keys = std::mem::take(&mut pending_derived_keys);
-        let (round_chains, round_addresses): (Vec<_>, Vec<_>) = round_keys.into_iter().unzip();
+        stage_streamed_derived_contract_keys(&mut *executor, round_keys).await?;
         let mut after_key = None::<String>;
         loop {
-            let rows = sqlx::query(&format!(
-                r#"
-                SELECT {STREAMED_OBSERVATION_COLUMNS_QUALIFIED}
-                FROM pg_temp.reconcile_observations obs
-                JOIN UNNEST($1::TEXT[], $2::TEXT[]) AS derived(chain_id, address)
-                  ON derived.chain_id = obs.chain_id
-                 AND derived.address = obs.normalized_from_address
-                WHERE ($3::TEXT IS NULL OR obs.observation_key > $3)
-                ORDER BY obs.observation_key
-                LIMIT $4
-                "#
-            ))
-            .bind(&round_chains)
-            .bind(&round_addresses)
-            .bind(after_key.as_deref())
-            .bind(options.observation_page_limit)
-            .fetch_all(&mut *executor)
-            .await
-            .context("failed to page staged observations for derived discovery contracts")?;
+            let rows = sqlx::query(&derived_observation_page_query)
+                .bind(after_key.as_deref())
+                .fetch_all(&mut *executor)
+                .await
+                .context("failed to page staged observations for derived discovery contracts")?;
             if rows.is_empty() {
                 break;
             }
@@ -138,6 +126,21 @@ pub(super) async fn run_streamed_admission_walk(
     analyze_temp_table(&mut *executor, "reconcile_desired_edges").await?;
     analyze_temp_table(&mut *executor, "reconcile_admitted_edges").await?;
     Ok(())
+}
+
+fn derived_observation_page_query(observation_page_limit: i64) -> String {
+    format!(
+        r#"
+        SELECT {STREAMED_OBSERVATION_COLUMNS_QUALIFIED}
+        FROM pg_temp.reconcile_observations obs
+        JOIN pg_temp.reconcile_derived_contract_keys derived
+          ON derived.chain_id = obs.chain_id
+         AND derived.address = obs.normalized_from_address
+        WHERE ($1::TEXT IS NULL OR obs.observation_key > $1)
+        ORDER BY obs.observation_key
+        LIMIT {observation_page_limit}
+        "#
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -319,4 +322,21 @@ async fn flush_admitted_edge_buffer(
         .context("failed to stage streamed admitted discovery edges")?;
     buffer.clear();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::derived_observation_page_query;
+
+    #[test]
+    fn derived_observation_pages_join_the_staged_set_without_array_binds() {
+        let query = derived_observation_page_query(37);
+
+        assert!(query.contains("JOIN pg_temp.reconcile_derived_contract_keys derived"));
+        assert!(!query.contains("UNNEST"));
+        assert!(!query.contains("TEXT[]"));
+        assert!(query.contains("WHERE ($1::TEXT IS NULL OR obs.observation_key > $1)"));
+        assert!(!query.contains("$2"));
+        assert!(query.contains("LIMIT 37"));
+    }
 }

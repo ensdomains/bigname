@@ -38,6 +38,21 @@ pub(super) async fn create_streamed_reconcile_temp_tables(
     .await
     .context("failed to create the streamed reconcile observation temp table")?;
 
+    // Address keys whose newly admitted contracts require another
+    // fixed-point walk pass. One set is bulk-filled before its keyset walk,
+    // then reused by every page in that pass.
+    sqlx::query(
+        r#"
+        CREATE TEMP TABLE pg_temp.reconcile_derived_contract_keys (
+            chain_id TEXT NOT NULL,
+            address TEXT NOT NULL
+        ) ON COMMIT DROP
+        "#,
+    )
+    .execute(&mut *executor)
+    .await
+    .context("failed to create the streamed reconcile derived-contract-key temp table")?;
+
     // Full `ReconciledDiscoveryEdgeSpec` rows. The unique constraint spans
     // the complete spec identity so `ON CONFLICT DO NOTHING` deduplicates
     // exactly like `HashSet<ReconciledDiscoveryEdgeSpec>` insertion
@@ -208,6 +223,48 @@ pub(super) async fn stage_streamed_observations(
         staged_observation_count,
         observation_chains,
     })
+}
+
+/// Replace the current fixed-point round's derived contract keys with one
+/// bulk array bind. The keys stay constant while that round's observation
+/// pages advance, so the page query reads this indexed set without
+/// re-materializing it.
+pub(super) async fn stage_streamed_derived_contract_keys(
+    executor: &mut PgConnection,
+    keys: BTreeSet<(String, String)>,
+) -> Result<()> {
+    sqlx::query("TRUNCATE pg_temp.reconcile_derived_contract_keys")
+        .execute(&mut *executor)
+        .await
+        .context("failed to clear the streamed reconcile derived-contract-key temp table")?;
+
+    let (chains, addresses): (Vec<_>, Vec<_>) = keys.into_iter().unzip();
+    sqlx::query(
+        r#"
+        INSERT INTO pg_temp.reconcile_derived_contract_keys (chain_id, address)
+        SELECT derived.chain_id, derived.address
+        FROM UNNEST($1::TEXT[], $2::TEXT[]) AS derived(chain_id, address)
+        "#,
+    )
+    .bind(&chains)
+    .bind(&addresses)
+    .execute(&mut *executor)
+    .await
+    .context("failed to stage streamed reconcile derived contract keys")?;
+    // Build after the first bulk fill, like the observation index. Later
+    // fixed-point rounds retain the same index across TRUNCATE.
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS reconcile_derived_contract_keys_chain_address_idx
+        ON pg_temp.reconcile_derived_contract_keys (chain_id, address)
+        "#,
+    )
+    .execute(&mut *executor)
+    .await
+    .context("failed to index the streamed reconcile derived-contract-key temp table")?;
+    analyze_temp_table(&mut *executor, "reconcile_derived_contract_keys").await?;
+
+    Ok(())
 }
 
 pub(super) struct StreamedObservationRow {
