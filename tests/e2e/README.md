@@ -591,11 +591,12 @@ route inventory or a claim that every protocol transition is covered.
   `PreimageObserved` for `catchupeq.eth` to exist identically in both corpora,
   so equality cannot pass if both paths omit the event.
 - `catchup_equivalence::automatic_catchup_matches_live_wrapper_reverse_outputs`
-  — compares two finalized ENSv1 registrations across the same live-versus-
-  catch-up boundary. One name is wrapped and burns owner-controlled fuses; the
-  other is wrapped, unwrapped back to registrar authority, and then used in a
-  reverse/primary-name claim. Full route snapshots and normalized-event rows
-  must match, including stable chain/address provenance for contract instances.
+  — exercises two finalized ENSv1 registrations across the same live-versus-
+  catch-up boundary. The fixture registers, wraps, and sets fuses on one name,
+  then registers, wraps, unwraps, and emits a reverse/primary-name claim for the
+  other. The test asserts Full equality for route snapshots and normalized-event
+  rows over those events, including stable chain/address provenance for contract
+  instances.
   The full equality arm also requires receipt-reconstructed registrar
   `PreimageObserved` rows for both names, so equal omission cannot pass.
   Together, the catch-up scenarios cover finalized ENSv1 registration,
