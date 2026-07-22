@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
-use bigname_manifests::load_active_manifest_abi_events;
+use bigname_manifests::{is_block_derived_preimage_source_family, load_active_manifest_abi_events};
 use sqlx::PgPool;
 
 use crate::adapter_manifest::ActiveManifestEventTopic0sBySignature;
@@ -33,7 +33,7 @@ impl PreimageObservedEventTopics {
     pub(super) async fn load(pool: &PgPool, active_emitters: &[ActiveEmitter]) -> Result<Self> {
         let manifest_ids = active_emitters
             .iter()
-            .filter(|emitter| is_manifest_preimage_source(&emitter.source_family))
+            .filter(|emitter| is_block_derived_preimage_source_family(&emitter.source_family))
             .map(|emitter| emitter.source_manifest_id)
             .collect::<HashSet<_>>()
             .into_iter()
@@ -86,7 +86,7 @@ impl PreimageObservedEventTopics {
 
         for emitter in active_emitters
             .iter()
-            .filter(|emitter| is_manifest_preimage_source(&emitter.source_family))
+            .filter(|emitter| is_block_derived_preimage_source_family(&emitter.source_family))
         {
             let topics = by_manifest_id
                 .get(&emitter.source_manifest_id)
@@ -140,19 +140,6 @@ impl PreimageObservedEventTopics {
             })?;
         topics.matches(canonical_signature, topic0)
     }
-}
-
-fn is_manifest_preimage_source(source_family: &str) -> bool {
-    matches!(
-        source_family,
-        SOURCE_FAMILY_ENS_V1_REGISTRAR_L1
-            | SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR
-            | SOURCE_FAMILY_ENS_V1_WRAPPER_L1
-            | SOURCE_FAMILY_ENS_V2_ROOT_L1
-            | SOURCE_FAMILY_ENS_V2_REGISTRY_L1
-            | SOURCE_FAMILY_ENS_V2_REGISTRAR_L1
-            | SOURCE_FAMILY_ENS_V2_RESOLVER_L1
-    )
 }
 
 fn required_event_signatures(source_family: &str) -> &'static [&'static str] {

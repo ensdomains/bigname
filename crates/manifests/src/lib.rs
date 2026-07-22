@@ -1,5 +1,7 @@
 //! Repository manifest loading, persistence, and discovery admission.
 
+#[path = "lib/attribution.rs"]
+mod attribution;
 #[path = "lib/discovery.rs"]
 mod discovery;
 #[path = "lib/managed_edges.rs"]
@@ -32,6 +34,7 @@ const REACHABLE_FROM_ROOT_ADMISSION: &str = "reachable_from_root";
 const PROPAGATED_ROLE_PROVENANCE_FIELD: &str = "propagated_role";
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
+pub use attribution::is_block_derived_preimage_source_family;
 pub use discovery::*;
 pub use model::*;
 pub use repository::load_repository;

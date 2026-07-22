@@ -7,6 +7,7 @@ use std::{
 use alloy_primitives::{Address, hex};
 use anyhow::{Context, Result, bail};
 
+use crate::attribution::validate_block_derived_preimage_attribution;
 use crate::model::RawSourceManifest;
 use crate::{LoadedManifest, ManifestAbi, ManifestLoadStatus, ManifestLoadSummary};
 use crate::{ManifestRepository, SourceManifest};
@@ -188,6 +189,8 @@ fn validate_repository_manifests(manifests: &[LoadedManifest]) -> Result<()> {
             version_tags
         );
     }
+
+    validate_block_derived_preimage_attribution(manifests)?;
 
     Ok(())
 }
