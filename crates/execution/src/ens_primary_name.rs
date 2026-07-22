@@ -8,7 +8,9 @@ use crate::ens_resolution_abi::{
     decode_selector_result, decode_universal_resolver_result, dns_encode_name, hex_string,
     hex_to_bytes, namehash, resolver_record_call, universal_resolver_call,
 };
-use crate::ens_resolution_ccip::{follow_ccip_read, rpc_error_contains_offchain_lookup};
+use crate::ens_resolution_ccip::{
+    CcipReadSummary, follow_ccip_read, rpc_error_contains_offchain_lookup,
+};
 use crate::rpc::{ChainRpcUrls, JsonRpcCallError, JsonRpcCallResult, JsonRpcHttpClient};
 use crate::{ENS_REGISTRY_ADDRESS, ENS_UNIVERSAL_RESOLVER_ADDRESS, ETHEREUM_MAINNET_CHAIN_ID};
 
@@ -363,19 +365,36 @@ async fn eth_call_following_ccip_with_block_selector(
     let result = match &result.result {
         Err(error) => match follow_ccip_read(rpc, error, &block_selector, to).await {
             Ok(Some(outcome)) => {
-                evidence
-                    .gateway_digests
-                    .extend(outcome.summary.gateway_digests);
-                evidence
-                    .ccip_step_payloads
-                    .extend(outcome.summary.step_payloads);
+                record_ccip_summary(evidence, outcome.summary);
                 outcome.result
             }
-            Ok(None) | Err(_) => result,
+            Ok(None) => result,
+            Err(error) if error.is_gateway_transport_failure() => {
+                let configured_timeout = error.is_configured_timeout();
+                if let Some(summary) = error.summary().cloned() {
+                    record_ccip_summary(evidence, summary);
+                }
+                return Err(OnDemandEnsPrimaryNameError::transport(
+                    format!("failed to execute ENS primary-name CCIP gateway request: {error}"),
+                    configured_timeout,
+                ));
+            }
+            Err(_) => result,
         },
         Ok(_) => result,
     };
     decode_eth_call_result(result)
+}
+
+fn record_ccip_summary(
+    evidence: &mut OnDemandEnsPrimaryNameExecutionEvidence,
+    summary: CcipReadSummary,
+) {
+    evidence.gateway_digests.extend(summary.gateway_digests);
+    evidence.ccip_step_payloads.extend(summary.step_payloads);
+    if let Some(failure) = summary.failure_payload {
+        evidence.ccip_step_payloads.push(failure);
+    }
 }
 
 fn primary_name_contract_call(contract_address: &str, selector: &str) -> Value {

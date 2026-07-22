@@ -1368,9 +1368,10 @@ invalidation path.
 
 For an identical verified-primary cache identity, a stored `success` outcome
 wins over a later `execution_failed` attempt; the failed attempt does not write
-an unreferenced trace. A configured API RPC timeout remains an in-band durable
-failure. Other RPC transport failures, such as connection, DNS, or TLS errors,
-abort before trace or outcome persistence so the next request retries.
+an unreferenced trace. On both on-demand execution paths, configured API RPC and
+CCIP-Read gateway-client timeouts remain in-band durable failures. Other RPC or
+gateway HTTP transport failures, such as connection, DNS, or TLS errors, abort
+before trace or outcome persistence so the next request retries.
 
 Exact block-anchored `raw_call_snapshots` used by verified resolution stay in
 the intake-owned `raw_*` family. Execution persistence, including the API

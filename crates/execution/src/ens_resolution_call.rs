@@ -140,6 +140,29 @@ pub(super) async fn execute_record_call(
                         outcome.result
                     }
                     Ok(None) => result,
+                    Err(error) if error.is_gateway_transport_failure() => {
+                        if !error.is_configured_timeout() {
+                            return Err(error.into());
+                        }
+                        ccip_summary = error
+                            .summary()
+                            .cloned()
+                            .map(CcipReadSummary::for_durable_timeout);
+                        return Ok(SelectorCall {
+                            status: SelectorStatus::ExecutionFailed {
+                                failure_reason: "resolver_call_failed",
+                            },
+                            request_hash: Some(digest_json(&result.request_payload)),
+                            response_hash: Some(digest_json(&result.response_payload)),
+                            raw_call_snapshot: None,
+                            contract_call,
+                            universal_calldata: universal_calldata_hex,
+                            resolver_selector,
+                            block_selector,
+                            ccip_summary,
+                            latency_ms: elapsed_latency_ms(started),
+                        });
+                    }
                     Err(_) => result,
                 }
             }

@@ -55,6 +55,7 @@ static WORKER_CARGO_LOCK: Mutex<()> = Mutex::new(());
 struct ResolutionMockRpcResponse {
     code: i64,
     message: &'static str,
+    data: Option<Value>,
 }
 
 async fn spawn_resolution_mock_rpc(
@@ -106,6 +107,7 @@ async fn spawn_resolution_transport_recovery_rpc()
             ResolutionMockRpcResponse {
                 code: 3,
                 message: "execution reverted",
+                data: None,
             },
         )
         .await?;
@@ -130,6 +132,22 @@ async fn spawn_hanging_resolution_rpc() -> Result<(String, JoinHandle<Result<()>
         Ok(())
     });
 
+    Ok((url, handle))
+}
+
+async fn spawn_hanging_ccip_gateway() -> Result<(String, JoinHandle<Result<()>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("failed to bind hanging CCIP gateway listener")?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let handle = tokio::spawn(async move {
+        let (_socket, _) = listener
+            .accept()
+            .await
+            .context("failed to accept hanging CCIP gateway request")?;
+        std::future::pending::<()>().await;
+        Ok(())
+    });
     Ok((url, handle))
 }
 
@@ -198,6 +216,7 @@ async fn write_mock_json_rpc_error(
         "error": {
             "code": response.code,
             "message": response.message,
+            "data": response.data,
         },
     })
     .to_string();
@@ -219,6 +238,32 @@ async fn join_resolution_mock_requests(
         .await
         .context("resolution mock RPC task panicked")?
         .context("resolution mock RPC task failed")
+}
+
+fn encoded_resolution_offchain_lookup(url: String) -> Result<String> {
+    use alloy_primitives::{Address, Bytes, FixedBytes};
+    use alloy_sol_types::{SolError, sol};
+
+    sol! {
+        error OffchainLookup(
+            address sender,
+            string[] urls,
+            bytes callData,
+            bytes4 callbackFunction,
+            bytes extraData
+        );
+    }
+
+    Ok(ens_resolution_abi::hex_string(
+        &OffchainLookup {
+            sender: ENS_UNIVERSAL_RESOLVER_ADDRESS.parse::<Address>()?,
+            urls: vec![url],
+            callData: Bytes::copy_from_slice(&[0xab, 0xcd]),
+            callbackFunction: FixedBytes::from([0x12, 0x34, 0x56, 0x78]),
+            extraData: Bytes::copy_from_slice(&[0xef]),
+        }
+        .abi_encode(),
+    ))
 }
 
 #[test]
@@ -3306,6 +3351,7 @@ async fn on_demand_all_failed_persists_typed_failure_payloads() -> Result<()> {
     let (rpc_url, handle) = spawn_resolution_mock_rpc(vec![ResolutionMockRpcResponse {
         code: 3,
         message: "execution reverted",
+        data: None,
     }])
     .await?;
     let chain_rpc_urls =
@@ -3438,6 +3484,177 @@ async fn on_demand_transient_transport_error_is_not_persisted_and_next_attempt_r
             .await?
             .is_some(),
         "the recovered retry must persist its provider result"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn on_demand_gateway_connect_failure_is_not_persisted_and_next_attempt_retries() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let seed_request = success_request();
+    seed_supported_resolution_storage(&database, &seed_request).await?;
+    let resource_id = boundary_resource_id(&seed_request.outcome.cache_key.record_version_boundary);
+    let row = bigname_storage::load_name_current(database.pool(), "ens:alice.eth")
+        .await?
+        .context("gateway recovery test must load name_current row")?;
+    let record_inventory_row = bigname_storage::load_record_inventory_current(
+        database.pool(),
+        resource_id,
+        &seed_request.outcome.cache_key.record_version_boundary,
+    )
+    .await?
+    .context("gateway recovery test must load record_inventory_current row")?;
+    let unavailable_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let unavailable_gateway = format!("http://{}", unavailable_listener.local_addr()?);
+    drop(unavailable_listener);
+    let offchain_lookup =
+        encoded_resolution_offchain_lookup(format!("{unavailable_gateway}/{{data}}"))?;
+    let (rpc_url, handle) = spawn_resolution_mock_rpc(vec![
+        ResolutionMockRpcResponse {
+            code: 3,
+            message: "execution reverted",
+            data: Some(json!(offchain_lookup)),
+        },
+        ResolutionMockRpcResponse {
+            code: 3,
+            message: "execution reverted",
+            data: None,
+        },
+    ])
+    .await?;
+    let chain_rpc_urls =
+        ChainRpcUrls::from_entries(&[format!("{ETHEREUM_MAINNET_CHAIN_ID}={rpc_url}")])?;
+    let records = vec![EnsResolutionRecord::new(
+        "addr:60",
+        "addr",
+        Some("60".to_owned()),
+    )];
+    let request = || OnDemandEnsResolutionRequest {
+        row: &row,
+        records: &records,
+        record_inventory_row: Some(&record_inventory_row),
+        chain_positions: row.chain_positions.clone(),
+        chain_rpc_urls: &chain_rpc_urls,
+        use_latest_block_tag: true,
+        persist_execution: true,
+    };
+
+    let error = execute_ens_universal_resolver_verified_resolution(database.pool(), request())
+        .await
+        .expect_err("gateway connection failure must abort before persistence");
+    assert_eq!(error.kind(), OnDemandEnsResolutionErrorKind::Configuration);
+    assert!(error.message().contains("CCIP gateway transport failed"));
+    assert!(!error.message().contains(&unavailable_gateway));
+    assert!(
+        load_execution_outcome(database.pool(), &seed_request.outcome.cache_key)
+            .await?
+            .is_none(),
+        "gateway transport failure must not persist an execution outcome"
+    );
+    let trace_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM execution_traces WHERE request_type = 'verified_resolution' AND request_key = 'ens:alice.eth:addr:60'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(trace_count, 0, "gateway failure must not persist a trace");
+
+    let recovered = execute_ens_universal_resolver_verified_resolution(database.pool(), request())
+        .await
+        .context("the next identical request must retry after gateway recovery")?;
+    assert_eq!(join_resolution_mock_requests(handle).await?.len(), 2);
+    assert_eq!(
+        recovered
+            .failure_payload
+            .as_ref()
+            .and_then(|payload| payload.get("failure_reason")),
+        Some(&json!("resolver_call_reverted")),
+        "Ok(None) must continue to decode the original non-OffchainLookup revert"
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &recovered.cache_key)
+            .await?
+            .is_some(),
+        "the recovered retry must persist its completed provider response"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn on_demand_configured_gateway_timeout_remains_persisted_in_band_failure() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let seed_request = success_request();
+    seed_supported_resolution_storage(&database, &seed_request).await?;
+    let resource_id = boundary_resource_id(&seed_request.outcome.cache_key.record_version_boundary);
+    let row = bigname_storage::load_name_current(database.pool(), "ens:alice.eth")
+        .await?
+        .context("gateway timeout test must load name_current row")?;
+    let record_inventory_row = bigname_storage::load_record_inventory_current(
+        database.pool(),
+        resource_id,
+        &seed_request.outcome.cache_key.record_version_boundary,
+    )
+    .await?
+    .context("gateway timeout test must load record_inventory_current row")?;
+    let (gateway_url, gateway) = spawn_hanging_ccip_gateway().await?;
+    let offchain_lookup = encoded_resolution_offchain_lookup(format!("{gateway_url}/{{data}}"))?;
+    let (rpc_url, rpc) = spawn_resolution_mock_rpc(vec![ResolutionMockRpcResponse {
+        code: 3,
+        message: "execution reverted",
+        data: Some(json!(offchain_lookup)),
+    }])
+    .await?;
+    let chain_rpc_urls =
+        ChainRpcUrls::from_entries(&[format!("{ETHEREUM_MAINNET_CHAIN_ID}={rpc_url}")])?;
+    let records = vec![EnsResolutionRecord::new(
+        "addr:60",
+        "addr",
+        Some("60".to_owned()),
+    )];
+
+    let outcome = execute_ens_universal_resolver_verified_resolution(
+        database.pool(),
+        OnDemandEnsResolutionRequest {
+            row: &row,
+            records: &records,
+            record_inventory_row: Some(&record_inventory_row),
+            chain_positions: row.chain_positions.clone(),
+            chain_rpc_urls: &chain_rpc_urls,
+            use_latest_block_tag: true,
+            persist_execution: true,
+        },
+    )
+    .await
+    .context("configured gateway timeout must remain an in-band failure")?;
+    assert_eq!(join_resolution_mock_requests(rpc).await?.len(), 1);
+    gateway.abort();
+
+    assert_eq!(
+        outcome
+            .failure_payload
+            .as_ref()
+            .and_then(|payload| payload.get("failure_reason")),
+        Some(&json!("resolver_call_failed"))
+    );
+    let persisted = load_execution_outcome(database.pool(), &outcome.cache_key)
+        .await?
+        .context("configured gateway timeout outcome must persist")?;
+    let trace = load_execution_trace(database.pool(), persisted.execution_trace_id)
+        .await?
+        .context("configured gateway timeout trace must persist")?;
+    assert_eq!(trace.gateway_digests, json!([]));
+    assert_eq!(
+        trace.steps[1].step_payload["ccip_read"]["failure"]["configured_timeout"],
+        json!(true)
+    );
+    assert!(
+        trace
+            .steps
+            .iter()
+            .all(|step| step.step_kind != "ccip_offchain_lookup"),
+        "durable timeout evidence must remain within the admitted resolver-call step"
     );
 
     database.cleanup().await
