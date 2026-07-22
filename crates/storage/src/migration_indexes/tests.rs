@@ -283,6 +283,94 @@ async fn compat_trigger_tuple_invalidation_uses_request_lookup_index() -> Result
     Ok(())
 }
 
+#[tokio::test]
+async fn bulk_discovery_edge_reactivation_uses_deactivated_identity_index() -> Result<()> {
+    let database = test_database().await?;
+    let mut transaction = database.pool().begin().await?;
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("SET LOCAL enable_bitmapscan = off")
+        .execute(&mut *transaction)
+        .await?;
+
+    let plan = sqlx::query_scalar::<_, String>(
+        r#"
+        EXPLAIN (FORMAT TEXT)
+        WITH desired_edges (
+            desired_index,
+            chain_id,
+            edge_kind,
+            from_contract_instance_id,
+            to_contract_instance_id,
+            discovery_source,
+            source_manifest_id,
+            admission,
+            active_from_block_number,
+            active_from_block_hash,
+            provenance
+        ) AS (
+            VALUES (
+                0::BIGINT,
+                'eip155:8453'::TEXT,
+                'subregistry'::TEXT,
+                '00000000-0000-0000-0000-000000000001'::UUID,
+                '00000000-0000-0000-0000-000000000002'::UUID,
+                'ens_v1_subregistry_discovery'::TEXT,
+                NULL::BIGINT,
+                'reachable_from_root'::TEXT,
+                1::BIGINT,
+                '0x01'::TEXT,
+                '{}'::JSONB
+            )
+        ), reactivation_candidates AS (
+            SELECT desired.desired_index,
+                   (
+                       SELECT edge.discovery_edge_id
+                       FROM discovery_edges edge
+                       WHERE edge.chain_id = desired.chain_id
+                         AND edge.edge_kind = desired.edge_kind
+                         AND edge.from_contract_instance_id = desired.from_contract_instance_id
+                         AND edge.to_contract_instance_id = desired.to_contract_instance_id
+                         AND edge.discovery_source = desired.discovery_source
+                         AND edge.source_manifest_id IS NOT DISTINCT FROM desired.source_manifest_id
+                         AND edge.admission = desired.admission
+                         AND edge.active_from_block_number IS NOT DISTINCT FROM desired.active_from_block_number
+                         AND edge.active_from_block_hash IS NOT DISTINCT FROM desired.active_from_block_hash
+                         AND (
+                             edge.provenance
+                             - 'active_to_transaction_index'
+                             - 'active_to_log_index'
+                         ) = desired.provenance
+                         AND edge.deactivated_at IS NOT NULL
+                       ORDER BY edge.discovery_edge_id DESC
+                       LIMIT 1
+                       FOR UPDATE
+                   ) AS discovery_edge_id
+            FROM desired_edges desired
+        )
+        SELECT desired_index, discovery_edge_id
+        FROM reactivation_candidates
+        "#,
+    )
+    .fetch_all(&mut *transaction)
+    .await?
+    .join("\n");
+    eprintln!("bulk discovery-edge reactivation plan:\n{plan}");
+    assert!(
+        plan.contains(DISCOVERY_EDGES_DEACTIVATED_IDENTITY_INDEX),
+        "bulk discovery-edge reactivation must use its deactivated identity index:\n{plan}"
+    );
+    assert!(
+        !plan.contains("discovery_edges_lookup_idx"),
+        "bulk discovery-edge reactivation must not scan the broad lookup index:\n{plan}"
+    );
+
+    transaction.rollback().await?;
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[test]
 fn raw_log_revision_migration_fences_writers_before_backfill() {
     let migration =
