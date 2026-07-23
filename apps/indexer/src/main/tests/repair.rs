@@ -277,6 +277,35 @@ async fn repair_name_surface_normalization_updates_compatible_and_records_findin
         .execute(database.pool())
         .await
         .context("failed to anchor compatible name-surface observed_at")?;
+    sqlx::query(
+        r#"
+        INSERT INTO current_projection_replay_status (
+            projection,
+            replay_version,
+            completed_normalized_target_block,
+            requested_key_count,
+            upserted_row_count,
+            deleted_row_count
+        )
+        VALUES ('name_current', 10, 20, 1, 1, 0)
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO current_projection_replay_attempt (
+            singleton,
+            replay_version,
+            normalized_target_block,
+            full_replay_input_revision,
+            apply_baseline_change_id
+        )
+        VALUES (true, 10, 20, 0, 7)
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
 
     let outcome = repair_name_surface_normalization(
         database.pool(),
@@ -297,6 +326,33 @@ async fn repair_name_surface_normalization_updates_compatible_and_records_findin
     assert_eq!(outcome.incompatible_count, 1);
     assert_eq!(outcome.recorded_finding_count, 3);
     assert_eq!(outcome.remaining_old_normalizer_count, 3);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT revision FROM current_projection_full_replay_input_revision WHERE singleton"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "a compatible direct source repair must invalidate reusable projection stages"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM current_projection_replay_status"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "a direct source repair must invalidate published-family skip markers"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM current_projection_replay_attempt"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "a direct source repair must invalidate the automatic replay baseline and target"
+    );
 
     let (normalizer_version, canonical_display_name, observed_at) =
         sqlx::query_as::<_, (String, String, OffsetDateTime)>(

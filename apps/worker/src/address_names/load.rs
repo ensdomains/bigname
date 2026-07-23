@@ -144,9 +144,14 @@ fn current_bindings_query(affected_names_sql: &str) -> String {
     .replace("{CANONICAL_STATE_FILTER}", CANONICAL_STATE_FILTER)
 }
 
-pub(super) fn stream_current_bindings<'a>(
+pub(super) fn stream_current_bindings_after<'a>(
     pool: &'a PgPool,
+    after_source_key: Option<(&'a str, Uuid)>,
+    limit: i64,
 ) -> impl Stream<Item = Result<CurrentBindingSeed>> + 'a {
+    let (after_logical_name_id, after_surface_binding_id) = after_source_key
+        .map(|(logical_name_id, binding_id)| (Some(logical_name_id), Some(binding_id)))
+        .unwrap_or((None, None));
     sqlx::query_as::<_, CurrentBindingSeed>(
         r#"
         SELECT
@@ -205,9 +210,17 @@ pub(super) fn stream_current_bindings<'a>(
               'safe'::canonicality_state,
               'finalized'::canonicality_state
           )
-        ORDER BY ns.logical_name_id
+          AND (
+              $1::TEXT IS NULL
+              OR (ns.logical_name_id, sb.surface_binding_id) > ($1, $2)
+        )
+        ORDER BY ns.logical_name_id, sb.surface_binding_id
+        LIMIT $3
         "#,
     )
+    .bind(after_logical_name_id)
+    .bind(after_surface_binding_id)
+    .bind(limit)
     .fetch(pool)
     .map(|row| row.context("failed to stream current bindings for address_names_current rebuild"))
 }

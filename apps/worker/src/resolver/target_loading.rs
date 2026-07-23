@@ -1,11 +1,9 @@
-use bigname_storage::sql_row;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use bigname_storage::{
     CanonicalityState, PermissionsCurrentRow, SurfaceBindingKind,
-    load_permissions_current_for_resolver_scope, load_permissions_current_resolver_targets,
-    normalize_evm_address,
+    load_permissions_current_for_resolver_scope, normalize_evm_address,
 };
 use serde_json::Value;
 use sqlx::{PgPool, Row, types::time::OffsetDateTime};
@@ -65,8 +63,49 @@ pub(super) struct AliasSeed {
     pub(super) after_state: Value,
 }
 
-pub(super) async fn load_target_resolvers(pool: &PgPool) -> Result<Vec<ResolverTarget>> {
-    let rows = sqlx::query(&format!(
+pub(super) async fn load_target_resolvers_page(
+    pool: &PgPool,
+    cursor: Option<&[String; 2]>,
+    limit: usize,
+) -> Result<Vec<ResolverTarget>> {
+    ensure!(limit > 0, "resolver target page limit must be positive");
+    let cursor_chain_id = cursor.map(|cursor| cursor[0].as_str());
+    let cursor_resolver_address = cursor.map(|cursor| cursor[1].as_str());
+    let rows = sqlx::query(&target_resolver_page_query())
+        .bind(EVENT_KIND_RESOLVER_CHANGED)
+        .bind(EVENT_KIND_ALIAS_CHANGED)
+        .bind(ZERO_ADDRESS)
+        .bind(cursor_chain_id)
+        .bind(cursor_resolver_address)
+        .bind(i64::try_from(limit).context("resolver target page limit exceeds i64")?)
+        .fetch_all(pool)
+        .await
+        .context("failed to load resolver_current rebuild target page")?;
+
+    rows.into_iter()
+        .map(|row| {
+            let source_families = row
+                .try_get::<Vec<String>, _>("source_families")?
+                .into_iter()
+                .filter_map(|source_family| {
+                    resolver_profile_source_family_for_event_source(&source_family)
+                        .map(str::to_owned)
+                })
+                .collect();
+            Ok(ResolverTarget {
+                chain_id: row.try_get("chain_id")?,
+                resolver_address: normalize_resolver_address(
+                    &row.try_get::<String, _>("resolver_address")?,
+                ),
+                profile_source_family: unique_source_family(source_families),
+                enumerate_bindings: false,
+            })
+        })
+        .collect()
+}
+
+fn target_resolver_page_query() -> String {
+    format!(
         r#"
         WITH current_bindings AS (
             SELECT logical_name_id, resource_id
@@ -93,9 +132,8 @@ pub(super) async fn load_target_resolvers(pool: &PgPool) -> Result<Vec<ResolverT
                 ne.block_number DESC NULLS LAST,
                 ne.log_index DESC NULLS LAST,
                 ne.normalized_event_id DESC
-        )
-        SELECT DISTINCT chain_id, resolver_address, source_family
-        FROM (
+        ),
+        raw_targets AS (
             SELECT
                 lre.chain_id,
                 lre.resolver_address,
@@ -106,109 +144,54 @@ pub(super) async fn load_target_resolvers(pool: &PgPool) -> Result<Vec<ResolverT
              AND cb.resource_id = lre.resource_id
             WHERE lre.resolver_address IS NOT NULL
               AND lre.resolver_address <> ''
-              AND lre.resolver_address <> $2
-        ) targets
-        ORDER BY chain_id, resolver_address
-        "#
-    ))
-    .bind(EVENT_KIND_RESOLVER_CHANGED)
-    .bind(ZERO_ADDRESS)
-    .fetch_all(pool)
-    .await
-    .context("failed to load resolver_current rebuild targets")?;
+              AND lre.resolver_address <> $3
 
-    let mut targets = BTreeMap::<(String, String), BTreeSet<String>>::new();
-    for row in rows {
-        let chain_id = sql_row::get(&row, "chain_id")?;
-        let resolver_address =
-            normalize_resolver_address(&sql_row::get::<String>(&row, "resolver_address")?);
-        let source_family = sql_row::get::<String>(&row, "source_family")?;
-        insert_target(
-            &mut targets,
+            UNION ALL
+
+            SELECT
+                pc.scope_detail->>'chain_id' AS chain_id,
+                LOWER(pc.scope_detail->>'resolver_address') AS resolver_address,
+                NULL::TEXT AS source_family
+            FROM permissions_current pc
+            WHERE pc.scope_kind = 'resolver'
+              AND pc.scope_detail->>'chain_id' IS NOT NULL
+              AND pc.scope_detail->>'chain_id' <> ''
+              AND pc.scope_detail->>'resolver_address' IS NOT NULL
+              AND pc.scope_detail->>'resolver_address' <> ''
+              AND pc.canonicality_summary ->> 'status' IN (
+                  'canonical',
+                  'safe',
+                  'finalized'
+              )
+
+            UNION ALL
+
+            SELECT
+                ne.chain_id,
+                LOWER(ne.after_state->>'resolver') AS resolver_address,
+                ne.source_family
+            FROM normalized_events ne
+            WHERE ne.event_kind = $2
+              AND ne.chain_id IS NOT NULL
+              AND ne.after_state->>'resolver' IS NOT NULL
+              AND ne.canonicality_state {CANONICAL_STATE_FILTER}
+        )
+        SELECT
             chain_id,
             resolver_address,
-            resolver_profile_source_family_for_event_source(&source_family),
-        );
-    }
-
-    for (chain_id, resolver_address) in load_permissions_current_resolver_targets(pool).await? {
-        insert_target(&mut targets, chain_id, resolver_address, None);
-    }
-    for target in load_alias_target_resolvers(pool).await? {
-        let profile_source_family = target.profile_source_family;
-        insert_target(
-            &mut targets,
-            target.chain_id,
-            target.resolver_address,
-            profile_source_family.as_deref(),
-        );
-    }
-
-    Ok(targets
-        .into_iter()
-        .map(
-            |((chain_id, resolver_address), source_families)| ResolverTarget {
-                chain_id,
-                resolver_address,
-                profile_source_family: unique_source_family(source_families),
-                enumerate_bindings: false,
-            },
-        )
-        .collect())
-}
-
-async fn load_alias_target_resolvers(pool: &PgPool) -> Result<Vec<ResolverTarget>> {
-    let rows = sqlx::query(&format!(
-        r#"
-        SELECT DISTINCT
-            chain_id,
-            LOWER(after_state->>'resolver') AS resolver_address,
-            source_family
-        FROM normalized_events
-        WHERE event_kind = $1
-          AND chain_id IS NOT NULL
-          AND after_state->>'resolver' IS NOT NULL
-          AND canonicality_state {CANONICAL_STATE_FILTER}
+            COALESCE(
+                ARRAY_AGG(DISTINCT source_family ORDER BY source_family)
+                    FILTER (WHERE source_family IS NOT NULL),
+                ARRAY[]::TEXT[]
+            ) AS source_families
+        FROM raw_targets
+        WHERE $4::TEXT IS NULL
+           OR (chain_id, resolver_address) > ($4, $5)
+        GROUP BY chain_id, resolver_address
         ORDER BY chain_id, resolver_address
+        LIMIT $6
         "#
-    ))
-    .bind(EVENT_KIND_ALIAS_CHANGED)
-    .fetch_all(pool)
-    .await
-    .context("failed to load AliasChanged resolver_current rebuild targets")?;
-
-    rows.into_iter()
-        .map(|row| {
-            Ok(ResolverTarget {
-                chain_id: sql_row::get(&row, "chain_id")?,
-                resolver_address: normalize_resolver_address(&sql_row::get::<String>(
-                    &row,
-                    "resolver_address",
-                )?),
-                profile_source_family: row
-                    .try_get::<String, _>("source_family")
-                    .context("missing source_family")
-                    .ok()
-                    .and_then(|source_family| {
-                        resolver_profile_source_family_for_event_source(&source_family)
-                            .map(str::to_owned)
-                    }),
-                enumerate_bindings: false,
-            })
-        })
-        .collect()
-}
-
-fn insert_target(
-    targets: &mut BTreeMap<(String, String), BTreeSet<String>>,
-    chain_id: String,
-    resolver_address: String,
-    profile_source_family: Option<&str>,
-) {
-    let source_families = targets.entry((chain_id, resolver_address)).or_default();
-    if let Some(profile_source_family) = profile_source_family {
-        source_families.insert(profile_source_family.to_owned());
-    }
+    )
 }
 
 fn unique_source_family(source_families: BTreeSet<String>) -> Option<String> {
@@ -515,4 +498,17 @@ pub(super) fn normalize_resolver_address(value: &str) -> String {
 
 fn parse_surface_binding_kind(value: &str) -> Result<SurfaceBindingKind> {
     SurfaceBindingKind::parse(value)
+}
+
+#[cfg(test)]
+mod paging_tests {
+    use super::*;
+
+    #[test]
+    fn target_resolver_page_query_pushes_cursor_and_limit_into_database() {
+        let query = target_resolver_page_query();
+
+        assert!(query.contains("(chain_id, resolver_address) > ($4, $5)"));
+        assert!(query.contains("LIMIT $6"));
+    }
 }

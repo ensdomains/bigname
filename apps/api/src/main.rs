@@ -44,6 +44,63 @@ mod errors;
 mod graphql;
 mod pagination;
 mod query;
+#[cfg(test)]
+mod replay {
+    pub(crate) use super::replay_staging as staging;
+}
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../worker/src/replay/staging.rs"]
+pub(crate) mod replay_staging;
+#[cfg(test)]
+mod projection_apply {
+    use anyhow::{Context, Result};
+    use serde_json::Value;
+    use sqlx::{Postgres, Transaction};
+
+    pub(crate) struct NormalizedEventChangeCursor {
+        pub(crate) change_id: i64,
+    }
+
+    pub(crate) async fn capture_normalized_event_change_watermark_in_transaction(
+        transaction: &mut Transaction<'_, Postgres>,
+    ) -> Result<NormalizedEventChangeCursor> {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT public.capture_projection_normalized_event_change_watermark()",
+        )
+        .fetch_one(&mut **transaction)
+        .await
+        .context("failed to capture complete normalized-event projection change watermark")
+        .map(|change_id| NormalizedEventChangeCursor { change_id })
+    }
+
+    pub(crate) async fn completed_projection_sources_changed(
+        transaction: &mut Transaction<'_, Postgres>,
+        _projection: &str,
+        lower_change_id: i64,
+        upper_change_id: i64,
+        _last_source_key: &Value,
+    ) -> Result<bool> {
+        if upper_change_id <= lower_change_id {
+            return Ok(false);
+        }
+        sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM projection_normalized_event_changes
+                WHERE change_id > $1
+                  AND change_id <= $2
+            )
+            "#,
+        )
+        .bind(lower_change_id)
+        .bind(upper_change_id)
+        .fetch_one(&mut **transaction)
+        .await
+        .context("failed to conservatively fence API fixture projection staging")
+    }
+}
 mod routes;
 mod state;
 mod status_freshness;

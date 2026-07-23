@@ -1,14 +1,14 @@
 use std::collections::{BTreeMap, HashSet};
 
 use anyhow::{Context, Result};
+use bigname_storage::projection_staging::stream_canonical_declared_child_sources_after;
 use bigname_storage::{
     CanonicalityState, ChildrenCurrentRow, load_canonical_declared_child_sources, load_raw_block,
     stream_canonical_declared_child_sources, upsert_children_current_rows,
 };
-use futures_util::{TryStreamExt, pin_mut};
+use futures_util::{StreamExt, TryStreamExt, pin_mut, stream};
 use serde_json::{Value, json};
 use sqlx::PgPool;
-use tokio::task::JoinSet;
 
 #[allow(clippy::duplicate_mod)]
 #[path = "staged_rebuild.rs"]
@@ -19,13 +19,15 @@ use crate::{
     projection_json::format_timestamp,
 };
 use staged_rebuild::{
-    CHILDREN_CURRENT_COLUMNS, count_rows, create_stage_table, drop_stage_table,
-    publish_stage_table, stage_children_current_rows,
+    CHILDREN_CURRENT_COLUMNS, count_rows, publish_stage_table, stage_children_current_rows,
 };
 
 const DECLARED_SURFACE_CLASS: &str = "declared";
 const CHILDREN_CURRENT_DERIVATION_KIND: &str = "children_current_rebuild";
+#[cfg(not(test))]
 const CHILDREN_CURRENT_REBUILD_BATCH_SIZE: usize = 2_000;
+#[cfg(test)]
+const CHILDREN_CURRENT_REBUILD_BATCH_SIZE: usize = 1;
 const CHILDREN_CURRENT_TARGETED_BATCH_SIZE: usize = 500;
 const CHILDREN_CURRENT_TARGETED_CLEANUP_PAGE_SIZE: i64 = 1_000;
 const CHILDREN_CURRENT_BLOCK_CACHE_LIMIT: usize = 4_096;
@@ -45,14 +47,6 @@ pub async fn rebuild_children_current(
     rebuild_children_current_inner(pool, parent_logical_name_id, None).await
 }
 
-pub(crate) async fn rebuild_children_current_with_heartbeat(
-    pool: &PgPool,
-    parent_logical_name_id: Option<&str>,
-    loop_heartbeat: &mut LoopHeartbeat,
-) -> Result<ChildrenCurrentRebuildSummary> {
-    rebuild_children_current_inner(pool, parent_logical_name_id, Some(loop_heartbeat)).await
-}
-
 async fn rebuild_children_current_inner(
     pool: &PgPool,
     parent_logical_name_id: Option<&str>,
@@ -62,94 +56,113 @@ async fn rebuild_children_current_inner(
         Some(parent_logical_name_id) => {
             rebuild_one_parent(pool, parent_logical_name_id, loop_heartbeat).await
         }
-        None => rebuild_all_parents(pool, loop_heartbeat).await,
+        None => {
+            let summary = rebuild_all_parents(pool, None, loop_heartbeat).await?;
+            crate::replay::staging::cleanup_projection_checkpoint(pool, "children_current").await?;
+            Ok(summary)
+        }
     }
+}
+
+pub(crate) async fn rebuild_children_current_for_replay(
+    pool: &PgPool,
+    normalized_target_block: Option<i64>,
+    loop_heartbeat: Option<&mut LoopHeartbeat>,
+) -> Result<ChildrenCurrentRebuildSummary> {
+    rebuild_all_parents(pool, normalized_target_block, loop_heartbeat).await
 }
 
 async fn rebuild_all_parents(
     pool: &PgPool,
+    normalized_target_block: Option<i64>,
     mut loop_heartbeat: Option<&mut LoopHeartbeat>,
 ) -> Result<ChildrenCurrentRebuildSummary> {
-    let mut conn = pool
-        .acquire()
-        .await
-        .context("failed to acquire children_current staging connection")?;
-    let stage_table = create_stage_table(&mut conn, "children_current").await?;
     let previous_row_count = run_rebuild_phase(
         pool,
         &mut loop_heartbeat,
         "children_current.count_existing",
         count_rows(
-            &mut conn,
+            pool,
             "children_current",
             Some("WHERE surface_class = 'declared'"),
         ),
     )
     .await?;
-    let mut rows = Vec::with_capacity(CHILDREN_CURRENT_REBUILD_BATCH_SIZE);
-    let mut queued_source_count = 0usize;
-    let mut completed_source_count = 0usize;
-    let mut upserted_row_count = 0usize;
-
-    let sources = stream_canonical_declared_child_sources(pool, None);
-    pin_mut!(sources);
-    let mut tasks = JoinSet::new();
-
-    while tasks.len() < CHILDREN_CURRENT_REBUILD_CONCURRENCY {
-        let Some(source) = sources.try_next().await? else {
-            break;
-        };
-        queued_source_count += 1;
-        spawn_children_rebuild_task(&mut tasks, pool, source);
-    }
-
-    while let Some(result) = tasks.join_next().await {
-        completed_source_count += 1;
-        rows.push(result??);
-        record_rebuild_progress(pool, &mut loop_heartbeat).await;
-        if rows.len() >= CHILDREN_CURRENT_REBUILD_BATCH_SIZE {
-            upserted_row_count +=
-                stage_children_current_rows(&mut conn, &stage_table, &rows).await? as usize;
-            rows.clear();
-        }
-
-        if completed_source_count.is_multiple_of(5_000) {
-            tracing::info!(
-                projection = "children_current",
-                queued_source_count,
-                completed_source_count,
-                upserted_row_count,
-                "children_current rebuild sources processed"
+    let mut checkpoint = crate::replay::staging::ProjectionStagingCheckpoint::load_or_start(
+        pool,
+        "children_current",
+        normalized_target_block,
+    )
+    .await?;
+    if !checkpoint.staging_complete() {
+        loop {
+            let input_fence = checkpoint.prepare_next_batch(pool).await?;
+            let cursor = children_source_cursor(checkpoint.last_source_key())?;
+            let sources = stream_canonical_declared_child_sources_after(
+                pool,
+                cursor
+                    .as_ref()
+                    .map(|parts| (parts[0].as_str(), parts[1].as_str(), parts[2].as_str())),
+                i64::try_from(CHILDREN_CURRENT_REBUILD_BATCH_SIZE)?,
             );
-        }
-
-        while tasks.len() < CHILDREN_CURRENT_REBUILD_CONCURRENCY {
-            let Some(source) = sources.try_next().await? else {
+            pin_mut!(sources);
+            let mut page = Vec::with_capacity(CHILDREN_CURRENT_REBUILD_BATCH_SIZE);
+            while page.len() < CHILDREN_CURRENT_REBUILD_BATCH_SIZE {
+                let Some(source) = sources.try_next().await? else {
+                    break;
+                };
+                page.push(source);
+            }
+            if page.is_empty() {
+                checkpoint.mark_staging_complete(pool, input_fence).await?;
                 break;
-            };
-            queued_source_count += 1;
-            spawn_children_rebuild_task(&mut tasks, pool, source);
+            }
+            let last = page
+                .last()
+                .expect("children_current staging page must not be empty");
+            let last_source_key = json!([
+                last.parent_logical_name_id,
+                last.canonical_display_name,
+                last.child_logical_name_id
+            ]);
+            let rows = build_children_page(pool, &page, &mut loop_heartbeat).await?;
+            let mut transaction = pool.begin().await?;
+            let staged =
+                stage_children_current_rows(&mut transaction, checkpoint.stage_table(0)?, &rows)
+                    .await?;
+            let progress =
+                checkpoint.progress_after_batch(page.len(), last_source_key, staged, 0)?;
+            checkpoint
+                .persist_progress(&mut transaction, &progress, &input_fence)
+                .await?;
+            transaction.commit().await?;
+            checkpoint.accept_progress(progress, input_fence);
+            let completed_source_count = checkpoint.completed_source_count()?;
+            if completed_source_count.is_multiple_of(5_000) {
+                tracing::info!(
+                    projection = "children_current",
+                    completed_source_count,
+                    upserted_row_count = checkpoint.staged_row_count()?,
+                    "children_current rebuild sources processed"
+                );
+            }
         }
     }
-
-    if !rows.is_empty() {
-        upserted_row_count +=
-            stage_children_current_rows(&mut conn, &stage_table, &rows).await? as usize;
-    }
+    let upserted_row_count = checkpoint.staged_row_count()?;
     let (_deleted_row_count, published_row_count) = run_rebuild_phase(
         pool,
         &mut loop_heartbeat,
         "children_current.publish",
         publish_stage_table(
-            &mut conn,
+            pool,
             "children_current",
-            &stage_table,
+            checkpoint.stage_table(0)?,
             CHILDREN_CURRENT_COLUMNS,
             Some("WHERE surface_class = 'declared'"),
+            checkpoint.full_replay_input_revision(),
         ),
     )
     .await?;
-    drop_stage_table(&mut conn, &stage_table).await?;
     debug_assert_eq!(published_row_count as usize, upserted_row_count);
 
     let requested_parent_count = run_rebuild_phase(
@@ -167,16 +180,35 @@ async fn rebuild_all_parents(
     })
 }
 
-fn spawn_children_rebuild_task(
-    tasks: &mut JoinSet<Result<ChildrenCurrentRow>>,
+async fn build_children_page(
     pool: &PgPool,
-    source: bigname_storage::DeclaredChildEventSource,
-) {
-    let pool = pool.clone();
-    tasks.spawn(async move {
-        let mut block_cache = BTreeMap::new();
-        build_children_row(&pool, &source, &mut block_cache).await
-    });
+    sources: &[bigname_storage::DeclaredChildEventSource],
+    loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
+) -> Result<Vec<ChildrenCurrentRow>> {
+    let rows = stream::iter(sources.iter().cloned())
+        .map(|source| {
+            let pool = pool.clone();
+            async move {
+                let mut block_cache = BTreeMap::new();
+                build_children_row(&pool, &source, &mut block_cache).await
+            }
+        })
+        .buffer_unordered(CHILDREN_CURRENT_REBUILD_CONCURRENCY);
+    pin_mut!(rows);
+    let mut completed = Vec::with_capacity(sources.len());
+    while let Some(row) = rows.try_next().await? {
+        completed.push(row);
+        record_rebuild_progress(pool, loop_heartbeat).await;
+    }
+    Ok(completed)
+}
+
+fn children_source_cursor(value: Option<&Value>) -> Result<Option<[String; 3]>> {
+    value
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .context("children_current staging checkpoint source key must contain three strings")
 }
 
 async fn rebuild_one_parent(

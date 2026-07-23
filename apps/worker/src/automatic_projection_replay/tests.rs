@@ -240,6 +240,21 @@ fn all_current_projection_pool_size_preserves_higher_override() {
 }
 
 #[test]
+fn starting_primary_hydration_keeps_config_available_for_rebootstrap() {
+    let configured = Some(primary_name::PrimaryNameLegacyReverseHydrationConfig::new(
+        bigname_execution::ChainRpcUrls::default(),
+    ));
+
+    let background = background_primary_hydration_config(&configured, false);
+
+    assert!(background.is_some());
+    assert!(
+        configured.is_some(),
+        "starting the background hydrator must not consume the replay hydration config"
+    );
+}
+
+#[test]
 fn projection_replay_waits_for_normalized_replay_cursor() {
     let status = ProjectionReplayReadiness {
         normalized_replay_cursor_count: 0,
@@ -411,24 +426,17 @@ fn projection_replay_runs_when_normalized_replay_and_indexes_are_ready() {
 
 #[test]
 fn fresh_bootstrap_seeds_apply_cursor_at_captured_watermark() {
-    let captured = projection_apply::NormalizedEventChangeCursor { change_id: 17 };
-
     assert_eq!(
-        projection_bootstrap_apply_cursor_seed(false, 0, captured),
-        Some(captured)
+        projection_bootstrap_apply_cursor_seed(false, 17),
+        Some(projection_apply::NormalizedEventChangeCursor { change_id: 17 })
     );
-    assert_eq!(
-        projection_bootstrap_apply_cursor_seed(true, 0, captured),
-        None
-    );
+    assert_eq!(projection_bootstrap_apply_cursor_seed(true, 17), None);
 }
 
 #[test]
 fn resumed_bootstrap_without_apply_cursor_replays_change_log_from_beginning() {
-    let captured = projection_apply::NormalizedEventChangeCursor { change_id: 17 };
-
     assert_eq!(
-        projection_bootstrap_apply_cursor_seed(false, 1, captured),
+        projection_bootstrap_apply_cursor_seed(false, 0),
         Some(projection_apply::NormalizedEventChangeCursor { change_id: 0 })
     );
 }
@@ -474,6 +482,159 @@ async fn restart_bootstrap_skip_requires_apply_cursor_even_with_target_covering_
     assert!(
         !projection_bootstrap_already_handed_off_to_apply(database.pool()).await?,
         "replay markers must not hand off bootstrap before incremental apply has a cursor"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn restart_with_pre_marker_staging_replays_changes_from_before_the_stage() -> Result<()> {
+    let database = test_database().await?;
+    seed_ready_normalized_replay_cursor(database.pool(), 20).await?;
+    seed_chain_checkpoint(database.pool(), 20).await?;
+    let _checkpoint = replay::staging::ProjectionStagingCheckpoint::load_or_start(
+        database.pool(),
+        "name_current",
+        Some(20),
+    )
+    .await?;
+    insert_normalized_event_change(database.pool(), "pre-marker-stage-change").await?;
+
+    assert!(
+        replay_all_current_projections_when_ready(database.pool(), None, None).await?,
+        "ready automatic replay should complete bootstrap handoff"
+    );
+    let cursor = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT last_change_id
+        FROM projection_apply_cursors
+        WHERE cursor_name = 'normalized_events_to_projection_invalidations'
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        cursor, 0,
+        "durable staging without a family marker must retain the pre-stage apply baseline"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn restart_with_started_staging_keeps_the_original_target_when_chain_head_advances()
+-> Result<()> {
+    let database = test_database().await?;
+    seed_ready_normalized_replay_cursor(database.pool(), 20).await?;
+    seed_chain_checkpoint(database.pool(), 20).await?;
+    let checkpoint = replay::staging::ProjectionStagingCheckpoint::load_or_start(
+        database.pool(),
+        "name_current",
+        Some(20),
+    )
+    .await?;
+    let original_stage_table = checkpoint.stage_table(0)?.to_owned();
+
+    advance_chain_checkpoint(database.pool(), 21).await?;
+    let candidate_target = projection_bootstrap_replay_target_block(Some(20), Some(21));
+    let attempt = bootstrap_attempt::start_projection_replay_attempt(
+        database.pool(),
+        candidate_target,
+        projection_apply::NormalizedEventChangeCursor { change_id: 0 },
+    )
+    .await?;
+    assert_eq!(
+        attempt.normalized_target_block,
+        Some(20),
+        "the durable replay attempt must retain the target of in-flight staging"
+    );
+    let restarted = replay::staging::ProjectionStagingCheckpoint::load_or_start(
+        database.pool(),
+        "name_current",
+        attempt.normalized_target_block,
+    )
+    .await?;
+    assert_eq!(
+        restarted.stage_table(0)?,
+        original_stage_table,
+        "ordinary chain-head advancement must not discard a reusable in-flight stage"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn completed_handoff_cleans_a_leftover_staging_checkpoint() -> Result<()> {
+    let database = test_database().await?;
+    seed_apply_cursor(database.pool()).await?;
+    seed_replay_markers(database.pool(), 20).await?;
+    let checkpoint = replay::staging::ProjectionStagingCheckpoint::load_or_start(
+        database.pool(),
+        "name_current",
+        Some(20),
+    )
+    .await?;
+    let stage_table = checkpoint.stage_table(0)?.to_owned();
+
+    assert!(
+        projection_bootstrap_already_handed_off_to_apply(database.pool()).await?,
+        "complete markers and an apply cursor should hand off bootstrap"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM current_projection_staging_checkpoints"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "handoff must clean a checkpoint left after marker commit"
+    );
+    assert!(
+        !sqlx::query_scalar::<_, bool>("SELECT to_regclass($1) IS NOT NULL")
+            .bind(stage_table)
+            .fetch_one(database.pool())
+            .await?,
+        "handoff must drop the leftover logged stage table"
+    );
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn replay_handoff_rejects_an_input_revision_change_after_family_markers() -> Result<()> {
+    let database = test_database().await?;
+    let attempt = bootstrap_attempt::start_projection_replay_attempt(
+        database.pool(),
+        Some(20),
+        projection_apply::NormalizedEventChangeCursor { change_id: 7 },
+    )
+    .await?;
+    seed_replay_markers(database.pool(), 20).await?;
+    sqlx::query(
+        r#"
+        UPDATE current_projection_full_replay_input_revision
+        SET revision = revision + 1, updated_at = now()
+        WHERE singleton
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    let error = bootstrap_attempt::finalize_projection_replay_attempt(
+        database.pool(),
+        attempt,
+        Some(projection_apply::NormalizedEventChangeCursor { change_id: 7 }),
+    )
+    .await
+    .expect_err("handoff must fail when direct inputs change after family publication");
+    assert!(format!("{error:#}").contains("input revision changed"));
+    assert!(
+        !projection_apply::normalized_event_cursor_exists(database.pool()).await?,
+        "failed handoff must not acknowledge the replay apply baseline"
     );
 
     database.cleanup().await?;
@@ -584,6 +745,48 @@ async fn restart_after_markers_does_not_seed_past_post_marker_change() -> Result
     Ok(())
 }
 
+async fn insert_normalized_event_change(pool: &PgPool, suffix: &str) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_events (
+            event_identity,
+            namespace,
+            logical_name_id,
+            event_kind,
+            source_family,
+            manifest_version,
+            chain_id,
+            block_number,
+            block_hash,
+            derivation_kind,
+            canonicality_state,
+            after_state
+        )
+        VALUES (
+            $1,
+            'ens',
+            $2,
+            'ResolverChanged',
+            'ens_v1_registry_l1',
+            1,
+            'ethereum-mainnet',
+            20,
+            $3,
+            'ens_v1_unwrapped_authority',
+            'canonical'::canonicality_state,
+            '{"resolver":"0x0000000000000000000000000000000000000abc"}'::jsonb
+        )
+        "#,
+    )
+    .bind(format!("automatic-replay:{suffix}"))
+    .bind(format!("ens:{suffix}.eth"))
+    .bind(format!("0x{suffix}"))
+    .execute(pool)
+    .await
+    .context("failed to insert normalized-event change fixture")?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn restart_handoff_with_apply_cursor_ignores_later_chain_checkpoint() -> Result<()> {
     let database = test_database().await?;
@@ -633,6 +836,99 @@ async fn restart_handoff_rejects_previous_replay_version_markers() -> Result<()>
     );
 
     database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn running_worker_reenters_bootstrap_after_direct_input_revision_advance() -> Result<()> {
+    let database = test_database().await?;
+    seed_apply_cursor(database.pool()).await?;
+    sqlx::query(
+        "UPDATE projection_apply_cursors SET last_change_id = 0 WHERE cursor_name = 'normalized_events_to_projection_invalidations'",
+    )
+    .execute(database.pool())
+    .await?;
+    seed_ready_normalized_replay_cursor(database.pool(), 20).await?;
+    seed_chain_checkpoint(database.pool(), 20).await?;
+    seed_replay_markers(database.pool(), 20).await?;
+    let instance_id = "direct-input-revision-rebootstrap-test";
+    bigname_storage::register_service_loop(
+        database.pool(),
+        bigname_storage::WORKER_SERVICE_NAME,
+        instance_id,
+    )
+    .await?;
+
+    let worker_pool = database.pool().clone();
+    let worker = tokio::spawn(run_automatic_current_projection_replay(
+        worker_pool,
+        instance_id.to_owned(),
+        1,
+        None,
+        None,
+    ));
+    insert_normalized_event_change(database.pool(), "running-worker-ready").await?;
+    let ready_change_id = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(MAX(change_id), 0) FROM projection_normalized_event_changes",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let cursor = sqlx::query_scalar::<_, i64>(
+                r#"
+                SELECT last_change_id
+                FROM projection_apply_cursors
+                WHERE cursor_name = 'normalized_events_to_projection_invalidations'
+                "#,
+            )
+            .fetch_one(database.pool())
+            .await?;
+            if cursor >= ready_change_id {
+                return Ok::<_, anyhow::Error>(());
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("running worker did not enter continuous projection apply")??;
+
+    let mut transaction = database.pool().begin().await?;
+    bigname_storage::projection_staging::advance_current_projection_full_replay_input_revision_in_transaction(
+        &mut transaction,
+    )
+    .await?;
+    transaction.commit().await?;
+
+    let rebootstrap_observed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let marker_count = sqlx::query_scalar::<_, i64>(
+                r#"
+                SELECT COUNT(*)::BIGINT
+                FROM current_projection_replay_status
+                WHERE replay_version = $1
+                  AND full_replay_input_revision = 1
+                "#,
+            )
+            .bind(replay::CURRENT_PROJECTION_REPLAY_VERSION)
+            .fetch_one(database.pool())
+            .await?;
+            if marker_count == replay::ALL_CURRENT_PROJECTION_ORDER.len() as i64 {
+                return Ok::<_, anyhow::Error>(());
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok();
+
+    worker.abort();
+    let _ = worker.await;
+    database.cleanup().await?;
+    assert!(
+        rebootstrap_observed,
+        "an already-running worker must observe direct-input revision invalidation and replay"
+    );
     Ok(())
 }
 

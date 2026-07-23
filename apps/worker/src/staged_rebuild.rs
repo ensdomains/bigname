@@ -5,13 +5,16 @@ use anyhow::{Context, Result, bail};
 use bigname_storage::{
     ChildrenCurrentRow, PermissionsCurrentResourceSummary, PermissionsCurrentRow,
     PrimaryNameCurrentSnapshot, RecordInventoryCurrentRow, ResolverCurrentRow,
+    projection_staging::ensure_current_projection_full_replay_input_revision_in_transaction,
     publish_permissions_current_compatibility_in_transaction,
 };
 use serde_json::Value;
 use sqlx::{
-    Connection, PgConnection, Postgres, QueryBuilder,
+    PgPool, Postgres, QueryBuilder, Transaction,
     types::{Json, Uuid},
 };
+
+const POSTGRES_MAX_BIND_PARAMETERS: usize = 65_535;
 
 pub(crate) const CHILDREN_CURRENT_COLUMNS: &[&str] = &[
     "parent_logical_name_id",
@@ -98,34 +101,8 @@ pub(crate) const RESOLVER_CURRENT_COLUMNS: &[&str] = &[
     "last_recomputed_at",
 ];
 
-pub(crate) async fn create_stage_table(
-    conn: &mut PgConnection,
-    target_table: &str,
-) -> Result<String> {
-    let stage_table = format!("{target_table}_stage");
-    sqlx::query(&format!("DROP TABLE IF EXISTS {stage_table}"))
-        .execute(&mut *conn)
-        .await
-        .with_context(|| format!("failed to reset {target_table} staging table"))?;
-    sqlx::query(&format!(
-        "CREATE TEMP TABLE {stage_table} (LIKE {target_table} INCLUDING DEFAULTS)"
-    ))
-    .execute(&mut *conn)
-    .await
-    .with_context(|| format!("failed to create {target_table} staging table"))?;
-    Ok(stage_table)
-}
-
-pub(crate) async fn drop_stage_table(conn: &mut PgConnection, stage_table: &str) -> Result<()> {
-    sqlx::query(&format!("DROP TABLE IF EXISTS {stage_table}"))
-        .execute(conn)
-        .await
-        .with_context(|| format!("failed to drop staging table {stage_table}"))?;
-    Ok(())
-}
-
 pub(crate) async fn count_rows(
-    conn: &mut PgConnection,
+    pool: &PgPool,
     table: &str,
     where_clause: Option<&str>,
 ) -> Result<u64> {
@@ -134,18 +111,19 @@ pub(crate) async fn count_rows(
         None => format!("SELECT COUNT(*)::BIGINT FROM {table}"),
     };
     let count = sqlx::query_scalar::<_, i64>(&sql)
-        .fetch_one(conn)
+        .fetch_one(pool)
         .await
         .with_context(|| format!("failed to count rows in {table}"))?;
     u64::try_from(count).context("row count must fit u64")
 }
 
 pub(crate) async fn publish_stage_table(
-    conn: &mut PgConnection,
+    pool: &PgPool,
     target_table: &str,
     stage_table: &str,
     columns: &[&str],
     delete_where: Option<&str>,
+    full_replay_input_revision: i64,
 ) -> Result<(u64, u64)> {
     let column_list = columns.join(", ");
     let delete_sql = match delete_where {
@@ -155,10 +133,15 @@ pub(crate) async fn publish_stage_table(
     let insert_sql = format!(
         "INSERT INTO {target_table} ({column_list}) SELECT {column_list} FROM {stage_table}"
     );
-    let mut tx = conn
+    let mut tx = pool
         .begin()
         .await
         .with_context(|| format!("failed to open {target_table} replacement transaction"))?;
+    ensure_current_projection_full_replay_input_revision_in_transaction(
+        &mut tx,
+        full_replay_input_revision,
+    )
+    .await?;
     let deleted = sqlx::query(&delete_sql)
         .execute(&mut *tx)
         .await
@@ -177,16 +160,22 @@ pub(crate) async fn publish_stage_table(
 
 /// Atomically replace permission holder rows and the per-resource support summary projection.
 pub(crate) async fn publish_permissions_current_stage_tables(
-    conn: &mut PgConnection,
+    pool: &PgPool,
     rows_stage_table: &str,
     summaries_stage_table: &str,
+    full_replay_input_revision: i64,
 ) -> Result<(u64, u64, u64)> {
     let row_columns = PERMISSIONS_CURRENT_COLUMNS.join(", ");
     let summary_columns = PERMISSIONS_CURRENT_RESOURCE_SUMMARY_COLUMNS.join(", ");
-    let mut tx = conn
+    let mut tx = pool
         .begin()
         .await
         .context("failed to open permissions_current replacement transaction")?;
+    ensure_current_projection_full_replay_input_revision_in_transaction(
+        &mut tx,
+        full_replay_input_revision,
+    )
+    .await?;
     let deleted_rows = sqlx::query("DELETE FROM permissions_current")
         .execute(&mut *tx)
         .await
@@ -220,7 +209,7 @@ pub(crate) async fn publish_permissions_current_stage_tables(
 }
 
 pub(crate) async fn stage_children_current_rows(
-    conn: &mut PgConnection,
+    transaction: &mut Transaction<'_, Postgres>,
     stage_table: &str,
     rows: &[ChildrenCurrentRow],
 ) -> Result<u64> {
@@ -248,44 +237,51 @@ pub(crate) async fn stage_children_current_rows(
         values.push_bind(row.manifest_version);
         values.push_bind(row.last_recomputed_at);
     });
-    execute_stage_insert(conn, builder, "children_current").await
+    execute_stage_insert(transaction, builder, "children_current").await
 }
 
 pub(crate) async fn stage_permissions_current_rows(
-    conn: &mut PgConnection,
+    transaction: &mut Transaction<'_, Postgres>,
     stage_table: &str,
     rows: &[PermissionsCurrentRow],
 ) -> Result<u64> {
     if rows.is_empty() {
         return Ok(0);
     }
-    let mut builder = QueryBuilder::<Postgres>::new(format!(
-        "INSERT INTO {stage_table} ({}) ",
-        PERMISSIONS_CURRENT_COLUMNS.join(", ")
-    ));
-    builder.push_values(rows, |mut values, row| {
-        values.push_bind(row.resource_id);
-        values.push_bind(&row.subject);
-        values.push_bind(row.scope.storage_key());
-        values.push_bind(row.scope.kind());
-        values.push_bind(row.scope.detail());
-        values.push_bind(row.effective_powers.clone());
-        values.push_bind(row.grant_source.clone());
-        values.push_bind(row.revocation_source.clone());
-        values.push_bind(row.inheritance_path.clone());
-        values.push_bind(row.transfer_behavior.clone());
-        values.push_bind(row.provenance.clone());
-        values.push_bind(row.coverage.clone());
-        values.push_bind(row.chain_positions.clone());
-        values.push_bind(row.canonicality_summary.clone());
-        values.push_bind(row.manifest_version);
-        values.push_bind(row.last_recomputed_at);
-    });
-    execute_stage_insert(conn, builder, "permissions_current").await
+    let max_rows_per_insert = POSTGRES_MAX_BIND_PARAMETERS / PERMISSIONS_CURRENT_COLUMNS.len();
+    let mut staged = 0_u64;
+    for rows in rows.chunks(max_rows_per_insert) {
+        let mut builder = QueryBuilder::<Postgres>::new(format!(
+            "INSERT INTO {stage_table} ({}) ",
+            PERMISSIONS_CURRENT_COLUMNS.join(", ")
+        ));
+        builder.push_values(rows, |mut values, row| {
+            values.push_bind(row.resource_id);
+            values.push_bind(&row.subject);
+            values.push_bind(row.scope.storage_key());
+            values.push_bind(row.scope.kind());
+            values.push_bind(row.scope.detail());
+            values.push_bind(row.effective_powers.clone());
+            values.push_bind(row.grant_source.clone());
+            values.push_bind(row.revocation_source.clone());
+            values.push_bind(row.inheritance_path.clone());
+            values.push_bind(row.transfer_behavior.clone());
+            values.push_bind(row.provenance.clone());
+            values.push_bind(row.coverage.clone());
+            values.push_bind(row.chain_positions.clone());
+            values.push_bind(row.canonicality_summary.clone());
+            values.push_bind(row.manifest_version);
+            values.push_bind(row.last_recomputed_at);
+        });
+        staged = staged
+            .checked_add(execute_stage_insert(transaction, builder, "permissions_current").await?)
+            .context("permissions_current staged row count overflow")?;
+    }
+    Ok(staged)
 }
 
 pub(crate) async fn stage_permissions_current_resource_summaries(
-    conn: &mut PgConnection,
+    transaction: &mut Transaction<'_, Postgres>,
     stage_table: &str,
     summaries: &[PermissionsCurrentResourceSummary],
 ) -> Result<u64> {
@@ -307,11 +303,11 @@ pub(crate) async fn stage_permissions_current_resource_summaries(
         values.push_bind(summary.manifest_version);
         values.push_bind(summary.last_recomputed_at);
     });
-    execute_stage_insert(conn, builder, "permissions_current_resource_summary").await
+    execute_stage_insert(transaction, builder, "permissions_current_resource_summary").await
 }
 
 pub(crate) async fn stage_primary_names_current_snapshots(
-    conn: &mut PgConnection,
+    transaction: &mut Transaction<'_, Postgres>,
     stage_table: &str,
     snapshots: &[PrimaryNameCurrentSnapshot],
 ) -> Result<u64> {
@@ -332,11 +328,11 @@ pub(crate) async fn stage_primary_names_current_snapshots(
         values.push_bind(snapshot.claim_name_is_normalized);
         values.push_bind(snapshot.row.claim_provenance.clone());
     });
-    execute_stage_insert(conn, builder, "primary_names_current").await
+    execute_stage_insert(transaction, builder, "primary_names_current").await
 }
 
 pub(crate) async fn stage_record_inventory_current_rows(
-    conn: &mut PgConnection,
+    transaction: &mut Transaction<'_, Postgres>,
     stage_table: &str,
     rows: &[RecordInventoryCurrentRow],
 ) -> Result<u64> {
@@ -373,11 +369,11 @@ pub(crate) async fn stage_record_inventory_current_rows(
         values.push_bind(row.manifest_version);
         values.push_bind(row.last_recomputed_at);
     });
-    execute_stage_insert(conn, builder, "record_inventory_current").await
+    execute_stage_insert(transaction, builder, "record_inventory_current").await
 }
 
 pub(crate) async fn stage_resolver_current_rows(
-    conn: &mut PgConnection,
+    transaction: &mut Transaction<'_, Postgres>,
     stage_table: &str,
     rows: &[ResolverCurrentRow],
 ) -> Result<u64> {
@@ -399,17 +395,17 @@ pub(crate) async fn stage_resolver_current_rows(
         values.push_bind(row.manifest_version);
         values.push_bind(row.last_recomputed_at);
     });
-    execute_stage_insert(conn, builder, "resolver_current").await
+    execute_stage_insert(transaction, builder, "resolver_current").await
 }
 
 async fn execute_stage_insert(
-    conn: &mut PgConnection,
+    transaction: &mut Transaction<'_, Postgres>,
     mut builder: QueryBuilder<'_, Postgres>,
     projection: &str,
 ) -> Result<u64> {
     builder
         .build()
-        .execute(conn)
+        .execute(&mut **transaction)
         .await
         .with_context(|| format!("failed to stage {projection} rows"))
         .map(|result| result.rows_affected())

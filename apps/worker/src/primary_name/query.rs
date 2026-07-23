@@ -17,9 +17,14 @@ const CANONICAL_STATE_FILTER: &str = r#"
   )
 "#;
 
-pub(super) fn stream_primary_name_rebuild_inputs<'a>(
+pub(super) fn stream_primary_name_rebuild_inputs_after<'a>(
     pool: &'a PgPool,
+    after_source_key: Option<(&'a str, &'a str, &'a str)>,
+    limit: i64,
 ) -> impl Stream<Item = Result<PrimaryNameRebuildInput>> + 'a {
+    let (after_address, after_namespace, after_coin_type) = after_source_key
+        .map(|(address, namespace, coin_type)| (Some(address), Some(namespace), Some(coin_type)))
+        .unwrap_or((None, None, None));
     sqlx::query(
         r#"
         WITH reverse_claims AS (
@@ -101,13 +106,23 @@ pub(super) fn stream_primary_name_rebuild_inputs<'a>(
           ON name_claims.address = reverse_claims.address
          AND name_claims.namespace = reverse_claims.namespace
          AND name_claims.coin_type = reverse_claims.coin_type
+        WHERE (
+            $2::TEXT IS NULL
+            OR (reverse_claims.address, reverse_claims.namespace, reverse_claims.coin_type)
+               > ($2, $3, $4)
+        )
         ORDER BY
             reverse_claims.address ASC,
             reverse_claims.namespace ASC,
             reverse_claims.coin_type ASC
+        LIMIT $5
         "#,
     )
     .bind(EVENT_KIND_REVERSE_CHANGED)
+    .bind(after_address)
+    .bind(after_namespace)
+    .bind(after_coin_type)
+    .bind(limit)
     .fetch(pool)
     .map(|row| {
         row.context("failed to stream primary_names_current rebuild input")

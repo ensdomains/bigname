@@ -2,6 +2,8 @@ use anyhow::{Context, Result, bail};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::projection_staging::ensure_current_projection_full_replay_input_revision_in_transaction;
+
 use super::{types::AddressNameCurrentRow, write};
 
 #[derive(Clone, Debug)]
@@ -11,6 +13,14 @@ pub struct AddressNamesCurrentFullRebuild {
 }
 
 impl AddressNamesCurrentFullRebuild {
+    pub fn from_durable_stage(table_name: String, previous_row_count: u64) -> Result<Self> {
+        quote_identifier(&table_name)?;
+        Ok(Self {
+            table_name,
+            previous_row_count,
+        })
+    }
+
     pub fn previous_row_count(&self) -> u64 {
         self.previous_row_count
     }
@@ -59,6 +69,15 @@ pub async fn insert_address_names_current_full_rebuild_rows(
 
     let table_sql = rebuild.table_sql();
     insert_address_names_current_staging_rows(pool, &table_sql, rows, "full rebuild").await
+}
+
+pub async fn insert_address_names_current_full_rebuild_rows_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    rebuild: &AddressNamesCurrentFullRebuild,
+    rows: &[AddressNameCurrentRow],
+) -> Result<Vec<AddressNameCurrentRow>> {
+    let table_sql = rebuild.table_sql();
+    insert_address_names_current_staging_rows_in_transaction(transaction, &table_sql, rows).await
 }
 
 async fn create_address_names_current_staging_table(
@@ -120,13 +139,9 @@ async fn insert_address_names_current_staging_rows(
         format!("failed to open transaction for address_names_current {purpose} staging")
     })?;
 
-    let mut snapshots = Vec::with_capacity(rows.len());
-    for row in rows {
-        snapshots.push(
-            write::upsert_address_name_current_row_into_table(&mut transaction, table_sql, row)
-                .await?,
-        );
-    }
+    let snapshots =
+        insert_address_names_current_staging_rows_in_transaction(&mut transaction, table_sql, rows)
+            .await?;
 
     transaction.commit().await.with_context(|| {
         format!("failed to commit address_names_current {purpose} staging batch")
@@ -135,9 +150,44 @@ async fn insert_address_names_current_staging_rows(
     Ok(snapshots)
 }
 
+async fn insert_address_names_current_staging_rows_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    table_sql: &str,
+    rows: &[AddressNameCurrentRow],
+) -> Result<Vec<AddressNameCurrentRow>> {
+    let mut snapshots = Vec::with_capacity(rows.len());
+    for row in rows {
+        snapshots.push(
+            write::upsert_address_name_current_row_into_table(transaction, table_sql, row).await?,
+        );
+    }
+    Ok(snapshots)
+}
+
 pub async fn publish_address_names_current_full_rebuild(
     pool: &PgPool,
     rebuild: &AddressNamesCurrentFullRebuild,
+) -> Result<(u64, u64)> {
+    publish_address_names_current_full_rebuild_inner(pool, rebuild, None).await
+}
+
+pub async fn publish_address_names_current_full_rebuild_at_input_revision(
+    pool: &PgPool,
+    rebuild: &AddressNamesCurrentFullRebuild,
+    full_replay_input_revision: i64,
+) -> Result<(u64, u64)> {
+    publish_address_names_current_full_rebuild_inner(
+        pool,
+        rebuild,
+        Some(full_replay_input_revision),
+    )
+    .await
+}
+
+async fn publish_address_names_current_full_rebuild_inner(
+    pool: &PgPool,
+    rebuild: &AddressNamesCurrentFullRebuild,
+    full_replay_input_revision: Option<i64>,
 ) -> Result<(u64, u64)> {
     let table_sql = rebuild.table_sql();
 
@@ -145,6 +195,13 @@ pub async fn publish_address_names_current_full_rebuild(
         .begin()
         .await
         .context("failed to open transaction for address_names_current full rebuild publish")?;
+    if let Some(expected_revision) = full_replay_input_revision {
+        ensure_current_projection_full_replay_input_revision_in_transaction(
+            &mut transaction,
+            expected_revision,
+        )
+        .await?;
+    }
 
     write::set_address_names_current_sidecar_triggers(&mut transaction, false).await?;
 

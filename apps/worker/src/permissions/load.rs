@@ -11,9 +11,11 @@ use super::{
     SOURCE_FAMILY_ENS_V2_REGISTRY_L1, SOURCE_FAMILY_ENS_V2_ROOT_L1,
 };
 
-pub(super) fn stream_target_resource_ids<'a>(
-    pool: &'a PgPool,
-) -> impl Stream<Item = Result<Uuid>> + 'a {
+pub(super) fn stream_target_resource_ids_after(
+    pool: &PgPool,
+    after_resource_id: Option<Uuid>,
+    limit: i64,
+) -> impl Stream<Item = Result<Uuid>> + '_ {
     sqlx::query(
         r#"
         SELECT targets.resource_id
@@ -65,7 +67,9 @@ pub(super) fn stream_target_resource_ids<'a>(
                   )
               )
         ) targets
+        WHERE ($9::UUID IS NULL OR targets.resource_id > $9)
         ORDER BY targets.resource_id
+        LIMIT $10
         "#,
     )
     .bind(EVENT_KIND_PERMISSION_CHANGED)
@@ -76,6 +80,8 @@ pub(super) fn stream_target_resource_ids<'a>(
     .bind(EVENT_KIND_TOKEN_RESOURCE_LINKED)
     .bind(SOURCE_FAMILY_ENS_V2_REGISTRY_L1)
     .bind(SOURCE_FAMILY_ENS_V2_ROOT_L1)
+    .bind(after_resource_id)
+    .bind(limit)
     .fetch(pool)
     .map(|row| {
         row.context("failed to stream resource_ids for permissions_current rebuild")

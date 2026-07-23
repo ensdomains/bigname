@@ -217,7 +217,11 @@ docker compose --env-file .env.server \
 This command does not rewrite `logical_name_id` or identity-defining hash fields.
 Rows that reject or remap under the active normalizer remain unchanged and are
 recorded in `name_surface_normalization_repair_findings` for a separate
-semantic repair decision.
+semantic repair decision. Each compatible update transaction also advances the
+full-replay input revision, so a worker cannot resume or publish a durable
+projection stage built from the earlier metadata; completion markers and an
+automatic replay attempt from that revision are invalidated in the same
+transaction.
 
 Because compatible repair may refresh retained surface display metadata, replay
 all current projections before declaring the repair complete:

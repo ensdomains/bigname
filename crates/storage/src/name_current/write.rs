@@ -3,6 +3,7 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
 
 use crate::SurfaceBindingKind;
 use crate::address_names::rebuild_address_names_current_identity_sidecars_in_transaction;
+use crate::projection_staging::ensure_current_projection_full_replay_input_revision_in_transaction;
 
 use super::replacement_publish::publish_name_current_replacement_rows;
 use super::row::{NameCurrentRow, decode_name_current_row, validate_name_current_row};
@@ -35,7 +36,12 @@ impl NameCurrentReplacement {
 
     pub async fn stage_rows(&mut self, rows: &[NameCurrentRow]) -> Result<()> {
         for chunk in rows.chunks(NAME_CURRENT_REPLACEMENT_BATCH_SIZE) {
-            insert_name_current_replacement_chunk(&mut self.transaction, chunk).await?;
+            insert_name_current_replacement_chunk(
+                &mut self.transaction,
+                "name_current_replacement",
+                chunk,
+            )
+            .await?;
         }
         self.staged_row_count += rows.len();
         Ok(())
@@ -48,10 +54,16 @@ impl NameCurrentReplacement {
     pub async fn publish(mut self) -> Result<(usize, u64)> {
         index_name_current_replacement_rows(&mut self.transaction).await?;
         set_name_current_sidecar_triggers(&mut self.transaction, false).await?;
-        let upserted_row_count =
-            publish_name_current_replacement_rows(&mut self.transaction).await?;
-        let deleted_row_count =
-            delete_stale_name_current_rows_from_replacement(&mut self.transaction).await?;
+        let upserted_row_count = publish_name_current_replacement_rows(
+            &mut self.transaction,
+            "name_current_replacement",
+        )
+        .await?;
+        let deleted_row_count = delete_stale_name_current_rows_from_replacement(
+            &mut self.transaction,
+            "name_current_replacement",
+        )
+        .await?;
         set_name_current_sidecar_triggers(&mut self.transaction, true).await?;
         rebuild_address_names_current_identity_sidecars_in_transaction(&mut self.transaction)
             .await?;
@@ -62,6 +74,56 @@ impl NameCurrentReplacement {
 
         Ok((upserted_row_count, deleted_row_count))
     }
+}
+
+/// Stage exact-name rows into a worker-owned durable replacement table.
+pub async fn stage_name_current_replacement_rows_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    replacement_table: &str,
+    rows: &[NameCurrentRow],
+) -> Result<u64> {
+    let replacement_table = checked_staging_table(replacement_table)?;
+    let mut inserted = 0_u64;
+    for chunk in rows.chunks(NAME_CURRENT_REPLACEMENT_BATCH_SIZE) {
+        inserted +=
+            insert_name_current_replacement_chunk(transaction, &replacement_table, chunk).await?;
+    }
+    Ok(inserted)
+}
+
+/// Atomically publish a worker-owned durable exact-name replacement table.
+pub async fn publish_name_current_replacement_table(
+    pool: &PgPool,
+    replacement_table: &str,
+    full_replay_input_revision: i64,
+) -> Result<(usize, u64)> {
+    let replacement_table = checked_staging_table(replacement_table)?;
+    sqlx::query(&format!("ANALYZE {replacement_table}"))
+        .execute(pool)
+        .await
+        .context("failed to analyze durable name_current replacement table")?;
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to open durable name_current replacement transaction")?;
+    ensure_current_projection_full_replay_input_revision_in_transaction(
+        &mut transaction,
+        full_replay_input_revision,
+    )
+    .await?;
+    set_name_current_sidecar_triggers(&mut transaction, false).await?;
+    let upserted_row_count =
+        publish_name_current_replacement_rows(&mut transaction, &replacement_table).await?;
+    let deleted_row_count =
+        delete_stale_name_current_rows_from_replacement(&mut transaction, &replacement_table)
+            .await?;
+    set_name_current_sidecar_triggers(&mut transaction, true).await?;
+    rebuild_address_names_current_identity_sidecars_in_transaction(&mut transaction).await?;
+    transaction
+        .commit()
+        .await
+        .context("failed to commit durable name_current replacement")?;
+    Ok((upserted_row_count, deleted_row_count))
 }
 
 /// Insert or replace projection rows for exact-name current reads.
@@ -161,19 +223,20 @@ fn encode_name_current_row(row: &NameCurrentRow) -> Result<EncodedNameCurrentRow
 
 async fn insert_name_current_replacement_chunk(
     executor: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    replacement_table: &str,
     rows: &[NameCurrentRow],
-) -> Result<()> {
+) -> Result<u64> {
     if rows.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
 
     let encoded_rows = rows
         .iter()
         .map(encode_name_current_row)
         .collect::<Result<Vec<_>>>()?;
-    let mut builder = QueryBuilder::<Postgres>::new(
+    let mut builder = QueryBuilder::<Postgres>::new(format!(
         r#"
-        INSERT INTO name_current_replacement (
+        INSERT INTO {replacement_table} (
             logical_name_id,
             namespace,
             canonical_display_name,
@@ -191,8 +254,8 @@ async fn insert_name_current_replacement_chunk(
             manifest_version,
             last_recomputed_at
         )
-        "#,
-    );
+        "#
+    ));
 
     builder.push_values(encoded_rows.iter(), |mut row_builder, encoded| {
         row_builder
@@ -219,13 +282,14 @@ async fn insert_name_current_replacement_chunk(
             .push_bind(encoded.row.last_recomputed_at);
     });
 
-    builder
+    let inserted = builder
         .build()
         .execute(&mut **executor)
         .await
-        .context("failed to stage name_current replacement chunk")?;
+        .context("failed to stage name_current replacement chunk")?
+        .rows_affected();
 
-    Ok(())
+    Ok(inserted)
 }
 
 async fn upsert_name_current_rows_in_transaction(
@@ -296,20 +360,32 @@ async fn set_name_current_sidecar_triggers(
 
 async fn delete_stale_name_current_rows_from_replacement(
     executor: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    replacement_table: &str,
 ) -> Result<u64> {
-    sqlx::query(
+    sqlx::query(&format!(
         r#"
         DELETE FROM name_current current
         WHERE NOT EXISTS (
-            SELECT 1 FROM name_current_replacement replacement
+            SELECT 1 FROM {replacement_table} replacement
             WHERE replacement.logical_name_id = current.logical_name_id
         )
-        "#,
-    )
+        "#
+    ))
     .execute(&mut **executor)
     .await
     .context("failed to delete stale name_current rows during replacement")
     .map(|result| result.rows_affected())
+}
+
+fn checked_staging_table(table: &str) -> Result<String> {
+    anyhow::ensure!(
+        !table.is_empty()
+            && table
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
+        "unsafe name_current replacement table {table:?}"
+    );
+    Ok(format!("\"{table}\""))
 }
 
 async fn upsert_name_current_row(

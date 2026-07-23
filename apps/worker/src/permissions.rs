@@ -12,12 +12,11 @@ mod types;
 
 use anyhow::{Context, Result};
 use bigname_storage::replace_permissions_current_resource_projection;
-use futures_util::{TryStreamExt, pin_mut};
-use load::stream_target_resource_ids;
+use futures_util::{StreamExt, TryStreamExt, pin_mut, stream};
+use load::stream_target_resource_ids_after;
 use project::build_resource_projection;
 pub(crate) use project::{mask_effective_powers_for_fuse_state, scope_fuse_state_from_after_state};
 use sqlx::PgPool;
-use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use crate::primary_name::rebuild_heartbeat::{
@@ -25,7 +24,7 @@ use crate::primary_name::rebuild_heartbeat::{
 };
 
 use staged_rebuild::{
-    count_rows, create_stage_table, drop_stage_table, publish_permissions_current_stage_tables,
+    count_rows, publish_permissions_current_stage_tables,
     stage_permissions_current_resource_summaries, stage_permissions_current_rows,
 };
 
@@ -39,7 +38,10 @@ const SOURCE_FAMILY_ENS_V2_ROOT_L1: &str = "ens_v2_root_l1";
 const SOURCE_FAMILY_ENS_V2_REGISTRY_L1: &str = "ens_v2_registry_l1";
 const PERMISSIONS_CURRENT_DERIVATION_KIND: &str = "permissions_current_rebuild";
 const PERMISSIONS_ENUMERATION_BASIS: &str = "resource_permissions";
+#[cfg(not(test))]
 const PERMISSIONS_CURRENT_REBUILD_BATCH_SIZE: usize = 2_000;
+#[cfg(test)]
+const PERMISSIONS_CURRENT_REBUILD_BATCH_SIZE: usize = 1;
 const PERMISSIONS_CURRENT_REBUILD_CONCURRENCY: usize = 8;
 const CANONICAL_STATE_FILTER: &str = r#"
   IN (
@@ -63,14 +65,6 @@ pub async fn rebuild_permissions_current(
     rebuild_permissions_current_inner(pool, resource_id, None).await
 }
 
-pub(crate) async fn rebuild_permissions_current_with_heartbeat(
-    pool: &PgPool,
-    resource_id: Option<&str>,
-    loop_heartbeat: &mut LoopHeartbeat,
-) -> Result<PermissionsCurrentRebuildSummary> {
-    rebuild_permissions_current_inner(pool, resource_id, Some(loop_heartbeat)).await
-}
-
 async fn rebuild_permissions_current_inner(
     pool: &PgPool,
     resource_id: Option<&str>,
@@ -78,110 +72,128 @@ async fn rebuild_permissions_current_inner(
 ) -> Result<PermissionsCurrentRebuildSummary> {
     match resource_id {
         Some(resource_id) => rebuild_one_resource(pool, resource_id, loop_heartbeat).await,
-        None => rebuild_all_resources(pool, loop_heartbeat).await,
+        None => {
+            let summary = rebuild_all_resources(pool, None, loop_heartbeat).await?;
+            crate::replay::staging::cleanup_projection_checkpoint(pool, "permissions_current")
+                .await?;
+            Ok(summary)
+        }
     }
+}
+
+pub(crate) async fn rebuild_permissions_current_for_replay(
+    pool: &PgPool,
+    normalized_target_block: Option<i64>,
+    loop_heartbeat: Option<&mut LoopHeartbeat>,
+) -> Result<PermissionsCurrentRebuildSummary> {
+    rebuild_all_resources(pool, normalized_target_block, loop_heartbeat).await
 }
 
 async fn rebuild_all_resources(
     pool: &PgPool,
+    normalized_target_block: Option<i64>,
     mut loop_heartbeat: Option<&mut LoopHeartbeat>,
 ) -> Result<PermissionsCurrentRebuildSummary> {
-    let mut conn = pool
-        .acquire()
-        .await
-        .context("failed to acquire permissions_current staging connection")?;
-    let stage_table = create_stage_table(&mut conn, "permissions_current").await?;
-    let summary_stage_table =
-        create_stage_table(&mut conn, "permissions_current_resource_summary").await?;
     let previous_row_count = run_rebuild_phase(
         pool,
         &mut loop_heartbeat,
         "permissions_current.count_existing",
-        count_rows(&mut conn, "permissions_current", None),
+        count_rows(pool, "permissions_current", None),
     )
     .await?;
-    let mut rows = Vec::with_capacity(PERMISSIONS_CURRENT_REBUILD_BATCH_SIZE);
-    let mut summaries = Vec::with_capacity(PERMISSIONS_CURRENT_REBUILD_BATCH_SIZE);
-    let mut requested_resource_count = 0usize;
-    let mut completed_resource_count = 0usize;
-    let mut upserted_row_count = 0usize;
-    let mut staged_summary_count = 0usize;
-
-    let resource_ids = stream_target_resource_ids(pool);
-    pin_mut!(resource_ids);
-    let mut tasks = JoinSet::new();
-
-    while tasks.len() < PERMISSIONS_CURRENT_REBUILD_CONCURRENCY {
-        let Some(resource_id) = resource_ids.try_next().await? else {
-            break;
-        };
-        requested_resource_count += 1;
-        spawn_permissions_rebuild_task(&mut tasks, pool, resource_id);
-    }
-
-    while let Some(result) = tasks.join_next().await {
-        completed_resource_count += 1;
-        let projection = result??;
-        record_rebuild_progress(pool, &mut loop_heartbeat).await;
-        rows.extend(projection.rows);
-        if let Some(summary) = projection.summary {
-            summaries.push(summary);
-        }
-        if rows.len() >= PERMISSIONS_CURRENT_REBUILD_BATCH_SIZE
-            || summaries.len() >= PERMISSIONS_CURRENT_REBUILD_BATCH_SIZE
-        {
-            upserted_row_count +=
-                stage_permissions_current_rows(&mut conn, &stage_table, &rows).await? as usize;
-            rows.clear();
-            staged_summary_count += stage_permissions_current_resource_summaries(
-                &mut conn,
-                &summary_stage_table,
+    let mut checkpoint = crate::replay::staging::ProjectionStagingCheckpoint::load_or_start(
+        pool,
+        "permissions_current",
+        normalized_target_block,
+    )
+    .await?;
+    if !checkpoint.staging_complete() {
+        loop {
+            let input_fence = checkpoint.prepare_next_batch(pool).await?;
+            let after_resource_id = checkpoint
+                .last_source_key()
+                .and_then(serde_json::Value::as_str)
+                .map(Uuid::parse_str)
+                .transpose()
+                .context("permissions_current staging source key must be a UUID")?;
+            let resource_ids = stream_target_resource_ids_after(
+                pool,
+                after_resource_id,
+                i64::try_from(PERMISSIONS_CURRENT_REBUILD_BATCH_SIZE)?,
+            );
+            pin_mut!(resource_ids);
+            let mut page = Vec::with_capacity(PERMISSIONS_CURRENT_REBUILD_BATCH_SIZE);
+            while page.len() < PERMISSIONS_CURRENT_REBUILD_BATCH_SIZE {
+                let Some(resource_id) = resource_ids.try_next().await? else {
+                    break;
+                };
+                page.push(resource_id);
+            }
+            if page.is_empty() {
+                checkpoint.mark_staging_complete(pool, input_fence).await?;
+                break;
+            }
+            let last_source_key = serde_json::Value::String(
+                page.last()
+                    .expect("permissions_current staging page must not be empty")
+                    .to_string(),
+            );
+            let projections = build_permissions_page(pool, &page, &mut loop_heartbeat).await?;
+            let mut rows = Vec::new();
+            let mut summaries = Vec::with_capacity(projections.len());
+            for projection in projections {
+                rows.extend(projection.rows);
+                if let Some(summary) = projection.summary {
+                    summaries.push(summary);
+                }
+            }
+            let mut transaction = pool.begin().await?;
+            let staged_rows =
+                stage_permissions_current_rows(&mut transaction, checkpoint.stage_table(0)?, &rows)
+                    .await?;
+            let staged_summaries = stage_permissions_current_resource_summaries(
+                &mut transaction,
+                checkpoint.stage_table(1)?,
                 &summaries,
             )
-            .await? as usize;
-            summaries.clear();
-        }
-
-        if completed_resource_count.is_multiple_of(5_000) {
-            tracing::info!(
-                projection = "permissions_current",
-                queued_resource_count = requested_resource_count,
-                completed_resource_count,
-                upserted_row_count,
-                "permissions_current rebuild resources processed"
-            );
-        }
-
-        while tasks.len() < PERMISSIONS_CURRENT_REBUILD_CONCURRENCY {
-            let Some(resource_id) = resource_ids.try_next().await? else {
-                break;
-            };
-            requested_resource_count += 1;
-            spawn_permissions_rebuild_task(&mut tasks, pool, resource_id);
+            .await?;
+            let progress = checkpoint.progress_after_batch(
+                page.len(),
+                last_source_key,
+                staged_rows,
+                staged_summaries,
+            )?;
+            checkpoint
+                .persist_progress(&mut transaction, &progress, &input_fence)
+                .await?;
+            transaction.commit().await?;
+            checkpoint.accept_progress(progress, input_fence);
+            let completed_resource_count = checkpoint.completed_source_count()?;
+            if completed_resource_count.is_multiple_of(5_000) {
+                tracing::info!(
+                    projection = "permissions_current",
+                    completed_resource_count,
+                    upserted_row_count = checkpoint.staged_row_count()?,
+                    "permissions_current rebuild resources processed"
+                );
+            }
         }
     }
-
-    if !rows.is_empty() {
-        upserted_row_count +=
-            stage_permissions_current_rows(&mut conn, &stage_table, &rows).await? as usize;
-    }
-    if !summaries.is_empty() {
-        staged_summary_count += stage_permissions_current_resource_summaries(
-            &mut conn,
-            &summary_stage_table,
-            &summaries,
-        )
-        .await? as usize;
-    }
+    let requested_resource_count = checkpoint.completed_source_count()?;
+    let upserted_row_count = checkpoint.staged_row_count()?;
+    let staged_summary_count = checkpoint.staged_aux_row_count()?;
     let (_deleted_row_count, published_row_count, published_summary_count) = run_rebuild_phase(
         pool,
         &mut loop_heartbeat,
         "permissions_current.publish",
-        publish_permissions_current_stage_tables(&mut conn, &stage_table, &summary_stage_table),
+        publish_permissions_current_stage_tables(
+            pool,
+            checkpoint.stage_table(0)?,
+            checkpoint.stage_table(1)?,
+            checkpoint.full_replay_input_revision(),
+        ),
     )
     .await?;
-    drop_stage_table(&mut conn, &stage_table).await?;
-    drop_stage_table(&mut conn, &summary_stage_table).await?;
     debug_assert_eq!(published_row_count as usize, upserted_row_count);
     debug_assert_eq!(published_summary_count as usize, staged_summary_count);
 
@@ -192,13 +204,24 @@ async fn rebuild_all_resources(
     })
 }
 
-fn spawn_permissions_rebuild_task(
-    tasks: &mut JoinSet<Result<types::ProjectedPermissionsResource>>,
+async fn build_permissions_page(
     pool: &PgPool,
-    resource_id: Uuid,
-) {
-    let pool = pool.clone();
-    tasks.spawn(async move { build_resource_projection(&pool, resource_id).await });
+    resource_ids: &[Uuid],
+    loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
+) -> Result<Vec<types::ProjectedPermissionsResource>> {
+    let projections = stream::iter(resource_ids.iter().copied())
+        .map(|resource_id| {
+            let pool = pool.clone();
+            async move { build_resource_projection(&pool, resource_id).await }
+        })
+        .buffer_unordered(PERMISSIONS_CURRENT_REBUILD_CONCURRENCY);
+    pin_mut!(projections);
+    let mut completed = Vec::with_capacity(resource_ids.len());
+    while let Some(projection) = projections.try_next().await? {
+        completed.push(projection);
+        record_rebuild_progress(pool, loop_heartbeat).await;
+    }
+    Ok(completed)
 }
 
 async fn rebuild_one_resource(

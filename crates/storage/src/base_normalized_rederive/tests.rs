@@ -1807,6 +1807,11 @@ async fn execute_runtime_session_check_uses_held_transaction_connection() -> Res
     let database = test_database().await?;
     seed_rederive_fixture(database.pool()).await?;
     let expected = reviewed_counts(database.pool()).await?;
+    let input_revision_before = sqlx::query_scalar::<_, i64>(
+        "SELECT revision FROM current_projection_full_replay_input_revision WHERE singleton",
+    )
+    .fetch_one(database.pool())
+    .await?;
     let tight_pool = single_connection_pool(database.database_name()).await?;
 
     let outcome = timeout(
@@ -1825,6 +1830,16 @@ async fn execute_runtime_session_check_uses_held_transaction_connection() -> Res
         "single-connection execute timed out; runtime-session check likely acquired from pool",
     )?;
     assert_eq!(outcome.deleted.current_projection_replay_status, 7);
+    let input_revision_after = sqlx::query_scalar::<_, i64>(
+        "SELECT revision FROM current_projection_full_replay_input_revision WHERE singleton",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        input_revision_after,
+        input_revision_before + 1,
+        "destructive normalized-event rederive must invalidate reusable full-replay stages"
+    );
 
     tight_pool.close().await;
     database.cleanup().await?;

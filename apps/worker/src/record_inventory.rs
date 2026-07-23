@@ -24,13 +24,17 @@ pub async fn rebuild_record_inventory_current(
     projection::rebuild_record_inventory_current(pool, resource_id).await
 }
 
-pub(crate) async fn rebuild_record_inventory_current_with_heartbeat(
+pub(crate) async fn rebuild_record_inventory_current_for_replay(
     pool: &PgPool,
-    resource_id: Option<&str>,
-    loop_heartbeat: &mut LoopHeartbeat,
+    normalized_target_block: Option<i64>,
+    loop_heartbeat: Option<&mut LoopHeartbeat>,
 ) -> Result<RecordInventoryCurrentRebuildSummary> {
-    projection::rebuild_record_inventory_current_with_heartbeat(pool, resource_id, loop_heartbeat)
-        .await
+    projection::rebuild_record_inventory_current_for_replay(
+        pool,
+        normalized_target_block,
+        loop_heartbeat,
+    )
+    .await
 }
 
 pub async fn hydrate_record_inventory_text_values(

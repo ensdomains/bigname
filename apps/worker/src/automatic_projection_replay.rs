@@ -15,6 +15,8 @@ use tracing::{debug, info, warn};
 use crate::primary_name::rebuild_heartbeat as heartbeat;
 use crate::{cli::RunArgs, primary_name, projection_apply, record_inventory, replay};
 
+#[path = "automatic_projection_replay/bootstrap_attempt.rs"]
+mod bootstrap_attempt;
 #[path = "automatic_projection_replay/bootstrap_replay.rs"]
 mod bootstrap_replay;
 #[path = "automatic_projection_replay/invalidation_derive_loop.rs"]
@@ -153,7 +155,7 @@ async fn run_automatic_current_projection_replay_loop(
     heartbeat_instance_id: String,
     poll_interval_secs: u64,
     text_hydration_config: Option<record_inventory::RecordInventoryTextHydrationConfig>,
-    mut primary_hydration_config: Option<primary_name::PrimaryNameLegacyReverseHydrationConfig>,
+    primary_hydration_config: Option<primary_name::PrimaryNameLegacyReverseHydrationConfig>,
     subtasks: subtask_supervision::SubtaskSpawner,
 ) -> Result<()> {
     let poll_interval = Duration::from_secs(poll_interval_secs.max(1));
@@ -176,6 +178,29 @@ async fn run_automatic_current_projection_replay_loop(
         record_loop_heartbeat_if_due(&pool, &loop_heartbeat, &invalidation_derive_activity).await;
 
         let mut progressed = false;
+        if bootstrap_completed {
+            match projection_bootstrap_handoff_is_current(&pool).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    bootstrap_completed = false;
+                    progressed = true;
+                    info!(
+                        service = "worker",
+                        replay = "all_current_projections",
+                        "automatic all-current projection replay re-entered after durable handoff invalidation"
+                    );
+                }
+                Err(error) => {
+                    bootstrap_completed = false;
+                    warn!(
+                        service = "worker",
+                        replay = "all_current_projections",
+                        error = %format!("{error:#}"),
+                        "failed to revalidate automatic all-current projection replay handoff; continuous apply paused"
+                    );
+                }
+            }
+        }
         if !bootstrap_completed {
             match projection_bootstrap_already_handed_off_to_apply(&pool).await {
                 Ok(true) => {
@@ -201,6 +226,7 @@ async fn run_automatic_current_projection_replay_loop(
 
         if !bootstrap_completed {
             let replay_result = {
+                let _apply_hydration_guard = projection_apply_hydration_lock.lock().await;
                 let mut loop_heartbeat = loop_heartbeat.lock().await;
                 replay_all_current_projections_when_ready_with_heartbeat(
                     &pool,
@@ -249,7 +275,10 @@ async fn run_automatic_current_projection_replay_loop(
             );
 
             if hydration_schedule.start_primary_hydration {
-                if let Some(config) = primary_hydration_config.take() {
+                if let Some(config) = background_primary_hydration_config(
+                    &primary_hydration_config,
+                    primary_hydration_started,
+                ) {
                     primary_hydration_loop::spawn(
                         &subtasks,
                         pool.clone(),
@@ -337,6 +366,15 @@ async fn run_automatic_current_projection_replay_loop(
     }
 }
 
+fn background_primary_hydration_config(
+    config: &Option<primary_name::PrimaryNameLegacyReverseHydrationConfig>,
+    primary_hydration_started: bool,
+) -> Option<primary_name::PrimaryNameLegacyReverseHydrationConfig> {
+    (!primary_hydration_started)
+        .then(|| config.clone())
+        .flatten()
+}
+
 async fn record_loop_heartbeat_if_due(
     pool: &PgPool,
     loop_heartbeat: &SharedLoopHeartbeat,
@@ -382,34 +420,38 @@ async fn hydrate_record_inventory_text_values_after_bootstrap(
 }
 
 async fn projection_bootstrap_already_handed_off_to_apply(pool: &PgPool) -> Result<bool> {
+    let handed_off = projection_bootstrap_handoff_is_current(pool).await?;
+    if handed_off {
+        for projection in replay::ALL_CURRENT_PROJECTION_ORDER {
+            replay::staging::cleanup_projection_checkpoint(pool, projection).await?;
+        }
+        bootstrap_attempt::clear_projection_replay_attempt(pool).await?;
+    }
+    Ok(handed_off)
+}
+
+async fn projection_bootstrap_handoff_is_current(pool: &PgPool) -> Result<bool> {
     let cursor_exists = projection_apply::normalized_event_cursor_exists(pool).await?;
     if !cursor_exists {
         return Ok(false);
     }
 
     let complete_marker_count = load_current_projection_replay_marker_count(pool, None).await?;
-    Ok(should_skip_bootstrap_for_existing_apply_cursor(
-        cursor_exists,
-        complete_marker_count,
-    ))
+    let handed_off =
+        should_skip_bootstrap_for_existing_apply_cursor(cursor_exists, complete_marker_count);
+    Ok(handed_off)
 }
 
 fn projection_bootstrap_apply_cursor_seed(
     cursor_exists: bool,
-    reusable_marker_count: i64,
-    captured_watermark: projection_apply::NormalizedEventChangeCursor,
+    apply_baseline_change_id: i64,
 ) -> Option<projection_apply::NormalizedEventChangeCursor> {
     if cursor_exists {
         return None;
     }
-
-    if reusable_marker_count > 0 {
-        // A prior process may have committed this family before it died without
-        // recording the watermark that preceded that rebuild.
-        return Some(projection_apply::NormalizedEventChangeCursor { change_id: 0 });
-    }
-
-    Some(captured_watermark)
+    Some(projection_apply::NormalizedEventChangeCursor {
+        change_id: apply_baseline_change_id,
+    })
 }
 
 fn should_skip_bootstrap_for_existing_apply_cursor(
@@ -504,12 +546,15 @@ async fn load_current_projection_replay_marker_count(
     sqlx::query_scalar::<_, i64>(
         r#"
         SELECT COUNT(DISTINCT projection)::BIGINT
-        FROM current_projection_replay_status
-        WHERE replay_version = $1
-          AND projection = ANY($2::TEXT[])
+        FROM current_projection_replay_status AS status
+        JOIN current_projection_full_replay_input_revision AS input_revision
+          ON input_revision.singleton
+         AND input_revision.revision = status.full_replay_input_revision
+        WHERE status.replay_version = $1
+          AND status.projection = ANY($2::TEXT[])
           AND (
               $3::BIGINT IS NULL
-              OR completed_normalized_target_block >= $3
+              OR status.completed_normalized_target_block >= $3
           )
         "#,
     )

@@ -104,19 +104,19 @@ async fn rebuild_all_current_projections_inner(
 
     steps.push(replay_step!(
         "name_current",
-        rebuild_name_current(pool, &mut loop_heartbeat),
+        rebuild_name_current(pool, normalized_target_block, &mut loop_heartbeat),
         requested_name_count
     ));
     record_loop_progress(pool, &mut loop_heartbeat).await;
     steps.push(replay_step!(
         "children_current",
-        rebuild_children_current(pool, &mut loop_heartbeat),
+        rebuild_children_current(pool, normalized_target_block, &mut loop_heartbeat),
         requested_parent_count
     ));
     record_loop_progress(pool, &mut loop_heartbeat).await;
     steps.push(replay_step!(
         "permissions_current",
-        rebuild_permissions_current(pool, &mut loop_heartbeat),
+        rebuild_permissions_current(pool, normalized_target_block, &mut loop_heartbeat),
         requested_resource_count
     ));
     record_loop_progress(pool, &mut loop_heartbeat).await;
@@ -127,9 +127,13 @@ async fn rebuild_all_current_projections_inner(
             normalized_target_block,
             skip_completed,
             async {
-                let summary = rebuild_record_inventory_current(pool, &mut loop_heartbeat)
-                    .await
-                    .context("failed to replay record_inventory_current")?;
+                let summary = rebuild_record_inventory_current(
+                    pool,
+                    normalized_target_block,
+                    &mut loop_heartbeat,
+                )
+                .await
+                .context("failed to replay record_inventory_current")?;
                 if let Some(config) = text_hydration_config {
                     let hydration_summary = hydrate_record_inventory_text_values(
                         pool,
@@ -153,13 +157,13 @@ async fn rebuild_all_current_projections_inner(
     record_loop_progress(pool, &mut loop_heartbeat).await;
     steps.push(replay_step!(
         "resolver_current",
-        rebuild_resolver_current(pool, &mut loop_heartbeat),
+        rebuild_resolver_current(pool, normalized_target_block, &mut loop_heartbeat),
         requested_resolver_count
     ));
     record_loop_progress(pool, &mut loop_heartbeat).await;
     steps.push(replay_step!(
         "address_names_current",
-        rebuild_address_names_current(pool, &mut loop_heartbeat),
+        rebuild_address_names_current(pool, normalized_target_block, &mut loop_heartbeat),
         requested_address_count
     ));
     record_loop_progress(pool, &mut loop_heartbeat).await;
@@ -170,9 +174,13 @@ async fn rebuild_all_current_projections_inner(
             normalized_target_block,
             skip_completed,
             async {
-                let summary = rebuild_primary_names_current(pool, &mut loop_heartbeat)
-                    .await
-                    .context("failed to replay primary_names_current")?;
+                let summary = rebuild_primary_names_current(
+                    pool,
+                    normalized_target_block,
+                    &mut loop_heartbeat,
+                )
+                .await
+                .context("failed to replay primary_names_current")?;
                 if let Some(config) = primary_hydration_config {
                     let hydration_summary = hydrate_primary_names_current(
                         pool,
@@ -217,51 +225,54 @@ async fn record_loop_progress(pool: &PgPool, loop_heartbeat: &mut Option<&mut Lo
 
 async fn rebuild_name_current(
     pool: &PgPool,
+    normalized_target_block: Option<i64>,
     loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
 ) -> Result<name_current::NameCurrentRebuildSummary> {
-    if let Some(loop_heartbeat) = loop_heartbeat.as_deref_mut() {
-        name_current::rebuild_name_current_with_heartbeat(pool, None, loop_heartbeat).await
-    } else {
-        name_current::rebuild_name_current(pool, None).await
-    }
+    name_current::rebuild_name_current_for_replay(
+        pool,
+        normalized_target_block,
+        loop_heartbeat.as_deref_mut(),
+    )
+    .await
 }
 
 async fn rebuild_children_current(
     pool: &PgPool,
+    normalized_target_block: Option<i64>,
     loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
 ) -> Result<children::ChildrenCurrentRebuildSummary> {
-    if let Some(loop_heartbeat) = loop_heartbeat.as_deref_mut() {
-        children::rebuild_children_current_with_heartbeat(pool, None, loop_heartbeat).await
-    } else {
-        children::rebuild_children_current(pool, None).await
-    }
+    children::rebuild_children_current_for_replay(
+        pool,
+        normalized_target_block,
+        loop_heartbeat.as_deref_mut(),
+    )
+    .await
 }
 
 async fn rebuild_permissions_current(
     pool: &PgPool,
+    normalized_target_block: Option<i64>,
     loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
 ) -> Result<permissions::PermissionsCurrentRebuildSummary> {
-    if let Some(loop_heartbeat) = loop_heartbeat.as_deref_mut() {
-        permissions::rebuild_permissions_current_with_heartbeat(pool, None, loop_heartbeat).await
-    } else {
-        permissions::rebuild_permissions_current(pool, None).await
-    }
+    permissions::rebuild_permissions_current_for_replay(
+        pool,
+        normalized_target_block,
+        loop_heartbeat.as_deref_mut(),
+    )
+    .await
 }
 
 async fn rebuild_record_inventory_current(
     pool: &PgPool,
+    normalized_target_block: Option<i64>,
     loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
 ) -> Result<record_inventory::RecordInventoryCurrentRebuildSummary> {
-    if let Some(loop_heartbeat) = loop_heartbeat.as_deref_mut() {
-        record_inventory::rebuild_record_inventory_current_with_heartbeat(
-            pool,
-            None,
-            loop_heartbeat,
-        )
-        .await
-    } else {
-        record_inventory::rebuild_record_inventory_current(pool, None).await
-    }
+    record_inventory::rebuild_record_inventory_current_for_replay(
+        pool,
+        normalized_target_block,
+        loop_heartbeat.as_deref_mut(),
+    )
+    .await
 }
 
 async fn hydrate_record_inventory_text_values(
@@ -284,43 +295,41 @@ async fn hydrate_record_inventory_text_values(
 
 async fn rebuild_resolver_current(
     pool: &PgPool,
+    normalized_target_block: Option<i64>,
     loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
 ) -> Result<resolver::ResolverCurrentRebuildSummary> {
-    if let Some(loop_heartbeat) = loop_heartbeat.as_deref_mut() {
-        resolver::rebuild_resolver_current_with_heartbeat(pool, None, None, loop_heartbeat).await
-    } else {
-        resolver::rebuild_resolver_current(pool, None, None).await
-    }
+    resolver::rebuild_resolver_current_for_replay(
+        pool,
+        normalized_target_block,
+        loop_heartbeat.as_deref_mut(),
+    )
+    .await
 }
 
 async fn rebuild_address_names_current(
     pool: &PgPool,
+    normalized_target_block: Option<i64>,
     loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
 ) -> Result<address_names::AddressNamesCurrentRebuildSummary> {
-    if let Some(loop_heartbeat) = loop_heartbeat.as_deref_mut() {
-        address_names::rebuild_address_names_current_with_heartbeat(pool, None, loop_heartbeat)
-            .await
-    } else {
-        address_names::rebuild_address_names_current(pool, None).await
-    }
+    address_names::rebuild_address_names_current_for_replay(
+        pool,
+        normalized_target_block,
+        loop_heartbeat.as_deref_mut(),
+    )
+    .await
 }
 
 async fn rebuild_primary_names_current(
     pool: &PgPool,
+    normalized_target_block: Option<i64>,
     loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
 ) -> Result<primary_name::PrimaryNamesCurrentRebuildSummary> {
-    if let Some(loop_heartbeat) = loop_heartbeat.as_deref_mut() {
-        primary_name::rebuild_primary_names_current_with_heartbeat(
-            pool,
-            None,
-            None,
-            None,
-            loop_heartbeat,
-        )
-        .await
-    } else {
-        primary_name::rebuild_primary_names_current(pool, None, None, None).await
-    }
+    primary_name::rebuild_primary_names_current_for_replay(
+        pool,
+        normalized_target_block,
+        loop_heartbeat.as_deref_mut(),
+    )
+    .await
 }
 
 async fn hydrate_primary_names_current(
@@ -355,6 +364,7 @@ where
         mark_projection_replay_completed(pool, &step, normalized_target_block).await?;
         Ok(step)
     } else {
+        super::staging::cleanup_projection_checkpoint(pool, projection).await?;
         Ok(skipped_step(projection))
     }
 }

@@ -69,21 +69,33 @@ async fn replay_all_current_projections_when_ready_inner(
 
     let replay_result: Result<_> = async {
         let cursor_exists = projection_apply::normalized_event_cursor_exists(pool).await?;
-        let captured_watermark =
-            projection_apply::load_normalized_event_change_watermark(pool).await?;
         let chain_checkpoint_max_block =
             projection_apply::load_chain_checkpoint_max_block(pool).await?;
-        let replay_target_block = projection_bootstrap_replay_target_block(
-            readiness.normalized_replay_max_target_block,
-            chain_checkpoint_max_block,
-        );
+        let (attempt, resumed_attempt) =
+            if let Some(attempt) = bootstrap_attempt::load_projection_replay_attempt(pool).await? {
+                (attempt, true)
+            } else {
+                let captured_watermark =
+                    projection_apply::load_normalized_event_change_watermark(pool).await?;
+                let candidate_target_block = projection_bootstrap_replay_target_block(
+                    readiness.normalized_replay_max_target_block,
+                    chain_checkpoint_max_block,
+                );
+                (
+                    bootstrap_attempt::start_projection_replay_attempt(
+                        pool,
+                        candidate_target_block,
+                        captured_watermark,
+                    )
+                    .await?,
+                    false,
+                )
+            };
+        let replay_target_block = attempt.normalized_target_block;
         let reusable_marker_count =
             load_current_projection_replay_marker_count(pool, replay_target_block).await?;
-        let cursor_seed = projection_bootstrap_apply_cursor_seed(
-            cursor_exists,
-            reusable_marker_count,
-            captured_watermark,
-        );
+        let cursor_seed =
+            projection_bootstrap_apply_cursor_seed(cursor_exists, attempt.apply_baseline_change_id);
 
         info!(
             service = "worker",
@@ -92,7 +104,9 @@ async fn replay_all_current_projections_when_ready_inner(
             normalized_replay_max_target_block = readiness.normalized_replay_max_target_block,
             chain_checkpoint_max_block,
             projection_replay_target_block = replay_target_block,
-            captured_change_watermark = captured_watermark.change_id,
+            replay_input_revision = attempt.full_replay_input_revision,
+            resumed_attempt,
+            apply_baseline_change_id = attempt.apply_baseline_change_id,
             reusable_marker_count,
             cursor_seed_change_id = cursor_seed.map(|cursor| cursor.change_id),
             "automatic all-current projection replay started"
@@ -116,9 +130,7 @@ async fn replay_all_current_projections_when_ready_inner(
             .await
         }
         .context("failed to automatically replay all current projections")?;
-        if let Some(cursor_seed) = cursor_seed {
-            projection_apply::seed_normalized_event_cursor_if_absent(pool, cursor_seed).await?;
-        }
+        bootstrap_attempt::finalize_projection_replay_attempt(pool, attempt, cursor_seed).await?;
         Ok(summary)
     }
     .await;

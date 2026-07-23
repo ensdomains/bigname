@@ -83,3 +83,16 @@ pub(super) const INVALIDATION_QUERY_PREFIXES: &[&str] = &[
     PRIMARY_NAMES_CURRENT_INVALIDATIONS_PREFIX,
     MANIFEST_CURRENT_INVALIDATIONS_PREFIX,
 ];
+
+pub(super) fn current_projection_invalidation_prefix(projection: &str) -> Option<&'static str> {
+    match projection {
+        "name_current" => Some(NAME_CURRENT_INVALIDATIONS_PREFIX),
+        "children_current" => Some(CHILDREN_CURRENT_INVALIDATIONS_PREFIX),
+        "permissions_current" => Some(PERMISSIONS_CURRENT_INVALIDATIONS_PREFIX),
+        "record_inventory_current" => Some(RECORD_INVENTORY_CURRENT_INVALIDATIONS_PREFIX),
+        "resolver_current" => Some(RESOLVER_CURRENT_INVALIDATIONS_PREFIX),
+        "address_names_current" => Some(ADDRESS_NAMES_CURRENT_INVALIDATIONS_PREFIX),
+        "primary_names_current" => Some(PRIMARY_NAMES_CURRENT_INVALIDATIONS_PREFIX),
+        _ => None,
+    }
+}
