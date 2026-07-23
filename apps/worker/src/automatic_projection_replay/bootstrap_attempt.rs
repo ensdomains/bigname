@@ -1,7 +1,7 @@
 use super::*;
 use anyhow::ensure;
 use bigname_storage::projection_staging::load_current_projection_full_replay_input_revision_in_transaction;
-use sqlx::Row;
+use sqlx::{Postgres, Row};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ProjectionReplayAttempt {

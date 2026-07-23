@@ -104,6 +104,50 @@ pub(super) async fn update_compatible_name_surfaces(
         })
         .collect::<Result<Vec<_>>>()?;
 
+    let compatible_row_exists = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM name_surfaces surface
+            JOIN unnest(
+                $1::TEXT[],
+                $2::TEXT[],
+                $3::TEXT[],
+                $4::BYTEA[],
+                $5::TEXT[],
+                $6::TEXT[]
+            ) AS input(
+                logical_name_id, namespace, normalized_name,
+                dns_encoded_name, namehash, labelhashes
+            )
+              ON surface.logical_name_id = input.logical_name_id
+             AND surface.namespace = input.namespace
+             AND surface.normalized_name = input.normalized_name
+             AND surface.dns_encoded_name = input.dns_encoded_name
+             AND surface.namehash = input.namehash
+             AND surface.labelhashes = ARRAY(
+                    SELECT jsonb_array_elements_text(input.labelhashes::jsonb)
+                 )
+            WHERE surface.normalizer_version <> $7
+              AND surface.normalization_errors = '[]'::jsonb
+        )
+        "#,
+    )
+    .bind(&logical_name_ids)
+    .bind(&namespaces)
+    .bind(&normalized_names)
+    .bind(&dns_encoded_names)
+    .bind(&namehashes)
+    .bind(&labelhashes)
+    .bind(expected_normalizer_version)
+    .fetch_one(&mut **transaction)
+    .await
+    .context("failed to guard compatible name-surface normalization updates")?;
+    if !compatible_row_exists {
+        return Ok(Vec::new());
+    }
+
+    advance_current_projection_full_replay_input_revision_in_transaction(transaction).await?;
     let updated_logical_name_ids = sqlx::query_scalar::<_, String>(
         r#"
         WITH input_rows AS (
@@ -164,9 +208,6 @@ pub(super) async fn update_compatible_name_surfaces(
     .fetch_all(&mut **transaction)
     .await
     .context("failed to update compatible name-surface normalization metadata")?;
-    if !updated_logical_name_ids.is_empty() {
-        advance_current_projection_full_replay_input_revision_in_transaction(transaction).await?;
-    }
     Ok(updated_logical_name_ids)
 }
 

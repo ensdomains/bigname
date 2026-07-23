@@ -2,6 +2,7 @@ mod json;
 mod ordering;
 mod progress;
 mod rebuild;
+pub(crate) mod replay_lock;
 pub(crate) mod staging;
 mod summary;
 

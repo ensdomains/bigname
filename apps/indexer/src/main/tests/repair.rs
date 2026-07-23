@@ -397,6 +397,199 @@ async fn repair_name_surface_normalization_updates_compatible_and_records_findin
     database.cleanup().await
 }
 
+#[tokio::test]
+async fn normalization_repair_racing_publication_cannot_leave_a_fresh_marker_on_stale_content()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let expected = bigname_domain::normalization::ENS_NORMALIZER_VERSION;
+    let old_version = "ensip15@2026-04-16";
+    upsert_name_surfaces(
+        database.pool(),
+        &[normalization_repair_surface(
+            "Alice.eth",
+            "alice.eth",
+            old_version,
+        )],
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE TABLE name_current (
+            logical_name_id TEXT PRIMARY KEY,
+            namespace TEXT NOT NULL,
+            canonical_display_name TEXT NOT NULL,
+            normalized_name TEXT NOT NULL,
+            namehash TEXT NOT NULL,
+            manifest_version BIGINT NOT NULL
+        )
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE FUNCTION assert_replay_revision_precedes_name_surface_update()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            IF (
+                SELECT revision
+                FROM current_projection_full_replay_input_revision
+                WHERE singleton
+            ) <> 1 THEN
+                RAISE EXCEPTION 'name-surface mutation preceded replay revision advance';
+            END IF;
+            RETURN NEW;
+        END;
+        $$
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE TRIGGER assert_replay_revision_before_name_surface_update
+        BEFORE UPDATE ON name_surfaces
+        FOR EACH ROW
+        EXECUTE FUNCTION assert_replay_revision_precedes_name_surface_update()
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    let mut publication = database.pool().begin().await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT revision
+            FROM current_projection_full_replay_input_revision
+            WHERE singleton
+            FOR SHARE
+            "#,
+        )
+        .fetch_one(&mut *publication)
+        .await?,
+        0
+    );
+
+    let repair_pool = database.pool().clone();
+    let expected_version = expected.to_owned();
+    let repair = tokio::spawn(async move {
+        repair_name_surface_normalization(
+            &repair_pool,
+            NameSurfaceNormalizationRepairConfig {
+                expected_normalizer_version: expected_version,
+                page_size: 1,
+                limit: None,
+                apply_compatible: true,
+                record_findings: true,
+            },
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let revision_advance_is_waiting = sqlx::query_scalar::<_, bool>(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_stat_activity
+                    WHERE datname = current_database()
+                      AND pid <> pg_backend_pid()
+                      AND query LIKE
+                          '%UPDATE current_projection_full_replay_input_revision%'
+                      AND wait_event_type = 'Lock'
+                )
+                "#,
+            )
+            .fetch_one(database.pool())
+            .await?;
+            if revision_advance_is_waiting {
+                return Ok::<_, anyhow::Error>(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("normalization repair did not wait at the replay revision fence")??;
+
+    sqlx::query(
+        r#"
+        INSERT INTO name_current (
+            logical_name_id,
+            namespace,
+            canonical_display_name,
+            normalized_name,
+            namehash,
+            manifest_version
+        )
+        SELECT
+            logical_name_id,
+            namespace,
+            input_name,
+            normalized_name,
+            namehash,
+            1
+        FROM name_surfaces
+        WHERE logical_name_id = 'ens:alice.eth'
+        "#,
+    )
+    .execute(&mut *publication)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO current_projection_replay_status (
+            projection,
+            replay_version,
+            completed_normalized_target_block,
+            full_replay_input_revision,
+            requested_key_count,
+            upserted_row_count,
+            deleted_row_count
+        )
+        VALUES ('name_current', $1, 20, 0, 1, 1, 0)
+        "#,
+    )
+    .bind(bigname_storage::CURRENT_PROJECTION_REPLAY_VERSION)
+    .execute(&mut *publication)
+    .await?;
+    publication.commit().await?;
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), repair)
+        .await
+        .context("normalization repair did not finish after publication released its fence")???;
+    assert_eq!(outcome.updated_compatible_count, 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT canonical_display_name FROM name_surfaces WHERE logical_name_id = 'ens:alice.eth'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "alice.eth"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT canonical_display_name FROM name_current WHERE logical_name_id = 'ens:alice.eth'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "Alice.eth",
+        "the fixture must represent content published from the pre-repair stage"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM current_projection_replay_status WHERE projection = 'name_current'"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "revision advance must invalidate the completion marker before source mutation"
+    );
+
+    database.cleanup().await
+}
+
 async fn insert_generic_text_record_event(
     pool: &PgPool,
     chain: &str,
