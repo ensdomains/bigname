@@ -1,5 +1,10 @@
 #[path = "staging/cleanup.rs"]
 pub(super) mod cleanup;
+#[path = "staging/cursor.rs"]
+mod cursor;
+#[cfg(test)]
+#[path = "staging/fingerprint.rs"]
+pub(crate) mod fingerprint;
 #[path = "staging/input_fence.rs"]
 mod input_fence;
 #[path = "staging/tables.rs"]
@@ -16,10 +21,15 @@ use bigname_storage::{
     },
 };
 use serde_json::Value;
-use sqlx::{PgPool, Postgres, Row, Transaction, types::Uuid};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use tables::{create_stage_tables, drop_stage_tables, projection_stage_specs, stage_tables_exist};
 use tracing::info;
 
+/// Compatibility version for durable full-rebuild staging checkpoints.
+///
+/// Bump this for any incompatible source ordering, staged-row construction, stage-table shape,
+/// publication, or completed-range classification change. The full bump contract lives in
+/// `docs/projections.md` under "Replay status tracking".
 const CURRENT_PROJECTION_STAGING_SCHEMA_VERSION: i32 = 1;
 
 struct StoredCheckpoint {
@@ -437,32 +447,7 @@ fn checkpoint_source_key_is_valid(projection: &str, checkpoint: &StoredCheckpoin
     let Some(source_key) = checkpoint.last_source_key.as_ref() else {
         return false;
     };
-    match projection {
-        "name_current" => nonempty_string(source_key),
-        "children_current" | "primary_names_current" => string_array(source_key, 3),
-        "permissions_current" | "record_inventory_current" => source_key
-            .as_str()
-            .is_some_and(|value| Uuid::parse_str(value).is_ok()),
-        "resolver_current" => string_array(source_key, 2),
-        "address_names_current" => source_key.as_array().is_some_and(|values| {
-            values.len() == 2
-                && nonempty_string(&values[0])
-                && values[1]
-                    .as_str()
-                    .is_some_and(|value| Uuid::parse_str(value).is_ok())
-        }),
-        _ => false,
-    }
-}
-
-fn string_array(value: &Value, expected_len: usize) -> bool {
-    value
-        .as_array()
-        .is_some_and(|values| values.len() == expected_len && values.iter().all(nonempty_string))
-}
-
-fn nonempty_string(value: &Value) -> bool {
-    value.as_str().is_some_and(|value| !value.is_empty())
+    cursor::source_key_is_valid(projection, source_key)
 }
 
 #[cfg(test)]
