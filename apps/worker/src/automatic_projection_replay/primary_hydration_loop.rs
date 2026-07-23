@@ -14,6 +14,15 @@ use crate::{
     projection_apply,
 };
 
+pub(super) fn background_primary_hydration_config(
+    config: &Option<primary_name::PrimaryNameLegacyReverseHydrationConfig>,
+    primary_hydration_started: bool,
+) -> Option<primary_name::PrimaryNameLegacyReverseHydrationConfig> {
+    (!primary_hydration_started)
+        .then(|| config.clone())
+        .flatten()
+}
+
 #[expect(clippy::too_many_arguments)]
 pub(super) fn spawn(
     subtasks: &SubtaskSpawner,

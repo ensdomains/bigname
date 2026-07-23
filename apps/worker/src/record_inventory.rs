@@ -21,7 +21,22 @@ pub async fn rebuild_record_inventory_current(
     pool: &PgPool,
     resource_id: Option<&str>,
 ) -> Result<RecordInventoryCurrentRebuildSummary> {
-    projection::rebuild_record_inventory_current(pool, resource_id).await
+    projection::rebuild_record_inventory_current_inner(pool, resource_id, None, true, None).await
+}
+
+pub(crate) async fn rebuild_record_inventory_current_with_heartbeat(
+    pool: &PgPool,
+    resource_id: Option<&str>,
+    loop_heartbeat: &mut LoopHeartbeat,
+) -> Result<RecordInventoryCurrentRebuildSummary> {
+    projection::rebuild_record_inventory_current_inner(
+        pool,
+        resource_id,
+        None,
+        true,
+        Some(loop_heartbeat),
+    )
+    .await
 }
 
 pub(crate) async fn rebuild_record_inventory_current_for_replay(
@@ -29,9 +44,11 @@ pub(crate) async fn rebuild_record_inventory_current_for_replay(
     normalized_target_block: Option<i64>,
     loop_heartbeat: Option<&mut LoopHeartbeat>,
 ) -> Result<RecordInventoryCurrentRebuildSummary> {
-    projection::rebuild_record_inventory_current_for_replay(
+    projection::rebuild_record_inventory_current_inner(
         pool,
+        None,
         normalized_target_block,
+        false,
         loop_heartbeat,
     )
     .await

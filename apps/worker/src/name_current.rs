@@ -128,6 +128,14 @@ pub async fn rebuild_name_current(
     rebuild_name_current_inner(pool, logical_name_id, None).await
 }
 
+pub(crate) async fn rebuild_name_current_with_heartbeat(
+    pool: &PgPool,
+    logical_name_id: Option<&str>,
+    loop_heartbeat: &mut LoopHeartbeat,
+) -> Result<NameCurrentRebuildSummary> {
+    rebuild_name_current_inner(pool, logical_name_id, Some(loop_heartbeat)).await
+}
+
 async fn rebuild_name_current_inner(
     pool: &PgPool,
     logical_name_id: Option<&str>,

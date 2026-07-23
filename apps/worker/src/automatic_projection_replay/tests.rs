@@ -245,7 +245,8 @@ fn starting_primary_hydration_keeps_config_available_for_rebootstrap() {
         bigname_execution::ChainRpcUrls::default(),
     ));
 
-    let background = background_primary_hydration_config(&configured, false);
+    let background =
+        primary_hydration_loop::background_primary_hydration_config(&configured, false);
 
     assert!(background.is_some());
     assert!(

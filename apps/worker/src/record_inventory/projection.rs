@@ -1,6 +1,7 @@
 use crate::primary_name::rebuild_heartbeat::{
     LoopHeartbeat, record_rebuild_progress, run_rebuild_phase,
 };
+use crate::replay::staging::cleanup_projection_checkpoint;
 use anyhow::{Context, Result};
 use bigname_storage::{
     RecordInventoryCurrentRow, normalize_evm_address, upsert_record_inventory_current_rows,
@@ -78,35 +79,24 @@ const RECORD_INVENTORY_CURRENT_REBUILD_BATCH_SIZE: usize = 500;
 const RECORD_INVENTORY_CURRENT_REBUILD_BATCH_SIZE: usize = 1;
 const RECORD_INVENTORY_CURRENT_REBUILD_CONCURRENCY: usize = 8;
 
-pub(super) async fn rebuild_record_inventory_current(
+pub(super) async fn rebuild_record_inventory_current_inner(
     pool: &PgPool,
     resource_id: Option<&str>,
-) -> Result<RecordInventoryCurrentRebuildSummary> {
-    rebuild_record_inventory_current_inner(pool, resource_id, None).await
-}
-
-async fn rebuild_record_inventory_current_inner(
-    pool: &PgPool,
-    resource_id: Option<&str>,
+    normalized_target_block: Option<i64>,
+    cleanup_checkpoint: bool,
     loop_heartbeat: Option<&mut LoopHeartbeat>,
 ) -> Result<RecordInventoryCurrentRebuildSummary> {
     match resource_id {
         Some(resource_id) => rebuild_one_resource(pool, resource_id, loop_heartbeat).await,
         None => {
-            let summary = rebuild_all_resources(pool, None, loop_heartbeat).await?;
-            crate::replay::staging::cleanup_projection_checkpoint(pool, "record_inventory_current")
-                .await?;
+            let summary =
+                rebuild_all_resources(pool, normalized_target_block, loop_heartbeat).await?;
+            if cleanup_checkpoint {
+                cleanup_projection_checkpoint(pool, "record_inventory_current").await?;
+            }
             Ok(summary)
         }
     }
-}
-
-pub(super) async fn rebuild_record_inventory_current_for_replay(
-    pool: &PgPool,
-    normalized_target_block: Option<i64>,
-    loop_heartbeat: Option<&mut LoopHeartbeat>,
-) -> Result<RecordInventoryCurrentRebuildSummary> {
-    rebuild_all_resources(pool, normalized_target_block, loop_heartbeat).await
 }
 
 async fn rebuild_all_resources(
