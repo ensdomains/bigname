@@ -17,16 +17,16 @@ use crate::{
     startup_progress::{STARTUP_ADAPTER_PROGRESS_PAGE_ROWS, StartupManifestProgress},
 };
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct ActiveEmitter {
     pub(crate) address: String,
-    pub(crate) contract_instance_id: Uuid,
-    pub(crate) source_manifest_id: i64,
-    pub(crate) namespace: String,
     pub(crate) source_family: String,
-    pub(crate) manifest_version: i64,
     pub(crate) active_from_block_number: Option<i64>,
     pub(crate) active_to_block_number: Option<i64>,
+    pub(crate) source_manifest_id: i64,
+    pub(crate) contract_instance_id: Uuid,
+    pub(crate) namespace: String,
+    pub(crate) manifest_version: i64,
 }
 
 /// Identifies one distinct discovery/watched interval for an emitting address:
@@ -87,9 +87,7 @@ fn insert_distinct_emitter(
         }
         Entry::Occupied(mut entry) => {
             let existing = entry.get_mut();
-            if (emitter.source_manifest_id, emitter.contract_instance_id)
-                < (existing.source_manifest_id, existing.contract_instance_id)
-            {
+            if emitter < *existing {
                 *existing = emitter;
             }
         }
@@ -471,5 +469,16 @@ mod tests {
         let kept = by_scope.values().next().expect("one emitter");
         assert_eq!(kept.source_manifest_id, 2);
         assert_eq!(kept.contract_instance_id, Uuid::from_u128(3));
+
+        let preferred = emitter_with("0xresolver", 3, 2, Some(100), Some(200));
+        let mut alternate = preferred.clone();
+        alternate.namespace = "z-namespace".to_owned();
+        let mut forward_order = BTreeMap::new();
+        insert_distinct_emitter(&mut forward_order, preferred.clone());
+        insert_distinct_emitter(&mut forward_order, alternate.clone());
+        let mut reverse_order = BTreeMap::new();
+        insert_distinct_emitter(&mut reverse_order, alternate);
+        insert_distinct_emitter(&mut reverse_order, preferred);
+        assert_eq!(reverse_order, forward_order);
     }
 }

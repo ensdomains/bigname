@@ -22,7 +22,7 @@ use profile_stream::{ResolverProfileStreamInput, sync_resolver_profile_stream};
 use summary::empty_summary;
 
 const FULL_REPLAY_RAW_LOG_STREAM_MAX_BLOCK_SCAN_SPAN: i64 = 262_144;
-const FULL_REPLAY_RAW_LOG_STREAM_DEFAULT_MAX_LOGS_PER_PAGE: usize = 1_000;
+const FULL_REPLAY_RAW_LOG_STREAM_DEFAULT_MAX_LOGS_PER_PAGE: usize = 100_000;
 
 pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
     pool: &PgPool,

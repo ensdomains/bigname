@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use anyhow::{Context, Result};
 use bigname_manifests::{load_watched_contracts, load_watched_contracts_scoped_with_progress};
-use sqlx::PgPool;
+use sqlx::{PgPool, types::Uuid};
 
 use crate::adapter_manifest::{
     active_manifest_for_watched_contract, ensure_watched_contract_manifest_chain,
@@ -15,14 +15,17 @@ use crate::{
 
 use super::SOURCE_FAMILY_ENS_V2_REGISTRAR_L1;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct ActiveEmitter {
     pub(super) address: String,
+    pub(super) source_rank: i32,
     pub(super) source_manifest_id: i64,
+    pub(super) contract_instance_id: Uuid,
+    pub(super) active_from_block_number: Option<i64>,
+    pub(super) active_to_block_number: Option<i64>,
     pub(super) namespace: String,
     pub(super) source_family: String,
     pub(super) manifest_version: i64,
-    pub(super) source_rank: i32,
 }
 
 pub(super) async fn load_active_emitters(
@@ -75,19 +78,17 @@ pub(super) async fn load_active_emitters(
 
         let candidate = ActiveEmitter {
             address: watched_contract.address.clone(),
+            source_rank: source_rank(watched_contract.source),
             source_manifest_id,
+            contract_instance_id: watched_contract.contract_instance_id,
+            active_from_block_number: watched_contract.active_from_block_number,
+            active_to_block_number: watched_contract.active_to_block_number,
             namespace: manifest.namespace.clone(),
             source_family: manifest.source_family.clone(),
             manifest_version: manifest.manifest_version,
-            source_rank: source_rank(watched_contract.source),
         };
 
-        match emitters_by_address.get(&candidate.address) {
-            Some(current) if !candidate_precedes(&candidate, current) => {}
-            _ => {
-                emitters_by_address.insert(candidate.address.clone(), candidate);
-            }
-        }
+        insert_preferred_emitter(&mut emitters_by_address, candidate);
         record_emitter_progress(pool, progress, index + 1, watched_contract_count).await?;
     }
 
@@ -106,7 +107,57 @@ async fn record_emitter_progress(
     Ok(())
 }
 
+fn insert_preferred_emitter(
+    emitters_by_address: &mut BTreeMap<String, ActiveEmitter>,
+    candidate: ActiveEmitter,
+) {
+    match emitters_by_address.get(&candidate.address) {
+        Some(current) if !candidate_precedes(&candidate, current) => {}
+        _ => {
+            emitters_by_address.insert(candidate.address.clone(), candidate);
+        }
+    }
+}
+
 fn candidate_precedes(candidate: &ActiveEmitter, current: &ActiveEmitter) -> bool {
-    (candidate.source_rank, candidate.source_manifest_id)
-        < (current.source_rank, current.source_manifest_id)
+    candidate < current
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tied_emitter(contract_instance_id: u128) -> ActiveEmitter {
+        ActiveEmitter {
+            address: "0xregistrar".to_owned(),
+            source_rank: 1,
+            source_manifest_id: 7,
+            contract_instance_id: Uuid::from_u128(contract_instance_id),
+            active_from_block_number: Some(100),
+            active_to_block_number: None,
+            namespace: "ens".to_owned(),
+            source_family: SOURCE_FAMILY_ENS_V2_REGISTRAR_L1.to_owned(),
+            manifest_version: 1,
+        }
+    }
+
+    fn winner(candidates: impl IntoIterator<Item = ActiveEmitter>) -> ActiveEmitter {
+        let mut emitters = BTreeMap::new();
+        for candidate in candidates {
+            insert_preferred_emitter(&mut emitters, candidate);
+        }
+        emitters.into_values().next().expect("one address winner")
+    }
+
+    #[test]
+    fn exact_rank_tie_has_the_same_winner_for_both_loader_orders() {
+        let lower_identity = tied_emitter(1);
+        let higher_identity = tied_emitter(2);
+
+        let non_progress = winner([lower_identity.clone(), higher_identity.clone()]);
+        let progress = winner([higher_identity, lower_identity.clone()]);
+
+        assert_eq!(progress, non_progress);
+        assert_eq!(progress, lower_identity);
+    }
 }

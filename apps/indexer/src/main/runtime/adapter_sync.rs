@@ -15,9 +15,8 @@ use super::logging::{
     log_ens_v2_resolver_sync_summary,
 };
 
-// At roughly 2 KiB per log, the 100,000-log target is about 200 MB page-resident:
-// about 10x smaller than normalized replay's resident set and 400x smaller than
-// the #218 OOM class. Ownership/control pages preserve whole blocks, so an
+// Startup heartbeat replay uses small pages so long ownership/control scans
+// report liveness between pages. These pages preserve whole blocks, so an
 // unusually dense block can exceed this target.
 pub(crate) const DEFAULT_STARTUP_DISCOVERY_PAGE_LOGS: usize = 1_000;
 
