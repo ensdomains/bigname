@@ -233,6 +233,15 @@ docker compose --env-file .env.server \
   exec -T worker bigname-worker replay all-current-projections
 ```
 
+The manual command acquires the same cross-process replay lock as automatic
+bootstrap and fails immediately with an `automatic replay owns the
+cross-process replay lock` error when that replay is active. Let automatic
+replay finish, or stop the worker before rerunning the command; do not run both
+against the same database. Once admitted, the command resumes the persisted
+attempt target when one exists, otherwise records the current normalized-replay
+and chain-checkpoint head, and writes that real target on its family completion
+markers so automatic handoff can consume them.
+
 The live identity validation checks for stale display rows in the API-readable
 current projections and identity-feed [sidecar](../glossary.md) after this replay.
 

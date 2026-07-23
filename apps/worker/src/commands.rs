@@ -6,7 +6,7 @@ mod execution_invalidation;
 use crate::cli::*;
 use crate::{
     address_names, automatic_projection_replay, children, healthcheck, inspect, manifest_drift,
-    name_current, permissions, primary_name, raw_facts, record_inventory, replay, resolver,
+    name_current, permissions, primary_name, raw_facts, record_inventory, resolver,
 };
 use execution_invalidation::execution_command;
 
@@ -280,7 +280,7 @@ async fn replay_all_current_projections(args: AllCurrentProjectionsArgs) -> Resu
         args.legacy_reverse_hydration_batch_size,
         &args.legacy_reverse_resolver_addresses,
     )?;
-    let summary = replay::rebuild_all_current_projections(
+    let summary = automatic_projection_replay::replay_all_current_projections_manually(
         &pool,
         text_hydration_config.as_ref(),
         primary_hydration_config.as_ref(),

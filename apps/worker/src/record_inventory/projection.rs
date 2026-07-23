@@ -1,3 +1,6 @@
+use crate::primary_name::rebuild_heartbeat::{
+    LoopHeartbeat, record_rebuild_progress, run_rebuild_phase,
+};
 use anyhow::{Context, Result};
 use bigname_storage::{
     RecordInventoryCurrentRow, normalize_evm_address, upsert_record_inventory_current_rows,
@@ -6,16 +9,9 @@ use futures_util::{StreamExt, TryStreamExt, pin_mut, stream};
 use serde_json::{Value, json};
 use sqlx::{PgPool, types::time::OffsetDateTime};
 use uuid::Uuid;
-use crate::primary_name::rebuild_heartbeat::{
-    LoopHeartbeat, record_rebuild_progress, run_rebuild_phase,
-};
 #[allow(clippy::duplicate_mod)]
 #[path = "../staged_rebuild.rs"]
 mod staged_rebuild;
-use staged_rebuild::{
-    RECORD_INVENTORY_CURRENT_COLUMNS, count_rows, publish_stage_table,
-    stage_record_inventory_current_rows,
-};
 use super::{
     chain_position::{
         build_chain_positions, build_record_version_boundary, collect_chain_position_events,
@@ -33,6 +29,10 @@ use super::{
         resolver_local_source_family, resolver_source_family_for_resolver_event,
     },
     types::{RecordInventoryCurrentRebuildSummary, RelevantEvent},
+};
+use staged_rebuild::{
+    RECORD_INVENTORY_CURRENT_COLUMNS, count_rows, publish_stage_table,
+    stage_record_inventory_current_rows,
 };
 
 mod profile_rows;
