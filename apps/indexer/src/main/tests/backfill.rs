@@ -58,6 +58,23 @@ struct MaterializedRawFactSet {
     payload_cache_metadata_count: i64,
 }
 
+#[derive(Default)]
+struct CountingSourceIdentityProgress {
+    count: usize,
+}
+
+impl bigname_adapters::StartupAdapterProgress for CountingSourceIdentityProgress {
+    fn record<'a>(
+        &'a mut self,
+        _pool: &'a PgPool,
+    ) -> bigname_adapters::StartupAdapterProgressFuture<'a> {
+        Box::pin(async move {
+            self.count += 1;
+            Ok(())
+        })
+    }
+}
+
 #[tokio::test]
 async fn pruned_primary_code_fallback_persists_like_primary_observation() -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -325,6 +342,153 @@ fn large_source_family_backfill_source_identity_uses_compact_digest() -> Result<
             .get("source_identity_hash")
             .and_then(Value::as_str),
         payload.get("source_identity_hash").and_then(Value::as_str)
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn large_backfill_source_identities_match_pre_heartbeat_values() -> Result<()> {
+    let selected_targets = (0..=backfill::COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD)
+        .map(|index| WatchedBackfillTarget {
+            source_family: "identity_fixture".to_owned(),
+            contract_instance_id: Uuid::from_u128(index as u128 + 1),
+            address: format!("0x{index:040x}"),
+            effective_from_block: index as i64,
+            effective_to_block: index as i64 + 10,
+        })
+        .collect::<Vec<_>>();
+    let watched_chain_plan = WatchedChainPlan {
+        chain: "identity-chain".to_owned(),
+        addresses: Vec::new(),
+        manifest_root_entry_count: 0,
+        manifest_contract_entry_count: 0,
+        discovery_edge_entry_count: 0,
+    };
+    let mut source_plan = WatchedSourceSelectorPlan {
+        chain: "identity-chain".to_owned(),
+        selector_kind: WatchedSourceSelectorKind::SourceFamily,
+        source_family: Some("identity_fixture".to_owned()),
+        requested_watched_targets: Vec::new(),
+        selected_targets,
+        watched_chain_plan,
+    };
+
+    let source_family_expected = json!({
+        "selector_kind": "source_family",
+        "source_family": "identity_fixture",
+        "requested_watched_targets": [],
+        "selected_target_count": source_plan.selected_targets.len(),
+        "selected_targets_digest_algorithm": "keccak256",
+        "selected_targets_digest":
+            "keccak256:0x7d4a66659d48822809252feb8566d43fea06ce8b07ef8f3d47230c63c18bac44",
+        "selected_targets_sample": {
+            "first": source_plan.selected_targets.first(),
+            "last": source_plan.selected_targets.last(),
+        },
+        "source_identity_payload_format": "selected_targets_digest_v1",
+        "source_identity_hash":
+            "keccak256:0xd836c01edfa5b2f5c4f575bc79e480a84ec4b0ebc1b2b40f6412eeb1541b4d26",
+    });
+
+    source_plan.selector_kind = WatchedSourceSelectorKind::WholeActiveWatchedChain;
+    source_plan.source_family = None;
+    let whole_active_expected = json!({
+        "selector_kind": "whole_active_watched_chain",
+        "source_family": null,
+        "requested_watched_targets": [],
+        "selected_target_count": source_plan.selected_targets.len(),
+        "selected_targets_digest_algorithm": "keccak256",
+        "selected_targets_digest":
+            "keccak256:0xbecb80264009c12d3996d435bf591edb21c6467a014e1ecbe830bd2b0f63f547",
+        "selected_targets_sample": {
+            "first": source_plan.selected_targets.first(),
+            "last": source_plan.selected_targets.last(),
+        },
+        "source_identity_payload_format": "selected_targets_digest_v1",
+        "source_identity_hash": "fnv1a64:557cee9b843c194a",
+    });
+
+    source_plan.selector_kind = WatchedSourceSelectorKind::WatchedTargetSet;
+    source_plan.requested_watched_targets = vec![
+        source_plan.selected_targets[0].contract_instance_id.into(),
+        source_plan
+            .selected_targets
+            .last()
+            .expect("identity fixture has selected targets")
+            .contract_instance_id
+            .into(),
+    ];
+    let watched_target_set_expected = json!({
+        "selector_kind": "watched_target_set",
+        "source_family": null,
+        "requested_watched_targets": &source_plan.requested_watched_targets,
+        "selected_targets": &source_plan.selected_targets,
+        "source_identity_hash": "fnv1a64:8be4681e2c671f3a",
+    });
+
+    let pool = PgPoolOptions::new().connect_lazy(default_database_url())?;
+    let mut progress = CountingSourceIdentityProgress::default();
+
+    source_plan.selector_kind = WatchedSourceSelectorKind::SourceFamily;
+    source_plan.source_family = Some("identity_fixture".to_owned());
+    source_plan.requested_watched_targets.clear();
+    assert_eq!(
+        backfill::backfill_job_source_identity_payload(&source_plan)?,
+        source_family_expected
+    );
+    assert_eq!(
+        backfill::backfill_job_source_identity_payload_with_progress(
+            &pool,
+            &source_plan,
+            &mut progress,
+        )
+        .await?,
+        source_family_expected
+    );
+
+    source_plan.selector_kind = WatchedSourceSelectorKind::WholeActiveWatchedChain;
+    source_plan.source_family = None;
+    assert_eq!(
+        backfill::backfill_job_source_identity_payload(&source_plan)?,
+        whole_active_expected
+    );
+    assert_eq!(
+        backfill::backfill_job_source_identity_payload_with_progress(
+            &pool,
+            &source_plan,
+            &mut progress,
+        )
+        .await?,
+        whole_active_expected
+    );
+
+    source_plan.selector_kind = WatchedSourceSelectorKind::WatchedTargetSet;
+    source_plan.requested_watched_targets = vec![
+        source_plan.selected_targets[0].contract_instance_id.into(),
+        source_plan
+            .selected_targets
+            .last()
+            .expect("identity fixture has selected targets")
+            .contract_instance_id
+            .into(),
+    ];
+    assert_eq!(
+        backfill::backfill_job_source_identity_payload(&source_plan)?,
+        watched_target_set_expected
+    );
+    assert_eq!(
+        backfill::backfill_job_source_identity_payload_with_progress(
+            &pool,
+            &source_plan,
+            &mut progress,
+        )
+        .await?,
+        watched_target_set_expected
+    );
+    assert!(
+        progress.count > 0,
+        "large progress-aware identity construction must retain heartbeat boundaries"
     );
 
     Ok(())
