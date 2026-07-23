@@ -45,13 +45,12 @@ pub async fn materialize_completed_backfill_topic_evidence(
         "topic-evidence lower bound must not be negative"
     );
     ensure!(
-        to_block >= from_block,
-        "topic-evidence bounds must not be inverted"
-    );
-    ensure!(
         retention_generation.is_none_or(|generation| generation >= 0),
         "topic-evidence retention generation must not be negative"
     );
+    if from_block > to_block {
+        return Ok(0);
+    }
     let topics = serde_json::to_value(current_topic0s_by_family)
         .context("failed to encode current topic evidence")?;
 
@@ -239,6 +238,10 @@ pub async fn find_backfill_topic_coverage_violations(
         "topic-evidence violation limit exceeds {}",
         MAX_BACKFILL_TOPIC_EVIDENCE_REQUIREMENTS
     );
+    let requirements = requirements
+        .iter()
+        .filter(|requirement| requirement.required_from_block <= requirement.required_to_block)
+        .collect::<Vec<_>>();
     if requirements.is_empty() {
         return Ok(Vec::new());
     }

@@ -9,6 +9,7 @@ use bigname_storage::{
     MAX_BACKFILL_TOPIC_EVIDENCE_REQUIREMENTS, find_backfill_topic_coverage_violations,
     materialize_completed_backfill_topic_evidence,
 };
+use tracing::debug;
 
 /// Retention recovery uses the same compact topic-evidence proof, restricted
 /// to jobs captured in the current raw-log generation.
@@ -20,6 +21,9 @@ pub(crate) async fn find_uncovered_generation_bound_coverage_with_current_topics
     retention_generation: i64,
     uncovered_limit: i64,
 ) -> std::result::Result<Vec<UncoveredWatchedTuple>, String> {
+    let required_tuples = nonempty_required_tuples(chain, required_tuples)
+        .cloned()
+        .collect::<Vec<_>>();
     if required_tuples.is_empty() {
         return Ok(Vec::new());
     }
@@ -54,7 +58,7 @@ pub(crate) async fn find_uncovered_generation_bound_coverage_with_current_topics
     let uncovered = find_uncovered_required_watched_tuples_for_retention_generation_in_transaction(
         transaction.as_mut(),
         chain,
-        required_tuples,
+        &required_tuples,
         retention_generation,
         uncovered_limit,
     )
@@ -65,6 +69,28 @@ pub(crate) async fn find_uncovered_generation_bound_coverage_with_current_topics
         .await
         .map_err(|error| error.to_string())?;
     Ok(uncovered)
+}
+
+fn nonempty_required_tuples<'a>(
+    chain: &'a str,
+    required_tuples: &'a [RequiredWatchedTuple],
+) -> impl Iterator<Item = &'a RequiredWatchedTuple> + 'a {
+    required_tuples.iter().filter(move |tuple| {
+        let nonempty = tuple.required_from_block <= tuple.required_to_block;
+        if !nonempty {
+            debug!(
+                service = "indexer",
+                command = "run",
+                chain,
+                source_family = %tuple.source_family,
+                address = %tuple.address,
+                required_from_block = tuple.required_from_block,
+                required_to_block = tuple.required_to_block,
+                "skipping watched tuple with an empty bounded catch-up window"
+            );
+        }
+        nonempty
+    })
 }
 
 pub(super) async fn materialize_topic_evidence_in_transaction(
@@ -97,8 +123,7 @@ pub(super) async fn ensure_required_topic_sets_undrifted_in_transaction(
     chain: &str,
     required_tuples: &[RequiredWatchedTuple],
 ) -> std::result::Result<(), String> {
-    let requirements = required_tuples
-        .iter()
+    let requirements = nonempty_required_tuples(chain, required_tuples)
         .map(|tuple| BackfillTopicCoverageRequirement {
             source_family: tuple.source_family.clone(),
             address: tuple.address.clone(),
@@ -167,6 +192,48 @@ mod tests {
         .await
         .map_err(anyhow::Error::msg)?;
         assert_eq!(uncovered.len(), 20);
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn generation_bound_proof_skips_empty_requirement_windows() -> Result<()> {
+        let database = TestDatabase::create_migrated(
+            TestDatabaseConfig::new("topic_evidence_skips_empty_requirement_windows"),
+            &bigname_storage::MIGRATOR,
+            "failed to migrate empty topic requirement test",
+        )
+        .await?;
+        let valid = RequiredWatchedTuple {
+            source_family: "test-family".to_owned(),
+            address: "0x0000000000000000000000000000000000000001".to_owned(),
+            required_from_block: 1,
+            required_to_block: 10,
+        };
+        let inverted = RequiredWatchedTuple {
+            source_family: "test-family".to_owned(),
+            address: "0x0000000000000000000000000000000000000002".to_owned(),
+            required_from_block: 11,
+            required_to_block: 10,
+        };
+        let uncovered = find_uncovered_generation_bound_coverage_with_current_topics(
+            database.pool(),
+            "test-chain",
+            &BTreeMap::new(),
+            &[inverted, valid.clone()],
+            0,
+            20,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+        assert_eq!(
+            uncovered,
+            vec![UncoveredWatchedTuple {
+                source_family: valid.source_family,
+                address: valid.address,
+                required_from_block: valid.required_from_block,
+                required_to_block: valid.required_to_block,
+            }]
+        );
         database.cleanup().await
     }
 

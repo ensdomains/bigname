@@ -88,6 +88,15 @@ fn requirement() -> BackfillTopicCoverageRequirement {
     }
 }
 
+fn inverted_requirement() -> BackfillTopicCoverageRequirement {
+    BackfillTopicCoverageRequirement {
+        source_family: FAMILY.to_owned(),
+        address: ADDRESS.to_owned(),
+        required_from_block: 12,
+        required_to_block: 10,
+    }
+}
+
 fn current_topics() -> BTreeMap<String, Vec<String>> {
     BTreeMap::from([(FAMILY.to_owned(), vec![CURRENT_TOPIC.to_owned()])])
 }
@@ -111,6 +120,77 @@ async fn violations(database: &TestDatabase) -> Result<Vec<BackfillTopicCoverage
             .await?;
     transaction.rollback().await?;
     Ok(violations)
+}
+
+#[tokio::test]
+async fn inverted_requirement_is_skipped_without_masking_valid_violation() -> Result<()> {
+    let database = database("topic_evidence_mixed_inverted_requirement").await?;
+    let stale_job = insert_job_with_fact(
+        &database,
+        json!({
+            "coinbase_sql_topic_plan": {
+                "topic0s_by_source_family": {FAMILY: []}
+            }
+        }),
+        1,
+        20,
+        1,
+        20,
+    )
+    .await?;
+    let mut transaction = database.pool().begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(transaction.as_mut())
+        .await?;
+    materialize_completed_backfill_topic_evidence(
+        transaction.as_mut(),
+        CHAIN,
+        1,
+        10,
+        &current_topics(),
+        None,
+    )
+    .await?;
+    let requirements = vec![inverted_requirement(), requirement()];
+    let found =
+        find_backfill_topic_coverage_violations(transaction.as_mut(), CHAIN, &requirements, 2)
+            .await?;
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].backfill_job_id, stale_job);
+    assert_eq!(found[0].required_from_block, 1);
+    assert_eq!(found[0].required_to_block, 10);
+    transaction.rollback().await?;
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn all_inverted_requirements_are_satisfied_without_querying() -> Result<()> {
+    let database = database("topic_evidence_all_inverted_requirements").await?;
+    let mut connection = database.pool().acquire().await?;
+    assert!(
+        find_backfill_topic_coverage_violations(
+            connection.as_mut(),
+            CHAIN,
+            &[inverted_requirement()],
+            1,
+        )
+        .await?
+        .is_empty()
+    );
+    assert_eq!(
+        materialize_completed_backfill_topic_evidence(
+            connection.as_mut(),
+            CHAIN,
+            12,
+            10,
+            &current_topics(),
+            None,
+        )
+        .await?,
+        0
+    );
+    drop(connection);
+    database.cleanup().await
 }
 
 #[tokio::test]
