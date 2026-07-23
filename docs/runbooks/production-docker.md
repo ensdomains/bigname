@@ -238,9 +238,12 @@ bootstrap and fails immediately with an `automatic replay owns the
 cross-process replay lock` error when that replay is active. Let automatic
 replay finish, or stop the worker before rerunning the command; do not run both
 against the same database. Once admitted, the command resumes the persisted
-attempt target when one exists, otherwise records the current normalized-replay
-and chain-checkpoint head, and writes that real target on its family completion
-markers so automatic handoff can consume them.
+attempt and its target when one exists. Without an attempt, it records the
+current normalized-replay or chain-checkpoint head when either exists and
+writes that real target on its family completion markers so automatic handoff
+can consume them. In a replay context with no attempt and neither head, it
+proceeds targetless and writes `NULL`-target markers without creating an
+automatic handoff attempt.
 
 The live identity validation checks for stale display rows in the API-readable
 current projections and identity-feed [sidecar](../glossary.md) after this replay.

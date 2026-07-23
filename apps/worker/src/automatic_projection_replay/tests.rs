@@ -609,6 +609,53 @@ async fn manual_replay_fails_cleanly_when_automatic_replay_holds_the_lock() -> R
 }
 
 #[tokio::test]
+async fn manual_replay_without_attempt_or_head_proceeds_targetless() -> Result<()> {
+    let database = test_database().await?;
+    assert!(
+        bootstrap_attempt::load_projection_replay_attempt(database.pool())
+            .await?
+            .is_none(),
+        "a fresh database must not have a durable replay attempt"
+    );
+    let readiness = load_projection_replay_readiness(database.pool()).await?;
+    assert_eq!(readiness.normalized_replay_max_target_block, None);
+    assert_eq!(
+        projection_apply::load_chain_checkpoint_max_block(database.pool()).await?,
+        None
+    );
+
+    manual_replay::replay_all_current_projections_manually(database.pool(), None, None).await?;
+    let (marker_count, targetless_marker_count) = sqlx::query_as::<_, (i64, i64)>(
+        r#"
+        SELECT
+            COUNT(*)::BIGINT,
+            COUNT(*) FILTER (
+                WHERE completed_normalized_target_block IS NULL
+            )::BIGINT
+        FROM current_projection_replay_status
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        marker_count,
+        replay::ALL_CURRENT_PROJECTION_ORDER.len() as i64
+    );
+    assert_eq!(
+        targetless_marker_count, marker_count,
+        "a replay without an attempt or head must retain NULL-target markers"
+    );
+    assert!(
+        bootstrap_attempt::load_projection_replay_attempt(database.pool())
+            .await?
+            .is_none(),
+        "target-less manual replay must not create an automatic handoff attempt"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn manual_replay_markers_carry_the_real_target_and_satisfy_handoff() -> Result<()> {
     let database = test_database().await?;
     seed_ready_normalized_replay_cursor(database.pool(), 20).await?;
