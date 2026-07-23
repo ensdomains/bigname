@@ -48,6 +48,8 @@ pub(crate) use backlog::{
 };
 use block_scoped::{sync_ens_v1_unwrapped_authority_for_scope, sync_ens_v2_registrar_for_scope};
 use ens_v1_subregistry::{ens_v1_subregistry_sync_operation, sync_ens_v1_subregistry_for_mode};
+#[cfg(test)]
+pub(crate) use ens_v2_registry::sync_ens_v2_registry_for_mode as sync_ens_v2_registry_for_mode_for_test;
 use ens_v2_registry::{ens_v2_registry_sync_operation, sync_ens_v2_registry_for_mode};
 use ens_v2_tail::sync_ens_v2_tail_adapters;
 #[allow(unused_imports)]
@@ -71,6 +73,8 @@ pub(crate) use full_closure::{
     install_stateless_page_observer,
     sync_full_closure_normalized_events_from_persisted_raw_payloads,
 };
+#[cfg(test)]
+pub(crate) use mode::PersistedRawPayloadAdapterSyncMode as PersistedRawPayloadAdapterSyncModeForTest;
 use mode::{PersistedRawPayloadAdapterSyncMode, ensure_raw_fact_adapter_allowed};
 use progress::{journal_authority_epoch_with_progress, record_adapter_progress};
 use scope::load_live_adapter_source_scope;

@@ -38,6 +38,25 @@ impl EnsV2RegistryResourceSurfaceSyncSummary {
         .await
     }
 
+    pub async fn sync_for_block_hashes_with_progress(
+        pool: &PgPool,
+        chain: &str,
+        block_hashes: &[String],
+        progress: &mut dyn StartupAdapterProgress,
+    ) -> Result<Self> {
+        sync_ens_v2_registry_resource_surface_with_scope(
+            pool,
+            chain,
+            true,
+            block_hashes,
+            None,
+            RawLogCanonicalityFilter::IncludeObserved,
+            None,
+            Some(progress),
+        )
+        .await
+    }
+
     pub async fn sync_for_block_hashes_canonical_only(
         pool: &PgPool,
         chain: &str,
@@ -52,6 +71,25 @@ impl EnsV2RegistryResourceSurfaceSyncSummary {
             RawLogCanonicalityFilter::CanonicalOnly,
             None,
             None,
+        )
+        .await
+    }
+
+    pub async fn sync_for_block_hashes_canonical_only_with_progress(
+        pool: &PgPool,
+        chain: &str,
+        block_hashes: &[String],
+        progress: &mut dyn StartupAdapterProgress,
+    ) -> Result<Self> {
+        sync_ens_v2_registry_resource_surface_with_scope(
+            pool,
+            chain,
+            true,
+            block_hashes,
+            None,
+            RawLogCanonicalityFilter::CanonicalOnly,
+            None,
+            Some(progress),
         )
         .await
     }
@@ -75,6 +113,26 @@ impl EnsV2RegistryResourceSurfaceSyncSummary {
         .await
     }
 
+    pub async fn sync_for_block_hashes_with_source_scope_and_progress(
+        pool: &PgPool,
+        chain: &str,
+        block_hashes: &[String],
+        source_scope: &[(String, String, i64, i64)],
+        progress: &mut dyn StartupAdapterProgress,
+    ) -> Result<Self> {
+        sync_ens_v2_registry_resource_surface_with_scope(
+            pool,
+            chain,
+            true,
+            block_hashes,
+            Some(source_scope),
+            RawLogCanonicalityFilter::IncludeObserved,
+            None,
+            Some(progress),
+        )
+        .await
+    }
+
     pub async fn sync_for_block_hashes_with_source_scope_canonical_only(
         pool: &PgPool,
         chain: &str,
@@ -90,6 +148,26 @@ impl EnsV2RegistryResourceSurfaceSyncSummary {
             RawLogCanonicalityFilter::CanonicalOnly,
             None,
             None,
+        )
+        .await
+    }
+
+    pub async fn sync_for_block_hashes_with_source_scope_canonical_only_and_progress(
+        pool: &PgPool,
+        chain: &str,
+        block_hashes: &[String],
+        source_scope: &[(String, String, i64, i64)],
+        progress: &mut dyn StartupAdapterProgress,
+    ) -> Result<Self> {
+        sync_ens_v2_registry_resource_surface_with_scope(
+            pool,
+            chain,
+            true,
+            block_hashes,
+            Some(source_scope),
+            RawLogCanonicalityFilter::CanonicalOnly,
+            None,
+            Some(progress),
         )
         .await
     }
