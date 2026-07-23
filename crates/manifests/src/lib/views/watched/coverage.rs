@@ -26,6 +26,8 @@ required_tuples AS (
     FROM watched
     WHERE COALESCE(active_from_block_number, $2::BIGINT) <= $3::BIGINT
       AND COALESCE(active_to_block_number, $3::BIGINT) >= $2::BIGINT
+      AND GREATEST(COALESCE(active_from_block_number, $2::BIGINT), $2::BIGINT)
+          <= LEAST(COALESCE(active_to_block_number, $3::BIGINT), $3::BIGINT)
 )
 "#,
         historical_predicate = super::intervals::HISTORICAL_WATCHED_INTERVAL_PREDICATE,
@@ -371,6 +373,10 @@ async fn find_uncovered_required_watched_tuples_with_retention_generation(
     retention_generation: Option<i64>,
     limit: i64,
 ) -> Result<Vec<UncoveredWatchedTuple>> {
+    let requirements = requirements
+        .iter()
+        .filter(|requirement| requirement.required_from_block <= requirement.required_to_block)
+        .collect::<Vec<_>>();
     if requirements.is_empty() {
         return Ok(Vec::new());
     }

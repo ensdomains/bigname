@@ -3103,6 +3103,61 @@ async fn syncs_start_blocks_into_watch_plan_and_bootstrap_targets() -> Result<()
 }
 
 #[tokio::test]
+async fn required_tuple_clamp_skips_empty_manifest_address_intersection() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let test_dir = TestDir::new()?;
+    test_dir.write_manifest(
+        "ens",
+        "ens_v2_registry_l1",
+        "v1",
+        &start_block_manifest_contents(
+            Some(120),
+            Some(100),
+            "0x0000000000000000000000000000000000000003",
+        ),
+    )?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET active_from_block_number = 50,
+            active_to_block_number = 100
+        WHERE chain_id = 'ethereum-mainnet'
+          AND address = '0x0000000000000000000000000000000000000001'
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    assert_eq!(
+        load_required_watched_tuples(
+            database.pool(),
+            "ethereum-mainnet",
+            50,
+            180,
+            &["ens_v2_registry_l1".to_owned()],
+        )
+        .await?,
+        vec![
+            RequiredWatchedTuple {
+                source_family: "ens_v2_registry_l1".to_owned(),
+                address: "0x0000000000000000000000000000000000000002".to_owned(),
+                required_from_block: 100,
+                required_to_block: 180,
+            },
+            RequiredWatchedTuple {
+                source_family: "ens_v2_registry_l1".to_owned(),
+                address: "0x0000000000000000000000000000000000000003".to_owned(),
+                required_from_block: 50,
+                required_to_block: 180,
+            },
+        ]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn simple_contract_start_block_persists_to_active_address_row() -> Result<()> {
     let database = TestDatabase::new().await?;
     let test_dir = TestDir::new()?;
@@ -8394,6 +8449,47 @@ async fn coverage_reads_ignore_facts_without_completed_containing_jobs() -> Resu
             })
             .collect::<Vec<_>>(),
         "pending jobs and facts outside their completed job range are not promotion authority"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn explicit_coverage_skips_empty_requirement_windows() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let valid = RequiredWatchedTuple {
+        source_family: "ens_v1_registry_l1".to_owned(),
+        address: "0x0000000000000000000000000000000000000001".to_owned(),
+        required_from_block: 100,
+        required_to_block: 120,
+    };
+    let inverted = RequiredWatchedTuple {
+        source_family: "ens_v1_registry_l1".to_owned(),
+        address: "0x0000000000000000000000000000000000000002".to_owned(),
+        required_from_block: 121,
+        required_to_block: 120,
+    };
+
+    assert_eq!(
+        find_uncovered_required_watched_tuples(
+            database.pool(),
+            chain,
+            &[inverted.clone(), valid.clone()],
+            10,
+        )
+        .await?,
+        vec![UncoveredWatchedTuple {
+            source_family: valid.source_family,
+            address: valid.address,
+            required_from_block: valid.required_from_block,
+            required_to_block: valid.required_to_block,
+        }]
+    );
+    assert!(
+        find_uncovered_required_watched_tuples(database.pool(), chain, &[inverted], 10)
+            .await?
+            .is_empty()
     );
 
     database.cleanup().await
