@@ -25,6 +25,10 @@ const CHILD_LOGICAL_NAME_ID: &str = "ens:bob.alice.eth";
 const CHILD_DISPLAY_NAME: &str = "bob.alice.eth";
 pub(super) const APPENDED_LOGICAL_NAME_ID: &str = "ens:zulu.eth";
 pub(super) const APPENDED_DISPLAY_NAME: &str = "zulu.eth";
+pub(super) const MOVED_CHILD_OLD_PARENT_ID: &str = "ens:aaa-old.eth";
+pub(super) const MOVED_CHILD_NEW_PARENT_ID: &str = "ens:alice.eth";
+pub(super) const MOVED_CHILD_LOGICAL_NAME_ID: &str = "ens:bob.alice.eth";
+pub(super) const ZERO_EVENT_PERMISSIONS_RESOURCE_ID: Uuid = Uuid::from_u128(0xf200);
 const HOLDER_ADDRESS: &str = "0x0000000000000000000000000000000000000abc";
 const RESOLVER_ADDRESS: &str = "0x0000000000000000000000000000000000000def";
 
@@ -430,6 +434,180 @@ pub(super) async fn seed_replay_inputs(pool: &PgPool) -> Result<()> {
     .await?;
 
     Ok(())
+}
+
+pub(super) async fn seed_moved_child_staging_inputs(pool: &PgPool) -> Result<()> {
+    upsert_raw_blocks(
+        pool,
+        &[
+            raw_block("0xreplay0100", 100, 1_776_300_100),
+            raw_block("0xchildmove0200", 200, 1_776_300_200),
+            raw_block("0xchildmove0201", 201, 1_776_300_201),
+            raw_block("0xchildmove0202", 202, 1_776_300_202),
+        ],
+    )
+    .await?;
+    upsert_name_surfaces(
+        pool,
+        &[
+            name_surface(
+                MOVED_CHILD_NEW_PARENT_ID,
+                "alice.eth",
+                CanonicalityState::Finalized,
+            ),
+            name_surface(
+                MOVED_CHILD_LOGICAL_NAME_ID,
+                "bob.alice.eth",
+                CanonicalityState::Finalized,
+            ),
+        ],
+    )
+    .await?;
+
+    let parent_contract = Uuid::from_u128(0xf102);
+    let child_registry_contract = Uuid::from_u128(0xf103);
+    upsert_normalized_events(
+        pool,
+        &[
+            ensv2_subregistry_event(
+                "worker-replay:moved-child-new-subregistry",
+                MOVED_CHILD_NEW_PARENT_ID,
+                parent_contract,
+                child_registry_contract,
+                200,
+                "0xchildmove0200",
+            ),
+            NormalizedEvent {
+                event_identity: "worker-replay:moved-child-registration".to_owned(),
+                namespace: "ens".to_owned(),
+                logical_name_id: Some(MOVED_CHILD_LOGICAL_NAME_ID.to_owned()),
+                resource_id: None,
+                event_kind: "RegistrationGranted".to_owned(),
+                source_family: "ens_v2_registry_l1".to_owned(),
+                manifest_version: 3,
+                source_manifest_id: None,
+                chain_id: Some("ethereum-mainnet".to_owned()),
+                block_number: Some(201),
+                block_hash: Some("0xchildmove0201".to_owned()),
+                transaction_hash: Some("0xchildmovetx0201".to_owned()),
+                log_index: Some(0),
+                raw_fact_ref: raw_fact_ref("0xchildmove0201", 201, 0),
+                derivation_kind: "ens_v2_registry_resource_surface".to_owned(),
+                canonicality_state: CanonicalityState::Finalized,
+                before_state: json!({}),
+                after_state: json!({
+                    "registry_contract_instance_id": child_registry_contract,
+                }),
+            },
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+pub(super) async fn move_staged_child_to_new_parent(pool: &PgPool) -> Result<()> {
+    upsert_normalized_events(
+        pool,
+        &[ensv2_parent_changed_event(
+            "worker-replay:moved-child-new-parent",
+            "alice.eth",
+            Uuid::from_u128(0xf102),
+            Uuid::from_u128(0xf103),
+            202,
+            "0xchildmove0202",
+        )],
+    )
+    .await?;
+    Ok(())
+}
+
+pub(super) async fn insert_zero_event_permissions_resource(pool: &PgPool) -> Result<()> {
+    upsert_raw_blocks(pool, &[raw_block("0xpermissionszero", 220, 1_776_300_220)]).await?;
+    upsert_resources(
+        pool,
+        &[Resource {
+            resource_id: ZERO_EVENT_PERMISSIONS_RESOURCE_ID,
+            token_lineage_id: None,
+            chain_id: "ethereum-mainnet".to_owned(),
+            block_hash: "0xpermissionszero".to_owned(),
+            block_number: 220,
+            provenance: json!({
+                "source_family": "ens_v1_registry_l1",
+                "manifest_version": 7,
+                "authority_kind": "registry",
+            }),
+            canonicality_state: CanonicalityState::Finalized,
+        }],
+    )
+    .await?;
+    Ok(())
+}
+
+fn ensv2_subregistry_event(
+    event_identity: &str,
+    logical_name_id: &str,
+    parent_contract: Uuid,
+    child_registry_contract: Uuid,
+    block_number: i64,
+    block_hash: &str,
+) -> NormalizedEvent {
+    NormalizedEvent {
+        event_identity: event_identity.to_owned(),
+        namespace: "ens".to_owned(),
+        logical_name_id: Some(logical_name_id.to_owned()),
+        resource_id: None,
+        event_kind: "SubregistryChanged".to_owned(),
+        source_family: "ens_v2_root_l1".to_owned(),
+        manifest_version: 2,
+        source_manifest_id: None,
+        chain_id: Some("ethereum-mainnet".to_owned()),
+        block_number: Some(block_number),
+        block_hash: Some(block_hash.to_owned()),
+        transaction_hash: Some(format!("0xchildmovetx{block_number}")),
+        log_index: Some(0),
+        raw_fact_ref: raw_fact_ref(block_hash, block_number, 0),
+        derivation_kind: "ens_v2_registry_resource_surface".to_owned(),
+        canonicality_state: CanonicalityState::Finalized,
+        before_state: json!({}),
+        after_state: json!({
+            "from_contract_instance_id": parent_contract,
+            "to_contract_instance_id": child_registry_contract,
+        }),
+    }
+}
+
+fn ensv2_parent_changed_event(
+    event_identity: &str,
+    registry_name: &str,
+    parent_contract: Uuid,
+    child_registry_contract: Uuid,
+    block_number: i64,
+    block_hash: &str,
+) -> NormalizedEvent {
+    NormalizedEvent {
+        event_identity: event_identity.to_owned(),
+        namespace: "ens".to_owned(),
+        logical_name_id: None,
+        resource_id: None,
+        event_kind: "ParentChanged".to_owned(),
+        source_family: "ens_v2_registry_l1".to_owned(),
+        manifest_version: 3,
+        source_manifest_id: None,
+        chain_id: Some("ethereum-mainnet".to_owned()),
+        block_number: Some(block_number),
+        block_hash: Some(block_hash.to_owned()),
+        transaction_hash: Some(format!("0xchildmovetx{block_number}")),
+        log_index: Some(0),
+        raw_fact_ref: raw_fact_ref(block_hash, block_number, 0),
+        derivation_kind: "ens_v2_registry_resource_surface".to_owned(),
+        canonicality_state: CanonicalityState::Finalized,
+        before_state: json!({}),
+        after_state: json!({
+            "registry_name": registry_name,
+            "registry_contract_instance_id": child_registry_contract,
+            "parent_contract_instance_id": parent_contract,
+        }),
+    }
 }
 
 pub(super) async fn append_name_source_after_completed_cursor(pool: &PgPool) -> Result<()> {

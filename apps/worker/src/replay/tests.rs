@@ -11,13 +11,13 @@ use support::*;
 
 #[test]
 fn current_projection_staging_contract_matches_schema_version_fingerprint() -> Result<()> {
-    let expected = r#"schema_version=4
+    let expected = r#"schema_version=5
 completion_fence=post_empty_page_full_range|publish_fence=pre_replace_full_range
 projection=name_current|cursor=logical_name_id:string|channels=normalized_event,manifest_current,direct_invalidation_generation
 stage=name_current|unique=logical_name_id|has_inserted_at=true
-projection=children_current|cursor=(parent_logical_name_id,canonical_display_name,child_logical_name_id):string_tuple|channels=normalized_event,direct_invalidation_generation
+projection=children_current|cursor=(parent_logical_name_id,canonical_display_name,child_logical_name_id):string_tuple|channels=normalized_event,parent_changed_full_restage,direct_invalidation_generation
 stage=children_current|unique=parent_logical_name_id,child_logical_name_id,surface_class|has_inserted_at=true
-projection=permissions_current|cursor=resource_id:uuid|channels=normalized_event,direct_invalidation_generation
+projection=permissions_current|cursor=resource_id:uuid|channels=normalized_event,direct_invalidation_generation,permissions_resource_input_revision
 stage=permissions_current|unique=resource_id,subject,scope|has_inserted_at=true
 stage=permissions_current_resource_summary|unique=resource_id|has_inserted_at=false
 projection=record_inventory_current|cursor=resource_id:uuid|channels=normalized_event,manifest_current,direct_invalidation_generation
@@ -777,6 +777,222 @@ async fn completed_stage_reuses_without_drift_but_restarts_for_an_appended_sourc
 }
 
 #[tokio::test]
+async fn completed_children_stage_parent_change_restages_without_live_old_parent() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    assert!(
+        MOVED_CHILD_NEW_PARENT_ID > MOVED_CHILD_OLD_PARENT_ID,
+        "the moved-to parent must sort after the completed old-parent cursor"
+    );
+    seed_moved_child_staging_inputs(database.pool()).await?;
+    let initial_sources =
+        bigname_storage::load_canonical_declared_child_sources(database.pool(), None).await?;
+    assert!(
+        initial_sources.is_empty(),
+        "the ENSv2 child graph must remain inactive until ParentChanged supplies its parent"
+    );
+
+    let mut checkpoint = super::staging::ProjectionStagingCheckpoint::load_or_start(
+        database.pool(),
+        "children_current",
+        None,
+    )
+    .await?;
+    let page_fence = checkpoint.prepare_next_batch(database.pool()).await?;
+    let stale_stage_table = checkpoint.stage_table(0)?.to_owned();
+    validate_test_stage_table(&stale_stage_table)?;
+    sqlx::query(&format!(
+        r#"
+        INSERT INTO {stale_stage_table} (
+            parent_logical_name_id,
+            child_logical_name_id,
+            surface_class,
+            namespace,
+            canonical_display_name,
+            normalized_name,
+            namehash,
+            provenance,
+            chain_positions,
+            canonicality_summary,
+            manifest_version,
+            last_recomputed_at
+        )
+        VALUES (
+            $1,
+            $2,
+            'declared',
+            'ens',
+            'bob.alice.eth',
+            'bob.alice.eth',
+            'namehash:bob.alice.eth',
+            '{{}}'::JSONB,
+            '{{}}'::JSONB,
+            '{{"status":"finalized"}}'::JSONB,
+            1,
+            '2026-04-20T00:00:00Z'::TIMESTAMPTZ
+        )
+        "#
+    ))
+    .bind(MOVED_CHILD_OLD_PARENT_ID)
+    .bind(MOVED_CHILD_LOGICAL_NAME_ID)
+    .execute(database.pool())
+    .await?;
+    let progress = checkpoint.progress_after_batch(
+        1,
+        serde_json::json!([
+            MOVED_CHILD_OLD_PARENT_ID,
+            "bob.alice.eth",
+            MOVED_CHILD_LOGICAL_NAME_ID
+        ]),
+        1,
+        0,
+    )?;
+    let mut transaction = database.pool().begin().await?;
+    checkpoint
+        .persist_progress(&mut transaction, &progress, &page_fence)
+        .await?;
+    transaction.commit().await?;
+    checkpoint.accept_progress(progress, page_fence);
+    let empty_page_fence = checkpoint.prepare_next_batch(database.pool()).await?;
+    assert!(
+        checkpoint
+            .mark_staging_complete(database.pool(), empty_page_fence)
+            .await?,
+        "the old-parent-only durable stage must complete before the parent move"
+    );
+
+    let stale = load_projection_staging_checkpoint(database.pool(), "children_current").await?;
+    assert_eq!(stale.status, "staging_complete");
+    assert_eq!(stale.completed_source_count, 1);
+    assert_eq!(
+        stale
+            .last_source_key
+            .as_ref()
+            .and_then(Value::as_array)
+            .and_then(|parts| parts.first())
+            .and_then(Value::as_str),
+        Some(MOVED_CHILD_OLD_PARENT_ID)
+    );
+    let stored_stale_stage_table = stale
+        .stage_tables
+        .first()
+        .context("children_current checkpoint must have one stage table")?;
+    assert_eq!(stored_stale_stage_table, &stale_stage_table);
+    assert_eq!(
+        load_staged_children_parent_ids(database.pool(), stored_stale_stage_table).await?,
+        vec![MOVED_CHILD_OLD_PARENT_ID.to_owned()]
+    );
+    let live_row_count =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM children_current")
+            .fetch_one(database.pool())
+            .await?;
+    assert_eq!(
+        live_row_count, 0,
+        "the old parent must exist only in the durable stage"
+    );
+
+    move_staged_child_to_new_parent(database.pool()).await?;
+    crate::children::rebuild_children_current_for_replay(database.pool(), None, None).await?;
+
+    let replacement =
+        load_projection_staging_checkpoint(database.pool(), "children_current").await?;
+    let replacement_stage_table = replacement
+        .stage_tables
+        .first()
+        .context("replacement children_current checkpoint must have one stage table")?;
+    assert_ne!(
+        replacement_stage_table, stored_stale_stage_table,
+        "ParentChanged must discard the completed stage even when live rows cannot recover the old parent"
+    );
+    assert!(
+        !stage_table_exists(database.pool(), stored_stale_stage_table).await?,
+        "the stale old-parent stage table must be dropped"
+    );
+    let published = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT parent_logical_name_id, child_logical_name_id
+        FROM children_current
+        ORDER BY parent_logical_name_id, child_logical_name_id
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        published,
+        vec![(
+            MOVED_CHILD_NEW_PARENT_ID.to_owned(),
+            MOVED_CHILD_LOGICAL_NAME_ID.to_owned()
+        )],
+        "fresh publication must contain only the moved child under its new parent"
+    );
+
+    super::staging::cleanup_projection_checkpoint(database.pool(), "children_current").await?;
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn completed_permissions_stage_restarts_for_zero_event_resource_input() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    install_permissions_publish_failure(database.pool()).await?;
+
+    let error =
+        crate::permissions::rebuild_permissions_current_for_replay(database.pool(), None, None)
+            .await
+            .expect_err(
+                "the publish stop must retain the empty completed permissions_current stage",
+            );
+    assert!(
+        format!("{error:#}").contains("injected permissions_current publish stop"),
+        "unexpected permissions_current staging error: {error:#}"
+    );
+    let stale = load_projection_staging_checkpoint(database.pool(), "permissions_current").await?;
+    assert_eq!(stale.status, "staging_complete");
+    assert_eq!(stale.completed_source_count, 0);
+
+    insert_zero_event_permissions_resource(database.pool()).await?;
+    let normalized_event_count =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM normalized_events")
+            .fetch_one(database.pool())
+            .await?;
+    assert_eq!(
+        normalized_event_count, 0,
+        "the regression resource must have no normalized-event drift key"
+    );
+    remove_permissions_publish_failure(database.pool()).await?;
+    let summary =
+        crate::permissions::rebuild_permissions_current_for_replay(database.pool(), None, None)
+            .await?;
+
+    assert_eq!(summary.requested_resource_count, 1);
+    assert_eq!(summary.upserted_row_count, 0);
+    let replacement =
+        load_projection_staging_checkpoint(database.pool(), "permissions_current").await?;
+    assert_ne!(
+        replacement.stage_tables, stale.stage_tables,
+        "resource-input revision drift must replace the completed empty stage"
+    );
+    for stale_stage_table in &stale.stage_tables {
+        assert!(
+            !stage_table_exists(database.pool(), stale_stage_table).await?,
+            "the stale permissions stage table must be dropped"
+        );
+    }
+    let resource_summary = sqlx::query_as::<_, (Option<String>, i64)>(
+        r#"
+        SELECT authority_kind, manifest_version
+        FROM permissions_current_resource_summary
+        WHERE resource_id = $1
+        "#,
+    )
+    .bind(ZERO_EVENT_PERMISSIONS_RESOURCE_ID)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(resource_summary, (Some("registry".to_owned()), 7));
+
+    super::staging::cleanup_projection_checkpoint(database.pool(), "permissions_current").await?;
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn later_source_change_is_loaded_by_a_fresh_page_without_discarding_progress() -> Result<()> {
     let database = TestDatabase::new().await?;
     seed_replay_inputs(database.pool()).await?;
@@ -1158,6 +1374,36 @@ async fn replay_marker_failure_rolls_back_completed_stage_cleanup() -> Result<()
 }
 
 #[derive(Debug)]
+struct ProjectionStagingCheckpointState {
+    stage_tables: Vec<String>,
+    last_source_key: Option<Value>,
+    completed_source_count: i64,
+    status: String,
+}
+
+async fn load_projection_staging_checkpoint(
+    pool: &PgPool,
+    projection: &str,
+) -> Result<ProjectionStagingCheckpointState> {
+    let row = sqlx::query(
+        r#"
+        SELECT stage_tables, last_source_key, completed_source_count, status
+        FROM current_projection_staging_checkpoints
+        WHERE projection = $1
+        "#,
+    )
+    .bind(projection)
+    .fetch_one(pool)
+    .await?;
+    Ok(ProjectionStagingCheckpointState {
+        stage_tables: row.try_get("stage_tables")?,
+        last_source_key: row.try_get("last_source_key")?,
+        completed_source_count: row.try_get("completed_source_count")?,
+        status: row.try_get("status")?,
+    })
+}
+
+#[derive(Debug)]
 struct NameStagingCheckpoint {
     stage_table: String,
     last_source_key: Option<Value>,
@@ -1193,6 +1439,16 @@ async fn count_stage_rows(pool: &PgPool, stage_table: &str) -> Result<i64> {
         .fetch_one(pool)
         .await
         .context("failed to count staged name_current rows")
+}
+
+async fn load_staged_children_parent_ids(pool: &PgPool, stage_table: &str) -> Result<Vec<String>> {
+    validate_test_stage_table(stage_table)?;
+    sqlx::query_scalar::<_, String>(&format!(
+        "SELECT parent_logical_name_id FROM {stage_table} ORDER BY parent_logical_name_id"
+    ))
+    .fetch_all(pool)
+    .await
+    .context("failed to load staged children_current parent ids")
 }
 
 async fn change_already_staged_name_source(pool: &PgPool) -> Result<()> {
@@ -1353,7 +1609,7 @@ async fn stage_table_exists(pool: &PgPool, stage_table: &str) -> Result<bool> {
 
 fn validate_test_stage_table(stage_table: &str) -> Result<()> {
     anyhow::ensure!(
-        stage_table.starts_with("cprs_name_")
+        stage_table.starts_with("cprs_")
             && stage_table
                 .bytes()
                 .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'),
@@ -1477,6 +1733,40 @@ async fn remove_name_publish_failure(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await?;
     sqlx::query("DROP FUNCTION fail_name_current_publish()")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn install_permissions_publish_failure(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE FUNCTION fail_permissions_current_publish() RETURNS TRIGGER AS $function$
+        BEGIN
+            RAISE EXCEPTION 'injected permissions_current publish stop';
+        END
+        $function$ LANGUAGE plpgsql
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE TRIGGER fail_permissions_current_publish
+        BEFORE INSERT OR UPDATE OR DELETE ON permissions_current
+        FOR EACH STATEMENT EXECUTE FUNCTION fail_permissions_current_publish()
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn remove_permissions_publish_failure(pool: &PgPool) -> Result<()> {
+    sqlx::query("DROP TRIGGER fail_permissions_current_publish ON permissions_current")
+        .execute(pool)
+        .await?;
+    sqlx::query("DROP FUNCTION fail_permissions_current_publish()")
         .execute(pool)
         .await?;
     Ok(())
