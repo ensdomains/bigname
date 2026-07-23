@@ -453,7 +453,8 @@ where
             topology_version_boundary,
             record_version_boundary
         FROM execution_cache_outcomes
-        WHERE ($1::text IS NULL OR execution_cache_key > $1)
+        WHERE request_type IN ('verified_resolution', 'verified_primary_name')
+          AND ($1::text IS NULL OR execution_cache_key > $1)
         ORDER BY execution_cache_key
         LIMIT $2
         "#,

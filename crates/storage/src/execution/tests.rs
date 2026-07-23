@@ -2635,6 +2635,43 @@ async fn invalidates_verified_execution_outcomes_for_orphaned_block_dependencies
         "block_hash": "0xrequested-orphan"
     }]);
     insert_trace_and_outcome(&database, &out_of_scope_trace, &out_of_scope_outcome).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO execution_cache_outcomes (
+            execution_cache_key,
+            request_key,
+            requested_chain_positions,
+            manifest_versions,
+            topology_version_boundary,
+            record_version_boundary,
+            execution_trace_id,
+            request_type,
+            namespace,
+            outcome_payload,
+            failure_payload,
+            finished_at
+        )
+        SELECT
+            'dominant-declared-outcome-' || series::TEXT,
+            request_key,
+            requested_chain_positions,
+            manifest_versions,
+            topology_version_boundary,
+            record_version_boundary,
+            execution_trace_id,
+            request_type,
+            namespace,
+            outcome_payload,
+            failure_payload,
+            finished_at
+        FROM execution_cache_outcomes
+        CROSS JOIN generate_series(1, 5) AS series
+        WHERE request_type = 'declared_resolution'
+        "#,
+    )
+    .execute(database.pool())
+    .await
+    .context("failed to make out-of-scope execution outcomes dominate the invalidation fixture")?;
 
     let mut progress = CountingExecutionInvalidationProgress::default();
     let summary = invalidate_execution_outcomes_for_orphaned_blocks_with_progress(
@@ -2643,9 +2680,9 @@ async fn invalidates_verified_execution_outcomes_for_orphaned_block_dependencies
     )
     .await?;
     assert_eq!(summary.deleted_outcome_count, 3);
-    assert!(
-        progress.count >= 3,
-        "reorg invalidation must report each completed cache-candidate source page"
+    assert_eq!(
+        progress.count, 2,
+        "reorg invalidation must page only the four verified cache candidates"
     );
 
     assert_eq!(
