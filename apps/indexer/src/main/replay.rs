@@ -117,6 +117,7 @@ mod tests {
             from_block,
             to_block,
             block_hashes,
+            stateless_only: false,
         }
     }
 

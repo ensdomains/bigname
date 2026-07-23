@@ -13,19 +13,20 @@ fn normalized_event_producer_inventory_is_classified() {
 }
 
 #[test]
-fn stateless_raw_fact_contracts_have_restricted_replay_proofs() {
+fn centrally_classified_stateless_replay_lanes_have_proofs() {
     for contract in NORMALIZED_EVENT_REPLAY_CONTRACTS {
-        if contract.raw_fact_replay_participant
-            && contract.model == ReplayDependencyModel::StatelessRawFact
-        {
+        if contract.raw_fact_replay_participant && contract.stateless_replay_lane.supported() {
             assert!(
-                contract.closure_replay_supported,
-                "{} must advertise restricted replay support",
+                !contract.stateless_replay_proof_tests.is_empty(),
+                "{} must name tests proving its stateless replay lane",
                 contract.adapter.as_str()
             );
-            assert!(
-                !contract.restricted_replay_proof_tests.is_empty(),
-                "{} must name tests proving restricted replay",
+        }
+        if contract.model == ReplayDependencyModel::StatelessRawFact {
+            assert_eq!(
+                contract.stateless_replay_lane,
+                StatelessReplayLane::WholeAdapter,
+                "{} must expose its whole adapter as the stateless lane",
                 contract.adapter.as_str()
             );
         }
@@ -33,18 +34,36 @@ fn stateless_raw_fact_contracts_have_restricted_replay_proofs() {
 }
 
 #[test]
-fn closure_or_dependency_contracts_do_not_claim_restricted_replay_proofs() {
+fn adapters_without_stateless_lanes_do_not_claim_stateless_replay_proofs() {
     for contract in NORMALIZED_EVENT_REPLAY_CONTRACTS {
-        if contract.raw_fact_replay_participant
-            && contract.model != ReplayDependencyModel::StatelessRawFact
-        {
+        if contract.stateless_replay_lane == StatelessReplayLane::Unsupported {
             assert!(
-                contract.restricted_replay_proof_tests.is_empty(),
-                "{} must not cite restricted replay tests",
+                contract.stateless_replay_proof_tests.is_empty(),
+                "{} must not cite stateless replay tests",
                 contract.adapter.as_str()
             );
         }
     }
+}
+
+#[test]
+fn stateless_only_plan_reuses_the_central_replay_contract() {
+    let plan = RawFactReplayContractPlan::stateless_only_authoritative();
+    let selected = NORMALIZED_EVENT_REPLAY_CONTRACTS
+        .iter()
+        .filter(|contract| plan.uses_restricted_sync_for(contract.adapter))
+        .map(|contract| contract.adapter)
+        .collect::<BTreeSet<_>>();
+
+    assert!(plan.uses_stateless_replay_authority());
+    assert_eq!(
+        selected,
+        BTreeSet::from([
+            NormalizedEventReplayAdapter::BlockDerivedNormalizedEvents,
+            NormalizedEventReplayAdapter::EnsV1ReverseClaim,
+            NormalizedEventReplayAdapter::EnsV1SubregistryDiscovery,
+        ])
+    );
 }
 
 #[test]

@@ -11,22 +11,26 @@ use crate::registry_migration_cache::MigratedRegistryNodes;
 
 mod assignment;
 mod checkpoint;
+mod constants;
 mod emitter;
 mod entrypoints;
 mod event;
 mod hex_topic;
 mod loader;
 mod migration_guard;
+mod mode;
 mod reconciliation;
 mod replay;
 mod scope;
 mod startup;
+mod types;
 
 use assignment::{
     ObservedRegistryAssignment, build_registry_assignment, ens_v1_resolver_discovery_source,
     ens_v1_subregistry_discovery_source,
 };
 use checkpoint::SubregistryReplayCheckpoint;
+use constants::*;
 use emitter::{emit_registry_changed_events, emit_registry_changed_events_from_checkpoint};
 use hex_topic::{ZERO_ADDRESS, normalize_address};
 use loader::{
@@ -36,41 +40,13 @@ use loader::{
 use migration_guard::{
     current_registry_emitter, registry_migration_guard_action, rewrite_old_registry_assignment,
 };
+use mode::{DiscoveryEdgeMutation, EnsV1SubregistryDiscoverySyncOutcome};
 use reconciliation::{
     reconcile_subregistry_discovery_from_checkpoint,
     reconcile_subregistry_discovery_source_through_block,
 };
 use scope::{load_migrated_registry_nodes_before_block, normalized_registry_source_scope_targets};
-
-const ENS_V1_REGISTRY_SOURCE_FAMILY: &str = "ens_v1_registry_l1";
-#[cfg(test)]
-const ENS_V1_RESOLVER_SOURCE_FAMILY: &str = "ens_v1_resolver_l1";
-const BASENAMES_BASE_REGISTRY_SOURCE_FAMILY: &str = "basenames_base_registry";
-#[cfg(test)]
-const BASENAMES_BASE_RESOLVER_SOURCE_FAMILY: &str = "basenames_base_resolver";
-const SUBREGISTRY_EDGE_KIND: &str = "subregistry";
-const RESOLVER_EDGE_KIND: &str = "resolver";
-const CONTRACT_ROLE_REGISTRY: &str = "registry";
-const CONTRACT_ROLE_REGISTRY_OLD: &str = "registry_old";
-const EVENT_KIND_SUBREGISTRY_CHANGED: &str = "SubregistryChanged";
-const EVENT_KIND_RESOLVER_CHANGED: &str = "ResolverChanged";
-const DERIVATION_KIND_ENS_V1_SUBREGISTRY_CHANGED: &str = "ens_v1_subregistry_changed";
-const DERIVATION_KIND_ENS_V1_REGISTRY_RESOLVER_CHANGED: &str = "ens_v1_registry_resolver_changed";
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct EnsV1SubregistryDiscoverySyncSummary {
-    pub scanned_log_count: usize,
-    pub matched_log_count: usize,
-    pub active_observation_count: usize,
-    pub active_edge_count: usize,
-    pub admitted_edge_count: usize,
-    pub inserted_edge_count: usize,
-    pub deactivated_edge_count: usize,
-    pub total_normalized_event_count: usize,
-    pub total_normalized_event_inserted_count: usize,
-}
-
-pub(super) type EnsV1SubregistryDiscoverySyncOutcome = (EnsV1SubregistryDiscoverySyncSummary, bool);
+pub use types::EnsV1SubregistryDiscoverySyncSummary;
 
 pub use crate::checkpoint_context::{
     ReplayAdapterCheckpointContext, StartupAdapterCheckpointContext,
@@ -89,13 +65,7 @@ pub use startup::{
     sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit_and_progress,
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum DiscoveryEdgeMutation {
-    Reconcile,
-    Skip,
-}
-
-pub(super) async fn sync_ens_v1_subregistry_discovery_with_scope(
+async fn sync_ens_v1_subregistry_discovery_with_scope(
     pool: &PgPool,
     chain: &str,
     restrict_to_block_hashes: bool,
@@ -113,7 +83,7 @@ pub(super) async fn sync_ens_v1_subregistry_discovery_with_scope(
         full_source_through_block.is_none()
             || (!restrict_to_block_hashes
                 && source_scope.is_none()
-                && discovery_edge_mutation == DiscoveryEdgeMutation::Reconcile
+                && discovery_edge_mutation.reconciles()
                 && checkpoint_context.is_none()),
         "target-bounded ENSv1 registry reconciliation requires an uncheckpointed complete-source pass"
     );
@@ -130,10 +100,14 @@ pub(super) async fn sync_ens_v1_subregistry_discovery_with_scope(
     let source_scope = source_scope.map(normalized_registry_source_scope_targets);
     let use_replay_checkpoint = !restrict_to_block_hashes
         && source_scope.is_none()
-        && discovery_edge_mutation == DiscoveryEdgeMutation::Reconcile
+        && discovery_edge_mutation.reconciles()
         && checkpoint_context.is_some();
     if source_scope.as_ref().is_some_and(Vec::is_empty) {
-        return Ok((EnsV1SubregistryDiscoverySyncSummary::default(), false));
+        return Ok((
+            EnsV1SubregistryDiscoverySyncSummary::default(),
+            false,
+            bigname_storage::NormalizedEventReplayAuthoritySummary::default(),
+        ));
     }
 
     let emitters = load_active_emitters(
@@ -158,7 +132,11 @@ pub(super) async fn sync_ens_v1_subregistry_discovery_with_scope(
         let active_checkpoint =
             SubregistryReplayCheckpoint::load_or_start(pool, chain, checkpoint).await?;
         if let Some(summary) = active_checkpoint.completed_summary()? {
-            return Ok((summary, false));
+            return Ok((
+                summary,
+                false,
+                bigname_storage::NormalizedEventReplayAuthoritySummary::default(),
+            ));
         }
         if !active_checkpoint.stream_complete() {
             // Assignments stay DB-staged and page-local; only the migrated-node
@@ -244,7 +222,11 @@ pub(super) async fn sync_ens_v1_subregistry_discovery_with_scope(
         )
         .await?;
         if source_scope.is_some() && raw_logs.is_empty() {
-            return Ok((EnsV1SubregistryDiscoverySyncSummary::default(), false));
+            return Ok((
+                EnsV1SubregistryDiscoverySyncSummary::default(),
+                false,
+                bigname_storage::NormalizedEventReplayAuthoritySummary::default(),
+            ));
         }
         scanned_log_count = raw_logs.len();
         let preload_migrated_registry_nodes = raw_logs
@@ -319,7 +301,7 @@ pub(super) async fn sync_ens_v1_subregistry_discovery_with_scope(
         total_normalized_event_count: 0,
         total_normalized_event_inserted_count: 0,
     };
-    if discovery_edge_mutation == DiscoveryEdgeMutation::Reconcile {
+    if discovery_edge_mutation.reconciles() {
         if finalize_from_checkpoint {
             reconcile_subregistry_discovery_from_checkpoint(
                 pool,
@@ -336,7 +318,11 @@ pub(super) async fn sync_ens_v1_subregistry_discovery_with_scope(
                     .as_ref()
                     .expect("finalizing checkpoint should be present");
                 checkpoint::delete_checkpoint(pool, &checkpoint.chain, &checkpoint.context).await?;
-                return Ok((reconciliation, true));
+                return Ok((
+                    reconciliation,
+                    true,
+                    bigname_storage::NormalizedEventReplayAuthoritySummary::default(),
+                ));
             }
         } else if source_scope.is_some() {
             let observations = latest_assignments
@@ -416,7 +402,13 @@ pub(super) async fn sync_ens_v1_subregistry_discovery_with_scope(
         )
         .await?
     } else {
-        emit_registry_changed_events(pool, &latest_assignments, &discovery_sources).await?
+        emit_registry_changed_events(
+            pool,
+            &latest_assignments,
+            &discovery_sources,
+            discovery_edge_mutation.uses_stateless_replay_authority(),
+        )
+        .await?
     };
     reconciliation.total_normalized_event_count = event_summary.synced_count;
     reconciliation.total_normalized_event_inserted_count = event_summary.inserted_count;
@@ -426,7 +418,11 @@ pub(super) async fn sync_ens_v1_subregistry_discovery_with_scope(
         record_startup_adapter_progress(pool, startup_progress).await?;
     }
 
-    Ok((reconciliation, false))
+    Ok((
+        reconciliation,
+        false,
+        event_summary.stateless_replay_authority,
+    ))
 }
 
 async fn sync_checkpointed_registry_raw_logs(

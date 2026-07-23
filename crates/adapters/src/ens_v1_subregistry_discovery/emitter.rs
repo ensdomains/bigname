@@ -1,7 +1,11 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use bigname_storage::upsert_normalized_events_with_summary;
+use bigname_storage::{
+    NormalizedEventReplayAuthoritySummary,
+    upsert_normalized_events_with_stateless_replay_authority,
+    upsert_normalized_events_with_summary,
+};
 use sqlx::PgPool;
 
 use crate::checkpoint_context::{StartupAdapterProgress, record_startup_adapter_progress};
@@ -16,16 +20,18 @@ use super::{
 
 const NORMALIZED_EVENT_UPSERT_CHUNK_SIZE: usize = 5_000;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct RegistryChangedEventEmitSummary {
     pub synced_count: usize,
     pub inserted_count: usize,
+    pub stateless_replay_authority: NormalizedEventReplayAuthoritySummary,
 }
 
 pub(super) async fn emit_registry_changed_events(
     pool: &PgPool,
     latest_assignments: &BTreeMap<String, ObservedRegistryAssignment>,
     discovery_sources: &[String],
+    stateless_replay_authority: bool,
 ) -> Result<RegistryChangedEventEmitSummary> {
     let mut startup_progress = None;
     let discovery_sources = discovery_sources
@@ -47,6 +53,7 @@ pub(super) async fn emit_registry_changed_events(
                 &mut events,
                 &mut summary,
                 &mut startup_progress,
+                stateless_replay_authority,
             )
             .await?;
             assignments.clear();
@@ -58,9 +65,17 @@ pub(super) async fn emit_registry_changed_events(
         &mut events,
         &mut summary,
         &mut startup_progress,
+        stateless_replay_authority,
     )
     .await?;
-    flush_registry_changed_events(pool, &mut events, &mut summary, &mut startup_progress).await?;
+    flush_registry_changed_events(
+        pool,
+        &mut events,
+        &mut summary,
+        &mut startup_progress,
+        stateless_replay_authority,
+    )
+    .await?;
     Ok(summary)
 }
 
@@ -100,12 +115,13 @@ pub(super) async fn emit_registry_changed_events_from_checkpoint(
                 &mut events,
                 &mut summary,
                 startup_progress,
+                false,
             )
             .await?;
             record_startup_adapter_progress(pool, startup_progress).await?;
         }
     }
-    flush_registry_changed_events(pool, &mut events, &mut summary, startup_progress).await?;
+    flush_registry_changed_events(pool, &mut events, &mut summary, startup_progress, false).await?;
     Ok(summary)
 }
 
@@ -115,6 +131,7 @@ pub(super) async fn emit_registry_changed_event_chunk(
     events: &mut Vec<bigname_storage::NormalizedEvent>,
     summary: &mut RegistryChangedEventEmitSummary,
     startup_progress: &mut Option<&mut dyn StartupAdapterProgress>,
+    stateless_replay_authority: bool,
 ) -> Result<()> {
     if assignments.is_empty() {
         return Ok(());
@@ -134,7 +151,14 @@ pub(super) async fn emit_registry_changed_event_chunk(
             events.push(event);
         }
         if events.len() >= NORMALIZED_EVENT_UPSERT_CHUNK_SIZE {
-            flush_registry_changed_events(pool, events, summary, startup_progress).await?;
+            flush_registry_changed_events(
+                pool,
+                events,
+                summary,
+                startup_progress,
+                stateless_replay_authority,
+            )
+            .await?;
         }
     }
 
@@ -146,14 +170,23 @@ pub(super) async fn flush_registry_changed_events(
     events: &mut Vec<bigname_storage::NormalizedEvent>,
     summary: &mut RegistryChangedEventEmitSummary,
     startup_progress: &mut Option<&mut dyn StartupAdapterProgress>,
+    stateless_replay_authority: bool,
 ) -> Result<()> {
     if events.is_empty() {
         return Ok(());
     }
 
-    let upsert = upsert_normalized_events_with_summary(pool, events).await?;
     summary.synced_count += events.len();
-    summary.inserted_count += upsert.inserted_count;
+    if stateless_replay_authority {
+        let authority =
+            upsert_normalized_events_with_stateless_replay_authority(pool, events).await?;
+        summary.inserted_count += authority.identities_inserted;
+        summary.stateless_replay_authority.add(&authority);
+    } else {
+        summary.inserted_count += upsert_normalized_events_with_summary(pool, events)
+            .await?
+            .inserted_count;
+    }
     events.clear();
     record_startup_adapter_progress(pool, startup_progress).await?;
     Ok(())

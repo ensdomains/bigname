@@ -2565,6 +2565,149 @@ async fn normalized_event_upsert_rejects_identity_mismatch() -> Result<()> {
 }
 
 #[tokio::test]
+async fn stateless_replay_authority_supersedes_content_and_journals_once() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let mut stale = normalized_event(
+        "ens-v1-reverse-claim:stale-vintage",
+        "ReverseChanged",
+        CanonicalityState::Canonical,
+    );
+    stale.source_family = "ens_v1_reverse_l1".to_owned();
+    stale.derivation_kind = "ens_v1_reverse_claim".to_owned();
+    stale.after_state = json!({
+        "address": "0x1111111111111111111111111111111111111111",
+        "namespace": "ens",
+        "coin_type": "60",
+        "reverse_name": "stale.addr.reverse"
+    });
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&stale)).await?;
+    let stored_id = sqlx::query_scalar::<_, i64>(
+        "SELECT normalized_event_id FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&stale.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+
+    let mut current = stale.clone();
+    current.after_state["reverse_name"] =
+        json!("1111111111111111111111111111111111111111.addr.reverse");
+    let summary = upsert_normalized_events_with_stateless_replay_authority(
+        database.pool(),
+        std::slice::from_ref(&current),
+    )
+    .await?;
+    assert_eq!(
+        summary,
+        NormalizedEventReplayAuthoritySummary {
+            identities_examined: 1,
+            identities_inserted: 0,
+            identities_unchanged: 0,
+            identities_superseded: 1,
+            ..NormalizedEventReplayAuthoritySummary::default()
+        }
+    );
+
+    let stored = sqlx::query_as::<_, (i64, serde_json::Value, i64, i64)>(
+        r#"
+        SELECT
+            event.normalized_event_id,
+            event.after_state,
+            COUNT(change.change_id)::BIGINT,
+            COUNT(*) FILTER (
+                WHERE change.change_kind = 'canonicality_update'
+            )::BIGINT
+        FROM normalized_events event
+        JOIN projection_normalized_event_changes change
+          ON change.normalized_event_id = event.normalized_event_id
+        WHERE event.event_identity = $1
+        GROUP BY event.normalized_event_id, event.after_state
+        "#,
+    )
+    .bind(&current.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(stored.0, stored_id, "replay must retain the durable row ID");
+    assert_eq!(stored.1, current.after_state);
+    assert_eq!(
+        stored.2, 2,
+        "insert and supersession must each be journaled"
+    );
+    assert_eq!(stored.3, 1, "supersession must use the repair journal kind");
+
+    let idempotent = upsert_normalized_events_with_stateless_replay_authority(
+        database.pool(),
+        std::slice::from_ref(&current),
+    )
+    .await?;
+    assert_eq!(idempotent.identities_unchanged, 1);
+    assert_eq!(idempotent.identities_superseded, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM projection_normalized_event_changes change
+            JOIN normalized_events event
+              ON event.normalized_event_id = change.normalized_event_id
+            WHERE event.event_identity = $1
+            "#,
+        )
+        .bind(&current.event_identity)
+        .fetch_one(database.pool())
+        .await?,
+        2,
+        "an unchanged replay must not append another change"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn stateless_replay_authority_rejects_projection_key_change() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let mut stored = normalized_event(
+        "ens-v1-reverse-claim:projection-key-change",
+        "ReverseChanged",
+        CanonicalityState::Canonical,
+    );
+    stored.source_family = "ens_v1_reverse_l1".to_owned();
+    stored.derivation_kind = "ens_v1_reverse_claim".to_owned();
+    stored.after_state = json!({
+        "address": "0x1111111111111111111111111111111111111111",
+        "namespace": "ens",
+        "coin_type": "60",
+        "reverse_name": "1111111111111111111111111111111111111111.addr.reverse"
+    });
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&stored)).await?;
+
+    let mut incoming = stored.clone();
+    incoming.after_state["address"] = json!("0x2222222222222222222222222222222222222222");
+    let error = upsert_normalized_events_with_stateless_replay_authority(
+        database.pool(),
+        std::slice::from_ref(&incoming),
+    )
+    .await
+    .expect_err("stateless replay must not strand the old projection key");
+    assert!(
+        error
+            .to_string()
+            .contains("would change downstream projection identity"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT after_state FROM normalized_events WHERE event_identity = $1",
+        )
+        .bind(&stored.event_identity)
+        .fetch_one(database.pool())
+        .await?,
+        stored.after_state,
+        "a rejected supersession must leave the stored row untouched"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn normalized_event_upsert_rejects_resource_id_change() -> Result<()> {
     let database = TestDatabase::new().await?;
     let mut event = normalized_event(

@@ -17,7 +17,10 @@ pub(super) async fn sync_ens_v1_subregistry_for_mode(
     source_scope: Option<&[(String, String, i64, i64)]>,
     mode: PersistedRawPayloadAdapterSyncMode,
     reconcile_full_source: bool,
-) -> Result<bigname_adapters::EnsV1SubregistryDiscoverySyncSummary> {
+) -> Result<(
+    bigname_adapters::EnsV1SubregistryDiscoverySyncSummary,
+    bigname_storage::NormalizedEventReplayAuthoritySummary,
+)> {
     if reconcile_full_source {
         let target_block_number =
             load_live_adapter_target_block_number(pool, chain, block_hashes).await?;
@@ -45,7 +48,12 @@ pub(super) async fn sync_ens_v1_subregistry_for_mode(
         }
         .await;
         let release_result = raw_log_guard.release().await;
-        return prioritize_operation_error(sync_result, release_result);
+        return prioritize_operation_error(sync_result, release_result).map(|summary| {
+            (
+                summary,
+                bigname_storage::NormalizedEventReplayAuthoritySummary::default(),
+            )
+        });
     }
 
     match mode {
@@ -61,6 +69,32 @@ pub(super) async fn sync_ens_v1_subregistry_for_mode(
                 .await
             } else {
                 bigname_adapters::EnsV1SubregistryDiscoverySyncSummary::sync_for_block_hashes_without_discovery_reconciliation(
+                    pool,
+                    chain,
+                    block_hashes,
+                )
+                .await
+            }
+            .map(|summary| {
+                (
+                    summary,
+                    bigname_storage::NormalizedEventReplayAuthoritySummary::default(),
+                )
+            })
+        }
+        PersistedRawPayloadAdapterSyncMode::RawFactReplay { .. }
+            if mode.uses_stateless_replay_authority() =>
+        {
+            if let Some(source_scope) = source_scope {
+                bigname_adapters::EnsV1SubregistryDiscoverySyncSummary::sync_for_block_hashes_with_source_scope_and_stateless_replay_authority(
+                    pool,
+                    chain,
+                    block_hashes,
+                    source_scope,
+                )
+                .await
+            } else {
+                bigname_adapters::EnsV1SubregistryDiscoverySyncSummary::sync_for_block_hashes_with_stateless_replay_authority(
                     pool,
                     chain,
                     block_hashes,
@@ -85,6 +119,12 @@ pub(super) async fn sync_ens_v1_subregistry_for_mode(
                 )
                 .await
             }
+            .map(|summary| {
+                (
+                    summary,
+                    bigname_storage::NormalizedEventReplayAuthoritySummary::default(),
+                )
+            })
         }
     }
 }

@@ -1213,6 +1213,76 @@ async fn create_normalized_replay_adapter_checkpoint_tables(pool: &PgPool) -> Re
     Ok(())
 }
 
+async fn create_projection_normalized_event_change_tables(pool: &PgPool) -> Result<()> {
+    if sqlx::query_scalar::<_, bool>(
+        "SELECT to_regclass('public.projection_normalized_event_changes') IS NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .context("failed to inspect projection normalized-event change test fixture")?
+    {
+        sqlx::raw_sql(
+            r#"
+            CREATE TABLE projection_normalized_event_changes (
+                change_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                normalized_event_id BIGINT NOT NULL
+                    REFERENCES normalized_events(normalized_event_id),
+                changed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                change_kind TEXT NOT NULL CHECK (
+                    change_kind IN ('insert', 'canonicality_update')
+                ),
+                canonicality_state canonicality_state NOT NULL
+            );
+
+            CREATE FUNCTION record_projection_normalized_event_change()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                IF TG_OP = 'INSERT' THEN
+                    INSERT INTO projection_normalized_event_changes (
+                        normalized_event_id,
+                        changed_at,
+                        change_kind,
+                        canonicality_state
+                    )
+                    VALUES (
+                        NEW.normalized_event_id,
+                        NEW.observed_at,
+                        'insert',
+                        NEW.canonicality_state
+                    );
+                ELSIF OLD.canonicality_state IS DISTINCT FROM NEW.canonicality_state THEN
+                    INSERT INTO projection_normalized_event_changes (
+                        normalized_event_id,
+                        changed_at,
+                        change_kind,
+                        canonicality_state
+                    )
+                    VALUES (
+                        NEW.normalized_event_id,
+                        NEW.observed_at,
+                        'canonicality_update',
+                        NEW.canonicality_state
+                    );
+                END IF;
+                RETURN NEW;
+            END;
+            $$;
+
+            CREATE TRIGGER normalized_events_projection_change_trigger
+            AFTER INSERT OR UPDATE OF canonicality_state ON normalized_events
+            FOR EACH ROW
+            EXECUTE FUNCTION record_projection_normalized_event_change();
+            "#,
+        )
+        .execute(pool)
+        .await
+        .context("failed to create projection normalized-event change test fixture")?;
+    }
+    Ok(())
+}
+
 async fn ensure_normalized_replay_adapter_checkpoint_tables(pool: &PgPool) -> Result<()> {
     let checkpoint_table_exists = sqlx::query_scalar::<_, bool>(
         "SELECT to_regclass('public.normalized_replay_adapter_checkpoints') IS NOT NULL",

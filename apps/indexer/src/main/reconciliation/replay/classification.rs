@@ -3,8 +3,6 @@ use std::collections::BTreeSet;
 use anyhow::{Context, Result, bail};
 use sqlx::Row;
 
-use crate::ens_v1_resolver::SOURCE_FAMILY_ENS_V1_RESOLVER_L1;
-
 use super::ReplayRawLogSelection;
 use crate::reconciliation::types::{
     RawFactNormalizedEventReplayRequest, RawFactNormalizedEventReplaySelection,
@@ -12,45 +10,21 @@ use crate::reconciliation::types::{
 
 #[path = "classification/closure_boundary.rs"]
 mod closure_boundary;
+#[path = "classification/contracts.rs"]
+mod contracts;
 
 pub(crate) use closure_boundary::LegacyRegistryNewlyRequiredCoverage;
 use closure_boundary::{
     earliest_required_raw_fact_block, ensure_full_closure_retention_authority,
     ensure_legacy_registry_closure_retention_authority,
 };
-
-pub(crate) const SOURCE_FAMILY_ENS_V2_ROOT_L1: &str = "ens_v2_root_l1";
-pub(crate) const SOURCE_FAMILY_ENS_V2_REGISTRY_L1: &str = "ens_v2_registry_l1";
-pub(crate) const SOURCE_FAMILY_ENS_V2_REGISTRAR_L1: &str = "ens_v2_registrar_l1";
-pub(crate) const SOURCE_FAMILY_ENS_V2_RESOLVER_L1: &str = "ens_v2_resolver_l1";
-pub(crate) const SOURCE_FAMILY_ENS_V1_REVERSE_L1: &str = "ens_v1_reverse_l1";
-pub(crate) const SOURCE_FAMILY_ENS_V1_REGISTRAR_L1: &str = "ens_v1_registrar_l1";
-pub(crate) const SOURCE_FAMILY_ENS_V1_REGISTRY_L1: &str = "ens_v1_registry_l1";
-pub(crate) const SOURCE_FAMILY_ENS_V1_WRAPPER_L1: &str = "ens_v1_wrapper_l1";
-pub(crate) const SOURCE_FAMILY_BASENAMES_BASE_PRIMARY: &str = "basenames_base_primary";
-pub(crate) const SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR: &str = "basenames_base_registrar";
-pub(crate) const SOURCE_FAMILY_BASENAMES_BASE_REGISTRY: &str = "basenames_base_registry";
-pub(crate) const SOURCE_FAMILY_BASENAMES_BASE_RESOLVER: &str = "basenames_base_resolver";
-
-#[rustfmt::skip]
-const BLOCK_DERIVED_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V1_REGISTRAR_L1, SOURCE_FAMILY_ENS_V1_WRAPPER_L1, SOURCE_FAMILY_ENS_V2_ROOT_L1, SOURCE_FAMILY_ENS_V2_REGISTRY_L1, SOURCE_FAMILY_ENS_V2_REGISTRAR_L1, SOURCE_FAMILY_ENS_V2_RESOLVER_L1];
-#[rustfmt::skip]
-const ENS_V1_REVERSE_CLAIM_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V1_REVERSE_L1, SOURCE_FAMILY_BASENAMES_BASE_PRIMARY];
-#[rustfmt::skip]
-const ENS_V1_SUBREGISTRY_DISCOVERY_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V1_REGISTRY_L1, SOURCE_FAMILY_BASENAMES_BASE_REGISTRY];
-#[rustfmt::skip]
-const ENS_V1_UNWRAPPED_AUTHORITY_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V1_REGISTRAR_L1, SOURCE_FAMILY_ENS_V1_REGISTRY_L1, SOURCE_FAMILY_ENS_V1_RESOLVER_L1, SOURCE_FAMILY_ENS_V1_WRAPPER_L1, SOURCE_FAMILY_BASENAMES_BASE_REGISTRAR, SOURCE_FAMILY_BASENAMES_BASE_REGISTRY, SOURCE_FAMILY_BASENAMES_BASE_RESOLVER];
-#[rustfmt::skip]
-const ENS_V2_REGISTRY_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V2_ROOT_L1, SOURCE_FAMILY_ENS_V2_REGISTRY_L1];
-const ENS_V2_REGISTRAR_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V2_REGISTRAR_L1];
-const ENS_V2_RESOLVER_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V2_RESOLVER_L1];
-#[rustfmt::skip]
-const ENS_V2_PERMISSIONS_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V2_ROOT_L1, SOURCE_FAMILY_ENS_V2_REGISTRY_L1, SOURCE_FAMILY_ENS_V2_RESOLVER_L1];
-
-#[rustfmt::skip]
-const ENS_V2_REGISTRAR_DEPENDENCY_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V2_ROOT_L1, SOURCE_FAMILY_ENS_V2_REGISTRY_L1, SOURCE_FAMILY_ENS_V2_REGISTRAR_L1];
-#[rustfmt::skip]
-const ENS_V2_RESOLVER_DEPENDENCY_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V2_ROOT_L1, SOURCE_FAMILY_ENS_V2_REGISTRY_L1, SOURCE_FAMILY_ENS_V2_RESOLVER_L1];
+pub(crate) use contracts::NORMALIZED_EVENT_REPLAY_CONTRACTS;
+#[cfg(test)]
+pub(crate) use contracts::SOURCE_FAMILY_ENS_V2_REGISTRY_L1;
+use contracts::{
+    SOURCE_FAMILY_BASENAMES_BASE_REGISTRY, SOURCE_FAMILY_ENS_V1_REGISTRY_L1,
+    SOURCE_FAMILY_ENS_V2_RESOLVER_L1,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ReplayDependencyModel {
@@ -103,145 +77,37 @@ impl NormalizedEventReplayAdapter {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StatelessReplayLane {
+    WholeAdapter,
+    NormalizedEventsOnly,
+    Unsupported,
+}
+
+impl StatelessReplayLane {
+    const fn supported(self) -> bool {
+        !matches!(self, Self::Unsupported)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct AdapterReplayContract {
     pub(crate) adapter: NormalizedEventReplayAdapter,
     pub(crate) model: ReplayDependencyModel,
+    pub(crate) stateless_replay_lane: StatelessReplayLane,
     pub(crate) raw_fact_replay_participant: bool,
     pub(crate) source_families: &'static [&'static str],
     pub(crate) closure_source_families: &'static [&'static str],
     pub(crate) dependency_adapters: &'static [NormalizedEventReplayAdapter],
     pub(crate) producer_paths: &'static [&'static str],
-    pub(crate) restricted_replay_proof_tests: &'static [&'static str],
+    pub(crate) stateless_replay_proof_tests: &'static [&'static str],
     pub(crate) closure_replay_supported: bool,
     pub(crate) replay_note: &'static str,
 }
 
-const NO_DEPENDENCIES: &[NormalizedEventReplayAdapter] = &[];
-const ENS_V2_REGISTRY_DEPENDENCY: &[NormalizedEventReplayAdapter] =
-    &[NormalizedEventReplayAdapter::EnsV2RegistryResourceSurface];
-
-pub(crate) const NORMALIZED_EVENT_REPLAY_CONTRACTS: &[AdapterReplayContract] = &[
-    AdapterReplayContract {
-        adapter: NormalizedEventReplayAdapter::BlockDerivedNormalizedEvents,
-        model: ReplayDependencyModel::StatelessRawFact,
-        raw_fact_replay_participant: true,
-        source_families: BLOCK_DERIVED_SOURCE_FAMILIES,
-        closure_source_families: BLOCK_DERIVED_SOURCE_FAMILIES,
-        dependency_adapters: NO_DEPENDENCIES,
-        producer_paths: &["crates/adapters/src/block_derived_normalized_events"],
-        restricted_replay_proof_tests: &[
-            "replay_normalized_events_is_idempotent_without_checkpoint_mutation",
-            "sync_block_derived_normalized_events_is_idempotent",
-            "sync_block_derived_normalized_events_replays_scoped_selected_logs_without_payload_rows",
-        ],
-        closure_replay_supported: true,
-        replay_note: "preimage rows are decoded from each selected raw log and manifest event-topic constants",
-    },
-    AdapterReplayContract {
-        adapter: NormalizedEventReplayAdapter::EnsV1ReverseClaim,
-        model: ReplayDependencyModel::StatelessRawFact,
-        raw_fact_replay_participant: true,
-        source_families: ENS_V1_REVERSE_CLAIM_SOURCE_FAMILIES,
-        closure_source_families: ENS_V1_REVERSE_CLAIM_SOURCE_FAMILIES,
-        dependency_adapters: NO_DEPENDENCIES,
-        producer_paths: &["crates/adapters/src/ens_v1_reverse_claim"],
-        restricted_replay_proof_tests: &[
-            "replay_normalized_events_runs_full_persisted_raw_adapter_boundary",
-            "replay_normalized_events_scoped_block_range_selects_only_requested_targets",
-            "replay_normalized_events_skips_noncanonical_raw_logs_in_selected_block_hashes",
-        ],
-        closure_replay_supported: true,
-        replay_note: "reverse rows are decoded from the selected reverse-claim raw log",
-    },
-    AdapterReplayContract {
-        adapter: NormalizedEventReplayAdapter::EnsV1SubregistryDiscovery,
-        model: ReplayDependencyModel::ContextualDependencyRequired,
-        raw_fact_replay_participant: true,
-        source_families: ENS_V1_SUBREGISTRY_DISCOVERY_SOURCE_FAMILIES,
-        closure_source_families: ENS_V1_SUBREGISTRY_DISCOVERY_SOURCE_FAMILIES,
-        dependency_adapters: NO_DEPENDENCIES,
-        producer_paths: &["crates/adapters/src/ens_v1_subregistry_discovery"],
-        restricted_replay_proof_tests: &[],
-        closure_replay_supported: true,
-        replay_note: "normalized rows include discovery-edge contract-instance context, so raw-log selection alone is insufficient",
-    },
-    AdapterReplayContract {
-        adapter: NormalizedEventReplayAdapter::EnsV1UnwrappedAuthority,
-        model: ReplayDependencyModel::StatefulClosureRequired,
-        raw_fact_replay_participant: true,
-        source_families: ENS_V1_UNWRAPPED_AUTHORITY_SOURCE_FAMILIES,
-        closure_source_families: ENS_V1_UNWRAPPED_AUTHORITY_SOURCE_FAMILIES,
-        dependency_adapters: NO_DEPENDENCIES,
-        producer_paths: &["crates/adapters/src/ens_v1_unwrapped_authority"],
-        restricted_replay_proof_tests: &[],
-        closure_replay_supported: true,
-        replay_note: "authority state, before_state, resource identity, and permission provenance depend on ordered in-memory history",
-    },
-    AdapterReplayContract {
-        adapter: NormalizedEventReplayAdapter::EnsV2RegistryResourceSurface,
-        model: ReplayDependencyModel::StatefulClosureRequired,
-        raw_fact_replay_participant: true,
-        source_families: ENS_V2_REGISTRY_SOURCE_FAMILIES,
-        closure_source_families: ENS_V2_REGISTRY_SOURCE_FAMILIES,
-        dependency_adapters: NO_DEPENDENCIES,
-        producer_paths: &["crates/adapters/src/ens_v2_registry"],
-        restricted_replay_proof_tests: &[],
-        closure_replay_supported: true,
-        replay_note: "registry/resource rows depend on ordered token, suffix, binding, and discovery state",
-    },
-    AdapterReplayContract {
-        adapter: NormalizedEventReplayAdapter::EnsV2Registrar,
-        model: ReplayDependencyModel::ContextualDependencyRequired,
-        raw_fact_replay_participant: true,
-        source_families: ENS_V2_REGISTRAR_SOURCE_FAMILIES,
-        closure_source_families: ENS_V2_REGISTRAR_DEPENDENCY_SOURCE_FAMILIES,
-        dependency_adapters: ENS_V2_REGISTRY_DEPENDENCY,
-        producer_paths: &["crates/adapters/src/ens_v2_registrar"],
-        restricted_replay_proof_tests: &[],
-        closure_replay_supported: true,
-        replay_note: "registrar rows resolve logical_name_id/resource_id through stable ENSv2 registry normalized output",
-    },
-    AdapterReplayContract {
-        adapter: NormalizedEventReplayAdapter::EnsV2Resolver,
-        model: ReplayDependencyModel::ContextualDependencyRequired,
-        raw_fact_replay_participant: true,
-        source_families: ENS_V2_RESOLVER_SOURCE_FAMILIES,
-        closure_source_families: ENS_V2_RESOLVER_DEPENDENCY_SOURCE_FAMILIES,
-        dependency_adapters: ENS_V2_REGISTRY_DEPENDENCY,
-        producer_paths: &["crates/adapters/src/ens_v2_resolver"],
-        restricted_replay_proof_tests: &[],
-        closure_replay_supported: true,
-        replay_note: "resolver rows resolve name/resource links from stable name_surfaces and surface_bindings",
-    },
-    AdapterReplayContract {
-        adapter: NormalizedEventReplayAdapter::EnsV2Permissions,
-        model: ReplayDependencyModel::StatefulClosureRequired,
-        raw_fact_replay_participant: true,
-        source_families: ENS_V2_PERMISSIONS_SOURCE_FAMILIES,
-        closure_source_families: ENS_V2_PERMISSIONS_SOURCE_FAMILIES,
-        dependency_adapters: NO_DEPENDENCIES,
-        producer_paths: &["crates/adapters/src/ens_v2_permissions"],
-        restricted_replay_proof_tests: &[],
-        closure_replay_supported: true,
-        replay_note: "permission resources and role events are stateful within root, registry, and resolver emitter histories",
-    },
-    AdapterReplayContract {
-        adapter: NormalizedEventReplayAdapter::ManifestNormalizedEvents,
-        model: ReplayDependencyModel::ContextualDependencyRequired,
-        raw_fact_replay_participant: false,
-        source_families: &[],
-        closure_source_families: &[],
-        dependency_adapters: NO_DEPENDENCIES,
-        producer_paths: &["crates/adapters/src/manifest_normalized_events"],
-        restricted_replay_proof_tests: &[],
-        closure_replay_supported: false,
-        replay_note: "manifest rows are derived from manifest, capability, code-hash, and discovery-edge corpus state, not raw-log replay",
-    },
-];
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RawFactReplayContractMode {
     StatelessRestricted,
+    StatelessOnlyAuthoritative,
     FullClosure,
 }
 
@@ -257,12 +123,29 @@ impl RawFactReplayContractPlan {
         Self(RawFactReplayContractMode::FullClosure)
     }
 
+    pub(crate) const fn stateless_only_authoritative() -> Self {
+        Self(RawFactReplayContractMode::StatelessOnlyAuthoritative)
+    }
+
     pub(crate) fn permits_nonstateless_adapters(self) -> bool {
         matches!(self.0, RawFactReplayContractMode::FullClosure)
     }
 
+    pub(crate) fn uses_stateless_replay_authority(self) -> bool {
+        matches!(
+            self.0,
+            RawFactReplayContractMode::StatelessOnlyAuthoritative
+        )
+    }
+
     pub(crate) fn uses_restricted_sync_for(self, adapter: NormalizedEventReplayAdapter) -> bool {
-        !self.permits_nonstateless_adapters() || !full_closure_reemits_adapter(adapter)
+        match self.0 {
+            RawFactReplayContractMode::StatelessRestricted => true,
+            RawFactReplayContractMode::StatelessOnlyAuthoritative => {
+                replay_contract(adapter).stateless_replay_lane.supported()
+            }
+            RawFactReplayContractMode::FullClosure => !full_closure_reemits_adapter(adapter),
+        }
     }
 
     pub(crate) fn ensure_adapter_allowed(
@@ -273,6 +156,15 @@ impl RawFactReplayContractPlan {
         if !contract.raw_fact_replay_participant {
             bail!(
                 "normalized-event replay adapter {} is not part of raw-fact replay",
+                adapter.as_str()
+            );
+        }
+        if self.uses_stateless_replay_authority() {
+            if contract.stateless_replay_lane.supported() {
+                return Ok(());
+            }
+            bail!(
+                "normalized-event replay adapter {} has no centrally classified stateless replay lane",
                 adapter.as_str()
             );
         }

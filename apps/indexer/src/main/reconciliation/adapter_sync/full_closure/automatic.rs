@@ -139,6 +139,8 @@ async fn replay_stateless_normalized_events_for_ranges(
         matched_raw_log_count: 0,
         normalized_event_synced_count: 0,
         normalized_event_inserted_count: 0,
+        stateless_replay_authority: bigname_storage::NormalizedEventReplayAuthoritySummary::default(
+        ),
     };
     for &(range_start_block_number, target_block_number) in stateless_ranges {
         let range = replay_stateless_normalized_events_in_pages(
@@ -156,6 +158,9 @@ async fn replay_stateless_normalized_events_for_ranges(
         aggregate.matched_raw_log_count += range.matched_raw_log_count;
         aggregate.normalized_event_synced_count += range.normalized_event_synced_count;
         aggregate.normalized_event_inserted_count += range.normalized_event_inserted_count;
+        aggregate
+            .stateless_replay_authority
+            .add(&range.stateless_replay_authority);
     }
     Ok(aggregate)
 }
@@ -187,6 +192,8 @@ async fn replay_stateless_normalized_events_in_pages(
         matched_raw_log_count: 0,
         normalized_event_synced_count: 0,
         normalized_event_inserted_count: 0,
+        stateless_replay_authority: bigname_storage::NormalizedEventReplayAuthoritySummary::default(
+        ),
     };
     let mut from_block = range_start_block_number;
     loop {
@@ -219,6 +226,9 @@ async fn replay_stateless_normalized_events_in_pages(
         aggregate.matched_raw_log_count += page.matched_raw_log_count;
         aggregate.normalized_event_synced_count += page.normalized_event_synced_count;
         aggregate.normalized_event_inserted_count += page.normalized_event_inserted_count;
+        aggregate
+            .stateless_replay_authority
+            .add(&page.stateless_replay_authority);
 
         if to_block == target_block_number {
             break;

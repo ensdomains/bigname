@@ -979,6 +979,79 @@ Use `RUST_LOG=info,sqlx::query=error` for these runs; otherwise SQLx slow-query
 warnings can print huge generated INSERT statements for dense chunks and waste
 time on logging instead of ingest.
 
+### Targeted stateless normalized-event repair
+
+Use `replay normalized-events --stateless-only` when a retained canonical raw
+fact re-derives a stateless normalized event differently from a stale stored
+row and the ordinary family sync correctly fails closed on that stable event
+identity. This is a write-authoritative repair, not a dry run: stop the indexer
+so live adapter or startup family sync cannot race the selected rows. Projection
+workers may remain running because the repair publishes the ordinary durable
+normalized-event change journal they consume.
+
+For an exact block, run:
+
+```sh
+bigname-indexer replay normalized-events \
+  --deployment-profile <deployment-profile> \
+  --chain <chain-id> \
+  --stateless-only \
+  --block-hash <canonical-block-hash>
+```
+
+Repeat `--block-hash` to select more than one exact block. A contiguous repair
+window uses the same authority without invoking full closure:
+
+```sh
+bigname-indexer replay normalized-events \
+  --deployment-profile <deployment-profile> \
+  --chain <chain-id> \
+  --stateless-only \
+  --from-block <first-block> \
+  --to-block <last-block>
+```
+
+`BIGNAME_INDEXER_REPLAY_NORMALIZED_EVENTS_STATELESS_ONLY=true` is the
+environment equivalent of the flag. The mode selects only lanes marked
+stateless by the central normalized-event replay contract: the complete
+block-derived and ENSv1 reverse-claim producers, plus the normalized-event-only
+lane of ENSv1 subregistry discovery. The latter reads existing stable
+contract-instance context but does not reconcile discovery edges. It never
+runs ENSv1 unwrapped-authority or any other closure/stateful lane. Leaving off
+the flag preserves the existing refusal when a block-hash or source-scoped
+selection includes a closure/context-dependent adapter.
+
+For every derived identity, the storage log message
+`stateless-only normalized-event replay identity examined` carries
+`event_identity`, `derivation_kind`,
+`identity_outcome=inserted|unchanged|superseded`, and `differing_fields`. The
+storage message `stateless-only normalized-event replay authority completed`
+reports those counts for one persistence transaction and can appear more than
+once for a chunked range. Use the command-wide `raw-fact normalized-event replay
+completed` message for aggregate `identities_examined`, `identities_inserted`,
+`identities_unchanged`, and `identities_superseded`. Treat an unexpected
+identity or differing field as a hard stop before widening the selection. A
+superseded row keeps its `normalized_event_id`, receives the current derivation,
+and appends a `projection_normalized_event_changes` record so the worker
+invalidates and re-derives dependent projections. An unchanged rerun appends no
+additional change record. Replay fails closed with `would change downstream
+projection identity` if old and current content would address different
+projection keys; the retained-row journal cannot reconstruct the old key, so
+that case needs a separately reviewed key-aware repair rather than this flag.
+
+The 2026-07-23 Ethereum Mainnet repair is the reference scenario. Four
+`ens_v1_registry_resolver_changed` rows retained pre-#208 attribution in
+`after_state` (the old registry instance and resolver-address-keyed observation
+key), so startup family sync rejected the first mismatch. For each implicated
+canonical block hash, capture the family-sync error and stored row for review,
+then run the exact-block command above. Expect only that
+[derivation kind](glossary.md#derivation-kind) to report `superseded`, with
+`differing_fields` identifying the stale content; closure-derived rows in the
+same block must not appear in the examined set. Restart the indexer after the
+reported scope matches the reviewed incident, and let projection derive/apply
+drain the resulting journal work. Do not hand-update `after_state`, delete the
+normalized row, or remove its existing journal records.
+
 ### Single-phase to two-phase normalized replay upgrade
 
 The `raw_fact_normalized_events` cursor has no phase-version field. Its state at

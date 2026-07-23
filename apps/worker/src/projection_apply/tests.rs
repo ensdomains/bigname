@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use super::{
     NORMALIZED_EVENT_DERIVE_BATCH_LIMIT, NORMALIZED_EVENT_DERIVE_PROGRESS_LIMIT,
+    apply::apply_pending_invalidations,
     derive::{
         capture_normalized_event_change_watermark, derive_normalized_event_invalidations,
         derive_normalized_event_invalidations_through,
@@ -34,6 +35,119 @@ async fn test_database() -> Result<TestDatabase> {
         "failed to apply migrations for worker projection apply tests",
     )
     .await
+}
+
+#[tokio::test]
+async fn stateless_replay_supersession_invalidates_and_rederives_projection() -> Result<()> {
+    let database = test_database().await?;
+    let address = "0x1111111111111111111111111111111111111111";
+    let mut event = bigname_storage::NormalizedEvent {
+        event_identity: "projection-apply:stateless-replay-supersession".to_owned(),
+        namespace: "ens".to_owned(),
+        logical_name_id: None,
+        resource_id: None,
+        event_kind: "ReverseChanged".to_owned(),
+        source_family: "ens_v1_reverse_l1".to_owned(),
+        manifest_version: 1,
+        source_manifest_id: None,
+        chain_id: Some("ethereum-mainnet".to_owned()),
+        block_number: Some(42),
+        block_hash: Some(
+            "0x4242424242424242424242424242424242424242424242424242424242424242".to_owned(),
+        ),
+        transaction_hash: Some(
+            "0x4343434343434343434343434343434343434343434343434343434343434343".to_owned(),
+        ),
+        log_index: Some(1),
+        raw_fact_ref: json!({
+            "kind": "raw_log",
+            "chain_id": "ethereum-mainnet",
+            "block_number": 42,
+            "block_hash": "0x4242424242424242424242424242424242424242424242424242424242424242",
+            "transaction_hash": "0x4343434343434343434343434343434343434343434343434343434343434343",
+            "log_index": 1
+        }),
+        derivation_kind: "ens_v1_reverse_claim".to_owned(),
+        canonicality_state: bigname_storage::CanonicalityState::Canonical,
+        before_state: json!({}),
+        after_state: json!({
+            "address": address,
+            "namespace": "ens",
+            "coin_type": "60",
+            "claim_provenance": {"derivation_vintage": "stale"}
+        }),
+    };
+    bigname_storage::upsert_normalized_events(database.pool(), std::slice::from_ref(&event))
+        .await?;
+    assert_eq!(derive_once(database.pool()).await?.scanned_event_count, 1);
+    assert_eq!(
+        apply_pending_invalidations(database.pool(), 10, None)
+            .await?
+            .applied_invalidation_count,
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT claim_provenance->>'derivation_vintage'
+            FROM primary_names_current
+            WHERE address = $1
+              AND namespace = 'ens'
+              AND coin_type = '60'
+            "#,
+        )
+        .bind(address)
+        .fetch_one(database.pool())
+        .await?,
+        "stale"
+    );
+
+    event.after_state["claim_provenance"]["derivation_vintage"] = json!("current");
+    let authority = bigname_storage::upsert_normalized_events_with_stateless_replay_authority(
+        database.pool(),
+        std::slice::from_ref(&event),
+    )
+    .await?;
+    assert_eq!(authority.identities_superseded, 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM projection_normalized_event_changes change
+            JOIN normalized_events event
+              ON event.normalized_event_id = change.normalized_event_id
+            WHERE event.event_identity = $1
+              AND change.change_kind = 'canonicality_update'
+            "#,
+        )
+        .bind(&event.event_identity)
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+
+    let derive = derive_once(database.pool()).await?;
+    assert_eq!(derive.scanned_event_count, 1);
+    assert_eq!(derive.enqueued_invalidation_count, 1);
+    let apply = apply_pending_invalidations(database.pool(), 10, None).await?;
+    assert_eq!(apply.applied_invalidation_count, 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT claim_provenance->>'derivation_vintage'
+            FROM primary_names_current
+            WHERE address = $1
+              AND namespace = 'ens'
+              AND coin_type = '60'
+            "#,
+        )
+        .bind(address)
+        .fetch_one(database.pool())
+        .await?,
+        "current"
+    );
+
+    database.cleanup().await
 }
 
 #[tokio::test]

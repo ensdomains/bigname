@@ -15,6 +15,16 @@ pub(super) enum PersistedRawPayloadAdapterSyncMode {
 }
 
 impl PersistedRawPayloadAdapterSyncMode {
+    pub(super) fn uses_stateless_replay_authority(self) -> bool {
+        matches!(
+            self,
+            Self::RawFactReplay {
+                replay_contract_plan,
+                ..
+            } if replay_contract_plan.uses_stateless_replay_authority()
+        )
+    }
+
     pub(super) fn selects_adapter(
         self,
         source_scope: Option<&[(String, String, i64, i64)]>,
