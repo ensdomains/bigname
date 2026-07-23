@@ -980,6 +980,111 @@ async fn reorg_common_ancestor_must_be_on_current_canonical_branch() -> Result<(
 }
 
 #[tokio::test]
+async fn losing_branch_orphaning_rolls_back_every_block_on_mid_branch_failure() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let ancestor = provider_block(
+        "0x1010101010101010101010101010101010101010101010101010101010101010",
+        None,
+        1,
+    );
+    let losing_parent = provider_block(
+        "0x2020202020202020202020202020202020202020202020202020202020202020",
+        Some(&ancestor.block_hash),
+        2,
+    );
+    let losing_head = provider_block(
+        "0x3030303030303030303030303030303030303030303030303030303030303030",
+        Some(&losing_parent.block_hash),
+        3,
+    );
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[
+            provider_block_to_lineage(chain, &ancestor, CanonicalityState::Canonical),
+            provider_block_to_lineage(chain, &losing_parent, CanonicalityState::Canonical),
+            provider_block_to_lineage(chain, &losing_head, CanonicalityState::Canonical),
+        ],
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE FUNCTION fail_middle_losing_branch_orphaning()
+        RETURNS TRIGGER
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            IF NEW.block_hash =
+                '0x2020202020202020202020202020202020202020202020202020202020202020'
+               AND NEW.canonicality_state = 'orphaned'::canonicality_state
+            THEN
+                RAISE EXCEPTION 'injected failure while orphaning the middle losing block';
+            END IF;
+            RETURN NEW;
+        END;
+        $$
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE TRIGGER fail_middle_losing_branch_orphaning
+        BEFORE UPDATE OF canonicality_state ON chain_lineage
+        FOR EACH ROW
+        EXECUTE FUNCTION fail_middle_losing_branch_orphaning()
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    let error = orphan_canonical_branch(
+        database.pool(),
+        chain,
+        &losing_head.block_hash,
+        Some(&ancestor.block_hash),
+    )
+    .await
+    .expect_err("the injected middle-block failure must abort losing-branch orphaning");
+    assert!(
+        format!("{error:#}").contains("injected failure while orphaning the middle losing block"),
+        "unexpected orphaning error: {error:#}"
+    );
+
+    let states = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT block_hash, canonicality_state::TEXT
+        FROM chain_lineage
+        WHERE chain_id = $1
+          AND block_hash = ANY($2::TEXT[])
+        ORDER BY block_number
+        "#,
+    )
+    .bind(chain)
+    .bind([losing_parent.block_hash, losing_head.block_hash])
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        states,
+        vec![
+            (
+                "0x2020202020202020202020202020202020202020202020202020202020202020"
+                    .to_owned(),
+                "canonical".to_owned(),
+            ),
+            (
+                "0x3030303030303030303030303030303030303030303030303030303030303030"
+                    .to_owned(),
+                "canonical".to_owned(),
+            ),
+        ],
+        "a failed losing-branch repair must not leave mixed canonicality"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn awaiting_ancestor_raw_persistence_preserves_walked_orphaned_lineage() -> Result<()> {
     let database = TestDatabase::new().await?;
     let old_head = provider_block(
