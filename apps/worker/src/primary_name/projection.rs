@@ -49,6 +49,17 @@ pub async fn rebuild_primary_names_current(
     rebuild_primary_names_current_inner(pool, address, namespace, coin_type, None).await
 }
 
+pub(crate) async fn rebuild_primary_names_current_with_heartbeat(
+    pool: &PgPool,
+    address: Option<&str>,
+    namespace: Option<&str>,
+    coin_type: Option<&str>,
+    loop_heartbeat: &mut LoopHeartbeat,
+) -> Result<PrimaryNamesCurrentRebuildSummary> {
+    rebuild_primary_names_current_inner(pool, address, namespace, coin_type, Some(loop_heartbeat))
+        .await
+}
+
 async fn rebuild_primary_names_current_inner(
     pool: &PgPool,
     address: Option<&str>,

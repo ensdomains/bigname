@@ -87,6 +87,15 @@ pub async fn rebuild_resolver_current(
     rebuild_resolver_current_inner(pool, chain_id, resolver_address, None).await
 }
 
+pub(crate) async fn rebuild_resolver_current_with_heartbeat(
+    pool: &PgPool,
+    chain_id: Option<&str>,
+    resolver_address: Option<&str>,
+    loop_heartbeat: &mut LoopHeartbeat,
+) -> Result<ResolverCurrentRebuildSummary> {
+    rebuild_resolver_current_inner(pool, chain_id, resolver_address, Some(loop_heartbeat)).await
+}
+
 async fn rebuild_resolver_current_inner(
     pool: &PgPool,
     chain_id: Option<&str>,

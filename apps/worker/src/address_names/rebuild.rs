@@ -44,6 +44,14 @@ pub async fn rebuild_address_names_current(
     rebuild_address_names_current_inner(pool, address, None).await
 }
 
+pub(crate) async fn rebuild_address_names_current_with_heartbeat(
+    pool: &PgPool,
+    address: Option<&str>,
+    loop_heartbeat: &mut LoopHeartbeat,
+) -> Result<AddressNamesCurrentRebuildSummary> {
+    rebuild_address_names_current_inner(pool, address, Some(loop_heartbeat)).await
+}
+
 async fn rebuild_address_names_current_inner(
     pool: &PgPool,
     address: Option<&str>,

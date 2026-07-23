@@ -65,6 +65,14 @@ pub async fn rebuild_permissions_current(
     rebuild_permissions_current_inner(pool, resource_id, None).await
 }
 
+pub(crate) async fn rebuild_permissions_current_with_heartbeat(
+    pool: &PgPool,
+    resource_id: Option<&str>,
+    loop_heartbeat: &mut LoopHeartbeat,
+) -> Result<PermissionsCurrentRebuildSummary> {
+    rebuild_permissions_current_inner(pool, resource_id, Some(loop_heartbeat)).await
+}
+
 async fn rebuild_permissions_current_inner(
     pool: &PgPool,
     resource_id: Option<&str>,

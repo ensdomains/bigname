@@ -19,7 +19,9 @@ pub use hydration::{
 };
 pub use projection::rebuild_primary_names_current;
 #[allow(unused_imports)]
-pub(crate) use projection::rebuild_primary_names_current_for_replay;
+pub(crate) use projection::{
+    rebuild_primary_names_current_for_replay, rebuild_primary_names_current_with_heartbeat,
+};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PrimaryNamesCurrentRebuildSummary {

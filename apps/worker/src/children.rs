@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use bigname_storage::projection_staging::stream_canonical_declared_child_sources_after;
 use bigname_storage::{
     CanonicalityState, ChildrenCurrentRow, load_canonical_declared_child_sources, load_raw_block,
-    stream_canonical_declared_child_sources, upsert_children_current_rows,
+    upsert_children_current_rows,
 };
 use futures_util::{StreamExt, TryStreamExt, pin_mut, stream};
 use serde_json::{Value, json};
@@ -45,6 +45,14 @@ pub async fn rebuild_children_current(
     parent_logical_name_id: Option<&str>,
 ) -> Result<ChildrenCurrentRebuildSummary> {
     rebuild_children_current_inner(pool, parent_logical_name_id, None).await
+}
+
+pub(crate) async fn rebuild_children_current_with_heartbeat(
+    pool: &PgPool,
+    parent_logical_name_id: Option<&str>,
+    loop_heartbeat: &mut LoopHeartbeat,
+) -> Result<ChildrenCurrentRebuildSummary> {
+    rebuild_children_current_inner(pool, parent_logical_name_id, Some(loop_heartbeat)).await
 }
 
 async fn rebuild_children_current_inner(

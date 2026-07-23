@@ -278,7 +278,7 @@ async fn run_automatic_current_projection_replay_loop(
             );
 
             if hydration_schedule.start_primary_hydration {
-                if let Some(config) = background_primary_hydration_config(
+                if let Some(config) = primary_hydration_loop::background_primary_hydration_config(
                     &primary_hydration_config,
                     primary_hydration_started,
                 ) {
@@ -367,15 +367,6 @@ async fn run_automatic_current_projection_replay_loop(
             sleep(poll_interval).await;
         }
     }
-}
-
-fn background_primary_hydration_config(
-    config: &Option<primary_name::PrimaryNameLegacyReverseHydrationConfig>,
-    primary_hydration_started: bool,
-) -> Option<primary_name::PrimaryNameLegacyReverseHydrationConfig> {
-    (!primary_hydration_started)
-        .then(|| config.clone())
-        .flatten()
 }
 
 async fn record_loop_heartbeat_if_due(
