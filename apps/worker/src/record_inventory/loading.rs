@@ -7,9 +7,11 @@ use uuid::Uuid;
 
 use super::{constants::*, types::RelevantEvent};
 
-pub(super) fn stream_target_resource_ids<'a>(
-    pool: &'a PgPool,
-) -> impl Stream<Item = Result<Uuid>> + 'a {
+pub(super) fn stream_target_resource_ids_after(
+    pool: &PgPool,
+    after_resource_id: Option<Uuid>,
+    limit: i64,
+) -> impl Stream<Item = Result<Uuid>> + '_ {
     let derivation_kinds = record_inventory_derivation_kinds();
     let resolver_event_namespaces = resolver_event_namespaces();
     sqlx::query(
@@ -36,7 +38,9 @@ pub(super) fn stream_target_resource_ids<'a>(
               'safe'::canonicality_state,
               'finalized'::canonicality_state
           )
+          AND ($6::UUID IS NULL OR ne.resource_id > $6)
         ORDER BY ne.resource_id
+        LIMIT $7
         "#,
     )
     .bind(derivation_kinds)
@@ -44,6 +48,8 @@ pub(super) fn stream_target_resource_ids<'a>(
     .bind(EVENT_KIND_RECORD_VERSION_CHANGED)
     .bind(EVENT_KIND_RESOLVER_CHANGED)
     .bind(resolver_event_namespaces)
+    .bind(after_resource_id)
+    .bind(limit)
     .fetch(pool)
     .map(|row| {
         row.context("failed to stream resource_ids for record_inventory_current rebuild")

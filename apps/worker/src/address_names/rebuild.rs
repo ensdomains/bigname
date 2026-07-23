@@ -1,16 +1,20 @@
 use anyhow::{Context, Result};
+use bigname_storage::projection_staging::{
+    insert_address_names_current_full_rebuild_rows_in_transaction,
+    publish_address_names_current_full_rebuild_at_input_revision,
+};
 use bigname_storage::{
     AddressNamesCurrentAddressReplacement, AddressNamesCurrentFullRebuild,
-    begin_address_names_current_address_replacement, begin_address_names_current_full_rebuild,
-    drop_address_names_current_address_replacement, drop_address_names_current_full_rebuild,
+    begin_address_names_current_address_replacement,
+    drop_address_names_current_address_replacement,
     insert_address_names_current_address_replacement_rows,
-    insert_address_names_current_full_rebuild_rows,
-    publish_address_names_current_address_replacement, publish_address_names_current_full_rebuild,
-    replace_address_names_current_logical_names,
+    publish_address_names_current_address_replacement, replace_address_names_current_logical_names,
 };
-use futures_util::{TryStreamExt, pin_mut};
+use futures_util::{StreamExt, TryStreamExt, pin_mut, stream};
+use serde_json::{Value, json};
 use sqlx::PgPool;
 use tokio::task::JoinSet;
+use uuid::Uuid;
 
 use crate::primary_name::rebuild_heartbeat::{
     LoopHeartbeat, record_rebuild_progress, run_rebuild_phase,
@@ -20,14 +24,17 @@ use super::{
     AddressNamesCurrentRebuildSummary,
     load::{
         load_current_bindings_for_address, load_current_bindings_for_logical_name,
-        stream_current_bindings,
+        stream_current_bindings_after,
     },
     model::CurrentBindingSeed,
     projection::build_rows_for_binding,
     util::normalize_address,
 };
 
+#[cfg(not(test))]
 const ADDRESS_NAMES_CURRENT_REBUILD_BATCH_SIZE: usize = 2_000;
+#[cfg(test)]
+const ADDRESS_NAMES_CURRENT_REBUILD_BATCH_SIZE: usize = 1;
 const ADDRESS_NAMES_CURRENT_REBUILD_CONCURRENCY: usize = 8;
 
 pub async fn rebuild_address_names_current(
@@ -37,14 +44,6 @@ pub async fn rebuild_address_names_current(
     rebuild_address_names_current_inner(pool, address, None).await
 }
 
-pub(crate) async fn rebuild_address_names_current_with_heartbeat(
-    pool: &PgPool,
-    address: Option<&str>,
-    loop_heartbeat: &mut LoopHeartbeat,
-) -> Result<AddressNamesCurrentRebuildSummary> {
-    rebuild_address_names_current_inner(pool, address, Some(loop_heartbeat)).await
-}
-
 async fn rebuild_address_names_current_inner(
     pool: &PgPool,
     address: Option<&str>,
@@ -52,8 +51,21 @@ async fn rebuild_address_names_current_inner(
 ) -> Result<AddressNamesCurrentRebuildSummary> {
     match address {
         Some(address) => rebuild_one_address(pool, address, loop_heartbeat).await,
-        None => rebuild_all_addresses(pool, loop_heartbeat).await,
+        None => {
+            let summary = rebuild_all_addresses(pool, None, loop_heartbeat).await?;
+            crate::replay::staging::cleanup_projection_checkpoint(pool, "address_names_current")
+                .await?;
+            Ok(summary)
+        }
     }
+}
+
+pub(crate) async fn rebuild_address_names_current_for_replay(
+    pool: &PgPool,
+    normalized_target_block: Option<i64>,
+    loop_heartbeat: Option<&mut LoopHeartbeat>,
+) -> Result<AddressNamesCurrentRebuildSummary> {
+    rebuild_all_addresses(pool, normalized_target_block, loop_heartbeat).await
 }
 
 pub async fn rebuild_address_names_current_logical_name(
@@ -132,63 +144,49 @@ async fn rebuild_address_names_current_logical_names_inner(
 
 async fn rebuild_all_addresses(
     pool: &PgPool,
+    normalized_target_block: Option<i64>,
     mut loop_heartbeat: Option<&mut LoopHeartbeat>,
 ) -> Result<AddressNamesCurrentRebuildSummary> {
-    let rebuild = run_rebuild_phase(
+    let deleted_row_count =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM address_names_current")
+            .fetch_one(pool)
+            .await
+            .context("failed to count address_names_current rows before full rebuild")?;
+    let deleted_row_count = u64::try_from(deleted_row_count)?;
+    let mut checkpoint = crate::replay::staging::ProjectionStagingCheckpoint::load_or_start(
         pool,
-        &mut loop_heartbeat,
-        "address_names_current.prepare",
-        begin_address_names_current_full_rebuild(pool),
+        "address_names_current",
+        normalized_target_block,
     )
     .await?;
-    let deleted_row_count = rebuild.previous_row_count();
+    let rebuild = AddressNamesCurrentFullRebuild::from_durable_stage(
+        checkpoint.stage_table(0)?.to_owned(),
+        deleted_row_count,
+    )?;
     tracing::info!(
         projection = "address_names_current",
         deleted_row_count,
         "address_names_current full rebuild staging started"
     );
 
-    let staged = match stage_all_address_rows(pool, &rebuild, &mut loop_heartbeat).await {
-        Ok(staged) => staged,
-        Err(error) => {
-            if let Err(drop_error) = drop_address_names_current_full_rebuild(pool, &rebuild).await {
-                tracing::warn!(
-                    projection = "address_names_current",
-                    error = %drop_error,
-                    "failed to drop address_names_current full rebuild staging table after error"
-                );
-            }
-            return Err(error);
-        }
+    if !checkpoint.staging_complete() {
+        stage_all_address_rows(pool, &rebuild, &mut checkpoint, &mut loop_heartbeat).await?;
+    }
+    let staged = AddressNamesCurrentStagingSummary {
+        upserted_row_count: checkpoint.staged_row_count()?,
     };
 
-    let (_deleted_row_count, published_row_count) = match run_rebuild_phase(
+    let (_deleted_row_count, published_row_count) = run_rebuild_phase(
         pool,
         &mut loop_heartbeat,
         "address_names_current.publish",
-        publish_address_names_current_full_rebuild(pool, &rebuild),
+        publish_address_names_current_full_rebuild_at_input_revision(
+            pool,
+            &rebuild,
+            checkpoint.full_replay_input_revision(),
+        ),
     )
-    .await
-    {
-        Ok(published) => published,
-        Err(error) => {
-            if let Err(drop_error) = drop_address_names_current_full_rebuild(pool, &rebuild).await {
-                tracing::warn!(
-                    projection = "address_names_current",
-                    error = %drop_error,
-                    "failed to drop address_names_current full rebuild staging table after publish error"
-                );
-            }
-            return Err(error);
-        }
-    };
-    if let Err(error) = drop_address_names_current_full_rebuild(pool, &rebuild).await {
-        tracing::warn!(
-            projection = "address_names_current",
-            error = %error,
-            "failed to drop address_names_current full rebuild staging table after publish"
-        );
-    }
+    .await?;
     tracing::info!(
         projection = "address_names_current",
         upserted_row_count = staged.upserted_row_count,
@@ -218,71 +216,99 @@ struct AddressNamesCurrentStagingSummary {
 async fn stage_all_address_rows(
     pool: &PgPool,
     rebuild: &AddressNamesCurrentFullRebuild,
+    checkpoint: &mut crate::replay::staging::ProjectionStagingCheckpoint,
     loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
 ) -> Result<AddressNamesCurrentStagingSummary> {
-    let mut queued_binding_count = 0usize;
-    let mut completed_binding_count = 0usize;
-    let mut rows = Vec::with_capacity(ADDRESS_NAMES_CURRENT_REBUILD_BATCH_SIZE);
-    let mut upserted_row_count = 0usize;
-
-    let bindings = stream_current_bindings(pool);
-    pin_mut!(bindings);
-    let mut tasks = JoinSet::new();
-
-    while tasks.len() < ADDRESS_NAMES_CURRENT_REBUILD_CONCURRENCY {
-        let Some(binding) = bindings.try_next().await? else {
-            break;
-        };
-        queued_binding_count += 1;
-        spawn_address_names_rebuild_task(&mut tasks, pool, binding, None);
-    }
-
-    while let Some(result) = tasks.join_next().await {
-        completed_binding_count += 1;
-        let binding_rows = result??;
-        record_rebuild_progress(pool, loop_heartbeat).await;
-        rows.extend(binding_rows);
-
-        if rows.len() >= ADDRESS_NAMES_CURRENT_REBUILD_BATCH_SIZE {
-            upserted_row_count +=
-                insert_address_names_current_full_rebuild_rows(pool, rebuild, &rows)
-                    .await?
-                    .len();
-            rows.clear();
-        }
-
-        if completed_binding_count.is_multiple_of(5_000) {
-            tracing::info!(
-                projection = "address_names_current",
-                queued_binding_count,
-                completed_binding_count,
-                upserted_row_count,
-                "address_names_current rebuild bindings processed"
-            );
-        }
-
-        while tasks.len() < ADDRESS_NAMES_CURRENT_REBUILD_CONCURRENCY {
+    loop {
+        let input_fence = checkpoint.prepare_next_batch(pool).await?;
+        let cursor = address_names_source_cursor(checkpoint.last_source_key())?;
+        let bindings = stream_current_bindings_after(
+            pool,
+            cursor
+                .as_ref()
+                .map(|(logical_name_id, binding_id)| (logical_name_id.as_str(), *binding_id)),
+            i64::try_from(ADDRESS_NAMES_CURRENT_REBUILD_BATCH_SIZE)?,
+        );
+        pin_mut!(bindings);
+        let mut page = Vec::with_capacity(ADDRESS_NAMES_CURRENT_REBUILD_BATCH_SIZE);
+        while page.len() < ADDRESS_NAMES_CURRENT_REBUILD_BATCH_SIZE {
             let Some(binding) = bindings.try_next().await? else {
                 break;
             };
-            queued_binding_count += 1;
-            spawn_address_names_rebuild_task(&mut tasks, pool, binding, None);
+            page.push(binding);
         }
-    }
-
-    if !rows.is_empty() {
-        upserted_row_count += insert_address_names_current_full_rebuild_rows(pool, rebuild, &rows)
-            .await?
-            .len();
+        if page.is_empty() {
+            checkpoint.mark_staging_complete(pool, input_fence).await?;
+            break;
+        }
+        let last = page
+            .last()
+            .expect("address_names_current staging page must not be empty");
+        let last_source_key = json!([last.logical_name_id, last.surface_binding_id]);
+        let rows = build_address_names_page(pool, &page, loop_heartbeat).await?;
+        let mut transaction = pool.begin().await?;
+        let staged = insert_address_names_current_full_rebuild_rows_in_transaction(
+            &mut transaction,
+            rebuild,
+            &rows,
+        )
+        .await?
+        .len() as u64;
+        let progress = checkpoint.progress_after_batch(page.len(), last_source_key, staged, 0)?;
+        checkpoint
+            .persist_progress(&mut transaction, &progress, &input_fence)
+            .await?;
+        transaction.commit().await?;
+        checkpoint.accept_progress(progress, input_fence);
+        let completed_binding_count = checkpoint.completed_source_count()?;
+        if completed_binding_count.is_multiple_of(5_000) {
+            tracing::info!(
+                projection = "address_names_current",
+                completed_binding_count,
+                upserted_row_count = checkpoint.staged_row_count()?,
+                "address_names_current rebuild bindings processed"
+            );
+        }
     }
 
     tracing::info!(
         projection = "address_names_current",
-        upserted_row_count,
+        upserted_row_count = checkpoint.staged_row_count()?,
         "address_names_current full rebuild staged projection rows"
     );
 
-    Ok(AddressNamesCurrentStagingSummary { upserted_row_count })
+    Ok(AddressNamesCurrentStagingSummary {
+        upserted_row_count: checkpoint.staged_row_count()?,
+    })
+}
+
+async fn build_address_names_page(
+    pool: &PgPool,
+    bindings: &[CurrentBindingSeed],
+    loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
+) -> Result<Vec<bigname_storage::AddressNameCurrentRow>> {
+    let rows = stream::iter(bindings.iter().cloned().enumerate())
+        .map(|(source_index, binding)| {
+            let pool = pool.clone();
+            async move {
+                Ok::<_, anyhow::Error>((
+                    source_index,
+                    build_rows_for_binding(&pool, &binding, None).await?,
+                ))
+            }
+        })
+        .buffer_unordered(ADDRESS_NAMES_CURRENT_REBUILD_CONCURRENCY);
+    pin_mut!(rows);
+    let mut completed_pages = Vec::with_capacity(bindings.len());
+    while let Some(binding_rows) = rows.try_next().await? {
+        completed_pages.push(binding_rows);
+        record_rebuild_progress(pool, loop_heartbeat).await;
+    }
+    completed_pages.sort_by_key(|(source_index, _)| *source_index);
+    Ok(completed_pages
+        .into_iter()
+        .flat_map(|(_, rows)| rows)
+        .collect())
 }
 
 fn spawn_address_names_rebuild_task(
@@ -295,6 +321,19 @@ fn spawn_address_names_rebuild_task(
     tasks.spawn(
         async move { build_rows_for_binding(&pool, &binding, address_filter.as_deref()).await },
     );
+}
+
+fn address_names_source_cursor(value: Option<&Value>) -> Result<Option<(String, Uuid)>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let [logical_name_id, binding_id]: [String; 2] = serde_json::from_value(value.clone())
+        .context("address_names_current staging source key must contain two strings")?;
+    Ok(Some((
+        logical_name_id,
+        Uuid::parse_str(&binding_id)
+            .context("address_names_current staging source binding id must be a UUID")?,
+    )))
 }
 
 async fn rebuild_one_address(

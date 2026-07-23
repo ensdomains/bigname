@@ -2,10 +2,9 @@ use anyhow::{Context, Result};
 use bigname_storage::{
     RecordInventoryCurrentRow, normalize_evm_address, upsert_record_inventory_current_rows,
 };
-use futures_util::{TryStreamExt, pin_mut};
+use futures_util::{StreamExt, TryStreamExt, pin_mut, stream};
 use serde_json::{Value, json};
 use sqlx::{PgPool, types::time::OffsetDateTime};
-use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use crate::primary_name::rebuild_heartbeat::{
@@ -17,8 +16,8 @@ use crate::primary_name::rebuild_heartbeat::{
 mod staged_rebuild;
 
 use staged_rebuild::{
-    RECORD_INVENTORY_CURRENT_COLUMNS, count_rows, create_stage_table, drop_stage_table,
-    publish_stage_table, stage_record_inventory_current_rows,
+    RECORD_INVENTORY_CURRENT_COLUMNS, count_rows, publish_stage_table,
+    stage_record_inventory_current_rows,
 };
 
 use super::{
@@ -32,7 +31,7 @@ use super::{
         build_last_change, build_provenance, build_selectors, build_unsupported_families,
         resolver_family_status_value,
     },
-    loading::{load_relevant_events, stream_target_resource_ids},
+    loading::{load_relevant_events, stream_target_resource_ids_after},
     profile::{
         ResolverProfileGate, ResolverRecordFamilyStatuses, resolver_address_from_event,
         resolver_local_source_family, resolver_source_family_for_resolver_event,
@@ -77,7 +76,10 @@ mod staged_rebuild_tests {
     }
 }
 
+#[cfg(not(test))]
 const RECORD_INVENTORY_CURRENT_REBUILD_BATCH_SIZE: usize = 500;
+#[cfg(test)]
+const RECORD_INVENTORY_CURRENT_REBUILD_BATCH_SIZE: usize = 1;
 const RECORD_INVENTORY_CURRENT_REBUILD_CONCURRENCY: usize = 8;
 
 pub(super) async fn rebuild_record_inventory_current(
@@ -87,14 +89,6 @@ pub(super) async fn rebuild_record_inventory_current(
     rebuild_record_inventory_current_inner(pool, resource_id, None).await
 }
 
-pub(super) async fn rebuild_record_inventory_current_with_heartbeat(
-    pool: &PgPool,
-    resource_id: Option<&str>,
-    loop_heartbeat: &mut LoopHeartbeat,
-) -> Result<RecordInventoryCurrentRebuildSummary> {
-    rebuild_record_inventory_current_inner(pool, resource_id, Some(loop_heartbeat)).await
-}
-
 async fn rebuild_record_inventory_current_inner(
     pool: &PgPool,
     resource_id: Option<&str>,
@@ -102,94 +96,114 @@ async fn rebuild_record_inventory_current_inner(
 ) -> Result<RecordInventoryCurrentRebuildSummary> {
     match resource_id {
         Some(resource_id) => rebuild_one_resource(pool, resource_id, loop_heartbeat).await,
-        None => rebuild_all_resources(pool, loop_heartbeat).await,
+        None => {
+            let summary = rebuild_all_resources(pool, None, loop_heartbeat).await?;
+            crate::replay::staging::cleanup_projection_checkpoint(pool, "record_inventory_current")
+                .await?;
+            Ok(summary)
+        }
     }
+}
+
+pub(super) async fn rebuild_record_inventory_current_for_replay(
+    pool: &PgPool,
+    normalized_target_block: Option<i64>,
+    loop_heartbeat: Option<&mut LoopHeartbeat>,
+) -> Result<RecordInventoryCurrentRebuildSummary> {
+    rebuild_all_resources(pool, normalized_target_block, loop_heartbeat).await
 }
 
 async fn rebuild_all_resources(
     pool: &PgPool,
+    normalized_target_block: Option<i64>,
     mut loop_heartbeat: Option<&mut LoopHeartbeat>,
 ) -> Result<RecordInventoryCurrentRebuildSummary> {
-    let mut conn = pool
-        .acquire()
-        .await
-        .context("failed to acquire record_inventory_current staging connection")?;
-    let stage_table = create_stage_table(&mut conn, "record_inventory_current").await?;
     let previous_row_count = run_rebuild_phase(
         pool,
         &mut loop_heartbeat,
         "record_inventory_current.count_existing",
-        count_rows(&mut conn, "record_inventory_current", None),
+        count_rows(pool, "record_inventory_current", None),
     )
     .await?;
-    let mut rows = Vec::with_capacity(RECORD_INVENTORY_CURRENT_REBUILD_BATCH_SIZE);
-    let mut requested_resource_count = 0usize;
-    let mut completed_resource_count = 0usize;
-    let mut upserted_row_count = 0usize;
-
-    let resource_ids = stream_target_resource_ids(pool);
-    pin_mut!(resource_ids);
-    let mut tasks = JoinSet::new();
-
-    while tasks.len() < RECORD_INVENTORY_CURRENT_REBUILD_CONCURRENCY {
-        let Some(resource_id) = resource_ids.try_next().await? else {
-            break;
-        };
-        requested_resource_count += 1;
-        spawn_record_inventory_rebuild_task(&mut tasks, pool, resource_id);
-    }
-
-    while let Some(result) = tasks.join_next().await {
-        completed_resource_count += 1;
-        let row = result??;
-        record_rebuild_progress(pool, &mut loop_heartbeat).await;
-        if let Some(row) = row {
-            rows.push(row);
-        }
-
-        if rows.len() >= RECORD_INVENTORY_CURRENT_REBUILD_BATCH_SIZE {
-            upserted_row_count +=
-                stage_record_inventory_current_rows(&mut conn, &stage_table, &rows).await? as usize;
-            rows.clear();
-        }
-
-        if completed_resource_count.is_multiple_of(5_000) {
-            tracing::info!(
-                projection = "record_inventory_current",
-                queued_resource_count = requested_resource_count,
-                completed_resource_count,
-                upserted_row_count,
-                "record_inventory_current rebuild resources processed"
+    let mut checkpoint = crate::replay::staging::ProjectionStagingCheckpoint::load_or_start(
+        pool,
+        "record_inventory_current",
+        normalized_target_block,
+    )
+    .await?;
+    if !checkpoint.staging_complete() {
+        loop {
+            let input_fence = checkpoint.prepare_next_batch(pool).await?;
+            let after_resource_id = checkpoint
+                .last_source_key()
+                .and_then(serde_json::Value::as_str)
+                .map(Uuid::parse_str)
+                .transpose()
+                .context("record_inventory_current staging source key must be a UUID")?;
+            let resource_ids = stream_target_resource_ids_after(
+                pool,
+                after_resource_id,
+                i64::try_from(RECORD_INVENTORY_CURRENT_REBUILD_BATCH_SIZE)?,
             );
-        }
-
-        while tasks.len() < RECORD_INVENTORY_CURRENT_REBUILD_CONCURRENCY {
-            let Some(resource_id) = resource_ids.try_next().await? else {
+            pin_mut!(resource_ids);
+            let mut page = Vec::with_capacity(RECORD_INVENTORY_CURRENT_REBUILD_BATCH_SIZE);
+            while page.len() < RECORD_INVENTORY_CURRENT_REBUILD_BATCH_SIZE {
+                let Some(resource_id) = resource_ids.try_next().await? else {
+                    break;
+                };
+                page.push(resource_id);
+            }
+            if page.is_empty() {
+                checkpoint.mark_staging_complete(pool, input_fence).await?;
                 break;
-            };
-            requested_resource_count += 1;
-            spawn_record_inventory_rebuild_task(&mut tasks, pool, resource_id);
+            }
+            let last_source_key = serde_json::Value::String(
+                page.last()
+                    .expect("record_inventory_current staging page must not be empty")
+                    .to_string(),
+            );
+            let rows = build_record_inventory_page(pool, &page, &mut loop_heartbeat).await?;
+            let mut transaction = pool.begin().await?;
+            let staged = stage_record_inventory_current_rows(
+                &mut transaction,
+                checkpoint.stage_table(0)?,
+                &rows,
+            )
+            .await?;
+            let progress =
+                checkpoint.progress_after_batch(page.len(), last_source_key, staged, 0)?;
+            checkpoint
+                .persist_progress(&mut transaction, &progress, &input_fence)
+                .await?;
+            transaction.commit().await?;
+            checkpoint.accept_progress(progress, input_fence);
+            let completed_resource_count = checkpoint.completed_source_count()?;
+            if completed_resource_count.is_multiple_of(5_000) {
+                tracing::info!(
+                    projection = "record_inventory_current",
+                    completed_resource_count,
+                    upserted_row_count = checkpoint.staged_row_count()?,
+                    "record_inventory_current rebuild resources processed"
+                );
+            }
         }
     }
-
-    if !rows.is_empty() {
-        upserted_row_count +=
-            stage_record_inventory_current_rows(&mut conn, &stage_table, &rows).await? as usize;
-    }
+    let requested_resource_count = checkpoint.completed_source_count()?;
+    let upserted_row_count = checkpoint.staged_row_count()?;
     let (_deleted_row_count, published_row_count) = run_rebuild_phase(
         pool,
         &mut loop_heartbeat,
         "record_inventory_current.publish",
         publish_stage_table(
-            &mut conn,
+            pool,
             "record_inventory_current",
-            &stage_table,
+            checkpoint.stage_table(0)?,
             RECORD_INVENTORY_CURRENT_COLUMNS,
             None,
+            checkpoint.full_replay_input_revision(),
         ),
     )
     .await?;
-    drop_stage_table(&mut conn, &stage_table).await?;
     debug_assert_eq!(published_row_count as usize, upserted_row_count);
 
     Ok(RecordInventoryCurrentRebuildSummary {
@@ -199,13 +213,26 @@ async fn rebuild_all_resources(
     })
 }
 
-fn spawn_record_inventory_rebuild_task(
-    tasks: &mut JoinSet<Result<Option<RecordInventoryCurrentRow>>>,
+async fn build_record_inventory_page(
     pool: &PgPool,
-    resource_id: Uuid,
-) {
-    let pool = pool.clone();
-    tasks.spawn(async move { build_row_for_resource(&pool, resource_id).await });
+    resource_ids: &[Uuid],
+    loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
+) -> Result<Vec<RecordInventoryCurrentRow>> {
+    let rows = stream::iter(resource_ids.iter().copied())
+        .map(|resource_id| {
+            let pool = pool.clone();
+            async move { build_row_for_resource(&pool, resource_id).await }
+        })
+        .buffer_unordered(RECORD_INVENTORY_CURRENT_REBUILD_CONCURRENCY);
+    pin_mut!(rows);
+    let mut completed = Vec::new();
+    while let Some(row) = rows.try_next().await? {
+        if let Some(row) = row {
+            completed.push(row);
+        }
+        record_rebuild_progress(pool, loop_heartbeat).await;
+    }
+    Ok(completed)
 }
 
 async fn build_row_for_resource(

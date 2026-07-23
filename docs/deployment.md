@@ -1337,10 +1337,13 @@ rejects a smaller pool before starting that work.
    census and digest checks remain live.
    Do not run replay until the run row is `status='completed'`; before that
    final state, replay cursors and projection markers are intentionally
-   untouched. Normal indexer, worker, and guarded one-shot writers also refuse
-   to start while the run remains incomplete. If the operator decides not to
-   resume, restore the database to a consistent pre-run snapshot first, then
-   explicitly mark the run aborted so guarded writers may start:
+   untouched. Completion also advances the full-projection input revision and
+   invalidates any automatic replay attempt or durable projection stage built
+   from the pre-delete corpus. Normal indexer, worker, and guarded one-shot
+   writers also refuse to start while the run remains incomplete. If the
+   operator decides not to resume, restore the database to a consistent pre-run
+   snapshot first, then explicitly mark the run aborted so guarded writers may
+   start:
 
    ```sql
    UPDATE base_normalized_rederive_runs

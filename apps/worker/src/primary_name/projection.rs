@@ -5,12 +5,14 @@ use bigname_storage::{
     VERIFIED_PRIMARY_NAME_REQUEST_TYPE, delete_primary_name_current_in_transaction,
     load_primary_name_current_snapshot_for_update_in_transaction,
     lock_primary_name_tuple_in_transaction, lock_primary_names_current_replacement_in_transaction,
-    normalize_evm_address, publish_primary_names_current_full_rebuild_in_transaction,
+    normalize_evm_address,
+    projection_staging::ensure_current_projection_full_replay_input_revision_in_transaction,
+    publish_primary_names_current_full_rebuild_in_transaction,
     upsert_primary_name_current_snapshots_in_transaction, verified_primary_name_claim_hooks,
 };
 use futures_util::{TryStreamExt, pin_mut};
 use serde_json::{Map, Value, json};
-use sqlx::{Connection, PgPool, Postgres, Transaction};
+use sqlx::{PgPool, Postgres, Transaction};
 
 use super::rebuild_heartbeat::{
     LoopHeartbeat, record_rebuild_progress, run_rebuild_phase, run_rebuild_phases,
@@ -20,9 +22,7 @@ use super::rebuild_heartbeat::{
 #[path = "../staged_rebuild.rs"]
 mod staged_rebuild;
 
-use staged_rebuild::{
-    count_rows, create_stage_table, drop_stage_table, stage_primary_names_current_snapshots,
-};
+use staged_rebuild::{count_rows, stage_primary_names_current_snapshots};
 
 #[cfg(test)]
 #[path = "projection/test_hooks.rs"]
@@ -32,12 +32,15 @@ use super::{
     PrimaryNamesCurrentRebuildSummary,
     query::{
         load_latest_name_claim_observation, load_reverse_claim_tuple,
-        stream_primary_name_rebuild_inputs,
+        stream_primary_name_rebuild_inputs_after,
     },
     types::{NameClaimObservation, PrimaryNameTupleKey, ReverseClaimTuple},
 };
 
+#[cfg(not(test))]
 const PRIMARY_NAMES_CURRENT_REBUILD_BATCH_SIZE: usize = 2_000;
+#[cfg(test)]
+const PRIMARY_NAMES_CURRENT_REBUILD_BATCH_SIZE: usize = 1;
 
 pub async fn rebuild_primary_names_current(
     pool: &PgPool,
@@ -46,17 +49,6 @@ pub async fn rebuild_primary_names_current(
     coin_type: Option<&str>,
 ) -> Result<PrimaryNamesCurrentRebuildSummary> {
     rebuild_primary_names_current_inner(pool, address, namespace, coin_type, None).await
-}
-
-pub(crate) async fn rebuild_primary_names_current_with_heartbeat(
-    pool: &PgPool,
-    address: Option<&str>,
-    namespace: Option<&str>,
-    coin_type: Option<&str>,
-    loop_heartbeat: &mut LoopHeartbeat,
-) -> Result<PrimaryNamesCurrentRebuildSummary> {
-    rebuild_primary_names_current_inner(pool, address, namespace, coin_type, Some(loop_heartbeat))
-        .await
 }
 
 async fn rebuild_primary_names_current_inner(
@@ -70,69 +62,109 @@ async fn rebuild_primary_names_current_inner(
         (Some(address), Some(namespace), Some(coin_type)) => {
             rebuild_one_primary_name(pool, address, namespace, coin_type, loop_heartbeat).await
         }
-        (None, None, None) => rebuild_all_primary_names(pool, loop_heartbeat).await,
+        (None, None, None) => {
+            let summary = rebuild_all_primary_names(pool, None, loop_heartbeat).await?;
+            crate::replay::staging::cleanup_projection_checkpoint(pool, "primary_names_current")
+                .await?;
+            Ok(summary)
+        }
         _ => bail!(
             "primary_names_current rebuild requires address, namespace, and coin_type together when targeting one tuple"
         ),
     }
 }
 
+pub(crate) async fn rebuild_primary_names_current_for_replay(
+    pool: &PgPool,
+    normalized_target_block: Option<i64>,
+    loop_heartbeat: Option<&mut LoopHeartbeat>,
+) -> Result<PrimaryNamesCurrentRebuildSummary> {
+    rebuild_all_primary_names(pool, normalized_target_block, loop_heartbeat).await
+}
+
 async fn rebuild_all_primary_names(
     pool: &PgPool,
+    normalized_target_block: Option<i64>,
     mut loop_heartbeat: Option<&mut LoopHeartbeat>,
 ) -> Result<PrimaryNamesCurrentRebuildSummary> {
     #[cfg(test)]
     let test_database = test_hooks::current_database(pool).await?;
-    let mut conn = pool
-        .acquire()
-        .await
-        .context("failed to acquire primary_names_current staging connection")?;
-    let stage_table = create_stage_table(&mut conn, "primary_names_current").await?;
     let previous_row_count = run_rebuild_phase(
         pool,
         &mut loop_heartbeat,
         "primary_names_current.count_existing",
-        count_rows(&mut conn, "primary_names_current", None),
+        count_rows(pool, "primary_names_current", None),
     )
     .await?;
-    let mut projections = Vec::with_capacity(PRIMARY_NAMES_CURRENT_REBUILD_BATCH_SIZE);
-    let mut status_counts = StatusCounts::default();
-    let mut requested_tuple_count = 0usize;
-    let mut upserted_row_count = 0usize;
-
-    let inputs = stream_primary_name_rebuild_inputs(pool);
-    pin_mut!(inputs);
-
-    while let Some(input) = inputs.try_next().await? {
-        requested_tuple_count += 1;
-        let projection = primary_name_row(&input.tuple, input.claim_observation.as_ref())?;
-        record_rebuild_progress(pool, &mut loop_heartbeat).await;
-        add_status(&mut status_counts, &projection.row);
-        projections.push(projection);
-
-        if projections.len() >= PRIMARY_NAMES_CURRENT_REBUILD_BATCH_SIZE {
-            upserted_row_count +=
-                stage_primary_names_current_snapshots(&mut conn, &stage_table, &projections).await?
-                    as usize;
-            projections.clear();
-        }
-
-        if requested_tuple_count.is_multiple_of(5_000) {
-            tracing::info!(
-                projection = "primary_names_current",
-                queued_tuple_count = requested_tuple_count,
-                completed_tuple_count = requested_tuple_count,
-                upserted_row_count,
-                "primary_names_current rebuild tuples processed"
+    let mut checkpoint = crate::replay::staging::ProjectionStagingCheckpoint::load_or_start(
+        pool,
+        "primary_names_current",
+        normalized_target_block,
+    )
+    .await?;
+    if !checkpoint.staging_complete() {
+        loop {
+            let input_fence = checkpoint.prepare_next_batch(pool).await?;
+            let cursor = primary_name_source_cursor(checkpoint.last_source_key())?;
+            let inputs = stream_primary_name_rebuild_inputs_after(
+                pool,
+                cursor
+                    .as_ref()
+                    .map(|parts| (parts[0].as_str(), parts[1].as_str(), parts[2].as_str())),
+                i64::try_from(PRIMARY_NAMES_CURRENT_REBUILD_BATCH_SIZE)?,
             );
+            pin_mut!(inputs);
+            let mut page = Vec::with_capacity(PRIMARY_NAMES_CURRENT_REBUILD_BATCH_SIZE);
+            while page.len() < PRIMARY_NAMES_CURRENT_REBUILD_BATCH_SIZE {
+                let Some(input) = inputs.try_next().await? else {
+                    break;
+                };
+                page.push(input);
+            }
+            if page.is_empty() {
+                checkpoint.mark_staging_complete(pool, input_fence).await?;
+                break;
+            }
+            let last = page
+                .last()
+                .expect("primary_names_current staging page must not be empty");
+            let last_source_key = json!([
+                last.tuple.key.address,
+                last.tuple.key.namespace,
+                last.tuple.key.coin_type
+            ]);
+            let projections = page
+                .iter()
+                .map(|input| primary_name_row(&input.tuple, input.claim_observation.as_ref()))
+                .collect::<Result<Vec<_>>>()?;
+            record_rebuild_progress(pool, &mut loop_heartbeat).await;
+            let mut transaction = pool.begin().await?;
+            let staged = stage_primary_names_current_snapshots(
+                &mut transaction,
+                checkpoint.stage_table(0)?,
+                &projections,
+            )
+            .await?;
+            let progress =
+                checkpoint.progress_after_batch(page.len(), last_source_key, staged, 0)?;
+            checkpoint
+                .persist_progress(&mut transaction, &progress, &input_fence)
+                .await?;
+            transaction.commit().await?;
+            checkpoint.accept_progress(progress, input_fence);
+            let requested_tuple_count = checkpoint.completed_source_count()?;
+            if requested_tuple_count.is_multiple_of(5_000) {
+                tracing::info!(
+                    projection = "primary_names_current",
+                    completed_tuple_count = requested_tuple_count,
+                    upserted_row_count = checkpoint.staged_row_count()?,
+                    "primary_names_current rebuild tuples processed"
+                );
+            }
         }
     }
-
-    if !projections.is_empty() {
-        upserted_row_count +=
-            stage_primary_names_current_snapshots(&mut conn, &stage_table, &projections).await?
-                as usize;
-    }
+    let requested_tuple_count = checkpoint.completed_source_count()?;
+    let upserted_row_count = checkpoint.staged_row_count()?;
     // Both long-operation phase markers are established before the replacement
     // transaction starts and cleared after it commits. This preserves the
     // invalidation and publication liveness evidence without writing a
@@ -145,9 +177,14 @@ async fn rebuild_all_primary_names(
             "primary_names_current.publish",
         ],
         async {
-            let mut transaction = conn.begin().await.context(
+            let mut transaction = pool.begin().await.context(
                 "failed to open primary_names_current full-rebuild publication transaction",
             )?;
+            ensure_current_projection_full_replay_input_revision_in_transaction(
+                &mut transaction,
+                checkpoint.full_replay_input_revision(),
+            )
+            .await?;
             // Full replacement takes the global advisory lock before
             // invalidation. Tuple readers and writers first join the shared
             // side of this fence, so no verified outcome can be persisted
@@ -155,7 +192,7 @@ async fn rebuild_all_primary_names(
             lock_primary_names_current_replacement_in_transaction(&mut transaction).await?;
             invalidate_full_rebuild_verified_primary_name_claim_changes(
                 &mut transaction,
-                &stage_table,
+                checkpoint.stage_table(0)?,
             )
             .await?;
             #[cfg(test)]
@@ -166,7 +203,7 @@ async fn rebuild_all_primary_names(
             // rebuilt in bulk instead.
             let published = publish_primary_names_current_full_rebuild_in_transaction(
                 &mut transaction,
-                &stage_table,
+                checkpoint.stage_table(0)?,
             )
             .await?;
             transaction
@@ -177,9 +214,9 @@ async fn rebuild_all_primary_names(
         },
     )
     .await?;
-    drop_stage_table(&mut conn, &stage_table).await?;
     debug_assert_eq!(published_row_count as usize, upserted_row_count);
 
+    let status_counts = count_staged_statuses(pool, checkpoint.stage_table(0)?).await?;
     Ok(PrimaryNamesCurrentRebuildSummary {
         requested_tuple_count,
         upserted_row_count,
@@ -187,6 +224,34 @@ async fn rebuild_all_primary_names(
         success_row_count: status_counts.success_row_count,
         not_found_row_count: status_counts.not_found_row_count,
         invalid_name_row_count: status_counts.invalid_name_row_count,
+    })
+}
+
+fn primary_name_source_cursor(value: Option<&Value>) -> Result<Option<[String; 3]>> {
+    value
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .context("primary_names_current staging source key must contain three strings")
+}
+
+async fn count_staged_statuses(pool: &PgPool, stage_table: &str) -> Result<StatusCounts> {
+    let (success, not_found, invalid_name) = sqlx::query_as::<_, (i64, i64, i64)>(&format!(
+        r#"
+        SELECT
+            COUNT(*) FILTER (WHERE claim_status = 'success')::BIGINT,
+            COUNT(*) FILTER (WHERE claim_status = 'not_found')::BIGINT,
+            COUNT(*) FILTER (WHERE claim_status = 'invalid_name')::BIGINT
+        FROM {stage_table}
+        "#
+    ))
+    .fetch_one(pool)
+    .await
+    .context("failed to count staged primary_names_current claim statuses")?;
+    Ok(StatusCounts {
+        success_row_count: usize::try_from(success)?,
+        not_found_row_count: usize::try_from(not_found)?,
+        invalid_name_row_count: usize::try_from(invalid_name)?,
     })
 }
 

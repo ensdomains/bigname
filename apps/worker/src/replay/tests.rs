@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, time::Duration};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 
 use super::*;
 use support::*;
@@ -253,6 +253,15 @@ async fn all_current_projection_replay_clears_stale_rows_and_is_idempotent() -> 
         third_snapshot,
         load_api_visible_projection_snapshot(database.pool()).await?
     );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM current_projection_staging_checkpoints"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "published-family skip must leave no stale staging checkpoint"
+    );
 
     let advanced_summary =
         rebuild_pending_all_current_projections(database.pool(), Some(109), None, None).await?;
@@ -275,6 +284,640 @@ async fn all_current_projection_replay_clears_stale_rows_and_is_idempotent() -> 
     }
 
     database.cleanup().await
+}
+
+#[tokio::test]
+async fn changed_completed_source_range_restages_to_byte_identical_control() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    seed_replay_inputs(database.pool()).await?;
+    install_second_name_page_termination(database.pool()).await?;
+
+    let error = rebuild_pending_all_current_projections(database.pool(), Some(108), None, None)
+        .await
+        .expect_err("the injected second-page failure must interrupt name_current staging");
+    assert!(!format!("{error:#}").is_empty());
+    let interrupted = load_name_staging_checkpoint(database.pool()).await?;
+    assert_eq!(interrupted.completed_source_count, 1);
+    assert_eq!(
+        count_stage_rows(database.pool(), &interrupted.stage_table).await?,
+        1,
+        "the first page and its stage row must survive interruption"
+    );
+
+    change_already_staged_name_source(database.pool()).await?;
+    remove_second_name_page_termination(database.pool()).await?;
+    install_name_publish_failure(database.pool()).await?;
+    let error = rebuild_pending_all_current_projections(database.pool(), Some(108), None, None)
+        .await
+        .expect_err("the publish stop must retain the resumed completed stage");
+    assert!(format!("{error:#}").contains("injected name_current publish stop"));
+    let resumed = load_name_staging_checkpoint(database.pool()).await?;
+    assert_ne!(
+        resumed.stage_table, interrupted.stage_table,
+        "a changed completed source range must fail closed to a fresh stage"
+    );
+    assert_eq!(resumed.completed_source_count, 2);
+    assert_eq!(resumed.status, "staging_complete");
+    let resumed_snapshot = load_stage_snapshot(database.pool(), &resumed.stage_table).await?;
+
+    super::staging::cleanup_projection_checkpoint(database.pool(), "name_current").await?;
+    let error = rebuild_pending_all_current_projections(database.pool(), Some(108), None, None)
+        .await
+        .expect_err("the publish stop must retain the uninterrupted control stage");
+    assert!(format!("{error:#}").contains("injected name_current publish stop"));
+    let control = load_name_staging_checkpoint(database.pool()).await?;
+    assert_eq!(control.completed_source_count, 2);
+    assert_eq!(control.status, "staging_complete");
+    let control_snapshot = load_stage_snapshot(database.pool(), &control.stage_table).await?;
+    assert_eq!(
+        resumed_snapshot, control_snapshot,
+        "kill/resume staging output must be byte-identical to uninterrupted staging"
+    );
+
+    remove_name_publish_failure(database.pool()).await?;
+    super::staging::cleanup_projection_checkpoint(database.pool(), "name_current").await?;
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn killed_name_staging_reuses_the_last_durable_page_when_inputs_are_unchanged() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    seed_replay_inputs(database.pool()).await?;
+    install_second_name_page_termination(database.pool()).await?;
+
+    rebuild_pending_all_current_projections(database.pool(), Some(108), None, None)
+        .await
+        .expect_err("the injected second-page failure must interrupt name_current staging");
+    let interrupted = load_name_staging_checkpoint(database.pool()).await?;
+    assert_eq!(interrupted.completed_source_count, 1);
+
+    remove_second_name_page_termination(database.pool()).await?;
+    install_name_publish_failure(database.pool()).await?;
+    rebuild_pending_all_current_projections(database.pool(), Some(108), None, None)
+        .await
+        .expect_err("the publish stop must retain the resumed completed stage");
+    let resumed = load_name_staging_checkpoint(database.pool()).await?;
+    assert_eq!(resumed.stage_table, interrupted.stage_table);
+    assert_eq!(resumed.completed_source_count, 2);
+    assert_eq!(resumed.status, "staging_complete");
+
+    remove_name_publish_failure(database.pool()).await?;
+    super::staging::cleanup_projection_checkpoint(database.pool(), "name_current").await?;
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn later_source_change_is_loaded_by_a_fresh_page_without_discarding_progress() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    seed_replay_inputs(database.pool()).await?;
+    install_second_name_page_termination(database.pool()).await?;
+    rebuild_pending_all_current_projections(database.pool(), Some(108), None, None)
+        .await
+        .expect_err("the injected second-page failure must interrupt name_current staging");
+    let interrupted = load_name_staging_checkpoint(database.pool()).await?;
+    assert_eq!(interrupted.completed_source_count, 1);
+
+    change_not_yet_staged_name_source(database.pool()).await?;
+    remove_second_name_page_termination(database.pool()).await?;
+    install_name_publish_failure(database.pool()).await?;
+    rebuild_pending_all_current_projections(database.pool(), Some(108), None, None)
+        .await
+        .expect_err("the publish stop must retain the resumed completed stage");
+    let resumed = load_name_staging_checkpoint(database.pool()).await?;
+    assert_eq!(resumed.stage_table, interrupted.stage_table);
+    assert_eq!(resumed.completed_source_count, 2);
+    let snapshot = load_stage_snapshot(database.pool(), &resumed.stage_table).await?;
+    assert!(
+        snapshot.contains(r#""canonical_display_name": "Bob.alice.eth""#),
+        "the later fresh source page must include the post-checkpoint source change"
+    );
+
+    remove_name_publish_failure(database.pool()).await?;
+    super::staging::cleanup_projection_checkpoint(database.pool(), "name_current").await?;
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn completed_range_change_fence_covers_every_projection_cursor_shape() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    seed_replay_inputs(database.pool()).await?;
+    let cases = [
+        (
+            "name_current",
+            serde_json::json!("ens:alice.eth"),
+            "RegistrationGranted",
+        ),
+        (
+            "children_current",
+            serde_json::json!(["ens:alice.eth", "bob.alice.eth", "ens:bob.alice.eth"]),
+            "SubregistryChanged",
+        ),
+        (
+            "permissions_current",
+            serde_json::json!("00000000-0000-0000-0000-000000001002"),
+            "PermissionChanged",
+        ),
+        (
+            "record_inventory_current",
+            serde_json::json!("00000000-0000-0000-0000-000000001002"),
+            "RecordChanged",
+        ),
+        (
+            "resolver_current",
+            serde_json::json!([
+                "ethereum-mainnet",
+                "0x0000000000000000000000000000000000000def"
+            ]),
+            "ResolverChanged",
+        ),
+        (
+            "address_names_current",
+            serde_json::json!(["ens:alice.eth", "00000000-0000-0000-0000-000000001003"]),
+            "RegistrationGranted",
+        ),
+        (
+            "primary_names_current",
+            serde_json::json!(["0x0000000000000000000000000000000000000abc", "ens", "60"]),
+            "ReverseChanged",
+        ),
+    ];
+
+    for (projection, cursor, event_kind) in cases {
+        let mut checkpoint = super::staging::ProjectionStagingCheckpoint::load_or_start(
+            database.pool(),
+            projection,
+            Some(108),
+        )
+        .await?;
+        let old_stage_table = checkpoint.stage_table(0)?.to_owned();
+        let input_fence = checkpoint.prepare_next_batch(database.pool()).await?;
+        let progress = checkpoint.progress_after_batch(1, cursor, 0, 0)?;
+        let mut transaction = database.pool().begin().await?;
+        checkpoint
+            .persist_progress(&mut transaction, &progress, &input_fence)
+            .await?;
+        transaction.commit().await?;
+        checkpoint.accept_progress(progress, input_fence);
+        append_event_change_for_kind(database.pool(), event_kind).await?;
+
+        let replacement = super::staging::ProjectionStagingCheckpoint::load_or_start(
+            database.pool(),
+            projection,
+            Some(108),
+        )
+        .await?;
+        assert_ne!(
+            replacement.stage_table(0)?,
+            old_stage_table,
+            "{projection} must fail closed when a relevant change reaches its completed cursor"
+        );
+        super::staging::cleanup_projection_checkpoint(database.pool(), projection).await?;
+    }
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn staging_version_mismatch_discards_old_stage_and_restages_from_zero() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    seed_replay_inputs(database.pool()).await?;
+    install_second_name_page_termination(database.pool()).await?;
+    rebuild_pending_all_current_projections(database.pool(), Some(108), None, None)
+        .await
+        .expect_err("the injected second-page failure must leave an incomplete checkpoint");
+    remove_second_name_page_termination(database.pool()).await?;
+    let old = load_name_staging_checkpoint(database.pool()).await?;
+    assert_eq!(old.completed_source_count, 1);
+
+    sqlx::query(
+        r#"
+        UPDATE current_projection_staging_checkpoints
+        SET staging_schema_version = $1
+        WHERE projection = 'name_current'
+        "#,
+    )
+    // The initial schema version is 1 and storage accepts only positive versions;
+    // reuse is exact-equality fenced, so either direction exercises the mismatch path.
+    .bind(super::staging::current_staging_schema_version() + 1)
+    .execute(database.pool())
+    .await?;
+    install_name_publish_failure(database.pool()).await?;
+    rebuild_pending_all_current_projections(database.pool(), Some(108), None, None)
+        .await
+        .expect_err("the publish stop must retain the replacement stage");
+
+    let replacement = load_name_staging_checkpoint(database.pool()).await?;
+    assert_ne!(replacement.stage_table, old.stage_table);
+    assert_eq!(replacement.completed_source_count, 2);
+    assert_eq!(replacement.status, "staging_complete");
+    assert!(
+        !stage_table_exists(database.pool(), &old.stage_table).await?,
+        "version mismatch must drop the incompatible durable stage"
+    );
+    assert_eq!(
+        count_stage_rows(database.pool(), &replacement.stage_table).await?,
+        2,
+        "version mismatch must restage the complete source set"
+    );
+
+    remove_name_publish_failure(database.pool()).await?;
+    super::staging::cleanup_projection_checkpoint(database.pool(), "name_current").await?;
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn full_replay_input_revision_mismatch_discards_old_stage_and_restages() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    seed_replay_inputs(database.pool()).await?;
+    install_second_name_page_termination(database.pool()).await?;
+    rebuild_pending_all_current_projections(database.pool(), Some(108), None, None)
+        .await
+        .expect_err("the injected second-page failure must leave an incomplete checkpoint");
+    remove_second_name_page_termination(database.pool()).await?;
+    let old = load_name_staging_checkpoint(database.pool()).await?;
+    assert_eq!(old.completed_source_count, 1);
+
+    sqlx::query(
+        r#"
+        UPDATE current_projection_full_replay_input_revision
+        SET revision = revision + 1, updated_at = now()
+        WHERE singleton
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    install_name_publish_failure(database.pool()).await?;
+    rebuild_pending_all_current_projections(database.pool(), Some(108), None, None)
+        .await
+        .expect_err("the publish stop must retain the replacement stage");
+
+    let replacement = load_name_staging_checkpoint(database.pool()).await?;
+    assert_ne!(replacement.stage_table, old.stage_table);
+    assert_eq!(replacement.completed_source_count, 2);
+    assert_eq!(replacement.status, "staging_complete");
+    assert!(
+        !stage_table_exists(database.pool(), &old.stage_table).await?,
+        "direct-input revision mismatch must drop the stale durable stage"
+    );
+
+    remove_name_publish_failure(database.pool()).await?;
+    super::staging::cleanup_projection_checkpoint(database.pool(), "name_current").await?;
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn replay_marker_failure_rolls_back_completed_stage_cleanup() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    seed_replay_inputs(database.pool()).await?;
+    install_name_replay_marker_failure(database.pool()).await?;
+
+    let error = rebuild_pending_all_current_projections(database.pool(), Some(108), None, None)
+        .await
+        .expect_err("the injected marker failure must stop replay after name publication");
+    assert!(format!("{error:#}").contains("injected name_current replay marker stop"));
+    let retained = load_name_staging_checkpoint(database.pool()).await?;
+    assert_eq!(retained.completed_source_count, 2);
+    assert_eq!(retained.status, "staging_complete");
+    assert!(
+        stage_table_exists(database.pool(), &retained.stage_table).await?,
+        "marker failure must roll back logged stage-table cleanup"
+    );
+    assert!(
+        !super::progress::projection_replay_completed(database.pool(), "name_current", Some(108),)
+            .await?,
+        "marker failure must not leave a published-family skip marker"
+    );
+
+    remove_name_replay_marker_failure(database.pool()).await?;
+    rebuild_pending_all_current_projections(database.pool(), Some(108), None, None).await?;
+    assert!(
+        super::progress::projection_replay_completed(database.pool(), "name_current", Some(108),)
+            .await?,
+        "retry must consume the retained stage and persist its marker"
+    );
+    assert!(
+        !stage_table_exists(database.pool(), &retained.stage_table).await?,
+        "successful marker commit must atomically remove the consumed stage"
+    );
+
+    database.cleanup().await
+}
+
+#[derive(Debug)]
+struct NameStagingCheckpoint {
+    stage_table: String,
+    completed_source_count: i64,
+    status: String,
+}
+
+async fn load_name_staging_checkpoint(pool: &PgPool) -> Result<NameStagingCheckpoint> {
+    let row = sqlx::query(
+        r#"
+        SELECT stage_tables, completed_source_count, status
+        FROM current_projection_staging_checkpoints
+        WHERE projection = 'name_current'
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+    let stage_tables: Vec<String> = row.try_get("stage_tables")?;
+    Ok(NameStagingCheckpoint {
+        stage_table: stage_tables
+            .into_iter()
+            .next()
+            .context("name_current staging checkpoint must have one stage table")?,
+        completed_source_count: row.try_get("completed_source_count")?,
+        status: row.try_get("status")?,
+    })
+}
+
+async fn count_stage_rows(pool: &PgPool, stage_table: &str) -> Result<i64> {
+    validate_test_stage_table(stage_table)?;
+    sqlx::query_scalar::<_, i64>(&format!("SELECT COUNT(*)::BIGINT FROM {stage_table}"))
+        .fetch_one(pool)
+        .await
+        .context("failed to count staged name_current rows")
+}
+
+async fn change_already_staged_name_source(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE name_surfaces
+        SET canonical_display_name = 'Alice.eth'
+        WHERE logical_name_id = 'ens:alice.eth'
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to mutate an already-staged name source")?;
+    let updated = sqlx::query(
+        r#"
+        UPDATE normalized_events
+        SET
+            raw_fact_ref = COALESCE(raw_fact_ref, '{}'::JSONB)
+                || '{"staging_content_revision":1}'::JSONB,
+            canonicality_state = canonicality_state
+        WHERE normalized_event_id = (
+            SELECT normalized_event_id
+            FROM normalized_events
+            WHERE logical_name_id = 'ens:alice.eth'
+            ORDER BY normalized_event_id
+            LIMIT 1
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to supersede normalized-event content during staging")?
+    .rows_affected();
+    anyhow::ensure!(
+        updated == 1,
+        "the staging fixture must supersede one normalized event"
+    );
+    let content_update_recorded = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM projection_normalized_event_changes change
+            JOIN normalized_events event
+              ON event.normalized_event_id = change.normalized_event_id
+            WHERE event.logical_name_id = 'ens:alice.eth'
+              AND change.change_kind = 'content_update'
+        )
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .context("failed to inspect the normalized-event content-update journal")?;
+    anyhow::ensure!(
+        content_update_recorded,
+        "the normalized-event trigger must journal the staging content update"
+    );
+    Ok(())
+}
+
+async fn change_not_yet_staged_name_source(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE name_surfaces
+        SET canonical_display_name = 'Bob.alice.eth'
+        WHERE logical_name_id = 'ens:bob.alice.eth'
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to mutate a not-yet-staged name source")?;
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_events (
+            event_identity,
+            namespace,
+            logical_name_id,
+            event_kind,
+            source_family,
+            manifest_version,
+            chain_id,
+            block_number,
+            block_hash,
+            derivation_kind,
+            canonicality_state,
+            after_state
+        )
+        VALUES (
+            'worker-replay:later-name-change',
+            'ens',
+            'ens:bob.alice.eth',
+            'ResolverChanged',
+            'ens_v1_registry_l1',
+            1,
+            'ethereum-mainnet',
+            107,
+            '0xreplay0107',
+            'ens_v1_unwrapped_authority',
+            'finalized'::canonicality_state,
+            '{"resolver":"0x0000000000000000000000000000000000000def"}'::jsonb
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to append a not-yet-staged name change")?;
+    Ok(())
+}
+
+async fn append_event_change_for_kind(pool: &PgPool, event_kind: &str) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO projection_normalized_event_changes (
+            normalized_event_id,
+            change_kind,
+            canonicality_state
+        )
+        SELECT
+            normalized_event_id,
+            'canonicality_update',
+            canonicality_state
+        FROM normalized_events
+        WHERE event_kind = $1
+        ORDER BY normalized_event_id
+        LIMIT 1
+        "#,
+    )
+    .bind(event_kind)
+    .execute(pool)
+    .await
+    .with_context(|| format!("failed to append {event_kind} projection change"))?;
+    Ok(())
+}
+
+async fn load_stage_snapshot(pool: &PgPool, stage_table: &str) -> Result<String> {
+    validate_test_stage_table(stage_table)?;
+    sqlx::query_scalar::<_, String>(&format!(
+        r#"
+        SELECT COALESCE(
+            JSONB_AGG(TO_JSONB(staged) ORDER BY logical_name_id),
+            '[]'::JSONB
+        )::TEXT
+        FROM {stage_table} staged
+        "#
+    ))
+    .fetch_one(pool)
+    .await
+    .context("failed to load staged name_current snapshot")
+}
+
+async fn stage_table_exists(pool: &PgPool, stage_table: &str) -> Result<bool> {
+    validate_test_stage_table(stage_table)?;
+    sqlx::query_scalar::<_, bool>("SELECT to_regclass(format('public.%I', $1)) IS NOT NULL")
+        .bind(stage_table)
+        .fetch_one(pool)
+        .await
+        .context("failed to inspect staged name_current table")
+}
+
+fn validate_test_stage_table(stage_table: &str) -> Result<()> {
+    anyhow::ensure!(
+        stage_table.starts_with("cprs_name_")
+            && stage_table
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'),
+        "unsafe test stage table {stage_table:?}"
+    );
+    Ok(())
+}
+
+async fn install_second_name_page_termination(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE FUNCTION terminate_second_name_staging_page() RETURNS TRIGGER AS $function$
+        BEGIN
+            IF NEW.projection = 'name_current'
+               AND OLD.completed_source_count = 1
+               AND NEW.completed_source_count = 2
+            THEN
+                PERFORM pg_terminate_backend(pg_backend_pid());
+            END IF;
+            RETURN NEW;
+        END
+        $function$ LANGUAGE plpgsql
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE TRIGGER terminate_second_name_staging_page
+        BEFORE UPDATE ON current_projection_staging_checkpoints
+        FOR EACH ROW EXECUTE FUNCTION terminate_second_name_staging_page()
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn remove_second_name_page_termination(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        "DROP TRIGGER terminate_second_name_staging_page ON current_projection_staging_checkpoints",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("DROP FUNCTION terminate_second_name_staging_page()")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn install_name_publish_failure(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE FUNCTION fail_name_current_publish() RETURNS TRIGGER AS $function$
+        BEGIN
+            RAISE EXCEPTION 'injected name_current publish stop';
+        END
+        $function$ LANGUAGE plpgsql
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE TRIGGER fail_name_current_publish
+        BEFORE INSERT OR UPDATE OR DELETE ON name_current
+        FOR EACH STATEMENT EXECUTE FUNCTION fail_name_current_publish()
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn remove_name_publish_failure(pool: &PgPool) -> Result<()> {
+    sqlx::query("DROP TRIGGER fail_name_current_publish ON name_current")
+        .execute(pool)
+        .await?;
+    sqlx::query("DROP FUNCTION fail_name_current_publish()")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn install_name_replay_marker_failure(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE FUNCTION fail_name_current_replay_marker() RETURNS TRIGGER AS $function$
+        BEGIN
+            IF NEW.projection = 'name_current' THEN
+                RAISE EXCEPTION 'injected name_current replay marker stop';
+            END IF;
+            RETURN NEW;
+        END
+        $function$ LANGUAGE plpgsql
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE TRIGGER fail_name_current_replay_marker
+        BEFORE INSERT OR UPDATE ON current_projection_replay_status
+        FOR EACH ROW EXECUTE FUNCTION fail_name_current_replay_marker()
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn remove_name_replay_marker_failure(pool: &PgPool) -> Result<()> {
+    sqlx::query("DROP TRIGGER fail_name_current_replay_marker ON current_projection_replay_status")
+        .execute(pool)
+        .await?;
+    sqlx::query("DROP FUNCTION fail_name_current_replay_marker()")
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -309,6 +952,51 @@ async fn stale_replay_version_marker_does_not_complete_projection() -> Result<()
         )
         .await?,
         "stale replay-version markers must not satisfy projection replay completion"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn stale_full_replay_input_revision_marker_does_not_complete_projection() -> Result<()> {
+    let database = TestDatabase::new().await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO current_projection_replay_status (
+            projection,
+            replay_version,
+            completed_normalized_target_block,
+            requested_key_count,
+            upserted_row_count,
+            deleted_row_count
+        )
+        VALUES ($1, $2, $3, 0, 0, 0)
+        "#,
+    )
+    .bind("permissions_current")
+    .bind(super::progress::CURRENT_PROJECTION_REPLAY_VERSION)
+    .bind(108_i64)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE current_projection_full_replay_input_revision
+        SET revision = revision + 1, updated_at = now()
+        WHERE singleton
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    assert!(
+        !super::progress::projection_replay_completed(
+            database.pool(),
+            "permissions_current",
+            Some(108),
+        )
+        .await?,
+        "a marker from an older direct-input revision must force replay"
     );
 
     database.cleanup().await

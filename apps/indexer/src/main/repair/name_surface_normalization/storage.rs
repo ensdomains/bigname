@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use bigname_storage::projection_staging::advance_current_projection_full_replay_input_revision_in_transaction;
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
 
 use super::{
@@ -103,7 +104,7 @@ pub(super) async fn update_compatible_name_surfaces(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    sqlx::query_scalar::<_, String>(
+    let updated_logical_name_ids = sqlx::query_scalar::<_, String>(
         r#"
         WITH input_rows AS (
             SELECT *
@@ -162,7 +163,11 @@ pub(super) async fn update_compatible_name_surfaces(
     .bind(expected_normalizer_version)
     .fetch_all(&mut **transaction)
     .await
-    .context("failed to update compatible name-surface normalization metadata")
+    .context("failed to update compatible name-surface normalization metadata")?;
+    if !updated_logical_name_ids.is_empty() {
+        advance_current_projection_full_replay_input_revision_in_transaction(transaction).await?;
+    }
+    Ok(updated_logical_name_ids)
 }
 
 pub(super) async fn clear_compatible_name_surface_findings(

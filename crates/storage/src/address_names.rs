@@ -21,7 +21,10 @@ pub(crate) use full_rebuild::rebuild_address_names_current_identity_sidecars_in_
 pub use full_rebuild::{
     AddressNamesCurrentFullRebuild, begin_address_names_current_full_rebuild,
     drop_address_names_current_full_rebuild, insert_address_names_current_full_rebuild_rows,
-    publish_address_names_current_full_rebuild, rebuild_address_names_current_identity_sidecars,
+    insert_address_names_current_full_rebuild_rows_in_transaction,
+    publish_address_names_current_full_rebuild,
+    publish_address_names_current_full_rebuild_at_input_revision,
+    rebuild_address_names_current_identity_sidecars,
 };
 pub use page::{
     load_address_names_current_page, load_address_names_current_page_sorted_for_relations,

@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use futures_util::{Stream, StreamExt};
 use sqlx::{PgPool, Postgres, postgres::PgArguments, query::Query};
 
 use super::{
@@ -15,7 +14,7 @@ pub async fn load_canonical_declared_child_sources(
     pool: &PgPool,
     parent_logical_name_id: Option<&str>,
 ) -> Result<Vec<DeclaredChildEventSource>> {
-    let rows = canonical_declared_child_sources_query(parent_logical_name_id)
+    let rows = canonical_declared_child_sources_query(parent_logical_name_id, None, None)
         .fetch_all(pool)
         .await
         .with_context(|| declared_child_sources_context(parent_logical_name_id))?;
@@ -25,23 +24,14 @@ pub async fn load_canonical_declared_child_sources(
         .collect()
 }
 
-/// Stream the latest canonical declared-child subregistry event per child surface.
-pub fn stream_canonical_declared_child_sources<'a>(
-    pool: &'a PgPool,
+pub(super) fn canonical_declared_child_sources_query<'a>(
     parent_logical_name_id: Option<&'a str>,
-) -> impl Stream<Item = Result<DeclaredChildEventSource>> + 'a {
-    let context = declared_child_sources_context(parent_logical_name_id);
-    canonical_declared_child_sources_query(parent_logical_name_id)
-        .fetch(pool)
-        .map(move |row| {
-            row.with_context(|| context.clone())
-                .and_then(decode_declared_child_event_source)
-        })
-}
-
-fn canonical_declared_child_sources_query<'a>(
-    parent_logical_name_id: Option<&'a str>,
+    after_source_key: Option<(&'a str, &'a str, &'a str)>,
+    limit: Option<i64>,
 ) -> Query<'a, Postgres, PgArguments> {
+    let (after_parent, after_display_name, after_child) = after_source_key
+        .map(|(parent, display_name, child)| (Some(parent), Some(display_name), Some(child)))
+        .unwrap_or((None, None, None));
     sqlx::query(
         r#"
         WITH target_v1_child_nodes AS (
@@ -560,10 +550,16 @@ fn canonical_declared_child_sources_query<'a>(
         FROM deduped_current_sources
         WHERE current_pair_rank = 1
           AND ($5::TEXT IS NULL OR parent_logical_name_id = $5)
+          AND (
+              $14::TEXT IS NULL
+              OR (parent_logical_name_id, canonical_display_name, child_logical_name_id)
+                 > ($14, $15, $16)
+          )
         ORDER BY
             parent_logical_name_id ASC,
             canonical_display_name ASC,
             child_logical_name_id ASC
+        LIMIT $17
         "#,
     )
     .bind(SUBREGISTRY_EVENT_KIND)
@@ -579,9 +575,13 @@ fn canonical_declared_child_sources_query<'a>(
     .bind(REGISTRATION_GRANTED_EVENT_KIND)
     .bind(REGISTRATION_RENEWED_EVENT_KIND)
     .bind(REGISTRATION_RELEASED_EVENT_KIND)
+    .bind(after_parent)
+    .bind(after_display_name)
+    .bind(after_child)
+    .bind(limit)
 }
 
-fn declared_child_sources_context(parent_logical_name_id: Option<&str>) -> String {
+pub(super) fn declared_child_sources_context(parent_logical_name_id: Option<&str>) -> String {
     match parent_logical_name_id {
         Some(parent_logical_name_id) => format!(
             "failed to load canonical declared child sources for parent_logical_name_id {parent_logical_name_id}"

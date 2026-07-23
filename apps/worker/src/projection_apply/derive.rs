@@ -1,8 +1,11 @@
 use anyhow::{Context, Result, bail};
-use sqlx::{PgPool, Postgres, Transaction};
+use serde_json::Value;
+use sqlx::{PgPool, Postgres, Transaction, types::Uuid};
 
 use super::{NORMALIZED_EVENT_CURSOR, NormalizedEventChangeCursor};
-use crate::projection_apply::derive_queries::{INVALIDATION_QUERY_PREFIXES, UPSERT_SUFFIX};
+use crate::projection_apply::derive_queries::{
+    INVALIDATION_QUERY_PREFIXES, UPSERT_SUFFIX, current_projection_invalidation_prefix,
+};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ProjectionInvalidationDeriveSummary {
@@ -26,8 +29,8 @@ pub(crate) async fn normalized_event_cursor_exists(pool: &PgPool) -> Result<bool
     .context("failed to inspect normalized-event projection apply cursor")
 }
 
-pub(crate) async fn seed_normalized_event_cursor_if_absent(
-    pool: &PgPool,
+pub(crate) async fn seed_normalized_event_cursor_if_absent_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
     watermark: NormalizedEventChangeCursor,
 ) -> Result<bool> {
     let inserted = sqlx::query_scalar::<_, i64>(
@@ -47,7 +50,7 @@ pub(crate) async fn seed_normalized_event_cursor_if_absent(
     )
     .bind(NORMALIZED_EVENT_CURSOR)
     .bind(watermark.change_id)
-    .fetch_one(pool)
+    .fetch_one(&mut **transaction)
     .await
     .context("failed to seed normalized-event projection apply cursor")?;
 
@@ -77,6 +80,139 @@ pub(crate) async fn capture_normalized_event_change_watermark(
     .await
     .context("failed to capture complete normalized-event projection change watermark")
     .map(|change_id| NormalizedEventChangeCursor { change_id })
+}
+
+pub(crate) async fn capture_normalized_event_change_watermark_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<NormalizedEventChangeCursor> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT public.capture_projection_normalized_event_change_watermark()",
+    )
+    .fetch_one(&mut **transaction)
+    .await
+    .context("failed to capture complete normalized-event projection change watermark")
+    .map(|change_id| NormalizedEventChangeCursor { change_id })
+}
+
+pub(crate) async fn completed_projection_sources_changed(
+    transaction: &mut Transaction<'_, Postgres>,
+    projection: &str,
+    lower_change_id: i64,
+    upper_change_id: i64,
+    last_source_key: &Value,
+) -> Result<bool> {
+    if upper_change_id <= lower_change_id {
+        return Ok(false);
+    }
+    let prefix = current_projection_invalidation_prefix(projection)
+        .with_context(|| format!("unsupported staged projection {projection}"))?;
+    let changed = match projection {
+        "name_current" => {
+            let cursor = json_string(last_source_key, projection)?;
+            let query = completed_change_query(prefix, "key_payload ->> 'logical_name_id' <= $3");
+            sqlx::query_scalar::<_, bool>(&query)
+                .bind(lower_change_id)
+                .bind(upper_change_id)
+                .bind(cursor)
+                .fetch_one(&mut **transaction)
+                .await?
+        }
+        "children_current" => {
+            let cursor = json_string_array(last_source_key, 3, projection)?;
+            let query =
+                completed_change_query(prefix, "key_payload ->> 'parent_logical_name_id' <= $3");
+            sqlx::query_scalar::<_, bool>(&query)
+                .bind(lower_change_id)
+                .bind(upper_change_id)
+                .bind(&cursor[0])
+                .fetch_one(&mut **transaction)
+                .await?
+        }
+        "permissions_current" | "record_inventory_current" => {
+            let cursor = Uuid::parse_str(json_string(last_source_key, projection)?)?;
+            let query =
+                completed_change_query(prefix, "(key_payload ->> 'resource_id')::UUID <= $3");
+            sqlx::query_scalar::<_, bool>(&query)
+                .bind(lower_change_id)
+                .bind(upper_change_id)
+                .bind(cursor)
+                .fetch_one(&mut **transaction)
+                .await?
+        }
+        "resolver_current" => {
+            let cursor = json_string_array(last_source_key, 2, projection)?;
+            let query = completed_change_query(
+                prefix,
+                "(key_payload ->> 'chain_id', key_payload ->> 'resolver_address') <= ($3, $4)",
+            );
+            sqlx::query_scalar::<_, bool>(&query)
+                .bind(lower_change_id)
+                .bind(upper_change_id)
+                .bind(&cursor[0])
+                .bind(&cursor[1])
+                .fetch_one(&mut **transaction)
+                .await?
+        }
+        "address_names_current" => {
+            let cursor = json_string_array(last_source_key, 2, projection)?;
+            let query = completed_change_query(
+                prefix,
+                "key_payload ->> 'logical_name_id' IS NULL OR key_payload ->> 'logical_name_id' <= $3",
+            );
+            sqlx::query_scalar::<_, bool>(&query)
+                .bind(lower_change_id)
+                .bind(upper_change_id)
+                .bind(&cursor[0])
+                .fetch_one(&mut **transaction)
+                .await?
+        }
+        "primary_names_current" => {
+            let cursor = json_string_array(last_source_key, 3, projection)?;
+            let query = completed_change_query(
+                prefix,
+                "(key_payload ->> 'address', key_payload ->> 'namespace', key_payload ->> 'coin_type') <= ($3, $4, $5)",
+            );
+            sqlx::query_scalar::<_, bool>(&query)
+                .bind(lower_change_id)
+                .bind(upper_change_id)
+                .bind(&cursor[0])
+                .bind(&cursor[1])
+                .bind(&cursor[2])
+                .fetch_one(&mut **transaction)
+                .await?
+        }
+        _ => unreachable!("projection prefix was accepted above"),
+    };
+    Ok(changed)
+}
+
+fn completed_change_query(prefix: &str, completed_predicate: &str) -> String {
+    format!(
+        "{prefix} SELECT EXISTS (SELECT 1 FROM candidate_keys WHERE projection_key IS NOT NULL AND btrim(projection_key) <> '' AND ({completed_predicate}))"
+    )
+}
+
+fn json_string<'a>(value: &'a Value, projection: &str) -> Result<&'a str> {
+    value
+        .as_str()
+        .with_context(|| format!("{projection} staging source cursor must be a string"))
+}
+
+fn json_string_array(value: &Value, len: usize, projection: &str) -> Result<Vec<String>> {
+    let parts = value
+        .as_array()
+        .with_context(|| format!("{projection} staging source cursor must be an array"))?;
+    if parts.len() != len {
+        bail!("{projection} staging source cursor must contain {len} strings");
+    }
+    parts
+        .iter()
+        .map(|part| {
+            part.as_str()
+                .map(str::to_owned)
+                .with_context(|| format!("{projection} staging source cursor must contain strings"))
+        })
+        .collect()
 }
 
 pub(super) async fn derive_normalized_event_invalidations_through(

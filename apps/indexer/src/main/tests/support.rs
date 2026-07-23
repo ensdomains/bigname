@@ -887,6 +887,20 @@ impl TestDatabase {
         .execute(&pool)
         .await
         .context("failed to create name_surfaces table for indexer tests")?;
+        sqlx::raw_sql(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../migrations/20260502160000_current_projection_replay_status.sql"
+        )))
+        .execute(&pool)
+        .await
+        .context("failed to create current-projection replay status for indexer tests")?;
+        sqlx::raw_sql(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../migrations/20260723120300_current_projection_staging_checkpoints.sql"
+        )))
+        .execute(&pool)
+        .await
+        .context("failed to create current-projection staging state for indexer tests")?;
         sqlx::query(
             r#"
                 CREATE TABLE name_surface_normalization_repair_findings (

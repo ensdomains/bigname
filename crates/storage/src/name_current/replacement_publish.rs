@@ -3,17 +3,21 @@ use sqlx::{Postgres, Transaction};
 
 pub(super) async fn publish_name_current_replacement_rows(
     executor: &mut Transaction<'_, Postgres>,
+    replacement_table: &str,
 ) -> Result<usize> {
-    let identity_update_count = update_identity_changed_rows(executor).await?;
-    let metadata_update_count = update_metadata_changed_rows(executor).await?;
-    let insert_count = insert_missing_rows(executor).await?;
+    let identity_update_count = update_identity_changed_rows(executor, replacement_table).await?;
+    let metadata_update_count = update_metadata_changed_rows(executor, replacement_table).await?;
+    let insert_count = insert_missing_rows(executor, replacement_table).await?;
     let rows_affected = identity_update_count + metadata_update_count + insert_count;
 
     usize::try_from(rows_affected).context("name_current replacement row count exceeds usize")
 }
 
-async fn update_identity_changed_rows(executor: &mut Transaction<'_, Postgres>) -> Result<u64> {
-    sqlx::query(
+async fn update_identity_changed_rows(
+    executor: &mut Transaction<'_, Postgres>,
+    replacement_table: &str,
+) -> Result<u64> {
+    sqlx::query(&format!(
         r#"
         UPDATE name_current AS target
         SET
@@ -32,23 +36,26 @@ async fn update_identity_changed_rows(executor: &mut Transaction<'_, Postgres>) 
             canonicality_summary = replacement.canonicality_summary,
             manifest_version = replacement.manifest_version,
             last_recomputed_at = replacement.last_recomputed_at
-        FROM name_current_replacement AS replacement
+        FROM {replacement_table} AS replacement
         WHERE target.logical_name_id = replacement.logical_name_id
           AND (
               target.surface_binding_id IS DISTINCT FROM replacement.surface_binding_id
               OR target.resource_id IS DISTINCT FROM replacement.resource_id
               OR target.token_lineage_id IS DISTINCT FROM replacement.token_lineage_id
           )
-        "#,
-    )
+        "#
+    ))
     .execute(&mut **executor)
     .await
     .context("failed to publish identity-changing name_current replacement rows")
     .map(|result| result.rows_affected())
 }
 
-async fn update_metadata_changed_rows(executor: &mut Transaction<'_, Postgres>) -> Result<u64> {
-    sqlx::query(
+async fn update_metadata_changed_rows(
+    executor: &mut Transaction<'_, Postgres>,
+    replacement_table: &str,
+) -> Result<u64> {
+    sqlx::query(&format!(
         r#"
         UPDATE name_current AS target
         SET
@@ -64,7 +71,7 @@ async fn update_metadata_changed_rows(executor: &mut Transaction<'_, Postgres>) 
             canonicality_summary = replacement.canonicality_summary,
             manifest_version = replacement.manifest_version,
             last_recomputed_at = replacement.last_recomputed_at
-        FROM name_current_replacement AS replacement
+        FROM {replacement_table} AS replacement
         WHERE target.logical_name_id = replacement.logical_name_id
           AND target.surface_binding_id IS NOT DISTINCT FROM replacement.surface_binding_id
           AND target.resource_id IS NOT DISTINCT FROM replacement.resource_id
@@ -83,16 +90,19 @@ async fn update_metadata_changed_rows(executor: &mut Transaction<'_, Postgres>) 
               OR target.manifest_version IS DISTINCT FROM replacement.manifest_version
               OR target.last_recomputed_at IS DISTINCT FROM replacement.last_recomputed_at
           )
-        "#,
-    )
+        "#
+    ))
     .execute(&mut **executor)
     .await
     .context("failed to publish metadata-only name_current replacement rows")
     .map(|result| result.rows_affected())
 }
 
-async fn insert_missing_rows(executor: &mut Transaction<'_, Postgres>) -> Result<u64> {
-    sqlx::query(
+async fn insert_missing_rows(
+    executor: &mut Transaction<'_, Postgres>,
+    replacement_table: &str,
+) -> Result<u64> {
+    sqlx::query(&format!(
         r#"
         INSERT INTO name_current (
             logical_name_id,
@@ -129,15 +139,15 @@ async fn insert_missing_rows(executor: &mut Transaction<'_, Postgres>) -> Result
             replacement.canonicality_summary,
             replacement.manifest_version,
             replacement.last_recomputed_at
-        FROM name_current_replacement AS replacement
+        FROM {replacement_table} AS replacement
         WHERE NOT EXISTS (
             SELECT 1
             FROM name_current AS target
             WHERE target.logical_name_id = replacement.logical_name_id
         )
         ON CONFLICT (logical_name_id) DO NOTHING
-        "#,
-    )
+        "#
+    ))
     .execute(&mut **executor)
     .await
     .context("failed to publish new name_current replacement rows")

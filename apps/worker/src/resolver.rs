@@ -1,7 +1,8 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use bigname_storage::{ResolverCurrentRow, delete_resolver_current, upsert_resolver_current_rows};
+use futures_util::{StreamExt, TryStreamExt, pin_mut, stream};
+use serde_json::{Value, json};
 use sqlx::PgPool;
-use tokio::task::JoinSet;
 
 use crate::primary_name::rebuild_heartbeat::{
     LoopHeartbeat, record_rebuild_progress, run_rebuild_phase,
@@ -12,8 +13,7 @@ use crate::primary_name::rebuild_heartbeat::{
 mod staged_rebuild;
 
 use staged_rebuild::{
-    RESOLVER_CURRENT_COLUMNS, count_rows, create_stage_table, drop_stage_table,
-    publish_stage_table, stage_resolver_current_rows,
+    RESOLVER_CURRENT_COLUMNS, count_rows, publish_stage_table, stage_resolver_current_rows,
 };
 
 mod profile;
@@ -24,14 +24,12 @@ mod target_loading;
 use profile::ResolverProfileGate;
 use summary_json::{build_resolver_current_row, build_resolver_current_row_with_progress};
 use target_loading::{
-    ResolverTarget, count_current_binding_candidate_pairs, load_target_resolvers,
+    ResolverTarget, count_current_binding_candidate_pairs, load_target_resolvers_page,
     normalize_resolver_address,
 };
 
 #[cfg(test)]
 use bigname_storage::{CanonicalityState, SurfaceBindingKind};
-#[cfg(test)]
-use serde_json::{Value, json};
 #[cfg(test)]
 use sqlx::{Row, types::time::OffsetDateTime};
 #[cfg(test)]
@@ -50,7 +48,10 @@ const ENS_V1_PUBLIC_RESOLVER_COMPATIBLE_PROFILE: &str = "public_resolver_compati
 const BASENAMES_L2_RESOLVER_COMPATIBLE_PROFILE: &str = "l2_resolver_compatible";
 const RESOLVER_CURRENT_DERIVATION_KIND: &str = "resolver_current_rebuild";
 const RESOLVER_CURRENT_ENUMERATION_BASIS: &str = "resolver_overview";
+#[cfg(not(test))]
 const RESOLVER_CURRENT_REBUILD_BATCH_SIZE: usize = 1_000;
+#[cfg(test)]
+const RESOLVER_CURRENT_REBUILD_BATCH_SIZE: usize = 1;
 const RESOLVER_CURRENT_REBUILD_CONCURRENCY: usize = 1;
 const RESOLVER_CURRENT_REBUILD_LOG_INTERVAL: usize = 100;
 const TARGETED_RESOLVER_BINDING_ENUMERATION_CANDIDATE_LIMIT: i64 = 10_000;
@@ -86,15 +87,6 @@ pub async fn rebuild_resolver_current(
     rebuild_resolver_current_inner(pool, chain_id, resolver_address, None).await
 }
 
-pub(crate) async fn rebuild_resolver_current_with_heartbeat(
-    pool: &PgPool,
-    chain_id: Option<&str>,
-    resolver_address: Option<&str>,
-    loop_heartbeat: &mut LoopHeartbeat,
-) -> Result<ResolverCurrentRebuildSummary> {
-    rebuild_resolver_current_inner(pool, chain_id, resolver_address, Some(loop_heartbeat)).await
-}
-
 async fn rebuild_resolver_current_inner(
     pool: &PgPool,
     chain_id: Option<&str>,
@@ -105,15 +97,28 @@ async fn rebuild_resolver_current_inner(
         (Some(chain_id), Some(resolver_address)) => {
             rebuild_one_resolver(pool, chain_id, resolver_address, loop_heartbeat).await
         }
-        (None, None) => rebuild_all_resolvers(pool, loop_heartbeat).await,
+        (None, None) => {
+            let summary = rebuild_all_resolvers(pool, None, loop_heartbeat).await?;
+            crate::replay::staging::cleanup_projection_checkpoint(pool, "resolver_current").await?;
+            Ok(summary)
+        }
         _ => bail!(
             "resolver_current rebuild requires both chain_id and resolver_address when targeting one resolver"
         ),
     }
 }
 
+pub(crate) async fn rebuild_resolver_current_for_replay(
+    pool: &PgPool,
+    normalized_target_block: Option<i64>,
+    loop_heartbeat: Option<&mut LoopHeartbeat>,
+) -> Result<ResolverCurrentRebuildSummary> {
+    rebuild_all_resolvers(pool, normalized_target_block, loop_heartbeat).await
+}
+
 async fn rebuild_all_resolvers(
     pool: &PgPool,
+    normalized_target_block: Option<i64>,
     mut loop_heartbeat: Option<&mut LoopHeartbeat>,
 ) -> Result<ResolverCurrentRebuildSummary> {
     let profile_gate = run_rebuild_phase(
@@ -123,90 +128,88 @@ async fn rebuild_all_resolvers(
         ResolverProfileGate::load(pool),
     )
     .await?;
-    let targets = run_rebuild_phase(
-        pool,
-        &mut loop_heartbeat,
-        "resolver_current.load_targets",
-        load_target_resolvers(pool),
-    )
-    .await?;
-    let requested_resolver_count = targets.len();
-    let mut conn = pool.acquire().await.map_err(anyhow::Error::from)?;
-    let stage_table = create_stage_table(&mut conn, "resolver_current").await?;
     let previous_row_count = run_rebuild_phase(
         pool,
         &mut loop_heartbeat,
         "resolver_current.count_existing",
-        count_rows(&mut conn, "resolver_current", None),
+        count_rows(pool, "resolver_current", None),
     )
     .await?;
     tracing::info!(
         projection = "resolver_current",
-        requested_resolver_count,
         rebuild_concurrency = RESOLVER_CURRENT_REBUILD_CONCURRENCY,
-        "resolver_current rebuild targets loaded"
+        target_page_size = RESOLVER_CURRENT_REBUILD_BATCH_SIZE,
+        "resolver_current rebuild staging started"
     );
 
-    let mut rows = Vec::with_capacity(RESOLVER_CURRENT_REBUILD_BATCH_SIZE);
-    let mut completed_resolver_count = 0usize;
-    let mut upserted_row_count = 0usize;
-    let mut targets = targets.into_iter();
-    let mut tasks = JoinSet::new();
-
-    for _ in 0..RESOLVER_CURRENT_REBUILD_CONCURRENCY {
-        let Some(target) = targets.next() else {
-            break;
-        };
-        spawn_resolver_rebuild_task(&mut tasks, pool, profile_gate.clone(), target);
+    let mut checkpoint = crate::replay::staging::ProjectionStagingCheckpoint::load_or_start(
+        pool,
+        "resolver_current",
+        normalized_target_block,
+    )
+    .await?;
+    if !checkpoint.staging_complete() {
+        loop {
+            let input_fence = checkpoint.prepare_next_batch(pool).await?;
+            let cursor = resolver_source_cursor(checkpoint.last_source_key())?;
+            let page = run_rebuild_phase(
+                pool,
+                &mut loop_heartbeat,
+                "resolver_current.load_targets_page",
+                load_target_resolvers_page(
+                    pool,
+                    cursor.as_ref(),
+                    RESOLVER_CURRENT_REBUILD_BATCH_SIZE,
+                ),
+            )
+            .await?;
+            if page.is_empty() {
+                checkpoint.mark_staging_complete(pool, input_fence).await?;
+                break;
+            }
+            let last = page
+                .last()
+                .expect("resolver_current staging page must not be empty");
+            let last_source_key = json!([last.chain_id, last.resolver_address]);
+            let rows = build_resolver_page(pool, &profile_gate, &page, &mut loop_heartbeat).await?;
+            let mut transaction = pool.begin().await?;
+            let staged =
+                stage_resolver_current_rows(&mut transaction, checkpoint.stage_table(0)?, &rows)
+                    .await?;
+            let progress =
+                checkpoint.progress_after_batch(page.len(), last_source_key, staged, 0)?;
+            checkpoint
+                .persist_progress(&mut transaction, &progress, &input_fence)
+                .await?;
+            transaction.commit().await?;
+            checkpoint.accept_progress(progress, input_fence);
+            let completed_resolver_count = checkpoint.completed_source_count()?;
+            if completed_resolver_count.is_multiple_of(RESOLVER_CURRENT_REBUILD_LOG_INTERVAL) {
+                tracing::info!(
+                    projection = "resolver_current",
+                    completed_resolver_count,
+                    upserted_row_count = checkpoint.staged_row_count()?,
+                    "resolver_current rebuild resolvers processed"
+                );
+            }
+        }
     }
-
-    while let Some(result) = tasks.join_next().await {
-        completed_resolver_count += 1;
-        let row = result??;
-        record_rebuild_progress(pool, &mut loop_heartbeat).await;
-        if let Some(row) = row {
-            rows.push(row);
-        }
-
-        if rows.len() >= RESOLVER_CURRENT_REBUILD_BATCH_SIZE {
-            upserted_row_count +=
-                stage_resolver_current_rows(&mut conn, &stage_table, &rows).await? as usize;
-            rows.clear();
-        }
-
-        if completed_resolver_count.is_multiple_of(RESOLVER_CURRENT_REBUILD_LOG_INTERVAL) {
-            tracing::info!(
-                projection = "resolver_current",
-                requested_resolver_count,
-                completed_resolver_count,
-                upserted_row_count,
-                "resolver_current rebuild resolvers processed"
-            );
-        }
-
-        if let Some(target) = targets.next() {
-            spawn_resolver_rebuild_task(&mut tasks, pool, profile_gate.clone(), target);
-        }
-    }
-
-    if !rows.is_empty() {
-        upserted_row_count +=
-            stage_resolver_current_rows(&mut conn, &stage_table, &rows).await? as usize;
-    }
+    let requested_resolver_count = checkpoint.completed_source_count()?;
+    let upserted_row_count = checkpoint.staged_row_count()?;
     let (_deleted_row_count, published_row_count) = run_rebuild_phase(
         pool,
         &mut loop_heartbeat,
         "resolver_current.publish",
         publish_stage_table(
-            &mut conn,
+            pool,
             "resolver_current",
-            &stage_table,
+            checkpoint.stage_table(0)?,
             RESOLVER_CURRENT_COLUMNS,
             None,
+            checkpoint.full_replay_input_revision(),
         ),
     )
     .await?;
-    drop_stage_table(&mut conn, &stage_table).await?;
     debug_assert_eq!(published_row_count as usize, upserted_row_count);
 
     Ok(ResolverCurrentRebuildSummary {
@@ -216,14 +219,36 @@ async fn rebuild_all_resolvers(
     })
 }
 
-fn spawn_resolver_rebuild_task(
-    tasks: &mut JoinSet<Result<Option<ResolverCurrentRow>>>,
+async fn build_resolver_page(
     pool: &PgPool,
-    profile_gate: ResolverProfileGate,
-    target: ResolverTarget,
-) {
-    let pool = pool.clone();
-    tasks.spawn(async move { build_resolver_current_row(&pool, &profile_gate, &target).await });
+    profile_gate: &ResolverProfileGate,
+    targets: &[ResolverTarget],
+    loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
+) -> Result<Vec<ResolverCurrentRow>> {
+    let rows = stream::iter(targets.iter().cloned())
+        .map(|target| {
+            let pool = pool.clone();
+            let profile_gate = profile_gate.clone();
+            async move { build_resolver_current_row(&pool, &profile_gate, &target).await }
+        })
+        .buffer_unordered(RESOLVER_CURRENT_REBUILD_CONCURRENCY);
+    pin_mut!(rows);
+    let mut completed = Vec::new();
+    while let Some(row) = rows.try_next().await? {
+        if let Some(row) = row {
+            completed.push(row);
+        }
+        record_rebuild_progress(pool, loop_heartbeat).await;
+    }
+    Ok(completed)
+}
+
+fn resolver_source_cursor(value: Option<&Value>) -> Result<Option<[String; 2]>> {
+    value
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .context("resolver_current staging checkpoint source key must contain two strings")
 }
 
 async fn rebuild_one_resolver(

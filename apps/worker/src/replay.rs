@@ -2,6 +2,7 @@ mod json;
 mod ordering;
 mod progress;
 mod rebuild;
+pub(crate) mod staging;
 mod summary;
 
 pub use ordering::{ALL_CURRENT_PROJECTION_JSON_ORDER, ALL_CURRENT_PROJECTION_ORDER};

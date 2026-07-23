@@ -1,6 +1,7 @@
 mod invalidations;
 mod reads;
 mod source_decode;
+mod source_stream;
 mod sources;
 mod types;
 mod writes;
@@ -10,9 +11,11 @@ pub use reads::{
     load_children_current, load_children_current_including_noncanonical,
     load_children_current_page, load_children_current_summaries,
 };
+pub use source_stream::{
+    stream_canonical_declared_child_sources, stream_canonical_declared_child_sources_after,
+};
 pub use sources::{
     load_canonical_declared_child_sources, load_canonical_ens_v1_declared_child_sources,
-    stream_canonical_declared_child_sources,
 };
 pub use types::{
     ChildrenCurrentKeysetCursor, ChildrenCurrentPage, ChildrenCurrentRow, ChildrenCurrentSummary,

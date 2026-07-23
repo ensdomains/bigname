@@ -19,6 +19,7 @@ use super::canonicality::format_timestamp;
 use super::{
     EVENT_KIND_PERMISSION_CHANGED, PERMISSIONS_CURRENT_DERIVATION_KIND,
     PERMISSIONS_ENUMERATION_BASIS, rebuild_permissions_current,
+    staged_rebuild::stage_permissions_current_rows,
 };
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -89,6 +90,49 @@ impl TestDatabase {
         self.admin_pool.close().await;
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn staging_large_permission_page_stays_below_postgres_bind_limit() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let resource_id = Uuid::from_u128(0x7000);
+    let rows = (0..4_096)
+        .map(|index| PermissionsCurrentRow {
+            resource_id,
+            subject: format!("0x{index:040x}"),
+            scope: PermissionScope::Resource,
+            effective_powers: json!(["resource_control"]),
+            grant_source: json!({}),
+            revocation_source: None,
+            inheritance_path: json!([]),
+            transfer_behavior: json!({}),
+            provenance: json!({"derivation_kind": "bind_limit_test"}),
+            coverage: json!({"enumeration_basis": PERMISSIONS_ENUMERATION_BASIS}),
+            chain_positions: json!({}),
+            canonicality_summary: json!({"status": "finalized", "chains": {}}),
+            manifest_version: 1,
+            last_recomputed_at: timestamp(1_776_100_000),
+        })
+        .collect::<Vec<_>>();
+    let mut transaction = database.pool().begin().await?;
+    sqlx::query(
+        "CREATE TEMP TABLE permissions_bind_limit_stage (LIKE permissions_current INCLUDING DEFAULTS)",
+    )
+    .execute(&mut *transaction)
+    .await?;
+
+    let staged =
+        stage_permissions_current_rows(&mut transaction, "permissions_bind_limit_stage", &rows)
+            .await?;
+    assert_eq!(staged, 4_096);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM permissions_bind_limit_stage")
+            .fetch_one(&mut *transaction)
+            .await?,
+        4_096
+    );
+    transaction.rollback().await?;
+    database.cleanup().await
 }
 
 #[tokio::test]

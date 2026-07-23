@@ -67,7 +67,11 @@ pub(super) async fn load_name_resource_ids(
         .collect())
 }
 
-pub(super) async fn load_canonical_name_surfaces(pool: &PgPool) -> Result<Vec<NameSurfaceSeed>> {
+pub(super) async fn load_canonical_name_surfaces_after(
+    pool: &PgPool,
+    after_logical_name_id: Option<&str>,
+    limit: i64,
+) -> Result<Vec<NameSurfaceSeed>> {
     let rows = sqlx::query_as::<_, NameSurfaceSeed>(&format!(
         r#"
         SELECT
@@ -86,9 +90,13 @@ pub(super) async fn load_canonical_name_surfaces(pool: &PgPool) -> Result<Vec<Na
           ON rb.chain_id = ns.chain_id
          AND rb.block_hash = ns.block_hash
         WHERE ns.canonicality_state {CANONICAL_STATE_FILTER}
+          AND ($1::TEXT IS NULL OR ns.logical_name_id > $1)
         ORDER BY ns.logical_name_id
+        LIMIT $2
         "#
     ))
+    .bind(after_logical_name_id)
+    .bind(limit)
     .fetch_all(pool)
     .await
     .context("failed to load canonical name_surfaces for name_current rebuild")?;

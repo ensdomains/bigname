@@ -8,24 +8,26 @@ mod types;
 mod wildcard;
 
 use anyhow::Result;
-use bigname_storage::{
-    NameCurrentReplacement, NameCurrentRow, delete_name_current, upsert_name_current_rows,
+use bigname_storage::projection_staging::{
+    publish_name_current_replacement_table, stage_name_current_replacement_rows_in_transaction,
 };
+use bigname_storage::{NameCurrentRow, delete_name_current, upsert_name_current_rows};
 use coverage::build_exact_name_coverage;
+use futures_util::{StreamExt, TryStreamExt, pin_mut, stream};
 use json::{build_declared_summary, build_provenance};
 use load::{
-    load_canonical_name_surface, load_canonical_name_surfaces, load_current_binding_context,
+    load_canonical_name_surface, load_canonical_name_surfaces_after, load_current_binding_context,
     load_history_heads, load_relevant_events,
 };
 use project::{
     build_canonicality_summary, build_chain_positions, max_timestamp, min_timestamp, project_facts,
 };
 use resolution::build_supported_resolution_projection;
+use serde_json::Value;
 use sqlx::{PgPool, types::time::OffsetDateTime};
 use supplemental::{
     load_active_basenames_execution_manifest, load_supplemental_chain_observations,
 };
-use tokio::task::JoinSet;
 use types::{NameSurfaceSeed, WildcardSourceContext};
 use wildcard::load_wildcard_source_context;
 
@@ -40,7 +42,7 @@ use load::load_name_resource_ids;
 #[cfg(test)]
 use resolution::{empty_alias_detail, empty_transport_detail, empty_wildcard_detail};
 #[cfg(test)]
-use serde_json::{Value, json};
+use serde_json::json;
 #[cfg(test)]
 use sqlx::Row;
 #[cfg(test)]
@@ -82,7 +84,10 @@ const EVENT_KIND_REGISTRAR_NAME_REGISTERED: &str = "RegistrarNameRegistered";
 const RECORD_INVENTORY_UNSUPPORTED_REASON: &str =
     "record_inventory remains unsupported in the ENSv1 name_current rebuild";
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
+#[cfg(not(test))]
 const NAME_CURRENT_REBUILD_STAGE_BATCH_SIZE: usize = 2_000;
+#[cfg(test)]
+const NAME_CURRENT_REBUILD_STAGE_BATCH_SIZE: usize = 1;
 const RELEVANT_EVENT_KINDS: &[&str] = &[
     "AuthorityEpochChanged",
     "AuthorityTransferred",
@@ -122,14 +127,6 @@ pub async fn rebuild_name_current(
     rebuild_name_current_inner(pool, logical_name_id, None).await
 }
 
-pub(crate) async fn rebuild_name_current_with_heartbeat(
-    pool: &PgPool,
-    logical_name_id: Option<&str>,
-    loop_heartbeat: &mut LoopHeartbeat,
-) -> Result<NameCurrentRebuildSummary> {
-    rebuild_name_current_inner(pool, logical_name_id, Some(loop_heartbeat)).await
-}
-
 async fn rebuild_name_current_inner(
     pool: &PgPool,
     logical_name_id: Option<&str>,
@@ -139,73 +136,104 @@ async fn rebuild_name_current_inner(
         Some(logical_name_id) => {
             rebuild_one_name_current(pool, logical_name_id, loop_heartbeat).await
         }
-        None => rebuild_all_name_current(pool, loop_heartbeat).await,
+        None => {
+            let summary = rebuild_all_name_current(pool, None, loop_heartbeat).await?;
+            crate::replay::staging::cleanup_projection_checkpoint(pool, "name_current").await?;
+            Ok(summary)
+        }
     }
+}
+
+pub(crate) async fn rebuild_name_current_for_replay(
+    pool: &PgPool,
+    normalized_target_block: Option<i64>,
+    loop_heartbeat: Option<&mut LoopHeartbeat>,
+) -> Result<NameCurrentRebuildSummary> {
+    rebuild_all_name_current(pool, normalized_target_block, loop_heartbeat).await
 }
 
 async fn rebuild_all_name_current(
     pool: &PgPool,
+    normalized_target_block: Option<i64>,
     mut loop_heartbeat: Option<&mut LoopHeartbeat>,
 ) -> Result<NameCurrentRebuildSummary> {
-    let names = run_rebuild_phase(
+    let mut checkpoint = crate::replay::staging::ProjectionStagingCheckpoint::load_or_start(
         pool,
-        &mut loop_heartbeat,
-        "name_current.load_inputs",
-        load_canonical_name_surfaces(pool),
+        "name_current",
+        normalized_target_block,
     )
     .await?;
-    let requested_name_count = names.len();
-    let mut replacement = NameCurrentReplacement::begin(pool).await?;
-    let mut rows = Vec::with_capacity(NAME_CURRENT_REBUILD_STAGE_BATCH_SIZE);
-    let mut completed_name_count = 0usize;
-    let mut names = names.into_iter();
-    let mut tasks = JoinSet::new();
-
-    for _ in 0..NAME_CURRENT_REBUILD_CONCURRENCY {
-        let Some(name) = names.next() else {
-            break;
-        };
-        spawn_name_current_rebuild_task(&mut tasks, pool, name);
-    }
-
-    while let Some(result) = tasks.join_next().await {
-        rows.push(result??);
-        completed_name_count += 1;
-        record_rebuild_progress(pool, &mut loop_heartbeat).await;
-        if rows.len() >= NAME_CURRENT_REBUILD_STAGE_BATCH_SIZE {
-            replacement.stage_rows(&rows).await?;
-            rows.clear();
-        }
-        if completed_name_count.is_multiple_of(5_000) {
-            tracing::info!(
-                projection = "name_current",
-                requested_name_count,
-                completed_name_count,
-                staged_row_count = replacement.staged_row_count(),
-                "name_current rebuild rows built"
+    if !checkpoint.staging_complete() {
+        loop {
+            let input_fence = checkpoint.prepare_next_batch(pool).await?;
+            let after_logical_name_id = checkpoint
+                .last_source_key()
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let page = run_rebuild_phase(
+                pool,
+                &mut loop_heartbeat,
+                "name_current.load_inputs",
+                load_canonical_name_surfaces_after(
+                    pool,
+                    after_logical_name_id.as_deref(),
+                    i64::try_from(NAME_CURRENT_REBUILD_STAGE_BATCH_SIZE)?,
+                ),
+            )
+            .await?;
+            if page.is_empty() {
+                checkpoint.mark_staging_complete(pool, input_fence).await?;
+                break;
+            }
+            let last_source_key = Value::String(
+                page.last()
+                    .expect("name_current staging page must not be empty")
+                    .logical_name_id
+                    .clone(),
             );
-        }
-        if let Some(name) = names.next() {
-            spawn_name_current_rebuild_task(&mut tasks, pool, name);
+            let rows = build_name_current_page(pool, &page, &mut loop_heartbeat).await?;
+            let mut transaction = pool.begin().await?;
+            let staged = stage_name_current_replacement_rows_in_transaction(
+                &mut transaction,
+                checkpoint.stage_table(0)?,
+                &rows,
+            )
+            .await?;
+            let progress =
+                checkpoint.progress_after_batch(page.len(), last_source_key, staged, 0)?;
+            checkpoint
+                .persist_progress(&mut transaction, &progress, &input_fence)
+                .await?;
+            transaction.commit().await?;
+            checkpoint.accept_progress(progress, input_fence);
+            let completed_name_count = checkpoint.completed_source_count()?;
+            if completed_name_count.is_multiple_of(5_000) {
+                tracing::info!(
+                    projection = "name_current",
+                    completed_name_count,
+                    staged_row_count = checkpoint.staged_row_count()?,
+                    "name_current rebuild rows built"
+                );
+            }
         }
     }
-
-    if !rows.is_empty() {
-        replacement.stage_rows(&rows).await?;
-        rows.clear();
-    }
-    let upserted_row_count = replacement.staged_row_count();
+    let requested_name_count = checkpoint.completed_source_count()?;
+    let upserted_row_count = checkpoint.staged_row_count()?;
     let (published_row_count, deleted_row_count) = run_rebuild_phase(
         pool,
         &mut loop_heartbeat,
         "name_current.publish",
-        replacement.publish(),
+        publish_name_current_replacement_table(
+            pool,
+            checkpoint.stage_table(0)?,
+            checkpoint.full_replay_input_revision(),
+        ),
     )
     .await?;
     tracing::info!(
         projection = "name_current",
         requested_name_count,
-        completed_name_count,
+        completed_name_count = requested_name_count,
         upserted_row_count,
         published_row_count,
         deleted_row_count,
@@ -218,13 +246,24 @@ async fn rebuild_all_name_current(
     })
 }
 
-fn spawn_name_current_rebuild_task(
-    tasks: &mut JoinSet<Result<bigname_storage::NameCurrentRow>>,
+async fn build_name_current_page(
     pool: &PgPool,
-    name: NameSurfaceSeed,
-) {
-    let pool = pool.clone();
-    tasks.spawn(async move { build_name_current_row(&pool, &name).await });
+    names: &[NameSurfaceSeed],
+    loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
+) -> Result<Vec<NameCurrentRow>> {
+    let rows = stream::iter(names.iter().cloned())
+        .map(|name| {
+            let pool = pool.clone();
+            async move { build_name_current_row(&pool, &name).await }
+        })
+        .buffer_unordered(NAME_CURRENT_REBUILD_CONCURRENCY);
+    pin_mut!(rows);
+    let mut completed = Vec::with_capacity(names.len());
+    while let Some(row) = rows.try_next().await? {
+        completed.push(row);
+        record_rebuild_progress(pool, loop_heartbeat).await;
+    }
+    Ok(completed)
 }
 
 async fn rebuild_one_name_current(

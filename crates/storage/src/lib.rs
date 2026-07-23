@@ -19,6 +19,7 @@ mod normalized_events;
 mod permissions;
 mod primary_name;
 mod projection_helpers;
+pub mod projection_staging;
 mod raw;
 mod raw_calls;
 mod raw_children;
@@ -361,8 +362,7 @@ pub async fn connect(config: &DatabaseConfig) -> Result<PgPool> {
     connect_inner(config, None, None).await
 }
 
-/// Open a PostgreSQL connection pool with an application name visible in
-/// `pg_stat_activity`.
+/// Open a PostgreSQL connection pool with an application name visible in `pg_stat_activity`.
 pub async fn connect_with_application_name(
     config: &DatabaseConfig,
     application_name: &str,

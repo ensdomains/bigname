@@ -1,3 +1,4 @@
+use crate::projection_staging::advance_current_projection_full_replay_input_revision_in_transaction;
 use anyhow::{Context, Result};
 
 use super::super::guards::ensure_canonical_raw_log_floor_from;
@@ -25,6 +26,9 @@ pub(super) async fn reset_replay_state(
         state.replay_target_block,
     )
     .await?;
+    advance_current_projection_full_replay_input_revision_in_transaction(transaction)
+        .await
+        .context("failed to invalidate full-projection staging after Base rederive")?;
     Ok(BaseNormalizedRederiveCounts {
         current_projection_replay_status,
         replay_cursor_rows,
