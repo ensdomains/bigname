@@ -1,3 +1,5 @@
+use std::{future::Future, pin::Pin};
+
 use anyhow::{Context, Result, bail};
 use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder};
 
@@ -53,6 +55,23 @@ pub struct BackfillCoverageFactWrite {
     pub covered_to_block: i64,
 }
 
+/// One item consumed while a large in-memory backfill plan is converted into
+/// durable coverage. `Progress` means the source iterator examined another
+/// bounded unit even when that unit did not yield a fact (for example, an
+/// address covered by a family-wide scan).
+pub enum BackfillCoverageFactStreamItem {
+    Fact(BackfillCoverageFactWrite),
+    Progress,
+}
+
+pub type BackfillCoverageProgressFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+
+/// Progress hook for whole-plan coverage publication. Callers must only emit a
+/// hook after input was consumed or a database insert chunk completed.
+pub trait BackfillCoverageProgress: Send {
+    fn record<'a>(&'a mut self) -> BackfillCoverageProgressFuture<'a>;
+}
+
 struct BackfillCoverageAuthority {
     chain_id: String,
     status: String,
@@ -106,22 +125,55 @@ pub(super) async fn write_backfill_coverage_facts_from_iter(
     derivation: BackfillCoverageFactDerivation,
     facts: impl Iterator<Item = BackfillCoverageFactWrite>,
 ) -> Result<u64> {
+    write_backfill_coverage_fact_stream(
+        conn,
+        backfill_job_id,
+        derivation,
+        facts.map(BackfillCoverageFactStreamItem::Fact),
+        &mut None,
+    )
+    .await
+}
+
+pub(super) async fn write_backfill_coverage_fact_stream(
+    conn: &mut PgConnection,
+    backfill_job_id: i64,
+    derivation: BackfillCoverageFactDerivation,
+    facts: impl Iterator<Item = BackfillCoverageFactStreamItem>,
+    progress: &mut Option<&mut dyn BackfillCoverageProgress>,
+) -> Result<u64> {
     let mut inserted = 0_u64;
     let mut chunk = Vec::new();
     let authority = load_backfill_job_coverage_authority(conn, backfill_job_id).await?;
-    for fact in facts {
-        chunk.push(fact);
-        if chunk.len() == COVERAGE_FACT_INSERT_CHUNK_ROWS {
-            validate_backfill_job_coverage_authority(backfill_job_id, &authority, chunk.iter())?;
-            inserted += insert_backfill_coverage_fact_chunk(
-                conn,
-                backfill_job_id,
-                &authority.chain_id,
-                derivation,
-                &chunk,
-            )
-            .await?;
-            chunk.clear();
+    for item in facts {
+        match item {
+            BackfillCoverageFactStreamItem::Fact(fact) => {
+                chunk.push(fact);
+                if chunk.len() == COVERAGE_FACT_INSERT_CHUNK_ROWS {
+                    validate_backfill_job_coverage_authority(
+                        backfill_job_id,
+                        &authority,
+                        chunk.iter(),
+                    )?;
+                    inserted += insert_backfill_coverage_fact_chunk(
+                        conn,
+                        backfill_job_id,
+                        &authority.chain_id,
+                        derivation,
+                        &chunk,
+                    )
+                    .await?;
+                    chunk.clear();
+                    if let Some(progress) = progress.as_deref_mut() {
+                        progress.record().await?;
+                    }
+                }
+            }
+            BackfillCoverageFactStreamItem::Progress => {
+                if let Some(progress) = progress.as_deref_mut() {
+                    progress.record().await?;
+                }
+            }
         }
     }
     if !chunk.is_empty() {
@@ -134,6 +186,9 @@ pub(super) async fn write_backfill_coverage_facts_from_iter(
             &chunk,
         )
         .await?;
+        if let Some(progress) = progress.as_deref_mut() {
+            progress.record().await?;
+        }
     }
     Ok(inserted)
 }

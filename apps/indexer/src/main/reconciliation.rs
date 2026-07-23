@@ -23,8 +23,10 @@ pub(crate) use adapter_sync::{
     automatic_stateless_replay_completed, sync_adapter_state_from_persisted_raw_payloads,
     sync_adapter_state_from_scoped_persisted_raw_payloads,
     sync_automatic_two_phase_full_closure_normalized_events,
-    sync_live_adapter_backlog_after_normalized_replay,
-    sync_live_adapter_state_from_persisted_raw_payloads, validate_chain_handoff_while_guarded,
+    sync_live_adapter_backlog_after_normalized_replay_with_progress,
+    sync_live_adapter_state_from_persisted_raw_payloads,
+    sync_live_adapter_state_from_persisted_raw_payloads_with_progress,
+    validate_chain_handoff_while_guarded,
 };
 #[cfg(test)]
 pub(crate) use adapter_sync::{
@@ -32,15 +34,18 @@ pub(crate) use adapter_sync::{
     install_ownership_release_test_hook, install_post_discovery_mutation_failure_for_test,
     install_stateless_page_observer,
     sync_full_closure_normalized_events_from_persisted_raw_payloads,
+    sync_live_adapter_backlog_after_normalized_replay,
     sync_manual_full_closure_normalized_events_from_persisted_raw_payloads,
 };
+#[cfg(test)]
+pub(crate) use canonical::reconcile_canonical_head_with_adapter_progress;
 #[allow(unused_imports)]
 pub(crate) use canonical::{
     ChainCoverageFrontiers, EnsV2LiveCoverageRecoveryStatus, RawCodeBaselineFrontier,
     orphan_canonical_branch, orphan_reorg_losing_branch_payloads, poll_provider_heads,
-    poll_provider_heads_with_adapter_sync, reconcile_canonical_head, reconcile_fetched_heads,
-    reconcile_fetched_heads_with_adapter_sync, reconcile_intake_chain_task,
-    recover_ens_v2_live_coverage_requirement,
+    poll_provider_heads_with_adapter_sync, poll_provider_heads_with_adapter_sync_and_progress,
+    reconcile_canonical_head, reconcile_fetched_heads, reconcile_fetched_heads_with_adapter_sync,
+    reconcile_intake_chain_task, recover_ens_v2_live_coverage_requirement,
 };
 #[allow(unused_imports)]
 pub(crate) use lineage::{
@@ -77,8 +82,10 @@ pub(crate) use replay::{
     chain_has_closure_or_dependency_replay_adapter,
     ensure_full_closure_retention_authority_for_adapters,
     ensure_legacy_registry_closure_retention_authority_for_adapters,
-    replay_raw_fact_normalized_events, replay_stateless_only_raw_fact_normalized_events,
-    select_log_bounded_replay_to_block, unsupported_closure_replay_adapters,
+    replay_raw_fact_normalized_events, replay_raw_fact_normalized_events_with_progress,
+    replay_stateless_normalized_events_before_full_closure_with_progress,
+    replay_stateless_only_raw_fact_normalized_events, select_log_bounded_replay_to_block,
+    unsupported_closure_replay_adapters,
 };
 #[allow(unused_imports)]
 pub(crate) use types::{

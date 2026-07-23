@@ -394,6 +394,8 @@ pub(super) async fn record_cursor_failure(
     chain: &str,
     error: &anyhow::Error,
 ) -> Result<()> {
+    #[cfg(test)]
+    super::test_hook::pause_before_cursor_failure_record(pool, deployment_profile, chain).await;
     let failure_reason = postgres_text_safe(&format!("{error:#}"));
     sqlx::query(
         r#"

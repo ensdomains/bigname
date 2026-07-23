@@ -68,7 +68,7 @@ async fn rebuild_primary_names_current_inner(
 ) -> Result<PrimaryNamesCurrentRebuildSummary> {
     match (address, namespace, coin_type) {
         (Some(address), Some(namespace), Some(coin_type)) => {
-            rebuild_one_primary_name(pool, address, namespace, coin_type).await
+            rebuild_one_primary_name(pool, address, namespace, coin_type, loop_heartbeat).await
         }
         (None, None, None) => rebuild_all_primary_names(pool, loop_heartbeat).await,
         _ => bail!(
@@ -195,6 +195,7 @@ async fn rebuild_one_primary_name(
     address: &str,
     namespace: &str,
     coin_type: &str,
+    mut loop_heartbeat: Option<&mut LoopHeartbeat>,
 ) -> Result<PrimaryNamesCurrentRebuildSummary> {
     #[cfg(test)]
     let test_database = test_hooks::current_database(pool).await?;
@@ -210,6 +211,7 @@ async fn rebuild_one_primary_name(
         }
         None => None,
     };
+    record_rebuild_progress(pool, &mut loop_heartbeat).await;
     let mut transaction = pool
         .begin()
         .await
@@ -304,6 +306,7 @@ async fn rebuild_one_primary_name(
                 target.address, target.namespace, target.coin_type
             )
         })?;
+    record_rebuild_progress(pool, &mut loop_heartbeat).await;
     let projected_rows = projected_row
         .iter()
         .map(|projection| projection.row.clone())

@@ -12,9 +12,11 @@ mod validate;
 
 pub use complete::{
     complete_backfill_job, complete_backfill_range, complete_backfill_range_recording_coverage,
+    complete_backfill_range_recording_coverage_with_progress,
 };
 pub use coverage_facts::{
-    BackfillCoverageFactDerivation, BackfillCoverageFactScope, BackfillCoverageFactWrite,
+    BackfillCoverageFactDerivation, BackfillCoverageFactScope, BackfillCoverageFactStreamItem,
+    BackfillCoverageFactWrite, BackfillCoverageProgress, BackfillCoverageProgressFuture,
     load_backfill_coverage_fact_counts, write_backfill_coverage_facts,
 };
 pub use create::{

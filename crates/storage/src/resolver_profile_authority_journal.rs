@@ -9,6 +9,7 @@ mod reads;
 
 pub use advance::{
     ResolverProfileAuthorityJournalAdvance, ResolverProfileAuthorityJournalAdvanceSummary,
+    ResolverProfileAuthorityJournalProgress, ResolverProfileAuthorityJournalProgressFuture,
 };
 pub use reads::{
     load_resolver_profile_authority_entries_for_targets,

@@ -948,13 +948,52 @@ async fn hash_pinned_backfill_persists_range_and_is_idempotent_without_advancing
 
     let range = BackfillBlockRange::new(42, 43)?;
     let config = backfill_job_config(range, "indexer-backfill-hash-pinned", "lease-first")?;
-    let outcome = run_resumable_hash_pinned_backfill_job(
+    let heartbeat_instance_id = "backfill-in-flight-progress-test";
+    install_stale_indexer_heartbeat(database.pool(), heartbeat_instance_id).await?;
+    let (mut progress, progress_handle) = BlockingHeartbeatProgress::new(
+        heartbeat_instance_id,
+        vec!["ethereum-mainnet".to_owned()],
+        2,
+    );
+    let mut operation = Box::pin(
+        backfill::run_resumable_hash_pinned_backfill_job_with_progress(
+            database.pool(),
+            &source_plan,
+            &provider,
+            config.clone(),
+            &mut progress,
+        ),
+    );
+    tokio::time::timeout(StdDuration::from_secs(10), async {
+        tokio::select! {
+            () = progress_handle.wait_until_blocked() => Ok(()),
+            result = operation.as_mut() => Err(anyhow::anyhow!(
+                "backfill completed before its later progress boundary blocked: {result:?}"
+            )),
+        }
+    })
+    .await
+    .context("backfill did not reach its later progress boundary")??;
+    let heartbeat = bigname_storage::load_service_loop_heartbeat(
         database.pool(),
-        &source_plan,
-        &provider,
-        config.clone(),
+        bigname_storage::INDEXER_SERVICE_NAME,
+        heartbeat_instance_id,
     )
-    .await?;
+    .await?
+    .context("backfill progress heartbeat must remain registered")?;
+    assert!(
+        heartbeat.age_seconds <= 1,
+        "an earlier completed backfill unit must beat before later work finishes"
+    );
+    assert!(
+        progress_handle.record_count() >= 2,
+        "backfill must reach a later progress boundary while still in flight"
+    );
+    progress_handle.resume();
+    let outcome = tokio::time::timeout(StdDuration::from_secs(10), operation.as_mut())
+        .await
+        .context("backfill did not finish after its progress blocker was released")??;
+    drop(operation);
     assert_eq!(
         outcome,
         backfill::BackfillJobRunOutcome {

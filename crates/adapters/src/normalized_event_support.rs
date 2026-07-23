@@ -155,6 +155,26 @@ pub(crate) async fn upsert_normalized_events_in_chunks_with_stateless_replay_aut
     NormalizedEventSyncCounts,
     NormalizedEventReplayAuthoritySummary,
 )> {
+    upsert_normalized_events_in_chunks_with_stateless_replay_authority_counts_and_progress(
+        pool,
+        events,
+        adapter_label,
+        chunk_size,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn upsert_normalized_events_in_chunks_with_stateless_replay_authority_counts_and_progress(
+    pool: &PgPool,
+    events: &[NormalizedEvent],
+    adapter_label: &str,
+    chunk_size: usize,
+    mut progress: Option<&mut dyn StartupAdapterProgress>,
+) -> Result<(
+    NormalizedEventSyncCounts,
+    NormalizedEventReplayAuthoritySummary,
+)> {
     if chunk_size == 0 {
         bail!("normalized event upsert chunk size must be positive");
     }
@@ -163,6 +183,7 @@ pub(crate) async fn upsert_normalized_events_in_chunks_with_stateless_replay_aut
     for chunk in events.chunks(chunk_size) {
         authority
             .add(&upsert_normalized_events_with_stateless_replay_authority(pool, chunk).await?);
+        record_startup_adapter_progress(pool, &mut progress).await?;
     }
     let counts = stateless_replay_counts(events, &authority);
     info!(

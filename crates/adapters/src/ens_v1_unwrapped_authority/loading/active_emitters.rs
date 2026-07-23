@@ -1,5 +1,5 @@
 use bigname_storage::sql_row;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::super::scope::{
     AuthorityRawLogSourceScopeTarget, is_generic_resolver_event_source_scope_target,
@@ -8,27 +8,44 @@ use super::super::*;
 use anyhow::{Context, Result};
 use bigname_manifests::{
     WatchedContract, WatchedContractSource, load_manifest_declared_watched_contracts,
-    load_watched_contracts_by_chain,
+    load_watched_contracts_by_chain, load_watched_contracts_scoped_with_progress,
 };
 use sqlx::{PgPool, types::Uuid};
 
-use crate::adapter_manifest::{required_source_manifest_id, watched_contract_manifest_ids};
+use crate::{
+    adapter_manifest::required_source_manifest_id,
+    checkpoint_context::{StartupAdapterProgress, record_startup_adapter_progress},
+    startup_progress::{STARTUP_ADAPTER_PROGRESS_PAGE_ROWS, StartupManifestProgress},
+};
+
+#[path = "active_emitters/manifest.rs"]
+mod manifest;
+use manifest::*;
 
 pub(in crate::ens_v1_unwrapped_authority) async fn load_active_emitters(
     pool: &PgPool,
     chain: &str,
     source_scope: Option<&[AuthorityRawLogSourceScopeTarget]>,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<Vec<ActiveEmitter>> {
-    let watched_contracts = load_scoped_watched_contracts(pool, chain, source_scope).await?;
+    let watched_contracts =
+        load_scoped_watched_contracts(pool, chain, source_scope, progress).await?;
     if watched_contracts.is_empty() {
         return Ok(Vec::new());
     }
-    let contract_roles = load_manifest_contract_roles(pool, &watched_contracts).await?;
+    let contract_roles = load_manifest_contract_roles(pool, &watched_contracts, progress).await?;
 
-    let manifest_ids = watched_contract_manifest_ids(&watched_contracts)?;
+    let mut manifest_ids = HashSet::new();
+    for (index, contract) in watched_contracts.iter().enumerate() {
+        manifest_ids.insert(required_source_manifest_id(contract)?);
+        record_emitter_progress(pool, progress, index + 1, watched_contracts.len()).await?;
+    }
+    let manifest_ids = manifest_ids.into_iter().collect::<Vec<_>>();
     let active_manifests = load_active_manifest_metadata(pool, &manifest_ids).await?;
-    let mut emitters = Vec::new();
-    for watched_contract in watched_contracts {
+    record_startup_adapter_progress(pool, progress).await?;
+    let watched_contract_count = watched_contracts.len();
+    let mut emitters = BTreeMap::new();
+    for (index, watched_contract) in watched_contracts.into_iter().enumerate() {
         let source_manifest_id = required_source_manifest_id(&watched_contract)?;
         let Some(manifest) = active_manifests.get(&source_manifest_id) else {
             continue;
@@ -60,16 +77,21 @@ pub(in crate::ens_v1_unwrapped_authority) async fn load_active_emitters(
             source_rank: source_rank(watched_contract.source),
         };
 
-        emitters.push(candidate);
+        emitters.insert(
+            (
+                candidate.address.clone(),
+                candidate.source_rank,
+                candidate.source_manifest_id,
+                candidate.contract_instance_id,
+                candidate.active_from_block_number,
+                candidate.active_to_block_number,
+                index,
+            ),
+            candidate,
+        );
+        record_emitter_progress(pool, progress, index + 1, watched_contract_count).await?;
     }
-
-    emitters.sort_by(|left, right| {
-        left.address
-            .cmp(&right.address)
-            .then(left.source_rank.cmp(&right.source_rank))
-            .then(left.source_manifest_id.cmp(&right.source_manifest_id))
-    });
-    Ok(emitters)
+    Ok(emitters.into_values().collect())
 }
 
 pub(in crate::ens_v1_unwrapped_authority) async fn load_generic_resolver_event_sources(
@@ -130,8 +152,23 @@ async fn load_scoped_watched_contracts(
     pool: &PgPool,
     chain: &str,
     source_scope: Option<&[AuthorityRawLogSourceScopeTarget]>,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<Vec<WatchedContract>> {
     let Some(source_scope) = source_scope else {
+        if let Some(progress) = progress.as_deref_mut() {
+            let source_families = unwrapped_authority_source_families();
+            let mut manifest_progress = StartupManifestProgress::new(progress);
+            return load_watched_contracts_scoped_with_progress(
+                pool,
+                Some(chain),
+                &source_families,
+                &mut manifest_progress,
+            )
+            .await
+            .context(
+                "failed to stream watched contracts for ENSv1 unwrapped authority attribution",
+            );
+        }
         return load_watched_contracts_by_chain(pool, chain)
             .await
             .context("failed to load watched contracts for ENSv1 unwrapped authority attribution");
@@ -768,125 +805,4 @@ fn watched_contract_intersects_source_scope(
     let contract_from = contract.active_from_block_number.unwrap_or(0);
     let contract_to = contract.active_to_block_number.unwrap_or(i64::MAX);
     target.effective_from_block <= contract_to && contract_from <= target.effective_to_block
-}
-
-async fn load_active_manifest_metadata(
-    pool: &PgPool,
-    manifest_ids: &[i64],
-) -> Result<HashMap<i64, ActiveManifestMetadata>> {
-    let rows = sqlx::query(
-        r#"
-        SELECT manifest_id, chain, namespace, source_family, manifest_version, normalizer_version
-        FROM manifest_versions
-        WHERE rollout_status = 'active'
-          AND manifest_id = ANY($1::BIGINT[])
-        "#,
-    )
-    .bind(manifest_ids)
-    .fetch_all(pool)
-    .await
-    .context("failed to load active manifest metadata for ENSv1 unwrapped authority")?;
-
-    rows.into_iter()
-        .map(|row| {
-            let manifest = ActiveManifestMetadata {
-                manifest_id: sql_row::get(&row, "manifest_id")?,
-                chain: sql_row::get(&row, "chain")?,
-                namespace: sql_row::get(&row, "namespace")?,
-                source_family: sql_row::get(&row, "source_family")?,
-                manifest_version: sql_row::get(&row, "manifest_version")?,
-                normalizer_version: sql_row::get(&row, "normalizer_version")?,
-            };
-            Ok((manifest.manifest_id, manifest))
-        })
-        .collect()
-}
-
-async fn load_manifest_contract_roles(
-    pool: &PgPool,
-    watched_contracts: &[WatchedContract],
-) -> Result<HashMap<(i64, Uuid), String>> {
-    let manifest_ids = watched_contracts
-        .iter()
-        .filter_map(|contract| contract.source_manifest_id)
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let contract_instance_ids = watched_contracts
-        .iter()
-        .map(|contract| contract.contract_instance_id)
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    if manifest_ids.is_empty() || contract_instance_ids.is_empty() {
-        return Ok(HashMap::new());
-    }
-
-    let rows = sqlx::query(
-        r#"
-        SELECT manifest_id, contract_instance_id, role
-        FROM manifest_contract_instances
-        WHERE declaration_kind = 'contract'
-          AND manifest_id = ANY($1::BIGINT[])
-          AND contract_instance_id = ANY($2::UUID[])
-        "#,
-    )
-    .bind(&manifest_ids)
-    .bind(&contract_instance_ids)
-    .fetch_all(pool)
-    .await
-    .context("failed to load manifest contract roles for ENSv1 unwrapped authority")?;
-
-    rows.into_iter()
-        .map(|row| {
-            Ok((
-                (
-                    sql_row::get(&row, "manifest_id")?,
-                    sql_row::get(&row, "contract_instance_id")?,
-                ),
-                sql_row::get(&row, "role")?,
-            ))
-        })
-        .collect()
-}
-
-fn source_rank(source: WatchedContractSource) -> i32 {
-    crate::adapter_manifest::source_rank(source)
-}
-
-async fn load_active_manifest_metadata_for_source_family(
-    pool: &PgPool,
-    chain: &str,
-    source_family: &str,
-) -> Result<Vec<ActiveManifestMetadata>> {
-    let rows = sqlx::query(
-        r#"
-        SELECT manifest_id, chain, namespace, source_family, manifest_version, normalizer_version
-        FROM manifest_versions
-        WHERE rollout_status = 'active'
-          AND chain = $1
-          AND source_family = $2
-        ORDER BY manifest_id
-        "#,
-    )
-    .bind(chain)
-    .bind(source_family)
-    .fetch_all(pool)
-    .await
-    .with_context(|| {
-        format!("failed to load active {source_family} manifest metadata for {chain}")
-    })?;
-
-    rows.into_iter()
-        .map(|row| {
-            Ok(ActiveManifestMetadata {
-                manifest_id: sql_row::get(&row, "manifest_id")?,
-                chain: sql_row::get(&row, "chain")?,
-                namespace: sql_row::get(&row, "namespace")?,
-                source_family: sql_row::get(&row, "source_family")?,
-                manifest_version: sql_row::get(&row, "manifest_version")?,
-                normalizer_version: sql_row::get(&row, "normalizer_version")?,
-            })
-        })
-        .collect()
 }

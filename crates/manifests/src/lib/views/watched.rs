@@ -11,27 +11,50 @@ mod scoped;
 #[path = "watched/selection.rs"]
 mod selection;
 
+use std::{collections::BTreeSet, future::Future, pin::Pin};
+
 use anyhow::{Context, Result, ensure};
+use futures_util::TryStreamExt;
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow};
 
 use crate::{WatchedContract, WatchedContractSource, normalize_address};
+
+const WATCHED_PLAN_PROGRESS_ROWS: usize = 10_000;
+
+pub type ManifestRuntimeProgressFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+
+pub trait ManifestRuntimeProgress: Send {
+    fn record<'a>(&'a mut self, pool: &'a PgPool) -> ManifestRuntimeProgressFuture<'a>;
+}
 
 pub use coverage::{
     RequiredWatchedTuple, UncoveredWatchedTuple, find_uncovered_required_watched_tuples,
     find_uncovered_required_watched_tuples_for_retention_generation,
     find_uncovered_required_watched_tuples_for_retention_generation_in_transaction,
     find_uncovered_required_watched_tuples_in_transaction, find_uncovered_watched_tuples,
+    has_required_watched_tuples, has_required_watched_tuples_with_progress,
     load_required_watched_tuples, load_required_watched_tuples_in_transaction,
+    load_required_watched_tuples_in_transaction_with_progress,
+    load_required_watched_tuples_with_progress,
 };
 pub use frontier::{
     StoredLineageCoverageCandidateSummary, StoredLineageCoverageDeltaCursor,
     StoredLineageCoverageDeltaPage, load_earliest_known_watched_block,
+    load_earliest_known_watched_block_with_progress,
     load_stored_lineage_coverage_candidate_delta_page,
     materialize_stored_lineage_coverage_candidate,
+    materialize_stored_lineage_coverage_candidate_delta_with_progress,
+    materialize_stored_lineage_coverage_candidate_with_progress,
 };
 pub use historical::{
     ENS_V2_RETAINED_HISTORY_SOURCE_FAMILIES, load_ens_v2_authoritative_discovery_bootstrap_targets,
-    load_ens_v2_retained_history_recovery_targets, load_historical_watched_contracts_by_chain,
+    load_ens_v2_authoritative_discovery_bootstrap_targets_with_progress,
+    load_ens_v2_retained_history_recovery_targets,
+    load_ens_v2_retained_history_recovery_targets_with_progress,
+    load_historical_watched_contracts_by_chain,
+    load_historical_watched_contracts_by_chain_with_progress,
+    load_historical_watched_contracts_for_target,
+    load_historical_watched_contracts_scoped_with_progress,
 };
 pub use scoped::{
     load_watched_contracts_by_addresses, load_watched_contracts_by_source_family_and_addresses,
@@ -77,6 +100,30 @@ ORDER BY 1, 2, 3, 5, 6, 4
     ))
 }
 
+fn streaming_watched_contracts_sql() -> String {
+    intervals::with_streaming_watched_intervals(&format!(
+        r#"
+SELECT
+    watched.chain,
+    watched.source_family,
+    watched.address,
+    watched.contract_instance_id,
+    watched.source,
+    watched.source_manifest_id,
+    watched.active_from_block_number,
+    watched.active_to_block_number
+FROM watched_intervals watched
+WHERE {current_predicate}
+  AND ($1::TEXT IS NULL OR watched.chain = $1)
+  AND (
+      cardinality($2::TEXT[]) = 0
+      OR watched.source_family = ANY($2::TEXT[])
+  )
+"#,
+        current_predicate = intervals::CURRENT_WATCHED_INTERVAL_PREDICATE,
+    ))
+}
+
 fn manifest_declared_watched_contracts_sql() -> String {
     intervals::with_watched_intervals(&format!(
         r#"
@@ -99,25 +146,26 @@ ORDER BY 1, 2, 3, 5, 6, 4
 }
 
 fn resolver_profile_authority_target_cursor_sql() -> String {
-    let targets = intervals::with_watched_intervals(&format!(
+    let targets = intervals::with_streaming_watched_intervals(&format!(
         r#"
-SELECT DISTINCT watched.chain, watched.address
+SELECT watched.chain, watched.address
 FROM watched_intervals watched
 WHERE {current_predicate}
   AND watched.source_family IN (
       'ens_v1_resolver_l1',
       'basenames_base_resolver'
   )
-ORDER BY watched.chain, watched.address
 "#,
         current_predicate = intervals::CURRENT_WATCHED_INTERVAL_PREDICATE,
     ));
     format!("DECLARE resolver_profile_authority_targets NO SCROLL CURSOR FOR\n{targets}")
 }
 
-/// One server-side cursor over the distinct current addresses which can
+/// One streaming server-side cursor over current addresses which can
 /// contribute ENSv1 or Basenames
-/// [resolver-profile](../../../../../docs/glossary.md) authority entries.
+/// [resolver-profile](../../../../../docs/glossary.md) authority entries. The
+/// caller deduplicates across pages so PostgreSQL need not sort the complete
+/// watched surface before returning the first page.
 pub struct ResolverProfileAuthorityTargetPages;
 
 impl ResolverProfileAuthorityTargetPages {
@@ -165,6 +213,57 @@ pub async fn load_watched_contracts(pool: &PgPool) -> Result<Vec<WatchedContract
     watched_contracts_from_rows(rows)
 }
 
+pub async fn load_watched_contracts_with_progress(
+    pool: &PgPool,
+    progress: &mut dyn ManifestRuntimeProgress,
+) -> Result<Vec<WatchedContract>> {
+    load_watched_contracts_scoped_with_progress(pool, None, &[], progress).await
+}
+
+/// Stream the current watch plan for one optional chain and source-family
+/// subset. The SQL deliberately uses `UNION ALL` without a global sort; the
+/// client restores exact deduplication while reporting each completed row
+/// page.
+pub async fn load_watched_contracts_scoped_with_progress(
+    pool: &PgPool,
+    chain: Option<&str>,
+    source_families: &[String],
+    progress: &mut dyn ManifestRuntimeProgress,
+) -> Result<Vec<WatchedContract>> {
+    let query = streaming_watched_contracts_sql();
+    let mut rows = sqlx::query(&query)
+        .bind(chain)
+        .bind(source_families)
+        .fetch(pool);
+    let mut watched_contracts = BTreeSet::new();
+    let mut streamed_row_count = 0usize;
+    while let Some(row) = rows
+        .try_next()
+        .await
+        .context("failed to stream watched contracts")?
+    {
+        watched_contracts.insert(watched_contract_from_row(row)?);
+        streamed_row_count += 1;
+        if streamed_row_count.is_multiple_of(WATCHED_PLAN_PROGRESS_ROWS) {
+            progress.record(pool).await?;
+        }
+    }
+    if streamed_row_count > 0 && !streamed_row_count.is_multiple_of(WATCHED_PLAN_PROGRESS_ROWS) {
+        progress.record(pool).await?;
+    }
+    let mut result = Vec::with_capacity(watched_contracts.len());
+    for watched_contract in watched_contracts {
+        result.push(watched_contract);
+        if result.len().is_multiple_of(WATCHED_PLAN_PROGRESS_ROWS) {
+            progress.record(pool).await?;
+        }
+    }
+    if !result.is_empty() && !result.len().is_multiple_of(WATCHED_PLAN_PROGRESS_ROWS) {
+        progress.record(pool).await?;
+    }
+    Ok(result)
+}
+
 pub async fn load_watched_contracts_by_chain(
     pool: &PgPool,
     chain: &str,
@@ -208,38 +307,38 @@ pub async fn load_manifest_declared_watched_contracts(
 }
 
 fn watched_contracts_from_rows(rows: Vec<PgRow>) -> Result<Vec<WatchedContract>> {
-    rows.into_iter()
-        .map(|row| {
-            let source = row
-                .try_get::<String, _>("source")
-                .context("failed to read watched contract source")?;
-            Ok(WatchedContract {
-                chain: row
-                    .try_get("chain")
-                    .context("failed to read watched contract chain")?,
-                source_family: row
-                    .try_get("source_family")
-                    .context("failed to read watched contract source_family")?,
-                address: normalize_address(
-                    &row.try_get::<String, _>("address")
-                        .context("failed to read watched contract address")?,
-                ),
-                contract_instance_id: row
-                    .try_get("contract_instance_id")
-                    .context("failed to read watched contract_instance_id")?,
-                source: WatchedContractSource::from_db_value(&source)?,
-                source_manifest_id: row
-                    .try_get("source_manifest_id")
-                    .context("failed to read watched contract source_manifest_id")?,
-                active_from_block_number: row
-                    .try_get("active_from_block_number")
-                    .context("failed to read watched contract active_from_block_number")?,
-                active_to_block_number: row
-                    .try_get("active_to_block_number")
-                    .context("failed to read watched contract active_to_block_number")?,
-            })
-        })
-        .collect()
+    rows.into_iter().map(watched_contract_from_row).collect()
+}
+
+fn watched_contract_from_row(row: PgRow) -> Result<WatchedContract> {
+    let source = row
+        .try_get::<String, _>("source")
+        .context("failed to read watched contract source")?;
+    Ok(WatchedContract {
+        chain: row
+            .try_get("chain")
+            .context("failed to read watched contract chain")?,
+        source_family: row
+            .try_get("source_family")
+            .context("failed to read watched contract source_family")?,
+        address: normalize_address(
+            &row.try_get::<String, _>("address")
+                .context("failed to read watched contract address")?,
+        ),
+        contract_instance_id: row
+            .try_get("contract_instance_id")
+            .context("failed to read watched contract_instance_id")?,
+        source: WatchedContractSource::from_db_value(&source)?,
+        source_manifest_id: row
+            .try_get("source_manifest_id")
+            .context("failed to read watched contract source_manifest_id")?,
+        active_from_block_number: row
+            .try_get("active_from_block_number")
+            .context("failed to read watched contract active_from_block_number")?,
+        active_to_block_number: row
+            .try_get("active_to_block_number")
+            .context("failed to read watched contract active_to_block_number")?,
+    })
 }
 
 fn sort_and_dedup_watched_contracts(watched_contracts: &mut Vec<WatchedContract>) {
@@ -305,6 +404,8 @@ mod query_tests {
         assert!(resolver_targets.contains("DECLARE resolver_profile_authority_targets"));
         assert!(resolver_targets.contains("'ens_v1_resolver_l1'"));
         assert!(resolver_targets.contains("'basenames_base_resolver'"));
-        assert!(resolver_targets.contains("SELECT DISTINCT watched.chain, watched.address"));
+        assert!(resolver_targets.contains("SELECT watched.chain, watched.address"));
+        assert!(resolver_targets.contains("UNION ALL"));
+        assert!(!resolver_targets.contains("ORDER BY watched.chain, watched.address"));
     }
 }

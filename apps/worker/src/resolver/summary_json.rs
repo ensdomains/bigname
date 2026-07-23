@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use sqlx::types::time::OffsetDateTime;
 
+use crate::primary_name::rebuild_heartbeat::{LoopHeartbeat, record_rebuild_progress};
 use crate::projection_json::{
     dedupe_json_values, json_array_field, json_string_array_field, projection_coverage,
 };
@@ -35,6 +36,15 @@ pub(super) async fn build_resolver_current_row(
     profile_gate: &ResolverProfileGate,
     target: &ResolverTarget,
 ) -> Result<Option<ResolverCurrentRow>> {
+    build_resolver_current_row_with_progress(pool, profile_gate, target, &mut None).await
+}
+
+pub(super) async fn build_resolver_current_row_with_progress(
+    pool: &PgPool,
+    profile_gate: &ResolverProfileGate,
+    target: &ResolverTarget,
+    loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
+) -> Result<Option<ResolverCurrentRow>> {
     let skip_known_binding_enumeration = profile_gate.skips_binding_enumeration(target);
     let hinted_target_status = target
         .profile_source_family
@@ -57,16 +67,19 @@ pub(super) async fn build_resolver_current_row(
     } else {
         load_current_bindings(pool, target).await?
     };
+    record_rebuild_progress(pool, loop_heartbeat).await;
     let aliases = if skip_binding_enumeration {
         Vec::new()
     } else {
         load_alias_events(pool, target).await?
     };
+    record_rebuild_progress(pool, loop_heartbeat).await;
     let permissions = if skip_permission_enumeration {
         Vec::new()
     } else {
         load_resolver_permissions(pool, target).await?
     };
+    record_rebuild_progress(pool, loop_heartbeat).await;
     if bindings.is_empty()
         && aliases.is_empty()
         && permissions.is_empty()

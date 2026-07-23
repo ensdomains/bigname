@@ -77,7 +77,7 @@ async fn rebuild_permissions_current_inner(
     loop_heartbeat: Option<&mut LoopHeartbeat>,
 ) -> Result<PermissionsCurrentRebuildSummary> {
     match resource_id {
-        Some(resource_id) => rebuild_one_resource(pool, resource_id).await,
+        Some(resource_id) => rebuild_one_resource(pool, resource_id, loop_heartbeat).await,
         None => rebuild_all_resources(pool, loop_heartbeat).await,
     }
 }
@@ -204,10 +204,12 @@ fn spawn_permissions_rebuild_task(
 async fn rebuild_one_resource(
     pool: &PgPool,
     resource_id: &str,
+    mut loop_heartbeat: Option<&mut LoopHeartbeat>,
 ) -> Result<PermissionsCurrentRebuildSummary> {
     let resource_id = Uuid::parse_str(resource_id)
         .with_context(|| format!("resource_id must be a UUID: {resource_id}"))?;
     let projection = build_resource_projection(pool, resource_id).await?;
+    record_rebuild_progress(pool, &mut loop_heartbeat).await;
     let (upserted_row_count, deleted_row_count) = replace_permissions_current_resource_projection(
         pool,
         resource_id,
@@ -215,6 +217,7 @@ async fn rebuild_one_resource(
         projection.summary.as_ref(),
     )
     .await?;
+    record_rebuild_progress(pool, &mut loop_heartbeat).await;
 
     Ok(PermissionsCurrentRebuildSummary {
         requested_resource_count: 1,

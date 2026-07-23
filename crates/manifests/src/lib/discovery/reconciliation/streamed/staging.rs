@@ -344,10 +344,15 @@ pub(super) const STREAMED_OBSERVATION_COLUMNS_QUALIFIED: &str = r#"
     obs.provenance
 "#;
 
-pub(super) async fn load_streamed_observations_for_keys(
+pub(super) async fn load_streamed_observations_for_keys<Source>(
     executor: &mut PgConnection,
     candidates: &[ExistingReconciledDiscoveryEdge],
-) -> Result<Vec<DiscoveryObservation>> {
+    page_size: usize,
+    source: &Source,
+) -> Result<Vec<DiscoveryObservation>>
+where
+    Source: DiscoveryObservationPageSource + Sync,
+{
     if candidates.is_empty() {
         return Ok(Vec::new());
     }
@@ -357,22 +362,28 @@ pub(super) async fn load_streamed_observations_for_keys(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let rows = sqlx::query(&format!(
-        r#"
-        SELECT {STREAMED_OBSERVATION_COLUMNS}
-        FROM pg_temp.reconcile_observations
-        WHERE observation_key = ANY($1::TEXT[])
-        ORDER BY observation_key
-        "#
-    ))
-    .bind(&observation_keys)
-    .fetch_all(executor)
-    .await
-    .context("failed to load staged observations for deactivation candidates")?;
-
-    rows.into_iter()
-        .map(|row| Ok(streamed_observation_from_row(row)?.observation))
-        .collect()
+    let mut observations = Vec::new();
+    for keys in observation_keys.chunks(page_size.max(1)) {
+        let rows = sqlx::query(&format!(
+            r#"
+            SELECT {STREAMED_OBSERVATION_COLUMNS}
+            FROM pg_temp.reconcile_observations
+            WHERE observation_key = ANY($1::TEXT[])
+            ORDER BY observation_key
+            "#
+        ))
+        .bind(keys)
+        .fetch_all(&mut *executor)
+        .await
+        .context("failed to load a staged-observation page for deactivation candidates")?;
+        observations.extend(
+            rows.into_iter()
+                .map(|row| Ok(streamed_observation_from_row(row)?.observation))
+                .collect::<Result<Vec<_>>>()?,
+        );
+        source.record_progress().await?;
+    }
+    Ok(observations)
 }
 
 /// Temp tables are never autoanalyzed; without stats the diff's correlated
@@ -384,13 +395,4 @@ pub(super) async fn analyze_temp_table(executor: &mut PgConnection, table: &str)
         .await
         .with_context(|| format!("failed to analyze streamed reconcile temp table {table}"))?;
     Ok(())
-}
-
-pub(super) async fn count_temp_rows(executor: &mut PgConnection, table: &str) -> Result<usize> {
-    let count =
-        sqlx::query_scalar::<_, i64>(&format!("SELECT COUNT(*)::BIGINT FROM pg_temp.{table}"))
-            .fetch_one(executor)
-            .await
-            .with_context(|| format!("failed to count streamed reconcile rows in {table}"))?;
-    usize::try_from(count).with_context(|| format!("streamed {table} count overflowed usize"))
 }

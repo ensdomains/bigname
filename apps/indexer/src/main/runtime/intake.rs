@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
-use bigname_manifests::WatchedChainPlan;
+use bigname_manifests::{ManifestRuntimeProgress, WatchedChainPlan};
 use bigname_storage::{ChainCheckpoint, sync_chain_checkpoints};
 
 use crate::provider::ProviderRegistry;
+
+const INTAKE_ADDRESS_CLONE_PROGRESS_SIZE: usize = 10_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WatchedChainPlanState {
@@ -195,6 +197,132 @@ pub(crate) async fn sync_intake_chain_tasks(
     pool: &sqlx::PgPool,
     watched_chain_plan: &[WatchedChainPlan],
 ) -> Result<Vec<IntakeChainTask>> {
+    sync_intake_chain_tasks_inner(pool, watched_chain_plan, &mut None).await
+}
+
+pub(crate) async fn sync_intake_chain_tasks_with_progress(
+    pool: &sqlx::PgPool,
+    watched_chain_plan: &[WatchedChainPlan],
+    progress: &mut dyn ManifestRuntimeProgress,
+) -> Result<Vec<IntakeChainTask>> {
+    sync_intake_chain_tasks_inner(pool, watched_chain_plan, &mut Some(progress)).await
+}
+
+pub(crate) async fn watched_chain_plans_equal_with_progress(
+    pool: &sqlx::PgPool,
+    left: &[WatchedChainPlan],
+    right: &[WatchedChainPlan],
+    progress: &mut dyn ManifestRuntimeProgress,
+) -> Result<bool> {
+    if left.len() != right.len() {
+        return Ok(false);
+    }
+    for (left, right) in left.iter().zip(right) {
+        if left.chain != right.chain
+            || left.manifest_root_entry_count != right.manifest_root_entry_count
+            || left.manifest_contract_entry_count != right.manifest_contract_entry_count
+            || left.discovery_edge_entry_count != right.discovery_edge_entry_count
+            || left.addresses.len() != right.addresses.len()
+        {
+            return Ok(false);
+        }
+        for (left, right) in left
+            .addresses
+            .chunks(INTAKE_ADDRESS_CLONE_PROGRESS_SIZE)
+            .zip(right.addresses.chunks(INTAKE_ADDRESS_CLONE_PROGRESS_SIZE))
+        {
+            let equal = left == right;
+            progress.record(pool).await?;
+            if !equal {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+pub(crate) async fn clone_watched_chain_plan_with_progress(
+    pool: &sqlx::PgPool,
+    plan: &[WatchedChainPlan],
+    progress: &mut dyn ManifestRuntimeProgress,
+) -> Result<Vec<WatchedChainPlan>> {
+    let mut cloned = Vec::with_capacity(plan.len());
+    for chain in plan {
+        let mut addresses = Vec::with_capacity(chain.addresses.len());
+        for address_chunk in chain.addresses.chunks(INTAKE_ADDRESS_CLONE_PROGRESS_SIZE) {
+            addresses.extend_from_slice(address_chunk);
+            progress.record(pool).await?;
+        }
+        cloned.push(WatchedChainPlan {
+            chain: chain.chain.clone(),
+            addresses,
+            manifest_root_entry_count: chain.manifest_root_entry_count,
+            manifest_contract_entry_count: chain.manifest_contract_entry_count,
+            discovery_edge_entry_count: chain.discovery_edge_entry_count,
+        });
+    }
+    Ok(cloned)
+}
+
+pub(crate) async fn intake_chain_tasks_equal_with_progress(
+    pool: &sqlx::PgPool,
+    left: &[IntakeChainTask],
+    right: &[IntakeChainTask],
+    progress: &mut dyn ManifestRuntimeProgress,
+) -> Result<bool> {
+    if left.len() != right.len() {
+        return Ok(false);
+    }
+    for (left, right) in left.iter().zip(right) {
+        if left.chain != right.chain
+            || left.manifest_root_entry_count != right.manifest_root_entry_count
+            || left.manifest_contract_entry_count != right.manifest_contract_entry_count
+            || left.discovery_edge_entry_count != right.discovery_edge_entry_count
+            || left.checkpoint != right.checkpoint
+            || left.addresses.len() != right.addresses.len()
+        {
+            return Ok(false);
+        }
+        for (left, right) in left
+            .addresses
+            .chunks(INTAKE_ADDRESS_CLONE_PROGRESS_SIZE)
+            .zip(right.addresses.chunks(INTAKE_ADDRESS_CLONE_PROGRESS_SIZE))
+        {
+            let equal = left == right;
+            progress.record(pool).await?;
+            if !equal {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+pub(crate) async fn clone_intake_chain_task_with_progress(
+    pool: &sqlx::PgPool,
+    task: &IntakeChainTask,
+    progress: &mut dyn ManifestRuntimeProgress,
+) -> Result<IntakeChainTask> {
+    let mut addresses = Vec::with_capacity(task.addresses.len());
+    for address_chunk in task.addresses.chunks(INTAKE_ADDRESS_CLONE_PROGRESS_SIZE) {
+        addresses.extend_from_slice(address_chunk);
+        progress.record(pool).await?;
+    }
+    Ok(IntakeChainTask {
+        chain: task.chain.clone(),
+        addresses,
+        manifest_root_entry_count: task.manifest_root_entry_count,
+        manifest_contract_entry_count: task.manifest_contract_entry_count,
+        discovery_edge_entry_count: task.discovery_edge_entry_count,
+        checkpoint: task.checkpoint.clone(),
+    })
+}
+
+async fn sync_intake_chain_tasks_inner(
+    pool: &sqlx::PgPool,
+    watched_chain_plan: &[WatchedChainPlan],
+    progress: &mut Option<&mut dyn ManifestRuntimeProgress>,
+) -> Result<Vec<IntakeChainTask>> {
     let chain_ids = watched_chain_plan
         .iter()
         .map(|chain| chain.chain.clone())
@@ -213,9 +341,16 @@ pub(crate) async fn sync_intake_chain_tasks(
                 chain.chain
             )
         })?;
+        let mut addresses = Vec::with_capacity(chain.addresses.len());
+        for address_chunk in chain.addresses.chunks(INTAKE_ADDRESS_CLONE_PROGRESS_SIZE) {
+            addresses.extend_from_slice(address_chunk);
+            if let Some(progress) = progress.as_deref_mut() {
+                progress.record(pool).await?;
+            }
+        }
         tasks.push(IntakeChainTask {
             chain: chain.chain.clone(),
-            addresses: chain.addresses.clone(),
+            addresses,
             manifest_root_entry_count: chain.manifest_root_entry_count,
             manifest_contract_entry_count: chain.manifest_contract_entry_count,
             discovery_edge_entry_count: chain.discovery_edge_entry_count,

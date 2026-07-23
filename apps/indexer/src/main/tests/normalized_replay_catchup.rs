@@ -149,6 +149,271 @@ async fn normalized_replay_catchup_rewinds_for_later_older_raw_backfill() -> Res
 }
 
 #[tokio::test]
+async fn spawned_normalized_replay_beats_on_progress_and_exposes_a_later_wedge() -> Result<()> {
+    let database = bigname_test_support::TestDatabase::create_migrated(
+        bigname_test_support::TestDatabaseConfig::new(
+            "bigname_indexer_normalized_replay_heartbeat_test",
+        )
+        .pool_max_connections(5),
+        &bigname_storage::MIGRATOR,
+        "failed to migrate normalized replay heartbeat test database",
+    )
+    .await?;
+    let chain = "ethereum-mainnet";
+    let instance_id = "normalized-replay-progress-test";
+    let reverse_address = "0x00000000000000000000000000000000000000be";
+    let block = provider_block(
+        "0xbebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebe",
+        Some("0xadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad"),
+        100,
+    );
+    insert_active_replay_watched_contract_with_source_family(
+        database.pool(),
+        389,
+        chain,
+        "ens_v1_reverse_l1",
+        Uuid::from_u128(0x389),
+        reverse_address,
+        "reverse_registrar",
+    )
+    .await?;
+    insert_chain_lineage_for_block(
+        database.pool(),
+        chain,
+        &block,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_reverse_claimed_log(
+        database.pool(),
+        chain,
+        &block,
+        reverse_address,
+        "0x2222222222222222222222222222222222222222",
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    install_stale_indexer_heartbeat(database.pool(), instance_id).await?;
+
+    let config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
+        "mainnet".to_owned(),
+        vec![chain.to_owned()],
+        1_000,
+        1_000,
+        1,
+    )?
+    .with_defer_projection_indexes(false);
+    let hook = normalized_replay_catchup::install_after_progress_test_hook(
+        database.pool(),
+        "mainnet",
+        chain,
+    )
+    .await;
+    let activity = crate::run::startup_heartbeat::RequiredSubtaskActivity::default();
+    let child_activity = activity.clone();
+    let catchup_pool = database.pool().clone();
+    let catchup = tokio::spawn(async move {
+        let mut heartbeat = crate::run::startup_heartbeat::NormalizedReplayHeartbeat::new(
+            instance_id.to_owned(),
+            tokio::time::Duration::ZERO,
+            vec![chain.to_owned()],
+        );
+        normalized_replay_catchup::run_required_normalized_replay_catchup_iteration_for_test(
+            &catchup_pool,
+            &config,
+            chain,
+            &mut heartbeat,
+            &child_activity,
+        )
+        .await
+    });
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(10),
+        hook.wait_until_after_progress(),
+    )
+    .await
+    .context("normalized replay did not reach its post-progress barrier")?;
+    let heartbeat = bigname_storage::load_service_loop_heartbeat(
+        database.pool(),
+        bigname_storage::INDEXER_SERVICE_NAME,
+        instance_id,
+    )
+    .await?
+    .context("normalized replay must retain its registered heartbeat")?;
+    assert!(
+        heartbeat.age_seconds <= 1,
+        "completed replay work must refresh the process heartbeat"
+    );
+    assert!(
+        !catchup.is_finished(),
+        "the replay iteration must remain blocked after its progress beat"
+    );
+
+    sqlx::query(
+        r#"
+        UPDATE service_loop_heartbeats
+        SET started_at = clock_timestamp() - INTERVAL '2 minutes',
+            heartbeat_at = clock_timestamp() - INTERVAL '1 minute'
+        WHERE service_name = 'indexer'
+          AND instance_id = $1
+          AND scope_kind = 'process'
+        "#,
+    )
+    .bind(instance_id)
+    .execute(database.pool())
+    .await?;
+    let parent_activity = activity.clone();
+    let parent_pool = database.pool().clone();
+    let parent = tokio::spawn(async move {
+        let _required_subtask_exclusion = parent_activity.exclude_required_subtask().await;
+        let mut parent_heartbeat = crate::run::startup_heartbeat::StartupHeartbeat::new(
+            instance_id.to_owned(),
+            tokio::time::Duration::ZERO,
+        );
+        parent_heartbeat
+            .record(&parent_pool, &[chain.to_owned()])
+            .await
+    });
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    assert!(
+        !parent.is_finished(),
+        "the parent heartbeat must wait while replay owns required-operation liveness"
+    );
+    let heartbeat_age = bigname_storage::load_service_loop_heartbeat(
+        database.pool(),
+        bigname_storage::INDEXER_SERVICE_NAME,
+        instance_id,
+    )
+    .await?
+    .context("normalized replay must retain its registered heartbeat")?
+    .age_seconds;
+    assert!(
+        heartbeat_age >= 30,
+        "parent polling must not hide a wedged required replay iteration"
+    );
+
+    hook.resume();
+    let status = tokio::time::timeout(tokio::time::Duration::from_secs(10), catchup)
+        .await
+        .context("normalized replay did not finish after its barrier was released")?
+        .context("normalized replay task failed")??;
+    assert_eq!(
+        status,
+        normalized_replay_catchup::CatchupIterationStatus::Progressed
+    );
+    tokio::time::timeout(tokio::time::Duration::from_secs(10), parent)
+        .await
+        .context("parent heartbeat did not resume after replay completed")?
+        .context("parent heartbeat task failed")??;
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_replay_failure_journal_keeps_child_heartbeat_ownership() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_normalized_replay_cursor_table(database.pool()).await?;
+    let chain = "ethereum-mainnet";
+    let instance_id = "normalized-replay-failure-journal-test";
+    normalized_replay_catchup::ensure_cursor_for_test(
+        database.pool(),
+        "mainnet",
+        chain,
+        1,
+        1,
+        true,
+    )
+    .await?;
+    install_stale_indexer_heartbeat(database.pool(), instance_id).await?;
+    sqlx::query("DROP TABLE raw_logs CASCADE")
+        .execute(database.pool())
+        .await?;
+
+    let config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
+        "mainnet".to_owned(),
+        vec![chain.to_owned()],
+        1_000,
+        1_000,
+        1,
+    )?;
+    let hook = normalized_replay_catchup::install_before_cursor_failure_record_test_hook(
+        database.pool(),
+        "mainnet",
+        chain,
+    )
+    .await;
+    let activity = crate::run::startup_heartbeat::RequiredSubtaskActivity::default();
+    let child_activity = activity.clone();
+    let catchup_pool = database.pool().clone();
+    let mut catchup = tokio::spawn(async move {
+        let mut heartbeat = crate::run::startup_heartbeat::NormalizedReplayHeartbeat::new(
+            instance_id.to_owned(),
+            tokio::time::Duration::ZERO,
+            vec![chain.to_owned()],
+        );
+        normalized_replay_catchup::run_required_normalized_replay_catchup_iteration_for_test(
+            &catchup_pool,
+            &config,
+            chain,
+            &mut heartbeat,
+            &child_activity,
+        )
+        .await
+    });
+    tokio::select! {
+        () = hook.wait_until_before_record() => {}
+        result = &mut catchup => {
+            panic!("normalized replay returned before failure journaling was protected: {result:?}");
+        }
+    }
+
+    let parent_activity = activity.clone();
+    let parent_pool = database.pool().clone();
+    let parent = tokio::spawn(async move {
+        let _required_subtask_exclusion = parent_activity.exclude_required_subtask().await;
+        let mut parent_heartbeat = crate::run::startup_heartbeat::StartupHeartbeat::new(
+            instance_id.to_owned(),
+            tokio::time::Duration::ZERO,
+        );
+        parent_heartbeat
+            .record(&parent_pool, &[chain.to_owned()])
+            .await
+    });
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    assert!(
+        !parent.is_finished(),
+        "the parent heartbeat must wait while the child journals its failed work unit"
+    );
+    let heartbeat_age = bigname_storage::load_service_loop_heartbeat(
+        database.pool(),
+        bigname_storage::INDEXER_SERVICE_NAME,
+        instance_id,
+    )
+    .await?
+    .context("normalized replay must retain its registered heartbeat")?
+    .age_seconds;
+    assert!(
+        heartbeat_age >= 30,
+        "parent polling must not hide a failure-journal wedge"
+    );
+
+    hook.resume();
+    let catchup_error = tokio::time::timeout(tokio::time::Duration::from_secs(10), catchup)
+        .await
+        .context("normalized replay did not finish after failure journaling resumed")?
+        .context("normalized replay task panicked")?
+        .expect_err("the injected missing raw-log table must fail the replay iteration");
+    assert!(
+        catchup_error.to_string().contains("raw-log bounds"),
+        "unexpected normalized replay error: {catchup_error:#}"
+    );
+    tokio::time::timeout(tokio::time::Duration::from_secs(10), parent)
+        .await
+        .context("parent heartbeat did not resume after failure journaling completed")?
+        .context("parent heartbeat task panicked")??;
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn normalized_replay_catchup_log_bound_preserves_whole_blocks() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_normalized_replay_cursor_table(database.pool()).await?;

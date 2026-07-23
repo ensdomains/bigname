@@ -319,13 +319,52 @@ async fn live_adapter_sync_continues_after_block_derived_events() -> Result<()> 
     )
     .await?;
 
-    let summary = sync_live_adapter_state_from_persisted_raw_payloads(
+    let heartbeat_instance_id = "live-adapter-in-flight-progress-test";
+    install_stale_indexer_heartbeat(database.pool(), heartbeat_instance_id).await?;
+    let (mut progress, progress_handle) = BlockingHeartbeatProgress::new(
+        heartbeat_instance_id,
+        vec!["ethereum-mainnet".to_owned()],
+        2,
+    );
+    let mut progress_ref = Some(&mut progress as &mut dyn bigname_adapters::StartupAdapterProgress);
+    let mut operation = Box::pin(sync_live_adapter_state_from_persisted_raw_payloads_with_progress(
         database.pool(),
         "test",
         "ethereum-mainnet",
         std::slice::from_ref(&stored_block.block_hash),
+        &mut progress_ref,
+    ));
+    tokio::time::timeout(tokio::time::Duration::from_secs(10), async {
+        tokio::select! {
+            () = progress_handle.wait_until_blocked() => Ok(()),
+            result = operation.as_mut() => Err(anyhow::anyhow!(
+                "live adapter sync completed before its later progress boundary blocked: {result:?}"
+            )),
+        }
+    })
+    .await
+    .context("live adapter sync did not reach its later progress boundary")??;
+    let heartbeat = bigname_storage::load_service_loop_heartbeat(
+        database.pool(),
+        bigname_storage::INDEXER_SERVICE_NAME,
+        heartbeat_instance_id,
     )
-    .await?;
+    .await?
+    .context("live adapter progress heartbeat must remain registered")?;
+    assert!(
+        heartbeat.age_seconds <= 1,
+        "an earlier adapter page must beat before later family work finishes"
+    );
+    progress_handle.resume();
+    let summary = tokio::time::timeout(tokio::time::Duration::from_secs(10), operation.as_mut())
+        .await
+        .context("live adapter sync did not finish after progress resumed")??;
+    drop(operation);
+
+    assert!(
+        progress_handle.record_count() >= 6,
+        "block-derived loading plus reverse-claim loading, decoding, persistence, and family completion must each report live progress"
+    );
 
     assert_eq!(summary.total_synced_count, 1);
     assert_eq!(
@@ -1056,6 +1095,21 @@ async fn replay_handoff_multi_chain_fence_uses_one_connection_and_orders_writers
 
 #[tokio::test]
 async fn post_replay_handoff_fetches_provider_gap_after_backlog() -> Result<()> {
+    #[derive(Default)]
+    struct CountingBacklogProgress(usize);
+
+    impl bigname_adapters::StartupAdapterProgress for CountingBacklogProgress {
+        fn record<'a>(
+            &'a mut self,
+            _pool: &'a PgPool,
+        ) -> bigname_adapters::StartupAdapterProgressFuture<'a> {
+            Box::pin(async move {
+                self.0 += 1;
+                Ok(())
+            })
+        }
+    }
+
     let database = TestDatabase::new().await?;
     create_normalized_replay_cursor_table(database.pool()).await?;
     let chain = "ethereum-mainnet";
@@ -1183,13 +1237,19 @@ async fn post_replay_handoff_fetches_provider_gap_after_backlog() -> Result<()> 
     )
     .await?;
 
-    let summary = sync_live_adapter_backlog_after_normalized_replay(
+    let mut progress = CountingBacklogProgress::default();
+    let summary = sync_live_adapter_backlog_after_normalized_replay_with_progress(
         database.pool(),
         "mainnet",
         &[chain.to_owned()],
+        &mut progress,
     )
     .await?;
     assert_eq!(summary.selected_block_count, 1);
+    assert!(
+        progress.0 > 1,
+        "backlog adapter work and durable cursor publication must each report progress"
+    );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'ReverseChanged'"

@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
-use sqlx::{Postgres, QueryBuilder};
+use sqlx::{PgPool, Postgres, QueryBuilder};
 
 use super::super::super::types::{ObservationTerminalState, ReconciledDiscoveryEdgeSpec};
+use crate::ManifestRuntimeProgress;
 
 const HISTORICAL_DISCOVERY_EDGE_BATCH_SIZE: usize = 1000;
 
@@ -13,6 +14,24 @@ pub(in crate::discovery::reconciliation) struct HistoricalDiscoveryEdgeSummary {
 pub(in crate::discovery::reconciliation) async fn reconcile_historical_discovery_edges(
     executor: &mut sqlx::postgres::PgConnection,
     edges: &[(&ReconciledDiscoveryEdgeSpec, ObservationTerminalState)],
+) -> Result<HistoricalDiscoveryEdgeSummary> {
+    reconcile_historical_discovery_edges_inner(executor, edges, None).await
+}
+
+pub(in crate::discovery::reconciliation) async fn reconcile_historical_discovery_edges_with_progress(
+    executor: &mut sqlx::postgres::PgConnection,
+    edges: &[(&ReconciledDiscoveryEdgeSpec, ObservationTerminalState)],
+    progress_pool: &PgPool,
+    progress: &mut dyn ManifestRuntimeProgress,
+) -> Result<HistoricalDiscoveryEdgeSummary> {
+    reconcile_historical_discovery_edges_inner(executor, edges, Some((progress_pool, progress)))
+        .await
+}
+
+async fn reconcile_historical_discovery_edges_inner(
+    executor: &mut sqlx::postgres::PgConnection,
+    edges: &[(&ReconciledDiscoveryEdgeSpec, ObservationTerminalState)],
+    mut progress: Option<(&PgPool, &mut dyn ManifestRuntimeProgress)>,
 ) -> Result<HistoricalDiscoveryEdgeSummary> {
     let mut inserted_count = 0;
     let mut updated_count = 0;
@@ -316,6 +335,9 @@ pub(in crate::discovery::reconciliation) async fn reconcile_historical_discovery
             .rows_affected();
         updated_count += usize::try_from(predecessor_updates)
             .context("historical discovery predecessor update count exceeds usize")?;
+        if let Some((progress_pool, progress)) = progress.as_mut() {
+            progress.record(progress_pool).await?;
+        }
     }
 
     Ok(HistoricalDiscoveryEdgeSummary {

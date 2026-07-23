@@ -1,11 +1,17 @@
 #[path = "reservation_execution/coinbase_sql.rs"]
 mod coinbase_sql_execution;
+#[path = "reservation_execution/creation.rs"]
+mod creation;
 #[path = "reservation_execution/digest.rs"]
 mod digest;
 #[path = "reservation_execution/generic_topic_identity.rs"]
 mod generic_topic_identity;
+#[path = "reservation_execution/identity.rs"]
+mod identity;
 #[path = "reservation_execution/lease_heartbeat.rs"]
 mod lease_heartbeat;
+#[path = "reservation_execution/progress.rs"]
+mod progress;
 #[path = "reservation_execution/scan_all.rs"]
 mod scan_all;
 #[path = "reservation_execution/startup_progress.rs"]
@@ -15,7 +21,8 @@ mod startup_progress;
 mod tests;
 
 use anyhow::{Context, Result, bail};
-use bigname_manifests::{WatchedSourceSelectorKind, WatchedSourceSelectorPlan};
+use bigname_adapters::StartupAdapterProgress;
+use bigname_manifests::WatchedSourceSelectorPlan;
 use bigname_storage::{
     BackfillJobCreate, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange,
     BackfillRangeSpec, advance_backfill_range, create_backfill_job,
@@ -42,6 +49,10 @@ use super::{
 };
 use digest::keccak256_json_digest;
 use generic_topic_identity::{generic_topic_scan_source_identity_payload, selected_targets_sample};
+use identity::requested_watched_targets_value_with_progress;
+pub(crate) use identity::{
+    backfill_job_source_identity_payload, backfill_job_source_identity_payload_with_progress,
+};
 
 pub(crate) use coinbase_sql_execution::{
     effective_coinbase_sql_adapter_sync_mode,
@@ -52,6 +63,8 @@ pub(super) use lease_heartbeat::{
     backfill_lease_duration_secs, refreshed_backfill_lease_expires_at,
     run_with_backfill_lease_heartbeat, validate_hash_pinned_chunk_blocks,
 };
+pub(super) use progress::run_reserved_hash_pinned_backfill_range_with_progress;
+pub(crate) use progress::run_resumable_hash_pinned_backfill_job_with_progress;
 pub(crate) use scan_all::effective_hash_pinned_adapter_sync_mode;
 use scan_all::{
     basenames_registry_scan_all_topics_source_identity_payload,
@@ -64,227 +77,14 @@ pub(crate) const COINBASE_SQL_BACKFILL_SCAN_MODE: &str = "coinbase_sql_hash_pinn
 pub(crate) const DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS: i64 = 1_024;
 pub(crate) const COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD: usize = 10_000;
 
-pub(crate) async fn create_hash_pinned_backfill_job(
-    pool: &sqlx::PgPool,
-    source_plan: &WatchedSourceSelectorPlan,
-    config: &BackfillJobRunConfig,
-) -> Result<BackfillJobRecord> {
-    let ranges = vec![BackfillRangeSpec {
-        range_start_block_number: config.range.from_block,
-        range_end_block_number: config.range.to_block,
-    }];
-    create_hash_pinned_backfill_job_with_ranges(pool, source_plan, config, ranges).await
-}
-
-pub(crate) async fn create_hash_pinned_backfill_job_with_ranges(
-    pool: &sqlx::PgPool,
-    source_plan: &WatchedSourceSelectorPlan,
-    config: &BackfillJobRunConfig,
-    ranges: Vec<BackfillRangeSpec>,
-) -> Result<BackfillJobRecord> {
-    let request = BackfillJobCreate {
-        deployment_profile: config.deployment_profile.clone(),
-        chain_id: source_plan.watched_chain_plan.chain.clone(),
-        source_identity: backfill_job_source_identity_payload(source_plan)?,
-        scan_mode: HASH_PINNED_BACKFILL_SCAN_MODE.to_owned(),
-        range_start_block_number: config.range.from_block,
-        range_end_block_number: config.range.to_block,
-        idempotency_key: config.idempotency_key.clone(),
-        ranges,
-    };
-    if config.scope_idempotency_to_raw_log_retention_generation {
-        create_generation_scoped_backfill_job(pool, &request).await
-    } else {
-        create_backfill_job(pool, &request).await
-    }
-}
-
-pub(crate) async fn create_coinbase_sql_backfill_job(
-    pool: &sqlx::PgPool,
-    source_plan: &WatchedSourceSelectorPlan,
-    config: &BackfillJobRunConfig,
-    coinbase_config: &CoinbaseSqlBackfillConfig,
-    topic_plan: &BackfillTopicPlan,
-) -> Result<BackfillJobRecord> {
-    let ranges = vec![BackfillRangeSpec {
-        range_start_block_number: config.range.from_block,
-        range_end_block_number: config.range.to_block,
-    }];
-    create_coinbase_sql_backfill_job_with_ranges(
-        pool,
-        source_plan,
-        config,
-        coinbase_config,
-        topic_plan,
-        ranges,
-    )
-    .await
-}
-
-pub(crate) async fn create_coinbase_sql_backfill_job_with_ranges(
-    pool: &sqlx::PgPool,
-    source_plan: &WatchedSourceSelectorPlan,
-    config: &BackfillJobRunConfig,
-    coinbase_config: &CoinbaseSqlBackfillConfig,
-    topic_plan: &BackfillTopicPlan,
-    ranges: Vec<BackfillRangeSpec>,
-) -> Result<BackfillJobRecord> {
-    let request = BackfillJobCreate {
-        deployment_profile: config.deployment_profile.clone(),
-        chain_id: source_plan.watched_chain_plan.chain.clone(),
-        source_identity: coinbase_sql_backfill_job_source_identity_payload(
-            source_plan,
-            coinbase_config,
-            topic_plan,
-        )?,
-        scan_mode: COINBASE_SQL_BACKFILL_SCAN_MODE.to_owned(),
-        range_start_block_number: config.range.from_block,
-        range_end_block_number: config.range.to_block,
-        idempotency_key: config.idempotency_key.clone(),
-        ranges,
-    };
-    if config.scope_idempotency_to_raw_log_retention_generation {
-        create_generation_scoped_backfill_job(pool, &request).await
-    } else {
-        create_backfill_job(pool, &request).await
-    }
-}
-
-pub(crate) fn hash_pinned_backfill_range_specs(
-    range: BackfillBlockRange,
-    range_blocks: i64,
-) -> Result<Vec<BackfillRangeSpec>> {
-    if range_blocks <= 0 {
-        bail!("hash-pinned backfill range blocks must be positive, got {range_blocks}");
-    }
-
-    let mut ranges = Vec::new();
-    let mut range_start = range.from_block;
-    while range_start <= range.to_block {
-        let range_end = range_start
-            .checked_add(range_blocks - 1)
-            .unwrap_or(range.to_block)
-            .min(range.to_block);
-        ranges.push(BackfillRangeSpec {
-            range_start_block_number: range_start,
-            range_end_block_number: range_end,
-        });
-        if range_end == range.to_block {
-            break;
-        }
-        range_start = range_end
-            .checked_add(1)
-            .context("hash-pinned backfill range start overflowed while partitioning")?;
-    }
-
-    Ok(ranges)
-}
-
-pub(crate) fn backfill_job_source_identity_payload(
-    source_plan: &WatchedSourceSelectorPlan,
-) -> Result<Value> {
-    if watched_source_plan_uses_basenames_registry_scan_all(source_plan) {
-        return basenames_registry_scan_all_topics_source_identity_payload(source_plan);
-    }
-    if watched_source_plan_uses_generic_resolver_scope(source_plan) {
-        return generic_topic_scan_source_identity_payload(source_plan);
-    }
-
-    if source_plan.selector_kind != WatchedSourceSelectorKind::SourceFamily
-        || source_plan.selected_targets.len() <= COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD
-    {
-        return Ok(source_plan.source_identity_payload());
-    }
-
-    let selected_targets_digest = keccak256_json_digest(&source_plan.selected_targets)
-        .context("failed to digest compact backfill source selected targets")?;
-    let mut payload = json!({
-        "selector_kind": source_plan.selector_kind.as_str(),
-        "source_family": &source_plan.source_family,
-        "requested_watched_targets": &source_plan.requested_watched_targets,
-        "selected_target_count": source_plan.selected_targets.len(),
-        "selected_targets_digest_algorithm": "keccak256",
-        "selected_targets_digest": selected_targets_digest,
-        "selected_targets_sample": selected_targets_sample(&source_plan.selected_targets),
-        "source_identity_payload_format": "selected_targets_digest_v1",
-    });
-    let source_identity_hash =
-        keccak256_json_digest(&payload).context("failed to digest backfill source identity")?;
-    payload
-        .as_object_mut()
-        .expect("compact source identity payload must be an object")
-        .insert(
-            "source_identity_hash".to_owned(),
-            Value::String(source_identity_hash),
-        );
-    Ok(payload)
-}
-
-pub(crate) fn coinbase_sql_backfill_job_source_identity_payload(
-    source_plan: &WatchedSourceSelectorPlan,
-    coinbase_config: &CoinbaseSqlBackfillConfig,
-    topic_plan: &BackfillTopicPlan,
-) -> Result<Value> {
-    let mut payload = if coinbase_sql_uses_basenames_registry_scan_all(source_plan, topic_plan) {
-        coinbase_sql_basenames_registry_scan_all_source_identity_payload(source_plan)?
-    } else {
-        if watched_source_plan_uses_basenames_registry_scan_all(source_plan) {
-            // A registry-family plan whose Coinbase SQL topic plan is empty
-            // would fetch address-scoped, so the hash-pinned scan-all
-            // identity (which asserts a topics-complete scan) must not be
-            // minted for it.
-            bail!(
-                "Coinbase SQL registry-family backfill has an empty topic plan; \
-                 refusing to mint a scan-all identity for an address-scoped fetch"
-            );
-        }
-        backfill_job_source_identity_payload(source_plan)?
-    };
-    let object = payload
-        .as_object_mut()
-        .context("backfill source identity payload must be an object")?;
-    object.insert(
-        "backfill_provider".to_owned(),
-        Value::String("coinbase_cdp_sql".to_owned()),
-    );
-    object.insert(
-        "scan_mode".to_owned(),
-        Value::String(COINBASE_SQL_BACKFILL_SCAN_MODE.to_owned()),
-    );
-    object.insert(
-        "coinbase_sql_plan_version".to_owned(),
-        Value::String("base_logs_v2".to_owned()),
-    );
-    object.insert("validation_provider_required".to_owned(), Value::Bool(true));
-    object.insert(
-        "coinbase_sql_validation_mode".to_owned(),
-        Value::String(coinbase_config.validation_mode.as_str().to_owned()),
-    );
-    object.insert(
-        "topic_filtering".to_owned(),
-        Value::String("manifest_abi_topic0_union_v1".to_owned()),
-    );
-    object.insert(
-        "coinbase_sql_topic_plan".to_owned(),
-        topic_plan.source_identity_payload()?,
-    );
-    payload
-        .as_object_mut()
-        .context("backfill source identity payload must be an object")?
-        .remove("source_identity_hash");
-    let source_identity_hash =
-        keccak256_json_digest(&payload).context("failed to digest Coinbase SQL source identity")?;
-    payload
-        .as_object_mut()
-        .context("backfill source identity payload must be an object")?
-        .insert(
-            "source_identity_hash".to_owned(),
-            Value::String(source_identity_hash),
-        );
-
-    Ok(payload)
-}
-
+#[cfg(test)]
+pub(crate) use creation::coinbase_sql_backfill_job_source_identity_payload;
+pub(crate) use creation::{
+    create_coinbase_sql_backfill_job, create_coinbase_sql_backfill_job_with_ranges,
+    create_hash_pinned_backfill_job, create_hash_pinned_backfill_job_with_progress,
+    create_hash_pinned_backfill_job_with_ranges,
+    create_hash_pinned_backfill_job_with_ranges_with_progress, hash_pinned_backfill_range_specs,
+};
 pub(crate) async fn run_resumable_hash_pinned_backfill_job(
     pool: &sqlx::PgPool,
     source_plan: &WatchedSourceSelectorPlan,
@@ -295,7 +95,15 @@ pub(crate) async fn run_resumable_hash_pinned_backfill_job(
         effective_hash_pinned_adapter_sync_mode(source_plan, config.adapter_sync_mode);
     validate_hash_pinned_chunk_blocks(config.hash_pinned_chunk_blocks)?;
     let record = create_hash_pinned_backfill_job(pool, source_plan, &config).await?;
-    run_precreated_hash_pinned_backfill_job_inner(pool, source_plan, provider, config, record).await
+    run_precreated_hash_pinned_backfill_job_inner(
+        pool,
+        source_plan,
+        provider,
+        config,
+        record,
+        &mut None,
+    )
+    .await
 }
 
 pub(crate) async fn run_precreated_hash_pinned_backfill_job(
@@ -308,7 +116,15 @@ pub(crate) async fn run_precreated_hash_pinned_backfill_job(
     config.adapter_sync_mode =
         effective_hash_pinned_adapter_sync_mode(source_plan, config.adapter_sync_mode);
     validate_hash_pinned_chunk_blocks(config.hash_pinned_chunk_blocks)?;
-    run_precreated_hash_pinned_backfill_job_inner(pool, source_plan, provider, config, record).await
+    run_precreated_hash_pinned_backfill_job_inner(
+        pool,
+        source_plan,
+        provider,
+        config,
+        record,
+        &mut None,
+    )
+    .await
 }
 
 async fn run_precreated_hash_pinned_backfill_job_inner(
@@ -317,6 +133,7 @@ async fn run_precreated_hash_pinned_backfill_job_inner(
     provider: &(impl ChainProviderOps + ?Sized),
     mut config: BackfillJobRunConfig,
     record: BackfillJobRecord,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<BackfillJobRunOutcome> {
     let watched_chain = &source_plan.watched_chain_plan;
     config
@@ -358,13 +175,15 @@ async fn run_precreated_hash_pinned_backfill_job_inner(
         };
 
         outcome.reserved_range_count += 1;
-        run_reserved_hash_pinned_backfill_range(
+        run_reserved_hash_pinned_backfill_range_inner(
             pool,
             source_plan,
             provider,
             &config,
             &reserved_range,
             &mut outcome,
+            None,
+            progress,
         )
         .await?;
         outcome.completed_range_count += 1;
@@ -404,6 +223,7 @@ async fn run_precreated_hash_pinned_backfill_job_inner(
     );
 }
 
+#[allow(dead_code)]
 pub(super) async fn run_reserved_hash_pinned_backfill_range(
     pool: &sqlx::PgPool,
     source_plan: &WatchedSourceSelectorPlan,
@@ -420,31 +240,12 @@ pub(super) async fn run_reserved_hash_pinned_backfill_range(
         reserved_range,
         aggregate,
         None,
+        &mut None,
     )
     .await
 }
 
-pub(super) async fn run_reserved_hash_pinned_backfill_range_with_progress(
-    pool: &sqlx::PgPool,
-    source_plan: &WatchedSourceSelectorPlan,
-    provider: &(impl ChainProviderOps + ?Sized),
-    config: &BackfillJobRunConfig,
-    reserved_range: &BackfillRange,
-    aggregate: &mut BackfillJobRunOutcome,
-    progress: &tokio::sync::mpsc::UnboundedSender<()>,
-) -> Result<()> {
-    run_reserved_hash_pinned_backfill_range_inner(
-        pool,
-        source_plan,
-        provider,
-        config,
-        reserved_range,
-        aggregate,
-        Some(progress),
-    )
-    .await
-}
-
+#[expect(clippy::too_many_arguments)]
 async fn run_reserved_hash_pinned_backfill_range_inner(
     pool: &sqlx::PgPool,
     source_plan: &WatchedSourceSelectorPlan,
@@ -452,7 +253,8 @@ async fn run_reserved_hash_pinned_backfill_range_inner(
     config: &BackfillJobRunConfig,
     reserved_range: &BackfillRange,
     aggregate: &mut BackfillJobRunOutcome,
-    progress: Option<&tokio::sync::mpsc::UnboundedSender<()>>,
+    progress_sender: Option<&tokio::sync::mpsc::UnboundedSender<()>>,
+    service_progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<()> {
     let mut active_range = reserved_range.clone();
     let mut block_number = active_range
@@ -490,8 +292,10 @@ async fn run_reserved_hash_pinned_backfill_range_inner(
             .unwrap_or(active_range.range_end_block_number)
             .min(active_range.range_end_block_number);
         let chunk_range = BackfillBlockRange::new(block_number, chunk_end)?;
-        let progress_ranges =
-            startup_progress::heartbeat_progress_ranges(chunk_range, progress.is_some())?;
+        let progress_ranges = startup_progress::heartbeat_progress_ranges(
+            chunk_range,
+            progress_sender.is_some() || service_progress.is_some(),
+        )?;
         for progress_range in progress_ranges {
             let selected_target_addresses = scan_all::chunk_addresses_for_plan(
                 source_plan,
@@ -530,8 +334,11 @@ async fn run_reserved_hash_pinned_backfill_range_inner(
                 Err(failure) => return Err(record_reserved_range_failure(failure).await),
             };
             aggregate.add_range_outcome(&outcome);
-            if let Some(progress) = progress {
-                let _ = progress.send(());
+            if let Some(progress_sender) = progress_sender {
+                let _ = progress_sender.send(());
+            }
+            if let Some(progress) = service_progress.as_deref_mut() {
+                progress.record(pool).await?;
             }
         }
 
@@ -573,6 +380,8 @@ async fn run_reserved_hash_pinned_backfill_range_inner(
         source_plan,
         watched_source_plan_uses_basenames_registry_scan_all(source_plan),
         "backfill range completion failed",
+        progress_sender,
+        service_progress,
     )
     .await
 }

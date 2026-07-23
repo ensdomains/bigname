@@ -1,6 +1,48 @@
+use std::{future::Future, sync::Arc};
+
 use anyhow::Result;
 use sqlx::PgPool;
-use tokio::time::{Duration, Instant};
+use tokio::{
+    sync::{Mutex, OwnedMutexGuard},
+    time::{Duration, Instant},
+};
+
+const MAX_PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Default)]
+pub(crate) struct RequiredSubtaskActivity {
+    exclusion: Arc<Mutex<()>>,
+}
+
+pub(crate) struct RequiredSubtaskActivityGuard {
+    _exclusion: OwnedMutexGuard<()>,
+}
+
+impl RequiredSubtaskActivity {
+    pub(crate) async fn begin(&self) -> RequiredSubtaskActivityGuard {
+        RequiredSubtaskActivityGuard {
+            _exclusion: Arc::clone(&self.exclusion).lock_owned().await,
+        }
+    }
+
+    pub(crate) async fn exclude_required_subtask(&self) -> OwnedMutexGuard<()> {
+        Arc::clone(&self.exclusion).lock_owned().await
+    }
+
+    pub(crate) async fn exclude_required_subtask_or_shutdown<F>(
+        &self,
+        shutdown: F,
+    ) -> Option<OwnedMutexGuard<()>>
+    where
+        F: Future,
+    {
+        tokio::select! {
+            biased;
+            _ = shutdown => None,
+            exclusion = self.exclude_required_subtask() => Some(exclusion),
+        }
+    }
+}
 
 pub(crate) struct StartupHeartbeat {
     instance_id: String,
@@ -13,6 +55,21 @@ pub(crate) struct StartupHeartbeat {
 pub(crate) struct StartupAdapterHeartbeat<'a> {
     heartbeat: &'a mut StartupHeartbeat,
     chain_ids: &'a [String],
+}
+
+#[derive(Clone)]
+pub(crate) struct NormalizedReplayHeartbeat {
+    heartbeat: Arc<Mutex<StartupHeartbeat>>,
+    chain_ids: Arc<Vec<String>>,
+}
+
+impl NormalizedReplayHeartbeat {
+    pub(crate) fn new(instance_id: String, interval: Duration, chain_ids: Vec<String>) -> Self {
+        Self {
+            heartbeat: Arc::new(Mutex::new(StartupHeartbeat::new(instance_id, interval))),
+            chain_ids: Arc::new(chain_ids),
+        }
+    }
 }
 
 impl<'a> StartupAdapterHeartbeat<'a> {
@@ -39,11 +96,41 @@ impl bigname_adapters::StartupAdapterProgress for StartupAdapterHeartbeat<'_> {
     }
 }
 
+impl bigname_manifests::ManifestRuntimeProgress for StartupAdapterHeartbeat<'_> {
+    fn record<'a>(
+        &'a mut self,
+        pool: &'a PgPool,
+    ) -> bigname_manifests::ManifestRuntimeProgressFuture<'a> {
+        Box::pin(async move {
+            #[cfg(test)]
+            {
+                self.heartbeat.adapter_progress_count += 1;
+            }
+            self.heartbeat.record_if_due(pool, self.chain_ids).await
+        })
+    }
+}
+
+impl bigname_adapters::StartupAdapterProgress for NormalizedReplayHeartbeat {
+    fn record<'a>(
+        &'a mut self,
+        pool: &'a PgPool,
+    ) -> bigname_adapters::StartupAdapterProgressFuture<'a> {
+        Box::pin(async move {
+            self.heartbeat
+                .lock()
+                .await
+                .record_if_due(pool, &self.chain_ids)
+                .await
+        })
+    }
+}
+
 impl StartupHeartbeat {
     pub(crate) fn new(instance_id: String, interval: Duration) -> Self {
         Self {
             instance_id,
-            interval,
+            interval: interval.min(MAX_PROGRESS_HEARTBEAT_INTERVAL),
             last_recorded_at: Instant::now(),
             #[cfg(test)]
             adapter_progress_count: 0,
@@ -82,6 +169,13 @@ impl StartupHeartbeat {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progress_heartbeat_throttle_never_inherits_a_stale_poll_interval() {
+        let heartbeat = StartupHeartbeat::new("long-poll-test".to_owned(), Duration::from_secs(60));
+
+        assert_eq!(heartbeat.interval, Duration::from_secs(5));
+    }
 
     #[tokio::test]
     async fn bootstrap_progress_refreshes_the_registered_indexer_loop() -> Result<()> {

@@ -1,11 +1,13 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, btree_map, btree_set};
 
 use anyhow::Result;
+use bigname_adapters::StartupAdapterProgress;
 use bigname_domain::block_interval::{InclusiveBlockInterval, coalesce_inclusive_block_intervals};
-use bigname_manifests::WatchedSourceSelectorPlan;
+use bigname_manifests::{WatchedBackfillTarget, WatchedSourceSelectorPlan};
 use bigname_storage::{
-    BackfillCoverageFactScope, BackfillCoverageFactWrite, BackfillRange,
-    complete_backfill_range_recording_coverage,
+    BackfillCoverageFactScope, BackfillCoverageFactStreamItem, BackfillCoverageFactWrite,
+    BackfillCoverageProgress, BackfillCoverageProgressFuture, BackfillRange,
+    complete_backfill_range_recording_coverage_with_progress,
 };
 
 use crate::{
@@ -19,11 +21,33 @@ use super::{
 };
 
 const SOURCE_FAMILY_BASENAMES_BASE_REGISTRY: &str = "basenames_base_registry";
+const COVERAGE_PLAN_PROGRESS_TARGETS: usize = 1_000;
+
+struct BackfillCoverageHeartbeat<'a, 'b> {
+    pool: &'a sqlx::PgPool,
+    progress_sender: Option<&'a tokio::sync::mpsc::UnboundedSender<()>>,
+    service_progress: &'a mut Option<&'b mut dyn StartupAdapterProgress>,
+}
+
+impl BackfillCoverageProgress for BackfillCoverageHeartbeat<'_, '_> {
+    fn record<'a>(&'a mut self) -> BackfillCoverageProgressFuture<'a> {
+        Box::pin(async move {
+            if let Some(progress_sender) = self.progress_sender {
+                let _ = progress_sender.send(());
+            }
+            if let Some(progress) = self.service_progress.as_deref_mut() {
+                progress.record(self.pool).await?;
+            }
+            Ok(())
+        })
+    }
+}
 
 /// Complete a reserved range, recording plan-derived coverage facts in the
 /// job-flip transaction when this range completion also completes the job.
 /// Completion failures are persisted as reserved-range failure state, matching
 /// the other reserved-range phases.
+#[expect(clippy::too_many_arguments)]
 pub(super) async fn complete_reserved_range_recording_plan_coverage(
     pool: &sqlx::PgPool,
     active_range: &BackfillRange,
@@ -31,21 +55,31 @@ pub(super) async fn complete_reserved_range_recording_plan_coverage(
     source_plan: &WatchedSourceSelectorPlan,
     uses_basenames_registry_scan_all: bool,
     failure_reason: &'static str,
+    progress_sender: Option<&tokio::sync::mpsc::UnboundedSender<()>>,
+    service_progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<()> {
-    let completion = complete_backfill_range_recording_coverage(
-        pool,
-        active_range.backfill_range_id,
-        &config.lease_token,
-        |job| {
-            job_completion_coverage_facts(
-                source_plan,
-                uses_basenames_registry_scan_all,
-                job.range_start_block_number,
-                job.range_end_block_number,
-            )
-        },
-    )
-    .await;
+    let completion = {
+        let mut progress = BackfillCoverageHeartbeat {
+            pool,
+            progress_sender,
+            service_progress,
+        };
+        complete_backfill_range_recording_coverage_with_progress(
+            pool,
+            active_range.backfill_range_id,
+            &config.lease_token,
+            |job| {
+                job_completion_coverage_fact_stream(
+                    source_plan,
+                    uses_basenames_registry_scan_all,
+                    job.range_start_block_number,
+                    job.range_end_block_number,
+                )
+            },
+            &mut progress,
+        )
+        .await
+    };
     if let Err(error) = completion {
         return Err(record_reserved_range_failure(ReservedRangeFailure {
             pool,
@@ -73,12 +107,31 @@ pub(super) async fn complete_reserved_range_recording_plan_coverage(
 /// per-address targets are excluded because the fetch was not
 /// address-enumerated. Every other selected target yields an address-scope
 /// fact clamped to the job range, skipping empty intersections.
+#[cfg(test)]
 fn job_completion_coverage_facts<'a>(
     source_plan: &'a WatchedSourceSelectorPlan,
     uses_basenames_registry_scan_all: bool,
     job_start_block: i64,
     job_end_block: i64,
 ) -> impl Iterator<Item = BackfillCoverageFactWrite> + 'a {
+    job_completion_coverage_fact_stream(
+        source_plan,
+        uses_basenames_registry_scan_all,
+        job_start_block,
+        job_end_block,
+    )
+    .filter_map(|item| match item {
+        BackfillCoverageFactStreamItem::Fact(fact) => Some(fact),
+        BackfillCoverageFactStreamItem::Progress => None,
+    })
+}
+
+fn job_completion_coverage_fact_stream(
+    source_plan: &WatchedSourceSelectorPlan,
+    uses_basenames_registry_scan_all: bool,
+    job_start_block: i64,
+    job_end_block: i64,
+) -> JobCompletionCoverageFactStream<'_> {
     let mut family_scan_source_families = BTreeSet::new();
     if watched_source_plan_uses_generic_resolver_scope(source_plan) {
         family_scan_source_families.insert(SOURCE_FAMILY_ENS_V1_RESOLVER_L1);
@@ -87,54 +140,188 @@ fn job_completion_coverage_facts<'a>(
         family_scan_source_families.insert(SOURCE_FAMILY_BASENAMES_BASE_REGISTRY);
     }
 
-    let mut family_scan_windows = BTreeMap::<&'a str, Vec<(i64, i64)>>::new();
-    for target in &source_plan.selected_targets {
-        if !family_scan_source_families.contains(target.source_family.as_str()) {
-            continue;
-        }
-        family_scan_windows
-            .entry(target.source_family.as_str())
-            .or_default()
-            .push((target.effective_from_block, target.effective_to_block));
+    JobCompletionCoverageFactStream {
+        all_targets: &source_plan.selected_targets,
+        targets: source_plan.selected_targets.iter(),
+        address_targets: None,
+        family_scan_source_families,
+        family_scan_windows: BTreeMap::new(),
+        family_sources: None,
+        family_merge: None,
+        pending_fact: None,
+        source_examined: 0,
+        address_examined: 0,
+        job_start_block,
+        job_end_block,
     }
-    let family_facts = family_scan_windows
-        .into_iter()
-        .flat_map(move |(source_family, windows)| {
-            merged_covered_block_segments(windows, job_start_block, job_end_block)
-                .into_iter()
-                .map(
-                    move |(covered_from_block, covered_to_block)| BackfillCoverageFactWrite {
-                        source_family: source_family.to_owned(),
-                        scope: BackfillCoverageFactScope::Family,
-                        address: None,
-                        covered_from_block,
-                        covered_to_block,
-                    },
-                )
-        });
-    let address_facts = source_plan
-        .selected_targets
-        .iter()
-        .filter_map(move |target| {
-            if family_scan_source_families.contains(target.source_family.as_str()) {
-                return None;
+}
+
+struct FamilyWindowMerge {
+    source_family: String,
+    windows: btree_set::IntoIter<(i64, i64)>,
+    current: Option<(i64, i64)>,
+    examined: usize,
+}
+
+struct JobCompletionCoverageFactStream<'a> {
+    all_targets: &'a [WatchedBackfillTarget],
+    targets: std::slice::Iter<'a, WatchedBackfillTarget>,
+    address_targets: Option<std::slice::Iter<'a, WatchedBackfillTarget>>,
+    family_scan_source_families: BTreeSet<&'static str>,
+    family_scan_windows: BTreeMap<String, BTreeSet<(i64, i64)>>,
+    family_sources: Option<btree_map::IntoIter<String, BTreeSet<(i64, i64)>>>,
+    family_merge: Option<FamilyWindowMerge>,
+    pending_fact: Option<BackfillCoverageFactWrite>,
+    source_examined: usize,
+    address_examined: usize,
+    job_start_block: i64,
+    job_end_block: i64,
+}
+
+impl Iterator for JobCompletionCoverageFactStream<'_> {
+    type Item = BackfillCoverageFactStreamItem;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(fact) = self.pending_fact.take() {
+            return Some(BackfillCoverageFactStreamItem::Fact(fact));
+        }
+
+        if let Some(address_targets) = self.address_targets.as_mut() {
+            loop {
+                let target = address_targets.next()?;
+                self.address_examined += 1;
+                let fact = if self
+                    .family_scan_source_families
+                    .contains(target.source_family.as_str())
+                {
+                    None
+                } else {
+                    covered_block_interval(
+                        target.effective_from_block,
+                        target.effective_to_block,
+                        self.job_start_block,
+                        self.job_end_block,
+                    )
+                    .map(|(covered_from_block, covered_to_block)| {
+                        BackfillCoverageFactWrite {
+                            source_family: target.source_family.clone(),
+                            scope: BackfillCoverageFactScope::Address,
+                            address: Some(target.address.to_ascii_lowercase()),
+                            covered_from_block,
+                            covered_to_block,
+                        }
+                    })
+                };
+                if self
+                    .address_examined
+                    .is_multiple_of(COVERAGE_PLAN_PROGRESS_TARGETS)
+                {
+                    self.pending_fact = fact;
+                    return Some(BackfillCoverageFactStreamItem::Progress);
+                }
+                if let Some(fact) = fact {
+                    return Some(BackfillCoverageFactStreamItem::Fact(fact));
+                }
             }
-            let (covered_from_block, covered_to_block) = covered_block_interval(
+        }
+
+        for target in self.targets.by_ref() {
+            self.source_examined += 1;
+            let interval = covered_block_interval(
                 target.effective_from_block,
                 target.effective_to_block,
-                job_start_block,
-                job_end_block,
-            )?;
-            Some(BackfillCoverageFactWrite {
-                source_family: target.source_family.clone(),
-                scope: BackfillCoverageFactScope::Address,
-                address: Some(target.address.to_ascii_lowercase()),
-                covered_from_block,
-                covered_to_block,
-            })
-        });
+                self.job_start_block,
+                self.job_end_block,
+            );
+            if self
+                .family_scan_source_families
+                .contains(target.source_family.as_str())
+                && let Some(interval) = interval
+            {
+                self.family_scan_windows
+                    .entry(target.source_family.clone())
+                    .or_default()
+                    .insert(interval);
+            }
+            if self
+                .source_examined
+                .is_multiple_of(COVERAGE_PLAN_PROGRESS_TARGETS)
+            {
+                return Some(BackfillCoverageFactStreamItem::Progress);
+            }
+        }
 
-    family_facts.chain(address_facts)
+        if self.family_sources.is_none() {
+            self.family_sources = Some(std::mem::take(&mut self.family_scan_windows).into_iter());
+        }
+        loop {
+            if self.family_merge.is_none() {
+                let Some((source_family, windows)) = self.family_sources.as_mut()?.next() else {
+                    self.address_targets = Some(self.all_targets.iter());
+                    return self.next();
+                };
+                self.family_merge = Some(FamilyWindowMerge {
+                    source_family,
+                    windows: windows.into_iter(),
+                    current: None,
+                    examined: 0,
+                });
+            }
+            let merge = self
+                .family_merge
+                .as_mut()
+                .expect("family merge initialized");
+            match merge.windows.next() {
+                Some((from_block, to_block)) => {
+                    merge.examined += 1;
+                    let completed = match merge.current.replace((from_block, to_block)) {
+                        Some((current_from, current_to))
+                            if from_block <= current_to.saturating_add(1) =>
+                        {
+                            merge.current = Some((current_from, current_to.max(to_block)));
+                            None
+                        }
+                        previous => previous,
+                    };
+                    let fact = completed.map(|(covered_from_block, covered_to_block)| {
+                        BackfillCoverageFactWrite {
+                            source_family: merge.source_family.clone(),
+                            scope: BackfillCoverageFactScope::Family,
+                            address: None,
+                            covered_from_block,
+                            covered_to_block,
+                        }
+                    });
+                    if merge
+                        .examined
+                        .is_multiple_of(COVERAGE_PLAN_PROGRESS_TARGETS)
+                    {
+                        self.pending_fact = fact;
+                        return Some(BackfillCoverageFactStreamItem::Progress);
+                    }
+                    if let Some(fact) = fact {
+                        return Some(BackfillCoverageFactStreamItem::Fact(fact));
+                    }
+                }
+                None => {
+                    let final_interval = merge.current.take();
+                    let source_family = merge.source_family.clone();
+                    self.family_merge = None;
+                    if let Some((covered_from_block, covered_to_block)) = final_interval {
+                        return Some(BackfillCoverageFactStreamItem::Fact(
+                            BackfillCoverageFactWrite {
+                                source_family,
+                                scope: BackfillCoverageFactScope::Family,
+                                address: None,
+                                covered_from_block,
+                                covered_to_block,
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Intersect a target's effective window with the job range; `None` when the
@@ -174,325 +361,5 @@ pub(crate) fn merged_covered_block_segments(
 }
 
 #[cfg(test)]
-mod tests {
-    use bigname_manifests::{
-        WatchedBackfillTarget, WatchedChainPlan, WatchedSourceSelectorKind,
-        WatchedSourceSelectorPlan,
-    };
-    use bigname_storage::BackfillCoverageFactScope;
-    use sqlx::types::Uuid;
-
-    use super::*;
-
-    #[test]
-    fn covered_block_interval_clamps_and_rejects_empty_intersections() {
-        assert_eq!(covered_block_interval(10, 20, 12, 18), Some((12, 18)));
-        assert_eq!(covered_block_interval(12, 18, 10, 20), Some((12, 18)));
-        assert_eq!(covered_block_interval(10, 20, 15, 30), Some((15, 20)));
-        assert_eq!(covered_block_interval(15, 30, 10, 20), Some((15, 20)));
-        assert_eq!(covered_block_interval(10, 10, 10, 10), Some((10, 10)));
-        assert_eq!(covered_block_interval(10, 20, 20, 25), Some((20, 20)));
-        assert_eq!(covered_block_interval(10, 20, 21, 25), None);
-        assert_eq!(covered_block_interval(21, 25, 10, 20), None);
-        assert_eq!(covered_block_interval(0, 0, 1, 1), None);
-    }
-
-    #[test]
-    fn job_completion_facts_clamp_targets_and_skip_out_of_range_targets() {
-        let source_plan = source_plan(
-            "base-mainnet",
-            vec![
-                target(
-                    "basenames_base_registry",
-                    1,
-                    "0xABCDEFabcdefABCDEFabcdefabcdefABCDEFabcd",
-                    10,
-                    30,
-                ),
-                target(
-                    "basenames_base_registrar",
-                    2,
-                    "0x2222222222222222222222222222222222222222",
-                    25,
-                    60,
-                ),
-                target(
-                    "basenames_base_resolver",
-                    3,
-                    "0x3333333333333333333333333333333333333333",
-                    1,
-                    19,
-                ),
-            ],
-        );
-
-        let facts = job_completion_coverage_facts(&source_plan, false, 20, 40).collect::<Vec<_>>();
-
-        assert_eq!(facts.len(), 2);
-        assert_eq!(facts[0].source_family, "basenames_base_registry");
-        assert_eq!(facts[0].scope, BackfillCoverageFactScope::Address);
-        assert_eq!(
-            facts[0].address.as_deref(),
-            Some("0xabcdefabcdefabcdefabcdefabcdefabcdefabcd")
-        );
-        assert_eq!(
-            (facts[0].covered_from_block, facts[0].covered_to_block),
-            (20, 30)
-        );
-        assert_eq!(facts[1].source_family, "basenames_base_registrar");
-        assert_eq!(
-            (facts[1].covered_from_block, facts[1].covered_to_block),
-            (25, 40)
-        );
-    }
-
-    #[test]
-    fn generic_resolver_scan_yields_family_fact_and_excludes_resolver_targets() {
-        let source_plan = source_plan(
-            "ethereum-mainnet",
-            vec![
-                target(
-                    "ens_v1_registry_l1",
-                    1,
-                    "0x1111111111111111111111111111111111111111",
-                    5,
-                    50,
-                ),
-                target(
-                    "ens_v1_resolver_l1",
-                    2,
-                    "0x2222222222222222222222222222222222222222",
-                    12,
-                    18,
-                ),
-            ],
-        );
-
-        let facts = job_completion_coverage_facts(&source_plan, false, 10, 20).collect::<Vec<_>>();
-
-        assert_eq!(facts.len(), 2);
-        assert_eq!(facts[0].source_family, "ens_v1_resolver_l1");
-        assert_eq!(facts[0].scope, BackfillCoverageFactScope::Family);
-        assert_eq!(facts[0].address, None);
-        assert_eq!(
-            (facts[0].covered_from_block, facts[0].covered_to_block),
-            (12, 18),
-            "family fact must be clamped to the resolver targets' effective span"
-        );
-        assert_eq!(facts[1].source_family, "ens_v1_registry_l1");
-        assert_eq!(facts[1].scope, BackfillCoverageFactScope::Address);
-        assert_eq!(
-            (facts[1].covered_from_block, facts[1].covered_to_block),
-            (10, 20)
-        );
-    }
-
-    #[test]
-    fn family_scans_without_matching_targets_or_overlap_yield_no_family_fact() {
-        let mut no_resolver_targets = source_plan(
-            "ethereum-mainnet",
-            vec![target(
-                "ens_v1_registry_l1",
-                1,
-                "0x1111111111111111111111111111111111111111",
-                5,
-                50,
-            )],
-        );
-        no_resolver_targets.selector_kind = WatchedSourceSelectorKind::SourceFamily;
-        no_resolver_targets.source_family = Some("ens_v1_resolver_l1".to_owned());
-        assert!(
-            job_completion_coverage_facts(&no_resolver_targets, false, 10, 20)
-                .all(|fact| fact.scope != BackfillCoverageFactScope::Family),
-            "a family scan with no selected targets must not claim family coverage"
-        );
-
-        let disjoint_span = source_plan(
-            "base-mainnet",
-            vec![target(
-                "basenames_base_registry",
-                1,
-                "0x1111111111111111111111111111111111111111",
-                30,
-                40,
-            )],
-        );
-        assert_eq!(
-            job_completion_coverage_facts(&disjoint_span, true, 10, 20).count(),
-            0,
-            "a family span disjoint from the job range must not claim coverage"
-        );
-    }
-
-    #[test]
-    fn family_targets_individually_disjoint_from_the_job_range_claim_nothing() {
-        // Both windows miss the job range, but their hull [5, 40] spans it:
-        // hull-then-intersect would mint a family fact over blocks that were
-        // never fetched.
-        let source_plan = source_plan(
-            "base-mainnet",
-            vec![
-                target(
-                    "basenames_base_registry",
-                    1,
-                    "0x1111111111111111111111111111111111111111",
-                    5,
-                    8,
-                ),
-                target(
-                    "basenames_base_registry",
-                    2,
-                    "0x2222222222222222222222222222222222222222",
-                    30,
-                    40,
-                ),
-            ],
-        );
-
-        assert_eq!(
-            job_completion_coverage_facts(&source_plan, true, 10, 20).count(),
-            0,
-            "windows individually disjoint from the job range must not claim family coverage"
-        );
-    }
-
-    #[test]
-    fn family_facts_split_on_interior_gaps_between_target_windows() {
-        let source_plan = source_plan(
-            "base-mainnet",
-            vec![
-                target(
-                    "basenames_base_registry",
-                    1,
-                    "0x1111111111111111111111111111111111111111",
-                    10,
-                    12,
-                ),
-                target(
-                    "basenames_base_registry",
-                    2,
-                    "0x2222222222222222222222222222222222222222",
-                    16,
-                    20,
-                ),
-                target(
-                    "basenames_base_registry",
-                    3,
-                    "0x3333333333333333333333333333333333333333",
-                    13,
-                    13,
-                ),
-            ],
-        );
-
-        let facts = job_completion_coverage_facts(&source_plan, true, 5, 25).collect::<Vec<_>>();
-
-        assert_eq!(
-            facts
-                .iter()
-                .map(|fact| (fact.scope, (fact.covered_from_block, fact.covered_to_block)))
-                .collect::<Vec<_>>(),
-            vec![
-                (BackfillCoverageFactScope::Family, (10, 13)),
-                (BackfillCoverageFactScope::Family, (16, 20)),
-            ],
-            "adjacent windows merge but the unfetched gap between segments must stay unclaimed"
-        );
-    }
-
-    #[test]
-    fn merged_covered_block_segments_clamp_before_merging() {
-        assert_eq!(
-            merged_covered_block_segments(vec![(5, 8), (30, 40)], 10, 20),
-            Vec::<(i64, i64)>::new()
-        );
-        assert_eq!(
-            merged_covered_block_segments(vec![(16, 30), (1, 12), (13, 14)], 10, 20),
-            vec![(10, 14), (16, 20)]
-        );
-        assert_eq!(
-            merged_covered_block_segments(vec![(1, 100)], 10, 20),
-            vec![(10, 20)]
-        );
-        assert_eq!(
-            merged_covered_block_segments(std::iter::empty(), 10, 20),
-            Vec::<(i64, i64)>::new()
-        );
-        let max = i64::MAX;
-        assert_eq!(
-            merged_covered_block_segments([(max, max), (max - 1, max - 1)], max - 1, max),
-            vec![(max - 1, max)]
-        );
-    }
-
-    #[test]
-    fn basenames_registry_scan_all_yields_only_the_registry_family_fact() {
-        let source_plan = source_plan(
-            "base-mainnet",
-            vec![
-                target(
-                    "basenames_base_registry",
-                    1,
-                    "0x1111111111111111111111111111111111111111",
-                    12,
-                    18,
-                ),
-                target(
-                    "basenames_base_registry",
-                    2,
-                    "0x2222222222222222222222222222222222222222",
-                    14,
-                    30,
-                ),
-            ],
-        );
-
-        let facts = job_completion_coverage_facts(&source_plan, true, 10, 20).collect::<Vec<_>>();
-
-        assert_eq!(facts.len(), 1);
-        assert_eq!(facts[0].source_family, "basenames_base_registry");
-        assert_eq!(facts[0].scope, BackfillCoverageFactScope::Family);
-        assert_eq!(facts[0].address, None);
-        assert_eq!(
-            (facts[0].covered_from_block, facts[0].covered_to_block),
-            (12, 20),
-            "family fact must span the union of registry target windows clamped to the job range"
-        );
-    }
-
-    fn target(
-        source_family: &str,
-        id: u128,
-        address: &str,
-        effective_from_block: i64,
-        effective_to_block: i64,
-    ) -> WatchedBackfillTarget {
-        WatchedBackfillTarget {
-            source_family: source_family.to_owned(),
-            contract_instance_id: Uuid::from_u128(id),
-            address: address.to_owned(),
-            effective_from_block,
-            effective_to_block,
-        }
-    }
-
-    fn source_plan(
-        chain: &str,
-        selected_targets: Vec<WatchedBackfillTarget>,
-    ) -> WatchedSourceSelectorPlan {
-        WatchedSourceSelectorPlan {
-            chain: chain.to_owned(),
-            selector_kind: WatchedSourceSelectorKind::WatchedTargetSet,
-            source_family: None,
-            requested_watched_targets: Vec::new(),
-            selected_targets,
-            watched_chain_plan: WatchedChainPlan {
-                chain: chain.to_owned(),
-                addresses: Vec::new(),
-                manifest_root_entry_count: 0,
-                manifest_contract_entry_count: 0,
-                discovery_edge_entry_count: 0,
-            },
-        }
-    }
-}
+#[path = "coverage_facts/tests.rs"]
+mod tests;

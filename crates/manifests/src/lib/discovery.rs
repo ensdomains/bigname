@@ -18,14 +18,15 @@ pub(crate) use admission_epoch::{
     bump_discovery_admission_epochs, fence_discovery_admission_epoch_writes,
 };
 pub use admission_epoch::{load_discovery_admission_epoch, load_discovery_admission_epochs};
-pub use loading::load_discovery_admission_state;
+pub use loading::{load_discovery_admission_state, load_discovery_admission_state_with_progress};
 pub use persistence::persist_discovery_observation;
 pub use provenance::discovery_observation_evm_event_position;
 pub use reconciliation::{
     DiscoveryObservationPageSource, ExpectedDiscoveryAdmissionEpoch,
     FullDiscoveryReconciliationOptions, reconcile_discovery_observations,
-    reconcile_discovery_observations_streamed, reconcile_scoped_discovery_observation_transitions,
-    reconcile_scoped_discovery_observations,
+    reconcile_discovery_observations_streamed,
+    reconcile_discovery_observations_streamed_with_full_options,
+    reconcile_scoped_discovery_observation_transitions, reconcile_scoped_discovery_observations,
 };
 #[cfg(test)]
 pub(crate) use reconciliation::{

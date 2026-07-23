@@ -47,6 +47,7 @@ pub(super) async fn stage_startup_checkpoint_events(
     reverse_histories: &mut BTreeMap<String, ReverseClaimSourceHistory>,
     checkpoint_delta: &mut UnwrappedAuthorityReplayCheckpointDelta,
     staged_events: &mut UnwrappedAuthorityReplayFlushedEvents,
+    startup_progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<usize> {
     let mut staged_count = 0usize;
     let mut buffer = Vec::with_capacity(REPLAY_EVENT_FLUSH_BATCH_SIZE);
@@ -56,19 +57,40 @@ pub(super) async fn stage_startup_checkpoint_events(
             checkpoint_delta.mark_history(key.clone());
             buffer.append(&mut history.events);
         }
-        staged_count +=
-            stage_startup_event_buffer(pool, checkpoint, &mut buffer, staged_events, false).await?;
+        staged_count += stage_startup_event_buffer(
+            pool,
+            checkpoint,
+            &mut buffer,
+            staged_events,
+            false,
+            startup_progress,
+        )
+        .await?;
     }
     for (key, history) in reverse_histories.iter_mut() {
         if !history.events.is_empty() {
             checkpoint_delta.mark_reverse_history(key.clone());
             buffer.append(&mut history.events);
         }
-        staged_count +=
-            stage_startup_event_buffer(pool, checkpoint, &mut buffer, staged_events, false).await?;
+        staged_count += stage_startup_event_buffer(
+            pool,
+            checkpoint,
+            &mut buffer,
+            staged_events,
+            false,
+            startup_progress,
+        )
+        .await?;
     }
-    staged_count +=
-        stage_startup_event_buffer(pool, checkpoint, &mut buffer, staged_events, true).await?;
+    staged_count += stage_startup_event_buffer(
+        pool,
+        checkpoint,
+        &mut buffer,
+        staged_events,
+        true,
+        startup_progress,
+    )
+    .await?;
     Ok(staged_count)
 }
 
@@ -78,13 +100,14 @@ async fn stage_startup_event_buffer(
     buffer: &mut Vec<NormalizedEvent>,
     staged_events: &mut UnwrappedAuthorityReplayFlushedEvents,
     flush_partial: bool,
+    startup_progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<usize> {
     if buffer.is_empty() || (!flush_partial && buffer.len() < REPLAY_EVENT_FLUSH_BATCH_SIZE) {
         return Ok(0);
     }
     let event_count = buffer.len();
     checkpoint
-        .stage_startup_events(pool, buffer, staged_events)
+        .stage_startup_events(pool, buffer, staged_events, startup_progress)
         .await?;
     buffer.clear();
     if buffer.capacity() > REPLAY_EVENT_FLUSH_BATCH_SIZE * 4 {

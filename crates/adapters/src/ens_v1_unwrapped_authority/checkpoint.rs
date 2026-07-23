@@ -1,5 +1,7 @@
 use super::*;
-use crate::checkpoint_context::AdapterCheckpointContext;
+use crate::checkpoint_context::{
+    AdapterCheckpointContext, StartupAdapterProgress, record_startup_adapter_progress,
+};
 use anyhow::{Context, Result, ensure};
 use bigname_storage::{
     RawLogStagingInputVersion, load_raw_log_staging_input_version,
@@ -14,9 +16,12 @@ mod payload;
 mod persistence;
 mod startup_events;
 use crate::checkpoint_codec::JsonbCheckpointCodec;
+#[cfg(test)]
+use items::{checkpoint_item_rows, checkpoint_pending_observation_delete_keys};
 use items::{
-    checkpoint_item_rows, checkpoint_pending_observation_delete_keys, delete_checkpoint_items,
-    insert_checkpoint_items, update_checkpoint_progress,
+    checkpoint_item_rows_with_progress, checkpoint_pending_observation_delete_keys_with_progress,
+    delete_checkpoint_items, delete_checkpoint_items_with_progress,
+    insert_checkpoint_items_with_progress, update_checkpoint_progress,
 };
 pub(super) use payload::{decode_item, encode_item};
 use payload::{flushed_events_from_payload, summary_from_payload, summary_payload};
@@ -48,46 +53,6 @@ pub(super) struct UnwrappedAuthorityReplayCheckpointDelta {
     pub(super) namehash_labelhash_keys: BTreeSet<String>,
     pub(super) pending_observation_keys: BTreeSet<String>,
     pub(super) migrated_nodes: BTreeSet<String>,
-}
-
-impl UnwrappedAuthorityReplayCheckpointDelta {
-    pub(super) fn mark_history(&mut self, key: impl Into<String>) {
-        self.history_keys.insert(key.into());
-    }
-
-    pub(super) fn mark_reverse_history(&mut self, key: impl Into<String>) {
-        self.reverse_history_keys.insert(key.into());
-    }
-
-    pub(super) fn mark_known_name(&mut self, key: impl Into<String>) {
-        self.known_name_keys.insert(key.into());
-    }
-
-    pub(super) fn mark_known_name_ref(&mut self, key: impl Into<String>) {
-        self.known_name_ref_keys.insert(key.into());
-    }
-
-    pub(super) fn mark_namehash_labelhash(&mut self, key: impl Into<String>) {
-        self.namehash_labelhash_keys.insert(key.into());
-    }
-
-    pub(super) fn mark_pending_observations(&mut self, key: impl Into<String>) {
-        self.pending_observation_keys.insert(key.into());
-    }
-
-    pub(super) fn mark_migrated_node(&mut self, node: impl Into<String>) {
-        self.migrated_nodes.insert(node.into());
-    }
-
-    pub(super) fn clear(&mut self) {
-        self.history_keys.clear();
-        self.reverse_history_keys.clear();
-        self.known_name_keys.clear();
-        self.known_name_ref_keys.clear();
-        self.namehash_labelhash_keys.clear();
-        self.pending_observation_keys.clear();
-        self.migrated_nodes.clear();
-    }
 }
 
 pub(super) struct UnwrappedAuthorityReplayCheckpointState {
@@ -322,6 +287,7 @@ impl UnwrappedAuthorityReplayCheckpoint {
         &self,
         pool: &PgPool,
         include_replay_auxiliary_state: bool,
+        progress: &mut Option<&mut dyn StartupAdapterProgress>,
     ) -> Result<Option<UnwrappedAuthorityReplayCheckpointState>> {
         if self.last_block_number.is_none() {
             return Ok(None);
@@ -348,7 +314,6 @@ impl UnwrappedAuthorityReplayCheckpoint {
                   $6::BOOLEAN
                   OR item_kind = ANY($7::TEXT[])
               )
-            ORDER BY item_kind, item_key
             "#,
         )
         .bind(&self.context.deployment_profile)
@@ -368,6 +333,7 @@ impl UnwrappedAuthorityReplayCheckpoint {
         let mut pending_namehash_observations = HashMap::new();
         let mut migrated_nodes = HashSet::new();
 
+        let mut loaded_item_count = 0usize;
         while let Some(row) = rows.try_next().await.with_context(|| {
             format!(
                 "failed to load staged {ADAPTER} replay checkpoint items for {}/{}",
@@ -416,6 +382,15 @@ impl UnwrappedAuthorityReplayCheckpoint {
                 }
                 _ => {}
             }
+            loaded_item_count += 1;
+            if loaded_item_count.is_multiple_of(CHECKPOINT_ITEM_INSERT_BATCH_SIZE) {
+                record_startup_adapter_progress(pool, progress).await?;
+            }
+        }
+        if loaded_item_count > 0
+            && !loaded_item_count.is_multiple_of(CHECKPOINT_ITEM_INSERT_BATCH_SIZE)
+        {
+            record_startup_adapter_progress(pool, progress).await?;
         }
 
         Ok(Some(UnwrappedAuthorityReplayCheckpointState {
@@ -438,10 +413,12 @@ impl UnwrappedAuthorityReplayCheckpoint {
         state: UnwrappedAuthorityReplayCheckpointStateRef<'_>,
         delta: &UnwrappedAuthorityReplayCheckpointDelta,
         flushed_events: &UnwrappedAuthorityReplayFlushedEvents,
+        progress: &mut Option<&mut dyn StartupAdapterProgress>,
     ) -> Result<()> {
-        let item_rows = checkpoint_item_rows(&state, delta)?;
+        let item_rows = checkpoint_item_rows_with_progress(pool, &state, delta, progress).await?;
         let pending_observation_delete_keys =
-            checkpoint_pending_observation_delete_keys(&state, delta);
+            checkpoint_pending_observation_delete_keys_with_progress(pool, &state, delta, progress)
+                .await?;
         let staged_item_count = state.histories.len() + state.reverse_histories.len();
         let staged_aux_item_count = state.known_names_by_namehash.len()
             + state.known_name_refs_by_namehash.len()
@@ -460,14 +437,17 @@ impl UnwrappedAuthorityReplayCheckpoint {
             .begin()
             .await
             .context("failed to start unwrapped-authority replay checkpoint transaction")?;
-        delete_checkpoint_items(
+        delete_checkpoint_items_with_progress(
+            pool,
             &mut transaction,
             self,
             ITEM_KIND_PENDING_OBSERVATIONS,
             &pending_observation_delete_keys,
+            progress,
         )
         .await?;
-        insert_checkpoint_items(&mut transaction, self, &item_rows).await?;
+        insert_checkpoint_items_with_progress(pool, &mut transaction, self, &item_rows, progress)
+            .await?;
         update_checkpoint_progress(
             &mut transaction,
             self,
@@ -484,6 +464,7 @@ impl UnwrappedAuthorityReplayCheckpoint {
             .commit()
             .await
             .context("failed to commit unwrapped-authority replay checkpoint progress")?;
+        record_startup_adapter_progress(pool, progress).await?;
 
         self.last_block_number = Some(boundary_block_number);
         self.scanned_log_count = scanned_log_count;

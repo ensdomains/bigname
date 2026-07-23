@@ -1,19 +1,16 @@
 use std::{future::Future, time::Instant};
 
-use anyhow::{Context, Result, ensure};
-use bigname_storage::{
-    RawLogStagingInputVersion, acquire_raw_log_staging_read_guard,
-    load_raw_log_staging_input_version,
-};
-#[cfg(target_os = "linux")]
-use tracing::info;
-
-use crate::resolver_profile_convergence::journal_resolver_profile_authority_if_epoch_changed;
 use crate::runtime::{
     log_ens_v1_reverse_claim_sync_summary, log_ens_v1_subregistry_discovery_sync_summary,
     log_ens_v1_unwrapped_authority_sync_summary, log_ens_v2_permissions_sync_summary,
     log_ens_v2_registrar_sync_summary, log_ens_v2_registry_resource_surface_sync_summary,
     log_ens_v2_resolver_sync_summary,
+};
+use anyhow::{Context, Result, ensure};
+use bigname_adapters::StartupAdapterProgress;
+use bigname_storage::{
+    RawLogStagingInputVersion, acquire_raw_log_staging_read_guard,
+    load_raw_log_staging_input_version,
 };
 
 use super::sync_logging::log_adapter_call_timing;
@@ -27,6 +24,8 @@ use crate::reconciliation::{
 
 #[path = "full_closure/automatic.rs"]
 mod automatic;
+#[path = "full_closure/heartbeat.rs"]
+mod heartbeat;
 #[path = "full_closure/ownership.rs"]
 mod ownership;
 #[path = "full_closure/reverse_claim.rs"]
@@ -38,15 +37,14 @@ pub(crate) use automatic::{
 };
 #[cfg(test)]
 pub(crate) use automatic::{install_after_stateless_failure, install_stateless_page_observer};
+use heartbeat::{
+    journal_full_closure_authority_with_progress, record_full_closure_progress,
+    trim_allocator_after_full_closure_adapter,
+};
 #[cfg(test)]
 pub(crate) use ownership::install_ownership_release_test_hook;
 use ownership::with_full_closure_replay_lock;
 use reverse_claim::sync_ens_v1_reverse_claim_range_in_pages;
-
-#[cfg(target_os = "linux")]
-unsafe extern "C" {
-    fn malloc_trim(pad: usize) -> i32;
-}
 
 #[cfg(test)]
 #[expect(clippy::too_many_arguments)]
@@ -70,6 +68,7 @@ pub(crate) async fn sync_full_closure_normalized_events_from_persisted_raw_paylo
         adapters,
         max_raw_logs_per_page,
         FullClosureCheckpointCompletion::Retain,
+        &mut None,
     )
     .await
 }
@@ -95,6 +94,7 @@ pub(crate) async fn sync_manual_full_closure_normalized_events_from_persisted_ra
         adapters,
         max_raw_logs_per_page,
         FullClosureCheckpointCompletion::ClearOnSuccess,
+        &mut None,
     )
     .await?
     .summary)
@@ -121,6 +121,7 @@ async fn sync_full_closure_with_checkpoint_completion(
     adapters: &[NormalizedEventReplayAdapter],
     max_raw_logs_per_page: usize,
     checkpoint_completion: FullClosureCheckpointCompletion,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<FullClosureSyncResult> {
     let (result, ()) = sync_full_closure_with_checkpoint_completion_and_prelude(
         pool,
@@ -132,6 +133,7 @@ async fn sync_full_closure_with_checkpoint_completion(
         adapters,
         max_raw_logs_per_page,
         checkpoint_completion,
+        progress,
         || async { Ok(()) },
     )
     .await?;
@@ -149,6 +151,7 @@ async fn sync_full_closure_with_checkpoint_completion_and_prelude<T, Prelude, Pr
     adapters: &[NormalizedEventReplayAdapter],
     max_raw_logs_per_page: usize,
     checkpoint_completion: FullClosureCheckpointCompletion,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
     prelude: Prelude,
 ) -> Result<(FullClosureSyncResult, T)>
 where
@@ -193,6 +196,7 @@ where
             target_block_number,
             adapters,
             max_raw_logs_per_page,
+            progress,
         )
         .await?;
         let raw_log_guard = if adapters.is_empty() {
@@ -244,6 +248,7 @@ async fn sync_full_closure_normalized_events_without_lock(
     target_block_number: i64,
     adapters: &[NormalizedEventReplayAdapter],
     max_raw_logs_per_page: usize,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<PersistedRawPayloadAdapterSyncSummary> {
     let mut aggregate = PersistedRawPayloadAdapterSyncSummary::default();
     let checkpoint_context = bigname_adapters::ReplayAdapterCheckpointContext {
@@ -262,6 +267,7 @@ async fn sync_full_closure_normalized_events_without_lock(
             target_block_number,
             replay_contract(NormalizedEventReplayAdapter::EnsV1ReverseClaim).source_families,
             max_raw_logs_per_page,
+            progress,
         )
         .await?;
         log_adapter_call_timing(
@@ -283,21 +289,36 @@ async fn sync_full_closure_normalized_events_without_lock(
             summary.total_synced_count,
             summary.total_inserted_count,
         );
+        record_full_closure_progress(pool, progress).await?;
     }
 
     if adapters.contains(&NormalizedEventReplayAdapter::EnsV1SubregistryDiscovery) {
-        let epoch_guard = journal_resolver_profile_authority_if_epoch_changed(pool, chain).await?;
+        let epoch_guard =
+            journal_full_closure_authority_with_progress(pool, chain, progress).await?;
         aggregate.resolver_profile_authority_epoch_guard_count += epoch_guard.epoch_guard_count;
         aggregate.resolver_profile_authority_scan_count += epoch_guard.authority_scan_count;
         let adapter_started = Instant::now();
-        let summary =
-            bigname_adapters::sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit(
-                pool,
-                chain,
-                &checkpoint_context,
-                max_raw_logs_per_page,
-            )
-            .await?;
+        let summary = match progress.as_deref_mut() {
+            Some(progress) => {
+                bigname_adapters::sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit_and_progress(
+                    pool,
+                    chain,
+                    &checkpoint_context,
+                    max_raw_logs_per_page,
+                    progress,
+                )
+                .await?
+            }
+            None => {
+                bigname_adapters::sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit(
+                    pool,
+                    chain,
+                    &checkpoint_context,
+                    max_raw_logs_per_page,
+                )
+                .await?
+            }
+        };
         log_adapter_call_timing(
             chain,
             "ens_v1_subregistry_discovery",
@@ -317,22 +338,37 @@ async fn sync_full_closure_normalized_events_without_lock(
             summary.total_normalized_event_count,
             summary.total_normalized_event_inserted_count,
         );
-        let epoch_guard = journal_resolver_profile_authority_if_epoch_changed(pool, chain).await?;
+        let epoch_guard =
+            journal_full_closure_authority_with_progress(pool, chain, progress).await?;
         aggregate.resolver_profile_authority_epoch_guard_count += epoch_guard.epoch_guard_count;
         aggregate.resolver_profile_authority_scan_count += epoch_guard.authority_scan_count;
         trim_allocator_after_full_closure_adapter("ens_v1_subregistry_discovery");
+        record_full_closure_progress(pool, progress).await?;
     }
 
     if adapters.contains(&NormalizedEventReplayAdapter::EnsV1UnwrappedAuthority) {
         let adapter_started = Instant::now();
-        let summary =
-            bigname_adapters::sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limit(
-                pool,
-                chain,
-                &checkpoint_context,
-                max_raw_logs_per_page,
-            )
-            .await?;
+        let summary = match progress.as_deref_mut() {
+            Some(progress) => {
+                bigname_adapters::sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limit_and_progress(
+                    pool,
+                    chain,
+                    &checkpoint_context,
+                    max_raw_logs_per_page,
+                    progress,
+                )
+                .await?
+            }
+            None => {
+                bigname_adapters::sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limit(
+                    pool,
+                    chain,
+                    &checkpoint_context,
+                    max_raw_logs_per_page,
+                )
+                .await?
+            }
+        };
         log_adapter_call_timing(
             chain,
             "ens_v1_unwrapped_authority",
@@ -353,16 +389,30 @@ async fn sync_full_closure_normalized_events_without_lock(
             summary.total_normalized_event_inserted_count,
         );
         trim_allocator_after_full_closure_adapter("ens_v1_unwrapped_authority");
+        record_full_closure_progress(pool, progress).await?;
     }
 
     if adapters.contains(&NormalizedEventReplayAdapter::EnsV2RegistryResourceSurface) {
         let adapter_started = Instant::now();
-        let summary = bigname_adapters::sync_ens_v2_registry_resource_surface_through_block(
-            pool,
-            chain,
-            target_block_number,
-        )
-        .await?;
+        let summary = match progress.as_deref_mut() {
+            Some(progress) => {
+                bigname_adapters::sync_ens_v2_registry_resource_surface_through_block_with_progress(
+                    pool,
+                    chain,
+                    target_block_number,
+                    progress,
+                )
+                .await?
+            }
+            None => {
+                bigname_adapters::sync_ens_v2_registry_resource_surface_through_block(
+                    pool,
+                    chain,
+                    target_block_number,
+                )
+                .await?
+            }
+        };
         log_adapter_call_timing(
             chain,
             "ens_v2_registry_resource_surface",
@@ -383,13 +433,30 @@ async fn sync_full_closure_normalized_events_without_lock(
             summary.total_normalized_event_inserted_count,
         );
         trim_allocator_after_full_closure_adapter("ens_v2_registry_resource_surface");
+        record_full_closure_progress(pool, progress).await?;
     }
 
     if adapters.contains(&NormalizedEventReplayAdapter::EnsV2Registrar) {
         let adapter_started = Instant::now();
-        let summary =
-            bigname_adapters::sync_ens_v2_registrar_through_block(pool, chain, target_block_number)
-                .await?;
+        let summary = match progress.as_deref_mut() {
+            Some(progress) => {
+                bigname_adapters::sync_ens_v2_registrar_through_block_with_progress(
+                    pool,
+                    chain,
+                    target_block_number,
+                    progress,
+                )
+                .await?
+            }
+            None => {
+                bigname_adapters::sync_ens_v2_registrar_through_block(
+                    pool,
+                    chain,
+                    target_block_number,
+                )
+                .await?
+            }
+        };
         log_adapter_call_timing(
             chain,
             "ens_v2_registrar",
@@ -410,13 +477,30 @@ async fn sync_full_closure_normalized_events_without_lock(
             summary.total_inserted_count,
         );
         trim_allocator_after_full_closure_adapter("ens_v2_registrar");
+        record_full_closure_progress(pool, progress).await?;
     }
 
     if adapters.contains(&NormalizedEventReplayAdapter::EnsV2Resolver) {
         let adapter_started = Instant::now();
-        let summary =
-            bigname_adapters::sync_ens_v2_resolver_through_block(pool, chain, target_block_number)
-                .await?;
+        let summary = match progress.as_deref_mut() {
+            Some(progress) => {
+                bigname_adapters::sync_ens_v2_resolver_through_block_with_progress(
+                    pool,
+                    chain,
+                    target_block_number,
+                    progress,
+                )
+                .await?
+            }
+            None => {
+                bigname_adapters::sync_ens_v2_resolver_through_block(
+                    pool,
+                    chain,
+                    target_block_number,
+                )
+                .await?
+            }
+        };
         log_adapter_call_timing(
             chain,
             "ens_v2_resolver",
@@ -437,16 +521,30 @@ async fn sync_full_closure_normalized_events_without_lock(
             summary.total_inserted_count,
         );
         trim_allocator_after_full_closure_adapter("ens_v2_resolver");
+        record_full_closure_progress(pool, progress).await?;
     }
 
     if adapters.contains(&NormalizedEventReplayAdapter::EnsV2Permissions) {
         let adapter_started = Instant::now();
-        let summary = bigname_adapters::sync_ens_v2_permissions_through_block(
-            pool,
-            chain,
-            target_block_number,
-        )
-        .await?;
+        let summary = match progress.as_deref_mut() {
+            Some(progress) => {
+                bigname_adapters::sync_ens_v2_permissions_through_block_with_progress(
+                    pool,
+                    chain,
+                    target_block_number,
+                    progress,
+                )
+                .await?
+            }
+            None => {
+                bigname_adapters::sync_ens_v2_permissions_through_block(
+                    pool,
+                    chain,
+                    target_block_number,
+                )
+                .await?
+            }
+        };
         log_adapter_call_timing(
             chain,
             "ens_v2_permissions",
@@ -467,23 +565,8 @@ async fn sync_full_closure_normalized_events_without_lock(
             summary.total_inserted_count,
         );
         trim_allocator_after_full_closure_adapter("ens_v2_permissions");
+        record_full_closure_progress(pool, progress).await?;
     }
 
     Ok(aggregate)
-}
-
-fn trim_allocator_after_full_closure_adapter(adapter: &'static str) {
-    #[cfg(target_os = "linux")]
-    {
-        let malloc_trim_result = unsafe { malloc_trim(0) };
-        info!(
-            service = "indexer",
-            adapter, malloc_trim_result, "allocator trim requested after full closure adapter"
-        );
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = adapter;
-    }
 }

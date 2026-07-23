@@ -1,19 +1,30 @@
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use bigname_domain::block_interval::InclusiveBlockInterval;
-use bigname_manifests::{RequiredWatchedTuple, load_required_watched_tuples};
+use bigname_manifests::{
+    RequiredWatchedTuple, load_required_watched_tuples, load_required_watched_tuples_with_progress,
+};
 use sqlx::PgPool;
 
+use crate::{
+    checkpoint_context::StartupAdapterProgress, startup_progress::StartupManifestProgress,
+};
+
 use crate::ens_v2_registry::constants::{
-    DERIVATION_KIND_ENS_V2_REGISTRY_RESOURCE_SURFACE, SOURCE_FAMILY_ENS_V2_REGISTRY_L1,
-    SOURCE_FAMILY_ENS_V2_RESOLVER_L1, SOURCE_FAMILY_ENS_V2_ROOT_L1,
+    SOURCE_FAMILY_ENS_V2_REGISTRY_L1, SOURCE_FAMILY_ENS_V2_RESOLVER_L1,
+    SOURCE_FAMILY_ENS_V2_ROOT_L1,
 };
 
 mod coverage;
+mod witnesses;
 pub(super) use coverage::{
     ensure_generation_bound_coverage, ensure_generation_bound_coverage_with_live_selection,
+    ensure_generation_bound_coverage_with_live_selection_with_progress,
     ensure_newly_required_generation_bound_coverage,
+};
+pub(super) use witnesses::{
+    ensure_retained_semantic_witnesses, ensure_retained_semantic_witnesses_with_progress,
 };
 
 pub(in crate::ens_v2_registry) async fn has_authoritative_ens_v2_closure_through(
@@ -31,6 +42,29 @@ pub(in crate::ens_v2_registry) async fn has_authoritative_ens_v2_closure_through
         0,
         through_block,
         &ens_v2_closure_source_families(),
+    )
+    .await?
+    .is_empty())
+}
+
+pub(in crate::ens_v2_registry) async fn has_authoritative_ens_v2_closure_through_with_progress(
+    pool: &PgPool,
+    chain: &str,
+    through_block: i64,
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<bool> {
+    ensure!(
+        through_block >= 0,
+        "ENSv2 authoritative-closure boundary cannot be negative"
+    );
+    let mut manifest_progress = StartupManifestProgress::new(progress);
+    Ok(!load_required_watched_tuples_with_progress(
+        pool,
+        chain,
+        0,
+        through_block,
+        &ens_v2_closure_source_families(),
+        &mut manifest_progress,
     )
     .await?
     .is_empty())
@@ -103,152 +137,72 @@ pub(super) fn requirement_intervals_not_covered_by(
     gaps
 }
 
-pub(super) async fn ensure_retained_semantic_witnesses(
-    connection: &mut sqlx::PgConnection,
-    chain: &str,
-    requirements: &[RequiredWatchedTuple],
-    through_block: i64,
-) -> Result<()> {
-    let source_families = requirements
-        .iter()
-        .map(|requirement| requirement.source_family.clone())
-        .collect::<Vec<_>>();
-    let addresses = requirements
-        .iter()
-        .map(|requirement| requirement.address.to_ascii_lowercase())
-        .collect::<Vec<_>>();
-    let from_blocks = requirements
-        .iter()
-        .map(|requirement| requirement.required_from_block)
-        .collect::<Vec<_>>();
-    let to_blocks = requirements
-        .iter()
-        .map(|requirement| requirement.required_to_block)
-        .collect::<Vec<_>>();
-    let complete = sqlx::query_scalar::<_, bool>(
-        r#"
-        WITH required_tuples AS (
-            SELECT *
-            FROM UNNEST(
-                $3::TEXT[],
-                $4::TEXT[],
-                $5::BIGINT[],
-                $6::BIGINT[]
-            ) AS watched(
-                source_family,
-                address,
-                required_from_block,
-                required_to_block
-            )
-        ),
-        readable_lineage AS (
-            SELECT chain_id, block_hash, block_number
-            FROM chain_lineage
-            WHERE canonicality_state IN (
-                'canonical'::canonicality_state,
-                'safe'::canonicality_state,
-                'finalized'::canonicality_state
-            )
-        ),
-        readable_raw_logs AS (
-            SELECT raw.chain_id, raw.block_hash, raw.block_number, raw.log_index
-            FROM raw_logs raw
-            JOIN readable_lineage lineage
-              ON lineage.chain_id = raw.chain_id
-             AND lineage.block_hash = raw.block_hash
-             AND lineage.block_number = raw.block_number
-            WHERE raw.canonicality_state IN (
-                'canonical'::canonicality_state,
-                'safe'::canonicality_state,
-                'finalized'::canonicality_state
-            )
-        )
-        SELECT
-            NOT EXISTS (
-                SELECT 1
-                FROM normalized_events event
-                WHERE event.chain_id = $1
-                  AND event.derivation_kind = $2
-                  AND event.raw_fact_ref ->> 'kind' = 'raw_log'
-                  AND event.block_number <= $7
-                  AND event.canonicality_state IN (
-                      'canonical'::canonicality_state,
-                      'safe'::canonicality_state,
-                      'finalized'::canonicality_state
-                  )
-                  AND EXISTS (
-                      SELECT 1
-                      FROM readable_lineage lineage
-                      WHERE lineage.chain_id = event.chain_id
-                        AND lineage.block_hash = event.block_hash
-                        AND lineage.block_number = event.block_number
-                  )
-                  AND EXISTS (
-                      SELECT 1
-                      FROM required_tuples watched
-                      WHERE watched.source_family = event.source_family
-                        AND watched.address = lower(event.raw_fact_ref ->> 'emitting_address')
-                        AND event.block_number BETWEEN watched.required_from_block
-                            AND watched.required_to_block
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM readable_raw_logs raw
-                      WHERE raw.chain_id = event.chain_id
-                        AND raw.block_hash = event.block_hash
-                        AND raw.block_number = event.block_number
-                        AND raw.log_index = event.log_index
-                  )
-            )
-            AND NOT EXISTS (
-                SELECT 1
-                FROM discovery_edges edge
-                WHERE edge.chain_id = $1
-                  AND edge.discovery_source LIKE 'ens_v2_registry_%'
-                  AND edge.provenance ->> 'source' = 'raw_log'
-                  AND edge.active_from_block_number <= $7
-                  AND EXISTS (
-                      SELECT 1
-                      FROM readable_lineage lineage
-                      WHERE lineage.chain_id = edge.chain_id
-                        AND lineage.block_hash = edge.provenance ->> 'block_hash'
-                        AND lineage.block_number = edge.active_from_block_number
-                  )
-                  AND EXISTS (
-                      SELECT 1
-                      FROM required_tuples watched
-                      WHERE watched.address = lower(edge.provenance ->> 'from_address')
-                        AND edge.active_from_block_number
-                            BETWEEN watched.required_from_block AND watched.required_to_block
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM readable_raw_logs raw
-                      WHERE raw.chain_id = edge.chain_id
-                        AND raw.block_hash = edge.provenance ->> 'block_hash'
-                        AND raw.block_number = edge.active_from_block_number
-                        AND raw.log_index::TEXT = edge.provenance ->> 'log_index'
-                  )
-            )
-        "#,
-    )
-    .bind(chain)
-    .bind(DERIVATION_KIND_ENS_V2_REGISTRY_RESOURCE_SURFACE)
-    .bind(&source_families)
-    .bind(&addresses)
-    .bind(&from_blocks)
-    .bind(&to_blocks)
-    .bind(through_block)
-    .fetch_one(connection)
-    .await
-    .with_context(|| {
-        format!("failed to verify retained ENSv2 semantic raw-log witnesses for {chain}")
-    })?;
-    ensure!(
-        complete,
-        "ENSv2 retained history on {chain} is missing raw-log witnesses for materialized ENSv2 events or discovery through block {through_block}"
-    );
-    Ok(())
+pub(super) async fn requirement_intervals_not_covered_by_with_progress(
+    pool: &PgPool,
+    required: &[RequiredWatchedTuple],
+    covered: &[RequiredWatchedTuple],
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<Vec<RequiredWatchedTuple>> {
+    let mut covered_by_tuple = BTreeMap::<(String, String), Vec<InclusiveBlockInterval>>::new();
+    for (index, requirement) in covered.iter().enumerate() {
+        if let Some(interval) = InclusiveBlockInterval::new(
+            requirement.required_from_block,
+            requirement.required_to_block,
+        ) {
+            covered_by_tuple
+                .entry((
+                    requirement.source_family.clone(),
+                    requirement.address.clone(),
+                ))
+                .or_default()
+                .push(interval);
+        }
+        if (index + 1).is_multiple_of(super::RETAINED_REQUIREMENT_PROGRESS_ROWS) {
+            progress.record(pool).await?;
+        }
+    }
+    if !covered.is_empty()
+        && !covered
+            .len()
+            .is_multiple_of(super::RETAINED_REQUIREMENT_PROGRESS_ROWS)
+    {
+        progress.record(pool).await?;
+    }
+
+    let mut gaps = Vec::new();
+    for (index, requirement) in required.iter().enumerate() {
+        if let Some(required_interval) = InclusiveBlockInterval::new(
+            requirement.required_from_block,
+            requirement.required_to_block,
+        ) {
+            let key = (
+                requirement.source_family.clone(),
+                requirement.address.clone(),
+            );
+            gaps.extend(
+                required_interval
+                    .uncovered_by(covered_by_tuple.get(&key).into_iter().flatten().copied())
+                    .into_iter()
+                    .map(|gap| RequiredWatchedTuple {
+                        source_family: requirement.source_family.clone(),
+                        address: requirement.address.clone(),
+                        required_from_block: gap.from_block(),
+                        required_to_block: gap.through_block(),
+                    }),
+            );
+        }
+        if (index + 1).is_multiple_of(super::RETAINED_REQUIREMENT_PROGRESS_ROWS) {
+            progress.record(pool).await?;
+        }
+    }
+    if !required.is_empty()
+        && !required
+            .len()
+            .is_multiple_of(super::RETAINED_REQUIREMENT_PROGRESS_ROWS)
+    {
+        progress.record(pool).await?;
+    }
+    Ok(gaps)
 }
 
 #[cfg(test)]

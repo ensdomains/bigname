@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use bigname_manifests::WatchedChainPlan;
 
 use crate::{
-    resolver_profile_convergence::journal_resolver_profile_authority,
+    resolver_profile_convergence::{
+        journal_resolver_profile_authority, journal_resolver_profile_authority_with_progress,
+    },
     run::startup_heartbeat::{StartupAdapterHeartbeat, StartupHeartbeat},
 };
 
@@ -17,7 +19,7 @@ use super::logging::{
 // about 10x smaller than normalized replay's resident set and 400x smaller than
 // the #218 OOM class. Ownership/control pages preserve whole blocks, so an
 // unusually dense block can exceed this target.
-pub(crate) const DEFAULT_STARTUP_DISCOVERY_PAGE_LOGS: usize = 100_000;
+pub(crate) const DEFAULT_STARTUP_DISCOVERY_PAGE_LOGS: usize = 1_000;
 
 pub(crate) async fn sync_adapter_owned_raw_log_state(
     pool: &sqlx::PgPool,
@@ -54,7 +56,7 @@ async fn sync_adapter_owned_raw_log_state_with_startup_context(
     record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
     // Broad startup/timer passes also recover any prior discovery transaction
     // that committed before its caller could journal the epoch change.
-    journal_resolver_profile_authority(pool).await?;
+    journal_authority_with_startup_progress(pool, &mut startup_heartbeat).await?;
     let mut completed_startup_checkpoints = Vec::new();
     for chain in watched_chain_plan {
         let startup_checkpoint = match startup_context {
@@ -245,7 +247,7 @@ async fn sync_adapter_owned_raw_log_state_with_startup_context(
         }
     }
 
-    journal_resolver_profile_authority(pool).await?;
+    journal_authority_with_startup_progress(pool, &mut startup_heartbeat).await?;
     clear_completed_startup_adapter_checkpoints(pool, &completed_startup_checkpoints).await?;
     record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
     Ok(())
@@ -298,7 +300,7 @@ async fn sync_discovery_adapter_owned_raw_log_state_inner(
     mut startup_heartbeat: Option<(&mut StartupHeartbeat, &[String])>,
 ) -> Result<()> {
     record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
-    journal_resolver_profile_authority(pool).await?;
+    journal_authority_with_startup_progress(pool, &mut startup_heartbeat).await?;
     let mut completed_startup_checkpoints = Vec::new();
     for chain in watched_chain_plan {
         let startup_checkpoint =
@@ -358,7 +360,7 @@ async fn sync_discovery_adapter_owned_raw_log_state_inner(
         record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
         completed_startup_checkpoints.push((chain.chain.clone(), startup_checkpoint));
     }
-    journal_resolver_profile_authority(pool).await?;
+    journal_authority_with_startup_progress(pool, &mut startup_heartbeat).await?;
     clear_completed_startup_adapter_checkpoints(pool, &completed_startup_checkpoints).await?;
     record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
     Ok(())
@@ -370,6 +372,22 @@ async fn record_startup_sync_progress(
 ) -> Result<()> {
     if let Some((heartbeat, chain_ids)) = startup_heartbeat.as_mut() {
         heartbeat.record_if_due(pool, chain_ids).await?;
+    }
+    Ok(())
+}
+
+async fn journal_authority_with_startup_progress(
+    pool: &sqlx::PgPool,
+    startup_heartbeat: &mut Option<(&mut StartupHeartbeat, &[String])>,
+) -> Result<()> {
+    match startup_heartbeat.as_mut() {
+        Some((heartbeat, chain_ids)) => {
+            let mut progress = StartupAdapterHeartbeat::new(heartbeat, chain_ids);
+            journal_resolver_profile_authority_with_progress(pool, &mut progress).await?;
+        }
+        None => {
+            journal_resolver_profile_authority(pool).await?;
+        }
     }
     Ok(())
 }

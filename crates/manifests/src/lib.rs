@@ -38,7 +38,7 @@ pub use attribution::is_block_derived_preimage_source_family;
 pub use discovery::*;
 pub use model::*;
 pub use repository::load_repository;
-pub use sync::sync_repository;
+pub use sync::{sync_repository, sync_repository_with_progress};
 pub use views::*;
 
 pub(crate) use managed_edges::{

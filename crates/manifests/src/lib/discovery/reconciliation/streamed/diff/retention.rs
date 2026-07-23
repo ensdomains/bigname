@@ -13,6 +13,7 @@ use super::super::super::super::types::{
 use super::super::super::chronology::{assignment_starts_no_later, compare_edge_starts};
 use super::super::super::compare_reconciled_discovery_edge_specs;
 use super::super::super::existing::edge_from_row;
+use super::super::DiscoveryObservationPageSource;
 use super::{
     STREAMED_DESIRED_EDGE_COLUMNS, STREAMED_EXISTING_EDGE_COLUMNS_QUALIFIED,
     desired_edge_spec_from_row,
@@ -95,13 +96,17 @@ impl SameAssignmentKeyArrays {
 /// ordinality column re-associates each matched row with the candidate or
 /// desired identity it matched, so the per-pair filters and the per-desired
 /// min-epoch resolution are unchanged.
-pub(in super::super) async fn collect_same_assignment_retained_edges(
+pub(in super::super) async fn collect_same_assignment_retained_edges<Source>(
     executor: &mut PgConnection,
     discovery_source: &str,
     candidates: &[ExistingReconciledDiscoveryEdge],
     batch_size: usize,
     retained_newer_edge_ids: &mut HashSet<i64>,
-) -> Result<()> {
+    source: &Source,
+) -> Result<()>
+where
+    Source: DiscoveryObservationPageSource + Sync,
+{
     // Orphaned candidates never satisfy the rule-3 filter, so they are
     // excluded from the batch up front (equivalent to the per-pair check).
     let live_candidates = candidates
@@ -150,6 +155,7 @@ pub(in super::super) async fn collect_same_assignment_retained_edges(
                 matched_desired.insert(desired);
             }
         }
+        source.record_progress().await?;
     }
 
     // Deterministic batching; the retained-id union is order-independent.
@@ -215,6 +221,7 @@ pub(in super::super) async fn collect_same_assignment_retained_edges(
                 retained_newer_edge_ids.insert(retained.discovery_edge_id);
             }
         }
+        source.record_progress().await?;
     }
     Ok(())
 }

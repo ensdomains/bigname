@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail, ensure};
-use bigname_adapters::begin_resolver_profile_event_reconciliation;
+use bigname_adapters::{StartupAdapterProgress, begin_resolver_profile_event_reconciliation};
 use bigname_storage::{
     RESOLVER_PROFILE_AUTHORITY_JOURNAL_ENTRY_BATCH_SIZE, ResolverProfileInputChange,
     ResolverProfileReconciliationTarget, acknowledge_resolver_profile_input_changes,
@@ -17,7 +17,9 @@ use super::{
     input_requires_reconciliation,
     invalidations::{
         publish_resolver_profile_projection_invalidations,
+        publish_resolver_profile_projection_invalidations_with_progress,
         stage_resolver_profile_projection_invalidations,
+        stage_resolver_profile_projection_invalidations_with_progress,
     },
     reconciliation_scope,
 };
@@ -25,8 +27,10 @@ use super::{
 // Preserve the previous durable input budget while making every authority and
 // reconciliation query inside that budget independently bounded.
 const MAX_DRAIN_INPUTS: usize = 128 * 1_024;
+const DRAIN_INPUT_PAGE_SIZE: usize = 1_000;
 const RECONCILIATION_TARGET_PAGE_SIZE: usize = 250;
 const MIN_CONVERGENCE_POOL_CONNECTIONS: u32 = 3;
+const MIN_PROGRESS_CONVERGENCE_POOL_CONNECTIONS: u32 = 4;
 
 /// Converge every currently eligible durable
 /// [resolver-profile](../../../../../docs/glossary.md) input change.
@@ -36,12 +40,27 @@ const MIN_CONVERGENCE_POOL_CONNECTIONS: u32 = 3;
 pub(crate) async fn drain_resolver_profile_input_changes(
     pool: &sqlx::PgPool,
 ) -> Result<ResolverProfileConvergenceSummary> {
+    drain_resolver_profile_input_changes_inner(pool, None).await
+}
+
+pub(crate) async fn drain_resolver_profile_input_changes_with_progress(
+    pool: &sqlx::PgPool,
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<ResolverProfileConvergenceSummary> {
+    drain_resolver_profile_input_changes_inner(pool, Some(progress)).await
+}
+
+async fn drain_resolver_profile_input_changes_inner(
+    pool: &sqlx::PgPool,
+    mut progress: Option<&mut dyn StartupAdapterProgress>,
+) -> Result<ResolverProfileConvergenceSummary> {
     let mut aggregate = ResolverProfileConvergenceSummary::default();
     let mut deferred_inputs = Vec::<ResolverProfileInputChange>::new();
     let mut deferred_chains = BTreeMap::<String, i64>::new();
 
     while aggregate.loaded_input_count < MAX_DRAIN_INPUTS {
-        let remaining_input_count = MAX_DRAIN_INPUTS - aggregate.loaded_input_count;
+        let remaining_input_count =
+            (MAX_DRAIN_INPUTS - aggregate.loaded_input_count).min(DRAIN_INPUT_PAGE_SIZE);
         let pending = load_pending_resolver_profile_input_changes_excluding(
             pool,
             i64::try_from(remaining_input_count)
@@ -53,18 +72,30 @@ pub(crate) async fn drain_resolver_profile_input_changes(
             log_completed_drain(&aggregate);
             return Ok(aggregate);
         }
+        let (minimum_pool_connections, connection_roles) = if progress.is_some() {
+            (
+                MIN_PROGRESS_CONVERGENCE_POOL_CONNECTIONS,
+                "runtime writer guard, reconciliation guard, bounded authority/event reads, and progress heartbeat writes",
+            )
+        } else {
+            (
+                MIN_CONVERGENCE_POOL_CONNECTIONS,
+                "runtime writer guard, reconciliation guard, and bounded authority/event reads",
+            )
+        };
         ensure!(
-            pool.options().get_max_connections() >= MIN_CONVERGENCE_POOL_CONNECTIONS,
-            "resolver-profile convergence requires at least {MIN_CONVERGENCE_POOL_CONNECTIONS} \
-             database connections (runtime writer guard, reconciliation guard, and bounded \
-             authority/event reads), but the pool allows only {}",
+            pool.options().get_max_connections() >= minimum_pool_connections,
+            "resolver-profile convergence requires at least {minimum_pool_connections} database \
+             connections ({connection_roles}), but the pool allows only {}",
             pool.options().get_max_connections()
         );
+        record_progress(pool, &mut progress).await?;
 
         aggregate.loaded_input_count += pending.len();
-        let authority_index = load_scoped_authority_index(pool, &pending, &mut aggregate).await?;
+        let authority_index =
+            load_scoped_authority_index(pool, &pending, &mut aggregate, &mut progress).await?;
         let scope = reconciliation_scope(&pending, &authority_index);
-        classify_deferred_chains(pool, &scope, &mut deferred_chains).await?;
+        classify_deferred_chains(pool, &scope, &mut deferred_chains, &mut progress).await?;
         aggregate.deferred_chains = deferred_chains.keys().cloned().collect();
 
         let eligible_direct_targets = scope
@@ -82,6 +113,7 @@ pub(crate) async fn drain_resolver_profile_input_changes(
             &eligible_direct_targets,
             &eligible_seed_families,
             &mut aggregate,
+            &mut progress,
         )
         .await?;
 
@@ -92,6 +124,7 @@ pub(crate) async fn drain_resolver_profile_input_changes(
             &deferred_chains,
             &mut deferred_inputs,
             &mut aggregate,
+            &mut progress,
         )
         .await?;
     }
@@ -111,6 +144,7 @@ async fn load_scoped_authority_index(
     pool: &sqlx::PgPool,
     pending: &[ResolverProfileInputChange],
     aggregate: &mut ResolverProfileConvergenceSummary,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<ResolverProfileAuthorityIndex> {
     let targets = pending
         .iter()
@@ -131,6 +165,7 @@ async fn load_scoped_authority_index(
                     .context("failed to decode scoped resolver-profile authority entry")?,
             );
         }
+        record_progress(pool, progress).await?;
     }
     Ok(authority_index)
 }
@@ -139,6 +174,7 @@ async fn classify_deferred_chains(
     pool: &sqlx::PgPool,
     scope: &super::ResolverProfileReconciliationScope,
     deferred_chains: &mut BTreeMap<String, i64>,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<()> {
     let chains = scope
         .direct_targets_by_chain
@@ -153,6 +189,7 @@ async fn classify_deferred_chains(
         let retention_generation = load_raw_log_staging_input_version(pool, &chain)
             .await?
             .retention_generation;
+        record_progress(pool, progress).await?;
         if retention_generation == 0 {
             continue;
         }
@@ -173,6 +210,7 @@ async fn reconcile_target_chains(
     direct_targets_by_chain: &BTreeMap<String, BTreeSet<String>>,
     seed_families: &[(String, String)],
     aggregate: &mut ResolverProfileConvergenceSummary,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<()> {
     let mut families_by_chain = BTreeMap::<String, BTreeSet<String>>::new();
     for (chain, source_family) in seed_families {
@@ -199,6 +237,7 @@ async fn reconcile_target_chains(
             let addresses = direct_targets.iter().cloned().collect::<Vec<_>>();
             for page in addresses.chunks(RECONCILIATION_TARGET_PAGE_SIZE) {
                 reconciliation.stage_addresses(page).await?;
+                record_progress(pool, progress).await?;
             }
         }
 
@@ -239,9 +278,11 @@ async fn reconcile_target_chains(
                     })
                     .collect::<Vec<_>>();
                 if addresses.is_empty() {
+                    record_progress(pool, progress).await?;
                     continue;
                 }
                 reconciliation.stage_addresses(&addresses).await?;
+                record_progress(pool, progress).await?;
             }
         }
 
@@ -249,20 +290,55 @@ async fn reconcile_target_chains(
         {
             aggregate.invalidation_capture_pass_count += 1;
         }
-        stage_resolver_profile_projection_invalidations(pool, reconciliation.run_id(), &chain)
-            .await?;
+        match progress.as_deref_mut() {
+            Some(progress) => {
+                stage_resolver_profile_projection_invalidations_with_progress(
+                    pool,
+                    reconciliation.run_id(),
+                    &chain,
+                    progress,
+                )
+                .await?
+            }
+            None => {
+                stage_resolver_profile_projection_invalidations(
+                    pool,
+                    reconciliation.run_id(),
+                    &chain,
+                )
+                .await?
+            }
+        }
         #[cfg(test)]
         {
             aggregate.adapter_reconciliation_call_count += 1;
         }
-        let mut publication = reconciliation
-            .reconcile()
-            .await
+        let reconciliation_result = match progress.as_deref_mut() {
+            Some(progress) => reconciliation.reconcile_with_progress(progress).await,
+            None => reconciliation.reconcile().await,
+        };
+        let mut publication = reconciliation_result
             .with_context(|| format!("failed to reconcile resolver-profile events on {chain}"))?;
-        aggregate.invalidated_projection_key_count +=
-            publish_resolver_profile_projection_invalidations(publication.connection_mut(), &chain)
-                .await?;
+        aggregate.invalidated_projection_key_count += match progress.as_deref_mut() {
+            Some(progress) => {
+                publish_resolver_profile_projection_invalidations_with_progress(
+                    pool,
+                    publication.connection_mut(),
+                    &chain,
+                    progress,
+                )
+                .await?
+            }
+            None => {
+                publish_resolver_profile_projection_invalidations(
+                    publication.connection_mut(),
+                    &chain,
+                )
+                .await?
+            }
+        };
         let summary = publication.finish().await?;
+        record_progress(pool, progress).await?;
         info!(
             service = "indexer",
             command = "resolver-profile-convergence",
@@ -288,6 +364,7 @@ async fn acknowledge_inputs(
     deferred_chains: &BTreeMap<String, i64>,
     deferred_inputs: &mut Vec<ResolverProfileInputChange>,
     aggregate: &mut ResolverProfileConvergenceSummary,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<()> {
     let mut candidates = Vec::new();
     for input in pending {
@@ -301,8 +378,21 @@ async fn acknowledge_inputs(
         }
     }
     let acknowledged = acknowledge_resolver_profile_input_changes(pool, &candidates).await?;
+    if !candidates.is_empty() {
+        record_progress(pool, progress).await?;
+    }
     aggregate.acknowledged_input_count += acknowledged;
     aggregate.concurrent_input_count += candidates.len() - acknowledged;
+    Ok(())
+}
+
+async fn record_progress(
+    pool: &sqlx::PgPool,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<()> {
+    if let Some(progress) = progress.as_deref_mut() {
+        progress.record(pool).await?;
+    }
     Ok(())
 }
 

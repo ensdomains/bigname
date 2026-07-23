@@ -13,6 +13,7 @@ pub(super) async fn apply_entry_diff(
     transaction: &mut Transaction<'_, Postgres>,
     journal_key: &str,
     batch_size: usize,
+    progress: &mut Option<&mut dyn super::ResolverProfileAuthorityJournalProgress>,
 ) -> Result<EntryMutationSummary> {
     ensure!(batch_size > 0, "journal entry batch size must be positive");
     let mut summary = EntryMutationSummary::default();
@@ -26,6 +27,7 @@ pub(super) async fn apply_entry_diff(
         after_key = Some(last_key);
         record_batch(&mut summary, count)?;
         summary.upserted_entry_count += count;
+        super::record_journal_progress(progress).await?;
     }
 
     let mut after_key = None::<String>;
@@ -38,6 +40,7 @@ pub(super) async fn apply_entry_diff(
         after_key = Some(last_key);
         record_batch(&mut summary, count)?;
         summary.deleted_entry_count += count;
+        super::record_journal_progress(progress).await?;
     }
     Ok(summary)
 }

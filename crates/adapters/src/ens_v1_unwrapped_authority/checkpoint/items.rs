@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use sqlx::{Postgres, QueryBuilder};
 
+use crate::checkpoint_context::{StartupAdapterProgress, record_startup_adapter_progress};
+
 use super::{
     ADAPTER, CHECKPOINT_CODEC, CHECKPOINT_ITEM_DELETE_BATCH_SIZE,
     CHECKPOINT_ITEM_INSERT_BATCH_SIZE, ITEM_KIND_HISTORY, ITEM_KIND_KNOWN_NAME,
@@ -11,6 +13,65 @@ use super::{
     encode_item,
 };
 
+impl UnwrappedAuthorityReplayCheckpointDelta {
+    pub(in crate::ens_v1_unwrapped_authority) fn mark_history(&mut self, key: impl Into<String>) {
+        self.history_keys.insert(key.into());
+    }
+
+    pub(in crate::ens_v1_unwrapped_authority) fn mark_reverse_history(
+        &mut self,
+        key: impl Into<String>,
+    ) {
+        self.reverse_history_keys.insert(key.into());
+    }
+
+    pub(in crate::ens_v1_unwrapped_authority) fn mark_known_name(
+        &mut self,
+        key: impl Into<String>,
+    ) {
+        self.known_name_keys.insert(key.into());
+    }
+
+    pub(in crate::ens_v1_unwrapped_authority) fn mark_known_name_ref(
+        &mut self,
+        key: impl Into<String>,
+    ) {
+        self.known_name_ref_keys.insert(key.into());
+    }
+
+    pub(in crate::ens_v1_unwrapped_authority) fn mark_namehash_labelhash(
+        &mut self,
+        key: impl Into<String>,
+    ) {
+        self.namehash_labelhash_keys.insert(key.into());
+    }
+
+    pub(in crate::ens_v1_unwrapped_authority) fn mark_pending_observations(
+        &mut self,
+        key: impl Into<String>,
+    ) {
+        self.pending_observation_keys.insert(key.into());
+    }
+
+    pub(in crate::ens_v1_unwrapped_authority) fn mark_migrated_node(
+        &mut self,
+        node: impl Into<String>,
+    ) {
+        self.migrated_nodes.insert(node.into());
+    }
+
+    pub(in crate::ens_v1_unwrapped_authority) fn clear(&mut self) {
+        self.history_keys.clear();
+        self.reverse_history_keys.clear();
+        self.known_name_keys.clear();
+        self.known_name_ref_keys.clear();
+        self.namehash_labelhash_keys.clear();
+        self.pending_observation_keys.clear();
+        self.migrated_nodes.clear();
+    }
+}
+
+#[cfg(test)]
 pub(super) fn checkpoint_item_rows(
     state: &UnwrappedAuthorityReplayCheckpointStateRef<'_>,
     delta: &UnwrappedAuthorityReplayCheckpointDelta,
@@ -68,6 +129,7 @@ pub(super) fn checkpoint_item_rows(
     Ok(rows)
 }
 
+#[cfg(test)]
 pub(super) fn checkpoint_pending_observation_delete_keys(
     state: &UnwrappedAuthorityReplayCheckpointStateRef<'_>,
     delta: &UnwrappedAuthorityReplayCheckpointDelta,
@@ -83,6 +145,147 @@ pub(super) fn checkpoint_pending_observation_delete_keys(
         })
         .cloned()
         .collect()
+}
+
+pub(super) async fn checkpoint_item_rows_with_progress(
+    pool: &sqlx::PgPool,
+    state: &UnwrappedAuthorityReplayCheckpointStateRef<'_>,
+    delta: &UnwrappedAuthorityReplayCheckpointDelta,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<Vec<(&'static str, String, Value)>> {
+    let mut rows = Vec::new();
+    let mut examined = 0usize;
+    macro_rules! push_encoded {
+        ($keys:expr, $values:expr, $kind:expr) => {
+            for key in $keys {
+                if let Some(value) = $values.get(key) {
+                    rows.push(($kind, key.clone(), encode_item(value)?));
+                }
+                examined += 1;
+                if examined.is_multiple_of(CHECKPOINT_ITEM_INSERT_BATCH_SIZE) {
+                    record_startup_adapter_progress(pool, progress).await?;
+                }
+            }
+        };
+    }
+    push_encoded!(
+        delta.history_keys.iter(),
+        state.histories,
+        ITEM_KIND_HISTORY
+    );
+    push_encoded!(
+        delta.reverse_history_keys.iter(),
+        state.reverse_histories,
+        ITEM_KIND_REVERSE_HISTORY
+    );
+    push_encoded!(
+        delta.known_name_keys.iter(),
+        state.known_names_by_namehash,
+        ITEM_KIND_KNOWN_NAME
+    );
+    push_encoded!(
+        delta.known_name_ref_keys.iter(),
+        state.known_name_refs_by_namehash,
+        ITEM_KIND_KNOWN_NAME_REF
+    );
+    for key in &delta.namehash_labelhash_keys {
+        if let Some(labelhash) = state.namehash_to_labelhash.get(key) {
+            rows.push((
+                ITEM_KIND_NAMEHASH_LABELHASH,
+                key.clone(),
+                CHECKPOINT_CODEC.encode(json!({ "labelhash": labelhash })),
+            ));
+        }
+        examined += 1;
+        if examined.is_multiple_of(CHECKPOINT_ITEM_INSERT_BATCH_SIZE) {
+            record_startup_adapter_progress(pool, progress).await?;
+        }
+    }
+    for key in &delta.pending_observation_keys {
+        if let Some(observations) = state
+            .pending_namehash_observations
+            .get(key)
+            .filter(|observations| !observations.is_empty())
+        {
+            rows.push((
+                ITEM_KIND_PENDING_OBSERVATIONS,
+                key.clone(),
+                encode_item(observations.as_slice())?,
+            ));
+        }
+        examined += 1;
+        if examined.is_multiple_of(CHECKPOINT_ITEM_INSERT_BATCH_SIZE) {
+            record_startup_adapter_progress(pool, progress).await?;
+        }
+    }
+    for node in &delta.migrated_nodes {
+        rows.push((
+            ITEM_KIND_MIGRATED_NODE,
+            node.clone(),
+            CHECKPOINT_CODEC.encode(json!({ "node": node })),
+        ));
+        examined += 1;
+        if examined.is_multiple_of(CHECKPOINT_ITEM_INSERT_BATCH_SIZE) {
+            record_startup_adapter_progress(pool, progress).await?;
+        }
+    }
+    if examined > 0 && !examined.is_multiple_of(CHECKPOINT_ITEM_INSERT_BATCH_SIZE) {
+        record_startup_adapter_progress(pool, progress).await?;
+    }
+    Ok(rows)
+}
+
+pub(super) async fn checkpoint_pending_observation_delete_keys_with_progress(
+    pool: &sqlx::PgPool,
+    state: &UnwrappedAuthorityReplayCheckpointStateRef<'_>,
+    delta: &UnwrappedAuthorityReplayCheckpointDelta,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<Vec<String>> {
+    let mut keys = Vec::new();
+    for (index, key) in delta.pending_observation_keys.iter().enumerate() {
+        if state
+            .pending_namehash_observations
+            .get(key)
+            .is_none_or(Vec::is_empty)
+        {
+            keys.push(key.clone());
+        }
+        if index + 1 == delta.pending_observation_keys.len()
+            || (index + 1).is_multiple_of(CHECKPOINT_ITEM_DELETE_BATCH_SIZE)
+        {
+            record_startup_adapter_progress(pool, progress).await?;
+        }
+    }
+    Ok(keys)
+}
+
+pub(super) async fn delete_checkpoint_items_with_progress(
+    pool: &sqlx::PgPool,
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    checkpoint: &UnwrappedAuthorityReplayCheckpoint,
+    item_kind: &str,
+    item_keys: &[String],
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<()> {
+    for chunk in item_keys.chunks(CHECKPOINT_ITEM_DELETE_BATCH_SIZE) {
+        delete_checkpoint_items(transaction, checkpoint, item_kind, chunk).await?;
+        record_startup_adapter_progress(pool, progress).await?;
+    }
+    Ok(())
+}
+
+pub(super) async fn insert_checkpoint_items_with_progress(
+    pool: &sqlx::PgPool,
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
+    checkpoint: &UnwrappedAuthorityReplayCheckpoint,
+    item_rows: &[(&'static str, String, Value)],
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<()> {
+    for chunk in item_rows.chunks(CHECKPOINT_ITEM_INSERT_BATCH_SIZE) {
+        insert_checkpoint_items(transaction, checkpoint, chunk).await?;
+        record_startup_adapter_progress(pool, progress).await?;
+    }
+    Ok(())
 }
 
 pub(super) async fn delete_checkpoint_items(

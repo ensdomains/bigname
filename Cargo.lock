@@ -1774,6 +1774,7 @@ dependencies = [
  "bigname-domain",
  "bigname-storage",
  "bigname-test-support",
+ "futures-util",
  "serde",
  "serde_json",
  "sqlx",

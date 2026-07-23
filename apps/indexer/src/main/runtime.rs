@@ -30,8 +30,8 @@ pub(crate) use adapter_sync::{
 #[allow(unused_imports)]
 pub(crate) use intake::{
     IntakeChainTask, IntakeRuntimeState, WatchedChainPlanState, checkpoint_mode,
-    intake_runtime_state, sync_intake_chain_tasks, validate_provider_registry_for_intake_tasks,
-    watched_chain_plan_state,
+    intake_runtime_state, sync_intake_chain_tasks, sync_intake_chain_tasks_with_progress,
+    validate_provider_registry_for_intake_tasks, watched_chain_plan_state,
 };
 #[allow(unused_imports)]
 pub(crate) use logging::{
@@ -47,8 +47,10 @@ pub(crate) use logging::{
 #[allow(unused_imports)]
 pub(crate) use manifest::{
     DiscoveryAdmissionSnapshot, ManifestRuntimeState, RuntimeWatchScope,
-    build_manifest_runtime_state, build_manifest_runtime_state_for_repository_refresh,
-    build_manifest_runtime_state_with_watch_scope, discovery_admission_snapshot,
+    build_manifest_runtime_state,
+    build_manifest_runtime_state_for_repository_refresh_with_progress,
+    build_manifest_runtime_state_with_watch_scope,
+    build_manifest_runtime_state_with_watch_scope_and_progress, discovery_admission_snapshot,
     ensure_manifest_root_ready, load_manifest_repository, manifest_normalized_event_kind_count,
     verify_stored_manifest_state,
 };
@@ -59,13 +61,20 @@ pub(crate) use poll_loop::{
     ReplayHandoffLatchStatus, install_replay_handoff_before_latch_test_hook,
     latch_replay_handoff_if_stable, refresh_discovery_watch_state,
 };
-#[allow(unused_imports)]
+#[cfg(test)]
 pub(crate) use refresh::{
     refresh_intake_chain_tasks, refresh_manifest_normalized_events_from_storage,
+};
+#[allow(unused_imports)]
+pub(crate) use refresh::{
+    refresh_intake_chain_tasks_with_progress,
+    refresh_manifest_normalized_events_from_storage_with_progress,
     refresh_runtime_state_from_storage_discovery, refresh_runtime_state_from_stored_discovery,
-    refresh_runtime_state_from_stored_discovery_when_epochs_move, refresh_watched_chain_plan,
-    widen_runtime_state_to_live_watch_scope,
+    refresh_runtime_state_from_stored_discovery_when_epochs_move,
+    refresh_runtime_state_from_stored_discovery_when_epochs_move_with_progress,
+    refresh_watched_chain_plan, widen_runtime_state_to_live_watch_scope,
     widen_runtime_state_to_live_watch_scope_with_admission_epochs,
+    widen_runtime_state_to_live_watch_scope_with_admission_epochs_and_progress,
 };
 #[allow(unused_imports)]
 pub(crate) use tracing_init::init_tracing;

@@ -1,5 +1,5 @@
 use bigname_storage::sql_row;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use sqlx::{PgPool, Row};
@@ -42,36 +42,4 @@ pub(super) async fn load_active_capabilities(
     }
 
     Ok(grouped)
-}
-
-pub(super) async fn load_normalized_event_counts_by_kind(
-    pool: &PgPool,
-) -> Result<BTreeMap<String, usize>> {
-    let rows = sqlx::query(
-        r#"
-        SELECT event_kind, COUNT(*)::BIGINT AS event_count
-        FROM normalized_events
-        GROUP BY event_kind
-        ORDER BY event_kind
-        "#,
-    )
-    .fetch_all(pool)
-    .await
-    .context("failed to load normalized-event counts by kind")?;
-
-    let mut counts = BTreeMap::new();
-    for row in rows {
-        let event_kind = row
-            .try_get::<String, _>("event_kind")
-            .context("missing event_kind from normalized-event count row")?;
-        let event_count = row
-            .try_get::<i64, _>("event_count")
-            .context("missing event_count from normalized-event count row")?;
-        counts.insert(
-            event_kind,
-            usize::try_from(event_count).context("normalized-event count does not fit in usize")?,
-        );
-    }
-
-    Ok(counts)
 }

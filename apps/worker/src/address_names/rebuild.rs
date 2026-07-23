@@ -51,7 +51,7 @@ async fn rebuild_address_names_current_inner(
     loop_heartbeat: Option<&mut LoopHeartbeat>,
 ) -> Result<AddressNamesCurrentRebuildSummary> {
     match address {
-        Some(address) => rebuild_one_address(pool, address).await,
+        Some(address) => rebuild_one_address(pool, address, loop_heartbeat).await,
         None => rebuild_all_addresses(pool, loop_heartbeat).await,
     }
 }
@@ -69,13 +69,39 @@ pub async fn rebuild_address_names_current_logical_names(
     address: &str,
     logical_name_ids: &[String],
 ) -> Result<AddressNamesCurrentRebuildSummary> {
+    rebuild_address_names_current_logical_names_inner(pool, address, logical_name_ids, None).await
+}
+
+pub(crate) async fn rebuild_address_names_current_logical_names_with_heartbeat(
+    pool: &PgPool,
+    address: &str,
+    logical_name_ids: &[String],
+    loop_heartbeat: &mut LoopHeartbeat,
+) -> Result<AddressNamesCurrentRebuildSummary> {
+    rebuild_address_names_current_logical_names_inner(
+        pool,
+        address,
+        logical_name_ids,
+        Some(loop_heartbeat),
+    )
+    .await
+}
+
+async fn rebuild_address_names_current_logical_names_inner(
+    pool: &PgPool,
+    address: &str,
+    logical_name_ids: &[String],
+    mut loop_heartbeat: Option<&mut LoopHeartbeat>,
+) -> Result<AddressNamesCurrentRebuildSummary> {
     let normalized_address = normalize_address(address);
     let mut rows = Vec::new();
 
     for logical_name_id in logical_name_ids {
         let bindings = load_current_bindings_for_logical_name(pool, logical_name_id).await?;
+        record_rebuild_progress(pool, &mut loop_heartbeat).await;
         for binding in &bindings {
             rows.extend(build_rows_for_binding(pool, binding, Some(&normalized_address)).await?);
+            record_rebuild_progress(pool, &mut loop_heartbeat).await;
         }
     }
 
@@ -86,6 +112,7 @@ pub async fn rebuild_address_names_current_logical_names(
         &rows,
     )
     .await?;
+    record_rebuild_progress(pool, &mut loop_heartbeat).await;
 
     tracing::info!(
         projection = "address_names_current",
@@ -273,17 +300,21 @@ fn spawn_address_names_rebuild_task(
 async fn rebuild_one_address(
     pool: &PgPool,
     address: &str,
+    mut loop_heartbeat: Option<&mut LoopHeartbeat>,
 ) -> Result<AddressNamesCurrentRebuildSummary> {
     let normalized_address = normalize_address(address);
     let bindings = load_current_bindings_for_address(pool, &normalized_address).await?;
+    record_rebuild_progress(pool, &mut loop_heartbeat).await;
     let replacement =
         begin_address_names_current_address_replacement(pool, &normalized_address).await?;
+    record_rebuild_progress(pool, &mut loop_heartbeat).await;
 
     let staged = match stage_one_address_rows(
         pool,
         &replacement,
         &normalized_address,
         bindings.as_slice(),
+        &mut loop_heartbeat,
     )
     .await
     {
@@ -320,6 +351,7 @@ async fn rebuild_one_address(
                 return Err(error);
             }
         };
+    record_rebuild_progress(pool, &mut loop_heartbeat).await;
 
     if let Err(error) = drop_address_names_current_address_replacement(pool, &replacement).await {
         tracing::warn!(
@@ -351,6 +383,7 @@ async fn stage_one_address_rows(
     replacement: &AddressNamesCurrentAddressReplacement,
     normalized_address: &str,
     bindings: &[CurrentBindingSeed],
+    loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
 ) -> Result<AddressNamesCurrentStagingSummary> {
     let mut queued_binding_count = 0usize;
     let mut completed_binding_count = 0usize;
@@ -375,6 +408,7 @@ async fn stage_one_address_rows(
     while let Some(result) = tasks.join_next().await {
         completed_binding_count += 1;
         let binding_rows = result??;
+        record_rebuild_progress(pool, loop_heartbeat).await;
         rows.extend(binding_rows);
 
         if rows.len() >= ADDRESS_NAMES_CURRENT_REBUILD_BATCH_SIZE {
@@ -383,6 +417,7 @@ async fn stage_one_address_rows(
                     .await?
                     .len();
             rows.clear();
+            record_rebuild_progress(pool, loop_heartbeat).await;
         }
 
         if completed_binding_count.is_multiple_of(5_000) {
@@ -415,6 +450,7 @@ async fn stage_one_address_rows(
             insert_address_names_current_address_replacement_rows(pool, replacement, &rows)
                 .await?
                 .len();
+        record_rebuild_progress(pool, loop_heartbeat).await;
     }
 
     Ok(AddressNamesCurrentStagingSummary { upserted_row_count })

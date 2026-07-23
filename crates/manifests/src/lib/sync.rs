@@ -27,14 +27,31 @@ use self::{
 };
 use crate::discovery::{bump_discovery_admission_epochs, fence_discovery_admission_epoch_writes};
 use crate::{
-    ManifestLoadStatus, ManifestRepository, ManifestSyncStatus, ManifestSyncSummary,
-    managed_edges::{reconcile_manifest_source_graph, replace_manifest_children},
+    ManifestLoadStatus, ManifestRepository, ManifestRuntimeProgress, ManifestSyncStatus,
+    ManifestSyncSummary,
+    managed_edges::{reconcile_manifest_source_graph_with_progress, replace_manifest_children},
     support::{ManifestStorageKey, ManifestTransition},
 };
 
 pub async fn sync_repository(
     pool: &PgPool,
     repository: &ManifestRepository,
+) -> Result<ManifestSyncSummary> {
+    sync_repository_inner(pool, repository, None).await
+}
+
+pub async fn sync_repository_with_progress(
+    pool: &PgPool,
+    repository: &ManifestRepository,
+    progress: &mut dyn ManifestRuntimeProgress,
+) -> Result<ManifestSyncSummary> {
+    sync_repository_inner(pool, repository, Some(progress)).await
+}
+
+async fn sync_repository_inner(
+    pool: &PgPool,
+    repository: &ManifestRepository,
+    mut progress: Option<&mut dyn ManifestRuntimeProgress>,
 ) -> Result<ManifestSyncSummary> {
     match repository.summary().status {
         ManifestLoadStatus::MissingRoot => {
@@ -55,6 +72,7 @@ pub async fn sync_repository(
         .await
         .context("failed to start manifest sync transaction")?;
     let existing_manifests = load_existing_manifest_versions(transaction.as_mut()).await?;
+    record_manifest_progress(pool, &mut progress).await?;
     let admission_fence_chains = repository
         .manifests()
         .iter()
@@ -189,6 +207,7 @@ pub async fn sync_repository(
         sync_summary.contract_count += loaded_manifest.manifest.contracts.len();
         sync_summary.capability_count += loaded_manifest.manifest.capability_flags.len();
         sync_summary.discovery_rule_count += loaded_manifest.manifest.discovery_rules.len();
+        record_manifest_progress(pool, &mut progress).await?;
     }
 
     for existing_manifest in existing_manifests {
@@ -199,10 +218,17 @@ pub async fn sync_repository(
         delete_stale_manifest_version(transaction.as_mut(), existing_manifest.manifest_id).await?;
         mutated_chains.insert(existing_manifest.storage_key.chain.clone());
         sync_summary.removed_manifest_count += 1;
+        record_manifest_progress(pool, &mut progress).await?;
     }
 
     let (cleared_discovery_edge_count, mutated_address_chains) =
-        reconcile_manifest_source_graph(transaction.as_mut(), &in_place_transitions).await?;
+        reconcile_manifest_source_graph_with_progress(
+            transaction.as_mut(),
+            pool,
+            &in_place_transitions,
+            &mut progress,
+        )
+        .await?;
     sync_summary.cleared_discovery_edge_count = cleared_discovery_edge_count;
     mutated_chains.extend(mutated_address_chains);
 
@@ -219,4 +245,14 @@ pub async fn sync_repository(
         .context("failed to commit manifest sync transaction")?;
 
     Ok(sync_summary)
+}
+
+async fn record_manifest_progress(
+    pool: &PgPool,
+    progress: &mut Option<&mut dyn ManifestRuntimeProgress>,
+) -> Result<()> {
+    if let Some(progress) = progress.as_deref_mut() {
+        progress.record(pool).await?;
+    }
+    Ok(())
 }

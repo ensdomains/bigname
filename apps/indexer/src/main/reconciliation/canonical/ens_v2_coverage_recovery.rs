@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, ensure};
-use bigname_adapters::EnsV2MissingCoverage;
+use bigname_adapters::{EnsV2MissingCoverage, StartupAdapterProgress};
 use bigname_manifests::{
-    WatchedSourceSelector, WatchedTargetIdentity, load_historical_watched_contracts_by_chain,
+    WatchedSourceSelector, WatchedTargetIdentity, load_historical_watched_contracts_for_target,
     resolve_watched_source_selector,
 };
 
@@ -9,6 +9,7 @@ use crate::{
     backfill::{
         BackfillAdapterSyncMode, BackfillBlockRange, BackfillJobRunConfig,
         DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS, run_resumable_hash_pinned_backfill_job,
+        run_resumable_hash_pinned_backfill_job_with_progress,
     },
     backfill_lease_expires_at, default_backfill_lease_owner, generated_backfill_lease_token,
     provider::ChainProviderOps,
@@ -40,6 +41,44 @@ pub(crate) async fn recover_ens_v2_live_coverage_requirement(
     header_audit_mode: HeaderAuditMode,
     requirement: &EnsV2MissingCoverage,
 ) -> Result<EnsV2LiveCoverageRecoveryStatus> {
+    recover_ens_v2_live_coverage_requirement_inner(
+        pool,
+        deployment_profile,
+        provider,
+        header_audit_mode,
+        requirement,
+        &mut None,
+    )
+    .await
+}
+
+pub(crate) async fn recover_ens_v2_live_coverage_requirement_with_progress(
+    pool: &sqlx::PgPool,
+    deployment_profile: &str,
+    provider: &(impl ChainProviderOps + ?Sized),
+    header_audit_mode: HeaderAuditMode,
+    requirement: &EnsV2MissingCoverage,
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<EnsV2LiveCoverageRecoveryStatus> {
+    recover_ens_v2_live_coverage_requirement_inner(
+        pool,
+        deployment_profile,
+        provider,
+        header_audit_mode,
+        requirement,
+        &mut Some(progress),
+    )
+    .await
+}
+
+async fn recover_ens_v2_live_coverage_requirement_inner(
+    pool: &sqlx::PgPool,
+    deployment_profile: &str,
+    provider: &(impl ChainProviderOps + ?Sized),
+    header_audit_mode: HeaderAuditMode,
+    requirement: &EnsV2MissingCoverage,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<EnsV2LiveCoverageRecoveryStatus> {
     let initial_authority = load_retention_authority(pool, &requirement.chain).await?;
     if initial_authority.retention_generation != requirement.retention_generation {
         return Ok(EnsV2LiveCoverageRecoveryStatus::AuthorityChanged);
@@ -49,20 +88,23 @@ pub(crate) async fn recover_ens_v2_live_coverage_requirement(
         requirement.required_from_block,
         requirement.required_to_block,
     )?;
-    let historical_contracts = load_historical_watched_contracts_by_chain(pool, &requirement.chain)
-        .await?
-        .into_iter()
-        .filter(|contract| {
-            contract.source_family == requirement.source_family
-                && contract.address.eq_ignore_ascii_case(&requirement.address)
-                && contract
-                    .active_from_block_number
-                    .is_none_or(|from| from <= requirement.required_to_block)
-                && contract
-                    .active_to_block_number
-                    .is_none_or(|to| to >= requirement.required_from_block)
-        })
-        .collect::<Vec<_>>();
+    let historical_contracts = load_historical_watched_contracts_for_target(
+        pool,
+        &requirement.chain,
+        &requirement.source_family,
+        &requirement.address,
+    )
+    .await?
+    .into_iter()
+    .filter(|contract| {
+        contract
+            .active_from_block_number
+            .is_none_or(|from| from <= requirement.required_to_block)
+            && contract
+                .active_to_block_number
+                .is_none_or(|to| to >= requirement.required_from_block)
+    })
+    .collect::<Vec<_>>();
     ensure!(
         !historical_contracts.is_empty(),
         "ENSv2 live coverage recovery cannot resolve watched target {} {} on {} over {}..={}",
@@ -109,30 +151,35 @@ pub(crate) async fn recover_ens_v2_live_coverage_requirement(
         "indexer-live-ens-v2-coverage-recovery:v1:deployment_profile={deployment_profile}:chain={}:generation={}:source_identity_hash={source_identity_hash}:from={}:to={}",
         requirement.chain, requirement.retention_generation, range.from_block, range.to_block,
     );
-    run_resumable_hash_pinned_backfill_job(
-        pool,
-        &source_plan,
-        provider,
-        BackfillJobRunConfig {
-            deployment_profile: deployment_profile.to_owned(),
-            idempotency_key,
-            scope_idempotency_to_raw_log_retention_generation: true,
-            range,
-            lease_owner: format!(
-                "{}:live-ens-v2-coverage-recovery",
-                default_backfill_lease_owner()
-            ),
-            lease_token: generated_backfill_lease_token()?,
-            lease_expires_at: backfill_lease_expires_at(
-                LIVE_COVERAGE_RECOVERY_LEASE_DURATION_SECS,
-            )?,
-            hash_pinned_chunk_blocks: DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
-            adapter_sync_mode: BackfillAdapterSyncMode::RawOnly,
-            header_audit_mode,
-        },
-    )
-    .await
-    .with_context(|| {
+    let config = BackfillJobRunConfig {
+        deployment_profile: deployment_profile.to_owned(),
+        idempotency_key,
+        scope_idempotency_to_raw_log_retention_generation: true,
+        range,
+        lease_owner: format!(
+            "{}:live-ens-v2-coverage-recovery",
+            default_backfill_lease_owner()
+        ),
+        lease_token: generated_backfill_lease_token()?,
+        lease_expires_at: backfill_lease_expires_at(LIVE_COVERAGE_RECOVERY_LEASE_DURATION_SECS)?,
+        hash_pinned_chunk_blocks: DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
+        adapter_sync_mode: BackfillAdapterSyncMode::RawOnly,
+        header_audit_mode,
+    };
+    let recovery_result = match progress.as_deref_mut() {
+        Some(progress) => {
+            run_resumable_hash_pinned_backfill_job_with_progress(
+                pool,
+                &source_plan,
+                provider,
+                config,
+                progress,
+            )
+            .await
+        }
+        None => run_resumable_hash_pinned_backfill_job(pool, &source_plan, provider, config).await,
+    };
+    recovery_result.with_context(|| {
         format!(
             "failed provider-backed ENSv2 live coverage recovery for {} {} {} over {}..={}",
             requirement.chain,

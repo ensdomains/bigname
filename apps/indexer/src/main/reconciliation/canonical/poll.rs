@@ -2,11 +2,12 @@ use std::collections::BTreeMap;
 
 use crate::{provider::ProviderRegistry, runtime::IntakeChainTask};
 use anyhow::Result;
+use bigname_adapters::StartupAdapterProgress;
 use tracing::{info, warn};
 
 use super::{
-    EnsV2LiveCoverageRecoveryStatus, reconcile_intake_chain_task_with_adapter_sync,
-    recover_ens_v2_live_coverage_requirement, stored_lineage::ChainCoverageFrontiers,
+    EnsV2LiveCoverageRecoveryStatus, reconcile_intake_chain_task_with_adapter_sync_and_progress,
+    recover_ens_v2_live_coverage_requirement_with_progress, stored_lineage::ChainCoverageFrontiers,
 };
 use crate::{
     provider::ProviderBlock,
@@ -22,7 +23,7 @@ const MAX_LIVE_COVERAGE_RECOVERY_ATTEMPTS: usize = 32;
 #[allow(dead_code)]
 pub(crate) async fn poll_provider_heads(
     pool: &sqlx::PgPool,
-    tasks: &mut Vec<IntakeChainTask>,
+    tasks: &mut [IntakeChainTask],
     provider_registry: &ProviderRegistry,
 ) -> Result<()> {
     poll_provider_heads_with_adapter_sync(
@@ -43,7 +44,7 @@ pub(crate) async fn poll_provider_heads(
 #[expect(clippy::too_many_arguments)]
 pub(crate) async fn poll_provider_heads_with_adapter_sync(
     pool: &sqlx::PgPool,
-    tasks: &mut Vec<IntakeChainTask>,
+    tasks: &mut [IntakeChainTask],
     provider_registry: &ProviderRegistry,
     deployment_profile: &str,
     watched_plan_admission_epochs: &BTreeMap<String, i64>,
@@ -53,8 +54,67 @@ pub(crate) async fn poll_provider_heads_with_adapter_sync(
     coverage_frontiers: &ChainCoverageFrontiers,
     latched_bootstrap_finalized_heads: &BTreeMap<String, ProviderBlock>,
 ) -> Result<()> {
-    let mut next_tasks = tasks.clone();
-    let mut any_change = false;
+    poll_provider_heads_with_adapter_sync_inner(
+        pool,
+        tasks,
+        provider_registry,
+        deployment_profile,
+        watched_plan_admission_epochs,
+        adapter_sync_enabled,
+        header_audit_mode,
+        event_silent_reverse_resolver_addresses,
+        coverage_frontiers,
+        latched_bootstrap_finalized_heads,
+        &mut None,
+    )
+    .await
+}
+
+#[expect(clippy::too_many_arguments)]
+pub(crate) async fn poll_provider_heads_with_adapter_sync_and_progress(
+    pool: &sqlx::PgPool,
+    tasks: &mut [IntakeChainTask],
+    provider_registry: &ProviderRegistry,
+    deployment_profile: &str,
+    watched_plan_admission_epochs: &BTreeMap<String, i64>,
+    adapter_sync_enabled: bool,
+    header_audit_mode: HeaderAuditMode,
+    event_silent_reverse_resolver_addresses: &[String],
+    coverage_frontiers: &ChainCoverageFrontiers,
+    latched_bootstrap_finalized_heads: &BTreeMap<String, ProviderBlock>,
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<()> {
+    poll_provider_heads_with_adapter_sync_inner(
+        pool,
+        tasks,
+        provider_registry,
+        deployment_profile,
+        watched_plan_admission_epochs,
+        adapter_sync_enabled,
+        header_audit_mode,
+        event_silent_reverse_resolver_addresses,
+        coverage_frontiers,
+        latched_bootstrap_finalized_heads,
+        &mut Some(progress),
+    )
+    .await
+}
+
+#[expect(clippy::too_many_arguments)]
+async fn poll_provider_heads_with_adapter_sync_inner(
+    pool: &sqlx::PgPool,
+    tasks: &mut [IntakeChainTask],
+    provider_registry: &ProviderRegistry,
+    deployment_profile: &str,
+    watched_plan_admission_epochs: &BTreeMap<String, i64>,
+    adapter_sync_enabled: bool,
+    header_audit_mode: HeaderAuditMode,
+    event_silent_reverse_resolver_addresses: &[String],
+    coverage_frontiers: &ChainCoverageFrontiers,
+    latched_bootstrap_finalized_heads: &BTreeMap<String, ProviderBlock>,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<()> {
+    let mut changed_tasks = Vec::<(usize, IntakeChainTask)>::new();
 
     for (index, task) in tasks.iter().enumerate() {
         let Some(provider) = provider_registry.provider_for(&task.chain) else {
@@ -62,7 +122,7 @@ pub(crate) async fn poll_provider_heads_with_adapter_sync(
         };
         let mut coverage_recovery_attempt = 0_usize;
         loop {
-            match reconcile_intake_chain_task_with_adapter_sync(
+            match reconcile_intake_chain_task_with_adapter_sync_and_progress(
                 pool,
                 deployment_profile,
                 task,
@@ -76,13 +136,13 @@ pub(crate) async fn poll_provider_heads_with_adapter_sync(
                 event_silent_reverse_resolver_addresses,
                 coverage_frontiers,
                 latched_bootstrap_finalized_heads.get(&task.chain),
+                progress,
             )
             .await
             {
                 Ok(Some((next_task, outcome))) => {
                     log_chain_reconciliation_outcome(&outcome);
-                    next_tasks[index] = next_task;
-                    any_change = true;
+                    changed_tasks.push((index, next_task));
                     break;
                 }
                 Ok(None) => break,
@@ -110,16 +170,32 @@ pub(crate) async fn poll_provider_heads_with_adapter_sync(
                     }
                     coverage_recovery_attempt += 1;
                     let recovery_requirement = requirement.as_recovery_requirement();
-                    match recover_ens_v2_live_coverage_requirement(
-                        pool,
-                        deployment_profile,
-                        provider,
-                        header_audit_mode,
-                        &recovery_requirement,
-                    )
-                    .await
-                    {
+                    let recovery_result = match progress.as_deref_mut() {
+                        Some(progress) => {
+                            recover_ens_v2_live_coverage_requirement_with_progress(
+                                pool,
+                                deployment_profile,
+                                provider,
+                                header_audit_mode,
+                                &recovery_requirement,
+                                progress,
+                            )
+                            .await
+                        }
+                        None => {
+                            super::recover_ens_v2_live_coverage_requirement(
+                                pool,
+                                deployment_profile,
+                                provider,
+                                header_audit_mode,
+                                &recovery_requirement,
+                            )
+                            .await
+                        }
+                    };
+                    match recovery_result {
                         Ok(status) => {
+                            record_progress(pool, progress).await?;
                             info!(
                                 service = "indexer",
                                 command = "poll",
@@ -160,8 +236,18 @@ pub(crate) async fn poll_provider_heads_with_adapter_sync(
             }
         }
     }
-    if any_change {
-        *tasks = next_tasks;
+    for (index, next_task) in changed_tasks {
+        tasks[index] = next_task;
+    }
+    Ok(())
+}
+
+async fn record_progress(
+    pool: &sqlx::PgPool,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<()> {
+    if let Some(progress) = progress.as_deref_mut() {
+        progress.record(pool).await?;
     }
     Ok(())
 }

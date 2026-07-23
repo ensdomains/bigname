@@ -2,19 +2,24 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 use anyhow::Result;
+use bigname_adapters::StartupAdapterProgress;
 use bigname_manifests::{
-    RequiredWatchedTuple, UncoveredWatchedTuple,
-    find_uncovered_required_watched_tuples_in_transaction,
+    ManifestRuntimeProgress, ManifestRuntimeProgressFuture, RequiredWatchedTuple,
+    UncoveredWatchedTuple, find_uncovered_required_watched_tuples_in_transaction,
     load_active_manifest_abi_events_by_chain_and_source_families,
-    load_earliest_known_watched_block, load_log_producing_source_families,
-    load_stored_lineage_coverage_candidate_delta_page,
+    load_earliest_known_watched_block, load_earliest_known_watched_block_with_progress,
+    load_log_producing_source_families, load_stored_lineage_coverage_candidate_delta_page,
     materialize_stored_lineage_coverage_candidate,
+    materialize_stored_lineage_coverage_candidate_delta_with_progress,
+    materialize_stored_lineage_coverage_candidate_with_progress,
 };
 use bigname_storage::{
-    ChainLineageBlock, StoredLineageCoverageFrontierPublication,
-    StoredLineageCoveragePublicationOutcome, begin_stored_lineage_coverage_frontier_publication,
+    ChainLineageBlock, StoredLineageCoverageFrontierPublication, StoredLineageCoverageProgress,
+    StoredLineageCoverageProgressFuture, StoredLineageCoveragePublicationOutcome,
+    begin_stored_lineage_coverage_frontier_publication,
     load_stored_lineage_coverage_frontier_header,
     stored_lineage_coverage_frontier_requirements_are_valid,
+    stored_lineage_coverage_frontier_requirements_are_valid_with_progress,
 };
 #[path = "coverage/companions.rs"]
 mod companions;
@@ -22,8 +27,30 @@ mod companions;
 mod frontier;
 #[path = "coverage/lineage_forks.rs"]
 mod lineage_forks;
+#[path = "coverage/verification.rs"]
+mod verification;
 
 use frontier::Topic0sByFamily;
+use verification::*;
+
+struct AdapterManifestProgress<'a>(&'a mut dyn StartupAdapterProgress);
+
+impl ManifestRuntimeProgress for AdapterManifestProgress<'_> {
+    fn record<'a>(&'a mut self, pool: &'a sqlx::PgPool) -> ManifestRuntimeProgressFuture<'a> {
+        self.0.record(pool)
+    }
+}
+
+struct AdapterStorageProgress<'a> {
+    pool: &'a sqlx::PgPool,
+    progress: &'a mut dyn StartupAdapterProgress,
+}
+
+impl StoredLineageCoverageProgress for AdapterStorageProgress<'_> {
+    fn record<'a>(&'a mut self) -> StoredLineageCoverageProgressFuture<'a> {
+        self.progress.record(self.pool)
+    }
+}
 
 /// Frontier extensions verify coverage in chunks of this many blocks, so a
 /// deep gap costs a handful of coverage queries once and every promotion
@@ -174,6 +201,7 @@ pub(super) async fn stored_path_has_required_raw_fact_coverage(
     coverage_frontiers: &ChainCoverageFrontiers,
     verify_ahead_through_block: i64,
     discovery_admission_epoch: i64,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> std::result::Result<(), String> {
     if path.is_empty() {
         return Ok(());
@@ -211,6 +239,7 @@ pub(super) async fn stored_path_has_required_raw_fact_coverage(
         path_through,
         verify_ahead_through_block,
         discovery_admission_epoch,
+        progress,
     )
     .await?;
 
@@ -244,6 +273,7 @@ async fn ensure_verified_coverage_frontier(
     required_through: i64,
     verify_ahead_through_block: i64,
     discovery_admission_epoch: i64,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> std::result::Result<(), String> {
     let verify_ahead_through_block = verify_ahead_through_block.max(required_through);
     let optimistic = ensure_verified_coverage_frontier_through(
@@ -256,6 +286,7 @@ async fn ensure_verified_coverage_frontier(
         required_through,
         verify_ahead_through_block,
         discovery_admission_epoch,
+        progress,
     )
     .await;
     match optimistic {
@@ -271,6 +302,7 @@ async fn ensure_verified_coverage_frontier(
                 required_through,
                 required_through,
                 discovery_admission_epoch,
+                progress,
             )
             .await
         }
@@ -289,6 +321,7 @@ async fn ensure_verified_coverage_frontier_through(
     required_through: i64,
     verify_ahead_through_block: i64,
     discovery_admission_epoch: i64,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> std::result::Result<(), String> {
     let current_topics = frontier::canonical_topic_sets(current_topic0s_by_family);
     let mut cas_conflicts = 0;
@@ -305,19 +338,45 @@ async fn ensure_verified_coverage_frontier_through(
             {
                 true
             }
-            Some(header) => stored_lineage_coverage_frontier_requirements_are_valid(pool, header)
-                .await
-                .map_err(|error| error.to_string())?,
+            Some(header) => match progress.as_deref_mut() {
+                Some(progress) => {
+                    let mut bridge = AdapterStorageProgress { pool, progress };
+                    stored_lineage_coverage_frontier_requirements_are_valid_with_progress(
+                        pool,
+                        header,
+                        &mut bridge,
+                    )
+                    .await
+                }
+                None => stored_lineage_coverage_frontier_requirements_are_valid(pool, header).await,
+            }
+            .map_err(|error| error.to_string())?,
             None => true,
         };
-        let earliest_known_watched_block = load_earliest_known_watched_block(
-            pool,
-            chain,
-            verify_ahead_through_block,
-            log_producing_source_families,
-        )
-        .await
+        let earliest_known_watched_block = match progress.as_deref_mut() {
+            Some(progress) => {
+                let mut bridge = AdapterManifestProgress(progress);
+                load_earliest_known_watched_block_with_progress(
+                    pool,
+                    chain,
+                    verify_ahead_through_block,
+                    log_producing_source_families,
+                    &mut bridge,
+                )
+                .await
+            }
+            None => {
+                load_earliest_known_watched_block(
+                    pool,
+                    chain,
+                    verify_ahead_through_block,
+                    log_producing_source_families,
+                )
+                .await
+            }
+        }
         .map_err(|error| error.to_string())?;
+        record_progress(pool, progress).await?;
         let Some(plan) = frontier::plan_publication(
             header.as_ref(),
             persisted_requirements_valid,
@@ -361,14 +420,31 @@ async fn ensure_verified_coverage_frontier_through(
         )
         .await
         .map_err(|error| error.to_string())?;
-        materialize_stored_lineage_coverage_candidate(
-            guard.connection_mut(),
-            chain,
-            plan.verified_from_block,
-            plan.verified_through_block,
-            log_producing_source_families,
-        )
-        .await
+        match progress.as_deref_mut() {
+            Some(progress) => {
+                let mut bridge = AdapterManifestProgress(progress);
+                materialize_stored_lineage_coverage_candidate_with_progress(
+                    guard.connection_mut(),
+                    pool,
+                    chain,
+                    plan.verified_from_block,
+                    plan.verified_through_block,
+                    log_producing_source_families,
+                    &mut bridge,
+                )
+                .await
+            }
+            None => {
+                materialize_stored_lineage_coverage_candidate(
+                    guard.connection_mut(),
+                    chain,
+                    plan.verified_from_block,
+                    plan.verified_through_block,
+                    log_producing_source_families,
+                )
+                .await
+            }
+        }
         .map_err(|error| error.to_string())?;
         super::topic_drift::materialize_topic_evidence_in_transaction(
             guard.connection_mut(),
@@ -379,6 +455,21 @@ async fn ensure_verified_coverage_frontier_through(
             None,
         )
         .await?;
+        record_progress(pool, progress).await?;
+
+        if let Some(progress) = progress.as_deref_mut() {
+            let mut bridge = AdapterManifestProgress(progress);
+            materialize_stored_lineage_coverage_candidate_delta_with_progress(
+                guard.connection_mut(),
+                pool,
+                chain,
+                &plan.topic_changed_source_families,
+                plan.reverify_all,
+                &mut bridge,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        }
 
         let mut cursor = None;
         loop {
@@ -393,11 +484,13 @@ async fn ensure_verified_coverage_frontier_through(
             .await
             .map_err(|error| error.to_string())?;
             verify_requirements(guard.connection_mut(), chain, &page.requirements).await?;
+            record_progress(pool, progress).await?;
             cursor = page.next_cursor;
             if cursor.is_none() {
                 break;
             }
         }
+        record_progress(pool, progress).await?;
 
         let publication = StoredLineageCoverageFrontierPublication {
             discovery_admission_epoch,
@@ -405,11 +498,15 @@ async fn ensure_verified_coverage_frontier_through(
             verified_through_block: plan.verified_through_block,
             topic0s_by_family: current_topics.clone(),
         };
-        match guard
-            .publish(&publication)
-            .await
-            .map_err(|error| error.to_string())?
-        {
+        let publication_outcome = match progress.as_deref_mut() {
+            Some(progress) => {
+                let mut bridge = AdapterStorageProgress { pool, progress };
+                guard.publish_with_progress(&publication, &mut bridge).await
+            }
+            None => guard.publish(&publication).await,
+        }
+        .map_err(|error| error.to_string())?;
+        match publication_outcome {
             StoredLineageCoveragePublicationOutcome::Published { snapshot_revision } => {
                 cas_conflicts = 0;
                 coverage_frontiers.record_validated_snapshot_revision(chain, snapshot_revision);
@@ -429,117 +526,4 @@ async fn ensure_verified_coverage_frontier_through(
     Err(format!(
         "stored-lineage coverage frontier for chain {chain} could not reach required block {required_through} within {MAX_PUBLICATIONS_PER_PROMOTION} bounded publications"
     ))
-}
-
-async fn verify_requirements(
-    connection: &mut sqlx::PgConnection,
-    chain: &str,
-    requirements: &[RequiredWatchedTuple],
-) -> std::result::Result<(), String> {
-    if requirements.is_empty() {
-        return Ok(());
-    }
-    super::topic_drift::ensure_required_topic_sets_undrifted_in_transaction(
-        connection,
-        chain,
-        requirements,
-    )
-    .await?;
-    let violations = find_uncovered_required_watched_tuples_in_transaction(
-        connection,
-        chain,
-        requirements,
-        MAX_REPORTED_UNCOVERED_TUPLES,
-    )
-    .await
-    .map_err(|error| error.to_string())?;
-    if violations.is_empty() {
-        return Ok(());
-    }
-    let from_block = requirements
-        .iter()
-        .map(|requirement| requirement.required_from_block)
-        .min()
-        .expect("non-empty requirements must have a lower bound");
-    let through_block = requirements
-        .iter()
-        .map(|requirement| requirement.required_to_block)
-        .max()
-        .expect("non-empty requirements must have an upper bound");
-    Err(uncovered_tuples_refusal(
-        from_block,
-        through_block,
-        &violations,
-    ))
-}
-
-fn uncovered_tuples_refusal(
-    from_block: i64,
-    through_block: i64,
-    violations: &[UncoveredWatchedTuple],
-) -> String {
-    let listed = violations
-        .iter()
-        .map(|tuple| {
-            format!(
-                "(source_family {}, address {}, blocks {}..={})",
-                tuple.source_family,
-                tuple.address,
-                tuple.required_from_block,
-                tuple.required_to_block
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    let suffix = if violations.len() as i64 >= MAX_REPORTED_UNCOVERED_TUPLES {
-        " (further violations elided)"
-    } else {
-        ""
-    };
-    format!(
-        "watched tuples over blocks {from_block}..={through_block} do not form gap-free coverage from exact address- or family-scoped backfill_coverage_facts: {listed}{suffix}; run hash-pinned or Coinbase SQL backfill for the missing tuple intervals (or repair derive-backfill-coverage-facts for legacy full-payload jobs) and retry"
-    )
-}
-
-/// Current manifest topic selectors per log-producing family. The frontier
-/// stores them per family so a semantic change invalidates only that family's
-/// tuple proofs.
-async fn load_current_topic0s_by_family(
-    pool: &sqlx::PgPool,
-    chain: &str,
-    log_producing_source_families: &[String],
-) -> std::result::Result<BTreeMap<String, BTreeSet<String>>, String> {
-    if log_producing_source_families.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    let events = load_active_manifest_abi_events_by_chain_and_source_families(
-        pool,
-        chain,
-        log_producing_source_families,
-    )
-    .await
-    .map_err(|error| error.to_string())?;
-    let mut current_topic0s_by_family = BTreeMap::<String, BTreeSet<String>>::new();
-    for event in events {
-        let Some(topic0) = event.topic0 else {
-            continue;
-        };
-        current_topic0s_by_family
-            .entry(event.source_family)
-            .or_default()
-            .insert(topic0.to_ascii_lowercase());
-    }
-    Ok(current_topic0s_by_family)
-}
-
-fn path_start_number(path: &[ChainLineageBlock]) -> i64 {
-    path.first()
-        .expect("stored lineage path must not be empty")
-        .block_number
-}
-
-fn path_end_number(path: &[ChainLineageBlock]) -> i64 {
-    path.last()
-        .expect("stored lineage path must not be empty")
-        .block_number
 }

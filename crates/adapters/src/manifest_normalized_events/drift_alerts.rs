@@ -3,10 +3,11 @@ use std::collections::HashMap;
 use anyhow::Result;
 use bigname_manifests::{
     ManifestCodeHashObservation, ManifestDeclaredContractDriftInput, ManifestDriftInputs,
-    ManifestProxyImplementationDriftEdge,
+    ManifestProxyImplementationDriftEdge, ManifestRuntimeProgress,
 };
 use bigname_storage::NormalizedEvent;
 use serde_json::json;
+use sqlx::PgPool;
 
 use super::constants::{
     DERIVATION_KIND_MANIFEST_ALERT, EVENT_KIND_MANIFEST_CODE_HASH_DRIFT_ALERT,
@@ -17,23 +18,29 @@ use super::utils::{
     watched_contract_source_name,
 };
 
-pub(super) fn build_code_hash_drift_alert_events(
+const CODE_HASH_DRIFT_BUILD_PROGRESS_ROWS: usize = 1_000;
+
+pub(super) async fn build_code_hash_drift_alert_events_with_progress(
+    pool: &PgPool,
     drift_inputs: &ManifestDriftInputs,
+    progress: &mut Option<&mut dyn ManifestRuntimeProgress>,
 ) -> Result<Vec<NormalizedEvent>> {
-    let observations = drift_inputs
-        .code_hash_observations
-        .iter()
-        .map(|observation| {
-            (
-                code_hash_observation_key(
-                    &observation.chain,
-                    observation.contract_instance_id,
-                    &observation.address,
-                ),
-                observation,
-            )
-        })
-        .collect::<HashMap<_, _>>();
+    let mut observations = HashMap::new();
+    for (index, observation) in drift_inputs.code_hash_observations.iter().enumerate() {
+        observations.insert(
+            code_hash_observation_key(
+                &observation.chain,
+                observation.contract_instance_id,
+                &observation.address,
+            ),
+            observation,
+        );
+        if (index + 1).is_multiple_of(CODE_HASH_DRIFT_BUILD_PROGRESS_ROWS)
+            && let Some(progress) = progress.as_deref_mut()
+        {
+            progress.record(pool).await?;
+        }
+    }
 
     let mut events = Vec::new();
     for declared_contract in &drift_inputs.declared_contracts {

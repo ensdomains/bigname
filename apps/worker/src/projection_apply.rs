@@ -16,13 +16,14 @@ use crate::primary_name::rebuild_heartbeat::LoopHeartbeat;
 use crate::record_inventory;
 
 pub(crate) use derive::{
+    ProjectionInvalidationDeriveSummary,
     capture_normalized_event_change_watermark as load_normalized_event_change_watermark,
     normalized_event_cursor_exists, seed_normalized_event_cursor_if_absent,
 };
 
 const NORMALIZED_EVENT_CURSOR: &str = "normalized_events_to_projection_invalidations";
 const NORMALIZED_EVENT_DERIVE_BATCH_LIMIT: i64 = 5_000;
-const NORMALIZED_EVENT_DERIVE_PROGRESS_LIMIT: i64 = 250;
+pub(crate) const NORMALIZED_EVENT_DERIVE_PROGRESS_LIMIT: i64 = 250;
 const PROJECTION_APPLY_BATCH_LIMIT: i64 = 25;
 const FAILURE_RETRY_DELAY: &str = "60 seconds";
 const CLAIM_RETRY_DELAY: &str = "5 minutes";
@@ -89,13 +90,14 @@ pub(crate) async fn run_once(
     Ok(summary)
 }
 
+#[cfg(test)]
 pub(crate) async fn derive_once(
     pool: &PgPool,
 ) -> Result<derive::ProjectionInvalidationDeriveSummary> {
     derive_once_inner(pool, None).await
 }
 
-async fn derive_once_with_heartbeat(
+pub(crate) async fn derive_once_with_heartbeat(
     pool: &PgPool,
     loop_heartbeat: &mut LoopHeartbeat,
 ) -> Result<derive::ProjectionInvalidationDeriveSummary> {
@@ -203,7 +205,7 @@ pub(crate) async fn load_chain_checkpoint_max_block(pool: &PgPool) -> Result<Opt
 }
 
 #[cfg(test)]
-mod heartbeat_tests {
+pub(crate) mod heartbeat_tests {
     use std::time::Duration;
 
     use anyhow::Context;
@@ -213,7 +215,7 @@ mod heartbeat_tests {
 
     use super::*;
 
-    async fn seed_blocked_later_progress_unit(
+    pub(crate) async fn seed_blocked_later_progress_unit(
         database: &TestDatabase,
     ) -> Result<(i64, Transaction<'static, Postgres>)> {
         sqlx::query(
@@ -294,7 +296,10 @@ mod heartbeat_tests {
         Ok((first_progress_change_id, later_unit_blocker))
     }
 
-    async fn wait_for_derive_cursor(database: &TestDatabase, expected: i64) -> Result<()> {
+    pub(crate) async fn wait_for_derive_cursor(
+        database: &TestDatabase,
+        expected: i64,
+    ) -> Result<()> {
         loop {
             let cursor = sqlx::query_scalar::<_, i64>(
                 r#"
@@ -313,7 +318,7 @@ mod heartbeat_tests {
         }
     }
 
-    async fn wait_for_fresh_worker_heartbeat(
+    pub(crate) async fn wait_for_fresh_worker_heartbeat(
         database: &TestDatabase,
         instance_id: &str,
     ) -> Result<()> {

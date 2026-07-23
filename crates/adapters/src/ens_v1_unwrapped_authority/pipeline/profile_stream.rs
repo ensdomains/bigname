@@ -18,6 +18,7 @@ pub(super) struct ResolverProfileStreamInput<'a> {
 
 pub(super) async fn sync_resolver_profile_stream(
     input: ResolverProfileStreamInput<'_>,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<EnsV1UnwrappedAuthoritySyncSummary> {
     let router = AuthorityRawLogStreamSourceRouter::new(
         input.raw_log_active_emitters,
@@ -179,6 +180,7 @@ pub(super) async fn sync_resolver_profile_stream(
         input
             .replay
             .record_page(raw_logs.len(), state.live_item_count(), payload_bytes);
+        record_startup_adapter_progress(input.pool, progress).await?;
         from_block = to_block
             .checked_add(1)
             .context("resolver-profile page boundary overflowed")?;

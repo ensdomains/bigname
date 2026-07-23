@@ -2833,7 +2833,15 @@ async fn reconcile_fetched_heads_promotes_stored_anchor_at_parent_fetch_depth_li
         finalized_block_number: None,
     };
 
-    let outcome = reconcile_canonical_head(
+    let heartbeat_instance_id = "canonical-reconciliation-in-flight-progress-test";
+    install_stale_indexer_heartbeat(database.pool(), heartbeat_instance_id).await?;
+    let (mut progress, progress_handle) = BlockingHeartbeatProgress::new(
+        heartbeat_instance_id,
+        vec![chain.to_owned()],
+        2,
+    );
+    let coverage_frontiers = ChainCoverageFrontiers::default();
+    let mut operation = Box::pin(reconcile_canonical_head_with_adapter_progress(
         database.pool(),
         &provider,
         chain,
@@ -2841,9 +2849,44 @@ async fn reconcile_fetched_heads_promotes_stored_anchor_at_parent_fetch_depth_li
         &safe,
         HeaderAuditMode::Minimal,
         std::slice::from_ref(&safe),
-        &ChainCoverageFrontiers::default(),
+        &coverage_frontiers,
+        &mut progress,
+    ));
+    tokio::time::timeout(tokio::time::Duration::from_secs(10), async {
+        tokio::select! {
+            () = progress_handle.wait_until_blocked() => Ok(()),
+            result = operation.as_mut() => Err(anyhow::anyhow!(
+                "canonical reconciliation completed before its later progress boundary blocked: {result:?}"
+            )),
+        }
+    })
+    .await
+    .context("canonical reconciliation did not reach its later progress boundary")??;
+    let heartbeat = bigname_storage::load_service_loop_heartbeat(
+        database.pool(),
+        bigname_storage::INDEXER_SERVICE_NAME,
+        heartbeat_instance_id,
     )
-    .await?;
+    .await?
+    .context("canonical reconciliation progress heartbeat must remain registered")?;
+    assert!(
+        heartbeat.age_seconds <= 1,
+        "an earlier fetched ancestor must beat before the later parent walk finishes"
+    );
+
+    assert!(
+        progress_handle.record_count() >= 2,
+        "the depth-limit parent walk must expose a later in-flight progress boundary"
+    );
+    progress_handle.resume();
+    let outcome = tokio::time::timeout(tokio::time::Duration::from_secs(30), operation.as_mut())
+        .await
+        .context("canonical reconciliation did not finish after progress resumed")??;
+    drop(operation);
+    assert!(
+        progress_handle.record_count() >= usize::try_from(parent_fetch_depth)?,
+        "the depth-limit parent walk must beat after each fetched ancestor"
+    );
 
     assert_eq!(
         outcome.status,

@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
+use bigname_adapters::StartupAdapterProgress;
 use bigname_storage::{
     CanonicalityState, RawBlock, RawLog, RawPayloadCacheMetadataUpsert, RawReceipt, RawTransaction,
     load_chain_lineage_block, load_raw_block, load_raw_blocks_by_hashes, upsert_raw_blocks,
@@ -17,8 +18,8 @@ use crate::{
 
 use super::{
     adapter_sync::{
-        sync_live_adapter_state_from_persisted_raw_payloads,
-        sync_live_adapter_state_from_persisted_raw_payloads_after_reorg,
+        sync_live_adapter_state_from_persisted_raw_payloads_after_reorg_with_progress,
+        sync_live_adapter_state_from_persisted_raw_payloads_with_progress,
     },
     canonical::ChainCoverageFrontiers,
     payload::{
@@ -37,57 +38,19 @@ use super::{
 
 #[path = "persistence/code_hashes.rs"]
 mod code_hashes;
-pub(crate) use code_hashes::persist_reconciled_raw_code_hashes;
+#[path = "persistence/raw_blocks.rs"]
+mod raw_blocks;
+pub(crate) use code_hashes::{
+    persist_reconciled_raw_code_hashes, persist_reconciled_raw_code_hashes_with_progress,
+};
+pub(crate) use raw_blocks::persist_reconciled_raw_blocks;
+use raw_blocks::persist_reconciled_raw_blocks_inner;
 
-pub(crate) async fn persist_reconciled_raw_blocks(
-    pool: &sqlx::PgPool,
-    chain: &str,
-    heads: &ProviderHeadSnapshot,
-    canonical: &CanonicalReconciliation,
-    header_audit_mode: HeaderAuditMode,
-) -> Result<()> {
-    let mut blocks = BTreeMap::<String, bigname_storage::RawBlock>::new();
+const LIVE_RAW_FACT_PROGRESS_ROWS: usize = 1_000;
+const LIVE_ADAPTER_PROGRESS_BLOCKS: usize = 32;
 
-    let canonical_state = canonical_raw_state(canonical.status);
-    for block in &canonical.reconciled_blocks {
-        insert_raw_block_candidate(
-            &mut blocks,
-            chain,
-            block,
-            canonical_state,
-            header_audit_mode,
-        );
-    }
-    if let Some(safe) = &heads.safe {
-        insert_raw_block_candidate(
-            &mut blocks,
-            chain,
-            safe,
-            CanonicalityState::Safe,
-            header_audit_mode,
-        );
-    }
-    if let Some(finalized) = &heads.finalized {
-        insert_raw_block_candidate(
-            &mut blocks,
-            chain,
-            finalized,
-            CanonicalityState::Finalized,
-            header_audit_mode,
-        );
-    }
-
-    let blocks = blocks.into_values().collect::<Vec<_>>();
-    if canonical.status == CanonicalReconciliationStatus::AwaitingAncestor {
-        upsert_raw_blocks(pool, &blocks).await?;
-    } else {
-        upsert_raw_blocks_recanonicalizing_orphaned(pool, &blocks).await?;
-    }
-    Ok(())
-}
-
-// Raw-state persistence keeps deployment, heads, canonicality, and refresh inputs explicit.
 #[expect(clippy::too_many_arguments)]
+#[allow(dead_code)]
 pub(crate) async fn persist_reconciled_raw_state(
     pool: &sqlx::PgPool,
     deployment_profile: &str,
@@ -102,9 +65,85 @@ pub(crate) async fn persist_reconciled_raw_state(
     event_silent_resolver_addresses: &[String],
     coverage_frontiers: &ChainCoverageFrontiers,
 ) -> Result<()> {
-    persist_reconciled_raw_blocks(pool, &task.chain, heads, canonical, header_audit_mode).await?;
+    persist_reconciled_raw_state_inner(
+        pool,
+        deployment_profile,
+        task,
+        provider,
+        heads,
+        canonical,
+        head_change_set,
+        loaded_plan_admission_epoch,
+        adapter_sync_enabled,
+        header_audit_mode,
+        event_silent_resolver_addresses,
+        coverage_frontiers,
+        &mut None,
+    )
+    .await
+}
+
+#[expect(clippy::too_many_arguments)]
+pub(crate) async fn persist_reconciled_raw_state_with_progress(
+    pool: &sqlx::PgPool,
+    deployment_profile: &str,
+    task: &IntakeChainTask,
+    provider: &(impl ChainProviderOps + ?Sized),
+    heads: &ProviderHeadSnapshot,
+    canonical: &CanonicalReconciliation,
+    head_change_set: HeadChangeSet,
+    loaded_plan_admission_epoch: i64,
+    adapter_sync_enabled: bool,
+    header_audit_mode: HeaderAuditMode,
+    event_silent_resolver_addresses: &[String],
+    coverage_frontiers: &ChainCoverageFrontiers,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<()> {
+    persist_reconciled_raw_state_inner(
+        pool,
+        deployment_profile,
+        task,
+        provider,
+        heads,
+        canonical,
+        head_change_set,
+        loaded_plan_admission_epoch,
+        adapter_sync_enabled,
+        header_audit_mode,
+        event_silent_resolver_addresses,
+        coverage_frontiers,
+        progress,
+    )
+    .await
+}
+
+#[expect(clippy::too_many_arguments)]
+async fn persist_reconciled_raw_state_inner(
+    pool: &sqlx::PgPool,
+    deployment_profile: &str,
+    task: &IntakeChainTask,
+    provider: &(impl ChainProviderOps + ?Sized),
+    heads: &ProviderHeadSnapshot,
+    canonical: &CanonicalReconciliation,
+    head_change_set: HeadChangeSet,
+    loaded_plan_admission_epoch: i64,
+    adapter_sync_enabled: bool,
+    header_audit_mode: HeaderAuditMode,
+    event_silent_resolver_addresses: &[String],
+    coverage_frontiers: &ChainCoverageFrontiers,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<()> {
+    persist_reconciled_raw_blocks_inner(
+        pool,
+        &task.chain,
+        heads,
+        canonical,
+        header_audit_mode,
+        progress,
+    )
+    .await?;
     if head_change_set.requires_raw_payload_refresh(canonical.status) {
-        persist_reconciled_raw_payloads(
+        persist_reconciled_raw_payloads_inner(
             pool,
             deployment_profile,
             &task.chain,
@@ -115,10 +154,11 @@ pub(crate) async fn persist_reconciled_raw_state(
             head_change_set,
             adapter_sync_enabled,
             event_silent_resolver_addresses,
+            progress,
         )
         .await?;
     }
-    persist_reconciled_raw_code_hashes(
+    persist_reconciled_raw_code_hashes_with_progress(
         pool,
         task,
         provider,
@@ -127,12 +167,15 @@ pub(crate) async fn persist_reconciled_raw_state(
         head_change_set,
         loaded_plan_admission_epoch,
         coverage_frontiers,
+        progress,
     )
-    .await
+    .await?;
+    record_progress(pool, progress).await
 }
 
 // Raw-payload persistence keeps selection, heads, canonicality, and adapter inputs explicit.
 #[expect(clippy::too_many_arguments)]
+#[allow(dead_code)]
 pub(crate) async fn persist_reconciled_raw_payloads(
     pool: &sqlx::PgPool,
     deployment_profile: &str,
@@ -145,12 +188,52 @@ pub(crate) async fn persist_reconciled_raw_payloads(
     adapter_sync_enabled: bool,
     event_silent_resolver_addresses: &[String],
 ) -> Result<()> {
+    persist_reconciled_raw_payloads_inner(
+        pool,
+        deployment_profile,
+        chain,
+        selected_addresses,
+        provider,
+        heads,
+        canonical,
+        head_change_set,
+        adapter_sync_enabled,
+        event_silent_resolver_addresses,
+        &mut None,
+    )
+    .await
+}
+
+#[expect(clippy::too_many_arguments)]
+async fn persist_reconciled_raw_payloads_inner(
+    pool: &sqlx::PgPool,
+    deployment_profile: &str,
+    chain: &str,
+    selected_addresses: &[String],
+    provider: &(impl ChainProviderOps + ?Sized),
+    heads: &ProviderHeadSnapshot,
+    canonical: &CanonicalReconciliation,
+    head_change_set: HeadChangeSet,
+    adapter_sync_enabled: bool,
+    event_silent_resolver_addresses: &[String],
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<()> {
     let block_hashes = raw_payload_candidate_hashes(heads, canonical, head_change_set);
     if block_hashes.is_empty() {
         return Ok(());
     }
 
-    let raw_blocks = load_raw_blocks_by_hashes(pool, chain, &block_hashes).await?;
+    let mut raw_blocks_by_order = BTreeMap::new();
+    for block_hash_page in block_hashes.chunks(LIVE_RAW_FACT_PROGRESS_ROWS) {
+        for raw_block in load_raw_blocks_by_hashes(pool, chain, block_hash_page).await? {
+            raw_blocks_by_order.insert(
+                (raw_block.block_number, raw_block.block_hash.clone()),
+                raw_block,
+            );
+        }
+        record_progress(pool, progress).await?;
+    }
+    let raw_blocks = raw_blocks_by_order.into_values().collect::<Vec<_>>();
     if raw_blocks.len() != block_hashes.len() {
         bail!(
             "stored raw block count {} does not match the raw payload fetch plan size {} for chain {}",
@@ -217,41 +300,95 @@ pub(crate) async fn persist_reconciled_raw_payloads(
             &retained_transaction_keys,
         )?);
         logs.extend(selected_logs);
+        record_progress(pool, progress).await?;
     }
 
-    upsert_raw_payload_cache_metadata(pool, &cache_metadata).await?;
-    upsert_raw_transactions(pool, &transactions).await?;
-    upsert_raw_receipts(pool, &receipts).await?;
-    upsert_raw_logs(pool, &logs).await?;
-    upsert_event_silent_resolver_call_observations(pool, &event_silent_resolver_calls).await?;
-    bigname_adapters::record_ens_v2_live_selected_raw_log_coverage(
-        pool,
-        chain,
-        selected_addresses,
-        &block_hashes,
-    )
-    .await
+    for chunk in cache_metadata.chunks(LIVE_RAW_FACT_PROGRESS_ROWS) {
+        upsert_raw_payload_cache_metadata(pool, chunk).await?;
+        record_progress(pool, progress).await?;
+    }
+    for chunk in transactions.chunks(LIVE_RAW_FACT_PROGRESS_ROWS) {
+        upsert_raw_transactions(pool, chunk).await?;
+        record_progress(pool, progress).await?;
+    }
+    for chunk in receipts.chunks(LIVE_RAW_FACT_PROGRESS_ROWS) {
+        upsert_raw_receipts(pool, chunk).await?;
+        record_progress(pool, progress).await?;
+    }
+    for chunk in logs.chunks(LIVE_RAW_FACT_PROGRESS_ROWS) {
+        upsert_raw_logs(pool, chunk).await?;
+        record_progress(pool, progress).await?;
+    }
+    upsert_event_silent_resolver_call_observations(pool, &event_silent_resolver_calls, progress)
+        .await?;
+    match progress.as_deref_mut() {
+        Some(progress) => {
+            bigname_adapters::record_ens_v2_live_selected_raw_log_coverage_with_progress(
+                pool,
+                chain,
+                selected_addresses,
+                &block_hashes,
+                progress,
+            )
+            .await
+        }
+        None => {
+            bigname_adapters::record_ens_v2_live_selected_raw_log_coverage(
+                pool,
+                chain,
+                selected_addresses,
+                &block_hashes,
+            )
+            .await
+        }
+    }
     .with_context(|| {
         format!("failed to record exact live selected-log coverage for ENSv2 on chain {chain}")
     })?;
+    record_progress(pool, progress).await?;
     if adapter_sync_enabled {
+        let ordered_block_hashes = raw_blocks
+            .iter()
+            .map(|block| block.block_hash.clone())
+            .collect::<Vec<_>>();
         if canonical.status == CanonicalReconciliationStatus::ReorgReconciled {
-            sync_live_adapter_state_from_persisted_raw_payloads_after_reorg(
-                pool,
-                deployment_profile,
-                chain,
-                &block_hashes,
-            )
-            .await?;
+            let mut chunks = ordered_block_hashes
+                .chunks(LIVE_ADAPTER_PROGRESS_BLOCKS)
+                .peekable();
+            while let Some(block_chunk) = chunks.next() {
+                if chunks.peek().is_some() {
+                    sync_live_adapter_state_from_persisted_raw_payloads_with_progress(
+                        pool,
+                        deployment_profile,
+                        chain,
+                        block_chunk,
+                        progress,
+                    )
+                    .await?;
+                } else {
+                    sync_live_adapter_state_from_persisted_raw_payloads_after_reorg_with_progress(
+                        pool,
+                        deployment_profile,
+                        chain,
+                        block_chunk,
+                        progress,
+                    )
+                    .await?;
+                }
+            }
         } else {
-            sync_live_adapter_state_from_persisted_raw_payloads(
-                pool,
-                deployment_profile,
-                chain,
-                &block_hashes,
-            )
-            .await?;
+            for block_chunk in ordered_block_hashes.chunks(LIVE_ADAPTER_PROGRESS_BLOCKS) {
+                sync_live_adapter_state_from_persisted_raw_payloads_with_progress(
+                    pool,
+                    deployment_profile,
+                    chain,
+                    block_chunk,
+                    progress,
+                )
+                .await?;
+            }
         }
+        record_progress(pool, progress).await?;
     } else {
         info!(
             service = "indexer",
@@ -294,6 +431,7 @@ async fn load_live_generic_resolver_topic0s(
 async fn upsert_event_silent_resolver_call_observations(
     pool: &sqlx::PgPool,
     observations: &[EventSilentResolverCallObservation],
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<()> {
     for observation in observations {
         sqlx::query(
@@ -351,8 +489,19 @@ async fn upsert_event_silent_resolver_call_observations(
                 observation.chain_id, observation.block_hash, observation.transaction_index
             )
         })?;
+        record_progress(pool, progress).await?;
     }
 
+    Ok(())
+}
+
+async fn record_progress(
+    pool: &sqlx::PgPool,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<()> {
+    if let Some(progress) = progress.as_deref_mut() {
+        progress.record(pool).await?;
+    }
     Ok(())
 }
 
@@ -361,6 +510,28 @@ pub(crate) async fn ensure_losing_branch_raw_blocks_exist(
     chain: &str,
     from_hash: &str,
     stop_before_hash: Option<&str>,
+) -> Result<()> {
+    ensure_losing_branch_raw_blocks_exist_inner(pool, chain, from_hash, stop_before_hash, &mut None)
+        .await
+}
+
+pub(crate) async fn ensure_losing_branch_raw_blocks_exist_with_progress(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    from_hash: &str,
+    stop_before_hash: Option<&str>,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<()> {
+    ensure_losing_branch_raw_blocks_exist_inner(pool, chain, from_hash, stop_before_hash, progress)
+        .await
+}
+
+async fn ensure_losing_branch_raw_blocks_exist_inner(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    from_hash: &str,
+    stop_before_hash: Option<&str>,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<()> {
     if stop_before_hash == Some(from_hash) {
         return Ok(());
@@ -376,6 +547,7 @@ pub(crate) async fn ensure_losing_branch_raw_blocks_exist(
 
         if let Some(raw_block) = load_raw_block(pool, chain, &block_hash).await? {
             cursor_hash = raw_block.parent_hash.clone();
+            record_progress(pool, progress).await?;
             continue;
         }
 
@@ -399,10 +571,16 @@ pub(crate) async fn ensure_losing_branch_raw_blocks_exist(
             state_root: lineage_block.state_root,
             canonicality_state: CanonicalityState::Orphaned,
         });
+        if missing_raw_blocks.len() >= LIVE_RAW_FACT_PROGRESS_ROWS {
+            upsert_raw_blocks(pool, &missing_raw_blocks).await?;
+            missing_raw_blocks.clear();
+        }
+        record_progress(pool, progress).await?;
     }
 
     if !missing_raw_blocks.is_empty() {
         upsert_raw_blocks(pool, &missing_raw_blocks).await?;
+        record_progress(pool, progress).await?;
     }
 
     Ok(())

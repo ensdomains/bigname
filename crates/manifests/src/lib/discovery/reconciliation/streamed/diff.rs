@@ -3,7 +3,7 @@
 //! reconcile, including the SQL translations of the stored-spec equality
 //! and chronology comparisons.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
 use sqlx::{Row, postgres::PgConnection};
@@ -12,8 +12,8 @@ use super::super::super::types::{
     EvmEventPosition, ExistingReconciledDiscoveryEdge, ObservationTerminalState,
     ReconciledDiscoveryEdgeSpec,
 };
-use super::super::chronology::{compare_edge_starts, edge_starts_after_spec};
 use super::super::existing::edge_from_row;
+use super::DiscoveryObservationPageSource;
 use super::staging::analyze_temp_table;
 
 #[path = "diff/retention.rs"]
@@ -119,77 +119,69 @@ const STREAMED_STARTS_NO_LATER_SQL: &str = r#"
     )
 "#;
 
-/// `starts_after(existing = de, desired)` in SQL: both block numbers must be
-/// present; equal blocks only compare when both sides carry a full event
-/// position.
-const STREAMED_STARTS_AFTER_SQL: &str = r#"
-    (
-        de.active_from_block_number IS NOT NULL
-        AND desired.active_from_block_number IS NOT NULL
-        AND (
-            de.active_from_block_number > desired.active_from_block_number
-            OR (
-                de.active_from_block_number = desired.active_from_block_number
-                AND (de.provenance ->> 'transaction_index') IS NOT NULL
-                AND (de.provenance ->> 'log_index') IS NOT NULL
-                AND desired.active_from_transaction_index IS NOT NULL
-                AND desired.active_from_log_index IS NOT NULL
-                AND (
-                    (de.provenance ->> 'transaction_index')::BIGINT,
-                    (de.provenance ->> 'log_index')::BIGINT
-                ) > (
-                    desired.active_from_transaction_index,
-                    desired.active_from_log_index
-                )
-            )
-        )
-    )
-"#;
-
-pub(super) async fn count_streamed_deactivation_candidates(
-    executor: &mut PgConnection,
-    discovery_source: &str,
-) -> Result<usize> {
-    let count = sqlx::query_scalar::<_, i64>(&format!(
-        r#"
-        SELECT COUNT(*)::BIGINT
-        {STREAMED_ACTIVE_EDGE_FROM_SQL}
-          AND NOT EXISTS (
-              SELECT 1
-              FROM pg_temp.reconcile_desired_edges desired
-              WHERE {STREAMED_EXACT_SPEC_MATCH_SQL}
-          )
-        "#
-    ))
-    .bind(discovery_source)
-    .fetch_one(executor)
-    .await
-    .context("failed to count streamed discovery-edge deactivation candidates")?;
-    usize::try_from(count).context("streamed deactivation candidate count overflowed usize")
+pub(super) struct StreamedDeactivationSourcePage {
+    pub(super) last_edge_id: Option<i64>,
+    pub(super) candidates: Vec<ExistingReconciledDiscoveryEdge>,
 }
 
-pub(super) async fn load_streamed_deactivation_candidates(
+pub(super) async fn load_streamed_deactivation_source_page(
     executor: &mut PgConnection,
     discovery_source: &str,
-) -> Result<Vec<ExistingReconciledDiscoveryEdge>> {
+    after_edge_id: i64,
+    limit: i64,
+) -> Result<StreamedDeactivationSourcePage> {
+    let edge_ids = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT discovery_edge_id
+        FROM discovery_edges
+        WHERE discovery_edge_id > $1
+        ORDER BY discovery_edge_id
+        LIMIT $2
+        "#,
+    )
+    .bind(after_edge_id)
+    .bind(limit)
+    .fetch_all(&mut *executor)
+    .await
+    .context("failed to page discovery-edge identities for streamed deactivation diff")?;
+    let Some(last_edge_id) = edge_ids.last().copied() else {
+        return Ok(StreamedDeactivationSourcePage {
+            last_edge_id: None,
+            candidates: Vec::new(),
+        });
+    };
     let rows = sqlx::query(&format!(
         r#"
-        SELECT {STREAMED_EXISTING_EDGE_COLUMNS_QUALIFIED}
+        SELECT {STREAMED_EXISTING_EDGE_COLUMNS_QUALIFIED},
+               NOT EXISTS (
+                   SELECT 1
+                   FROM pg_temp.reconcile_desired_edges desired
+                   WHERE {STREAMED_EXACT_SPEC_MATCH_SQL}
+               ) AS deactivation_candidate
         {STREAMED_ACTIVE_EDGE_FROM_SQL}
-          AND NOT EXISTS (
-              SELECT 1
-              FROM pg_temp.reconcile_desired_edges desired
-              WHERE {STREAMED_EXACT_SPEC_MATCH_SQL}
-          )
+          AND de.discovery_edge_id = ANY($2::BIGINT[])
         ORDER BY de.discovery_edge_id
         "#
     ))
     .bind(discovery_source)
-    .fetch_all(executor)
+    .bind(&edge_ids)
+    .fetch_all(&mut *executor)
     .await
-    .context("failed to load streamed discovery-edge deactivation candidates")?;
+    .context("failed to load a streamed discovery-edge deactivation source page")?;
 
-    rows.into_iter().map(edge_from_row).collect()
+    let mut candidates = Vec::new();
+    for row in rows {
+        if row
+            .try_get::<bool, _>("deactivation_candidate")
+            .context("failed to read streamed deactivation-candidate flag")?
+        {
+            candidates.push(edge_from_row(row)?);
+        }
+    }
+    Ok(StreamedDeactivationSourcePage {
+        last_edge_id: Some(last_edge_id),
+        candidates,
+    })
 }
 
 fn desired_edge_spec_from_row(
@@ -275,9 +267,8 @@ const STREAMED_DESIRED_EDGE_COLUMNS: &str = r#"
 /// materializing the same assignment at a no-later start (`current_new_
 /// edges` in the in-memory chronology, before its historical exclusion,
 /// which the caller applies from `collect_streamed_historical_edges`).
-pub(super) async fn materialize_streamed_insert_candidates(
+pub(super) async fn create_streamed_insert_candidate_table(
     executor: &mut PgConnection,
-    discovery_source: &str,
 ) -> Result<()> {
     sqlx::query(
         r#"
@@ -290,12 +281,39 @@ pub(super) async fn materialize_streamed_insert_candidates(
     .await
     .context("failed to create the streamed reconcile insert-candidate temp table")?;
 
-    sqlx::query(&format!(
+    Ok(())
+}
+
+pub(super) async fn materialize_streamed_insert_candidate_page(
+    executor: &mut PgConnection,
+    discovery_source: &str,
+    after_row_id: i64,
+    limit: i64,
+) -> Result<(Option<i64>, usize, usize)> {
+    let desired_row_ids = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT desired_row_id
+        FROM pg_temp.reconcile_desired_edges
+        WHERE desired_row_id > $1
+        ORDER BY desired_row_id
+        LIMIT $2
+        "#,
+    )
+    .bind(after_row_id)
+    .bind(limit)
+    .fetch_all(&mut *executor)
+    .await
+    .context("failed to page desired discovery edges for insert-candidate diff")?;
+    let Some(last_row_id) = desired_row_ids.last().copied() else {
+        return Ok((None, 0, 0));
+    };
+    let inserted = sqlx::query(&format!(
         r#"
         INSERT INTO pg_temp.reconcile_insert_candidates (desired_row_id)
         SELECT desired.desired_row_id
         FROM pg_temp.reconcile_desired_edges desired
-        WHERE NOT EXISTS (
+        WHERE desired.desired_row_id = ANY($2::BIGINT[])
+        AND NOT EXISTS (
             SELECT 1
             FROM discovery_edges de
             JOIN contract_instance_addresses cia
@@ -327,12 +345,19 @@ pub(super) async fn materialize_streamed_insert_candidates(
         "#
     ))
     .bind(discovery_source)
+    .bind(&desired_row_ids)
     .execute(&mut *executor)
     .await
-    .context("failed to materialize streamed discovery-edge insert candidates")?;
-    analyze_temp_table(&mut *executor, "reconcile_insert_candidates").await?;
+    .context("failed to materialize a streamed discovery-edge insert-candidate page")?
+    .rows_affected() as usize;
 
-    Ok(())
+    Ok((Some(last_row_id), desired_row_ids.len(), inserted))
+}
+
+pub(super) async fn finish_streamed_insert_candidate_table(
+    executor: &mut PgConnection,
+) -> Result<()> {
+    analyze_temp_table(executor, "reconcile_insert_candidates").await
 }
 
 pub(super) async fn load_streamed_insert_candidate_page(
@@ -371,12 +396,16 @@ pub(super) async fn load_streamed_insert_candidate_page(
 /// still held in memory: it is the input to the historical materialization
 /// batch and is bounded by the successor diff, which for a full-closure
 /// finalize means retained edges newer than the replay target.
-pub(super) async fn collect_streamed_historical_edges(
+pub(super) async fn collect_streamed_historical_edges<Source>(
     executor: &mut PgConnection,
     discovery_source: &str,
     page_limit: i64,
     retained_newer_edge_ids: &mut HashSet<i64>,
-) -> Result<Vec<(i64, ReconciledDiscoveryEdgeSpec, ObservationTerminalState)>> {
+    source: &Source,
+) -> Result<Vec<(i64, ReconciledDiscoveryEdgeSpec, ObservationTerminalState)>>
+where
+    Source: DiscoveryObservationPageSource + Sync,
+{
     let mut historical_edges = Vec::new();
     let mut after_row_id = 0i64;
     loop {
@@ -386,21 +415,6 @@ pub(super) async fn collect_streamed_historical_edges(
             FROM pg_temp.reconcile_desired_edges desired
             WHERE desired.desired_row_id > $2
               AND desired.active_from_block_number IS NOT NULL
-              AND EXISTS (
-                  SELECT 1
-                  FROM discovery_edges de
-                  JOIN contract_instance_addresses cia
-                    ON cia.contract_instance_id = de.to_contract_instance_id
-                   AND cia.deactivated_at IS NULL
-                  WHERE de.discovery_source = $1
-                    AND de.deactivated_at IS NULL
-                    AND de.provenance ->> 'observation_key' = desired.observation_key
-                    AND de.chain_id = desired.chain_id
-                    AND de.edge_kind = desired.edge_kind
-                    AND de.from_contract_instance_id = desired.from_contract_instance_id
-                    AND NOT {STREAMED_EDGE_IS_ORPHANED_SQL}
-                    AND {STREAMED_STARTS_AFTER_SQL}
-              )
             ORDER BY desired.desired_row_id
             LIMIT $3
             "#
@@ -423,47 +437,119 @@ pub(super) async fn collect_streamed_historical_edges(
             .map(|(desired_row_id, _)| *desired_row_id)
             .expect("a non-empty historical page has a last row");
 
-        for (desired_row_id, desired) in page {
-            let rows = sqlx::query(&format!(
-                r#"
-                SELECT {STREAMED_EXISTING_EDGE_COLUMNS_QUALIFIED}
+        source.record_progress().await?;
+        let desired_row_ids = page
+            .iter()
+            .map(|(desired_row_id, _)| *desired_row_id)
+            .collect::<Vec<_>>();
+        type HistoricalSuccessorRow = (
+            i64,
+            i64,
+            String,
+            Option<i64>,
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
+        );
+        let successor_rows = sqlx::query_as::<_, HistoricalSuccessorRow>(&format!(
+            r#"
+            SELECT
+                desired.desired_row_id,
+                successor.discovery_edge_id,
+                successor.chain_id,
+                successor.active_from_block_number,
+                successor.active_from_block_hash,
+                successor.transaction_index,
+                successor.log_index
+            FROM pg_temp.reconcile_desired_edges desired
+            JOIN LATERAL (
+                SELECT
+                    de.discovery_edge_id,
+                    de.chain_id,
+                    de.active_from_block_number,
+                    de.active_from_block_hash,
+                    (de.provenance ->> 'transaction_index')::BIGINT AS transaction_index,
+                    (de.provenance ->> 'log_index')::BIGINT AS log_index
                 {STREAMED_ACTIVE_EDGE_FROM_SQL}
-                  AND de.provenance ->> 'observation_key' = $2
-                  AND de.chain_id = $3
-                  AND de.edge_kind = $4
-                  AND de.from_contract_instance_id = $5
-                "#
-            ))
-            .bind(discovery_source)
-            .bind(&desired.observation_key)
-            .bind(&desired.chain)
-            .bind(&desired.edge_kind)
-            .bind(desired.from_contract_instance_id)
-            .fetch_all(&mut *executor)
-            .await
-            .context("failed to load successor candidates for a historical desired edge")?;
-            let successor_candidates = rows
-                .into_iter()
-                .map(edge_from_row)
-                .collect::<Result<Vec<_>>>()?;
-            let Some(successor) = successor_candidates
-                .iter()
-                .filter(|edge| {
-                    !edge.active_from_block_is_orphaned && edge_starts_after_spec(edge, &desired)
-                })
-                .min_by(compare_edge_starts)
+                  AND de.provenance ->> 'observation_key' = desired.observation_key
+                  AND de.chain_id = desired.chain_id
+                  AND de.edge_kind = desired.edge_kind
+                  AND de.from_contract_instance_id = desired.from_contract_instance_id
+                  AND NOT {STREAMED_EDGE_IS_ORPHANED_SQL}
+                  AND (
+                      de.active_from_block_number > desired.active_from_block_number
+                      OR (
+                          de.active_from_block_number = desired.active_from_block_number
+                          AND desired.active_from_transaction_index IS NOT NULL
+                          AND desired.active_from_log_index IS NOT NULL
+                          AND (de.provenance ->> 'transaction_index')::BIGINT IS NOT NULL
+                          AND (de.provenance ->> 'log_index')::BIGINT IS NOT NULL
+                          AND (
+                              (de.provenance ->> 'transaction_index')::BIGINT,
+                              (de.provenance ->> 'log_index')::BIGINT
+                          ) > (
+                              desired.active_from_transaction_index,
+                              desired.active_from_log_index
+                          )
+                      )
+                  )
+                ORDER BY
+                    de.active_from_block_number,
+                    (de.provenance ->> 'transaction_index')::BIGINT NULLS FIRST,
+                    (de.provenance ->> 'log_index')::BIGINT NULLS FIRST,
+                    de.discovery_edge_id
+                LIMIT 1
+            ) successor ON TRUE
+            WHERE desired.desired_row_id = ANY($2::BIGINT[])
+            ORDER BY desired.desired_row_id
+            "#
+        ))
+        .bind(discovery_source)
+        .bind(&desired_row_ids)
+        .fetch_all(&mut *executor)
+        .await
+        .context("failed to load a page of historical desired-edge successors")?;
+        let mut successors = HashMap::with_capacity(successor_rows.len());
+        for (
+            desired_row_id,
+            discovery_edge_id,
+            chain,
+            block_number,
+            block_hash,
+            transaction_index,
+            log_index,
+        ) in successor_rows
+        {
+            let event_position = match (transaction_index, log_index) {
+                (Some(transaction_index), Some(log_index)) => Some(EvmEventPosition {
+                    transaction_index,
+                    log_index,
+                }),
+                (None, None) => None,
+                _ => bail!("historical successor carries a partial event position"),
+            };
+            successors.insert(
+                desired_row_id,
+                (
+                    discovery_edge_id,
+                    ObservationTerminalState {
+                        chain,
+                        block_number,
+                        block_hash,
+                        event_position,
+                    },
+                ),
+            );
+        }
+        for (desired_row_id, desired) in page {
+            let Some((discovery_edge_id, terminal_state)) = successors.remove(&desired_row_id)
             else {
                 continue;
             };
-            retained_newer_edge_ids.insert(successor.discovery_edge_id);
-            let terminal_state = ObservationTerminalState {
-                chain: successor.spec.chain.clone(),
-                block_number: successor.spec.active_from_block_number,
-                block_hash: successor.spec.active_from_block_hash.clone(),
-                event_position: successor.spec.active_from_event_position,
-            };
+            retained_newer_edge_ids.insert(discovery_edge_id);
             historical_edges.push((desired_row_id, desired, terminal_state));
         }
+        source.record_progress().await?;
     }
     Ok(historical_edges)
 }

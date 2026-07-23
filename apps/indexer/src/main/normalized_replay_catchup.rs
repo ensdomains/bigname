@@ -14,19 +14,20 @@ use crate::provider::ChainProvider;
 use crate::{
     provider::{ChainProviderOps, ProviderRegistry},
     reconciliation::{
-        HeaderAuditMode, RawFactNormalizedEventReplayOutcome, RawFactNormalizedEventReplayRequest,
-        RawFactNormalizedEventReplaySelection, active_closure_or_dependency_replay_adapters,
-        chain_has_closure_or_dependency_replay_adapter, replay_raw_fact_normalized_events,
+        HeaderAuditMode, RawFactNormalizedEventReplayRequest,
+        RawFactNormalizedEventReplaySelection, chain_has_closure_or_dependency_replay_adapter,
+        replay_raw_fact_normalized_events, replay_raw_fact_normalized_events_with_progress,
         select_log_bounded_replay_to_block,
-        sync_automatic_two_phase_full_closure_normalized_events,
-        unsupported_closure_replay_adapters,
     },
+    run::startup_heartbeat::{NormalizedReplayHeartbeat, RequiredSubtaskActivity},
 };
 
 #[path = "normalized_replay_catchup/coverage_recovery.rs"]
 mod coverage_recovery;
 #[path = "normalized_replay_catchup/cursors.rs"]
 mod cursors;
+#[path = "normalized_replay_catchup/execution.rs"]
+mod execution;
 #[path = "normalized_replay_catchup/indexes.rs"]
 mod indexes;
 #[path = "normalized_replay_catchup/sources.rs"]
@@ -38,13 +39,18 @@ mod test_hook;
 #[cfg(test)]
 pub(crate) use test_hook::{
     install_after_coverage_recovery as install_after_coverage_recovery_test_hook,
+    install_after_progress as install_after_progress_test_hook,
     install_after_rewind as install_after_rewind_test_hook,
+    install_before_cursor_failure_record as install_before_cursor_failure_record_test_hook,
 };
 
 use coverage_recovery::replay_full_closure_with_coverage_recovery;
 use cursors::{
     advance_cursor, ensure_cursor, record_cursor_failure,
     rewind_cursor_for_newly_observed_older_logs,
+};
+use execution::{
+    record_normalized_replay_progress, replay_full_closure_or_dependency_normalized_events,
 };
 use indexes::{
     ensure_projection_indexes_after_catchup, prepare_deferred_projection_indexes_for_fresh_replay,
@@ -227,6 +233,8 @@ pub(crate) async fn run_normalized_replay_catchup(
     config: NormalizedReplayCatchupConfig,
     provider_registry: ProviderRegistry,
     header_audit_mode: HeaderAuditMode,
+    heartbeat: NormalizedReplayHeartbeat,
+    activity: RequiredSubtaskActivity,
 ) -> Result<()> {
     info!(
         service = "indexer",
@@ -244,12 +252,15 @@ pub(crate) async fn run_normalized_replay_catchup(
     loop {
         let mut progressed = false;
         for chain in &config.chains {
-            match run_normalized_replay_catchup_iteration_with_provider(
+            let mut progress = heartbeat.clone();
+            match run_required_normalized_replay_catchup_iteration(
                 &pool,
                 &config,
                 chain,
                 provider_registry.provider_for(chain),
                 header_audit_mode,
+                &mut progress,
+                &activity,
             )
             .await
             {
@@ -258,7 +269,6 @@ pub(crate) async fn run_normalized_replay_catchup(
                 }
                 Ok(CatchupIterationStatus::Idle) => {}
                 Err(error) => {
-                    record_cursor_failure(&pool, &config.deployment_profile, chain, &error).await?;
                     warn!(
                         service = "indexer",
                         command = "run",
@@ -298,6 +308,7 @@ pub(crate) async fn run_normalized_replay_catchup_iteration(
         chain,
         provider,
         HeaderAuditMode::Minimal,
+        &mut None,
     )
     .await
 }
@@ -316,8 +327,55 @@ pub(crate) async fn run_normalized_replay_catchup_iteration_with_provider_for_te
         chain,
         Some(provider),
         header_audit_mode,
+        &mut None,
     )
     .await
+}
+
+#[cfg(test)]
+pub(crate) async fn run_required_normalized_replay_catchup_iteration_for_test(
+    pool: &PgPool,
+    config: &NormalizedReplayCatchupConfig,
+    chain: &str,
+    progress: &mut NormalizedReplayHeartbeat,
+    activity: &RequiredSubtaskActivity,
+) -> Result<CatchupIterationStatus> {
+    let provider: Option<&ChainProvider> = None;
+    run_required_normalized_replay_catchup_iteration(
+        pool,
+        config,
+        chain,
+        provider,
+        HeaderAuditMode::Minimal,
+        progress,
+        activity,
+    )
+    .await
+}
+
+async fn run_required_normalized_replay_catchup_iteration(
+    pool: &PgPool,
+    config: &NormalizedReplayCatchupConfig,
+    chain: &str,
+    provider: Option<&(impl ChainProviderOps + ?Sized)>,
+    header_audit_mode: HeaderAuditMode,
+    progress: &mut NormalizedReplayHeartbeat,
+    activity: &RequiredSubtaskActivity,
+) -> Result<CatchupIterationStatus> {
+    let _activity = activity.begin().await;
+    let result = run_normalized_replay_catchup_iteration_with_provider(
+        pool,
+        config,
+        chain,
+        provider,
+        header_audit_mode,
+        &mut Some(progress),
+    )
+    .await;
+    if let Err(error) = &result {
+        record_cursor_failure(pool, &config.deployment_profile, chain, error).await?;
+    }
+    result
 }
 
 async fn run_normalized_replay_catchup_iteration_with_provider(
@@ -326,6 +384,7 @@ async fn run_normalized_replay_catchup_iteration_with_provider(
     chain: &str,
     provider: Option<&(impl ChainProviderOps + ?Sized)>,
     header_audit_mode: HeaderAuditMode,
+    progress: &mut Option<&mut NormalizedReplayHeartbeat>,
 ) -> Result<CatchupIterationStatus> {
     let pending_base_rederive_replay_target =
         bigname_storage::pending_base_normalized_rederive_replay_target(
@@ -448,23 +507,30 @@ async fn run_normalized_replay_catchup_iteration_with_provider(
             provider,
             header_audit_mode,
             rewind_inspection_input_version,
+            progress,
         )
         .await?
     } else {
-        let outcome = replay_raw_fact_normalized_events(
-            pool,
-            RawFactNormalizedEventReplayRequest {
-                deployment_profile: config.deployment_profile.clone(),
-                chain: chain.to_owned(),
-                selection: RawFactNormalizedEventReplaySelection::BlockRange {
-                    from_block,
-                    to_block,
-                },
+        let request = RawFactNormalizedEventReplayRequest {
+            deployment_profile: config.deployment_profile.clone(),
+            chain: chain.to_owned(),
+            selection: RawFactNormalizedEventReplaySelection::BlockRange {
+                from_block,
+                to_block,
             },
-        )
-        .await?;
+        };
+        let outcome = match progress.as_deref_mut() {
+            Some(progress) => {
+                replay_raw_fact_normalized_events_with_progress(pool, request, progress).await?
+            }
+            None => replay_raw_fact_normalized_events(pool, request).await?,
+        };
         (outcome, rewind_inspection_input_version)
     };
+
+    record_normalized_replay_progress(pool, progress).await?;
+    #[cfg(test)]
+    test_hook::pause_after_progress(pool, &config.deployment_profile, chain).await;
 
     advance_cursor(
         pool,
@@ -481,6 +547,7 @@ async fn run_normalized_replay_catchup_iteration_with_provider(
         raw_log_input_version,
     )
     .await?;
+    record_normalized_replay_progress(pool, progress).await?;
     if closure_or_dependency_replay {
         bigname_adapters::clear_replay_adapter_checkpoints(
             pool,
@@ -489,6 +556,7 @@ async fn run_normalized_replay_catchup_iteration_with_provider(
             CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS,
         )
         .await?;
+        record_normalized_replay_progress(pool, progress).await?;
     }
     if config.defer_projection_indexes {
         ensure_projection_indexes_after_catchup(pool, &config.deployment_profile, &config.chains)
@@ -516,69 +584,4 @@ async fn run_normalized_replay_catchup_iteration_with_provider(
     );
 
     Ok(CatchupIterationStatus::Progressed)
-}
-
-async fn replay_full_closure_or_dependency_normalized_events(
-    pool: &PgPool,
-    deployment_profile: &str,
-    chain: &str,
-    from_block: i64,
-    to_block: i64,
-    stateless_ranges: &[(i64, i64)],
-    max_raw_logs_per_page: usize,
-) -> Result<RawFactNormalizedEventReplayOutcome> {
-    let adapters = active_closure_or_dependency_replay_adapters(pool, chain).await?;
-    let unsupported = unsupported_closure_replay_adapters(&adapters);
-    if !unsupported.is_empty() {
-        bail!(
-            "normalized-event replay selected closure/context-dependent adapter(s) {}; full closure replay is not implemented for these adapters",
-            unsupported.join(", ")
-        );
-    }
-    info!(
-        service = "indexer",
-        replay_cursor_kind = CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS,
-        chain,
-        from_block,
-        to_block,
-        stateless_range_count = stateless_ranges.len(),
-        stateless_ranges = ?stateless_ranges,
-        max_raw_logs_per_page,
-        adapter_count = adapters.len(),
-        adapters = ?adapters,
-        "two-phase full closure normalized-event replay session started"
-    );
-
-    let replay = sync_automatic_two_phase_full_closure_normalized_events(
-        pool,
-        deployment_profile,
-        chain,
-        CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS,
-        from_block,
-        to_block,
-        stateless_ranges,
-        &adapters,
-        max_raw_logs_per_page,
-    )
-    .await?;
-    let stateless = replay.stateless;
-    let closure = replay.closure;
-    let mut stateless_replay_authority = stateless.stateless_replay_authority.clone();
-    stateless_replay_authority.add(&closure.stateless_replay_authority);
-
-    Ok(RawFactNormalizedEventReplayOutcome {
-        deployment_profile: deployment_profile.to_owned(),
-        chain: chain.to_owned(),
-        selection_kind: "two_phase_full_closure",
-        source_scope_target_count: adapters.len(),
-        selected_block_count: stateless.selected_block_count,
-        canonical_raw_log_count: stateless.canonical_raw_log_count,
-        scanned_raw_log_count: stateless.scanned_raw_log_count + closure.scanned_log_count,
-        matched_raw_log_count: stateless.matched_raw_log_count + closure.matched_log_count,
-        normalized_event_synced_count: stateless.normalized_event_synced_count
-            + closure.total_synced_count,
-        normalized_event_inserted_count: stateless.normalized_event_inserted_count
-            + closure.total_inserted_count,
-        stateless_replay_authority,
-    })
 }

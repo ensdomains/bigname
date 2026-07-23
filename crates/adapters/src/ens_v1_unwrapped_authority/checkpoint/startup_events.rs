@@ -15,6 +15,7 @@ impl UnwrappedAuthorityReplayCheckpoint {
         pool: &PgPool,
         events: &[NormalizedEvent],
         staged_events: &mut UnwrappedAuthorityReplayFlushedEvents,
+        startup_progress: &mut Option<&mut dyn StartupAdapterProgress>,
     ) -> Result<()> {
         ensure!(
             self.is_startup(),
@@ -24,32 +25,47 @@ impl UnwrappedAuthorityReplayCheckpoint {
             return Ok(());
         }
 
-        let item_rows = events
-            .iter()
-            .map(|event| {
-                Ok((
-                    ITEM_KIND_STARTUP_PENDING_EVENT,
-                    event.event_identity.clone(),
-                    encode_item(event)?,
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let mut item_rows = Vec::with_capacity(events.len());
+        for (index, event) in events.iter().enumerate() {
+            item_rows.push((
+                ITEM_KIND_STARTUP_PENDING_EVENT,
+                event.event_identity.clone(),
+                encode_item(event)?,
+            ));
+            if index + 1 == events.len()
+                || (index + 1).is_multiple_of(CHECKPOINT_ITEM_INSERT_BATCH_SIZE)
+            {
+                record_startup_adapter_progress(pool, startup_progress).await?;
+            }
+        }
         let mut transaction = pool
             .begin()
             .await
             .context("failed to start startup authority event-staging transaction")?;
-        insert_checkpoint_items(&mut transaction, self, &item_rows).await?;
+        insert_checkpoint_items_with_progress(
+            pool,
+            &mut transaction,
+            self,
+            &item_rows,
+            startup_progress,
+        )
+        .await?;
         transaction
             .commit()
             .await
             .context("failed to commit startup authority event staging")?;
 
         staged_events.total_count += events.len();
-        for event in events {
+        for (index, event) in events.iter().enumerate() {
             *staged_events
                 .by_kind
                 .entry(event.event_kind.clone())
                 .or_insert(0) += 1;
+            if index + 1 == events.len()
+                || (index + 1).is_multiple_of(CHECKPOINT_ITEM_INSERT_BATCH_SIZE)
+            {
+                record_startup_adapter_progress(pool, startup_progress).await?;
+            }
         }
         Ok(())
     }

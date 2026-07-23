@@ -7,11 +7,13 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+use bigname_adapters::StartupAdapterProgress;
 use tracing::info;
 
 use crate::reconciliation::{
     replay::{
-        NormalizedEventReplayAdapter, replay_stateless_normalized_events_before_full_closure,
+        NormalizedEventReplayAdapter,
+        replay_stateless_normalized_events_before_full_closure_with_progress,
         select_log_bounded_replay_to_block,
     },
     types::{
@@ -63,6 +65,8 @@ pub(crate) async fn sync_automatic_two_phase_full_closure_normalized_events(
     stateless_ranges: &[(i64, i64)],
     adapters: &[NormalizedEventReplayAdapter],
     max_raw_logs_per_page: usize,
+    stateless_progress: &mut dyn StartupAdapterProgress,
+    closure_progress: &mut dyn StartupAdapterProgress,
 ) -> Result<AutomaticTwoPhaseFullClosureSyncResult> {
     info!(
         service = "indexer",
@@ -87,6 +91,7 @@ pub(crate) async fn sync_automatic_two_phase_full_closure_normalized_events(
         adapters,
         max_raw_logs_per_page,
         FullClosureCheckpointCompletion::Retain,
+        &mut Some(closure_progress),
         move || async move {
             let stateless = replay_stateless_normalized_events_for_ranges(
                 pool,
@@ -94,6 +99,7 @@ pub(crate) async fn sync_automatic_two_phase_full_closure_normalized_events(
                 chain,
                 stateless_ranges,
                 max_raw_logs_per_page,
+                stateless_progress,
             )
             .await?;
             stateless_replay_completed_in_prelude.store(true, Ordering::Release);
@@ -123,6 +129,7 @@ async fn replay_stateless_normalized_events_for_ranges(
     chain: &str,
     stateless_ranges: &[(i64, i64)],
     max_raw_logs_per_page: usize,
+    progress: &mut dyn StartupAdapterProgress,
 ) -> Result<RawFactNormalizedEventReplayOutcome> {
     ensure!(
         !stateless_ranges.is_empty(),
@@ -150,6 +157,7 @@ async fn replay_stateless_normalized_events_for_ranges(
             range_start_block_number,
             target_block_number,
             max_raw_logs_per_page,
+            progress,
         )
         .await?;
         aggregate.selected_block_count += range.selected_block_count;
@@ -172,6 +180,7 @@ async fn replay_stateless_normalized_events_in_pages(
     range_start_block_number: i64,
     target_block_number: i64,
     max_raw_logs_per_page: usize,
+    progress: &mut dyn StartupAdapterProgress,
 ) -> Result<RawFactNormalizedEventReplayOutcome> {
     ensure!(
         range_start_block_number <= target_block_number,
@@ -208,7 +217,7 @@ async fn replay_stateless_normalized_events_in_pages(
         #[cfg(test)]
         test_hook::record_stateless_page(pool, deployment_profile, chain, from_block, to_block)
             .await?;
-        let page = replay_stateless_normalized_events_before_full_closure(
+        let page = replay_stateless_normalized_events_before_full_closure_with_progress(
             pool,
             RawFactNormalizedEventReplayRequest {
                 deployment_profile: deployment_profile.to_owned(),
@@ -218,6 +227,7 @@ async fn replay_stateless_normalized_events_in_pages(
                     to_block,
                 },
             },
+            progress,
         )
         .await?;
         aggregate.selected_block_count += page.selected_block_count;
@@ -229,6 +239,7 @@ async fn replay_stateless_normalized_events_in_pages(
         aggregate
             .stateless_replay_authority
             .add(&page.stateless_replay_authority);
+        progress.record(pool).await?;
 
         if to_block == target_block_number {
             break;

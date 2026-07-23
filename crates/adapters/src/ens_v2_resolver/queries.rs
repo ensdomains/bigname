@@ -314,13 +314,18 @@ pub(super) async fn load_resolver_raw_logs(
     Ok(output)
 }
 
-pub(super) async fn load_active_emitters(pool: &PgPool, chain: &str) -> Result<Vec<ActiveEmitter>> {
+pub(super) async fn load_active_emitters(
+    pool: &PgPool,
+    chain: &str,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<Vec<ActiveEmitter>> {
     crate::ens_v2_common::load_active_emitters(
         pool,
         chain,
         SOURCE_FAMILY_ENS_V2_RESOLVER_L1,
         RESOLVER_EDGE_KIND,
         "ENSv2 resolver",
+        progress,
     )
     .await
 }

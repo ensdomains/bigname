@@ -1,9 +1,12 @@
 use anyhow::{Context, Result};
 use bigname_manifests::{
-    ManifestBootstrapTarget, WatchedSourceSelector, WatchedTargetIdentity,
+    ManifestBootstrapTarget, ManifestRuntimeProgress, WatchedSourceSelector, WatchedTargetIdentity,
+    has_required_watched_tuples, has_required_watched_tuples_with_progress,
     load_discovery_admission_epoch, load_ens_v2_authoritative_discovery_bootstrap_targets,
+    load_ens_v2_authoritative_discovery_bootstrap_targets_with_progress,
     load_historical_watched_source_selector_plan,
-    load_manifest_declared_watched_source_selector_plan, load_required_watched_tuples,
+    load_historical_watched_source_selector_plan_with_progress,
+    load_manifest_declared_watched_source_selector_plan,
 };
 use sqlx::Row;
 
@@ -102,6 +105,7 @@ impl BootstrapConvergenceTracker {
         chain: &str,
         through_block: i64,
         status: BootstrapPassStatus,
+        mut progress: Option<&mut dyn ManifestRuntimeProgress>,
     ) -> Result<()> {
         match status {
             BootstrapPassStatus::Stable => Ok(()),
@@ -118,16 +122,39 @@ impl BootstrapConvergenceTracker {
             }
             BootstrapPassStatus::DiscoveryExpanded => {
                 self.consecutive_retention_authority_retries = 0;
-                let snapshot =
-                    load_bootstrap_retention_snapshot(pool, chain, through_block).await?;
+                let snapshot = match progress.as_mut() {
+                    Some(progress) => {
+                        load_bootstrap_retention_snapshot_with_progress(
+                            pool,
+                            chain,
+                            through_block,
+                            *progress,
+                        )
+                        .await?
+                    }
+                    None => load_bootstrap_retention_snapshot(pool, chain, through_block).await?,
+                };
                 let progress = EnsV2DiscoveryProgress {
                     generation: snapshot.generation,
-                    targets: load_ens_v2_authoritative_discovery_bootstrap_targets(
-                        pool,
-                        chain,
-                        through_block,
-                    )
-                    .await?,
+                    targets: match progress.as_mut() {
+                        Some(progress) => {
+                            load_ens_v2_authoritative_discovery_bootstrap_targets_with_progress(
+                                pool,
+                                chain,
+                                through_block,
+                                *progress,
+                            )
+                            .await?
+                        }
+                        None => {
+                            load_ens_v2_authoritative_discovery_bootstrap_targets(
+                                pool,
+                                chain,
+                                through_block,
+                            )
+                            .await?
+                        }
+                    },
                 };
                 self.record_discovery_progress(chain, progress)
             }
@@ -163,14 +190,41 @@ pub(crate) async fn load_bootstrap_retention_snapshot(
     chain: &str,
     through_block: i64,
 ) -> Result<BootstrapRetentionSnapshot> {
+    load_bootstrap_retention_snapshot_inner(pool, chain, through_block, None).await
+}
+
+pub(super) async fn load_bootstrap_retention_snapshot_with_progress(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    through_block: i64,
+    progress: &mut dyn ManifestRuntimeProgress,
+) -> Result<BootstrapRetentionSnapshot> {
+    load_bootstrap_retention_snapshot_inner(pool, chain, through_block, Some(progress)).await
+}
+
+async fn load_bootstrap_retention_snapshot_inner(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    through_block: i64,
+    progress: Option<&mut dyn ManifestRuntimeProgress>,
+) -> Result<BootstrapRetentionSnapshot> {
     let source_families = bigname_manifests::ENS_V2_RETAINED_HISTORY_SOURCE_FAMILIES
         .iter()
         .map(|source_family| (*source_family).to_owned())
         .collect::<Vec<_>>();
-    let has_ens_v2_history_requirements =
-        !load_required_watched_tuples(pool, chain, 0, through_block, &source_families)
-            .await?
-            .is_empty();
+    let has_ens_v2_history_requirements = if let Some(progress) = progress {
+        has_required_watched_tuples_with_progress(
+            pool,
+            chain,
+            0,
+            through_block,
+            &source_families,
+            progress,
+        )
+        .await?
+    } else {
+        has_required_watched_tuples(pool, chain, 0, through_block, &source_families).await?
+    };
     let discovery_admission_epoch = load_discovery_admission_epoch(pool, chain).await?;
     let row = sqlx::query(
         r#"
@@ -277,6 +331,35 @@ pub(crate) async fn converge_ens_v2_retained_history_through_block(
     }
 }
 
+pub(super) async fn converge_ens_v2_retained_history_through_block_with_progress(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    through_block: i64,
+    has_ens_v2_history_requirements: bool,
+    progress: &mut dyn bigname_adapters::StartupAdapterProgress,
+) -> Result<bool> {
+    if !has_ens_v2_history_requirements {
+        return Ok(false);
+    }
+
+    match bigname_adapters::sync_ens_v2_registry_resource_surface_through_block_with_progress(
+        pool,
+        chain,
+        through_block,
+        progress,
+    )
+    .await
+    {
+        Ok(_) => Ok(false),
+        Err(error) if bigname_adapters::is_ens_v2_missing_coverage(&error) => Ok(true),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "failed to converge ENSv2 full-source authority on chain {chain} through block {through_block}"
+            )
+        }),
+    }
+}
+
 pub(super) async fn finish_bootstrap_convergence_pass(
     pool: &sqlx::PgPool,
     chain: &str,
@@ -301,20 +384,72 @@ pub(super) async fn finish_bootstrap_convergence_pass(
     };
 
     let current = load_bootstrap_retention_snapshot(pool, chain, through_block).await?;
+    Ok(classify_bootstrap_pass(
+        planned,
+        current,
+        requested_adapter_sync_mode,
+        newly_required_coverage,
+    ))
+}
+
+pub(super) async fn finish_bootstrap_convergence_pass_with_progress<P>(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    through_block: i64,
+    planned: BootstrapRetentionSnapshot,
+    requested_adapter_sync_mode: BackfillAdapterSyncMode,
+    progress: &mut P,
+) -> Result<BootstrapPassStatus>
+where
+    P: bigname_adapters::StartupAdapterProgress + ManifestRuntimeProgress,
+{
+    #[cfg(test)]
+    maybe_force_retention_rotation(pool, chain).await?;
+
+    let newly_required_coverage = if requested_adapter_sync_mode == BackfillAdapterSyncMode::RawOnly
+    {
+        false
+    } else {
+        converge_ens_v2_retained_history_through_block_with_progress(
+            pool,
+            chain,
+            through_block,
+            planned.has_ens_v2_history_requirements,
+            progress,
+        )
+        .await?
+    };
+    let current =
+        load_bootstrap_retention_snapshot_with_progress(pool, chain, through_block, progress)
+            .await?;
+    Ok(classify_bootstrap_pass(
+        planned,
+        current,
+        requested_adapter_sync_mode,
+        newly_required_coverage,
+    ))
+}
+
+fn classify_bootstrap_pass(
+    planned: BootstrapRetentionSnapshot,
+    current: BootstrapRetentionSnapshot,
+    requested_adapter_sync_mode: BackfillAdapterSyncMode,
+    newly_required_coverage: bool,
+) -> BootstrapPassStatus {
     if !newly_required_coverage
         && (requested_adapter_sync_mode == BackfillAdapterSyncMode::RawOnly
             || !current.requires_ens_v2_history_recovery)
         && retention_snapshots_are_stable(planned, current)
     {
-        Ok(BootstrapPassStatus::Stable)
+        BootstrapPassStatus::Stable
     } else if current.generation != planned.generation {
-        Ok(BootstrapPassStatus::RetentionAuthorityChanged)
+        BootstrapPassStatus::RetentionAuthorityChanged
     } else if newly_required_coverage
         || current.discovery_admission_epoch != planned.discovery_admission_epoch
     {
-        Ok(BootstrapPassStatus::DiscoveryExpanded)
+        BootstrapPassStatus::DiscoveryExpanded
     } else {
-        Ok(BootstrapPassStatus::RetentionAuthorityChanged)
+        BootstrapPassStatus::RetentionAuthorityChanged
     }
 }
 
@@ -351,6 +486,46 @@ pub(super) async fn load_bootstrap_source_plan(
             range.to_block,
         )
         .await
+    }
+}
+
+pub(super) async fn load_bootstrap_source_plan_with_progress(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    targets: &[ManifestBootstrapTarget],
+    range: BackfillBlockRange,
+    include_historical_recovery_targets: bool,
+    progress: &mut dyn ManifestRuntimeProgress,
+) -> Result<bigname_manifests::WatchedSourceSelectorPlan> {
+    let selector = WatchedSourceSelector::WatchedTargetSet(
+        targets
+            .iter()
+            .map(|target| WatchedTargetIdentity {
+                contract_instance_id: target.contract_instance_id,
+            })
+            .collect(),
+    );
+    if include_historical_recovery_targets {
+        load_historical_watched_source_selector_plan_with_progress(
+            pool,
+            chain,
+            selector,
+            range.from_block,
+            range.to_block,
+            progress,
+        )
+        .await
+    } else {
+        let plan = load_manifest_declared_watched_source_selector_plan(
+            pool,
+            chain,
+            selector,
+            range.from_block,
+            range.to_block,
+        )
+        .await?;
+        progress.record(pool).await?;
+        Ok(plan)
     }
 }
 

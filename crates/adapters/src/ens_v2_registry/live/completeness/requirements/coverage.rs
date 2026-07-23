@@ -3,6 +3,8 @@ use bigname_manifests::RequiredWatchedTuple;
 use sqlx::Row;
 
 use super::requirement_intervals_not_covered_by;
+use super::requirement_intervals_not_covered_by_with_progress;
+use crate::checkpoint_context::StartupAdapterProgress;
 use crate::ens_v2_registry::EnsV2MissingCoverage;
 
 pub(in crate::ens_v2_registry::live::completeness) async fn ensure_generation_bound_coverage(
@@ -60,6 +62,71 @@ pub(in crate::ens_v2_registry::live::completeness) async fn ensure_generation_bo
         retention_generation,
     )
     .await
+}
+
+#[expect(clippy::too_many_arguments)]
+pub(in crate::ens_v2_registry::live::completeness) async fn ensure_generation_bound_coverage_with_live_selection_with_progress(
+    pool: &sqlx::PgPool,
+    connection: &mut sqlx::PgConnection,
+    chain: &str,
+    requirements: &[RequiredWatchedTuple],
+    retention_generation: i64,
+    selected_addresses: &[String],
+    selected_block_intervals: &[(i64, i64)],
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<()> {
+    let selected_addresses = selected_addresses
+        .iter()
+        .map(|address| address.to_ascii_lowercase())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut live_coverage = Vec::new();
+    let mut examined = 0usize;
+    for requirement in requirements {
+        if selected_addresses.contains(&requirement.address.to_ascii_lowercase()) {
+            for &(selected_from, selected_to) in selected_block_intervals {
+                let covered_from = requirement.required_from_block.max(selected_from);
+                let covered_to = requirement.required_to_block.min(selected_to);
+                if covered_from <= covered_to {
+                    live_coverage.push(RequiredWatchedTuple {
+                        source_family: requirement.source_family.clone(),
+                        address: requirement.address.clone(),
+                        required_from_block: covered_from,
+                        required_to_block: covered_to,
+                    });
+                }
+                examined += 1;
+                if examined.is_multiple_of(super::super::RETAINED_REQUIREMENT_PROGRESS_ROWS) {
+                    progress.record(pool).await?;
+                }
+            }
+        } else {
+            examined += 1;
+            if examined.is_multiple_of(super::super::RETAINED_REQUIREMENT_PROGRESS_ROWS) {
+                progress.record(pool).await?;
+            }
+        }
+    }
+    if examined > 0 && !examined.is_multiple_of(super::super::RETAINED_REQUIREMENT_PROGRESS_ROWS) {
+        progress.record(pool).await?;
+    }
+    let remaining_requirements = requirement_intervals_not_covered_by_with_progress(
+        pool,
+        requirements,
+        &live_coverage,
+        progress,
+    )
+    .await?;
+    for page in remaining_requirements.chunks(super::super::RETAINED_REQUIREMENT_PROGRESS_ROWS) {
+        ensure_newly_required_generation_bound_coverage(
+            connection,
+            chain,
+            page,
+            retention_generation,
+        )
+        .await?;
+        progress.record(pool).await?;
+    }
+    Ok(())
 }
 
 pub(in crate::ens_v2_registry::live::completeness) async fn ensure_newly_required_generation_bound_coverage(

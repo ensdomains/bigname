@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, future::Future, pin::Pin};
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
@@ -22,9 +22,18 @@ const REORG_INVALIDATION_BATCH_SIZE: i64 = 500;
 #[cfg(test)]
 const REORG_INVALIDATION_BATCH_SIZE: i64 = 2;
 
+pub type ExecutionOutcomeInvalidationProgressFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+
+pub trait ExecutionOutcomeInvalidationProgress: Send {
+    fn record<'a>(&'a mut self, pool: &'a PgPool)
+    -> ExecutionOutcomeInvalidationProgressFuture<'a>;
+}
+
 #[derive(Clone, Debug)]
 struct ExecutionOutcomeReorgInvalidationCandidate {
     execution_cache_key: String,
+    request_type: String,
     request_key: String,
     requested_chain_positions: Value,
     topology_version_boundary: Value,
@@ -181,12 +190,25 @@ pub async fn invalidate_execution_outcomes_for_record_boundary_and_request_key(
 pub async fn invalidate_execution_outcomes_for_orphaned_blocks(
     pool: &PgPool,
 ) -> Result<ExecutionOutcomeInvalidationSummary> {
+    invalidate_execution_outcomes_for_orphaned_blocks_inner(pool, &mut None).await
+}
+
+pub async fn invalidate_execution_outcomes_for_orphaned_blocks_with_progress(
+    pool: &PgPool,
+    progress: &mut dyn ExecutionOutcomeInvalidationProgress,
+) -> Result<ExecutionOutcomeInvalidationSummary> {
+    invalidate_execution_outcomes_for_orphaned_blocks_inner(pool, &mut Some(progress)).await
+}
+
+async fn invalidate_execution_outcomes_for_orphaned_blocks_inner(
+    pool: &PgPool,
+    progress: &mut Option<&mut dyn ExecutionOutcomeInvalidationProgress>,
+) -> Result<ExecutionOutcomeInvalidationSummary> {
     let mut transaction = pool
         .begin()
         .await
         .context("failed to open transaction for execution reorg invalidation")?;
 
-    let orphaned_blocks = load_orphaned_block_dependencies_internal(&mut *transaction).await?;
     let mut deleted_outcome_count = 0;
     let mut last_seen_cache_key = None;
     loop {
@@ -201,7 +223,15 @@ pub async fn invalidate_execution_outcomes_for_orphaned_blocks(
         last_seen_cache_key = Some(last_outcome.execution_cache_key.clone());
 
         let mut cache_keys = Vec::new();
+        let mut parsed_dependencies = Vec::new();
+        let mut candidate_dependencies = BTreeSet::new();
         for outcome in outcomes {
+            if !matches!(
+                outcome.request_type.as_str(),
+                "verified_resolution" | "verified_primary_name"
+            ) {
+                continue;
+            }
             let dependencies = match execution_outcome_block_dependencies(
                 &outcome.request_key,
                 &outcome.requested_chain_positions,
@@ -214,16 +244,24 @@ pub async fn invalidate_execution_outcomes_for_orphaned_blocks(
                     continue;
                 }
             };
+            candidate_dependencies.extend(dependencies.iter().cloned());
+            parsed_dependencies.push((outcome.execution_cache_key, dependencies));
+        }
+        let orphaned_dependencies =
+            load_orphaned_block_dependencies_internal(&mut *transaction, &candidate_dependencies)
+                .await?;
+        for (execution_cache_key, dependencies) in parsed_dependencies {
             if dependencies
                 .iter()
-                .any(|dependency| orphaned_blocks.contains(dependency))
+                .any(|dependency| orphaned_dependencies.contains(dependency))
             {
-                cache_keys.push(outcome.execution_cache_key);
+                cache_keys.push(execution_cache_key);
             }
         }
 
         deleted_outcome_count +=
             delete_execution_outcomes_by_keys(&mut transaction, &cache_keys).await?;
+        record_reorg_invalidation_progress(pool, progress).await?;
     }
 
     transaction
@@ -234,6 +272,16 @@ pub async fn invalidate_execution_outcomes_for_orphaned_blocks(
     Ok(ExecutionOutcomeInvalidationSummary {
         deleted_outcome_count,
     })
+}
+
+async fn record_reorg_invalidation_progress(
+    pool: &PgPool,
+    progress: &mut Option<&mut dyn ExecutionOutcomeInvalidationProgress>,
+) -> Result<()> {
+    if let Some(progress) = progress.as_deref_mut() {
+        progress.record(pool).await?;
+    }
+    Ok(())
 }
 
 impl ExecutionManifestInvalidation {
@@ -399,13 +447,13 @@ where
         r#"
         SELECT
             execution_cache_key,
+            request_type,
             request_key,
             requested_chain_positions,
             topology_version_boundary,
             record_version_boundary
         FROM execution_cache_outcomes
-        WHERE request_type IN ('verified_resolution', 'verified_primary_name')
-          AND ($1::text IS NULL OR execution_cache_key > $1)
+        WHERE ($1::text IS NULL OR execution_cache_key > $1)
         ORDER BY execution_cache_key
         LIMIT $2
         "#,
@@ -423,21 +471,37 @@ where
 
 async fn load_orphaned_block_dependencies_internal<'e, E>(
     executor: E,
+    dependencies: &BTreeSet<(String, String)>,
 ) -> Result<BTreeSet<(String, String)>>
 where
     E: Executor<'e, Database = Postgres>,
 {
+    if dependencies.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let chains = dependencies
+        .iter()
+        .map(|(chain, _)| chain.as_str())
+        .collect::<Vec<_>>();
+    let block_hashes = dependencies
+        .iter()
+        .map(|(_, block_hash)| block_hash.as_str())
+        .collect::<Vec<_>>();
     let rows = sqlx::query(
         r#"
-        SELECT chain_id, block_hash
-        FROM chain_lineage
-        WHERE canonicality_state = 'orphaned'::canonicality_state
-        ORDER BY chain_id, block_hash
+        SELECT lineage.chain_id, lineage.block_hash
+        FROM UNNEST($1::TEXT[], $2::TEXT[]) dependency(chain_id, block_hash)
+        JOIN chain_lineage lineage
+          ON lineage.chain_id = dependency.chain_id
+         AND lineage.block_hash = dependency.block_hash
+        WHERE lineage.canonicality_state = 'orphaned'::canonicality_state
         "#,
     )
+    .bind(chains)
+    .bind(block_hashes)
     .fetch_all(executor)
     .await
-    .context("failed to load orphaned block identities for execution reorg invalidation")?;
+    .context("failed to match execution dependencies against orphaned block identities")?;
 
     rows.into_iter()
         .map(|row| {
@@ -481,6 +545,9 @@ fn decode_execution_outcome_reorg_invalidation_candidate_row(
         execution_cache_key: row
             .try_get("execution_cache_key")
             .context("execution outcome row missing execution_cache_key")?,
+        request_type: row
+            .try_get("request_type")
+            .context("execution outcome row missing request_type")?,
         request_key: row
             .try_get("request_key")
             .context("execution outcome row missing request_key")?,

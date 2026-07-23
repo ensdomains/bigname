@@ -3377,6 +3377,7 @@ async fn insert_active_replay_watched_contract_with_source_family(
             file_path,
             manifest_payload
         )
+        OVERRIDING SYSTEM VALUE
         VALUES (
             $1,
             1,

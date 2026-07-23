@@ -24,7 +24,10 @@ pub use full::{
 pub use scoped::{
     reconcile_scoped_discovery_observation_transitions, reconcile_scoped_discovery_observations,
 };
-pub use streamed::{DiscoveryObservationPageSource, reconcile_discovery_observations_streamed};
+pub use streamed::{
+    DiscoveryObservationPageSource, reconcile_discovery_observations_streamed,
+    reconcile_discovery_observations_streamed_with_full_options,
+};
 #[cfg(test)]
 pub(crate) use streamed::{
     StreamedDiscoveryReconciliationOptions, reconcile_discovery_observations_streamed_with_options,

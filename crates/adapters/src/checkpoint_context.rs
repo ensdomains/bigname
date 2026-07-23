@@ -27,6 +27,15 @@ pub(crate) async fn record_startup_adapter_progress(
     Ok(())
 }
 
+pub(crate) fn reborrow_startup_adapter_progress<'a>(
+    progress: &'a mut Option<&mut dyn StartupAdapterProgress>,
+) -> Option<&'a mut dyn StartupAdapterProgress> {
+    match progress.as_mut() {
+        Some(progress) => Some(&mut **progress),
+        None => None,
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReplayAdapterCheckpointContext {
     pub deployment_profile: String,

@@ -89,7 +89,7 @@ pub struct ManifestProxyImplementationDriftEdge {
     pub provenance: Value,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ManifestCodeHashObservation {
     pub chain: String,
     pub source_family: String,

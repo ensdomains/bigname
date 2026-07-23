@@ -40,10 +40,11 @@ pub(super) async fn run_streamed_admission_walk(
     admission_state: &DiscoveryAdmissionState,
     options: &StreamedDiscoveryReconciliationOptions,
     progress: &impl DiscoveryObservationPageSource,
-) -> Result<()> {
+) -> Result<usize> {
     let mut walk = DiscoveryAdmissionWalk::new(admission_state);
     let mut desired_buffer = Vec::<ReconciledDiscoveryEdgeSpec>::new();
     let mut admitted_buffer = Vec::<AdmittedDiscoveryEdge>::new();
+    let mut admitted_edge_count = 0usize;
     let mut pending_derived_keys = BTreeSet::<(String, String)>::new();
 
     let mut after_key = None::<String>;
@@ -77,6 +78,7 @@ pub(super) async fn run_streamed_admission_walk(
             &rows,
             &mut desired_buffer,
             &mut admitted_buffer,
+            &mut admitted_edge_count,
             &mut pending_derived_keys,
             options,
             progress,
@@ -112,6 +114,7 @@ pub(super) async fn run_streamed_admission_walk(
                 &rows,
                 &mut desired_buffer,
                 &mut admitted_buffer,
+                &mut admitted_edge_count,
                 &mut pending_derived_keys,
                 options,
                 progress,
@@ -123,7 +126,7 @@ pub(super) async fn run_streamed_admission_walk(
 
     flush_desired_edge_buffer(&mut *executor, &mut desired_buffer).await?;
     progress.record_progress().await?;
-    flush_admitted_edge_buffer(&mut *executor, &mut admitted_buffer).await?;
+    admitted_edge_count += flush_admitted_edge_buffer(&mut *executor, &mut admitted_buffer).await?;
     progress.record_progress().await?;
     insert_pending_contract_instance_seeds(
         &mut *executor,
@@ -134,7 +137,7 @@ pub(super) async fn run_streamed_admission_walk(
     analyze_temp_table(&mut *executor, "reconcile_desired_edges").await?;
     analyze_temp_table(&mut *executor, "reconcile_admitted_edges").await?;
     progress.record_progress().await?;
-    Ok(())
+    Ok(admitted_edge_count)
 }
 
 fn derived_observation_page_query(observation_page_limit: i64) -> String {
@@ -160,6 +163,7 @@ async fn admit_streamed_observation_page(
     rows: &[StreamedObservationRow],
     desired_buffer: &mut Vec<ReconciledDiscoveryEdgeSpec>,
     admitted_buffer: &mut Vec<AdmittedDiscoveryEdge>,
+    admitted_edge_count: &mut usize,
     pending_derived_keys: &mut BTreeSet<(String, String)>,
     options: &StreamedDiscoveryReconciliationOptions,
     progress: &impl DiscoveryObservationPageSource,
@@ -206,7 +210,8 @@ async fn admit_streamed_observation_page(
             progress.record_progress().await?;
         }
         if admitted_buffer.len() >= options.mutation_batch_size {
-            flush_admitted_edge_buffer(&mut *executor, admitted_buffer).await?;
+            *admitted_edge_count +=
+                flush_admitted_edge_buffer(&mut *executor, admitted_buffer).await?;
             progress.record_progress().await?;
         }
     }
@@ -291,9 +296,9 @@ async fn flush_desired_edge_buffer(
 async fn flush_admitted_edge_buffer(
     executor: &mut PgConnection,
     buffer: &mut Vec<AdmittedDiscoveryEdge>,
-) -> Result<()> {
+) -> Result<usize> {
     if buffer.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
@@ -327,13 +332,14 @@ async fn flush_admitted_edge_buffer(
             .push_bind(&edge.from_role);
     });
     builder.push(" ON CONFLICT DO NOTHING ");
-    builder
+    let inserted_count = builder
         .build()
         .execute(&mut *executor)
         .await
-        .context("failed to stage streamed admitted discovery edges")?;
+        .context("failed to stage streamed admitted discovery edges")?
+        .rows_affected();
     buffer.clear();
-    Ok(())
+    usize::try_from(inserted_count).context("staged admitted discovery-edge count exceeds usize")
 }
 
 #[cfg(test)]

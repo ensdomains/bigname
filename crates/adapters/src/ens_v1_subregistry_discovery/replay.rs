@@ -50,6 +50,25 @@ pub async fn sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_li
     .await
 }
 
+pub async fn sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit_and_progress(
+    pool: &PgPool,
+    chain: &str,
+    checkpoint: &ReplayAdapterCheckpointContext,
+    max_raw_logs_per_page: usize,
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<EnsV1SubregistryDiscoverySyncSummary> {
+    let checkpoint = AdapterCheckpointContext::for_replay(checkpoint);
+    sync_ens_v1_subregistry_discovery_with_checkpoint_context(
+        pool,
+        chain,
+        &checkpoint,
+        max_raw_logs_per_page,
+        None,
+        Some(progress),
+    )
+    .await
+}
+
 pub(super) async fn sync_ens_v1_subregistry_discovery_with_checkpoint_context(
     pool: &PgPool,
     chain: &str,

@@ -3,7 +3,7 @@ use std::{
     str::FromStr,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize as HeartbeatRecordCount, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -26,6 +26,7 @@ use sqlx::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
+    sync::Notify,
     task::JoinHandle,
 };
 
@@ -33,6 +34,131 @@ use super::*;
 use crate::run_mode::IndexerRunMode;
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone)]
+pub(crate) struct BlockingHeartbeatHandle {
+    blocked: Arc<Notify>,
+    resume: Arc<Notify>,
+    record_count: Arc<HeartbeatRecordCount>,
+}
+
+pub(crate) struct BlockingHeartbeatProgress {
+    instance_id: String,
+    chain_ids: Vec<String>,
+    block_before_record: usize,
+    handle: BlockingHeartbeatHandle,
+}
+
+impl BlockingHeartbeatProgress {
+    pub(crate) fn new(
+        instance_id: impl Into<String>,
+        chain_ids: Vec<String>,
+        block_before_record: usize,
+    ) -> (Self, BlockingHeartbeatHandle) {
+        let handle = BlockingHeartbeatHandle {
+            blocked: Arc::new(Notify::new()),
+            resume: Arc::new(Notify::new()),
+            record_count: Arc::new(HeartbeatRecordCount::new(0)),
+        };
+        (
+            Self {
+                instance_id: instance_id.into(),
+                chain_ids,
+                block_before_record,
+                handle: handle.clone(),
+            },
+            handle,
+        )
+    }
+
+    async fn record(&mut self, pool: &PgPool) -> Result<()> {
+        let record_number = self.handle.record_count.fetch_add(1, Ordering::AcqRel) + 1;
+        if record_number == self.block_before_record {
+            self.handle.blocked.notify_one();
+            self.handle.resume.notified().await;
+        }
+        bigname_storage::record_service_loop_heartbeat(
+            pool,
+            bigname_storage::INDEXER_SERVICE_NAME,
+            &self.instance_id,
+            &self.chain_ids,
+        )
+        .await
+    }
+}
+
+impl BlockingHeartbeatHandle {
+    pub(crate) async fn wait_until_blocked(&self) {
+        self.blocked.notified().await;
+    }
+
+    pub(crate) fn resume(&self) {
+        self.resume.notify_one();
+    }
+
+    pub(crate) fn record_count(&self) -> usize {
+        self.record_count.load(Ordering::Acquire)
+    }
+}
+
+impl bigname_adapters::StartupAdapterProgress for BlockingHeartbeatProgress {
+    fn record<'a>(
+        &'a mut self,
+        pool: &'a PgPool,
+    ) -> bigname_adapters::StartupAdapterProgressFuture<'a> {
+        Box::pin(BlockingHeartbeatProgress::record(self, pool))
+    }
+}
+
+impl bigname_manifests::ManifestRuntimeProgress for BlockingHeartbeatProgress {
+    fn record<'a>(
+        &'a mut self,
+        pool: &'a PgPool,
+    ) -> bigname_manifests::ManifestRuntimeProgressFuture<'a> {
+        Box::pin(BlockingHeartbeatProgress::record(self, pool))
+    }
+}
+
+pub(crate) async fn install_stale_indexer_heartbeat(
+    pool: &PgPool,
+    instance_id: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS service_loop_heartbeats (
+            service_name TEXT NOT NULL,
+            instance_id TEXT NOT NULL,
+            scope_kind TEXT NOT NULL,
+            scope_id TEXT NOT NULL,
+            started_at TIMESTAMPTZ NOT NULL,
+            heartbeat_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (service_name, instance_id, scope_kind, scope_id)
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    bigname_storage::register_service_loop(
+        pool,
+        bigname_storage::INDEXER_SERVICE_NAME,
+        instance_id,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE service_loop_heartbeats
+        SET started_at = clock_timestamp() - INTERVAL '2 minutes',
+            heartbeat_at = clock_timestamp() - INTERVAL '1 minute'
+        WHERE service_name = 'indexer'
+          AND instance_id = $1
+          AND scope_kind = 'process'
+        "#,
+    )
+    .bind(instance_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
 
 struct TestManifestDir {
     path: PathBuf,
@@ -232,11 +358,11 @@ impl TestDatabase {
             .await
             .with_context(|| format!("failed to create test database {database_name}"))?;
 
-        // The full-closure replay holds the raw-log staging guard and the
-        // streamed reconcile transaction while paging staged checkpoint
-        // assignments over a third pooled connection.
+        // Progress-enabled resolver convergence can hold the runtime writer
+        // guard, reconciliation guard, and a bounded read transaction while
+        // recording a heartbeat over a fourth pooled connection.
         let pool = PgPoolOptions::new()
-            .max_connections(3)
+            .max_connections(4)
             .connect_with(base_options.database(&database_name))
             .await
             .context("failed to connect indexer test pool")?;
@@ -2198,22 +2324,27 @@ async fn insert_manifest_contract_instance(
                 "failed to insert manifest contract contract_instance_id {contract_instance_id} for manifest_id {manifest_id}"
             )
         })?;
-    sqlx::query(
-        r#"
-            INSERT INTO manifest_contracts (manifest_id, role, address, proxy_kind, implementation)
-            VALUES ($1, $2, $3, $4, $5)
-            "#,
-    )
-    .bind(manifest_id)
-    .bind(role)
-    .bind(address)
-    .bind(proxy_kind)
-    .bind(declared_implementation_address)
-    .execute(pool)
-    .await
-    .with_context(|| {
-        format!("failed to mirror manifest_contracts row for manifest_id {manifest_id}")
-    })?;
+    if sqlx::query_scalar::<_, bool>("SELECT to_regclass('manifest_contracts') IS NOT NULL")
+        .fetch_one(pool)
+        .await?
+    {
+        sqlx::query(
+            r#"
+                INSERT INTO manifest_contracts (manifest_id, role, address, proxy_kind, implementation)
+                VALUES ($1, $2, $3, $4, $5)
+                "#,
+        )
+        .bind(manifest_id)
+        .bind(role)
+        .bind(address)
+        .bind(proxy_kind)
+        .bind(declared_implementation_address)
+        .execute(pool)
+        .await
+        .with_context(|| {
+            format!("failed to mirror manifest_contracts row for manifest_id {manifest_id}")
+        })?;
+    }
 
     Ok(())
 }

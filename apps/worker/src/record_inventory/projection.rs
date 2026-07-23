@@ -101,7 +101,7 @@ async fn rebuild_record_inventory_current_inner(
     loop_heartbeat: Option<&mut LoopHeartbeat>,
 ) -> Result<RecordInventoryCurrentRebuildSummary> {
     match resource_id {
-        Some(resource_id) => rebuild_one_resource(pool, resource_id).await,
+        Some(resource_id) => rebuild_one_resource(pool, resource_id, loop_heartbeat).await,
         None => rebuild_all_resources(pool, loop_heartbeat).await,
     }
 }
@@ -220,13 +220,16 @@ async fn build_row_for_resource(
 async fn rebuild_one_resource(
     pool: &PgPool,
     resource_id: &str,
+    mut loop_heartbeat: Option<&mut LoopHeartbeat>,
 ) -> Result<RecordInventoryCurrentRebuildSummary> {
     let resource_id = Uuid::parse_str(resource_id)
         .with_context(|| format!("resource_id must be a UUID: {resource_id}"))?;
     let events = load_relevant_events(pool, resource_id).await?;
+    record_rebuild_progress(pool, &mut loop_heartbeat).await;
     if events.is_empty() {
         let deleted_row_count =
             delete_record_inventory_rows_for_resource(pool, resource_id).await?;
+        record_rebuild_progress(pool, &mut loop_heartbeat).await;
         return Ok(RecordInventoryCurrentRebuildSummary {
             requested_resource_count: 1,
             upserted_row_count: 0,
@@ -235,21 +238,26 @@ async fn rebuild_one_resource(
     };
 
     let profile_gate = ResolverProfileGate::load_for_events(pool, &events).await?;
+    record_rebuild_progress(pool, &mut loop_heartbeat).await;
     let Some(row) = build_row_from_events(pool, &profile_gate, resource_id, &events).await? else {
         let deleted_row_count =
             delete_record_inventory_rows_for_resource(pool, resource_id).await?;
+        record_rebuild_progress(pool, &mut loop_heartbeat).await;
         return Ok(RecordInventoryCurrentRebuildSummary {
             requested_resource_count: 1,
             upserted_row_count: 0,
             deleted_row_count,
         });
     };
+    record_rebuild_progress(pool, &mut loop_heartbeat).await;
 
     let upserted_row_count = upsert_record_inventory_current_rows(pool, std::slice::from_ref(&row))
         .await?
         .len();
+    record_rebuild_progress(pool, &mut loop_heartbeat).await;
     let deleted_row_count =
         delete_stale_record_inventory_current_rows_for_resource(pool, resource_id, &row).await?;
+    record_rebuild_progress(pool, &mut loop_heartbeat).await;
     Ok(RecordInventoryCurrentRebuildSummary {
         requested_resource_count: 1,
         upserted_row_count,

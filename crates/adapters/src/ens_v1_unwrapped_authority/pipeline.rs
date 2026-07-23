@@ -22,7 +22,7 @@ use profile_stream::{ResolverProfileStreamInput, sync_resolver_profile_stream};
 use summary::empty_summary;
 
 const FULL_REPLAY_RAW_LOG_STREAM_MAX_BLOCK_SCAN_SPAN: i64 = 262_144;
-const FULL_REPLAY_RAW_LOG_STREAM_DEFAULT_MAX_LOGS_PER_PAGE: usize = 100_000;
+const FULL_REPLAY_RAW_LOG_STREAM_DEFAULT_MAX_LOGS_PER_PAGE: usize = 1_000;
 
 pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
     pool: &PgPool,
@@ -44,15 +44,22 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
     let active_emitters_started = Instant::now();
     let generic_resolver_event_sources =
         load_generic_resolver_event_sources(pool, chain, source_scope.as_deref()).await?;
-    let active_emitters = load_active_emitters(pool, chain, source_scope.as_deref()).await?;
-    let raw_log_active_emitters = active_emitters
-        .iter()
-        .filter(|emitter| {
-            generic_resolver_event_sources.is_empty()
-                || emitter.source_family != SOURCE_FAMILY_ENS_V1_RESOLVER_L1
-        })
-        .cloned()
-        .collect::<Vec<_>>();
+    let active_emitters =
+        load_active_emitters(pool, chain, source_scope.as_deref(), &mut startup_progress).await?;
+    let mut raw_log_active_emitters = Vec::new();
+    for (index, emitter) in active_emitters.iter().enumerate() {
+        if generic_resolver_event_sources.is_empty()
+            || emitter.source_family != SOURCE_FAMILY_ENS_V1_RESOLVER_L1
+        {
+            raw_log_active_emitters.push(emitter.clone());
+        }
+        if index + 1 == active_emitters.len()
+            || (index + 1)
+                .is_multiple_of(crate::startup_progress::STARTUP_ADAPTER_PROGRESS_PAGE_ROWS)
+        {
+            record_startup_adapter_progress(pool, &mut startup_progress).await?;
+        }
+    }
     let active_emitters_ms = active_emitters_started.elapsed().as_millis();
     if active_emitters.is_empty() && generic_resolver_event_sources.is_empty() {
         let summary = empty_summary(0);
@@ -81,14 +88,17 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
                 && replay_checkpoint.is_none(),
             "resolver-profile replay cannot be combined with another restricted or checkpointed authority scope"
         );
-        return sync_resolver_profile_stream(ResolverProfileStreamInput {
-            pool,
-            chain,
-            raw_log_active_emitters: &raw_log_active_emitters,
-            generic_resolver_event_sources: &generic_resolver_event_sources,
-            event_topics: &event_topics,
-            replay,
-        })
+        return sync_resolver_profile_stream(
+            ResolverProfileStreamInput {
+                pool,
+                chain,
+                raw_log_active_emitters: &raw_log_active_emitters,
+                generic_resolver_event_sources: &generic_resolver_event_sources,
+                event_topics: &event_topics,
+                replay,
+            },
+            &mut startup_progress,
+        )
         .await;
     }
     let max_raw_logs_per_page = replay_max_raw_logs_per_page
@@ -127,14 +137,16 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
             active_replay_checkpoint = Some(checkpoint);
         }
         let canonical_blocks_started = Instant::now();
-        let canonical_blocks = load_canonical_blocks(
-            pool,
-            chain,
-            active_replay_checkpoint
-                .as_ref()
-                .map(UnwrappedAuthorityReplayCheckpoint::target_block_number),
-        )
-        .await?;
+        let target_block_number = active_replay_checkpoint
+            .as_ref()
+            .map(UnwrappedAuthorityReplayCheckpoint::target_block_number);
+        let canonical_blocks = match startup_progress.as_deref_mut() {
+            Some(progress) => {
+                load_canonical_blocks_with_progress(pool, chain, target_block_number, progress)
+                    .await?
+            }
+            None => load_canonical_blocks(pool, chain, target_block_number).await?,
+        };
         canonical_blocks_ms = canonical_blocks_started.elapsed().as_millis();
         if canonical_blocks.is_empty() {
             let summary = empty_summary(0);
@@ -160,12 +172,17 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
             .cloned()
             .context("canonical block index must contain a head block")?;
         let reverse_claim_sources_started = Instant::now();
-        let reverse_claim_sources = load_reverse_claim_sources(pool, chain).await?;
+        let reverse_claim_sources = match startup_progress.as_deref_mut() {
+            Some(progress) => {
+                load_reverse_claim_sources_with_progress(pool, chain, progress).await?
+            }
+            None => load_reverse_claim_sources(pool, chain).await?,
+        };
         reverse_claim_sources_ms = reverse_claim_sources_started.elapsed().as_millis();
         if let Some(checkpoint) = active_replay_checkpoint.as_ref() {
             let include_replay_auxiliary_state = checkpoint.needs_replay_auxiliary_state();
             if let Some(state) = checkpoint
-                .load_state(pool, include_replay_auxiliary_state)
+                .load_state(pool, include_replay_auxiliary_state, &mut startup_progress)
                 .await?
             {
                 histories = state.histories;
@@ -293,6 +310,7 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
                         &mut reverse_histories,
                         &mut checkpoint_delta,
                         &mut flushed_events,
+                        &mut startup_progress,
                     )
                     .await?
                 } else {
@@ -325,6 +343,7 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
                         },
                         &checkpoint_delta,
                         &flushed_events,
+                        &mut startup_progress,
                     )
                     .await?;
                 record_startup_adapter_progress(pool, &mut startup_progress).await?;
@@ -393,6 +412,7 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
         .await?;
         raw_log_load_ms = raw_log_load_started.elapsed().as_millis();
         scanned_log_count = raw_logs.len();
+        record_startup_adapter_progress(pool, &mut startup_progress).await?;
         if raw_logs.is_empty() {
             return Ok(empty_summary(scanned_log_count));
         }
@@ -406,6 +426,7 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
         )
         .await?;
         canonical_blocks_ms = canonical_blocks_started.elapsed().as_millis();
+        record_startup_adapter_progress(pool, &mut startup_progress).await?;
         if canonical_blocks.is_empty() {
             return Ok(empty_summary(scanned_log_count));
         }
@@ -421,6 +442,7 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
             HashMap::new()
         };
         reverse_claim_sources_ms = reverse_claim_sources_started.elapsed().as_millis();
+        record_startup_adapter_progress(pool, &mut startup_progress).await?;
         let resolver_profile_gate_started = Instant::now();
         let resolver_profile_gate = if !resolver_profile_fact_nodes.is_empty() {
             ResolverProfileGate::load_for_raw_logs(pool, &raw_logs, &event_topics).await?
@@ -428,10 +450,12 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
             ResolverProfileGate::default()
         };
         resolver_profile_gate_ms += resolver_profile_gate_started.elapsed().as_millis();
+        record_startup_adapter_progress(pool, &mut startup_progress).await?;
         let same_tx_name_intro_started = Instant::now();
         let same_tx_name_intro_positions =
             name_intro_positions_for_raw_logs(&raw_logs, &event_topics)?;
         same_tx_name_intro_ms = same_tx_name_intro_started.elapsed().as_millis();
+        record_startup_adapter_progress(pool, &mut startup_progress).await?;
         let preload_name_metadata_started = Instant::now();
         preload_name_metadata_for_raw_logs(
             pool,
@@ -441,6 +465,7 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
         )
         .await?;
         preload_name_metadata_ms = preload_name_metadata_started.elapsed().as_millis();
+        record_startup_adapter_progress(pool, &mut startup_progress).await?;
         for name in known_names_by_namehash.values() {
             if let Some(labelhash) = name.labelhashes.first() {
                 namehash_to_labelhash.insert(name.namehash.clone(), labelhash.clone());
@@ -461,6 +486,7 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
         .await?;
         preload_restricted_histories_ms =
             preload_restricted_histories_started.elapsed().as_millis();
+        record_startup_adapter_progress(pool, &mut startup_progress).await?;
 
         let preload_migrated_registry_nodes = raw_logs
             .iter()
@@ -481,10 +507,11 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
             )
             .await?;
             migrated_registry_nodes_ms = migrated_registry_nodes_started.elapsed().as_millis();
+            record_startup_adapter_progress(pool, &mut startup_progress).await?;
         }
 
         let apply_started = Instant::now();
-        for raw_log in &raw_logs {
+        for (index, raw_log) in raw_logs.iter().enumerate() {
             if apply_authority_raw_log(
                 raw_log,
                 &mut histories,
@@ -503,6 +530,13 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
             )? {
                 matched_log_count += 1;
             }
+            crate::startup_progress::record_processed_row_progress(
+                pool,
+                &mut startup_progress,
+                index + 1,
+                raw_logs.len(),
+            )
+            .await?;
         }
         apply_ms = apply_started.elapsed().as_millis();
     }

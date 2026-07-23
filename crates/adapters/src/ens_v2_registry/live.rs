@@ -8,12 +8,16 @@ use super::{
     load::RawLogCanonicalityFilter, sync_ens_v2_registry_resource_surface_with_scope_and_state,
     types::RegistryNameState,
 };
+use crate::checkpoint_context::{
+    StartupAdapterProgress, reborrow_startup_adapter_progress, record_startup_adapter_progress,
+};
 
 mod cache;
 mod checkpoint;
 mod completeness;
 mod fence;
 mod path;
+mod reuse;
 
 use cache::{
     CachedLiveRegistryReplayState, MAX_LIVE_REGISTRY_REPLAY_STATE_WEIGHT,
@@ -27,6 +31,7 @@ use checkpoint::{
 };
 pub(super) use completeness::{
     FullSourceRawLogHistoryGuard, RawLogClosureProof, has_authoritative_ens_v2_closure_through,
+    has_authoritative_ens_v2_closure_through_with_progress,
 };
 pub(super) use fence::{acquire_registry_sync_fence, release_registry_sync_fence};
 use path::{
@@ -34,6 +39,7 @@ use path::{
     load_registry_cache_metadata, load_selected_registry_target,
     raw_log_mutations_leave_cached_path_unchanged,
 };
+use reuse::*;
 
 #[derive(Debug, Default, Eq, PartialEq)]
 pub(super) struct RegistryReplayState {
@@ -65,6 +71,40 @@ pub async fn record_ens_v2_live_selected_raw_log_coverage(
     selected_addresses: &[String],
     selected_block_hashes: &[String],
 ) -> Result<()> {
+    record_ens_v2_live_selected_raw_log_coverage_inner(
+        pool,
+        chain,
+        selected_addresses,
+        selected_block_hashes,
+        None,
+    )
+    .await
+}
+
+pub async fn record_ens_v2_live_selected_raw_log_coverage_with_progress(
+    pool: &PgPool,
+    chain: &str,
+    selected_addresses: &[String],
+    selected_block_hashes: &[String],
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<()> {
+    record_ens_v2_live_selected_raw_log_coverage_inner(
+        pool,
+        chain,
+        selected_addresses,
+        selected_block_hashes,
+        Some(progress),
+    )
+    .await
+}
+
+async fn record_ens_v2_live_selected_raw_log_coverage_inner(
+    pool: &PgPool,
+    chain: &str,
+    selected_addresses: &[String],
+    selected_block_hashes: &[String],
+    mut progress: Option<&mut dyn StartupAdapterProgress>,
+) -> Result<()> {
     if selected_block_hashes.is_empty() {
         return Ok(());
     }
@@ -83,7 +123,19 @@ pub async fn record_ens_v2_live_selected_raw_log_coverage(
     .await
     .with_context(|| format!("failed to load ENSv2 live coverage target for {chain}"))?
     .with_context(|| format!("ENSv2 live coverage selection is absent for {chain}"))?;
-    if !has_authoritative_ens_v2_closure_through(pool, chain, target_block_number).await? {
+    let has_closure = match progress.as_deref_mut() {
+        Some(progress) => {
+            has_authoritative_ens_v2_closure_through_with_progress(
+                pool,
+                chain,
+                target_block_number,
+                progress,
+            )
+            .await?
+        }
+        None => has_authoritative_ens_v2_closure_through(pool, chain, target_block_number).await?,
+    };
+    if !has_closure {
         return Ok(());
     }
 
@@ -92,14 +144,29 @@ pub async fn record_ens_v2_live_selected_raw_log_coverage(
         chain,
     )
     .await?;
-    let result = guard
-        .ensure_proof_through_live_selection(
-            pool,
-            target_block_number,
-            selected_addresses,
-            selected_block_hashes,
-        )
-        .await;
+    let result = match progress.as_deref_mut() {
+        Some(progress) => {
+            guard
+                .ensure_proof_through_live_selection_with_progress(
+                    pool,
+                    target_block_number,
+                    selected_addresses,
+                    selected_block_hashes,
+                    progress,
+                )
+                .await
+        }
+        None => {
+            guard
+                .ensure_proof_through_live_selection(
+                    pool,
+                    target_block_number,
+                    selected_addresses,
+                    selected_block_hashes,
+                )
+                .await
+        }
+    };
     match result {
         Ok(_) => guard.release().await,
         Err(error) => {
@@ -152,6 +219,27 @@ pub async fn sync_ens_v2_registry_resource_surface_live_poll(
         target_block_number,
         block_hashes,
         MAX_LIVE_REGISTRY_REPLAY_STATE_WEIGHT,
+        None,
+    )
+    .await
+}
+
+pub async fn sync_ens_v2_registry_resource_surface_live_poll_with_progress(
+    pool: &PgPool,
+    deployment_profile: &str,
+    chain: &str,
+    target_block_number: i64,
+    block_hashes: &[String],
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<EnsV2RegistryResourceSurfaceSyncSummary> {
+    sync_ens_v2_registry_resource_surface_live_poll_with_cache_budget(
+        pool,
+        deployment_profile,
+        chain,
+        target_block_number,
+        block_hashes,
+        MAX_LIVE_REGISTRY_REPLAY_STATE_WEIGHT,
+        Some(progress),
     )
     .await
 }
@@ -171,6 +259,7 @@ pub(in crate::ens_v2_registry) async fn sync_ens_v2_registry_resource_surface_li
         target_block_number,
         block_hashes,
         1,
+        None,
     )
     .await
 }
@@ -182,6 +271,7 @@ async fn sync_ens_v2_registry_resource_surface_live_poll_with_cache_budget(
     target_block_number: i64,
     block_hashes: &[String],
     max_process_cache_weight: usize,
+    progress: Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<EnsV2RegistryResourceSurfaceSyncSummary> {
     ensure!(
         !deployment_profile.trim().is_empty(),
@@ -203,6 +293,7 @@ async fn sync_ens_v2_registry_resource_surface_live_poll_with_cache_budget(
         block_hashes,
         raw_log_guard,
         max_process_cache_weight,
+        progress,
     )
     .await
 }
@@ -215,6 +306,7 @@ async fn sync_ens_v2_registry_resource_surface_live_poll_locked(
     block_hashes: &[String],
     raw_log_guard: FullSourceRawLogHistoryGuard,
     max_process_cache_weight: usize,
+    mut progress: Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<EnsV2RegistryResourceSurfaceSyncSummary> {
     let current_closure_proof = raw_log_guard.load_current_proof(pool).await?;
     let target_block_hash =
@@ -275,12 +367,22 @@ async fn sync_ens_v2_registry_resource_surface_live_poll_locked(
         let proof = if let Some(proof) = current_closure_proof {
             proof
         } else {
-            raw_log_guard
-                .ensure_proof_through(pool, target_block_number)
-                .await?
+            match progress.as_deref_mut() {
+                Some(progress) => {
+                    raw_log_guard
+                        .ensure_proof_through_with_progress(pool, target_block_number, progress)
+                        .await?
+                }
+                None => {
+                    raw_log_guard
+                        .ensure_proof_through(pool, target_block_number)
+                        .await?
+                }
+            }
         };
         metadata_before = load_registry_cache_metadata(pool, chain).await?;
-        let registry_emitters = load_active_emitters(pool, chain, None, true).await?;
+        let registry_emitters =
+            load_active_emitters(pool, chain, None, true, &mut progress).await?;
         let retained_log_floor =
             load_raw_log_closure_floor(pool, chain, target_block_number, &registry_emitters)
                 .await?;
@@ -296,9 +398,23 @@ async fn sync_ens_v2_registry_resource_surface_live_poll_locked(
         .await?;
         (None, proof, path)
     };
-    let pre_sync_requirements = raw_log_guard
-        .load_requirements_through(pool, closure_proof, target_block_number)
-        .await?;
+    let pre_sync_requirements = match progress.as_deref_mut() {
+        Some(progress) => {
+            raw_log_guard
+                .load_requirements_through_with_progress(
+                    pool,
+                    closure_proof,
+                    target_block_number,
+                    progress,
+                )
+                .await?
+        }
+        None => {
+            raw_log_guard
+                .load_requirements_through(pool, closure_proof, target_block_number)
+                .await?
+        }
+    };
 
     let sync_result = if let Some(cached) = cached {
         let incremental_block_hashes = selected_path.hashes_after(cached.through_block_number);
@@ -320,7 +436,7 @@ async fn sync_ens_v2_registry_resource_surface_live_poll_locked(
                 true,
                 false,
                 Some(closure_proof.discovery_admission_epoch),
-                None,
+                reborrow_startup_adapter_progress(&mut progress),
             )
             .await
         }
@@ -338,7 +454,7 @@ async fn sync_ens_v2_registry_resource_surface_live_poll_locked(
             true,
             true,
             Some(closure_proof.discovery_admission_epoch),
-            None,
+            reborrow_startup_adapter_progress(&mut progress),
         )
         .await
     };
@@ -351,6 +467,7 @@ async fn sync_ens_v2_registry_resource_surface_live_poll_locked(
     };
 
     let metadata_after = load_registry_cache_metadata(pool, chain).await?;
+    record_startup_adapter_progress(pool, &mut progress).await?;
     ensure!(
         metadata_after.raw_log_input_revision == metadata_before.raw_log_input_revision,
         "ENSv2 raw-log input changed during live sync on {chain}; refusing to publish a stale replay cache"
@@ -392,120 +509,36 @@ async fn sync_ens_v2_registry_resource_surface_live_poll_locked(
         }
     };
 
-    raw_log_guard
-        .finish(
-            pool,
-            closure_proof,
-            target_block_number,
-            summary.discovery_admission_epoch_bump_count,
-            &pre_sync_requirements,
-            staged_checkpoint.as_ref(),
-        )
-        .await?;
+    match progress.as_deref_mut() {
+        Some(progress) => {
+            raw_log_guard
+                .finish_with_progress(
+                    pool,
+                    closure_proof,
+                    target_block_number,
+                    summary.discovery_admission_epoch_bump_count,
+                    &pre_sync_requirements,
+                    staged_checkpoint.as_ref(),
+                    progress,
+                )
+                .await?;
+        }
+        None => {
+            raw_log_guard
+                .finish(
+                    pool,
+                    closure_proof,
+                    target_block_number,
+                    summary.discovery_admission_epoch_bump_count,
+                    &pre_sync_requirements,
+                    staged_checkpoint.as_ref(),
+                )
+                .await?;
+        }
+    }
 
     if fits_process_cache {
         store_live_registry_replay_state(pool, deployment_profile, chain, snapshot);
     }
     Ok(summary)
-}
-
-async fn load_reusable_durable_checkpoint(
-    pool: &PgPool,
-    chain: &str,
-    target_block_number: i64,
-    target_block_hash: &str,
-    current_closure_proof: Option<RawLogClosureProof>,
-    metadata: &RegistryCacheMetadata,
-    header: LiveRegistryReplayCheckpointHeader,
-) -> Result<
-    Option<(
-        CachedLiveRegistryReplayState,
-        RawLogClosureProof,
-        SelectedRegistryPath,
-    )>,
-> {
-    let Some((proof, path)) = reusable_checkpoint_path(
-        pool,
-        chain,
-        target_block_number,
-        target_block_hash,
-        current_closure_proof,
-        metadata,
-        header.through_block_number,
-        &header.through_block_hash,
-        header.raw_log_input_revision,
-        header.raw_log_retention_generation,
-        header.discovery_admission_epoch,
-    )
-    .await?
-    else {
-        tracing::warn!(
-            deployment_profile = header.deployment_profile,
-            chain,
-            "discarding stale ENSv2 live checkpoint"
-        );
-        return Ok(None);
-    };
-    match load_live_registry_replay_checkpoint(pool, &header).await? {
-        LiveRegistryReplayCheckpointLoad::Ready(snapshot) => Ok(Some((snapshot, proof, path))),
-        LiveRegistryReplayCheckpointLoad::Missing => Ok(None),
-        LiveRegistryReplayCheckpointLoad::Invalid(reason) => {
-            tracing::warn!(
-                deployment_profile = header.deployment_profile,
-                chain,
-                reason,
-                "discarding invalid ENSv2 live checkpoint payload"
-            );
-            Ok(None)
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn reusable_checkpoint_path(
-    pool: &PgPool,
-    chain: &str,
-    target_block_number: i64,
-    target_block_hash: &str,
-    current_closure_proof: Option<RawLogClosureProof>,
-    metadata: &RegistryCacheMetadata,
-    through_block_number: i64,
-    through_block_hash: &str,
-    raw_log_input_revision: i64,
-    raw_log_retention_generation: i64,
-    discovery_admission_epoch: i64,
-) -> Result<Option<(RawLogClosureProof, SelectedRegistryPath)>> {
-    let Some(proof) = current_closure_proof.filter(|proof| {
-        proof.proven_through_block >= through_block_number
-            && target_block_number >= through_block_number
-    }) else {
-        return Ok(None);
-    };
-    if discovery_admission_epoch != proof.discovery_admission_epoch
-        || raw_log_retention_generation != proof.retention_generation
-        || !metadata.retained_raw_log_history_complete
-    {
-        return Ok(None);
-    }
-    let path = load_selected_registry_path_to_floor(
-        pool,
-        chain,
-        target_block_number,
-        target_block_hash,
-        through_block_number,
-    )
-    .await?;
-    if !path.contains_anchor(through_block_number, through_block_hash)
-        || !raw_log_mutations_leave_cached_path_unchanged(
-            pool,
-            chain,
-            raw_log_input_revision,
-            through_block_number,
-            through_block_hash,
-        )
-        .await?
-    {
-        return Ok(None);
-    }
-    Ok(Some((proof, path)))
 }

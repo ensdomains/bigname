@@ -1,9 +1,7 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::OnceLock,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
+use bigname_adapters::StartupAdapterProgress;
 use bigname_storage::{RawBlock, RawCodeHash, load_raw_blocks_by_hashes, upsert_raw_code_hashes};
 use sqlx::Row;
 
@@ -22,36 +20,17 @@ use super::super::{
 };
 use super::load_live_generic_resolver_topic0s;
 
-/// Per-chain watched-address cap for one baseline poll tick. The sweep walks
-/// the sorted watch surface behind a process-lifetime
-/// cursor, so a multi-million-address surface is baselined across ticks
-/// instead of arming one whole-surface `eth_getCode` storm inside a tick.
-const DEFAULT_RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK: usize = 2_048;
-const RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK_ENV: &str =
-    "BIGNAME_INDEXER_RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK";
-static RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK: OnceLock<usize> = OnceLock::new();
-
-fn raw_code_baseline_max_addresses_per_tick() -> usize {
-    *RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK.get_or_init(|| {
-        parse_raw_code_baseline_max_addresses_per_tick(
-            std::env::var(RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK_ENV)
-                .ok()
-                .as_deref(),
-        )
-    })
-}
-
-fn parse_raw_code_baseline_max_addresses_per_tick(value: Option<&str>) -> usize {
-    value
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_RAW_CODE_BASELINE_MAX_ADDRESSES_PER_TICK)
-}
+#[path = "code_hashes/config.rs"]
+mod config;
+use config::*;
 
 /// Provider-fetch chunk size; successful rounds persist before the sweep advances.
 const RAW_CODE_BASELINE_FETCH_CHUNK_ADDRESSES: usize = 256;
+const LIVE_CODE_HASH_PROGRESS_ROWS: usize = 1_000;
+const LIVE_CODE_OBSERVATION_PROGRESS_BLOCKS: usize = 32;
 
 #[expect(clippy::too_many_arguments)]
+#[allow(dead_code)]
 pub(crate) async fn persist_reconciled_raw_code_hashes(
     pool: &sqlx::PgPool,
     task: &IntakeChainTask,
@@ -61,6 +40,58 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
     head_change_set: HeadChangeSet,
     loaded_plan_admission_epoch: i64,
     coverage_frontiers: &ChainCoverageFrontiers,
+) -> Result<()> {
+    persist_reconciled_raw_code_hashes_inner(
+        pool,
+        task,
+        provider,
+        heads,
+        canonical,
+        head_change_set,
+        loaded_plan_admission_epoch,
+        coverage_frontiers,
+        &mut None,
+    )
+    .await
+}
+
+#[expect(clippy::too_many_arguments)]
+pub(crate) async fn persist_reconciled_raw_code_hashes_with_progress(
+    pool: &sqlx::PgPool,
+    task: &IntakeChainTask,
+    provider: &(impl ChainProviderOps + ?Sized),
+    heads: &ProviderHeadSnapshot,
+    canonical: &CanonicalReconciliation,
+    head_change_set: HeadChangeSet,
+    loaded_plan_admission_epoch: i64,
+    coverage_frontiers: &ChainCoverageFrontiers,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<()> {
+    persist_reconciled_raw_code_hashes_inner(
+        pool,
+        task,
+        provider,
+        heads,
+        canonical,
+        head_change_set,
+        loaded_plan_admission_epoch,
+        coverage_frontiers,
+        progress,
+    )
+    .await
+}
+
+#[expect(clippy::too_many_arguments)]
+async fn persist_reconciled_raw_code_hashes_inner(
+    pool: &sqlx::PgPool,
+    task: &IntakeChainTask,
+    provider: &(impl ChainProviderOps + ?Sized),
+    heads: &ProviderHeadSnapshot,
+    canonical: &CanonicalReconciliation,
+    head_change_set: HeadChangeSet,
+    loaded_plan_admission_epoch: i64,
+    coverage_frontiers: &ChainCoverageFrontiers,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<()> {
     if canonical.status == CanonicalReconciliationStatus::StoredLineagePromoted {
         return Ok(());
@@ -74,7 +105,17 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
         return Ok(());
     }
 
-    let raw_blocks = load_raw_blocks_by_hashes(pool, &task.chain, &candidate_hashes).await?;
+    let mut raw_blocks_by_order = BTreeMap::new();
+    for block_page in candidate_hashes.chunks(LIVE_CODE_OBSERVATION_PROGRESS_BLOCKS) {
+        for raw_block in load_raw_blocks_by_hashes(pool, &task.chain, block_page).await? {
+            raw_blocks_by_order.insert(
+                (raw_block.block_number, raw_block.block_hash.clone()),
+                raw_block,
+            );
+        }
+        record_progress(pool, progress).await?;
+    }
+    let raw_blocks = raw_blocks_by_order.into_values().collect::<Vec<_>>();
     if raw_blocks.len() != candidate_hashes.len() {
         bail!(
             "stored raw block count {} does not match the raw code-hash fetch plan size {} for chain {}",
@@ -93,15 +134,22 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
     // watched-membership filter runs client-side against the already-sorted
     // plan surface instead of binding the multi-million-address watch set
     // back into Postgres on every head-changed tick.
-    let emitter_addresses_by_block_hash = load_raw_log_emitter_addresses_by_block_hashes(
-        pool,
-        &task.chain,
-        &candidate_hashes,
-        &generic_resolver_topic0s,
-    )
-    .await?
-    .into_iter()
-    .map(|(block_hash, emitters)| {
+    let mut loaded_emitters_by_block_hash = BTreeMap::new();
+    for block_page in candidate_hashes.chunks(LIVE_CODE_OBSERVATION_PROGRESS_BLOCKS) {
+        loaded_emitters_by_block_hash.extend(
+            load_raw_log_emitter_addresses_by_block_hashes(
+                pool,
+                &task.chain,
+                block_page,
+                &generic_resolver_topic0s,
+            )
+            .await?,
+        );
+        record_progress(pool, progress).await?;
+    }
+    let mut emitter_addresses_by_block_hash = BTreeMap::new();
+    let loaded_emitter_count = loaded_emitters_by_block_hash.len();
+    for (index, (block_hash, emitters)) in loaded_emitters_by_block_hash.into_iter().enumerate() {
         let selected = emitters
             .into_iter()
             .filter(|(address, topic0_selected)| {
@@ -109,27 +157,39 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
             })
             .map(|(address, _)| address)
             .collect::<BTreeSet<_>>();
-        (block_hash, selected)
-    })
-    .filter(|(_, emitters)| !emitters.is_empty())
-    .collect::<BTreeMap<String, BTreeSet<String>>>();
-    let code_observation_addresses = emitter_addresses_by_block_hash
-        .values()
-        .flat_map(|addresses| addresses.iter().cloned())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let stored_code_addresses_by_block_hash = load_raw_code_addresses_by_block_hashes(
-        pool,
-        &task.chain,
-        &candidate_hashes,
-        &code_observation_addresses,
-    )
-    .await?;
-    let emitter_raw_blocks = raw_blocks
-        .iter()
-        .filter_map(|raw_block| {
-            let emitter_addresses = emitter_addresses_by_block_hash.get(&raw_block.block_hash)?;
+        if !selected.is_empty() {
+            emitter_addresses_by_block_hash.insert(block_hash, selected);
+        }
+        if index + 1 == loaded_emitter_count
+            || (index + 1).is_multiple_of(LIVE_CODE_HASH_PROGRESS_ROWS)
+        {
+            record_progress(pool, progress).await?;
+        }
+    }
+    let mut stored_code_addresses_by_block_hash = BTreeMap::new();
+    for block_page in candidate_hashes.chunks(LIVE_CODE_OBSERVATION_PROGRESS_BLOCKS) {
+        let code_observation_addresses = block_page
+            .iter()
+            .filter_map(|block_hash| emitter_addresses_by_block_hash.get(block_hash))
+            .flat_map(|addresses| addresses.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        stored_code_addresses_by_block_hash.extend(
+            load_raw_code_addresses_by_block_hashes(
+                pool,
+                &task.chain,
+                block_page,
+                &code_observation_addresses,
+            )
+            .await?,
+        );
+        record_progress(pool, progress).await?;
+    }
+    let mut emitter_raw_blocks = Vec::new();
+    for (index, raw_block) in raw_blocks.iter().enumerate() {
+        if let Some(emitter_addresses) = emitter_addresses_by_block_hash.get(&raw_block.block_hash)
+        {
             let stored_code_addresses = stored_code_addresses_by_block_hash
                 .get(&raw_block.block_hash)
                 .cloned()
@@ -140,12 +200,15 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
                 .filter(|address| block_refreshed || !stored_code_addresses.contains(*address))
                 .cloned()
                 .collect::<Vec<_>>();
-            if addresses.is_empty() {
-                return None;
+            if !addresses.is_empty() {
+                emitter_raw_blocks.push((raw_block, addresses));
             }
-            Some((raw_block, addresses))
-        })
-        .collect::<Vec<_>>();
+        }
+        if index + 1 == raw_blocks.len() || (index + 1).is_multiple_of(LIVE_CODE_HASH_PROGRESS_ROWS)
+        {
+            record_progress(pool, progress).await?;
+        }
+    }
 
     let emitter_raw_blocks_by_hash = emitter_raw_blocks
         .iter()
@@ -161,9 +224,15 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
             },
         )
         .collect::<Vec<_>>();
-    let fetched_observations = provider
-        .fetch_code_observations_at_block_hashes(&code_observation_requests)
-        .await?;
+    let mut fetched_observations = Vec::with_capacity(code_observation_requests.len());
+    for request_chunk in code_observation_requests.chunks(LIVE_CODE_OBSERVATION_PROGRESS_BLOCKS) {
+        fetched_observations.extend(
+            provider
+                .fetch_code_observations_at_block_hashes(request_chunk)
+                .await?,
+        );
+        record_progress(pool, progress).await?;
+    }
     if fetched_observations.len() != code_observation_requests.len() {
         bail!(
             "provider returned {} code-observation block groups for {} requested blocks on chain {}",
@@ -192,8 +261,9 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
                 .collect::<Result<Vec<_>>>()?,
         );
     }
-    if !code_hashes.is_empty() {
-        upsert_raw_code_hashes(pool, &code_hashes).await?;
+    for chunk in code_hashes.chunks(LIVE_CODE_HASH_PROGRESS_ROWS) {
+        upsert_raw_code_hashes(pool, chunk).await?;
+        record_progress(pool, progress).await?;
     }
 
     let canonical_baseline_block = canonical.canonical.as_ref().and_then(|canonical_head| {
@@ -210,6 +280,7 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
             watched_addresses,
             loaded_plan_admission_epoch,
             coverage_frontiers,
+            progress,
         )
         .await?;
     }
@@ -228,6 +299,7 @@ pub(crate) async fn persist_reconciled_raw_code_hashes(
 /// with a newer epoch is applied, a fresh sweep re-verifies the surface (cheap
 /// membership probes; only genuinely missing addresses are fetched) so newly
 /// watched addresses are eventually baselined too.
+#[expect(clippy::too_many_arguments)]
 async fn sweep_raw_code_baseline_chunk(
     pool: &sqlx::PgPool,
     task: &IntakeChainTask,
@@ -236,6 +308,7 @@ async fn sweep_raw_code_baseline_chunk(
     watched_addresses: SelectedAddressSet<'_>,
     loaded_plan_admission_epoch: i64,
     coverage_frontiers: &ChainCoverageFrontiers,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<()> {
     let sorted_watched_addresses = watched_addresses.as_sorted_slice();
     if sorted_watched_addresses.is_empty() {
@@ -304,6 +377,7 @@ async fn sweep_raw_code_baseline_chunk(
         // advance past a failure boundary without losing that progress.
         frontier.verified_through_address = chunk.last().cloned();
         coverage_frontiers.store_raw_code_baseline_frontier(&task.chain, frontier.clone());
+        record_progress(pool, progress).await?;
     }
 
     frontier.verified_through_address = batch.last().cloned();
@@ -313,6 +387,16 @@ async fn sweep_raw_code_baseline_chunk(
         frontier.verified_through_address = None;
     }
     coverage_frontiers.store_raw_code_baseline_frontier(&task.chain, frontier);
+    Ok(())
+}
+
+async fn record_progress(
+    pool: &sqlx::PgPool,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<()> {
+    if let Some(progress) = progress.as_deref_mut() {
+        progress.record(pool).await?;
+    }
     Ok(())
 }
 

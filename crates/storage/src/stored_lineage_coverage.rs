@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, future::Future, pin::Pin};
 
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
@@ -12,6 +12,14 @@ mod integrity;
 pub const STORED_LINEAGE_COVERAGE_CANDIDATE_TABLE: &str =
     "stored_lineage_coverage_frontier_candidate_requirements";
 pub const STORED_LINEAGE_COVERAGE_PROOF_FORMAT_VERSION: &str = "stored_lineage_coverage_v1";
+const COVERAGE_PUBLICATION_PAGE_ROWS: i64 = 1_000;
+
+pub type StoredLineageCoverageProgressFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+
+pub trait StoredLineageCoverageProgress: Send {
+    fn record<'a>(&'a mut self) -> StoredLineageCoverageProgressFuture<'a>;
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredLineageCoverageFrontierHeader {
@@ -60,8 +68,24 @@ impl StoredLineageCoveragePublicationGuard {
     }
 
     pub async fn publish(
+        self,
+        publication: &StoredLineageCoverageFrontierPublication,
+    ) -> Result<StoredLineageCoveragePublicationOutcome> {
+        self.publish_inner(publication, &mut None).await
+    }
+
+    pub async fn publish_with_progress(
+        self,
+        publication: &StoredLineageCoverageFrontierPublication,
+        progress: &mut dyn StoredLineageCoverageProgress,
+    ) -> Result<StoredLineageCoveragePublicationOutcome> {
+        self.publish_inner(publication, &mut Some(progress)).await
+    }
+
+    async fn publish_inner(
         mut self,
         publication: &StoredLineageCoverageFrontierPublication,
+        progress: &mut Option<&mut dyn StoredLineageCoverageProgress>,
     ) -> Result<StoredLineageCoveragePublicationOutcome> {
         validate_publication(publication)?;
         ensure!(
@@ -71,13 +95,27 @@ impl StoredLineageCoveragePublicationGuard {
             self.expected_discovery_admission_epoch
         );
 
-        let candidate_integrity = integrity::validate_candidate_and_load_integrity(
-            self.transaction.as_mut(),
-            &self.chain,
-            publication.verified_from_block,
-            publication.verified_through_block,
-        )
-        .await?;
+        let candidate_integrity = match progress.as_deref_mut() {
+            Some(progress) => {
+                integrity::validate_candidate_and_load_integrity_with_progress(
+                    self.transaction.as_mut(),
+                    &self.chain,
+                    publication.verified_from_block,
+                    publication.verified_through_block,
+                    progress,
+                )
+                .await?
+            }
+            None => {
+                integrity::validate_candidate_and_load_integrity(
+                    self.transaction.as_mut(),
+                    &self.chain,
+                    publication.verified_from_block,
+                    publication.verified_through_block,
+                )
+                .await?
+            }
+        };
 
         // Candidate derivation and immutable coverage-fact verification are
         // deliberately optimistic. Take the shared admission fence only for
@@ -203,40 +241,8 @@ impl StoredLineageCoveragePublicationGuard {
             return Ok(StoredLineageCoveragePublicationOutcome::Conflict);
         };
 
-        sqlx::query(
-            "DELETE FROM stored_lineage_coverage_frontier_requirements WHERE chain_id = $1",
-        )
-        .bind(&self.chain)
-        .execute(self.transaction.as_mut())
-        .await
-        .with_context(|| {
-            format!(
-                "failed to replace prior stored-lineage coverage requirements for {}",
-                self.chain
-            )
-        })?;
-        sqlx::query(
-            r#"
-            INSERT INTO stored_lineage_coverage_frontier_requirements (
-                chain_id,
-                source_family,
-                address,
-                required_intervals
-            )
-            SELECT $1, source_family, address, required_intervals
-            FROM pg_temp.stored_lineage_coverage_frontier_candidate_requirements
-            ORDER BY source_family, address
-            "#,
-        )
-        .bind(&self.chain)
-        .execute(self.transaction.as_mut())
-        .await
-        .with_context(|| {
-            format!(
-                "failed to publish stored-lineage coverage requirements for {}",
-                self.chain
-            )
-        })?;
+        replace_requirements_with_progress(self.transaction.as_mut(), &self.chain, progress)
+            .await?;
 
         self.transaction.commit().await.with_context(|| {
             format!(
@@ -295,6 +301,109 @@ pub async fn stored_lineage_coverage_frontier_requirements_are_valid(
     header: &StoredLineageCoverageFrontierHeader,
 ) -> Result<bool> {
     integrity::saved_snapshot_is_valid(pool, header).await
+}
+
+pub async fn stored_lineage_coverage_frontier_requirements_are_valid_with_progress(
+    pool: &PgPool,
+    header: &StoredLineageCoverageFrontierHeader,
+    progress: &mut dyn StoredLineageCoverageProgress,
+) -> Result<bool> {
+    integrity::saved_snapshot_is_valid_with_progress(pool, header, progress).await
+}
+
+async fn replace_requirements_with_progress(
+    connection: &mut PgConnection,
+    chain: &str,
+    progress: &mut Option<&mut dyn StoredLineageCoverageProgress>,
+) -> Result<()> {
+    loop {
+        let deleted = sqlx::query(
+            r#"
+            DELETE FROM stored_lineage_coverage_frontier_requirements target
+            WHERE target.ctid IN (
+                SELECT candidate.ctid
+                FROM stored_lineage_coverage_frontier_requirements candidate
+                WHERE candidate.chain_id = $1
+                ORDER BY candidate.source_family, candidate.address
+                LIMIT $2
+            )
+            "#,
+        )
+        .bind(chain)
+        .bind(COVERAGE_PUBLICATION_PAGE_ROWS)
+        .execute(&mut *connection)
+        .await
+        .with_context(|| {
+            format!("failed to delete a prior stored-lineage coverage page for {chain}")
+        })?
+        .rows_affected();
+        if deleted == 0 {
+            break;
+        }
+        record_publication_progress(progress).await?;
+    }
+
+    let mut cursor = None::<(String, String)>;
+    loop {
+        let rows = sqlx::query(
+            r#"
+            SELECT source_family, address
+            FROM pg_temp.stored_lineage_coverage_frontier_candidate_requirements
+            WHERE $1::TEXT IS NULL OR (source_family, address) > ($1, $2)
+            ORDER BY source_family, address
+            LIMIT $3
+            "#,
+        )
+        .bind(cursor.as_ref().map(|(family, _)| family))
+        .bind(cursor.as_ref().map(|(_, address)| address))
+        .bind(COVERAGE_PUBLICATION_PAGE_ROWS)
+        .fetch_all(&mut *connection)
+        .await
+        .with_context(|| format!("failed to page coverage publication candidate for {chain}"))?;
+        let Some(last) = rows.last() else {
+            break;
+        };
+        cursor = Some((last.try_get("source_family")?, last.try_get("address")?));
+        let families = rows
+            .iter()
+            .map(|row| row.try_get::<String, _>("source_family"))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let addresses = rows
+            .iter()
+            .map(|row| row.try_get::<String, _>("address"))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        sqlx::query(
+            r#"
+            WITH page_keys AS (
+                SELECT * FROM UNNEST($2::TEXT[], $3::TEXT[]) key(source_family, address)
+            )
+            INSERT INTO stored_lineage_coverage_frontier_requirements (
+                chain_id, source_family, address, required_intervals
+            )
+            SELECT $1, candidate.source_family, candidate.address, candidate.required_intervals
+            FROM page_keys key
+            JOIN pg_temp.stored_lineage_coverage_frontier_candidate_requirements candidate
+              USING (source_family, address)
+            "#,
+        )
+        .bind(chain)
+        .bind(&families)
+        .bind(&addresses)
+        .execute(&mut *connection)
+        .await
+        .with_context(|| format!("failed to insert a stored-lineage coverage page for {chain}"))?;
+        record_publication_progress(progress).await?;
+    }
+    Ok(())
+}
+
+async fn record_publication_progress(
+    progress: &mut Option<&mut dyn StoredLineageCoverageProgress>,
+) -> Result<()> {
+    if let Some(progress) = progress.as_deref_mut() {
+        progress.record().await?;
+    }
+    Ok(())
 }
 
 pub async fn begin_stored_lineage_coverage_frontier_publication(

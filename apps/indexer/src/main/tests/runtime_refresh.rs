@@ -1502,13 +1502,46 @@ async fn non_broad_repository_refresh_widens_plan_without_manifest_event_writes(
     manifests.write_manifest_for_source_family("ens_v1_registry_l1", &ens_v1_manifest_contents())?;
     let repository = load_manifest_repository(&manifests.path)?;
 
-    let state = build_manifest_runtime_state_for_repository_refresh(
+    let heartbeat_instance_id = "manifest-refresh-in-flight-progress-test";
+    install_stale_indexer_heartbeat(database.pool(), heartbeat_instance_id).await?;
+    let (mut progress, progress_handle) = BlockingHeartbeatProgress::new(
+        heartbeat_instance_id,
+        vec!["ethereum-mainnet".to_owned()],
+        2,
+    );
+    let mut operation = Box::pin(build_manifest_runtime_state_for_repository_refresh_with_progress(
         database.pool(),
         &repository,
         RuntimeWatchScope::ActiveWatchedChain,
         false,
+        &mut progress,
+    ));
+    tokio::time::timeout(tokio::time::Duration::from_secs(10), async {
+        tokio::select! {
+            () = progress_handle.wait_until_blocked() => Ok(()),
+            result = operation.as_mut() => Err(anyhow::anyhow!(
+                "manifest refresh completed before its later progress boundary blocked: {result:?}"
+            )),
+        }
+    })
+    .await
+    .context("manifest refresh did not reach its later progress boundary")??;
+    let heartbeat = bigname_storage::load_service_loop_heartbeat(
+        database.pool(),
+        bigname_storage::INDEXER_SERVICE_NAME,
+        heartbeat_instance_id,
     )
-    .await?;
+    .await?
+    .context("manifest refresh progress heartbeat must remain registered")?;
+    assert!(
+        heartbeat.age_seconds <= 1,
+        "an earlier manifest page must beat before later refresh work finishes"
+    );
+    progress_handle.resume();
+    let state = tokio::time::timeout(tokio::time::Duration::from_secs(10), operation.as_mut())
+        .await
+        .context("manifest refresh did not finish after progress resumed")??;
+    drop(operation);
 
     assert_eq!(state.watched_chain_plan.len(), 1);
     assert_eq!(state.manifest_normalized_event_summary.total_synced_count, 0);
