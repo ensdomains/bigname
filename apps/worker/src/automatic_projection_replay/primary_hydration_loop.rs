@@ -9,8 +9,12 @@ use tokio::time::{Duration, sleep};
 use tracing::{info, warn};
 
 use super::{SharedLoopHeartbeat, primary_hydration, subtask_supervision::SubtaskSpawner};
-use crate::{primary_name, projection_apply};
+use crate::{
+    primary_name::{self, rebuild_heartbeat::RequiredSubtaskActivity},
+    projection_apply,
+};
 
+#[expect(clippy::too_many_arguments)]
 pub(super) fn spawn(
     subtasks: &SubtaskSpawner,
     pool: PgPool,
@@ -19,6 +23,7 @@ pub(super) fn spawn(
     config: primary_name::PrimaryNameLegacyReverseHydrationConfig,
     projection_apply_generation: Arc<AtomicU64>,
     projection_apply_hydration_lock: Arc<Mutex<()>>,
+    required_subtask_activity: RequiredSubtaskActivity,
 ) -> anyhow::Result<()> {
     subtasks.spawn("primary_name_legacy_reverse_hydration", async move {
         run(
@@ -28,6 +33,7 @@ pub(super) fn spawn(
             config,
             projection_apply_generation,
             projection_apply_hydration_lock,
+            required_subtask_activity,
         )
         .await;
         Ok(())
@@ -41,6 +47,7 @@ async fn run(
     config: primary_name::PrimaryNameLegacyReverseHydrationConfig,
     projection_apply_generation: Arc<AtomicU64>,
     projection_apply_hydration_lock: Arc<Mutex<()>>,
+    required_subtask_activity: RequiredSubtaskActivity,
 ) {
     let poll_interval = Duration::from_secs(poll_interval_secs.max(1));
     let mut bootstrap_completed = false;
@@ -55,10 +62,12 @@ async fn run(
 
     loop {
         let mut progressed = false;
+        let required_subtask_exclusion = required_subtask_activity.exclude_required_subtask().await;
         let apply_hydration_guard = projection_apply_hydration_lock.lock().await;
         match projection_apply::has_primary_hydration_blocking_work(&pool).await {
             Ok(true) => {
                 drop(apply_hydration_guard);
+                drop(required_subtask_exclusion);
                 sleep(poll_interval).await;
                 continue;
             }
@@ -71,6 +80,7 @@ async fn run(
                     "failed to inspect projection apply work before primary-name hydration"
                 );
                 drop(apply_hydration_guard);
+                drop(required_subtask_exclusion);
                 sleep(poll_interval).await;
                 continue;
             }
@@ -137,6 +147,7 @@ async fn run(
             }
         }
         drop(apply_hydration_guard);
+        drop(required_subtask_exclusion);
 
         if !progressed {
             sleep(poll_interval).await;
@@ -188,6 +199,7 @@ mod tests {
             config,
             Arc::new(AtomicU64::new(0)),
             Arc::new(Mutex::new(())),
+            RequiredSubtaskActivity::default(),
         ));
 
         sleep(Duration::from_millis(250)).await;
@@ -274,6 +286,7 @@ mod tests {
             config,
             Arc::new(AtomicU64::new(0)),
             Arc::clone(&projection_apply_hydration_lock),
+            RequiredSubtaskActivity::default(),
         ));
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {

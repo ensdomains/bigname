@@ -4,17 +4,27 @@ use super::super::{
 };
 use super::ActiveEmitter;
 use anyhow::{Context, Result};
+use futures_util::TryStreamExt;
 use sqlx::PgPool;
+
+use crate::{
+    checkpoint_context::{StartupAdapterProgress, record_startup_adapter_progress},
+    startup_progress::STARTUP_ADAPTER_PROGRESS_PAGE_ROWS,
+};
 
 mod rows;
 
-use rows::{active_emitters_from_rows, sort_active_emitters, source_scope_covered_by_emitters};
+use rows::{
+    active_emitters_from_rows, active_emitters_from_rows_with_progress, sort_active_emitters,
+    source_scope_covered_by_emitters,
+};
 
 pub(in crate::ens_v1_subregistry_discovery) async fn load_active_emitters(
     pool: &PgPool,
     chain: &str,
     source_scope: Option<&[RegistryRawLogSourceScopeTarget]>,
     include_historical: bool,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<Vec<ActiveEmitter>> {
     let has_source_scope = source_scope.is_some();
     let source_scope = source_scope.unwrap_or(&[]);
@@ -39,7 +49,7 @@ pub(in crate::ens_v1_subregistry_discovery) async fn load_active_emitters(
         return Ok(manifest_emitters);
     }
 
-    let rows = sqlx::query(
+    let mut rows = sqlx::query(
         r#"
         SELECT
             chain,
@@ -119,7 +129,7 @@ pub(in crate::ens_v1_subregistry_discovery) async fn load_active_emitters(
                   )
               )
 
-            UNION
+            UNION ALL
 
             SELECT
                 de.chain_id AS chain,
@@ -177,7 +187,6 @@ pub(in crate::ens_v1_subregistry_discovery) async fn load_active_emitters(
                   OR cia.active_from_block_number <= de.active_to_block_number
               )
         ) registry_emitters
-        ORDER BY lower(address), source_rank, source_manifest_id, contract_instance_id
         "#,
     )
     .bind(chain)
@@ -188,11 +197,34 @@ pub(in crate::ens_v1_subregistry_discovery) async fn load_active_emitters(
     .bind(&scoped_source_families)
     .bind(&scoped_addresses)
     .bind(include_historical)
-    .fetch_all(pool)
-    .await
-    .with_context(|| format!("failed to load active ENSv1 registry emitters for {chain}"))?;
-
-    active_emitters_from_rows(rows)
+    .fetch(pool);
+    let mut loaded_rows = Vec::new();
+    while let Some(row) = rows
+        .try_next()
+        .await
+        .with_context(|| format!("failed to stream active ENSv1 registry emitters for {chain}"))?
+    {
+        loaded_rows.push(row);
+        if loaded_rows
+            .len()
+            .is_multiple_of(STARTUP_ADAPTER_PROGRESS_PAGE_ROWS)
+        {
+            record_startup_adapter_progress(pool, progress).await?;
+        }
+    }
+    if !loaded_rows.is_empty()
+        && !loaded_rows
+            .len()
+            .is_multiple_of(STARTUP_ADAPTER_PROGRESS_PAGE_ROWS)
+    {
+        record_startup_adapter_progress(pool, progress).await?;
+    }
+    match progress.as_deref_mut() {
+        Some(progress) => {
+            active_emitters_from_rows_with_progress(pool, loaded_rows, progress).await
+        }
+        None => active_emitters_from_rows(loaded_rows),
+    }
 }
 
 async fn load_scoped_discovery_active_emitters(

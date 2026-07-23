@@ -3,7 +3,8 @@ use bigname_storage::RawLogStagingInputVersion;
 use tracing::info;
 
 use super::{
-    CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS, replay_full_closure_or_dependency_normalized_events,
+    CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS, NormalizedReplayHeartbeat,
+    replay_full_closure_or_dependency_normalized_events,
 };
 use crate::{
     provider::ChainProviderOps,
@@ -26,6 +27,7 @@ pub(super) async fn replay_full_closure_with_coverage_recovery(
     provider: Option<&(impl ChainProviderOps + ?Sized)>,
     header_audit_mode: HeaderAuditMode,
     mut raw_log_input_version: RawLogStagingInputVersion,
+    progress: &mut Option<&mut NormalizedReplayHeartbeat>,
 ) -> Result<(
     RawFactNormalizedEventReplayOutcome,
     RawLogStagingInputVersion,
@@ -41,6 +43,7 @@ pub(super) async fn replay_full_closure_with_coverage_recovery(
             to_block,
             &stateless_ranges,
             max_raw_logs_per_page,
+            progress,
         )
         .await
         {

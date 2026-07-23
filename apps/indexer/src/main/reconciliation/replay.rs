@@ -1,6 +1,7 @@
 use std::{collections::BTreeSet, time::Instant};
 
 use anyhow::{Context, Result, bail};
+use bigname_adapters::StartupAdapterProgress;
 use bigname_storage::list_canonical_raw_log_replay_inputs_for_block_hashes;
 use sqlx::Row;
 use tracing::info;
@@ -17,7 +18,7 @@ pub(crate) mod scoped;
 use super::{
     adapter_sync::{
         sync_manual_full_closure_normalized_events_from_persisted_raw_payloads,
-        sync_replay_normalized_events_from_persisted_raw_payloads,
+        sync_replay_normalized_events_from_persisted_raw_payloads_with_progress,
     },
     types::{
         PersistedRawPayloadAdapterSyncSummary, RawFactNormalizedEventReplayOutcome,
@@ -74,18 +75,35 @@ pub(crate) async fn replay_raw_fact_normalized_events(
         pool,
         request,
         RawFactReplayExecution::Complete,
+        &mut None,
     )
     .await
 }
 
-pub(crate) async fn replay_stateless_normalized_events_before_full_closure(
+pub(crate) async fn replay_raw_fact_normalized_events_with_progress(
     pool: &sqlx::PgPool,
     request: RawFactNormalizedEventReplayRequest,
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<RawFactNormalizedEventReplayOutcome> {
+    replay_raw_fact_normalized_events_with_execution(
+        pool,
+        request,
+        RawFactReplayExecution::Complete,
+        &mut Some(progress),
+    )
+    .await
+}
+
+pub(crate) async fn replay_stateless_normalized_events_before_full_closure_with_progress(
+    pool: &sqlx::PgPool,
+    request: RawFactNormalizedEventReplayRequest,
+    progress: &mut dyn StartupAdapterProgress,
 ) -> Result<RawFactNormalizedEventReplayOutcome> {
     replay_raw_fact_normalized_events_with_execution(
         pool,
         request,
         RawFactReplayExecution::StatelessBeforeFullClosure,
+        &mut Some(progress),
     )
     .await
 }
@@ -98,6 +116,7 @@ pub(crate) async fn replay_stateless_only_raw_fact_normalized_events(
         pool,
         request,
         RawFactReplayExecution::StatelessOnlyAuthoritative,
+        &mut None,
     )
     .await
 }
@@ -106,6 +125,7 @@ async fn replay_raw_fact_normalized_events_with_execution(
     pool: &sqlx::PgPool,
     request: RawFactNormalizedEventReplayRequest,
     execution: RawFactReplayExecution,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<RawFactNormalizedEventReplayOutcome> {
     if request.deployment_profile.trim().is_empty() {
         bail!("deployment_profile must not be empty");
@@ -176,13 +196,14 @@ async fn replay_raw_fact_normalized_events_with_execution(
             resolver_profile_authority_scan_count: 0,
         }
     } else {
-        sync_replay_normalized_events_from_persisted_raw_payloads(
+        sync_replay_normalized_events_from_persisted_raw_payloads_with_progress(
             pool,
             &request.chain,
             &raw_log_selection.block_hashes,
             Some(source_scope),
             raw_log_selection.canonical_raw_log_count,
             replay_contract_plan,
+            progress,
         )
         .await?
     };

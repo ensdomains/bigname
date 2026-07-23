@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, ensure};
+use bigname_adapters::StartupAdapterProgress;
 use tracing::info;
 
 use crate::{
@@ -15,6 +16,7 @@ pub(super) async fn sync_ens_v1_reverse_claim_range_in_pages(
     target_block_number: i64,
     source_families: &[&str],
     max_raw_logs_per_page: usize,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<bigname_adapters::EnsV1ReverseClaimSyncSummary> {
     ensure!(
         max_raw_logs_per_page > 0,
@@ -61,15 +63,31 @@ pub(super) async fn sync_ens_v1_reverse_claim_range_in_pages(
             &reverse_scope.targets,
         )
         .await?;
-        let page_summary =
-            bigname_adapters::EnsV1ReverseClaimSyncSummary::sync_for_block_hashes_with_source_scope(
-                pool,
-                chain,
-                &page_selection.block_hashes,
-                &reverse_scope.adapter_sync_scope,
-            )
-            .await?;
+        let page_summary = match progress.as_deref_mut() {
+            Some(progress) => {
+                bigname_adapters::EnsV1ReverseClaimSyncSummary::sync_for_block_hashes_with_source_scope_and_progress(
+                    pool,
+                    chain,
+                    &page_selection.block_hashes,
+                    &reverse_scope.adapter_sync_scope,
+                    progress,
+                )
+                .await?
+            }
+            None => {
+                bigname_adapters::EnsV1ReverseClaimSyncSummary::sync_for_block_hashes_with_source_scope(
+                    pool,
+                    chain,
+                    &page_selection.block_hashes,
+                    &reverse_scope.adapter_sync_scope,
+                )
+                .await?
+            }
+        };
         merge_reverse_claim_summary(&mut aggregate, page_summary);
+        if let Some(progress) = progress.as_deref_mut() {
+            progress.record(pool).await?;
+        }
         page_count += 1;
         info!(
             service = "indexer",

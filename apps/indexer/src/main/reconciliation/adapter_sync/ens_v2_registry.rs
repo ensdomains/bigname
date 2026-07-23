@@ -4,6 +4,7 @@ use super::{
     mode::PersistedRawPayloadAdapterSyncMode, scope::load_live_adapter_target_block_number,
 };
 
+#[expect(clippy::too_many_arguments)]
 pub(super) async fn sync_ens_v2_registry_for_mode(
     pool: &sqlx::PgPool,
     live_deployment_profile: Option<&str>,
@@ -12,16 +13,30 @@ pub(super) async fn sync_ens_v2_registry_for_mode(
     source_scope: Option<&[(String, String, i64, i64)]>,
     mode: PersistedRawPayloadAdapterSyncMode,
     reconcile_full_source: bool,
+    progress: &mut Option<&mut dyn bigname_adapters::StartupAdapterProgress>,
 ) -> Result<bigname_adapters::EnsV2RegistryResourceSurfaceSyncSummary> {
     if reconcile_full_source {
         let target_block_number =
             load_live_adapter_target_block_number(pool, chain, block_hashes).await?;
-        return bigname_adapters::sync_ens_v2_registry_resource_surface_through_block(
-            pool,
-            chain,
-            target_block_number,
-        )
-        .await;
+        return match progress.as_deref_mut() {
+            Some(progress) => {
+                bigname_adapters::sync_ens_v2_registry_resource_surface_through_block_with_progress(
+                    pool,
+                    chain,
+                    target_block_number,
+                    progress,
+                )
+                .await
+            }
+            None => {
+                bigname_adapters::sync_ens_v2_registry_resource_surface_through_block(
+                    pool,
+                    chain,
+                    target_block_number,
+                )
+                .await
+            }
+        };
     }
     match (mode, source_scope) {
         (PersistedRawPayloadAdapterSyncMode::LivePoll, _) => {
@@ -29,14 +44,29 @@ pub(super) async fn sync_ens_v2_registry_for_mode(
                 .context("ENSv2 live-poll adapter sync is missing its deployment profile")?;
             let target_block_number =
                 load_live_adapter_target_block_number(pool, chain, block_hashes).await?;
-            bigname_adapters::sync_ens_v2_registry_resource_surface_live_poll(
-                pool,
-                deployment_profile,
-                chain,
-                target_block_number,
-                block_hashes,
-            )
-            .await
+            match progress.as_deref_mut() {
+                Some(progress) => {
+                    bigname_adapters::sync_ens_v2_registry_resource_surface_live_poll_with_progress(
+                        pool,
+                        deployment_profile,
+                        chain,
+                        target_block_number,
+                        block_hashes,
+                        progress,
+                    )
+                    .await
+                }
+                None => {
+                    bigname_adapters::sync_ens_v2_registry_resource_surface_live_poll(
+                        pool,
+                        deployment_profile,
+                        chain,
+                        target_block_number,
+                        block_hashes,
+                    )
+                    .await
+                }
+            }
         }
         (PersistedRawPayloadAdapterSyncMode::RawFactReplay { .. }, Some(source_scope)) => {
             bigname_adapters::EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_source_scope_canonical_only(

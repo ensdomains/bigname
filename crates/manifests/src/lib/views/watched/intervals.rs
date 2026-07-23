@@ -9,6 +9,7 @@
 pub(super) const WATCHED_INTERVALS_CTES: &str = r#"
 manifest_watched_intervals AS (
     SELECT
+        cia.contract_instance_address_id AS source_row_id,
         mv.chain AS chain,
         mv.source_family AS source_family,
         LOWER(cia.address) AS address,
@@ -58,6 +59,7 @@ manifest_watched_intervals AS (
 ),
 discovery_watched_intervals AS (
     SELECT
+        de.discovery_edge_id AS source_row_id,
         de.chain_id AS chain,
         COALESCE(target_mv.source_family, mv.source_family) AS source_family,
         LOWER(cia.address) AS address,
@@ -135,9 +137,35 @@ discovery_watched_intervals AS (
      AND cia.chain_id = de.chain_id
 ),
 watched_intervals AS (
-    SELECT * FROM manifest_watched_intervals
+    SELECT
+        chain,
+        source_family,
+        address,
+        contract_instance_id,
+        source,
+        source_manifest_id,
+        active_from_block_number,
+        active_to_block_number,
+        rollout_eligible,
+        interval_eligible,
+        current_eligible,
+        historical_eligible
+    FROM manifest_watched_intervals
     UNION
-    SELECT * FROM discovery_watched_intervals
+    SELECT
+        chain,
+        source_family,
+        address,
+        contract_instance_id,
+        source,
+        source_manifest_id,
+        active_from_block_number,
+        active_to_block_number,
+        rollout_eligible,
+        interval_eligible,
+        current_eligible,
+        historical_eligible
+    FROM discovery_watched_intervals
 )
 "#;
 
@@ -155,4 +183,17 @@ AND watched.historical_eligible
 
 pub(super) fn with_watched_intervals(query_body: &str) -> String {
     format!("WITH\n{WATCHED_INTERVALS_CTES}\n{query_body}")
+}
+
+/// Stream the two disjoint source kinds without forcing PostgreSQL to
+/// materialize and sort the multi-million-row union before returning its
+/// first row. The progress-aware caller restores exact `UNION` deduplication
+/// in a sorted set while rows arrive.
+pub(super) fn with_streaming_watched_intervals(query_body: &str) -> String {
+    let streaming_ctes = WATCHED_INTERVALS_CTES.replacen(
+        "\n    FROM manifest_watched_intervals\n    UNION\n",
+        "\n    FROM manifest_watched_intervals\n    UNION ALL\n",
+        1,
+    );
+    format!("WITH\n{streaming_ctes}\n{query_body}")
 }

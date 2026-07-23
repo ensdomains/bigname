@@ -1,4 +1,5 @@
 use super::*;
+use crate::checkpoint_context::StartupAdapterProgress;
 use anyhow::ensure;
 use sqlx::Postgres;
 
@@ -8,7 +9,7 @@ pub use targets::{
     ResolverProfileEventReconciliation, ResolverProfileEventReconciliationPublication,
 };
 
-const DEFAULT_REPLAY_MAX_RAW_LOGS_PER_PAGE: usize = 100_000;
+const DEFAULT_REPLAY_MAX_RAW_LOGS_PER_PAGE: usize = 1_000;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ResolverProfileEventReconciliationSummary {
@@ -96,7 +97,7 @@ pub(super) async fn reconcile_resolver_profile_events_with_log_limit(
     let mut reconciliation = begin_resolver_profile_event_reconciliation(pool, chain).await?;
     reconciliation.stage_addresses(resolver_addresses).await?;
     reconciliation
-        .reconcile_with_log_limit(max_raw_logs_per_page)
+        .reconcile_with_log_limit(max_raw_logs_per_page, None)
         .await?
         .finish()
         .await
@@ -114,19 +115,28 @@ impl ResolverProfileEventReconciliation {
     /// staged. The returned publication retains the exact target set until the
     /// indexer durably publishes its projection invalidations.
     pub async fn reconcile(self) -> Result<ResolverProfileEventReconciliationPublication> {
-        self.reconcile_with_log_limit(DEFAULT_REPLAY_MAX_RAW_LOGS_PER_PAGE)
+        self.reconcile_with_log_limit(DEFAULT_REPLAY_MAX_RAW_LOGS_PER_PAGE, None)
+            .await
+    }
+
+    pub async fn reconcile_with_progress(
+        self,
+        progress: &mut dyn StartupAdapterProgress,
+    ) -> Result<ResolverProfileEventReconciliationPublication> {
+        self.reconcile_with_log_limit(DEFAULT_REPLAY_MAX_RAW_LOGS_PER_PAGE, Some(progress))
             .await
     }
 
     async fn reconcile_with_log_limit(
         mut self,
         max_raw_logs_per_page: usize,
+        mut progress: Option<&mut dyn StartupAdapterProgress>,
     ) -> Result<ResolverProfileEventReconciliationPublication> {
         ensure!(
             max_raw_logs_per_page > 0,
             "resolver profile reconciliation max logs per page must be positive"
         );
-        let prepared = self.prepare().await?;
+        let prepared = self.prepare(&mut progress).await?;
         let targets::ResolverProfileEventReconciliation {
             pool,
             chain,
@@ -161,19 +171,38 @@ impl ResolverProfileEventReconciliation {
         // Derive one chronological history under the current resolver profile.
         // Resolver facts define the inclusive repair range; registry, registrar,
         // and wrapper facts inside that range remain required authority context.
-        let replay = pipeline::sync_ens_v1_unwrapped_authority_with_scope(
-            &pool,
-            &chain,
-            false,
-            &[],
-            None,
-            None,
-            None,
-            None,
-            Some(&mut replay_context),
-            None,
-        )
-        .await?;
+        let replay = match progress.as_mut() {
+            Some(progress) => {
+                pipeline::sync_ens_v1_unwrapped_authority_with_scope(
+                    &pool,
+                    &chain,
+                    false,
+                    &[],
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(&mut replay_context),
+                    Some(&mut **progress),
+                )
+                .await?
+            }
+            None => {
+                pipeline::sync_ens_v1_unwrapped_authority_with_scope(
+                    &pool,
+                    &chain,
+                    false,
+                    &[],
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(&mut replay_context),
+                    None,
+                )
+                .await?
+            }
+        };
         summary.scanned_log_count = replay.scanned_log_count;
         summary.matched_log_count = replay.matched_log_count;
         summary.normalized_event_count = replay.total_normalized_event_count;
@@ -185,12 +214,14 @@ impl ResolverProfileEventReconciliation {
 
         mark_reconciliation_replay_complete(&pool, &chain, run_id).await?;
         let (inserted_count, orphaned_count) = publish_resolver_profile_events(
+            &pool,
             raw_log_guard.transaction_mut(),
             &chain,
             replay_range,
             run_id,
             &prepared.resolver_address_set_digest,
             prepared.resolver_address_count,
+            &mut progress,
         )
         .await?;
         summary.normalized_event_inserted_count = inserted_count;
@@ -234,12 +265,14 @@ async fn mark_reconciliation_replay_complete(
 }
 
 async fn publish_resolver_profile_events(
+    pool: &PgPool,
     transaction: &mut sqlx::Transaction<'_, Postgres>,
     chain: &str,
     replay_range: ResolverEmitterReplayRange,
     run_id: Uuid,
     resolver_address_set_digest: &str,
     resolver_address_count: usize,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<(usize, u64)> {
     let run = sqlx::query_as::<_, (i64, i64, i64, String, String)>(
         r#"
@@ -304,13 +337,35 @@ async fn publish_resolver_profile_events(
             &events,
         )
         .await?;
+        record_progress(pool, progress).await?;
     }
 
-    let orphaned = sqlx::query(
-        r#"
-        WITH stale AS (
+    let event_watermark = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(MAX(normalized_event_id), 0)::BIGINT FROM normalized_events",
+    )
+    .fetch_one(transaction.as_mut())
+    .await
+    .context("failed to load resolver-profile orphan scan watermark")?;
+    let mut after_event_id = 0i64;
+    let mut orphaned = 0u64;
+    while after_event_id < event_watermark {
+        let (last_event_id, page_orphaned_count) = sqlx::query_as::<_, (Option<i64>, i64)>(
+            r#"
+        WITH source_page AS MATERIALIZED (
+            SELECT *
+            FROM normalized_events
+            WHERE normalized_event_id > $5
+              AND normalized_event_id <= $6
+            ORDER BY normalized_event_id
+            LIMIT 1000
+        ),
+        page_end AS (
+            SELECT MAX(normalized_event_id) AS last_event_id
+            FROM source_page
+        ),
+        stale AS (
             SELECT DISTINCT event.normalized_event_id
-            FROM normalized_events event
+            FROM source_page event
             JOIN raw_logs raw_log
               ON raw_log.chain_id = event.chain_id
              AND raw_log.block_hash = event.block_hash
@@ -337,20 +392,53 @@ async fn publish_resolver_profile_events(
               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
               AND raw_log.canonicality_state IN ('canonical', 'safe', 'finalized')
               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+        ),
+        updated AS (
+            UPDATE normalized_events event
+            SET canonicality_state = 'orphaned'::canonicality_state, observed_at = now()
+            FROM stale
+            WHERE event.normalized_event_id = stale.normalized_event_id
+            RETURNING 1
         )
-        UPDATE normalized_events event
-        SET canonicality_state = 'orphaned'::canonicality_state, observed_at = now()
-        FROM stale
-        WHERE event.normalized_event_id = stale.normalized_event_id
+        SELECT
+            page_end.last_event_id,
+            (SELECT COUNT(*)::BIGINT FROM updated)
+        FROM page_end
         "#,
-    )
-    .bind(chain)
-    .bind(replay_range.first_block_number)
-    .bind(replay_range.last_block_number)
-    .bind(run_id)
-    .execute(transaction.as_mut())
-    .await
-    .with_context(|| format!("failed to orphan stale resolver-profile events for {chain}"))?
-    .rows_affected();
+        )
+        .bind(chain)
+        .bind(replay_range.first_block_number)
+        .bind(replay_range.last_block_number)
+        .bind(run_id)
+        .bind(after_event_id)
+        .bind(event_watermark)
+        .fetch_one(transaction.as_mut())
+        .await
+        .with_context(|| {
+            format!("failed to orphan stale resolver-profile event page for {chain}")
+        })?;
+        let Some(last_event_id) = last_event_id else {
+            break;
+        };
+        ensure!(
+            last_event_id > after_event_id,
+            "resolver-profile orphan scan did not advance"
+        );
+        after_event_id = last_event_id;
+        orphaned = orphaned
+            .checked_add(u64::try_from(page_orphaned_count)?)
+            .context("resolver-profile orphan count overflowed u64")?;
+        record_progress(pool, progress).await?;
+    }
     Ok((inserted_count, orphaned))
+}
+
+async fn record_progress(
+    pool: &PgPool,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<()> {
+    if let Some(progress) = progress.as_deref_mut() {
+        progress.record(pool).await?;
+    }
+    Ok(())
 }

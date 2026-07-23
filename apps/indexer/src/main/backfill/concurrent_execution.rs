@@ -15,7 +15,9 @@ use super::{
     coinbase_sql::load_backfill_topic_plan,
     reservation_execution::{
         backfill_lease_duration_secs, create_coinbase_sql_backfill_job_with_ranges,
-        create_hash_pinned_backfill_job_with_ranges, effective_coinbase_sql_adapter_sync_mode,
+        create_hash_pinned_backfill_job_with_ranges,
+        create_hash_pinned_backfill_job_with_ranges_with_progress,
+        effective_coinbase_sql_adapter_sync_mode,
         ensure_coinbase_sql_registry_range_start_is_replay_safe,
         refreshed_backfill_lease_expires_at, run_reserved_coinbase_sql_backfill_range,
         run_reserved_hash_pinned_backfill_range_with_progress, validate_hash_pinned_chunk_blocks,
@@ -84,8 +86,23 @@ async fn run_resumable_hash_pinned_backfill_job_concurrently_inner(
         );
     validate_hash_pinned_chunk_blocks(config.hash_pinned_chunk_blocks)?;
     let watched_chain = &source_plan.watched_chain_plan;
-    let record =
-        create_hash_pinned_backfill_job_with_ranges(pool, source_plan, &config, ranges).await?;
+    let record = match heartbeat.as_mut() {
+        Some((heartbeat, chain_ids)) => {
+            let mut progress =
+                crate::run::startup_heartbeat::StartupAdapterHeartbeat::new(heartbeat, chain_ids);
+            create_hash_pinned_backfill_job_with_ranges_with_progress(
+                pool,
+                source_plan,
+                &config,
+                ranges,
+                &mut progress,
+            )
+            .await?
+        }
+        None => {
+            create_hash_pinned_backfill_job_with_ranges(pool, source_plan, &config, ranges).await?
+        }
+    };
     config
         .idempotency_key
         .clone_from(&record.job.idempotency_key);

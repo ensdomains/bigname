@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Context, Result};
-use bigname_manifests::ManifestBootstrapTarget;
 use serde_json::Value;
 use sqlx::Row;
 
@@ -140,15 +139,6 @@ pub(super) async fn load_bootstrap_target_checkpoint(
         expected_source_identity,
         target_id,
     )
-}
-
-pub(super) fn bootstrap_segment_target_ids(
-    targets: &[ManifestBootstrapTarget],
-) -> BTreeSet<String> {
-    targets
-        .iter()
-        .map(|target| target.contract_instance_id.to_string())
-        .collect()
 }
 
 fn source_identity_requested_target_ids(source_identity: &Value) -> Option<BTreeSet<String>> {

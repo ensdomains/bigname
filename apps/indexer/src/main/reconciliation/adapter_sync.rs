@@ -1,29 +1,34 @@
 use std::time::Instant;
 
 use anyhow::{Result, ensure};
+use bigname_adapters::StartupAdapterProgress;
 use tracing::info;
 
-use crate::resolver_profile_convergence::journal_resolver_profile_authority_if_epoch_changed;
 use crate::runtime::{
     log_ens_v1_subregistry_discovery_sync_summary, log_ens_v1_unwrapped_authority_sync_summary,
-    log_ens_v2_permissions_sync_summary, log_ens_v2_registrar_sync_summary,
-    log_ens_v2_registry_resource_surface_sync_summary, log_ens_v2_resolver_sync_summary,
+    log_ens_v2_registrar_sync_summary, log_ens_v2_registry_resource_surface_sync_summary,
 };
 
 use super::replay::NormalizedEventReplayAdapter;
 use super::types::PersistedRawPayloadAdapterSyncSummary;
 #[path = "adapter_sync/backlog.rs"]
 mod backlog;
+#[path = "adapter_sync/block_scoped.rs"]
+mod block_scoped;
 #[path = "adapter_sync/ens_v1_subregistry.rs"]
 mod ens_v1_subregistry;
 #[path = "adapter_sync/ens_v2_registry.rs"]
 mod ens_v2_registry;
+#[path = "adapter_sync/ens_v2_tail.rs"]
+mod ens_v2_tail;
 #[path = "adapter_sync/entrypoints.rs"]
 mod entrypoints;
 #[path = "adapter_sync/full_closure.rs"]
 mod full_closure;
 #[path = "adapter_sync/mode.rs"]
 mod mode;
+#[path = "adapter_sync/progress.rs"]
+mod progress;
 #[path = "adapter_sync/scope.rs"]
 mod scope;
 #[path = "adapter_sync/stateless.rs"]
@@ -35,18 +40,25 @@ mod sync_logging;
 mod test_hooks;
 #[cfg(test)]
 pub(crate) use backlog::install_backlog_after_adapter_sync_test_hook;
+#[cfg(test)]
+pub(crate) use backlog::sync_live_adapter_backlog_after_normalized_replay;
 pub(crate) use backlog::{
-    BacklogHandoffStatus, sync_live_adapter_backlog_after_normalized_replay,
+    BacklogHandoffStatus, sync_live_adapter_backlog_after_normalized_replay_with_progress,
     validate_chain_handoff_while_guarded,
 };
+use block_scoped::{sync_ens_v1_unwrapped_authority_for_scope, sync_ens_v2_registrar_for_scope};
 use ens_v1_subregistry::{ens_v1_subregistry_sync_operation, sync_ens_v1_subregistry_for_mode};
 use ens_v2_registry::{ens_v2_registry_sync_operation, sync_ens_v2_registry_for_mode};
+use ens_v2_tail::sync_ens_v2_tail_adapters;
+#[allow(unused_imports)]
 pub(crate) use entrypoints::{
     sync_adapter_state_from_persisted_raw_payloads,
     sync_adapter_state_from_scoped_persisted_raw_payloads,
     sync_live_adapter_state_from_persisted_raw_payloads,
     sync_live_adapter_state_from_persisted_raw_payloads_after_reorg,
-    sync_replay_normalized_events_from_persisted_raw_payloads,
+    sync_live_adapter_state_from_persisted_raw_payloads_after_reorg_with_progress,
+    sync_live_adapter_state_from_persisted_raw_payloads_with_progress,
+    sync_replay_normalized_events_from_persisted_raw_payloads_with_progress,
 };
 pub(crate) use full_closure::{
     AutomaticTwoPhaseFullClosureSyncResult, automatic_stateless_replay_completed,
@@ -60,6 +72,7 @@ pub(crate) use full_closure::{
     sync_full_closure_normalized_events_from_persisted_raw_payloads,
 };
 use mode::{PersistedRawPayloadAdapterSyncMode, ensure_raw_fact_adapter_allowed};
+use progress::{journal_authority_epoch_with_progress, record_adapter_progress};
 use scope::load_live_adapter_source_scope;
 use stateless::{sync_block_derived_for_mode, sync_reverse_claim_for_mode};
 use sync_logging::{log_adapter_call_timing, log_live_poll_adapter_sync_completion};
@@ -78,6 +91,7 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
     mode: PersistedRawPayloadAdapterSyncMode,
     reload_live_source_scope: bool,
     full_source_reconciliation: entrypoints::FullSourceReconciliationScope,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<PersistedRawPayloadAdapterSyncSummary> {
     if matches!(mode, PersistedRawPayloadAdapterSyncMode::LivePoll) {
         ensure!(
@@ -94,7 +108,7 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
     let ens_v2_full_source = full_source_reconciliation.reconciles_ens_v2_registry();
     let mut aggregate = PersistedRawPayloadAdapterSyncSummary::default();
     if !mode.uses_stateless_replay_authority() {
-        let epoch_guard = journal_resolver_profile_authority_if_epoch_changed(pool, chain).await?;
+        let epoch_guard = journal_authority_epoch_with_progress(pool, chain, progress).await?;
         aggregate.resolver_profile_authority_epoch_guard_count += epoch_guard.epoch_guard_count;
         aggregate.resolver_profile_authority_scan_count += epoch_guard.authority_scan_count;
     }
@@ -106,6 +120,7 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
         active_source_scope.as_deref(),
         mode,
         &mut aggregate,
+        progress,
     )
     .await?;
     if legacy_full_source
@@ -138,6 +153,7 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
                 active_source_scope.as_deref(),
                 mode,
                 legacy_full_source,
+                progress,
             )
             .await?;
         log_adapter_call_timing(
@@ -160,6 +176,7 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
             subregistry_discovery_summary.total_normalized_event_inserted_count,
         );
         aggregate.add_stateless_replay_authority(&stateless_replay_authority);
+        record_adapter_progress(pool, progress).await?;
         let discovery_mutated = subregistry_discovery_summary.inserted_edge_count > 0
             || subregistry_discovery_summary.deactivated_edge_count > 0;
         #[cfg(test)]
@@ -167,8 +184,7 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
             fail_after_discovery_mutation_for_test(pool).await?;
         }
         if !mode.uses_stateless_replay_authority() {
-            let epoch_guard =
-                journal_resolver_profile_authority_if_epoch_changed(pool, chain).await?;
+            let epoch_guard = journal_authority_epoch_with_progress(pool, chain, progress).await?;
             aggregate.resolver_profile_authority_epoch_guard_count += epoch_guard.epoch_guard_count;
             aggregate.resolver_profile_authority_scan_count += epoch_guard.authority_scan_count;
         }
@@ -185,6 +201,7 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
         source_scope,
         mode,
         &mut aggregate,
+        progress,
     )
     .await?;
     if mode.selects_adapter(
@@ -207,22 +224,14 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
             adapter_sync_mode = ?mode,
             "adapter sync call started"
         );
-        let unwrapped_authority_summary = if let Some(source_scope) = source_scope {
-            bigname_adapters::EnsV1UnwrappedAuthoritySyncSummary::sync_for_block_hashes_with_source_scope(
-                pool,
-                chain,
-                block_hashes,
-                source_scope,
-            )
-            .await?
-        } else {
-            bigname_adapters::EnsV1UnwrappedAuthoritySyncSummary::sync_for_block_hashes(
-                pool,
-                chain,
-                block_hashes,
-            )
-            .await?
-        };
+        let unwrapped_authority_summary = sync_ens_v1_unwrapped_authority_for_scope(
+            pool,
+            chain,
+            block_hashes,
+            source_scope,
+            progress,
+        )
+        .await?;
         log_adapter_call_timing(
             chain,
             "ens_v1_unwrapped_authority",
@@ -242,6 +251,7 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
             unwrapped_authority_summary.total_normalized_event_count,
             unwrapped_authority_summary.total_normalized_event_inserted_count,
         );
+        record_adapter_progress(pool, progress).await?;
     }
     if !mode.selects_adapter(
         source_scope,
@@ -282,6 +292,7 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
             source_scope,
             mode,
             ens_v2_full_source,
+            progress,
         )
         .await?;
         log_adapter_call_timing(
@@ -303,6 +314,7 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
             ens_v2_registry_summary.total_normalized_event_count,
             ens_v2_registry_summary.total_normalized_event_inserted_count,
         );
+        record_adapter_progress(pool, progress).await?;
         if reload_live_source_scope
             && (ens_v2_registry_summary.inserted_edge_count > 0
                 || ens_v2_registry_summary.deactivated_edge_count > 0)
@@ -328,14 +340,14 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
             adapter_sync_mode = ?mode,
             "adapter sync call started"
         );
-        let ens_v2_registrar_summary =
-            bigname_adapters::EnsV2RegistrarSyncSummary::sync_for_block_hashes_with_source_scope(
-                pool,
-                chain,
-                block_hashes,
-                source_scope,
-            )
-            .await?;
+        let ens_v2_registrar_summary = sync_ens_v2_registrar_for_scope(
+            pool,
+            chain,
+            block_hashes,
+            Some(source_scope),
+            progress,
+        )
+        .await?;
         log_adapter_call_timing(
             chain,
             "ens_v2_registrar",
@@ -355,6 +367,7 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
             ens_v2_registrar_summary.total_synced_count,
             ens_v2_registrar_summary.total_inserted_count,
         );
+        record_adapter_progress(pool, progress).await?;
     } else if source_scope.is_none() {
         ensure_raw_fact_adapter_allowed(mode, NormalizedEventReplayAdapter::EnsV2Registrar)?;
         let adapter_started = Instant::now();
@@ -369,12 +382,7 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
             "adapter sync call started"
         );
         let ens_v2_registrar_summary =
-            bigname_adapters::EnsV2RegistrarSyncSummary::sync_for_block_hashes(
-                pool,
-                chain,
-                block_hashes,
-            )
-            .await?;
+            sync_ens_v2_registrar_for_scope(pool, chain, block_hashes, None, progress).await?;
         log_adapter_call_timing(
             chain,
             "ens_v2_registrar",
@@ -394,105 +402,18 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
             ens_v2_registrar_summary.total_synced_count,
             ens_v2_registrar_summary.total_inserted_count,
         );
+        record_adapter_progress(pool, progress).await?;
     }
-    if mode.selects_adapter(source_scope, NormalizedEventReplayAdapter::EnsV2Resolver) {
-        ensure_raw_fact_adapter_allowed(mode, NormalizedEventReplayAdapter::EnsV2Resolver)?;
-        let adapter_started = Instant::now();
-        info!(
-            service = "indexer",
-            command = "adapter-sync",
-            chain,
-            adapter = "ens_v2_resolver",
-            block_hash_count = block_hashes.len(),
-            source_scope_target_count,
-            adapter_sync_mode = ?mode,
-            "adapter sync call started"
-        );
-        let ens_v2_resolver_summary = if let Some(source_scope) = source_scope {
-            bigname_adapters::EnsV2ResolverSyncSummary::sync_for_block_hashes_with_source_scope(
-                pool,
-                chain,
-                block_hashes,
-                source_scope,
-            )
-            .await?
-        } else {
-            bigname_adapters::EnsV2ResolverSyncSummary::sync_for_block_hashes(
-                pool,
-                chain,
-                block_hashes,
-            )
-            .await?
-        };
-        log_adapter_call_timing(
-            chain,
-            "ens_v2_resolver",
-            "sync_for_block_hashes",
-            block_hashes.len(),
-            source_scope_target_count,
-            ens_v2_resolver_summary.scanned_log_count,
-            ens_v2_resolver_summary.matched_log_count,
-            ens_v2_resolver_summary.total_synced_count,
-            ens_v2_resolver_summary.total_inserted_count,
-            adapter_started.elapsed().as_millis(),
-        );
-        log_ens_v2_resolver_sync_summary(chain, &ens_v2_resolver_summary);
-        aggregate.add_counts(
-            ens_v2_resolver_summary.scanned_log_count,
-            ens_v2_resolver_summary.matched_log_count,
-            ens_v2_resolver_summary.total_synced_count,
-            ens_v2_resolver_summary.total_inserted_count,
-        );
-    }
-    if mode.selects_adapter(source_scope, NormalizedEventReplayAdapter::EnsV2Permissions) {
-        ensure_raw_fact_adapter_allowed(mode, NormalizedEventReplayAdapter::EnsV2Permissions)?;
-        let adapter_started = Instant::now();
-        info!(
-            service = "indexer",
-            command = "adapter-sync",
-            chain,
-            adapter = "ens_v2_permissions",
-            block_hash_count = block_hashes.len(),
-            source_scope_target_count,
-            adapter_sync_mode = ?mode,
-            "adapter sync call started"
-        );
-        let ens_v2_permissions_summary = if let Some(source_scope) = source_scope {
-            bigname_adapters::EnsV2PermissionsSyncSummary::sync_for_block_hashes_with_source_scope(
-                pool,
-                chain,
-                block_hashes,
-                source_scope,
-            )
-            .await?
-        } else {
-            bigname_adapters::EnsV2PermissionsSyncSummary::sync_for_block_hashes(
-                pool,
-                chain,
-                block_hashes,
-            )
-            .await?
-        };
-        log_adapter_call_timing(
-            chain,
-            "ens_v2_permissions",
-            "sync_for_block_hashes",
-            block_hashes.len(),
-            source_scope_target_count,
-            ens_v2_permissions_summary.scanned_log_count,
-            ens_v2_permissions_summary.matched_log_count,
-            ens_v2_permissions_summary.total_synced_count,
-            ens_v2_permissions_summary.total_inserted_count,
-            adapter_started.elapsed().as_millis(),
-        );
-        log_ens_v2_permissions_sync_summary(chain, &ens_v2_permissions_summary);
-        aggregate.add_counts(
-            ens_v2_permissions_summary.scanned_log_count,
-            ens_v2_permissions_summary.matched_log_count,
-            ens_v2_permissions_summary.total_synced_count,
-            ens_v2_permissions_summary.total_inserted_count,
-        );
-    }
+    sync_ens_v2_tail_adapters(
+        pool,
+        chain,
+        block_hashes,
+        source_scope,
+        mode,
+        &mut aggregate,
+        progress,
+    )
+    .await?;
     if mode == PersistedRawPayloadAdapterSyncMode::LivePoll {
         log_live_poll_adapter_sync_completion(
             chain,

@@ -2,7 +2,10 @@ use anyhow::{Context, Result, ensure};
 use bigname_storage::STORED_LINEAGE_COVERAGE_CANDIDATE_TABLE;
 use sqlx::{PgConnection, PgPool, Row};
 
-use super::RequiredWatchedTuple;
+use super::{ManifestRuntimeProgress, RequiredWatchedTuple};
+
+const COVERAGE_SOURCE_PAGE_ROWS: i64 = 1_000;
+const COVERAGE_DELTA_TABLE: &str = "stored_lineage_coverage_frontier_candidate_delta";
 
 // Created and owned by bigname-storage's publication guard. Keeping manifest
 // authority in a temporary relation lets PostgreSQL derive, diff, and publish
@@ -63,6 +66,80 @@ pub async fn load_earliest_known_watched_block(
                 "failed to load earliest known watched block for chain {chain} through {through_block}"
             )
         })
+}
+
+pub async fn load_earliest_known_watched_block_with_progress(
+    pool: &PgPool,
+    chain: &str,
+    through_block: i64,
+    log_producing_source_families: &[String],
+    progress: &mut dyn ManifestRuntimeProgress,
+) -> Result<Option<i64>> {
+    if log_producing_source_families.is_empty() {
+        return Ok(None);
+    }
+    let mut connection = pool
+        .acquire()
+        .await
+        .context("failed to acquire earliest watched-block scan connection")?;
+    let mut earliest = None;
+    for (source_table, source_id_column, watched_branch) in [
+        (
+            "contract_instance_addresses",
+            "contract_instance_address_id",
+            "manifest_watched_intervals",
+        ),
+        (
+            "discovery_edges",
+            "discovery_edge_id",
+            "discovery_watched_intervals",
+        ),
+    ] {
+        let mut after_id = 0i64;
+        loop {
+            let source_ids = sqlx::query_scalar::<_, i64>(&format!(
+                "SELECT {source_id_column} FROM {source_table} WHERE {source_id_column} > $1 ORDER BY {source_id_column} LIMIT $2"
+            ))
+            .bind(after_id)
+            .bind(COVERAGE_SOURCE_PAGE_ROWS)
+            .fetch_all(&mut *connection)
+            .await
+            .with_context(|| format!("failed to page {source_table} for earliest watched block"))?;
+            let Some(last_id) = source_ids.last().copied() else {
+                break;
+            };
+            after_id = last_id;
+            let query = super::intervals::with_streaming_watched_intervals(&format!(
+                r#"
+                SELECT MIN(watched.active_from_block_number)::BIGINT
+                FROM {watched_branch} watched
+                WHERE watched.source_row_id = ANY($3::BIGINT[])
+                  AND {historical_predicate}
+                  AND watched.chain = $1
+                  AND watched.source_family = ANY($4::TEXT[])
+                  AND watched.active_from_block_number IS NOT NULL
+                  AND watched.active_from_block_number <= $2
+                "#,
+                historical_predicate = super::intervals::HISTORICAL_WATCHED_INTERVAL_PREDICATE,
+            ));
+            let page_earliest = sqlx::query_scalar::<_, Option<i64>>(&query)
+                .bind(chain)
+                .bind(through_block)
+                .bind(&source_ids)
+                .bind(log_producing_source_families)
+                .fetch_one(&mut *connection)
+                .await
+                .with_context(|| {
+                    format!("failed to inspect {watched_branch} earliest watched block page")
+                })?;
+            if let Some(page_earliest) = page_earliest {
+                earliest =
+                    Some(earliest.map_or(page_earliest, |value: i64| value.min(page_earliest)));
+            }
+            progress.record(pool).await?;
+        }
+    }
+    Ok(earliest)
 }
 
 /// Materialize the complete authoritative requirement snapshot, clipped to
@@ -165,6 +242,204 @@ pub async fn materialize_stored_lineage_coverage_candidate(
     })
 }
 
+/// Progress-aware candidate materialization. Source rows are first keyset
+/// paged by their primary identities; each bounded page contributes its
+/// interval union to the transaction-local candidate table.
+pub async fn materialize_stored_lineage_coverage_candidate_with_progress(
+    connection: &mut PgConnection,
+    progress_pool: &PgPool,
+    chain: &str,
+    verified_from_block: i64,
+    verified_through_block: i64,
+    log_producing_source_families: &[String],
+    progress: &mut dyn ManifestRuntimeProgress,
+) -> Result<StoredLineageCoverageCandidateSummary> {
+    ensure!(
+        !chain.trim().is_empty(),
+        "coverage candidate chain must not be empty"
+    );
+    ensure!(
+        verified_from_block >= 0 && verified_through_block >= verified_from_block,
+        "coverage candidate bounds must be non-negative and ordered"
+    );
+    ensure!(
+        verified_through_block < i64::MAX,
+        "inclusive coverage candidate upper bound cannot be represented as INT8MULTIRANGE"
+    );
+    sqlx::query(&format!(
+        "TRUNCATE pg_temp.{STORED_LINEAGE_COVERAGE_CANDIDATE_TABLE}"
+    ))
+    .execute(&mut *connection)
+    .await
+    .context("failed to clear stored-lineage coverage candidate")?;
+    if log_producing_source_families.is_empty() {
+        return Ok(StoredLineageCoverageCandidateSummary {
+            requirement_tuple_count: 0,
+        });
+    }
+
+    materialize_candidate_source_pages(
+        connection,
+        progress_pool,
+        chain,
+        verified_from_block,
+        verified_through_block,
+        log_producing_source_families,
+        "contract_instance_addresses",
+        "contract_instance_address_id",
+        "manifest_watched_intervals",
+        progress,
+    )
+    .await?;
+    materialize_candidate_source_pages(
+        connection,
+        progress_pool,
+        chain,
+        verified_from_block,
+        verified_through_block,
+        log_producing_source_families,
+        "discovery_edges",
+        "discovery_edge_id",
+        "discovery_watched_intervals",
+        progress,
+    )
+    .await?;
+
+    let mut requirement_tuple_count = 0i64;
+    let mut cursor = None::<(String, String)>;
+    loop {
+        let rows = sqlx::query(&format!(
+            r#"
+            SELECT source_family, address
+            FROM pg_temp.{STORED_LINEAGE_COVERAGE_CANDIDATE_TABLE}
+            WHERE $1::TEXT IS NULL OR (source_family, address) > ($1, $2)
+            ORDER BY source_family, address
+            LIMIT $3
+            "#,
+        ))
+        .bind(cursor.as_ref().map(|(family, _)| family))
+        .bind(cursor.as_ref().map(|(_, address)| address))
+        .bind(COVERAGE_SOURCE_PAGE_ROWS)
+        .fetch_all(&mut *connection)
+        .await
+        .context("failed to count a stored-lineage coverage candidate page")?;
+        let Some(last) = rows.last() else {
+            break;
+        };
+        cursor = Some((last.try_get("source_family")?, last.try_get("address")?));
+        requirement_tuple_count += i64::try_from(rows.len())?;
+        progress.record(progress_pool).await?;
+    }
+    Ok(StoredLineageCoverageCandidateSummary {
+        requirement_tuple_count,
+    })
+}
+
+#[expect(clippy::too_many_arguments)]
+#[path = "frontier/source_pages.rs"]
+mod source_pages;
+
+use source_pages::materialize_candidate_source_pages;
+pub async fn materialize_stored_lineage_coverage_candidate_delta_with_progress(
+    connection: &mut PgConnection,
+    progress_pool: &PgPool,
+    chain: &str,
+    topic_changed_source_families: &[String],
+    reverify_all: bool,
+    progress: &mut dyn ManifestRuntimeProgress,
+) -> Result<()> {
+    sqlx::query(&format!(
+        r#"
+        CREATE TEMP TABLE pg_temp.{COVERAGE_DELTA_TABLE} (
+            source_family TEXT NOT NULL,
+            address TEXT NOT NULL,
+            required_from_block BIGINT NOT NULL,
+            required_to_block BIGINT NOT NULL,
+            PRIMARY KEY (source_family, address, required_from_block, required_to_block)
+        ) ON COMMIT DROP
+        "#,
+    ))
+    .execute(&mut *connection)
+    .await
+    .context("failed to create stored-lineage coverage delta table")?;
+    let mut cursor = None::<(String, String)>;
+    loop {
+        let rows = sqlx::query(&format!(
+            r#"
+            SELECT source_family, address
+            FROM pg_temp.{STORED_LINEAGE_COVERAGE_CANDIDATE_TABLE}
+            WHERE $1::TEXT IS NULL OR (source_family, address) > ($1, $2)
+            ORDER BY source_family, address
+            LIMIT $3
+            "#,
+        ))
+        .bind(cursor.as_ref().map(|(family, _)| family))
+        .bind(cursor.as_ref().map(|(_, address)| address))
+        .bind(COVERAGE_SOURCE_PAGE_ROWS)
+        .fetch_all(&mut *connection)
+        .await
+        .context("failed to page coverage candidates for delta materialization")?;
+        let Some(last) = rows.last() else {
+            break;
+        };
+        cursor = Some((last.try_get("source_family")?, last.try_get("address")?));
+        let families = rows
+            .iter()
+            .map(|row| row.try_get::<String, _>("source_family"))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let addresses = rows
+            .iter()
+            .map(|row| row.try_get::<String, _>("address"))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        sqlx::query(&format!(
+            r#"
+            WITH page_keys AS (
+                SELECT * FROM UNNEST($4::TEXT[], $5::TEXT[]) key(source_family, address)
+            ), delta_by_tuple AS (
+                SELECT
+                    candidate.source_family,
+                    candidate.address,
+                    CASE WHEN $3::BOOLEAN
+                           OR candidate.source_family = ANY($2::TEXT[])
+                         THEN candidate.required_intervals
+                         ELSE candidate.required_intervals - COALESCE(
+                             persisted.required_intervals,
+                             '{{}}'::INT8MULTIRANGE
+                         )
+                    END AS required_intervals
+                FROM page_keys key
+                JOIN pg_temp.{STORED_LINEAGE_COVERAGE_CANDIDATE_TABLE} candidate
+                  USING (source_family, address)
+                LEFT JOIN stored_lineage_coverage_frontier_requirements persisted
+                  ON persisted.chain_id = $1
+                 AND persisted.source_family = candidate.source_family
+                 AND persisted.address = candidate.address
+            )
+            INSERT INTO pg_temp.{COVERAGE_DELTA_TABLE} (
+                source_family, address, required_from_block, required_to_block
+            )
+            SELECT
+                delta.source_family,
+                delta.address,
+                lower(required_range)::BIGINT,
+                (upper(required_range) - 1)::BIGINT
+            FROM delta_by_tuple delta
+            CROSS JOIN LATERAL unnest(delta.required_intervals) required_range
+            "#,
+        ))
+        .bind(chain)
+        .bind(topic_changed_source_families)
+        .bind(reverify_all)
+        .bind(&families)
+        .bind(&addresses)
+        .execute(&mut *connection)
+        .await
+        .context("failed to materialize a stored-lineage coverage delta page")?;
+        progress.record(progress_pool).await?;
+    }
+    Ok(())
+}
+
 /// Return one bounded, ordered page of candidate intervals which need fact
 /// verification. Unchanged topic families return only candidate-minus-saved
 /// intervals. Changed topic families (or a cold/deep rebuild) return their
@@ -185,8 +460,35 @@ pub async fn load_stored_lineage_coverage_candidate_delta_page(
         (1..=1_000).contains(&limit),
         "coverage delta page limit must be between 1 and 1000"
     );
-    let rows = sqlx::query(&format!(
-        r#"
+    let delta_is_materialized = sqlx::query_scalar::<_, bool>(
+        "SELECT to_regclass('pg_temp.stored_lineage_coverage_frontier_candidate_delta') IS NOT NULL",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .context("failed to inspect stored-lineage coverage delta materialization")?;
+    let rows = if delta_is_materialized {
+        sqlx::query(&format!(
+            r#"
+            SELECT source_family, address, required_from_block, required_to_block
+            FROM pg_temp.{COVERAGE_DELTA_TABLE}
+            WHERE $1::TEXT IS NULL
+               OR (source_family, address, required_from_block, required_to_block)
+                  > ($1::TEXT, $2::TEXT, $3::BIGINT, $4::BIGINT)
+            ORDER BY source_family, address, required_from_block, required_to_block
+            LIMIT $5
+            "#,
+        ))
+        .bind(cursor.map(|cursor| cursor.source_family.as_str()))
+        .bind(cursor.map(|cursor| cursor.address.as_str()))
+        .bind(cursor.map(|cursor| cursor.required_from_block))
+        .bind(cursor.map(|cursor| cursor.required_to_block))
+        .bind(limit)
+        .fetch_all(&mut *connection)
+        .await
+        .with_context(|| format!("failed to page materialized coverage delta for {chain}"))?
+    } else {
+        sqlx::query(&format!(
+            r#"
         WITH delta_by_tuple AS (
             SELECT
                 candidate.source_family,
@@ -227,19 +529,20 @@ pub async fn load_stored_lineage_coverage_candidate_delta_page(
         ORDER BY source_family, address, required_from_block, required_to_block
         LIMIT $8
         "#,
-        candidate_table = STORED_LINEAGE_COVERAGE_CANDIDATE_TABLE,
-    ))
-    .bind(chain)
-    .bind(topic_changed_source_families)
-    .bind(reverify_all)
-    .bind(cursor.map(|cursor| cursor.source_family.as_str()))
-    .bind(cursor.map(|cursor| cursor.address.as_str()))
-    .bind(cursor.map(|cursor| cursor.required_from_block))
-    .bind(cursor.map(|cursor| cursor.required_to_block))
-    .bind(limit)
-    .fetch_all(connection)
-    .await
-    .with_context(|| format!("failed to page stored-lineage coverage delta for {chain}"))?;
+            candidate_table = STORED_LINEAGE_COVERAGE_CANDIDATE_TABLE,
+        ))
+        .bind(chain)
+        .bind(topic_changed_source_families)
+        .bind(reverify_all)
+        .bind(cursor.map(|cursor| cursor.source_family.as_str()))
+        .bind(cursor.map(|cursor| cursor.address.as_str()))
+        .bind(cursor.map(|cursor| cursor.required_from_block))
+        .bind(cursor.map(|cursor| cursor.required_to_block))
+        .bind(limit)
+        .fetch_all(&mut *connection)
+        .await
+        .with_context(|| format!("failed to page stored-lineage coverage delta for {chain}"))?
+    };
 
     let requirements = rows
         .into_iter()
@@ -278,204 +581,5 @@ pub async fn load_stored_lineage_coverage_candidate_delta_page(
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-
-    use anyhow::Result;
-    use bigname_storage::{
-        StoredLineageCoverageFrontierPublication, StoredLineageCoveragePublicationGuard,
-        begin_stored_lineage_coverage_frontier_publication,
-    };
-    use bigname_test_support::{TestDatabase, TestDatabaseConfig};
-
-    use super::*;
-
-    const CHAIN: &str = "frontier-test-chain";
-    const FAMILY: &str = "frontier_test_family";
-    const ADDRESS_ONE: &str = "0x0000000000000000000000000000000000000001";
-    const ADDRESS_TWO: &str = "0x0000000000000000000000000000000000000002";
-
-    async fn database(name: &str) -> Result<TestDatabase> {
-        TestDatabase::create_migrated(
-            TestDatabaseConfig::new(name),
-            &bigname_storage::MIGRATOR,
-            "failed to apply migrations for manifest frontier test",
-        )
-        .await
-    }
-
-    fn publication() -> StoredLineageCoverageFrontierPublication {
-        StoredLineageCoverageFrontierPublication {
-            discovery_admission_epoch: 0,
-            verified_from_block: 10,
-            verified_through_block: 40,
-            topic0s_by_family: BTreeMap::from([(FAMILY.to_owned(), vec![format!("0x{:064x}", 1)])]),
-        }
-    }
-
-    async fn stage(
-        guard: &mut StoredLineageCoveragePublicationGuard,
-        rows: &[(&str, i64, i64)],
-    ) -> Result<()> {
-        for (address, from, through) in rows {
-            sqlx::query(&format!(
-                r#"
-                INSERT INTO pg_temp.{STORED_LINEAGE_COVERAGE_CANDIDATE_TABLE} (
-                    source_family,
-                    address,
-                    required_intervals
-                )
-                VALUES ($1, $2, int8multirange(int8range($3, $4 + 1, '[)')))
-                "#,
-            ))
-            .bind(FAMILY)
-            .bind(address)
-            .bind(from)
-            .bind(through)
-            .execute(guard.connection_mut())
-            .await?;
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn server_delta_handles_addition_removal_readmission_and_topic_change() -> Result<()> {
-        let database = database("manifest_frontier_delta").await?;
-        let mut first =
-            begin_stored_lineage_coverage_frontier_publication(database.pool(), CHAIN, None, 0)
-                .await?;
-        stage(&mut first, &[(ADDRESS_ONE, 10, 20)]).await?;
-        first.publish(&publication()).await?;
-
-        let mut replacement =
-            begin_stored_lineage_coverage_frontier_publication(database.pool(), CHAIN, Some(1), 0)
-                .await?;
-        stage(
-            &mut replacement,
-            &[(ADDRESS_ONE, 10, 15), (ADDRESS_TWO, 30, 40)],
-        )
-        .await?;
-        let delta = load_stored_lineage_coverage_candidate_delta_page(
-            replacement.connection_mut(),
-            CHAIN,
-            &[],
-            false,
-            None,
-            32,
-        )
-        .await?;
-        assert_eq!(
-            delta.requirements,
-            vec![RequiredWatchedTuple {
-                source_family: FAMILY.to_owned(),
-                address: ADDRESS_TWO.to_owned(),
-                required_from_block: 30,
-                required_to_block: 40,
-            }],
-            "a shortening/removal needs no fact read while an addition does"
-        );
-        replacement.publish(&publication()).await?;
-
-        let mut readmission =
-            begin_stored_lineage_coverage_frontier_publication(database.pool(), CHAIN, Some(2), 0)
-                .await?;
-        stage(
-            &mut readmission,
-            &[(ADDRESS_ONE, 10, 20), (ADDRESS_TWO, 30, 40)],
-        )
-        .await?;
-        let delta = load_stored_lineage_coverage_candidate_delta_page(
-            readmission.connection_mut(),
-            CHAIN,
-            &[],
-            false,
-            None,
-            32,
-        )
-        .await?;
-        assert_eq!(
-            delta.requirements,
-            vec![RequiredWatchedTuple {
-                source_family: FAMILY.to_owned(),
-                address: ADDRESS_ONE.to_owned(),
-                required_from_block: 16,
-                required_to_block: 20,
-            }],
-            "readmission verifies only the interval absent from the saved replacement"
-        );
-        let topic_delta = load_stored_lineage_coverage_candidate_delta_page(
-            readmission.connection_mut(),
-            CHAIN,
-            &[FAMILY.to_owned()],
-            false,
-            None,
-            32,
-        )
-        .await?;
-        assert_eq!(topic_delta.requirements.len(), 2);
-        assert_eq!(topic_delta.requirements[0].required_from_block, 10);
-        assert_eq!(topic_delta.requirements[0].required_to_block, 20);
-        drop(readmission);
-
-        database.cleanup().await
-    }
-
-    #[tokio::test]
-    async fn high_cardinality_candidate_returns_only_bounded_delta_pages() -> Result<()> {
-        let database = database("manifest_frontier_bounded_delta").await?;
-        let mut guard =
-            begin_stored_lineage_coverage_frontier_publication(database.pool(), CHAIN, None, 0)
-                .await?;
-        sqlx::query(&format!(
-            r#"
-            INSERT INTO pg_temp.{STORED_LINEAGE_COVERAGE_CANDIDATE_TABLE} (
-                source_family,
-                address,
-                required_intervals
-            )
-            SELECT
-                $1,
-                '0x' || lpad(to_hex(candidate), 40, '0'),
-                int8multirange(int8range(10, 21, '[)'))
-            FROM generate_series(1, 10000) candidate
-            "#,
-        ))
-        .bind(FAMILY)
-        .execute(guard.connection_mut())
-        .await?;
-
-        let first = load_stored_lineage_coverage_candidate_delta_page(
-            guard.connection_mut(),
-            CHAIN,
-            &[],
-            true,
-            None,
-            37,
-        )
-        .await?;
-        assert_eq!(first.requirements.len(), 37);
-        let second = load_stored_lineage_coverage_candidate_delta_page(
-            guard.connection_mut(),
-            CHAIN,
-            &[],
-            true,
-            first.next_cursor.as_ref(),
-            37,
-        )
-        .await?;
-        assert_eq!(second.requirements.len(), 37);
-        assert_ne!(first.requirements, second.requirements);
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>(&format!(
-                "SELECT COUNT(*)::BIGINT FROM pg_temp.{STORED_LINEAGE_COVERAGE_CANDIDATE_TABLE}"
-            ))
-            .fetch_one(guard.connection_mut())
-            .await?,
-            10_000,
-            "the full candidate stays server-side while each returned delta is bounded"
-        );
-        drop(guard);
-
-        database.cleanup().await
-    }
-}
+#[path = "frontier/tests.rs"]
+mod tests;

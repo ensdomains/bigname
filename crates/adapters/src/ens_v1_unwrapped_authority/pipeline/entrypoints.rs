@@ -39,6 +39,23 @@ pub async fn sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limi
     .await
 }
 
+pub async fn sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limit_and_progress(
+    pool: &PgPool,
+    chain: &str,
+    checkpoint: &ReplayAdapterCheckpointContext,
+    max_raw_logs_per_page: usize,
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<EnsV1UnwrappedAuthoritySyncSummary> {
+    sync_ens_v1_unwrapped_authority_with_checkpoint_context(
+        pool,
+        chain,
+        &AdapterCheckpointContext::for_replay(checkpoint),
+        max_raw_logs_per_page,
+        Some(progress),
+    )
+    .await
+}
+
 pub async fn sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit(
     pool: &PgPool,
     chain: &str,
@@ -137,6 +154,49 @@ impl EnsV1UnwrappedAuthoritySyncSummary {
             None,
             None,
             None,
+        )
+        .await
+    }
+
+    pub async fn sync_for_block_hashes_with_progress(
+        pool: &PgPool,
+        chain: &str,
+        block_hashes: &[String],
+        progress: &mut dyn StartupAdapterProgress,
+    ) -> Result<Self> {
+        sync_ens_v1_unwrapped_authority_with_scope(
+            pool,
+            chain,
+            true,
+            block_hashes,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(progress),
+        )
+        .await
+    }
+
+    pub async fn sync_for_block_hashes_with_source_scope_and_progress(
+        pool: &PgPool,
+        chain: &str,
+        block_hashes: &[String],
+        source_scope: &[(String, String, i64, i64)],
+        progress: &mut dyn StartupAdapterProgress,
+    ) -> Result<Self> {
+        sync_ens_v1_unwrapped_authority_with_scope(
+            pool,
+            chain,
+            true,
+            block_hashes,
+            None,
+            Some(source_scope),
+            None,
+            None,
+            None,
+            Some(progress),
         )
         .await
     }

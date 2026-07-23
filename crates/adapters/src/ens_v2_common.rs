@@ -1,16 +1,21 @@
 use bigname_storage::sql_row;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{Context, Result};
-use bigname_manifests::load_watched_contracts;
+use bigname_manifests::{load_watched_contracts, load_watched_contracts_scoped_with_progress};
+use futures_util::TryStreamExt;
 use sqlx::{PgPool, Row, types::Uuid};
 
 use crate::adapter_manifest::{
     ActiveManifestMetadata, active_manifest_for_watched_contract,
     ensure_watched_contract_manifest_chain, load_active_manifest_metadata,
-    load_latest_active_manifest_metadata_for_source_family, watched_contract_manifest_ids,
+    load_latest_active_manifest_metadata_for_source_family, required_source_manifest_id,
 };
 pub(crate) use crate::evm_abi::{keccak256_bytes, keccak256_hex};
+use crate::{
+    checkpoint_context::{StartupAdapterProgress, record_startup_adapter_progress},
+    startup_progress::{STARTUP_ADAPTER_PROGRESS_PAGE_ROWS, StartupManifestProgress},
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ActiveEmitter {
@@ -67,10 +72,10 @@ pub(crate) fn source_scope_bindings(
 /// discovery-edge `active_to`) and the dedup tie-break is plain id ordering — `ActiveEmitter` here
 /// carries no `source_rank`, and a collision only happens on an exact identical interval.
 fn insert_distinct_emitter(
-    emitters_by_scope: &mut HashMap<EmitterScopeKey, ActiveEmitter>,
+    emitters_by_scope: &mut BTreeMap<EmitterScopeKey, ActiveEmitter>,
     emitter: ActiveEmitter,
 ) {
-    use std::collections::hash_map::Entry;
+    use std::collections::btree_map::Entry;
     let scope_key = (
         emitter.address.clone(),
         emitter.active_from_block_number,
@@ -130,10 +135,23 @@ pub(crate) async fn load_active_emitters(
     source_family: &str,
     resolver_edge_kind: &str,
     adapter_label: &str,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<Vec<ActiveEmitter>> {
-    let watched_contracts = load_watched_contracts(pool)
+    let watched_contracts = if let Some(progress) = progress.as_deref_mut() {
+        let mut manifest_progress = StartupManifestProgress::new(progress);
+        load_watched_contracts_scoped_with_progress(
+            pool,
+            Some(chain),
+            &[source_family.to_owned()],
+            &mut manifest_progress,
+        )
         .await
-        .with_context(|| format!("failed to load watched contracts for {adapter_label} adapter"))?;
+        .with_context(|| format!("failed to load watched contracts for {adapter_label} adapter"))?
+    } else {
+        load_watched_contracts(pool).await.with_context(|| {
+            format!("failed to load watched contracts for {adapter_label} adapter")
+        })?
+    };
     let watched_contracts = watched_contracts
         .into_iter()
         .filter(|contract| contract.chain == chain)
@@ -142,13 +160,20 @@ pub(crate) async fn load_active_emitters(
         return Ok(Vec::new());
     }
 
-    let manifest_ids = watched_contract_manifest_ids(&watched_contracts)?;
+    let mut manifest_ids = HashSet::new();
+    for (index, watched_contract) in watched_contracts.iter().enumerate() {
+        manifest_ids.insert(required_source_manifest_id(watched_contract)?);
+        record_common_progress(pool, progress, index + 1, watched_contracts.len()).await?;
+    }
+    let manifest_ids = manifest_ids.into_iter().collect::<Vec<_>>();
     let context_label = format!("{adapter_label} emitters");
     let active_manifests =
         load_active_manifest_metadata(pool, &manifest_ids, &context_label).await?;
 
-    let mut emitters_by_scope = HashMap::<EmitterScopeKey, ActiveEmitter>::new();
-    for watched_contract in watched_contracts {
+    record_startup_adapter_progress(pool, progress).await?;
+    let watched_contract_count = watched_contracts.len();
+    let mut emitters_by_scope = BTreeMap::<EmitterScopeKey, ActiveEmitter>::new();
+    for (index, watched_contract) in watched_contracts.into_iter().enumerate() {
         let (source_manifest_id, manifest) =
             active_manifest_for_watched_contract(&active_manifests, &watched_contract)?;
         if manifest.source_family != source_family {
@@ -169,33 +194,20 @@ pub(crate) async fn load_active_emitters(
                 active_to_block_number: watched_contract.active_to_block_number,
             },
         );
+        record_common_progress(pool, progress, index + 1, watched_contract_count).await?;
     }
     if let Some(manifest) =
         load_active_source_family_manifest_metadata(pool, chain, source_family).await?
     {
         for emitter in
-            load_discovered_resolver_emitters(pool, chain, resolver_edge_kind, &manifest).await?
+            load_discovered_resolver_emitters(pool, chain, resolver_edge_kind, &manifest, progress)
+                .await?
         {
             insert_distinct_emitter(&mut emitters_by_scope, emitter);
         }
     }
 
-    let mut emitters = emitters_by_scope.into_values().collect::<Vec<_>>();
-    emitters.sort_by(|left, right| {
-        left.address
-            .cmp(&right.address)
-            .then(
-                left.active_from_block_number
-                    .cmp(&right.active_from_block_number),
-            )
-            .then(
-                left.active_to_block_number
-                    .cmp(&right.active_to_block_number),
-            )
-            .then(left.source_manifest_id.cmp(&right.source_manifest_id))
-            .then(left.contract_instance_id.cmp(&right.contract_instance_id))
-    });
-    Ok(emitters)
+    Ok(emitters_by_scope.into_values().collect())
 }
 
 async fn load_discovered_resolver_emitters(
@@ -203,8 +215,9 @@ async fn load_discovered_resolver_emitters(
     chain: &str,
     resolver_edge_kind: &str,
     manifest: &ActiveManifestMetadata,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<Vec<ActiveEmitter>> {
-    let rows = sqlx::query(
+    let mut rows = sqlx::query(
         r#"
         SELECT
             cia.address,
@@ -219,35 +232,58 @@ async fn load_discovered_resolver_emitters(
           ON cia.contract_instance_id = de.to_contract_instance_id
         WHERE de.chain_id = $1
           AND de.edge_kind = $2
-        ORDER BY lower(cia.address), de.active_from_block_number NULLS FIRST, de.discovery_edge_id
         "#,
     )
     .bind(chain)
     .bind(resolver_edge_kind)
-    .fetch_all(pool)
-    .await
-    .with_context(|| format!("failed to load ENSv2 discovered resolver emitters for {chain}"))?;
+    .fetch(pool);
+    let mut emitters = Vec::new();
+    while let Some(row) = rows.try_next().await.with_context(|| {
+        format!("failed to stream ENSv2 discovered resolver emitters for {chain}")
+    })? {
+        let address = normalize_address(
+            &row.try_get::<String, _>("address")
+                .context("missing discovered resolver address")?,
+        );
+        emitters.push(ActiveEmitter {
+            address,
+            contract_instance_id: row
+                .try_get("to_contract_instance_id")
+                .context("missing discovered resolver contract_instance_id")?,
+            source_manifest_id: manifest.manifest_id,
+            namespace: manifest.namespace.clone(),
+            source_family: manifest.source_family.clone(),
+            manifest_version: manifest.manifest_version,
+            active_from_block_number: sql_row::get(&row, "active_from_block_number")?,
+            active_to_block_number: sql_row::get(&row, "active_to_block_number")?,
+        });
+        if emitters
+            .len()
+            .is_multiple_of(STARTUP_ADAPTER_PROGRESS_PAGE_ROWS)
+        {
+            record_startup_adapter_progress(pool, progress).await?;
+        }
+    }
+    if !emitters.is_empty()
+        && !emitters
+            .len()
+            .is_multiple_of(STARTUP_ADAPTER_PROGRESS_PAGE_ROWS)
+    {
+        record_startup_adapter_progress(pool, progress).await?;
+    }
+    Ok(emitters)
+}
 
-    rows.into_iter()
-        .map(|row| {
-            let address = normalize_address(
-                &row.try_get::<String, _>("address")
-                    .context("missing discovered resolver address")?,
-            );
-            Ok(ActiveEmitter {
-                address,
-                contract_instance_id: row
-                    .try_get("to_contract_instance_id")
-                    .context("missing discovered resolver contract_instance_id")?,
-                source_manifest_id: manifest.manifest_id,
-                namespace: manifest.namespace.clone(),
-                source_family: manifest.source_family.clone(),
-                manifest_version: manifest.manifest_version,
-                active_from_block_number: sql_row::get(&row, "active_from_block_number")?,
-                active_to_block_number: sql_row::get(&row, "active_to_block_number")?,
-            })
-        })
-        .collect()
+async fn record_common_progress(
+    pool: &PgPool,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+    completed: usize,
+    total: usize,
+) -> Result<()> {
+    if completed == total || completed.is_multiple_of(STARTUP_ADAPTER_PROGRESS_PAGE_ROWS) {
+        record_startup_adapter_progress(pool, progress).await?;
+    }
+    Ok(())
 }
 
 async fn load_active_source_family_manifest_metadata(
@@ -315,7 +351,7 @@ mod tests {
 
     #[test]
     fn insert_distinct_emitter_preserves_disjoint_intervals_per_address() {
-        let mut by_scope = HashMap::new();
+        let mut by_scope = BTreeMap::new();
 
         // Two genuinely disjoint discovery edges for the same resolver address, discovered in
         // arbitrary order. They must NOT collapse into one envelope [100, 600): the gap [200, 500)
@@ -422,7 +458,7 @@ mod tests {
         // The same interval reported by two different sources (a watched-contract row and a
         // discovered-resolver row carry different source_manifest_id) dedups to one emitter,
         // keeping the lower (source_manifest_id, contract_instance_id).
-        let mut by_scope = HashMap::new();
+        let mut by_scope = BTreeMap::new();
         insert_distinct_emitter(
             &mut by_scope,
             emitter_with("0xresolver", 7, 5, Some(100), Some(200)),

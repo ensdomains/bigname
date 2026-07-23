@@ -1,7 +1,5 @@
 //! Shared PostgreSQL storage and migration utilities.
-
 use std::{str::FromStr, time::Duration};
-
 mod address_names;
 mod audit;
 mod backfill_jobs;
@@ -38,16 +36,6 @@ pub mod sql_row;
 mod stored_lineage_coverage;
 mod time;
 mod versions;
-
-use anyhow::{Context, Result, ensure};
-use clap::Args;
-use sqlx::{
-    PgPool, Postgres,
-    pool::PoolConnection,
-    postgres::{PgConnectOptions, PgPoolOptions},
-};
-use tracing::info;
-
 pub use address_names::{
     AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation,
     AddressNamesCurrentAddressReplacement, AddressNamesCurrentCountFilter,
@@ -68,6 +56,7 @@ pub use address_names::{
     rebuild_address_names_current_identity_sidecars, replace_address_names_current_logical_names,
     upsert_address_names_current_rows,
 };
+use anyhow::{Context, Result, ensure};
 pub use audit::{
     CanonicalityInspection, CanonicalityInspectionStatus, ManifestDriftAlertInspection,
     ManifestDriftAlertKind, ManifestDriftAlertObservation, RawFactAuditCounts,
@@ -75,18 +64,7 @@ pub use audit::{
     inspect_canonicality_range, list_manifest_drift_alert_observations,
     list_raw_payload_cache_audit_metadata, list_stored_lineage_range,
 };
-pub use backfill_jobs::{
-    BackfillCoverageFactDerivation, BackfillCoverageFactScope, BackfillCoverageFactWrite,
-    BackfillJob, BackfillJobCreate, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange,
-    BackfillRangeSpec, BackfillTopicCoverageRequirement, BackfillTopicCoverageViolation,
-    MAX_BACKFILL_TOPIC_EVIDENCE_REQUIREMENTS, advance_backfill_range, complete_backfill_job,
-    complete_backfill_range, complete_backfill_range_recording_coverage, create_backfill_job,
-    create_generation_scoped_backfill_job, ensure_and_load_raw_log_retention_generation,
-    fail_backfill_job, fail_backfill_range, find_backfill_topic_coverage_violations,
-    load_backfill_coverage_fact_counts, load_backfill_job, load_backfill_ranges,
-    load_completed_backfill_jobs_intersecting_range, materialize_completed_backfill_topic_evidence,
-    reserve_backfill_range, write_backfill_coverage_facts,
-};
+mod long_operation_exports;
 pub use base_normalized_rederive::{
     BASE_NORMALIZED_REDERIVE_ADAPTER, BASE_NORMALIZED_REDERIVE_BACKLOG_CURSOR_KIND,
     BASE_NORMALIZED_REDERIVE_CHAIN_ID, BASE_NORMALIZED_REDERIVE_CURSOR_KIND,
@@ -125,6 +103,7 @@ pub use children::{
     load_children_current_page, load_children_current_summaries,
     stream_canonical_declared_child_sources, upsert_children_current_rows,
 };
+use clap::Args;
 pub use evm_primitives::{ens_namehash_label_bytes, normalize_evm_address, normalize_evm_b256};
 pub use execution::{
     ExecutionBoundaryInvalidation, ExecutionCacheKey, ExecutionManifestInvalidation,
@@ -143,6 +122,15 @@ pub use execution::{
     upsert_execution_outcome, upsert_execution_outcome_in_transaction, upsert_execution_trace,
     upsert_execution_trace_in_transaction,
 };
+pub use long_operation_exports::*;
+use sqlx::{
+    PgPool, Postgres,
+    pool::PoolConnection,
+    postgres::{PgConnectOptions, PgPoolOptions},
+};
+use tracing::info;
+#[rustfmt::skip]
+pub use execution::{ExecutionOutcomeInvalidationProgress, ExecutionOutcomeInvalidationProgressFuture, invalidate_execution_outcomes_for_orphaned_blocks_with_progress};
 pub use history::{
     EventHistoryAddressFilter, EventHistoryFilter, HistoryChainPositionSample, HistoryCursor,
     HistoryEvent, HistoryPage, HistoryScope, HistorySummary, HistorySummaryMode,
@@ -311,6 +299,8 @@ pub use resolver_profile_authority_journal::{
     load_resolver_profile_authority_family_target_page, load_resolver_profile_authority_journal,
     resolver_profile_authority_entry_key,
 };
+#[rustfmt::skip]
+pub use resolver_profile_authority_journal::{ResolverProfileAuthorityJournalProgress, ResolverProfileAuthorityJournalProgressFuture};
 pub use resolver_profile_input_changes::{
     ResolverProfileInputChange, ResolverProfileReconciliationTarget,
     acknowledge_resolver_profile_input_changes, enqueue_resolver_profile_reconciliations,
@@ -331,14 +321,6 @@ pub use snapshot_selection::{
     SnapshotSelectionErrorKind, SnapshotSelectionResult, SnapshotSelectionScope,
     SnapshotSelectorInput, ensure_projection_chain_positions_match, parse_rfc3339_utc_timestamp,
     resolve_exact_name_snapshot_selection,
-};
-pub use stored_lineage_coverage::{
-    STORED_LINEAGE_COVERAGE_CANDIDATE_TABLE, STORED_LINEAGE_COVERAGE_PROOF_FORMAT_VERSION,
-    StoredLineageCoverageFrontierHeader, StoredLineageCoverageFrontierPublication,
-    StoredLineageCoveragePublicationGuard, StoredLineageCoveragePublicationOutcome,
-    begin_stored_lineage_coverage_frontier_publication,
-    load_stored_lineage_coverage_frontier_header,
-    stored_lineage_coverage_frontier_requirements_are_valid,
 };
 pub use versions::{CURRENT_PROJECTION_REPLAY_VERSION, latest_migration_version};
 

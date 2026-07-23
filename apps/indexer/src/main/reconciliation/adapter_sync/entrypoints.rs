@@ -75,6 +75,7 @@ pub(crate) async fn sync_adapter_state_from_persisted_raw_payloads(
         PersistedRawPayloadAdapterSyncMode::LiveOrBackfill,
         true,
         FullSourceReconciliationScope::default(),
+        &mut None,
     )
     .await
 }
@@ -91,10 +92,12 @@ pub(crate) async fn sync_live_adapter_state_from_persisted_raw_payloads(
         chain,
         block_hashes,
         false,
+        &mut None,
     )
     .await
 }
 
+#[allow(dead_code)]
 pub(crate) async fn sync_live_adapter_state_from_persisted_raw_payloads_after_reorg(
     pool: &sqlx::PgPool,
     deployment_profile: &str,
@@ -107,6 +110,43 @@ pub(crate) async fn sync_live_adapter_state_from_persisted_raw_payloads_after_re
         chain,
         block_hashes,
         true,
+        &mut None,
+    )
+    .await
+}
+
+pub(crate) async fn sync_live_adapter_state_from_persisted_raw_payloads_with_progress(
+    pool: &sqlx::PgPool,
+    deployment_profile: &str,
+    chain: &str,
+    block_hashes: &[String],
+    progress: &mut Option<&mut dyn bigname_adapters::StartupAdapterProgress>,
+) -> Result<PersistedRawPayloadAdapterSyncSummary> {
+    sync_live_adapter_state_from_persisted_raw_payloads_with_reorg_repair(
+        pool,
+        deployment_profile,
+        chain,
+        block_hashes,
+        false,
+        progress,
+    )
+    .await
+}
+
+pub(crate) async fn sync_live_adapter_state_from_persisted_raw_payloads_after_reorg_with_progress(
+    pool: &sqlx::PgPool,
+    deployment_profile: &str,
+    chain: &str,
+    block_hashes: &[String],
+    progress: &mut Option<&mut dyn bigname_adapters::StartupAdapterProgress>,
+) -> Result<PersistedRawPayloadAdapterSyncSummary> {
+    sync_live_adapter_state_from_persisted_raw_payloads_with_reorg_repair(
+        pool,
+        deployment_profile,
+        chain,
+        block_hashes,
+        true,
+        progress,
     )
     .await
 }
@@ -117,6 +157,7 @@ async fn sync_live_adapter_state_from_persisted_raw_payloads_with_reorg_repair(
     chain: &str,
     block_hashes: &[String],
     reconcile_discovery_full_sources: bool,
+    progress: &mut Option<&mut dyn bigname_adapters::StartupAdapterProgress>,
 ) -> Result<PersistedRawPayloadAdapterSyncSummary> {
     info!(
         service = "indexer",
@@ -152,17 +193,19 @@ async fn sync_live_adapter_state_from_persisted_raw_payloads_with_reorg_repair(
         PersistedRawPayloadAdapterSyncMode::LivePoll,
         true,
         full_source_reconciliation,
+        progress,
     )
     .await
 }
 
-pub(crate) async fn sync_replay_normalized_events_from_persisted_raw_payloads(
+pub(crate) async fn sync_replay_normalized_events_from_persisted_raw_payloads_with_progress(
     pool: &sqlx::PgPool,
     chain: &str,
     block_hashes: &[String],
     source_scope: Option<&[(String, String, i64, i64)]>,
     canonical_raw_log_count: usize,
     replay_contract_plan: RawFactReplayContractPlan,
+    progress: &mut Option<&mut dyn bigname_adapters::StartupAdapterProgress>,
 ) -> Result<PersistedRawPayloadAdapterSyncSummary> {
     sync_adapter_state_from_persisted_raw_payloads_with_mode(
         pool,
@@ -176,6 +219,7 @@ pub(crate) async fn sync_replay_normalized_events_from_persisted_raw_payloads(
         },
         false,
         FullSourceReconciliationScope::default(),
+        progress,
     )
     .await
 }
@@ -195,6 +239,7 @@ pub(crate) async fn sync_adapter_state_from_scoped_persisted_raw_payloads(
         PersistedRawPayloadAdapterSyncMode::LiveOrBackfill,
         false,
         FullSourceReconciliationScope::default(),
+        &mut None,
     )
     .await
     .map(|_| ())?;

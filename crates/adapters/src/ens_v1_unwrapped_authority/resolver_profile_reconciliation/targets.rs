@@ -6,6 +6,7 @@ use bigname_storage::{RawLogStagingReadGuard, acquire_raw_log_staging_read_guard
 use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder, types::Uuid};
 
 use super::{ResolverEmitterReplayRange, ResolverProfileEventReconciliationSummary};
+use crate::checkpoint_context::{StartupAdapterProgress, record_startup_adapter_progress};
 
 const TARGET_BATCH_SIZE: usize = 1_000;
 
@@ -115,15 +116,19 @@ impl ResolverProfileEventReconciliation {
         Ok(())
     }
 
-    pub(super) async fn prepare(&mut self) -> Result<PreparedResolverProfileEventReconciliation> {
+    pub(super) async fn prepare(
+        &mut self,
+        progress: &mut Option<&mut dyn StartupAdapterProgress>,
+    ) -> Result<PreparedResolverProfileEventReconciliation> {
         let (resolver_address_count, resolver_address_set_digest) =
-            load_target_metadata(&self.pool, self.run_id).await?;
+            load_target_metadata(&self.pool, self.run_id, progress).await?;
         ensure!(
             resolver_address_count > 0,
             "resolver-profile reconciliation must stage at least one target"
         );
         let replay_range =
-            load_resolver_emitter_replay_range(&self.pool, &self.chain, self.run_id).await?;
+            load_resolver_emitter_replay_range(&self.pool, &self.chain, self.run_id, progress)
+                .await?;
         let (first_block_number, last_block_number, status) = replay_range
             .map_or((0, 0, "replay_complete"), |range| {
                 (range.first_block_number, range.last_block_number, "running")
@@ -233,7 +238,11 @@ fn normalized_resolver_addresses(resolver_addresses: &[String]) -> Result<Vec<St
     Ok(normalized.into_iter().collect())
 }
 
-async fn load_target_metadata(pool: &PgPool, run_id: Uuid) -> Result<(usize, String)> {
+async fn load_target_metadata(
+    pool: &PgPool,
+    run_id: Uuid,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<(usize, String)> {
     let mut after = None::<String>;
     let mut count = 0usize;
     let mut digest = Keccak256::new();
@@ -265,6 +274,7 @@ async fn load_target_metadata(pool: &PgPool, run_id: Uuid) -> Result<(usize, Str
             digest.update(address.as_bytes());
             count += 1;
         }
+        record_startup_adapter_progress(pool, progress).await?;
     }
     Ok((count, format!("{:#x}", digest.finalize())))
 }
@@ -273,23 +283,61 @@ async fn load_resolver_emitter_replay_range(
     pool: &PgPool,
     chain: &str,
     run_id: Uuid,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<Option<ResolverEmitterReplayRange>> {
-    let (first_block_number, last_block_number, resolver_block_count, invalid_lineage_count) =
-        sqlx::query_as::<_, (Option<i64>, Option<i64>, i64, i64)>(
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to begin resolver-emitter replay-range scan")?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(transaction.as_mut())
+        .await
+        .context("failed to pin resolver-emitter replay-range scan")?;
+    sqlx::query(
+        r#"
+        CREATE TEMP TABLE resolver_profile_replay_block_hashes (
+            block_hash TEXT PRIMARY KEY
+        ) ON COMMIT DROP
+        "#,
+    )
+    .execute(transaction.as_mut())
+    .await
+    .context("failed to create resolver-emitter replay block set")?;
+
+    let mut after_raw_log_id = 0i64;
+    let mut first_block_number = None::<i64>;
+    let mut last_block_number = None::<i64>;
+    let mut resolver_block_count = 0usize;
+    let mut invalid_lineage_count = 0usize;
+    loop {
+        let raw_log_ids = sqlx::query_scalar::<_, i64>(
             r#"
-            SELECT
-                MIN(raw_log.block_number),
-                MAX(raw_log.block_number),
-                COUNT(DISTINCT raw_log.block_hash)::BIGINT,
-                COUNT(*) FILTER (
-                    WHERE lineage.block_hash IS NULL
-                       OR lineage.block_number <> raw_log.block_number
-                       OR lineage.canonicality_state NOT IN (
-                           'canonical'::canonicality_state,
-                           'safe'::canonicality_state,
-                           'finalized'::canonicality_state
-                       )
-                )::BIGINT AS invalid_lineage_count
+            SELECT raw_log_id
+            FROM raw_logs
+            WHERE raw_log_id > $1
+            ORDER BY raw_log_id
+            LIMIT $2
+            "#,
+        )
+        .bind(after_raw_log_id)
+        .bind(i64::try_from(TARGET_BATCH_SIZE)?)
+        .fetch_all(transaction.as_mut())
+        .await
+        .context("failed to page raw-log identities for resolver replay range")?;
+        let Some(last_raw_log_id) = raw_log_ids.last().copied() else {
+            break;
+        };
+        after_raw_log_id = last_raw_log_id;
+        let rows = sqlx::query(
+            r#"
+            SELECT raw_log.block_number, raw_log.block_hash,
+                   lineage.block_hash IS NOT NULL
+                   AND lineage.block_number = raw_log.block_number
+                   AND lineage.canonicality_state IN (
+                       'canonical'::canonicality_state,
+                       'safe'::canonicality_state,
+                       'finalized'::canonicality_state
+                   ) AS valid_lineage
             FROM raw_logs raw_log
             JOIN resolver_profile_reconciliation_targets target
               ON target.run_id = $2
@@ -298,6 +346,7 @@ async fn load_resolver_emitter_replay_range(
               ON lineage.chain_id = raw_log.chain_id
              AND lineage.block_hash = raw_log.block_hash
             WHERE raw_log.chain_id = $1
+              AND raw_log.raw_log_id = ANY($3::BIGINT[])
               AND raw_log.canonicality_state IN (
                   'canonical'::canonicality_state,
                   'safe'::canonicality_state,
@@ -307,17 +356,50 @@ async fn load_resolver_emitter_replay_range(
         )
         .bind(chain)
         .bind(run_id)
-        .fetch_one(pool)
+        .bind(&raw_log_ids)
+        .fetch_all(transaction.as_mut())
         .await
         .with_context(|| {
-            format!("failed to load retained resolver-emitter replay range for chain {chain}")
+            format!("failed to load a retained resolver-emitter replay page for chain {chain}")
         })?;
-
+        let mut page_hashes = BTreeSet::new();
+        for row in rows {
+            let block_number: i64 = sqlx::Row::try_get(&row, "block_number")?;
+            first_block_number =
+                Some(first_block_number.map_or(block_number, |value| value.min(block_number)));
+            last_block_number =
+                Some(last_block_number.map_or(block_number, |value| value.max(block_number)));
+            page_hashes.insert(sqlx::Row::try_get::<String, _>(&row, "block_hash")?);
+            if !sqlx::Row::try_get::<bool, _>(&row, "valid_lineage")? {
+                invalid_lineage_count += 1;
+            }
+        }
+        if !page_hashes.is_empty() {
+            let hashes = page_hashes.into_iter().collect::<Vec<_>>();
+            resolver_block_count += sqlx::query(
+                r#"
+                INSERT INTO resolver_profile_replay_block_hashes (block_hash)
+                SELECT * FROM UNNEST($1::TEXT[])
+                ON CONFLICT (block_hash) DO NOTHING
+                "#,
+            )
+            .bind(&hashes)
+            .execute(transaction.as_mut())
+            .await
+            .context("failed to accumulate resolver-emitter replay block hashes")?
+            .rows_affected() as usize;
+        }
+        record_startup_adapter_progress(pool, progress).await?;
+    }
     if invalid_lineage_count > 0 {
         bail!(
             "{invalid_lineage_count} canonical resolver-emitter raw logs lack matching canonical lineage on chain {chain}"
         );
     }
+    transaction
+        .commit()
+        .await
+        .context("failed to close resolver-emitter replay-range scan")?;
     let Some(first_block_number) = first_block_number else {
         ensure!(
             last_block_number.is_none() && resolver_block_count == 0,
@@ -330,7 +412,6 @@ async fn load_resolver_emitter_replay_range(
     Ok(Some(ResolverEmitterReplayRange {
         first_block_number,
         last_block_number,
-        resolver_block_count: usize::try_from(resolver_block_count)
-            .context("resolver-emitter block count does not fit usize")?,
+        resolver_block_count,
     }))
 }

@@ -11,18 +11,17 @@ use crate::{
     primary_name::rebuild_heartbeat::LoopHeartbeat, record_inventory, resolver,
 };
 
-use super::{
-    apply_locks::{
-        acquire_invalidation_apply_locks, ensure_invalidation_apply_locks_alive,
-        release_invalidation_apply_locks,
-    },
-    dead_letters::dead_letter_invalidation,
+use super::apply_locks::{
+    acquire_invalidation_apply_locks, ensure_invalidation_apply_locks_alive,
+    release_invalidation_apply_locks,
 };
 
 mod claim;
+mod completion;
 #[cfg(test)]
 use claim::refresh_claimed_invalidation_claim;
 use claim::{claim_pending_invalidations, spawn_claim_heartbeats, stop_claim_heartbeats};
+use completion::{complete_invalidation, fail_invalidation};
 
 const NAME_CURRENT_SINGLE_APPLY_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_PROJECTION_INVALIDATION_ATTEMPTS: i64 = 5;
@@ -92,7 +91,7 @@ async fn apply_pending_invalidations_inner(
                 let group = drain_address_names_group(&mut invalidations);
                 let group_len = group.len();
                 let mut locks = acquire_invalidation_apply_locks(pool, &group).await?;
-                let result = apply_address_names_group(pool, &group).await;
+                let result = apply_address_names_group(pool, &group, &mut loop_heartbeat).await;
                 let finish = async {
                     ensure_invalidation_apply_locks_alive(&mut locks).await?;
                     match result {
@@ -123,9 +122,15 @@ async fn apply_pending_invalidations_inner(
             let mut locks =
                 acquire_invalidation_apply_locks(pool, std::slice::from_ref(&invalidation)).await?;
             let result = if invalidation.projection == "name_current" {
-                apply_name_current_single(pool, &invalidation).await
+                apply_name_current_single(pool, &invalidation, &mut loop_heartbeat).await
             } else {
-                apply_one(pool, &invalidation, text_hydration_config).await
+                apply_one(
+                    pool,
+                    &invalidation,
+                    text_hydration_config,
+                    &mut loop_heartbeat,
+                )
+                .await
             };
             let finish = async {
                 ensure_invalidation_apply_locks_alive(&mut locks).await?;
@@ -184,6 +189,7 @@ fn drain_address_names_group(
 async fn apply_address_names_group(
     pool: &PgPool,
     invalidations: &[ClaimedInvalidation],
+    loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
 ) -> Result<()> {
     let Some(first) = invalidations.first() else {
         return Ok(());
@@ -192,7 +198,19 @@ async fn apply_address_names_group(
     if invalidations.iter().any(|invalidation| {
         optional_payload_str(&invalidation.key_payload, "logical_name_id").is_none()
     }) {
-        address_names::rebuild_address_names_current(pool, Some(address)).await?;
+        match loop_heartbeat.as_deref_mut() {
+            Some(loop_heartbeat) => {
+                address_names::rebuild_address_names_current_with_heartbeat(
+                    pool,
+                    Some(address),
+                    loop_heartbeat,
+                )
+                .await?;
+            }
+            None => {
+                address_names::rebuild_address_names_current(pool, Some(address)).await?;
+            }
+        }
         return Ok(());
     }
 
@@ -203,8 +221,25 @@ async fn apply_address_names_group(
         .into_iter()
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    address_names::rebuild_address_names_current_logical_names(pool, address, &logical_name_ids)
-        .await?;
+    match loop_heartbeat.as_deref_mut() {
+        Some(loop_heartbeat) => {
+            address_names::rebuild_address_names_current_logical_names_with_heartbeat(
+                pool,
+                address,
+                &logical_name_ids,
+                loop_heartbeat,
+            )
+            .await?;
+        }
+        None => {
+            address_names::rebuild_address_names_current_logical_names(
+                pool,
+                address,
+                &logical_name_ids,
+            )
+            .await?;
+        }
+    }
     Ok(())
 }
 
@@ -217,13 +252,29 @@ fn address_names_invalidation_address(invalidation: &ClaimedInvalidation) -> Res
 async fn apply_name_current_single(
     pool: &PgPool,
     invalidation: &ClaimedInvalidation,
+    loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
 ) -> Result<()> {
-    timeout(
-        NAME_CURRENT_SINGLE_APPLY_TIMEOUT,
-        name_current::rebuild_name_current(pool, Some(&invalidation.projection_key)),
-    )
-    .await
-    .with_context(|| {
+    let result = match loop_heartbeat.as_deref_mut() {
+        Some(loop_heartbeat) => {
+            timeout(
+                NAME_CURRENT_SINGLE_APPLY_TIMEOUT,
+                name_current::rebuild_name_current_with_heartbeat(
+                    pool,
+                    Some(&invalidation.projection_key),
+                    loop_heartbeat,
+                ),
+            )
+            .await
+        }
+        None => {
+            timeout(
+                NAME_CURRENT_SINGLE_APPLY_TIMEOUT,
+                name_current::rebuild_name_current(pool, Some(&invalidation.projection_key)),
+            )
+            .await
+        }
+    };
+    result.with_context(|| {
         format!(
             "timed out applying name_current invalidation {}",
             invalidation.projection_key
@@ -268,31 +319,89 @@ async fn apply_one(
     pool: &PgPool,
     invalidation: &ClaimedInvalidation,
     text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
+    loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
 ) -> Result<()> {
     match invalidation.projection.as_str() {
-        "name_current" => {
-            name_current::rebuild_name_current(pool, Some(&invalidation.projection_key)).await?;
-        }
-        "children_current" => {
-            children::rebuild_children_current(pool, Some(&invalidation.projection_key)).await?;
-        }
-        "permissions_current" => {
-            permissions::rebuild_permissions_current(pool, Some(&invalidation.projection_key))
-                .await?;
-        }
-        "record_inventory_current" => {
-            record_inventory::rebuild_record_inventory_current(
-                pool,
-                Some(&invalidation.projection_key),
-            )
-            .await?;
-            if let Some(config) = text_hydration_config {
-                let hydration_summary = record_inventory::hydrate_record_inventory_text_values(
+        "name_current" => match loop_heartbeat.as_deref_mut() {
+            Some(loop_heartbeat) => {
+                name_current::rebuild_name_current_with_heartbeat(
                     pool,
                     Some(&invalidation.projection_key),
-                    config.clone(),
+                    loop_heartbeat,
                 )
                 .await?;
+            }
+            None => {
+                name_current::rebuild_name_current(pool, Some(&invalidation.projection_key))
+                    .await?;
+            }
+        },
+        "children_current" => match loop_heartbeat.as_deref_mut() {
+            Some(loop_heartbeat) => {
+                children::rebuild_children_current_with_heartbeat(
+                    pool,
+                    Some(&invalidation.projection_key),
+                    loop_heartbeat,
+                )
+                .await?;
+            }
+            None => {
+                children::rebuild_children_current(pool, Some(&invalidation.projection_key))
+                    .await?;
+            }
+        },
+        "permissions_current" => match loop_heartbeat.as_deref_mut() {
+            Some(loop_heartbeat) => {
+                permissions::rebuild_permissions_current_with_heartbeat(
+                    pool,
+                    Some(&invalidation.projection_key),
+                    loop_heartbeat,
+                )
+                .await?;
+            }
+            None => {
+                permissions::rebuild_permissions_current(pool, Some(&invalidation.projection_key))
+                    .await?;
+            }
+        },
+        "record_inventory_current" => {
+            match loop_heartbeat.as_deref_mut() {
+                Some(loop_heartbeat) => {
+                    record_inventory::rebuild_record_inventory_current_with_heartbeat(
+                        pool,
+                        Some(&invalidation.projection_key),
+                        loop_heartbeat,
+                    )
+                    .await?;
+                }
+                None => {
+                    record_inventory::rebuild_record_inventory_current(
+                        pool,
+                        Some(&invalidation.projection_key),
+                    )
+                    .await?;
+                }
+            }
+            if let Some(config) = text_hydration_config {
+                let hydration_summary = match loop_heartbeat.as_deref_mut() {
+                    Some(loop_heartbeat) => {
+                        record_inventory::hydrate_record_inventory_text_values_with_heartbeat(
+                            pool,
+                            Some(&invalidation.projection_key),
+                            config.clone(),
+                            loop_heartbeat,
+                        )
+                        .await?
+                    }
+                    None => {
+                        record_inventory::hydrate_record_inventory_text_values(
+                            pool,
+                            Some(&invalidation.projection_key),
+                            config.clone(),
+                        )
+                        .await?
+                    }
+                };
                 record_inventory::log_text_hydration_summary(
                     Some(&invalidation.projection_key),
                     &hydration_summary,
@@ -302,39 +411,95 @@ async fn apply_one(
         "resolver_current" => {
             let chain_id = payload_str(&invalidation.key_payload, "chain_id")?;
             let resolver_address = payload_str(&invalidation.key_payload, "resolver_address")?;
-            resolver::rebuild_resolver_current(pool, Some(chain_id), Some(resolver_address))
-                .await?;
+            match loop_heartbeat.as_deref_mut() {
+                Some(loop_heartbeat) => {
+                    resolver::rebuild_resolver_current_with_heartbeat(
+                        pool,
+                        Some(chain_id),
+                        Some(resolver_address),
+                        loop_heartbeat,
+                    )
+                    .await?;
+                }
+                None => {
+                    resolver::rebuild_resolver_current(
+                        pool,
+                        Some(chain_id),
+                        Some(resolver_address),
+                    )
+                    .await?;
+                }
+            }
         }
         "address_names_current" => {
             if let Some(logical_name_id) =
                 optional_payload_str(&invalidation.key_payload, "logical_name_id")
             {
                 let address = payload_str(&invalidation.key_payload, "address")?;
-                address_names::rebuild_address_names_current_logical_name(
-                    pool,
-                    address,
-                    logical_name_id,
-                )
-                .await?;
+                match loop_heartbeat.as_deref_mut() {
+                    Some(loop_heartbeat) => {
+                        address_names::rebuild_address_names_current_logical_names_with_heartbeat(
+                            pool,
+                            address,
+                            &[logical_name_id.to_owned()],
+                            loop_heartbeat,
+                        )
+                        .await?;
+                    }
+                    None => {
+                        address_names::rebuild_address_names_current_logical_name(
+                            pool,
+                            address,
+                            logical_name_id,
+                        )
+                        .await?;
+                    }
+                }
             } else {
-                address_names::rebuild_address_names_current(
-                    pool,
-                    Some(&invalidation.projection_key),
-                )
-                .await?;
+                match loop_heartbeat.as_deref_mut() {
+                    Some(loop_heartbeat) => {
+                        address_names::rebuild_address_names_current_with_heartbeat(
+                            pool,
+                            Some(&invalidation.projection_key),
+                            loop_heartbeat,
+                        )
+                        .await?;
+                    }
+                    None => {
+                        address_names::rebuild_address_names_current(
+                            pool,
+                            Some(&invalidation.projection_key),
+                        )
+                        .await?;
+                    }
+                }
             }
         }
         "primary_names_current" => {
             let address = payload_str(&invalidation.key_payload, "address")?;
             let namespace = payload_str(&invalidation.key_payload, "namespace")?;
             let coin_type = payload_str(&invalidation.key_payload, "coin_type")?;
-            primary_name::rebuild_primary_names_current(
-                pool,
-                Some(address),
-                Some(namespace),
-                Some(coin_type),
-            )
-            .await?;
+            match loop_heartbeat.as_deref_mut() {
+                Some(loop_heartbeat) => {
+                    primary_name::rebuild_primary_names_current_with_heartbeat(
+                        pool,
+                        Some(address),
+                        Some(namespace),
+                        Some(coin_type),
+                        loop_heartbeat,
+                    )
+                    .await?;
+                }
+                None => {
+                    primary_name::rebuild_primary_names_current(
+                        pool,
+                        Some(address),
+                        Some(namespace),
+                        Some(coin_type),
+                    )
+                    .await?;
+                }
+            }
         }
         projection => bail!("unsupported projection invalidation family {projection}"),
     }
@@ -363,127 +528,6 @@ fn nonblank_str(value: &str) -> Option<&str> {
     } else {
         Some(value)
     }
-}
-
-async fn complete_invalidation(pool: &PgPool, invalidation: &ClaimedInvalidation) -> Result<()> {
-    let result = sqlx::query(
-        r#"
-        DELETE FROM projection_invalidations
-        WHERE projection = $1
-          AND projection_key = $2
-          AND generation = $3
-          AND claim_token = $4
-        "#,
-    )
-    .bind(&invalidation.projection)
-    .bind(&invalidation.projection_key)
-    .bind(invalidation.generation)
-    .bind(invalidation.claim_token)
-    .execute(pool)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to complete projection invalidation {}:{}",
-            invalidation.projection, invalidation.projection_key
-        )
-    })?;
-    if result.rows_affected() == 0 {
-        release_superseded_claim(pool, invalidation).await?;
-    }
-
-    Ok(())
-}
-
-async fn fail_invalidation(
-    pool: &PgPool,
-    invalidation: &ClaimedInvalidation,
-    error: &anyhow::Error,
-) -> Result<()> {
-    let failure_reason = postgres_text_safe(&format!("{error:#}"));
-    let failed_attempt_count = invalidation.attempt_count + 1;
-    let should_dead_letter = failed_attempt_count >= MAX_PROJECTION_INVALIDATION_ATTEMPTS;
-    let rows_affected = if should_dead_letter {
-        dead_letter_invalidation(pool, invalidation, &failure_reason, failed_attempt_count).await?
-    } else {
-        sqlx::query(
-            r#"
-        UPDATE projection_invalidations
-        SET
-            claim_token = NULL,
-            claimed_at = NULL,
-            attempt_count = $6,
-            last_failure_reason = $5,
-            last_failure_at = now()
-        WHERE projection = $1
-          AND projection_key = $2
-          AND generation = $3
-          AND claim_token = $4
-        "#,
-        )
-        .bind(&invalidation.projection)
-        .bind(&invalidation.projection_key)
-        .bind(invalidation.generation)
-        .bind(invalidation.claim_token)
-        .bind(&failure_reason)
-        .bind(failed_attempt_count)
-        .execute(pool)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to record projection invalidation failure {}:{}",
-                invalidation.projection, invalidation.projection_key
-            )
-        })?
-        .rows_affected()
-    };
-    if should_dead_letter && rows_affected > 0 {
-        tracing::warn!(
-            projection = %invalidation.projection,
-            projection_key = %invalidation.projection_key,
-            generation = invalidation.generation,
-            failed_attempt_count = failed_attempt_count,
-            max_attempts = MAX_PROJECTION_INVALIDATION_ATTEMPTS,
-            failure_reason = %failure_reason,
-            "moved projection invalidation to dead letter"
-        );
-    }
-    if rows_affected == 0 {
-        release_superseded_claim(pool, invalidation).await?;
-    }
-
-    Ok(())
-}
-
-async fn release_superseded_claim(pool: &PgPool, invalidation: &ClaimedInvalidation) -> Result<()> {
-    sqlx::query(
-        r#"
-        UPDATE projection_invalidations
-        SET claim_token = NULL,
-            claimed_at = NULL
-        WHERE projection = $1
-          AND projection_key = $2
-          AND generation > $3
-          AND claim_token = $4
-        "#,
-    )
-    .bind(&invalidation.projection)
-    .bind(&invalidation.projection_key)
-    .bind(invalidation.generation)
-    .bind(invalidation.claim_token)
-    .execute(pool)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to release superseded projection invalidation claim {}:{}",
-            invalidation.projection, invalidation.projection_key
-        )
-    })?;
-
-    Ok(())
-}
-
-fn postgres_text_safe(text: &str) -> String {
-    text.replace('\0', "\\u0000")
 }
 
 #[cfg(test)]

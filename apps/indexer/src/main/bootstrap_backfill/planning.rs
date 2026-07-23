@@ -14,6 +14,13 @@ use crate::{
 
 use super::DEFAULT_BOOTSTRAP_BACKFILL_WORKERS;
 
+#[path = "planning/progress.rs"]
+mod progress;
+pub(super) use progress::{
+    narrow_manifest_bootstrap_source_plan_with_progress,
+    plan_bootstrap_backfill_segments_with_progress,
+};
+
 const MAX_AUTOMATIC_BOOTSTRAP_BACKFILL_WORKERS: usize = 4;
 
 #[derive(Clone, Debug, Eq, PartialEq)]

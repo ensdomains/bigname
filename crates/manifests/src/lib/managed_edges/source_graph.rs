@@ -3,7 +3,8 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Context, Result};
 use std::collections::BTreeSet;
 
-use crate::discovery::bump_discovery_admission_epochs;
+use crate::{ManifestRuntimeProgress, discovery::bump_discovery_admission_epochs};
+use sqlx::PgPool;
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -17,37 +18,48 @@ use crate::{
     },
 };
 
-use super::active_addresses::reconcile_active_contract_instance_addresses_with_mutations;
+use super::active_addresses::reconcile_active_contract_instance_addresses_with_mutations_and_progress;
 
-pub(crate) async fn reconcile_manifest_source_graph(
+pub(crate) async fn reconcile_manifest_source_graph_with_progress(
     executor: &mut sqlx::postgres::PgConnection,
+    pool: &PgPool,
     in_place_transitions: &[ManifestTransition],
+    progress: &mut Option<&mut dyn ManifestRuntimeProgress>,
 ) -> Result<(usize, BTreeSet<String>)> {
     let desired_proxy_edges = load_desired_proxy_edges(executor).await?;
+    record_progress(pool, progress).await?;
     let desired_successor_edges =
         load_desired_manifest_successor_edges(executor, in_place_transitions).await?;
+    record_progress(pool, progress).await?;
 
     let mut cleared_edge_count = 0;
     cleared_edge_count += reconcile_managed_edges(
         executor,
+        pool,
         &desired_proxy_edges,
         MANIFEST_PROXY_IMPLEMENTATION_DISCOVERY_SOURCE,
+        progress,
     )
     .await?;
 
     cleared_edge_count += reconcile_managed_edges(
         executor,
+        pool,
         &desired_successor_edges,
         MANIFEST_SUCCESSOR_DISCOVERY_SOURCE,
+        progress,
     )
     .await?;
 
     let stale_source_edge_count =
-        deactivate_discovery_edges_without_active_source_manifest(executor).await?;
+        deactivate_discovery_edges_without_active_source_manifest(executor, pool, progress).await?;
     cleared_edge_count += stale_source_edge_count;
 
     let mutated_address_chains =
-        reconcile_active_contract_instance_addresses_with_mutations(executor).await?;
+        reconcile_active_contract_instance_addresses_with_mutations_and_progress(
+            executor, pool, progress,
+        )
+        .await?;
 
     Ok((cleared_edge_count, mutated_address_chains))
 }
@@ -248,8 +260,10 @@ async fn load_desired_manifest_successor_edges(
 
 async fn reconcile_managed_edges(
     executor: &mut sqlx::postgres::PgConnection,
+    pool: &PgPool,
     desired_edges: &[ManagedEdgeSpec],
     discovery_source: &str,
+    progress: &mut Option<&mut dyn ManifestRuntimeProgress>,
 ) -> Result<usize> {
     let existing_rows = sqlx::query(
         r#"
@@ -274,6 +288,7 @@ async fn reconcile_managed_edges(
     .with_context(|| {
         format!("failed to load active managed edges for discovery_source {discovery_source}")
     })?;
+    record_progress(pool, progress).await?;
 
     let existing_edges = existing_rows
         .into_iter()
@@ -344,6 +359,7 @@ async fn reconcile_managed_edges(
             )
         })?;
         cleared_edge_count += 1;
+        record_progress(pool, progress).await?;
     }
 
     for desired_edge in desired_edges {
@@ -385,6 +401,7 @@ async fn reconcile_managed_edges(
                 desired_edge.to_contract_instance_id
             )
         })?;
+        record_progress(pool, progress).await?;
     }
 
     bump_discovery_admission_epochs(executor, &mutated_chains).await?;
@@ -394,41 +411,79 @@ async fn reconcile_managed_edges(
 
 async fn deactivate_discovery_edges_without_active_source_manifest(
     executor: &mut sqlx::postgres::PgConnection,
+    pool: &PgPool,
+    progress: &mut Option<&mut dyn ManifestRuntimeProgress>,
 ) -> Result<usize> {
-    // Aggregate server-side: a stale manifest can own millions of edges, and
-    // materializing one returned row per edge would buffer them all in the
-    // sync transaction.
-    let deactivated_counts_by_chain = sqlx::query_as::<_, (String, i64)>(
-        r#"
-        WITH deactivated AS (
-            UPDATE discovery_edges de
-            SET deactivated_at = now()
-            WHERE de.deactivated_at IS NULL
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM manifest_versions mv
-                  WHERE mv.manifest_id = de.source_manifest_id
-                    AND mv.rollout_status = 'active'
-              )
-            RETURNING de.chain_id
+    const PAGE_ROWS: i64 = 10_000;
+
+    let mut cursor = 0_i64;
+    let mut deactivated_edge_count = 0usize;
+    let mut mutated_chains = BTreeSet::new();
+    loop {
+        let page = sqlx::query_as::<_, (i64, String, bool)>(
+            r#"
+            SELECT
+                de.discovery_edge_id,
+                de.chain_id,
+                de.deactivated_at IS NULL
+                AND NOT EXISTS (
+                        SELECT 1
+                        FROM manifest_versions mv
+                        WHERE mv.manifest_id = de.source_manifest_id
+                          AND mv.rollout_status = 'active'
+                    ) AS stale_source
+            FROM discovery_edges de
+            WHERE de.discovery_edge_id > $1
+            ORDER BY de.discovery_edge_id
+            LIMIT $2
+            "#,
         )
-        SELECT chain_id, COUNT(*)::BIGINT AS deactivated_count
-        FROM deactivated
-        GROUP BY chain_id
-        "#,
-    )
-    .fetch_all(&mut *executor)
-    .await
-    .context("failed to deactivate discovery edges without an active source manifest")?;
-    let deactivated_edge_count = deactivated_counts_by_chain
-        .iter()
-        .map(|(_, count)| *count as usize)
-        .sum();
-    let mutated_chains = deactivated_counts_by_chain
-        .into_iter()
-        .map(|(chain, _)| chain)
-        .collect::<BTreeSet<_>>();
+        .bind(cursor)
+        .bind(PAGE_ROWS)
+        .fetch_all(&mut *executor)
+        .await
+        .context("failed to scan discovery edges for inactive source manifests")?;
+        let Some((last_id, _, _)) = page.last() else {
+            break;
+        };
+        cursor = *last_id;
+        let stale_ids = page
+            .iter()
+            .filter_map(|(edge_id, _, stale)| stale.then_some(*edge_id))
+            .collect::<Vec<_>>();
+        if !stale_ids.is_empty() {
+            let result = sqlx::query(
+                r#"
+                UPDATE discovery_edges
+                SET deactivated_at = now()
+                WHERE discovery_edge_id = ANY($1::BIGINT[])
+                  AND deactivated_at IS NULL
+                "#,
+            )
+            .bind(&stale_ids)
+            .execute(&mut *executor)
+            .await
+            .context("failed to deactivate discovery edges without an active source manifest")?;
+            deactivated_edge_count += result.rows_affected() as usize;
+            mutated_chains.extend(
+                page.iter()
+                    .filter(|(_, _, stale)| *stale)
+                    .map(|(_, chain, _)| chain.clone()),
+            );
+        }
+        record_progress(pool, progress).await?;
+    }
     bump_discovery_admission_epochs(executor, &mutated_chains).await?;
 
     Ok(deactivated_edge_count)
+}
+
+async fn record_progress(
+    pool: &PgPool,
+    progress: &mut Option<&mut dyn ManifestRuntimeProgress>,
+) -> Result<()> {
+    if let Some(progress) = progress.as_deref_mut() {
+        progress.record(pool).await?;
+    }
+    Ok(())
 }

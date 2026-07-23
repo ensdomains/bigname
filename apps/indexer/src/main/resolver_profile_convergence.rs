@@ -14,9 +14,14 @@ use authority::ResolverProfileAuthorityEntry;
 #[cfg(test)]
 pub(crate) use authority::ResolverProfileAuthoritySnapshot;
 pub(crate) use authority::{
-    journal_resolver_profile_authority, journal_resolver_profile_authority_if_epoch_changed,
+    ResolverProfileAuthorityJournalSummary, journal_resolver_profile_authority,
+    journal_resolver_profile_authority_if_epoch_changed,
+    journal_resolver_profile_authority_if_epoch_changed_with_progress,
+    journal_resolver_profile_authority_with_progress,
 };
-pub(crate) use drain::drain_resolver_profile_input_changes;
+pub(crate) use drain::{
+    drain_resolver_profile_input_changes, drain_resolver_profile_input_changes_with_progress,
+};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ResolverProfileConvergenceSummary {

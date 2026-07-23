@@ -573,6 +573,161 @@ fn address_name_invalidations_are_grouped_by_address() {
 }
 
 #[tokio::test]
+async fn every_targeted_apply_family_records_internal_progress() -> Result<()> {
+    let database = test_database().await?;
+    let instance_id = "projection-apply-family-progress-test";
+    bigname_storage::register_service_loop(
+        database.pool(),
+        bigname_storage::WORKER_SERVICE_NAME,
+        instance_id,
+    )
+    .await?;
+    let mut heartbeat = LoopHeartbeat::new(instance_id.to_owned(), Duration::ZERO);
+
+    let cases = [
+        claimed_invalidation("name_current", "ens:missing-name.eth"),
+        claimed_invalidation("children_current", "ens:missing-parent.eth"),
+        claimed_invalidation("permissions_current", &Uuid::new_v4().to_string()),
+        claimed_invalidation("record_inventory_current", &Uuid::new_v4().to_string()),
+        ClaimedInvalidation {
+            projection: "resolver_current".to_owned(),
+            projection_key: "ethereum-mainnet:0x1111111111111111111111111111111111111111"
+                .to_owned(),
+            key_payload: serde_json::json!({
+                "chain_id": "ethereum-mainnet",
+                "resolver_address": "0x1111111111111111111111111111111111111111"
+            }),
+            generation: 0,
+            claim_token: Uuid::nil(),
+            attempt_count: 0,
+        },
+        ClaimedInvalidation {
+            projection: "primary_names_current".to_owned(),
+            projection_key: "0x2222222222222222222222222222222222222222:ens:60".to_owned(),
+            key_payload: serde_json::json!({
+                "address": "0x2222222222222222222222222222222222222222",
+                "namespace": "ens",
+                "coin_type": "60"
+            }),
+            generation: 0,
+            claim_token: Uuid::nil(),
+            attempt_count: 0,
+        },
+    ];
+
+    for invalidation in &cases {
+        let before = heartbeat.progress_record_count();
+        {
+            let mut progress = Some(&mut heartbeat);
+            apply_one(database.pool(), invalidation, None, &mut progress).await?;
+        }
+        assert!(
+            heartbeat.progress_record_count() > before,
+            "{} targeted apply must report progress inside its projection work",
+            invalidation.projection
+        );
+    }
+
+    let address = "0x3333333333333333333333333333333333333333";
+    let group = (0..40)
+        .map(|index| {
+            address_names_claimed_invalidation(address, Some(&format!("ens:missing-{index}.eth")))
+        })
+        .collect::<Vec<_>>();
+    let before = heartbeat.progress_record_count();
+    {
+        let mut progress = Some(&mut heartbeat);
+        apply_address_names_group(database.pool(), &group, &mut progress).await?;
+    }
+    assert!(
+        heartbeat.progress_record_count() >= before + group.len(),
+        "address_names_current targeted apply must report each completed logical-name unit"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn targeted_apply_beats_before_a_blocked_publish_finishes() -> Result<()> {
+    let database = test_database().await?;
+    let instance_id = "projection-apply-in-flight-progress-test";
+    bigname_storage::register_service_loop(
+        database.pool(),
+        bigname_storage::WORKER_SERVICE_NAME,
+        instance_id,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE service_loop_heartbeats
+        SET started_at = clock_timestamp() - INTERVAL '2 minutes',
+            heartbeat_at = clock_timestamp() - INTERVAL '1 minute'
+        WHERE service_name = 'worker'
+          AND instance_id = $1
+        "#,
+    )
+    .bind(instance_id)
+    .execute(database.pool())
+    .await?;
+
+    let address = "0x4444444444444444444444444444444444444444";
+    let mut publish_blocker = database.pool().begin().await?;
+    sqlx::query("SELECT address_names_current_identity_counts_lock_address($1)")
+        .bind(address)
+        .execute(&mut *publish_blocker)
+        .await?;
+
+    let group = (0..40)
+        .map(|index| {
+            address_names_claimed_invalidation(address, Some(&format!("ens:blocked-{index}.eth")))
+        })
+        .collect::<Vec<_>>();
+    let apply_pool = database.pool().clone();
+    let apply = tokio::spawn(async move {
+        let mut heartbeat = LoopHeartbeat::new(instance_id.to_owned(), Duration::ZERO);
+        let mut progress = Some(&mut heartbeat);
+        apply_address_names_group(&apply_pool, &group, &mut progress).await
+    });
+
+    let heartbeat_observed = timeout(Duration::from_secs(10), async {
+        loop {
+            let heartbeat = bigname_storage::load_service_loop_heartbeat(
+                database.pool(),
+                bigname_storage::WORKER_SERVICE_NAME,
+                instance_id,
+            )
+            .await?
+            .context("targeted apply must retain its registered heartbeat")?;
+            if heartbeat.age_seconds <= 1 {
+                return Ok::<(), anyhow::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    if let Err(error) = heartbeat_observed {
+        apply.abort();
+        publish_blocker.rollback().await?;
+        let _ = apply.await;
+        database.cleanup().await?;
+        return Err(error).context("targeted apply did not beat before blocked publication");
+    }
+    heartbeat_observed??;
+    assert!(
+        !apply.is_finished(),
+        "publication must still be blocked when internal progress is observed"
+    );
+
+    publish_blocker.rollback().await?;
+    timeout(Duration::from_secs(10), apply)
+        .await
+        .context("targeted apply did not finish after publication was unblocked")?
+        .context("targeted apply task failed")??;
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn address_name_default_payload_invalidation_rebuilds_by_projection_key() -> Result<()> {
     let database = test_database().await?;
     let address = "0x3333333333333333333333333333333333333333";

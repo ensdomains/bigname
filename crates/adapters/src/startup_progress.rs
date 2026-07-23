@@ -4,6 +4,25 @@ use sqlx::{PgPool, postgres::PgRow};
 
 use crate::checkpoint_context::{StartupAdapterProgress, record_startup_adapter_progress};
 
+pub(crate) struct StartupManifestProgress<'a> {
+    progress: &'a mut dyn StartupAdapterProgress,
+}
+
+impl<'a> StartupManifestProgress<'a> {
+    pub(crate) fn new(progress: &'a mut dyn StartupAdapterProgress) -> Self {
+        Self { progress }
+    }
+}
+
+impl bigname_manifests::ManifestRuntimeProgress for StartupManifestProgress<'_> {
+    fn record<'a>(
+        &'a mut self,
+        pool: &'a PgPool,
+    ) -> bigname_manifests::ManifestRuntimeProgressFuture<'a> {
+        self.progress.record(pool)
+    }
+}
+
 pub(crate) const STARTUP_ADAPTER_PROGRESS_PAGE_ROWS: usize = 1_000;
 pub(crate) const STARTUP_ADAPTER_PROGRESS_PAGE_ROWS_I64: i64 = 1_000;
 

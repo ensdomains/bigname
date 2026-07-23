@@ -50,9 +50,10 @@ pub(crate) use reservation_execution::coinbase_sql_backfill_job_source_identity_
 pub(crate) use reservation_execution::effective_hash_pinned_adapter_sync_mode;
 pub(crate) use reservation_execution::{
     DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS, backfill_job_source_identity_payload,
-    create_hash_pinned_backfill_job, effective_coinbase_sql_adapter_sync_mode,
-    hash_pinned_backfill_range_specs, run_precreated_hash_pinned_backfill_job,
-    run_resumable_coinbase_sql_backfill_job, run_resumable_hash_pinned_backfill_job,
+    backfill_job_source_identity_payload_with_progress, create_hash_pinned_backfill_job,
+    effective_coinbase_sql_adapter_sync_mode, hash_pinned_backfill_range_specs,
+    run_precreated_hash_pinned_backfill_job, run_resumable_coinbase_sql_backfill_job,
+    run_resumable_hash_pinned_backfill_job, run_resumable_hash_pinned_backfill_job_with_progress,
 };
 #[cfg(test)]
 pub(crate) use selection::SelectedTargetIntervalIndex;

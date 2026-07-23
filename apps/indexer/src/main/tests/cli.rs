@@ -82,7 +82,7 @@ fn run_cli_parses_startup_discovery_page_logs() {
     );
     assert_eq!(
         page_logs_arg.get_default_values(),
-        &[std::ffi::OsStr::new("100000")]
+        &[std::ffi::OsStr::new("1000")]
     );
 
     let cli = Cli::try_parse_from([

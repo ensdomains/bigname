@@ -1,11 +1,13 @@
+use std::collections::{BTreeMap, HashSet};
+
 use anyhow::{Context, Result};
-use bigname_manifests::load_watched_contracts;
+use bigname_manifests::{load_watched_contracts, load_watched_contracts_scoped_with_progress};
 use bigname_storage::sql_row;
 use sqlx::PgPool;
 
 use crate::adapter_manifest::{
     active_manifest_for_watched_contract, ensure_watched_contract_manifest_chain,
-    load_active_manifest_metadata, watched_contract_manifest_ids,
+    load_active_manifest_metadata, required_source_manifest_id,
 };
 use crate::ens_v2_common::{
     ActiveEmitter, active_emitter_for_block, emitters_by_address, normalize_address,
@@ -14,7 +16,7 @@ use crate::{
     checkpoint_context::{StartupAdapterProgress, record_startup_adapter_progress},
     startup_progress::{
         RawLogPagePosition, STARTUP_ADAPTER_PROGRESS_PAGE_ROWS,
-        STARTUP_ADAPTER_PROGRESS_PAGE_ROWS_I64,
+        STARTUP_ADAPTER_PROGRESS_PAGE_ROWS_I64, StartupManifestProgress,
     },
 };
 
@@ -187,44 +189,71 @@ pub(super) async fn load_permissions_raw_logs(
     Ok(output)
 }
 
-pub(super) async fn load_active_emitters(pool: &PgPool, chain: &str) -> Result<Vec<ActiveEmitter>> {
+pub(super) async fn load_active_emitters(
+    pool: &PgPool,
+    chain: &str,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<Vec<ActiveEmitter>> {
     let mut emitters = crate::ens_v2_common::load_active_emitters(
         pool,
         chain,
         SOURCE_FAMILY_ENS_V2_RESOLVER_L1,
         RESOLVER_EDGE_KIND,
         "ENSv2 permissions",
+        progress,
     )
     .await?;
-    emitters.extend(load_registry_active_emitters(pool, chain).await?);
+    emitters.extend(load_registry_active_emitters(pool, chain, progress).await?);
     // Order intervals by activation within each (address, source_family) group, then by identity.
     // Including active_from/active_to keeps this sort TOTAL: one address can now carry several
     // distinct intervals that share a (source_manifest_id, contract_instance_id) — without the
     // interval bounds in the key, their order would fall back to HashMap-iteration order and make
     // `active_emitter_for_block`'s first-match selection nondeterministic for overlapping windows.
     // This matches the resolver path's earliest-activation-first ordering (ens_v2_common).
-    emitters.sort_by(|left, right| {
-        left.address
-            .cmp(&right.address)
-            .then(left.source_family.cmp(&right.source_family))
-            .then(
-                left.active_from_block_number
-                    .cmp(&right.active_from_block_number),
-            )
-            .then(
-                left.active_to_block_number
-                    .cmp(&right.active_to_block_number),
-            )
-            .then(left.source_manifest_id.cmp(&right.source_manifest_id))
-            .then(left.contract_instance_id.cmp(&right.contract_instance_id))
-    });
-    Ok(emitters)
+    let emitter_count = emitters.len();
+    let mut ordered = BTreeMap::new();
+    for (index, emitter) in emitters.into_iter().enumerate() {
+        ordered.insert(
+            (
+                emitter.address.clone(),
+                emitter.source_family.clone(),
+                emitter.active_from_block_number,
+                emitter.active_to_block_number,
+                emitter.source_manifest_id,
+                emitter.contract_instance_id,
+                index,
+            ),
+            emitter,
+        );
+        record_emitter_progress(pool, progress, index + 1, emitter_count).await?;
+    }
+    Ok(ordered.into_values().collect())
 }
 
-async fn load_registry_active_emitters(pool: &PgPool, chain: &str) -> Result<Vec<ActiveEmitter>> {
-    let watched_contracts = load_watched_contracts(pool)
+async fn load_registry_active_emitters(
+    pool: &PgPool,
+    chain: &str,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<Vec<ActiveEmitter>> {
+    let source_families = vec![
+        SOURCE_FAMILY_ENS_V2_ROOT_L1.to_owned(),
+        SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+    ];
+    let watched_contracts = if let Some(progress) = progress.as_deref_mut() {
+        let mut manifest_progress = StartupManifestProgress::new(progress);
+        load_watched_contracts_scoped_with_progress(
+            pool,
+            Some(chain),
+            &source_families,
+            &mut manifest_progress,
+        )
         .await
-        .context("failed to load watched contracts for ENSv2 registry permissions")?;
+        .context("failed to load watched contracts for ENSv2 registry permissions")?
+    } else {
+        load_watched_contracts(pool)
+            .await
+            .context("failed to load watched contracts for ENSv2 registry permissions")?
+    };
     let watched_contracts = watched_contracts
         .into_iter()
         .filter(|contract| contract.chain == chain)
@@ -233,11 +262,18 @@ async fn load_registry_active_emitters(pool: &PgPool, chain: &str) -> Result<Vec
         return Ok(Vec::new());
     }
 
-    let manifest_ids = watched_contract_manifest_ids(&watched_contracts)?;
+    let mut manifest_ids = HashSet::new();
+    for (index, contract) in watched_contracts.iter().enumerate() {
+        manifest_ids.insert(required_source_manifest_id(contract)?);
+        record_emitter_progress(pool, progress, index + 1, watched_contracts.len()).await?;
+    }
+    let manifest_ids = manifest_ids.into_iter().collect::<Vec<_>>();
     let active_manifests =
         load_active_manifest_metadata(pool, &manifest_ids, "ENSv2 registry permissions").await?;
     let mut emitters = Vec::new();
-    for watched_contract in watched_contracts {
+    record_startup_adapter_progress(pool, progress).await?;
+    let watched_contract_count = watched_contracts.len();
+    for (index, watched_contract) in watched_contracts.into_iter().enumerate() {
         let (source_manifest_id, manifest) =
             active_manifest_for_watched_contract(&active_manifests, &watched_contract)?;
         if manifest.source_family != SOURCE_FAMILY_ENS_V2_ROOT_L1
@@ -256,8 +292,21 @@ async fn load_registry_active_emitters(pool: &PgPool, chain: &str) -> Result<Vec
             active_from_block_number: watched_contract.active_from_block_number,
             active_to_block_number: watched_contract.active_to_block_number,
         });
+        record_emitter_progress(pool, progress, index + 1, watched_contract_count).await?;
     }
     Ok(emitters)
+}
+
+async fn record_emitter_progress(
+    pool: &PgPool,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+    completed: usize,
+    total: usize,
+) -> Result<()> {
+    if completed == total || completed.is_multiple_of(STARTUP_ADAPTER_PROGRESS_PAGE_ROWS) {
+        record_startup_adapter_progress(pool, progress).await?;
+    }
+    Ok(())
 }
 
 fn source_scope_bindings(

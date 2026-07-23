@@ -8,7 +8,9 @@ use super::super::types::{ObservationTerminalState, ReconciledDiscoveryEdgeSpec}
 #[path = "bulk/historical.rs"]
 mod historical;
 
-pub(super) use historical::reconcile_historical_discovery_edges;
+pub(super) use historical::{
+    reconcile_historical_discovery_edges, reconcile_historical_discovery_edges_with_progress,
+};
 
 const CONTRACT_INSTANCE_SEED_BATCH_SIZE: usize = 1000;
 const DISCOVERY_EDGE_INSERT_BATCH_SIZE: usize = 1000;

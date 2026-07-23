@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use bigname_storage::NormalizedEventReplayAuthoritySummary;
 use sqlx::PgPool;
 
@@ -10,6 +10,7 @@ use crate::{
         upsert_normalized_events_in_chunks_with_counts,
         upsert_normalized_events_in_chunks_with_counts_and_progress,
         upsert_normalized_events_in_chunks_with_stateless_replay_authority_counts,
+        upsert_normalized_events_in_chunks_with_stateless_replay_authority_counts_and_progress,
     },
     startup_progress::{STARTUP_ADAPTER_PROGRESS_PAGE_ROWS, record_processed_row_progress},
 };
@@ -115,6 +116,82 @@ impl EnsV1ReverseClaimSyncSummary {
         )
         .await
     }
+
+    pub async fn sync_for_block_hashes_with_stateless_replay_authority_and_progress(
+        pool: &PgPool,
+        chain: &str,
+        block_hashes: &[String],
+        progress: &mut dyn StartupAdapterProgress,
+    ) -> Result<(Self, NormalizedEventReplayAuthoritySummary)> {
+        sync_ens_v1_reverse_claim_with_scope(
+            pool,
+            chain,
+            true,
+            block_hashes,
+            None,
+            true,
+            Some(progress),
+        )
+        .await
+    }
+
+    pub async fn sync_for_block_hashes_with_source_scope_and_stateless_replay_authority_and_progress(
+        pool: &PgPool,
+        chain: &str,
+        block_hashes: &[String],
+        source_scope: &[(String, String, i64, i64)],
+        progress: &mut dyn StartupAdapterProgress,
+    ) -> Result<(Self, NormalizedEventReplayAuthoritySummary)> {
+        sync_ens_v1_reverse_claim_with_scope(
+            pool,
+            chain,
+            true,
+            block_hashes,
+            Some(source_scope),
+            true,
+            Some(progress),
+        )
+        .await
+    }
+
+    pub async fn sync_for_block_hashes_with_progress(
+        pool: &PgPool,
+        chain: &str,
+        block_hashes: &[String],
+        progress: &mut dyn StartupAdapterProgress,
+    ) -> Result<Self> {
+        sync_ens_v1_reverse_claim_with_scope(
+            pool,
+            chain,
+            true,
+            block_hashes,
+            None,
+            false,
+            Some(progress),
+        )
+        .await
+        .map(|(summary, _)| summary)
+    }
+
+    pub async fn sync_for_block_hashes_with_source_scope_and_progress(
+        pool: &PgPool,
+        chain: &str,
+        block_hashes: &[String],
+        source_scope: &[(String, String, i64, i64)],
+        progress: &mut dyn StartupAdapterProgress,
+    ) -> Result<Self> {
+        sync_ens_v1_reverse_claim_with_scope(
+            pool,
+            chain,
+            true,
+            block_hashes,
+            Some(source_scope),
+            false,
+            Some(progress),
+        )
+        .await
+        .map(|(summary, _)| summary)
+    }
 }
 
 pub async fn sync_ens_v1_reverse_claim(
@@ -217,17 +294,27 @@ async fn sync_ens_v1_reverse_claim_with_scope(
     }
 
     let (counts, authority) = if stateless_replay_authority {
-        ensure!(
-            progress.is_none(),
-            "stateless replay authority is unavailable to checkpointed reverse-claim sync"
-        );
-        upsert_normalized_events_in_chunks_with_stateless_replay_authority_counts(
-            pool,
-            &events,
-            "ENSv1 reverse normalized-event",
-            10_000,
-        )
-        .await?
+        match progress {
+            Some(progress) => {
+                upsert_normalized_events_in_chunks_with_stateless_replay_authority_counts_and_progress(
+                    pool,
+                    &events,
+                    "ENSv1 reverse normalized-event",
+                    STARTUP_ADAPTER_PROGRESS_PAGE_ROWS,
+                    Some(progress),
+                )
+                .await?
+            }
+            None => {
+                upsert_normalized_events_in_chunks_with_stateless_replay_authority_counts(
+                    pool,
+                    &events,
+                    "ENSv1 reverse normalized-event",
+                    10_000,
+                )
+                .await?
+            }
+        }
     } else {
         let counts = match progress {
             Some(progress) => {

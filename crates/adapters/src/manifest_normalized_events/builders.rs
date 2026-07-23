@@ -3,24 +3,30 @@ use std::collections::HashMap;
 use anyhow::Result;
 use bigname_manifests::{
     ManifestDeclaredContractDriftInput, ManifestDriftActiveManifest, ManifestDriftInputs,
+    ManifestRuntimeProgress,
 };
 use bigname_storage::{CanonicalityState, NormalizedEvent};
 use serde_json::json;
+use sqlx::PgPool;
 
 use super::constants::{
     DERIVATION_KIND_MANIFEST_SYNC, EVENT_KIND_CAPABILITY_CHANGED,
     EVENT_KIND_PROXY_IMPLEMENTATION_CHANGED, EVENT_KIND_SOURCE_MANIFEST_UPDATED,
 };
 use super::drift_alerts::{
-    build_code_hash_drift_alert_events, build_proxy_implementation_alert_event,
+    build_code_hash_drift_alert_events_with_progress, build_proxy_implementation_alert_event,
 };
 use super::types::ActiveCapabilityRow;
 use super::utils::{event_identity, manifest_version_i64};
 
-pub(super) fn build_normalized_events(
+const MANIFEST_EVENT_BUILD_PROGRESS_ROWS: usize = 1_000;
+
+pub(super) async fn build_normalized_events(
+    pool: &PgPool,
     drift_inputs: &ManifestDriftInputs,
     capabilities: &HashMap<i64, Vec<ActiveCapabilityRow>>,
     contracts: &HashMap<i64, Vec<ManifestDeclaredContractDriftInput>>,
+    progress: &mut Option<&mut dyn ManifestRuntimeProgress>,
 ) -> Result<Vec<NormalizedEvent>> {
     let mut events = Vec::new();
 
@@ -42,9 +48,16 @@ pub(super) fn build_normalized_events(
         }
     }
 
-    events.extend(build_code_hash_drift_alert_events(drift_inputs)?);
-    for edge in &drift_inputs.proxy_implementation_edges {
+    events.extend(
+        build_code_hash_drift_alert_events_with_progress(pool, drift_inputs, progress).await?,
+    );
+    for (index, edge) in drift_inputs.proxy_implementation_edges.iter().enumerate() {
         events.push(build_proxy_implementation_alert_event(edge)?);
+        if (index + 1).is_multiple_of(MANIFEST_EVENT_BUILD_PROGRESS_ROWS)
+            && let Some(progress) = progress.as_deref_mut()
+        {
+            progress.record(pool).await?;
+        }
     }
 
     Ok(events)

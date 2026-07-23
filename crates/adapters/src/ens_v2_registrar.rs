@@ -66,6 +66,43 @@ impl EnsV2RegistrarSyncSummary {
         )
         .await
     }
+
+    pub async fn sync_for_block_hashes_with_progress(
+        pool: &PgPool,
+        chain: &str,
+        block_hashes: &[String],
+        progress: &mut dyn StartupAdapterProgress,
+    ) -> Result<Self> {
+        sync_ens_v2_registrar_with_scope(
+            pool,
+            chain,
+            true,
+            block_hashes,
+            None,
+            None,
+            Some(progress),
+        )
+        .await
+    }
+
+    pub async fn sync_for_block_hashes_with_source_scope_and_progress(
+        pool: &PgPool,
+        chain: &str,
+        block_hashes: &[String],
+        source_scope: &[(String, String, i64, i64)],
+        progress: &mut dyn StartupAdapterProgress,
+    ) -> Result<Self> {
+        sync_ens_v2_registrar_with_scope(
+            pool,
+            chain,
+            true,
+            block_hashes,
+            Some(source_scope),
+            None,
+            Some(progress),
+        )
+        .await
+    }
 }
 
 pub async fn sync_ens_v2_registrar(
@@ -100,6 +137,24 @@ pub async fn sync_ens_v2_registrar_through_block(
     .await
 }
 
+pub async fn sync_ens_v2_registrar_through_block_with_progress(
+    pool: &PgPool,
+    chain: &str,
+    target_block_number: i64,
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<EnsV2RegistrarSyncSummary> {
+    sync_ens_v2_registrar_with_scope(
+        pool,
+        chain,
+        false,
+        &[],
+        None,
+        Some(target_block_number),
+        Some(progress),
+    )
+    .await
+}
+
 async fn sync_ens_v2_registrar_with_scope(
     pool: &PgPool,
     chain: &str,
@@ -109,7 +164,7 @@ async fn sync_ens_v2_registrar_with_scope(
     max_block_number: Option<i64>,
     mut progress: Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<EnsV2RegistrarSyncSummary> {
-    let mut active_emitters = load_active_emitters(pool, chain).await?;
+    let mut active_emitters = load_active_emitters(pool, chain, &mut progress).await?;
     if let Some(source_scope) = source_scope {
         active_emitters.retain(|emitter| registrar_scope_includes_emitter(source_scope, emitter));
     }

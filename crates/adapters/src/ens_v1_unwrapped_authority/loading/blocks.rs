@@ -3,6 +3,10 @@ use anyhow::{Context, Result};
 use bigname_storage::sql_row;
 use sqlx::{PgPool, postgres::PgRow, types::time::OffsetDateTime};
 
+use crate::checkpoint_context::StartupAdapterProgress;
+
+const CANONICAL_BLOCK_PROGRESS_ROWS: i64 = 10_000;
+
 pub(in crate::ens_v1_unwrapped_authority) async fn load_canonical_blocks(
     pool: &PgPool,
     chain: &str,
@@ -44,6 +48,65 @@ pub(in crate::ens_v1_unwrapped_authority) async fn load_canonical_blocks(
             })
         })
         .collect()
+}
+
+pub(in crate::ens_v1_unwrapped_authority) async fn load_canonical_blocks_with_progress(
+    pool: &PgPool,
+    chain: &str,
+    target_block_number: Option<i64>,
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<Vec<RawBlockSnapshot>> {
+    let mut blocks = Vec::new();
+    let mut after = None::<(i64, String)>;
+    loop {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                chain_id,
+                block_hash,
+                block_number,
+                block_timestamp,
+                canonicality_state::TEXT AS canonicality_state
+            FROM chain_lineage
+            WHERE chain_id = $1
+              AND ($2::BIGINT IS NULL OR block_number <= $2::BIGINT)
+              AND canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+              AND (
+                  $3::BIGINT IS NULL
+                  OR (block_number, block_hash) > ($3::BIGINT, $4::TEXT)
+              )
+            ORDER BY block_number, block_hash
+            LIMIT $5
+            "#,
+        )
+        .bind(chain)
+        .bind(target_block_number)
+        .bind(after.as_ref().map(|(number, _)| *number))
+        .bind(after.as_ref().map(|(_, hash)| hash.as_str()))
+        .bind(CANONICAL_BLOCK_PROGRESS_ROWS)
+        .fetch_all(pool)
+        .await
+        .with_context(|| format!("failed to page canonical raw blocks for chain {chain}"))?;
+        if rows.is_empty() {
+            break;
+        }
+        let page_len = rows.len();
+        for row in rows {
+            let block = raw_block_snapshot_from_row(row)?;
+            after = Some((block.block_number, block.block_hash.clone()));
+            blocks.push(block);
+        }
+        progress.record(pool).await?;
+        if page_len < usize::try_from(CANONICAL_BLOCK_PROGRESS_ROWS).expect("page limit fits usize")
+        {
+            break;
+        }
+    }
+    Ok(blocks)
 }
 
 pub(in crate::ens_v1_unwrapped_authority) async fn load_canonical_block_at_number(

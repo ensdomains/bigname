@@ -7,6 +7,20 @@ use serde_json::{Value, json};
 use super::advance::ResolverProfileAuthorityJournalBatchSizes;
 use super::*;
 
+#[derive(Default)]
+struct CountingJournalProgress {
+    record_count: usize,
+}
+
+impl ResolverProfileAuthorityJournalProgress for CountingJournalProgress {
+    fn record(&mut self) -> ResolverProfileAuthorityJournalProgressFuture<'_> {
+        Box::pin(async move {
+            self.record_count += 1;
+            Ok(())
+        })
+    }
+}
+
 fn entry_payload(
     chain: &str,
     source_family: &str,
@@ -327,7 +341,11 @@ async fn batched_diff_preserves_seed_family_target_expansion() -> Result<()> {
     )
     .await?;
     stage_entries(&mut advance, &after).await?;
-    let summary = advance.publish(&json!({})).await?.unwrap();
+    let mut progress = CountingJournalProgress::default();
+    let summary = advance
+        .publish_with_progress(&json!({}), &mut progress)
+        .await?
+        .unwrap();
     assert_eq!(summary.changed_entry_count, 4);
     assert_eq!(summary.enqueued_target_count, 5);
     assert_eq!(summary.target_enqueue_statement_count, 3);
@@ -336,6 +354,10 @@ async fn batched_diff_preserves_seed_family_target_expansion() -> Result<()> {
     assert_eq!(summary.deleted_entry_count, 1);
     assert_eq!(summary.entry_mutation_statement_count, 3);
     assert_eq!(summary.max_entry_mutation_batch_size, 2);
+    assert!(
+        progress.record_count >= 8,
+        "authority journal publication must report bounded diff, target, queue, and mutation pages"
+    );
 
     let queued = sqlx::query_as::<_, (String, String)>(
         r#"

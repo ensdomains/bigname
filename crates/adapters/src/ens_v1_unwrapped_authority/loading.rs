@@ -8,7 +8,7 @@ pub(super) use active_emitters::{load_active_emitters, load_generic_resolver_eve
 pub(super) use blocks::{
     load_canonical_block_at_number, load_canonical_blocks,
     load_canonical_blocks_for_authority_logs_through_head,
-    load_canonical_blocks_for_restricted_authority_sync,
+    load_canonical_blocks_for_restricted_authority_sync, load_canonical_blocks_with_progress,
 };
 pub(super) use raw_logs::{
     AuthorityRawLogStreamSourceRouter, load_authority_raw_logs,

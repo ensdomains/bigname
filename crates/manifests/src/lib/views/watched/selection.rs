@@ -10,9 +10,22 @@ use crate::{
 };
 
 use super::{
-    load_historical_watched_contracts_by_chain, load_manifest_declared_watched_contracts,
-    load_watched_contracts, load_watched_contracts_by_source_family,
+    ManifestRuntimeProgress, load_historical_watched_contracts_by_chain,
+    load_manifest_declared_watched_contracts, load_watched_contracts,
+    load_watched_contracts_by_source_family, load_watched_contracts_with_progress,
 };
+
+#[path = "selection/progress.rs"]
+mod progress;
+pub use progress::load_historical_watched_source_selector_plan_with_progress;
+
+#[derive(Default)]
+struct ChainPlanAccumulator {
+    addresses: BTreeSet<String>,
+    manifest_root_entry_count: usize,
+    manifest_contract_entry_count: usize,
+    discovery_edge_entry_count: usize,
+}
 
 pub fn summarize_watched_contracts(
     watched_contracts: &[WatchedContract],
@@ -75,14 +88,6 @@ pub fn summarize_watched_contracts(
 }
 
 pub fn plan_watched_contracts(watched_contracts: &[WatchedContract]) -> Vec<WatchedChainPlan> {
-    #[derive(Default)]
-    struct ChainPlanAccumulator {
-        addresses: BTreeSet<String>,
-        manifest_root_entry_count: usize,
-        manifest_contract_entry_count: usize,
-        discovery_edge_entry_count: usize,
-    }
-
     let mut plans = BTreeMap::<String, ChainPlanAccumulator>::new();
 
     for watched_contract in watched_contracts {
@@ -122,6 +127,134 @@ pub fn plan_watched_contracts(watched_contracts: &[WatchedContract]) -> Vec<Watc
             discovery_edge_entry_count: accumulator.discovery_edge_entry_count,
         })
         .collect()
+}
+
+async fn summarize_watched_contracts_with_progress(
+    pool: &sqlx::PgPool,
+    watched_contracts: &[WatchedContract],
+    progress: &mut dyn ManifestRuntimeProgress,
+) -> Result<WatchedContractSummary> {
+    let mut unique_contracts = HashSet::new();
+    let mut unique_addresses_by_chain = BTreeMap::<String, HashSet<String>>::new();
+    let mut chains = BTreeMap::<String, WatchedContractChainSummary>::new();
+    let mut manifest_root_count = 0;
+    let mut manifest_contract_count = 0;
+    let mut discovery_edge_count = 0;
+
+    for (index, watched_contract) in watched_contracts.iter().enumerate() {
+        unique_contracts.insert((
+            watched_contract.chain.clone(),
+            watched_contract.address.clone(),
+        ));
+        unique_addresses_by_chain
+            .entry(watched_contract.chain.clone())
+            .or_default()
+            .insert(watched_contract.address.clone());
+        let chain_summary = chains
+            .entry(watched_contract.chain.clone())
+            .or_insert_with(|| WatchedContractChainSummary {
+                chain: watched_contract.chain.clone(),
+                unique_contract_count: 0,
+                manifest_root_count: 0,
+                manifest_contract_count: 0,
+                discovery_edge_count: 0,
+            });
+        match watched_contract.source {
+            WatchedContractSource::ManifestRoot => {
+                manifest_root_count += 1;
+                chain_summary.manifest_root_count += 1;
+            }
+            WatchedContractSource::ManifestContract => {
+                manifest_contract_count += 1;
+                chain_summary.manifest_contract_count += 1;
+            }
+            WatchedContractSource::DiscoveryEdge => {
+                discovery_edge_count += 1;
+                chain_summary.discovery_edge_count += 1;
+            }
+        }
+        if (index + 1).is_multiple_of(super::WATCHED_PLAN_PROGRESS_ROWS) {
+            progress.record(pool).await?;
+        }
+    }
+    for (chain, addresses) in unique_addresses_by_chain {
+        chains
+            .get_mut(&chain)
+            .expect("unique address chain must have a summary")
+            .unique_contract_count = addresses.len();
+    }
+    if !watched_contracts.is_empty()
+        && !watched_contracts
+            .len()
+            .is_multiple_of(super::WATCHED_PLAN_PROGRESS_ROWS)
+    {
+        progress.record(pool).await?;
+    }
+
+    Ok(WatchedContractSummary {
+        unique_contract_count: unique_contracts.len(),
+        source_entry_count: watched_contracts.len(),
+        manifest_root_count,
+        manifest_contract_count,
+        discovery_edge_count,
+        chains: chains.into_values().collect(),
+    })
+}
+
+async fn plan_watched_contracts_with_progress(
+    pool: &sqlx::PgPool,
+    watched_contracts: &[WatchedContract],
+    progress: &mut dyn ManifestRuntimeProgress,
+) -> Result<Vec<WatchedChainPlan>> {
+    let mut plans = BTreeMap::<String, ChainPlanAccumulator>::new();
+    for (index, watched_contract) in watched_contracts.iter().enumerate() {
+        let plan = plans.entry(watched_contract.chain.clone()).or_default();
+        plan.addresses.insert(watched_contract.address.clone());
+        match watched_contract.source {
+            WatchedContractSource::ManifestRoot => plan.manifest_root_entry_count += 1,
+            WatchedContractSource::ManifestContract => plan.manifest_contract_entry_count += 1,
+            WatchedContractSource::DiscoveryEdge => plan.discovery_edge_entry_count += 1,
+        }
+        if (index + 1).is_multiple_of(super::WATCHED_PLAN_PROGRESS_ROWS) {
+            progress.record(pool).await?;
+        }
+    }
+    if !watched_contracts.is_empty()
+        && !watched_contracts
+            .len()
+            .is_multiple_of(super::WATCHED_PLAN_PROGRESS_ROWS)
+    {
+        progress.record(pool).await?;
+    }
+
+    let mut result = Vec::with_capacity(plans.len());
+    for (chain, accumulator) in plans {
+        let mut addresses = Vec::with_capacity(accumulator.addresses.len());
+        for address in accumulator.addresses {
+            addresses.push(address);
+            if addresses
+                .len()
+                .is_multiple_of(super::WATCHED_PLAN_PROGRESS_ROWS)
+            {
+                progress.record(pool).await?;
+            }
+        }
+        if !addresses.is_empty()
+            && !addresses
+                .len()
+                .is_multiple_of(super::WATCHED_PLAN_PROGRESS_ROWS)
+        {
+            progress.record(pool).await?;
+        }
+        result.push(WatchedChainPlan {
+            chain,
+            addresses,
+            manifest_root_entry_count: accumulator.manifest_root_entry_count,
+            manifest_contract_entry_count: accumulator.manifest_contract_entry_count,
+            discovery_edge_entry_count: accumulator.discovery_edge_entry_count,
+        });
+    }
+    Ok(result)
 }
 
 pub fn resolve_watched_source_selector(
@@ -370,6 +503,17 @@ pub async fn load_watched_contract_summary_and_chain_plan(
         summarize_watched_contracts(&watched_contracts),
         plan_watched_contracts(&watched_contracts),
     ))
+}
+
+pub async fn load_watched_contract_summary_and_chain_plan_with_progress(
+    pool: &sqlx::PgPool,
+    progress: &mut dyn ManifestRuntimeProgress,
+) -> Result<(WatchedContractSummary, Vec<WatchedChainPlan>)> {
+    let watched_contracts = load_watched_contracts_with_progress(pool, progress).await?;
+    let summary =
+        summarize_watched_contracts_with_progress(pool, &watched_contracts, progress).await?;
+    let plan = plan_watched_contracts_with_progress(pool, &watched_contracts, progress).await?;
+    Ok((summary, plan))
 }
 
 pub async fn load_manifest_declared_watched_chain_plan(

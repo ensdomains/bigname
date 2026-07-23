@@ -531,6 +531,16 @@ instance cannot hide a stopped process. These rows are mutable operational signa
 not raw facts, [replay](glossary.md) checkpoints, chain checkpoints, or
 projection freshness evidence.
 
+The worker's parent projection loop and required spawned hydration or
+invalidation-derivation work share an exclusive process-heartbeat ownership
+gate. The indexer's parent poll and automatic normalized-event replay catch-up
+share the same kind of gate. A parent work unit or required child iteration
+acquires ownership before it starts and releases ownership before an idle poll
+sleep. Only the current owner can advance the row, and it can do so only after
+its own bounded work commits. A wedged child therefore cannot be hidden by an
+otherwise healthy parent, and a progressing child cannot hide a wedged parent.
+No timer generates beats on either operation's behalf.
+
 Full worker rebuild heartbeat routes are explicit:
 
 | Rebuild step | Bounded progress heartbeat | Named monolithic phases |
@@ -542,6 +552,72 @@ Full worker rebuild heartbeat routes are explicit:
 | `resolver_current` | each completed resolver target; staged writes remain in 1,000-row batches | `resolver_current.load_profile`, `resolver_current.load_targets`, `resolver_current.count_existing`, `resolver_current.publish` |
 | `address_names_current` | each completed surface binding; staged writes remain in 2,000-row batches | `address_names_current.prepare`, `address_names_current.publish`, `address_names_current.count_published_addresses` |
 | `primary_names_current` | each streamed tuple; legacy hydration beats during 1,000-candidate planning, configured provider batches, resolver-edge batches, and 1,000-row upserts | `primary_names_current.count_existing`, `primary_names_current.invalidate_execution_cache`, `primary_names_current.publish`, `primary_names_current.legacy_hydration.load_reverse_claim_candidates`, `primary_names_current.legacy_hydration.load_resolver_edge_candidates` |
+
+The following table is the maintained coverage audit for work performed by the
+worker and indexer service loops, including their spawned tasks. `covered`
+means the progress route predates the systematic audit; `newly-covered` means
+the audit added the route. Both advance liveness only after a completed unit of
+work. `cannot-exceed-20s-with-reason` is reserved for operations whose input
+cardinality is fixed independently of mainnet history. `n-a` means the operation does not own
+the service-loop heartbeat or has no smaller successful progress unit. In
+particular, a slow or stuck atomic database statement or RPC is not progress
+and must be allowed to make the heartbeat stale.
+
+| Service stage | Operation | Disposition | Progress boundary or scale reason |
+| --- | --- | --- | --- |
+| worker pre-registration | parse fixed CLI hydration and chain/provider configuration | cannot-exceed-20s-with-reason | Linear in the finite configured chain, resolver-address, and RPC-URL lists; it does not read chain history. |
+| worker pre-registration | connect to PostgreSQL and register the service loop | n-a | No heartbeat row exists yet, and each connection or registration statement is atomic. A stalled database operation has no completed progress unit and must not be kept green. |
+| worker startup/poll | replay-readiness and handoff checks | cannot-exceed-20s-with-reason | Scalar counts over configured replay cursors, seven replay markers, and PostgreSQL index metadata; cardinality does not grow with names or events. |
+| worker rebuild | `name_current` | covered (#213) | Completed name tasks and the named load/publication phases listed above. |
+| worker rebuild | `children_current` | covered (#213) | Completed child-source tasks and the named count/publication phases listed above. |
+| worker rebuild | `permissions_current` | covered (#213) | Completed resource tasks and the named count/publication phases listed above. |
+| worker rebuild | `record_inventory_current` | covered (#213) | Completed resource tasks and the named count/publication phases listed above. |
+| worker rebuild | `resolver_current` | covered (#213) | Completed resolver-target tasks and the named load/count/publication phases listed above. |
+| worker rebuild | `address_names_current` | covered (#213) | Completed surface-binding tasks and the named prepare/count/publication phases listed above. |
+| worker rebuild | `primary_names_current` | covered (#213) | Streamed tuples and the named count/cache-invalidation/publication phases listed above. |
+| worker hydration | record-inventory text values | covered (#213) | Each bounded 500-row input/provider/persistence page. |
+| worker hydration | legacy reverse-resolver primary names, including the spawned continuing pass | covered (#213) | Each 1,000-candidate planning or upsert page, configured provider batch, and resolver-edge batch; the spawned task uses the same shared progress recorder. |
+| worker invalidation | derive normalized-event changes, including the spawned continuing pass | newly-covered (#229; bounded derive beats originated in #213) | Each successfully derived bounded change unit. Parent work and the spawned pass mutually exclude each other's heartbeat writes while either owns a work unit, so neither can mask the other's wedge; exit and panic remain supervised (#242). |
+| worker invalidation | claim, dispatch, and complete queued keys | covered (#213) | Each completed claimed key or bounded address group. Claim-lease refreshes are separate queue ownership evidence, not service-loop liveness. |
+| worker invalidation | targeted rebuild work inside an applied key or address group | newly-covered (#229) | Completed projection-specific loads, source/target rows, bounded writes, and cleanup pages for all seven projection families. |
+| worker spawned task | route-local primary-name execution pruning | n-a | Detached best-effort maintenance does not own worker readiness; every call is capped by the configured delete batch, and the parent loop remains independently observable. |
+| worker/indexer main loop | idle poll sleep and subtask supervision | n-a | Sleeping is intentional inactivity; loop ticks record liveness only while no required spawned task owns the row. Spawned-task exit and panic are reported by the existing supervisor (#242), not by synthetic progress beats. |
+| indexer pre-registration and live poll | parse the checked-in manifest repository | cannot-exceed-20s-with-reason | Bounded by the finite checked-in deployment files, not chain history; live parsing runs before deciding whether stored manifest state needs refresh. |
+| indexer pre-registration | connect to PostgreSQL and register the service loop | n-a | No heartbeat row exists yet, and each connection or registration statement is atomic. A stalled database operation has no completed progress unit and must not be kept green. `indexer run` rejects pools below four connections before opening them so the permanent runtime writer guard, nested bounded work guards, and progress heartbeat writer cannot exhaust the pool. |
+| indexer startup | synchronize manifest declarations, source graph, active addresses, and stale discovery rows | newly-covered (#229) | Completed manifest, discovery-edge, active-address, and stale-row stream pages through `ManifestRuntimeProgress`. Full-source discovery reconciliation pages the active-edge summary, desired/insert and deactivation diffs, candidate observations, same-assignment retention, set-based historical-successor resolution, historical materialization, and final active-edge summary; the candidate allocation cap is checked before extending the retained vector with each bounded page. |
+| indexer startup | load discovery admission, watched contracts, drift inputs, and manifest-derived normalized events | newly-covered (#229) | Completed 1,000-row or 10,000-row database pages and bounded event-upsert pages. |
+| indexer startup | build and persist intake tasks from the watched-chain plan | newly-covered (#229) | Each completed 10,000-address plan copy/comparison chunk and persisted chain task. |
+| indexer startup adapter sync | ENSv1 reverse claim | covered (#221/#237) | Completed raw-log, decode, existing-event, and normalized-event pages. |
+| indexer startup adapter sync | ENSv1 subregistry discovery | covered (#221/#237) | Completed checkpoint raw-log pages plus bounded discovery, identity, binding, and event finalization units. |
+| indexer startup adapter sync | ENSv1 unwrapped authority | covered (#221/#237) | Completed checkpoint raw-log pages plus bounded resolver-profile, identity, and event finalization units. |
+| indexer startup adapter sync | ENSv2 registry resource/surface | covered (#221/#237) | Completed raw-log/processing pages and bounded lineage, resource, surface, binding, and event writes. |
+| indexer startup adapter sync | ENSv2 registrar | covered (#221/#237) | Completed raw-log, processing, and normalized-event pages. |
+| indexer startup adapter sync | ENSv2 resolver | covered (#221/#237) | Completed raw-log, processing, and normalized-event pages. |
+| indexer startup adapter sync | ENSv2 permissions | covered (#221/#237) | Completed raw-log/processing pages and bounded resource/event writes. |
+| indexer startup | plan source identities, targets, segments, reservations, and coverage for hash-pinned bootstrap | newly-covered (#229) | Completed 1,000-target planning/identity pages, durable reservation and coverage pages, and completed worker-result handling. |
+| indexer startup | execute hash-pinned bootstrap provider units | covered (#213) | Provider-backed ranges are divided into at-most-32-block progress units; a beat follows only a fully persisted unit. Worker completion and failure remain coordinator-owned. |
+| indexer startup | post-bootstrap adapter synchronization | covered (#213/#221/#237) | Reuses every adapter's page progress route and records completed family boundaries. |
+| indexer startup | widen bootstrap admission to the live watch plan | newly-covered (#229) | Reuses manifest/discovery page progress and records each 10,000-address plan/task copy or comparison chunk. |
+| indexer startup | initial resolver authority journal and resolver-profile convergence | newly-covered (#229) | Uses the authority and convergence boundaries described below. |
+| indexer live poll | refresh manifest declarations, source graph, active addresses, and stale discovery rows | newly-covered (#229) | Same `ManifestRuntimeProgress` pages as startup; no timer runs beside the refresh. |
+| indexer live poll | refresh discovery admission, watched plan, and intake tasks | newly-covered (#229) | Completed discovery pages, 10,000-address plan builds/copies/comparisons, and persisted chain tasks. |
+| indexer live poll | refresh code-hash drift and manifest-derived normalized events | newly-covered (#229) | Completed 1,000-row code-hash, address, discovery-parent, event-input, and event-upsert pages. |
+| indexer live poll | full-corpus adapter refresh after manifest/discovery changes | newly-covered (#229) | Existing adapter page callbacks now remain connected through live reconciliation; completed family, reconciliation, and finalization boundaries also beat. |
+| indexer live poll | post-replay adapter backlog and cursor publication | newly-covered (#229) | Completed adapter families and bounded publication/cursor units; publication beats only after its transaction commits. |
+| indexer live poll | fetch the provider head, safe head, and finalized head | n-a | A fixed set of atomic RPC results is required before reconciliation can advance. A provider call taking more than 20 seconds represents no completed progress and must not receive a beat. |
+| indexer canonical reconciliation | walk provider parents and fill a contiguous gap | newly-covered (#229) | Each fetched parent and each completed block-persistence unit; non-reorg adapter work is split into at-most-32-block chunks. |
+| indexer canonical reconciliation | prove stored lineage and retained-history coverage | newly-covered (#229) | Completed lineage blocks and bounded coverage candidate, companion, fork, and delta pages. |
+| indexer canonical reconciliation | orphan the losing branch | newly-covered (#229) | Each losing block plus bounded raw-fact, normalized-event, identity, and execution-invalidation pages. |
+| indexer canonical reconciliation | persist winning raw blocks, transactions, receipts, logs, and event-silent calls | newly-covered (#229) | Each block and each 1,000-row persistence page. |
+| indexer canonical reconciliation | observe code hashes and replay adapter-owned state | newly-covered (#229) | Completed code-observation pages, at-most-32-block adapter chunks, and internal raw-log/processing/persistence pages for block-derived events and all selected ENSv1/ENSv2 adapter families. |
+| indexer canonical reconciliation | recover exact missing retained-history coverage | newly-covered (#229) | Exact watched-target pages and provider-backed sequential backfill units of at most 32 blocks; coverage is recorded before the beat. |
+| indexer canonical reconciliation | publish chain checkpoints | newly-covered (#229) | A beat follows the committed checkpoint and admission-epoch fence; the atomic publication itself has no synthetic keepalive. |
+| indexer resolver-profile convergence | compare and advance the authority journal | newly-covered (#229) | Completed authority-entry, seed-family expansion, staged-diff, mutation, and forced-target pages. |
+| indexer resolver-profile convergence | drain input changes and materialize reconciliation targets | newly-covered (#229) | Each 1,000-input page and each completed target/family page. A progress-enabled drain rejects pools below four connections, reserving capacity for the runtime writer guard, reconciliation guard, bounded authority/event reads, and heartbeat writes. |
+| indexer resolver-profile convergence | replay resolver targets, stage/publish events, and enqueue invalidations | newly-covered (#229) | Completed target/log/state pages, 1,000-row staged-event and invalidation pages, family publication, and acknowledged input pages. |
+| indexer spawned task | automatic normalized-event replay catch-up | newly-covered (#229) | Completed stateless replay pages, adapter-internal pages, full-closure adapter boundaries, replay chunks, durable cursor publications, and checkpoint cleanup advance the shared process row. Parent work and the spawned iteration mutually exclude each other's heartbeat writes while either owns a work unit, including failure journaling, so neither can mask the other's wedge; idle catch-up sleep releases ownership. Exit and panic remain supervised (#242). |
+| indexer spawned task | normalized-replay projection-index preparation and restoration DDL statements | n-a | Each PostgreSQL catalog check and `CREATE INDEX` or `DROP INDEX` statement is atomic at the application boundary, with no safe successful progress callback inside the statement. The replay iteration retains heartbeat ownership, so a slow or stuck statement intentionally ages the process row instead of receiving a synthetic beat. |
+| indexer one-shot modes | manual backfill, replay, rewind, repair, and operational catch-up commands | n-a | These commands do not run inside the registered `indexer run` service loop, so service-loop heartbeat coverage does not describe their completion. Backfill range leases retain their separate ownership heartbeat. |
 
 A named phase is a distinct `scope_kind='phase'` row for the worker instance.
 Its `heartbeat_at` is the phase start rather than a free-running timer, so a

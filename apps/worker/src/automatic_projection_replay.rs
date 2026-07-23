@@ -163,13 +163,17 @@ async fn run_automatic_current_projection_replay_loop(
     let mut projection_derivation_started = false;
     let projection_apply_generation = Arc::new(AtomicU64::new(0));
     let projection_apply_hydration_lock = Arc::new(Mutex::new(()));
+    let invalidation_derive_activity = heartbeat::RequiredSubtaskActivity::default();
+    let derive_heartbeat =
+        heartbeat::LoopHeartbeat::new(heartbeat_instance_id.clone(), poll_interval);
     let loop_heartbeat = Arc::new(Mutex::new(heartbeat::LoopHeartbeat::new(
         heartbeat_instance_id,
         poll_interval,
     )));
+    let mut derive_heartbeat = Some(derive_heartbeat);
 
     loop {
-        record_loop_heartbeat_if_due(&pool, &loop_heartbeat).await;
+        record_loop_heartbeat_if_due(&pool, &loop_heartbeat, &invalidation_derive_activity).await;
 
         let mut progressed = false;
         if !bootstrap_completed {
@@ -221,12 +225,21 @@ async fn run_automatic_current_projection_replay_loop(
                     );
                 }
             }
-            record_loop_heartbeat_if_due(&pool, &loop_heartbeat).await;
+            record_loop_heartbeat_if_due(&pool, &loop_heartbeat, &invalidation_derive_activity)
+                .await;
         }
 
         if bootstrap_completed {
             if !projection_derivation_started {
-                invalidation_derive_loop::spawn(&subtasks, pool.clone(), poll_interval_secs)?;
+                invalidation_derive_loop::spawn(
+                    &subtasks,
+                    pool.clone(),
+                    poll_interval_secs,
+                    derive_heartbeat
+                        .take()
+                        .expect("invalidation derive heartbeat is consumed exactly once"),
+                    invalidation_derive_activity.clone(),
+                )?;
                 projection_derivation_started = true;
             }
 
@@ -245,6 +258,7 @@ async fn run_automatic_current_projection_replay_loop(
                         config,
                         Arc::clone(&projection_apply_generation),
                         Arc::clone(&projection_apply_hydration_lock),
+                        invalidation_derive_activity.clone(),
                     )?;
                 }
                 primary_hydration_started = true;
@@ -252,6 +266,9 @@ async fn run_automatic_current_projection_replay_loop(
 
             if hydration_schedule.run_text_hydration {
                 let hydration_result = {
+                    let _required_subtask_exclusion = invalidation_derive_activity
+                        .exclude_required_subtask()
+                        .await;
                     let mut loop_heartbeat = loop_heartbeat.lock().await;
                     hydrate_record_inventory_text_values_after_bootstrap(
                         &pool,
@@ -274,9 +291,13 @@ async fn run_automatic_current_projection_replay_loop(
                         );
                     }
                 }
-                record_loop_heartbeat_if_due(&pool, &loop_heartbeat).await;
+                record_loop_heartbeat_if_due(&pool, &loop_heartbeat, &invalidation_derive_activity)
+                    .await;
             }
 
+            let _required_subtask_exclusion = invalidation_derive_activity
+                .exclude_required_subtask()
+                .await;
             let _apply_hydration_guard = projection_apply_hydration_lock.lock().await;
             let apply_result = {
                 let mut loop_heartbeat = loop_heartbeat.lock().await;
@@ -304,7 +325,10 @@ async fn run_automatic_current_projection_replay_loop(
                     );
                 }
             }
-            record_loop_heartbeat_if_due(&pool, &loop_heartbeat).await;
+            drop(_apply_hydration_guard);
+            drop(_required_subtask_exclusion);
+            record_loop_heartbeat_if_due(&pool, &loop_heartbeat, &invalidation_derive_activity)
+                .await;
         }
 
         if !progressed {
@@ -313,7 +337,12 @@ async fn run_automatic_current_projection_replay_loop(
     }
 }
 
-async fn record_loop_heartbeat_if_due(pool: &PgPool, loop_heartbeat: &SharedLoopHeartbeat) {
+async fn record_loop_heartbeat_if_due(
+    pool: &PgPool,
+    loop_heartbeat: &SharedLoopHeartbeat,
+    required_subtask_activity: &heartbeat::RequiredSubtaskActivity,
+) {
+    let _required_subtask_exclusion = required_subtask_activity.exclude_required_subtask().await;
     loop_heartbeat.lock().await.record_if_due(pool).await;
 }
 

@@ -1,22 +1,53 @@
-use std::future::Future;
+use std::{future::Future, sync::Arc};
 
 use anyhow::{Context, Result};
 use sqlx::PgPool;
-use tokio::time::{Duration, Instant};
+use tokio::{
+    sync::{Mutex, OwnedMutexGuard},
+    time::{Duration, Instant},
+};
 use tracing::warn;
+
+const MAX_PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Default)]
+pub(crate) struct RequiredSubtaskActivity {
+    phase_exclusion: Arc<Mutex<()>>,
+}
+
+pub(crate) struct RequiredSubtaskActivityGuard {
+    _phase_exclusion: OwnedMutexGuard<()>,
+}
+
+impl RequiredSubtaskActivity {
+    pub(crate) async fn begin(&self) -> RequiredSubtaskActivityGuard {
+        let phase_exclusion = Arc::clone(&self.phase_exclusion).lock_owned().await;
+        RequiredSubtaskActivityGuard {
+            _phase_exclusion: phase_exclusion,
+        }
+    }
+
+    pub(crate) async fn exclude_required_subtask(&self) -> OwnedMutexGuard<()> {
+        Arc::clone(&self.phase_exclusion).lock_owned().await
+    }
+}
 
 pub(crate) struct LoopHeartbeat {
     instance_id: String,
     interval: Duration,
     last_recorded_at: Option<Instant>,
+    #[cfg(test)]
+    progress_record_count: usize,
 }
 
 impl LoopHeartbeat {
     pub(crate) fn new(instance_id: String, interval: Duration) -> Self {
         Self {
             instance_id,
-            interval,
+            interval: interval.min(MAX_PROGRESS_HEARTBEAT_INTERVAL),
             last_recorded_at: None,
+            #[cfg(test)]
+            progress_record_count: 0,
         }
     }
 
@@ -33,7 +64,13 @@ impl LoopHeartbeat {
         )
         .await;
         match result {
-            Ok(()) => self.last_recorded_at = Some(Instant::now()),
+            Ok(()) => {
+                self.last_recorded_at = Some(Instant::now());
+                #[cfg(test)]
+                {
+                    self.progress_record_count += 1;
+                }
+            }
             Err(error) => warn!(
                 service = "worker",
                 heartbeat_instance_id = %self.instance_id,
@@ -123,6 +160,11 @@ impl LoopHeartbeat {
             .map(|recorded_at| recorded_at.elapsed() >= self.interval)
             .unwrap_or(true)
     }
+
+    #[cfg(test)]
+    pub(crate) const fn progress_record_count(&self) -> usize {
+        self.progress_record_count
+    }
 }
 
 pub(crate) async fn record_rebuild_progress(
@@ -182,6 +224,13 @@ mod tests {
 
         heartbeat.last_recorded_at = Some(Instant::now());
         assert!(!heartbeat.is_due());
+    }
+
+    #[test]
+    fn progress_heartbeat_throttle_never_inherits_a_stale_poll_interval() {
+        let heartbeat = LoopHeartbeat::new("long-poll-test".to_owned(), Duration::from_secs(60));
+
+        assert_eq!(heartbeat.interval, Duration::from_secs(5));
     }
 
     #[tokio::test]

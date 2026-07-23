@@ -2,12 +2,15 @@ use bigname_storage::ResolverProfileInputChange;
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use uuid::Uuid;
 
+use crate::tests::{BlockingHeartbeatProgress, install_stale_indexer_heartbeat};
+
 use super::{
     ResolverProfileAuthorityIndex, ResolverProfileAuthoritySnapshot,
     ResolverProfileConvergenceSummary,
     authority::{ResolverProfileAdmissionSemantics, ResolverProfileAuthorityEntry},
-    drain_resolver_profile_input_changes, expanded_reconciliation_targets,
-    expanded_reconciliation_targets_with_family_count, input_requires_reconciliation,
+    drain_resolver_profile_input_changes, drain_resolver_profile_input_changes_with_progress,
+    expanded_reconciliation_targets, expanded_reconciliation_targets_with_family_count,
+    input_requires_reconciliation,
 };
 
 #[test]
@@ -310,7 +313,8 @@ fn indexed_authority_matches_full_scans_for_load_shaped_inputs() {
 #[tokio::test]
 async fn pending_input_drain_never_loads_the_full_authority_snapshot() -> anyhow::Result<()> {
     let database = TestDatabase::create_migrated(
-        TestDatabaseConfig::new("indexer_resolver_profile_scoped_authority_drain"),
+        TestDatabaseConfig::new("indexer_resolver_profile_scoped_authority_drain")
+            .pool_max_connections(3),
         &bigname_storage::MIGRATOR,
         "failed to apply migrations for scoped resolver-profile drain test",
     )
@@ -344,10 +348,59 @@ async fn pending_input_drain_never_loads_the_full_authority_snapshot() -> anyhow
 }
 
 #[tokio::test]
-async fn seed_change_reconciles_journal_family_in_bounded_pages() -> anyhow::Result<()> {
+async fn convergence_rejects_a_pool_without_a_progress_heartbeat_connection() -> anyhow::Result<()>
+{
+    let database = TestDatabase::create_migrated(
+        TestDatabaseConfig::new("indexer_resolver_profile_three_connection_rejection")
+            .pool_max_connections(3),
+        &bigname_storage::MIGRATOR,
+        "failed to apply migrations for resolver-profile pool rejection test",
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO resolver_profile_input_changes (
+            chain_id,
+            contract_address,
+            previous_code_hash,
+            current_code_hash
+        ) VALUES (
+            'ethereum-mainnet',
+            '0x0000000000000000000000000000000000000001',
+            '0x01',
+            '0x02'
+        )
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    let instance_id = "resolver-profile-three-connection-rejection";
+    install_stale_indexer_heartbeat(database.pool(), instance_id).await?;
+    let (mut progress, _) = BlockingHeartbeatProgress::new(
+        instance_id,
+        vec!["ethereum-mainnet".to_owned()],
+        usize::MAX,
+    );
+
+    let error = drain_resolver_profile_input_changes_with_progress(database.pool(), &mut progress)
+        .await
+        .expect_err("three connections cannot reserve a real convergence heartbeat writer");
+    assert!(
+        error
+            .to_string()
+            .contains("requires at least 4 database connections")
+            && error.to_string().contains("progress heartbeat writes"),
+        "unexpected convergence pool error: {error:#}"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn seed_change_reconciles_journal_family_with_real_heartbeats() -> anyhow::Result<()> {
     let database = TestDatabase::create_migrated(
         TestDatabaseConfig::new("indexer_resolver_profile_seed_family_pages")
-            .pool_max_connections(3),
+            .pool_max_connections(4),
         &bigname_storage::MIGRATOR,
         "failed to apply migrations for resolver-profile seed-family paging test",
     )
@@ -393,12 +446,43 @@ async fn seed_change_reconciles_journal_family_in_bounded_pages() -> anyhow::Res
         "bigname-indexer",
     )
     .await?;
-    let summary = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        drain_resolver_profile_input_changes(database.pool()),
-    )
+    let heartbeat_instance_id = "resolver-profile-seed-family-pages";
+    install_stale_indexer_heartbeat(database.pool(), heartbeat_instance_id).await?;
+    let (mut progress, progress_handle) = BlockingHeartbeatProgress::new(
+        heartbeat_instance_id,
+        vec!["ethereum-mainnet".to_owned()],
+        2,
+    );
+    let mut operation = Box::pin(drain_resolver_profile_input_changes_with_progress(
+        database.pool(),
+        &mut progress,
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::select! {
+            () = progress_handle.wait_until_blocked() => Ok(()),
+            result = operation.as_mut() => Err(anyhow::anyhow!(
+                "resolver-profile convergence completed before its later progress boundary blocked: {result:?}"
+            )),
+        }
+    })
     .await
-    .expect("three-connection seed-family drain must not starve bounded journal/event reads")?;
+    .expect("resolver-profile convergence did not reach its later progress boundary")?;
+    let persisted_heartbeat = bigname_storage::load_service_loop_heartbeat(
+        database.pool(),
+        bigname_storage::INDEXER_SERVICE_NAME,
+        heartbeat_instance_id,
+    )
+    .await?
+    .expect("resolver-profile progress heartbeat must remain registered");
+    assert!(
+        persisted_heartbeat.age_seconds <= 1,
+        "an earlier convergence page must beat before later target work finishes"
+    );
+    progress_handle.resume();
+    let summary = tokio::time::timeout(std::time::Duration::from_secs(30), operation.as_mut())
+        .await
+        .expect("four-connection seed-family drain must not starve progress heartbeat writes")?;
+    drop(operation);
     drop(runtime_guard);
     assert_eq!(summary.loaded_input_count, 1);
     assert_eq!(summary.authority_target_read_statement_count, 1);
@@ -416,6 +500,10 @@ async fn seed_change_reconciles_journal_family_in_bounded_pages() -> anyhow::Res
     assert_eq!(summary.reconciled_target_count, 2_501);
     assert_eq!(summary.invalidated_projection_key_count, 2_501);
     assert_eq!(summary.acknowledged_input_count, 1);
+    assert!(
+        progress_handle.record_count() >= 20,
+        "the multi-page authority scan and reconciliation must report progress before completion"
+    );
 
     database.cleanup().await
 }

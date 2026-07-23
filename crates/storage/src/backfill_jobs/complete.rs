@@ -5,7 +5,8 @@ use tracing::warn;
 
 use super::{
     coverage_facts::{
-        BackfillCoverageFactDerivation, BackfillCoverageFactWrite,
+        BackfillCoverageFactDerivation, BackfillCoverageFactStreamItem, BackfillCoverageFactWrite,
+        BackfillCoverageProgress, write_backfill_coverage_fact_stream,
         write_backfill_coverage_facts_from_iter,
     },
     decode::{decode_backfill_job, decode_backfill_range},
@@ -116,6 +117,92 @@ where
         .await
         .context("failed to commit backfill range completion")?;
 
+    Ok(range)
+}
+
+/// Progress-aware completion for whole-active plans. The stream may emit
+/// progress markers for examined inputs that do not produce facts; database
+/// insert chunks also trigger the supplied hook.
+pub async fn complete_backfill_range_recording_coverage_with_progress<F, I>(
+    pool: &PgPool,
+    backfill_range_id: i64,
+    lease_token: &str,
+    coverage_facts: F,
+    progress: &mut dyn BackfillCoverageProgress,
+) -> Result<BackfillRange>
+where
+    F: FnOnce(&BackfillJob) -> I,
+    I: Iterator<Item = BackfillCoverageFactStreamItem>,
+{
+    validate_non_empty("lease_token", lease_token)?;
+
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to open transaction for backfill range completion")?;
+    let backfill_job_id = load_backfill_range_job_id(&mut *transaction, backfill_range_id)
+        .await?
+        .with_context(|| format!("missing backfill range {backfill_range_id}"))?;
+    load_backfill_job_for_update(&mut *transaction, backfill_job_id)
+        .await?
+        .with_context(|| {
+            format!("missing backfill job {backfill_job_id} for range {backfill_range_id}")
+        })?;
+    let current = load_backfill_range_for_update(&mut *transaction, backfill_range_id)
+        .await?
+        .with_context(|| format!("missing backfill range {backfill_range_id}"))?;
+    if current.status == BackfillLifecycleStatus::Completed {
+        transaction
+            .commit()
+            .await
+            .context("failed to commit completed backfill range no-op")?;
+        return Ok(current);
+    }
+    if current.status == BackfillLifecycleStatus::Failed {
+        bail!("failed backfill range {backfill_range_id} must be reserved again before completion");
+    }
+    ensure_lease_matches(&current, lease_token)?;
+    if current.checkpoint_block_number != current.range_end_block_number {
+        bail!(
+            "backfill range {backfill_range_id} checkpoint {} has not reached declared range end {}",
+            current.checkpoint_block_number,
+            current.range_end_block_number
+        );
+    }
+
+    let complete_sql = backfill_range_returning_sql(
+        r#"
+        UPDATE backfill_ranges
+        SET
+            status = 'completed'::backfill_lifecycle_status,
+            lease_token = NULL,
+            lease_owner = NULL,
+            lease_expires_at = NULL,
+            failure_reason = NULL,
+            failure_metadata = '{}'::jsonb,
+            completed_at = COALESCE(completed_at, now()),
+            updated_at = now()
+        WHERE backfill_range_id = $1
+        "#,
+    );
+    let range = sqlx::query(&complete_sql)
+        .bind(backfill_range_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .with_context(|| format!("failed to complete backfill range {backfill_range_id}"))?;
+    let range = decode_backfill_range(range)?;
+
+    maybe_complete_backfill_job_with_progress(
+        &mut transaction,
+        range.backfill_job_id,
+        coverage_facts,
+        progress,
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .context("failed to commit backfill range completion")?;
     Ok(range)
 }
 
@@ -245,6 +332,40 @@ where
     // Catches every flip that ends up fact-less through this path: the
     // exported complete_backfill_range's empty iterator, and recording
     // completions whose derivation yielded nothing.
+    if inserted_fact_count == 0 {
+        warn_backfill_job_coverage_fact_gap(
+            &job,
+            "complete_backfill_range",
+            "backfill job completion recorded zero coverage facts",
+        );
+    }
+    Ok(())
+}
+
+async fn maybe_complete_backfill_job_with_progress<F, I>(
+    executor: &mut sqlx::Transaction<'_, Postgres>,
+    backfill_job_id: i64,
+    coverage_facts: F,
+    progress: &mut dyn BackfillCoverageProgress,
+) -> Result<()>
+where
+    F: FnOnce(&BackfillJob) -> I,
+    I: Iterator<Item = BackfillCoverageFactStreamItem>,
+{
+    let incomplete_count = incomplete_range_count(&mut **executor, backfill_job_id).await?;
+    if incomplete_count != 0 {
+        return Ok(());
+    }
+
+    let job = set_backfill_job_completed(executor, backfill_job_id).await?;
+    let inserted_fact_count = write_backfill_coverage_fact_stream(
+        executor,
+        job.backfill_job_id,
+        BackfillCoverageFactDerivation::JobCompletion,
+        coverage_facts(&job),
+        &mut Some(progress),
+    )
+    .await?;
     if inserted_fact_count == 0 {
         warn_backfill_job_coverage_fact_gap(
             &job,

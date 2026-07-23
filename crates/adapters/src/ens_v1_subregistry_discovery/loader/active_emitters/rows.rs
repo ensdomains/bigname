@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, Result};
 use sqlx::{Row, postgres::PgRow};
@@ -8,42 +8,16 @@ use super::super::super::{
     hex_topic::normalize_address, scope::RegistryRawLogSourceScopeTarget,
 };
 use super::super::ActiveEmitter;
+use crate::{
+    checkpoint_context::StartupAdapterProgress,
+    startup_progress::STARTUP_ADAPTER_PROGRESS_PAGE_ROWS,
+};
 
 pub(super) fn active_emitters_from_rows(rows: Vec<PgRow>) -> Result<Vec<ActiveEmitter>> {
     let mut emitters_by_scope =
         HashMap::<(String, String, Option<i64>, Option<i64>), ActiveEmitter>::new();
     for row in rows {
-        let address = normalize_address(&row.try_get::<String, _>("address")?);
-        let candidate = ActiveEmitter {
-            address,
-            contract_instance_id: row
-                .try_get("contract_instance_id")
-                .context("missing registry emitter contract_instance_id")?,
-            source_manifest_id: row
-                .try_get("source_manifest_id")
-                .context("missing registry emitter source_manifest_id")?,
-            namespace: row
-                .try_get("namespace")
-                .context("missing registry emitter namespace")?,
-            source_family: row
-                .try_get("source_family")
-                .context("missing registry emitter source_family")?,
-            manifest_version: row
-                .try_get("manifest_version")
-                .context("missing registry emitter manifest_version")?,
-            contract_role: row
-                .try_get("contract_role")
-                .context("missing registry emitter contract_role")?,
-            active_from_block_number: row
-                .try_get("active_from_block_number")
-                .context("missing registry emitter active_from_block_number")?,
-            active_to_block_number: row
-                .try_get("active_to_block_number")
-                .context("missing registry emitter active_to_block_number")?,
-            source_rank: row
-                .try_get("source_rank")
-                .context("missing registry emitter source_rank")?,
-        };
+        let candidate = active_emitter_from_row(&row)?;
 
         let scope_key = (
             candidate.source_family.clone(),
@@ -64,6 +38,135 @@ pub(super) fn active_emitters_from_rows(rows: Vec<PgRow>) -> Result<Vec<ActiveEm
     let mut emitters = remove_shadowed_emitters(emitters);
     sort_active_emitters(&mut emitters);
     Ok(emitters)
+}
+
+pub(super) async fn active_emitters_from_rows_with_progress(
+    pool: &sqlx::PgPool,
+    rows: Vec<PgRow>,
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<Vec<ActiveEmitter>> {
+    let row_count = rows.len();
+    let mut emitters_by_scope = BTreeMap::new();
+    for (index, row) in rows.into_iter().enumerate() {
+        let candidate = active_emitter_from_row(&row)?;
+        let scope_key = (
+            candidate.source_family.clone(),
+            candidate.address.clone(),
+            candidate.active_from_block_number,
+            candidate.active_to_block_number,
+        );
+        match emitters_by_scope.get(&scope_key) {
+            Some(current) if !candidate_precedes(&candidate, current) => {}
+            _ => {
+                emitters_by_scope.insert(scope_key, candidate);
+            }
+        }
+        record_progress(pool, progress, index + 1, row_count).await?;
+    }
+    remove_shadowed_emitters_with_progress(pool, emitters_by_scope.into_values(), progress).await
+}
+
+fn active_emitter_from_row(row: &PgRow) -> Result<ActiveEmitter> {
+    let address = normalize_address(&row.try_get::<String, _>("address")?);
+    Ok(ActiveEmitter {
+        address,
+        contract_instance_id: row
+            .try_get("contract_instance_id")
+            .context("missing registry emitter contract_instance_id")?,
+        source_manifest_id: row
+            .try_get("source_manifest_id")
+            .context("missing registry emitter source_manifest_id")?,
+        namespace: row
+            .try_get("namespace")
+            .context("missing registry emitter namespace")?,
+        source_family: row
+            .try_get("source_family")
+            .context("missing registry emitter source_family")?,
+        manifest_version: row
+            .try_get("manifest_version")
+            .context("missing registry emitter manifest_version")?,
+        contract_role: row
+            .try_get("contract_role")
+            .context("missing registry emitter contract_role")?,
+        active_from_block_number: row
+            .try_get("active_from_block_number")
+            .context("missing registry emitter active_from_block_number")?,
+        active_to_block_number: row
+            .try_get("active_to_block_number")
+            .context("missing registry emitter active_to_block_number")?,
+        source_rank: row
+            .try_get("source_rank")
+            .context("missing registry emitter source_rank")?,
+    })
+}
+
+async fn remove_shadowed_emitters_with_progress(
+    pool: &sqlx::PgPool,
+    emitters: impl IntoIterator<Item = ActiveEmitter>,
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<Vec<ActiveEmitter>> {
+    let mut emitters_by_address = BTreeMap::<
+        (String, String),
+        BTreeMap<(Option<i64>, Option<i64>, i32, i64, sqlx::types::Uuid), ActiveEmitter>,
+    >::new();
+    let mut grouped = 0usize;
+    for emitter in emitters {
+        emitters_by_address
+            .entry((emitter.address.clone(), emitter.source_family.clone()))
+            .or_default()
+            .insert(
+                (
+                    emitter.active_from_block_number,
+                    emitter.active_to_block_number,
+                    emitter.source_rank,
+                    emitter.source_manifest_id,
+                    emitter.contract_instance_id,
+                ),
+                emitter,
+            );
+        grouped += 1;
+        if grouped.is_multiple_of(STARTUP_ADAPTER_PROGRESS_PAGE_ROWS) {
+            progress.record(pool).await?;
+        }
+    }
+    if grouped > 0 && !grouped.is_multiple_of(STARTUP_ADAPTER_PROGRESS_PAGE_ROWS) {
+        progress.record(pool).await?;
+    }
+
+    let mut compacted = Vec::new();
+    let mut compared = 0usize;
+    for address_emitters in emitters_by_address.into_values() {
+        let mut retained = Vec::<ActiveEmitter>::new();
+        'candidate: for candidate in address_emitters.into_values() {
+            for retained_emitter in &retained {
+                compared += 1;
+                if compared.is_multiple_of(STARTUP_ADAPTER_PROGRESS_PAGE_ROWS) {
+                    progress.record(pool).await?;
+                }
+                if emitter_shadows(retained_emitter, &candidate) {
+                    continue 'candidate;
+                }
+            }
+            retained.push(candidate);
+        }
+        compacted.extend(retained);
+    }
+    if compared > 0 && !compared.is_multiple_of(STARTUP_ADAPTER_PROGRESS_PAGE_ROWS) {
+        progress.record(pool).await?;
+    }
+    Ok(compacted)
+}
+
+async fn record_progress(
+    pool: &sqlx::PgPool,
+    progress: &mut dyn StartupAdapterProgress,
+    completed: usize,
+    total: usize,
+) -> Result<()> {
+    if completed == total || completed.is_multiple_of(STARTUP_ADAPTER_PROGRESS_PAGE_ROWS) {
+        progress.record(pool).await?;
+    }
+    Ok(())
 }
 
 pub(super) fn sort_active_emitters(emitters: &mut [ActiveEmitter]) {

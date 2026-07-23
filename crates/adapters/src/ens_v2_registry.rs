@@ -13,6 +13,7 @@ mod constants;
 mod decode;
 mod discovery;
 mod emitters;
+mod entrypoints;
 mod events;
 mod identity;
 mod live;
@@ -26,7 +27,9 @@ mod util;
 
 use crate::{
     adapter_manifest::load_required_active_manifest_event_topic0s_by_signature,
-    checkpoint_context::{StartupAdapterProgress, record_startup_adapter_progress},
+    checkpoint_context::{
+        StartupAdapterProgress, reborrow_startup_adapter_progress, record_startup_adapter_progress,
+    },
     normalized_event_support::count_events_by_kind,
     startup_progress::record_processed_row_progress,
 };
@@ -45,7 +48,8 @@ use identity::{
 use live::{
     FullSourceRawLogHistoryGuard, RegistryReplayState, acquire_registry_sync_fence,
     clear_live_registry_replay_checkpoints_for_chain, has_authoritative_ens_v2_closure_through,
-    invalidate_live_registry_replay_state, release_registry_sync_fence,
+    has_authoritative_ens_v2_closure_through_with_progress, invalidate_live_registry_replay_state,
+    release_registry_sync_fence,
 };
 use load::{RawLogCanonicalityFilter, load_registry_raw_logs_with_progress};
 use names::initial_registry_suffixes;
@@ -53,9 +57,16 @@ use startup::persist_registry_outputs_with_progress;
 use types::*;
 use util::normalize_address;
 
+pub use entrypoints::{
+    sync_ens_v2_registry_resource_surface, sync_ens_v2_registry_resource_surface_through_block,
+    sync_ens_v2_registry_resource_surface_through_block_with_progress,
+    sync_ens_v2_registry_resource_surface_with_progress,
+};
 pub use live::{
     ensure_ens_v2_retained_history_proof_through, record_ens_v2_live_selected_raw_log_coverage,
+    record_ens_v2_live_selected_raw_log_coverage_with_progress,
     sync_ens_v2_registry_resource_surface_live_poll,
+    sync_ens_v2_registry_resource_surface_live_poll_with_progress,
 };
 pub use recovery::{EnsV2MissingCoverage, ens_v2_missing_coverage, is_ens_v2_missing_coverage};
 
@@ -93,154 +104,6 @@ pub struct EnsV2RegistryResourceSurfaceSyncSummary {
     pub by_kind: BTreeMap<String, usize>,
 }
 
-impl EnsV2RegistryResourceSurfaceSyncSummary {
-    pub fn empty(scanned_log_count: usize) -> Self {
-        Self {
-            scanned_log_count,
-            matched_log_count: 0,
-            total_name_surface_count: 0,
-            total_resource_count: 0,
-            total_surface_binding_count: 0,
-            total_normalized_event_count: 0,
-            total_normalized_event_inserted_count: 0,
-            active_discovery_observation_count: 0,
-            active_edge_count: 0,
-            admitted_edge_count: 0,
-            inserted_edge_count: 0,
-            deactivated_edge_count: 0,
-            discovery_admission_epoch_bump_count: 0,
-            by_kind: BTreeMap::new(),
-        }
-    }
-
-    pub async fn sync_for_block_hashes(
-        pool: &PgPool,
-        chain: &str,
-        block_hashes: &[String],
-    ) -> Result<Self> {
-        sync_ens_v2_registry_resource_surface_with_scope(
-            pool,
-            chain,
-            true,
-            block_hashes,
-            None,
-            RawLogCanonicalityFilter::IncludeObserved,
-            None,
-            None,
-        )
-        .await
-    }
-
-    pub async fn sync_for_block_hashes_canonical_only(
-        pool: &PgPool,
-        chain: &str,
-        block_hashes: &[String],
-    ) -> Result<Self> {
-        sync_ens_v2_registry_resource_surface_with_scope(
-            pool,
-            chain,
-            true,
-            block_hashes,
-            None,
-            RawLogCanonicalityFilter::CanonicalOnly,
-            None,
-            None,
-        )
-        .await
-    }
-
-    pub async fn sync_for_block_hashes_with_source_scope(
-        pool: &PgPool,
-        chain: &str,
-        block_hashes: &[String],
-        source_scope: &[(String, String, i64, i64)],
-    ) -> Result<Self> {
-        sync_ens_v2_registry_resource_surface_with_scope(
-            pool,
-            chain,
-            true,
-            block_hashes,
-            Some(source_scope),
-            RawLogCanonicalityFilter::IncludeObserved,
-            None,
-            None,
-        )
-        .await
-    }
-
-    pub async fn sync_for_block_hashes_with_source_scope_canonical_only(
-        pool: &PgPool,
-        chain: &str,
-        block_hashes: &[String],
-        source_scope: &[(String, String, i64, i64)],
-    ) -> Result<Self> {
-        sync_ens_v2_registry_resource_surface_with_scope(
-            pool,
-            chain,
-            true,
-            block_hashes,
-            Some(source_scope),
-            RawLogCanonicalityFilter::CanonicalOnly,
-            None,
-            None,
-        )
-        .await
-    }
-}
-
-pub async fn sync_ens_v2_registry_resource_surface(
-    pool: &PgPool,
-    chain: &str,
-) -> Result<EnsV2RegistryResourceSurfaceSyncSummary> {
-    sync_ens_v2_registry_resource_surface_with_scope(
-        pool,
-        chain,
-        false,
-        &[],
-        None,
-        RawLogCanonicalityFilter::IncludeObserved,
-        None,
-        None,
-    )
-    .await
-}
-
-pub async fn sync_ens_v2_registry_resource_surface_with_progress(
-    pool: &PgPool,
-    chain: &str,
-    progress: &mut dyn StartupAdapterProgress,
-) -> Result<EnsV2RegistryResourceSurfaceSyncSummary> {
-    sync_ens_v2_registry_resource_surface_with_scope(
-        pool,
-        chain,
-        false,
-        &[],
-        None,
-        RawLogCanonicalityFilter::IncludeObserved,
-        None,
-        Some(progress),
-    )
-    .await
-}
-
-pub async fn sync_ens_v2_registry_resource_surface_through_block(
-    pool: &PgPool,
-    chain: &str,
-    target_block_number: i64,
-) -> Result<EnsV2RegistryResourceSurfaceSyncSummary> {
-    sync_ens_v2_registry_resource_surface_with_scope(
-        pool,
-        chain,
-        false,
-        &[],
-        None,
-        RawLogCanonicalityFilter::CanonicalOnly,
-        Some(target_block_number),
-        None,
-    )
-    .await
-}
-
 async fn sync_ens_v2_registry_resource_surface_with_scope(
     pool: &PgPool,
     chain: &str,
@@ -249,7 +112,7 @@ async fn sync_ens_v2_registry_resource_surface_with_scope(
     source_scope: Option<&[(String, String, i64, i64)]>,
     canonicality_filter: RawLogCanonicalityFilter,
     max_block_number: Option<i64>,
-    progress: Option<&mut dyn StartupAdapterProgress>,
+    mut progress: Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<EnsV2RegistryResourceSurfaceSyncSummary> {
     let mut registry_sync_fence = Some(acquire_registry_sync_fence(pool, chain).await?);
     // Non-live entrypoints may rewrite persisted state behind the process-local live cache.
@@ -273,7 +136,21 @@ async fn sync_ens_v2_registry_resource_surface_with_scope(
             .with_context(|| format!("failed to load ENSv2 full-source target for {chain}"))?
             .unwrap_or(0)
         };
-        if !has_authoritative_ens_v2_closure_through(pool, chain, full_source_target).await? {
+        let has_authoritative_closure = match progress.as_deref_mut() {
+            Some(progress) => {
+                has_authoritative_ens_v2_closure_through_with_progress(
+                    pool,
+                    chain,
+                    full_source_target,
+                    progress,
+                )
+                .await?
+            }
+            None => {
+                has_authoritative_ens_v2_closure_through(pool, chain, full_source_target).await?
+            }
+        };
+        if !has_authoritative_closure {
             let fence = registry_sync_fence
                 .take()
                 .context("ENSv2 registry sync fence is absent before empty-source release")?;
@@ -284,10 +161,31 @@ async fn sync_ens_v2_registry_resource_surface_with_scope(
             .take()
             .context("ENSv2 registry sync fence is absent before full-source upgrade")?;
         let guard = FullSourceRawLogHistoryGuard::acquire(fence, chain).await?;
-        let proof = guard.ensure_proof_through(pool, full_source_target).await?;
-        let pre_sync_requirements = guard
-            .load_requirements_through(pool, proof, full_source_target)
-            .await?;
+        let proof = match progress.as_deref_mut() {
+            Some(progress) => {
+                guard
+                    .ensure_proof_through_with_progress(pool, full_source_target, progress)
+                    .await?
+            }
+            None => guard.ensure_proof_through(pool, full_source_target).await?,
+        };
+        let pre_sync_requirements = match progress.as_deref_mut() {
+            Some(progress) => {
+                guard
+                    .load_requirements_through_with_progress(
+                        pool,
+                        proof,
+                        full_source_target,
+                        progress,
+                    )
+                    .await?
+            }
+            None => {
+                guard
+                    .load_requirements_through(pool, proof, full_source_target)
+                    .await?
+            }
+        };
         Some((guard, proof, full_source_target, pre_sync_requirements))
     } else {
         None
@@ -307,7 +205,7 @@ async fn sync_ens_v2_registry_resource_surface_with_scope(
         !restrict_to_block_hashes,
         !restrict_to_block_hashes,
         expected_discovery_admission_epoch,
-        progress,
+        reborrow_startup_adapter_progress(&mut progress),
     )
     .await;
     let result = match (sync_result, full_source_guard) {
@@ -315,16 +213,33 @@ async fn sync_ens_v2_registry_resource_surface_with_scope(
             Ok((summary, replay_state)),
             Some((guard, proof, full_source_target, pre_sync_requirements)),
         ) => {
-            guard
-                .finish(
-                    pool,
-                    proof,
-                    full_source_target,
-                    summary.discovery_admission_epoch_bump_count,
-                    &pre_sync_requirements,
-                    None,
-                )
-                .await?;
+            match progress.as_deref_mut() {
+                Some(progress) => {
+                    guard
+                        .finish_with_progress(
+                            pool,
+                            proof,
+                            full_source_target,
+                            summary.discovery_admission_epoch_bump_count,
+                            &pre_sync_requirements,
+                            None,
+                            progress,
+                        )
+                        .await?;
+                }
+                None => {
+                    guard
+                        .finish(
+                            pool,
+                            proof,
+                            full_source_target,
+                            summary.discovery_admission_epoch_bump_count,
+                            &pre_sync_requirements,
+                            None,
+                        )
+                        .await?;
+                }
+            }
             Ok((summary, replay_state))
         }
         (Ok(result), None) => Ok(result),
@@ -386,6 +301,7 @@ async fn sync_ens_v2_registry_resource_surface_with_scope_and_state(
         chain,
         scoped_emitter_identities.as_ref(),
         include_historical_emitters,
+        &mut progress,
     )
     .await?;
     if active_emitters.is_empty() {

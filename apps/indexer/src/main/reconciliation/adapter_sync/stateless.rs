@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use anyhow::Result;
+use bigname_adapters::StartupAdapterProgress;
 use tracing::info;
 
 use crate::runtime::{
@@ -9,6 +10,7 @@ use crate::runtime::{
 
 use super::{
     mode::{PersistedRawPayloadAdapterSyncMode, ensure_raw_fact_adapter_allowed},
+    progress::record_adapter_progress,
     sync_logging::log_adapter_call_timing,
 };
 use crate::reconciliation::{
@@ -22,6 +24,7 @@ pub(super) async fn sync_block_derived_for_mode(
     source_scope: Option<&[(String, String, i64, i64)]>,
     mode: PersistedRawPayloadAdapterSyncMode,
     aggregate: &mut PersistedRawPayloadAdapterSyncSummary,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<()> {
     ensure_raw_fact_adapter_allowed(
         mode,
@@ -40,11 +43,31 @@ pub(super) async fn sync_block_derived_for_mode(
         "adapter sync call started"
     );
 
-    let (summary, authority) = match mode {
-        PersistedRawPayloadAdapterSyncMode::RawFactReplay {
-            canonical_raw_log_count,
-            ..
-        } if mode.uses_stateless_replay_authority() => {
+    let (summary, authority) = match (mode, progress.as_deref_mut()) {
+        (
+            PersistedRawPayloadAdapterSyncMode::RawFactReplay {
+                canonical_raw_log_count,
+                ..
+            },
+            Some(progress),
+        ) if mode.uses_stateless_replay_authority() => {
+            bigname_adapters::sync_block_derived_normalized_events_with_stateless_replay_authority_and_progress(
+                pool,
+                chain,
+                block_hashes,
+                source_scope,
+                canonical_raw_log_count,
+                progress,
+            )
+            .await?
+        }
+        (
+            PersistedRawPayloadAdapterSyncMode::RawFactReplay {
+                canonical_raw_log_count,
+                ..
+            },
+            None,
+        ) if mode.uses_stateless_replay_authority() => {
             bigname_adapters::sync_block_derived_normalized_events_with_stateless_replay_authority(
                 pool,
                 chain,
@@ -54,10 +77,31 @@ pub(super) async fn sync_block_derived_for_mode(
             )
             .await?
         }
-        PersistedRawPayloadAdapterSyncMode::RawFactReplay {
-            canonical_raw_log_count,
-            ..
-        } => (
+        (
+            PersistedRawPayloadAdapterSyncMode::RawFactReplay {
+                canonical_raw_log_count,
+                ..
+            },
+            Some(progress),
+        ) => (
+            bigname_adapters::sync_block_derived_normalized_events_with_scanned_log_count_and_progress(
+                pool,
+                chain,
+                block_hashes,
+                source_scope,
+                canonical_raw_log_count,
+                progress,
+            )
+            .await?,
+            bigname_storage::NormalizedEventReplayAuthoritySummary::default(),
+        ),
+        (
+            PersistedRawPayloadAdapterSyncMode::RawFactReplay {
+                canonical_raw_log_count,
+                ..
+            },
+            None,
+        ) => (
             bigname_adapters::sync_block_derived_normalized_events_with_scanned_log_count(
                 pool,
                 chain,
@@ -68,8 +112,26 @@ pub(super) async fn sync_block_derived_for_mode(
             .await?,
             bigname_storage::NormalizedEventReplayAuthoritySummary::default(),
         ),
-        PersistedRawPayloadAdapterSyncMode::LivePoll
-        | PersistedRawPayloadAdapterSyncMode::LiveOrBackfill => (
+        (
+            PersistedRawPayloadAdapterSyncMode::LivePoll
+            | PersistedRawPayloadAdapterSyncMode::LiveOrBackfill,
+            Some(progress),
+        ) => (
+            bigname_adapters::sync_block_derived_normalized_events_with_progress(
+                pool,
+                chain,
+                block_hashes,
+                source_scope,
+                progress,
+            )
+            .await?,
+            bigname_storage::NormalizedEventReplayAuthoritySummary::default(),
+        ),
+        (
+            PersistedRawPayloadAdapterSyncMode::LivePoll
+            | PersistedRawPayloadAdapterSyncMode::LiveOrBackfill,
+            None,
+        ) => (
             bigname_adapters::sync_block_derived_normalized_events(
                 pool,
                 chain,
@@ -100,6 +162,7 @@ pub(super) async fn sync_block_derived_for_mode(
         summary.total_inserted_count,
     );
     aggregate.add_stateless_replay_authority(&authority);
+    record_adapter_progress(pool, progress).await?;
     Ok(())
 }
 
@@ -110,6 +173,7 @@ pub(super) async fn sync_reverse_claim_for_mode(
     source_scope: Option<&[(String, String, i64, i64)]>,
     mode: PersistedRawPayloadAdapterSyncMode,
     aggregate: &mut PersistedRawPayloadAdapterSyncSummary,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<()> {
     if !mode.selects_adapter(
         source_scope,
@@ -136,8 +200,22 @@ pub(super) async fn sync_reverse_claim_for_mode(
         "adapter sync call started"
     );
 
-    let (summary, authority) = match (source_scope, mode.uses_stateless_replay_authority()) {
-        (Some(source_scope), true) => {
+    let (summary, authority) = match (
+        source_scope,
+        mode.uses_stateless_replay_authority(),
+        progress.as_deref_mut(),
+    ) {
+        (Some(source_scope), true, Some(progress)) => {
+            bigname_adapters::EnsV1ReverseClaimSyncSummary::sync_for_block_hashes_with_source_scope_and_stateless_replay_authority_and_progress(
+                pool,
+                chain,
+                block_hashes,
+                source_scope,
+                progress,
+            )
+            .await?
+        }
+        (Some(source_scope), true, None) => {
             bigname_adapters::EnsV1ReverseClaimSyncSummary::sync_for_block_hashes_with_source_scope_and_stateless_replay_authority(
                 pool,
                 chain,
@@ -146,7 +224,16 @@ pub(super) async fn sync_reverse_claim_for_mode(
             )
             .await?
         }
-        (None, true) => {
+        (None, true, Some(progress)) => {
+            bigname_adapters::EnsV1ReverseClaimSyncSummary::sync_for_block_hashes_with_stateless_replay_authority_and_progress(
+                pool,
+                chain,
+                block_hashes,
+                progress,
+            )
+            .await?
+        }
+        (None, true, None) => {
             bigname_adapters::EnsV1ReverseClaimSyncSummary::sync_for_block_hashes_with_stateless_replay_authority(
                 pool,
                 chain,
@@ -154,7 +241,18 @@ pub(super) async fn sync_reverse_claim_for_mode(
             )
             .await?
         }
-        (Some(source_scope), false) => (
+        (Some(source_scope), false, Some(progress)) => (
+            bigname_adapters::EnsV1ReverseClaimSyncSummary::sync_for_block_hashes_with_source_scope_and_progress(
+                pool,
+                chain,
+                block_hashes,
+                source_scope,
+                progress,
+            )
+            .await?,
+            bigname_storage::NormalizedEventReplayAuthoritySummary::default(),
+        ),
+        (Some(source_scope), false, None) => (
             bigname_adapters::EnsV1ReverseClaimSyncSummary::sync_for_block_hashes_with_source_scope(
                 pool,
                 chain,
@@ -164,7 +262,17 @@ pub(super) async fn sync_reverse_claim_for_mode(
             .await?,
             bigname_storage::NormalizedEventReplayAuthoritySummary::default(),
         ),
-        (None, false) => (
+        (None, false, Some(progress)) => (
+            bigname_adapters::EnsV1ReverseClaimSyncSummary::sync_for_block_hashes_with_progress(
+                pool,
+                chain,
+                block_hashes,
+                progress,
+            )
+            .await?,
+            bigname_storage::NormalizedEventReplayAuthoritySummary::default(),
+        ),
+        (None, false, None) => (
             bigname_adapters::EnsV1ReverseClaimSyncSummary::sync_for_block_hashes(
                 pool,
                 chain,
@@ -194,5 +302,6 @@ pub(super) async fn sync_reverse_claim_for_mode(
         summary.total_inserted_count,
     );
     aggregate.add_stateless_replay_authority(&authority);
+    record_adapter_progress(pool, progress).await?;
     Ok(())
 }

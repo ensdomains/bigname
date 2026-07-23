@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use bigname_adapters::StartupAdapterProgress;
 use bigname_manifests::{
     WatchedBackfillTarget, WatchedSourceSelectorKind, WatchedSourceSelectorPlan,
 };
@@ -6,7 +7,116 @@ use serde_json::{Value, json};
 
 use crate::ens_v1_resolver::{SOURCE_FAMILY_ENS_V1_RESOLVER_L1, generic_resolver_record_topic0s};
 
-use super::{COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD, digest::keccak256_json_digest};
+use super::{
+    COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD,
+    digest::{
+        keccak256_json_digest, keccak256_json_value_digest_with_progress,
+        keccak256_selected_targets_digest_with_progress,
+    },
+    requested_watched_targets_value_with_progress,
+};
+
+pub(super) async fn generic_topic_scan_source_identity_payload_with_progress(
+    pool: &sqlx::PgPool,
+    source_plan: &WatchedSourceSelectorPlan,
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<Value> {
+    const PROGRESS_TARGETS: usize = 1_000;
+    let mut selected_count = 0usize;
+    let mut selected_first = None;
+    let mut selected_last = None;
+    for (index, target) in source_plan.selected_targets.iter().enumerate() {
+        if target.source_family != SOURCE_FAMILY_ENS_V1_RESOLVER_L1 {
+            selected_count += 1;
+            selected_first.get_or_insert(target);
+            selected_last = Some(target);
+        }
+        if (index + 1).is_multiple_of(PROGRESS_TARGETS) {
+            progress.record(pool).await?;
+        }
+    }
+    if !source_plan.selected_targets.is_empty()
+        && !source_plan
+            .selected_targets
+            .len()
+            .is_multiple_of(PROGRESS_TARGETS)
+    {
+        progress.record(pool).await?;
+    }
+    let requested_watched_targets =
+        requested_watched_targets_value_with_progress(pool, source_plan, progress).await?;
+    let generic_topic0s = generic_resolver_record_topic0s();
+    let generic_topic_scans = json!([{
+        "source_family": SOURCE_FAMILY_ENS_V1_RESOLVER_L1,
+        "source_identity_payload_format": "generic_resolver_event_topics_v1"
+    }]);
+
+    let mut payload = if source_plan.selector_kind == WatchedSourceSelectorKind::SourceFamily
+        && source_plan.source_family.as_deref() == Some(SOURCE_FAMILY_ENS_V1_RESOLVER_L1)
+    {
+        json!({
+            "selector_kind": source_plan.selector_kind.as_str(),
+            "source_family": &source_plan.source_family,
+            "requested_watched_targets": requested_watched_targets,
+            "source_identity_payload_format": "generic_resolver_event_topics_v1",
+            "topic0s_by_source_family": {
+                SOURCE_FAMILY_ENS_V1_RESOLVER_L1: generic_topic0s,
+            },
+        })
+    } else if selected_count <= COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD {
+        let mut selected_targets = Vec::with_capacity(selected_count);
+        for target in &source_plan.selected_targets {
+            if target.source_family != SOURCE_FAMILY_ENS_V1_RESOLVER_L1 {
+                selected_targets.push(target.clone());
+            }
+        }
+        json!({
+            "selector_kind": source_plan.selector_kind.as_str(),
+            "source_family": &source_plan.source_family,
+            "requested_watched_targets": requested_watched_targets,
+            "selected_targets": selected_targets,
+            "generic_topic_scans": generic_topic_scans,
+            "source_identity_payload_format": "selected_targets_with_generic_topic_scans_v1",
+            "topic0s_by_source_family": {
+                SOURCE_FAMILY_ENS_V1_RESOLVER_L1: generic_topic0s,
+            },
+        })
+    } else {
+        let selected_targets_digest = keccak256_selected_targets_digest_with_progress(
+            pool,
+            &source_plan.selected_targets,
+            Some(SOURCE_FAMILY_ENS_V1_RESOLVER_L1),
+            progress,
+        )
+        .await
+        .context("failed to digest compact generic-topic-scan source selected targets")?;
+        json!({
+            "selector_kind": source_plan.selector_kind.as_str(),
+            "source_family": &source_plan.source_family,
+            "requested_watched_targets": requested_watched_targets,
+            "selected_target_count": selected_count,
+            "selected_targets_digest_algorithm": "keccak256",
+            "selected_targets_digest": selected_targets_digest,
+            "selected_targets_sample": {"first": selected_first, "last": selected_last},
+            "generic_topic_scans": generic_topic_scans,
+            "source_identity_payload_format": "selected_targets_digest_with_generic_topic_scans_v1",
+            "topic0s_by_source_family": {
+                SOURCE_FAMILY_ENS_V1_RESOLVER_L1: generic_topic0s,
+            },
+        })
+    };
+    let source_identity_hash = keccak256_json_value_digest_with_progress(pool, &payload, progress)
+        .await
+        .context("failed to digest generic-topic-scan backfill source identity")?;
+    payload
+        .as_object_mut()
+        .expect("generic-topic-scan source identity payload must be an object")
+        .insert(
+            "source_identity_hash".to_owned(),
+            Value::String(source_identity_hash),
+        );
+    Ok(payload)
+}
 
 pub(super) fn generic_topic_scan_source_identity_payload(
     source_plan: &WatchedSourceSelectorPlan,

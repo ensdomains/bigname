@@ -20,9 +20,16 @@ mod preimage_observation;
 mod source_selection;
 mod types;
 
-use crate::normalized_event_support::{
-    NormalizedEventSyncCounts, count_events_by_kind, upsert_normalized_events_with_counts,
-    upsert_normalized_events_with_stateless_replay_authority_counts,
+use crate::{
+    checkpoint_context::{StartupAdapterProgress, record_startup_adapter_progress},
+    normalized_event_support::{
+        NormalizedEventSyncCounts, count_events_by_kind,
+        upsert_normalized_events_in_chunks_with_counts_and_progress,
+        upsert_normalized_events_in_chunks_with_stateless_replay_authority_counts_and_progress,
+        upsert_normalized_events_with_counts,
+        upsert_normalized_events_with_stateless_replay_authority_counts,
+    },
+    startup_progress::{STARTUP_ADAPTER_PROGRESS_PAGE_ROWS, record_processed_row_progress},
 };
 use event_builders::build_preimage_observed_events;
 use loading::{RawLogCanonicalityFilter, load_scanned_log_count, load_watched_raw_logs};
@@ -61,6 +68,28 @@ pub async fn sync_block_derived_normalized_events(
         RawLogCanonicalityFilter::IncludeObserved,
         None,
         false,
+        None,
+    )
+    .await
+    .map(|(summary, _)| summary)
+}
+
+pub async fn sync_block_derived_normalized_events_with_progress(
+    pool: &PgPool,
+    chain: &str,
+    block_hashes: &[String],
+    source_scope: Option<&[(String, String, i64, i64)]>,
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<BlockDerivedNormalizedEventSyncSummary> {
+    sync_block_derived_normalized_events_inner(
+        pool,
+        chain,
+        block_hashes,
+        source_scope,
+        RawLogCanonicalityFilter::IncludeObserved,
+        None,
+        false,
+        Some(progress),
     )
     .await
     .map(|(summary, _)| summary)
@@ -83,6 +112,29 @@ pub async fn sync_block_derived_normalized_events_with_scanned_log_count(
         RawLogCanonicalityFilter::CanonicalOnly,
         Some(scanned_log_count),
         false,
+        None,
+    )
+    .await
+    .map(|(summary, _)| summary)
+}
+
+pub async fn sync_block_derived_normalized_events_with_scanned_log_count_and_progress(
+    pool: &PgPool,
+    chain: &str,
+    block_hashes: &[String],
+    source_scope: Option<&[(String, String, i64, i64)]>,
+    scanned_log_count: usize,
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<BlockDerivedNormalizedEventSyncSummary> {
+    sync_block_derived_normalized_events_inner(
+        pool,
+        chain,
+        block_hashes,
+        source_scope,
+        RawLogCanonicalityFilter::CanonicalOnly,
+        Some(scanned_log_count),
+        false,
+        Some(progress),
     )
     .await
     .map(|(summary, _)| summary)
@@ -107,6 +159,31 @@ pub async fn sync_block_derived_normalized_events_with_stateless_replay_authorit
         RawLogCanonicalityFilter::CanonicalOnly,
         Some(scanned_log_count),
         true,
+        None,
+    )
+    .await
+}
+
+pub async fn sync_block_derived_normalized_events_with_stateless_replay_authority_and_progress(
+    pool: &PgPool,
+    chain: &str,
+    block_hashes: &[String],
+    source_scope: Option<&[(String, String, i64, i64)]>,
+    scanned_log_count: usize,
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<(
+    BlockDerivedNormalizedEventSyncSummary,
+    NormalizedEventReplayAuthoritySummary,
+)> {
+    sync_block_derived_normalized_events_inner(
+        pool,
+        chain,
+        block_hashes,
+        source_scope,
+        RawLogCanonicalityFilter::CanonicalOnly,
+        Some(scanned_log_count),
+        true,
+        Some(progress),
     )
     .await
 }
@@ -119,6 +196,7 @@ async fn sync_block_derived_normalized_events_inner(
     canonicality_filter: RawLogCanonicalityFilter,
     known_scanned_log_count: Option<usize>,
     stateless_replay_authority: bool,
+    mut progress: Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<(
     BlockDerivedNormalizedEventSyncSummary,
     NormalizedEventReplayAuthoritySummary,
@@ -142,6 +220,7 @@ async fn sync_block_derived_normalized_events_inner(
     let watched_raw_logs_started = Instant::now();
     let raw_log_load =
         load_watched_raw_logs(pool, chain, block_hashes, source_scope, canonicality_filter).await?;
+    record_startup_adapter_progress(pool, &mut progress).await?;
     let load_watched_raw_logs_ms = watched_raw_logs_started.elapsed().as_millis();
     let raw_logs = raw_log_load.raw_logs;
     if raw_logs.is_empty() {
@@ -167,7 +246,7 @@ async fn sync_block_derived_normalized_events_inner(
     let mut matched_log_refs = HashSet::new();
     let mut events = Vec::new();
     let mut build_by_source_family = BTreeMap::<String, SourceFamilyBuildTiming>::new();
-    for raw_log in &raw_logs {
+    for (index, raw_log) in raw_logs.iter().enumerate() {
         let row_started = Instant::now();
         let observed_events = build_preimage_observed_events(raw_log, &raw_log_load.event_topics)?;
         let elapsed_us = row_started.elapsed().as_micros();
@@ -177,6 +256,7 @@ async fn sync_block_derived_normalized_events_inner(
         source_family_timing.raw_log_count += 1;
         source_family_timing.elapsed_us += elapsed_us;
         if observed_events.is_empty() {
+            record_processed_row_progress(pool, &mut progress, index + 1, raw_logs.len()).await?;
             continue;
         }
         source_family_timing.matched_log_count += 1;
@@ -188,6 +268,7 @@ async fn sync_block_derived_normalized_events_inner(
             raw_log.log_index,
         ));
         events.extend(observed_events);
+        record_processed_row_progress(pool, &mut progress, index + 1, raw_logs.len()).await?;
     }
     let build_events_ms = build_started.elapsed().as_millis();
 
@@ -213,18 +294,48 @@ async fn sync_block_derived_normalized_events_inner(
     let event_kind_counts = count_events_by_kind(&events);
     let persistence_started = Instant::now();
     let (counts, authority) = if stateless_replay_authority {
-        upsert_normalized_events_with_stateless_replay_authority_counts(
-            pool,
-            &events,
-            "block-derived normalized-event",
-        )
-        .await?
+        match progress {
+            Some(progress) => {
+                upsert_normalized_events_in_chunks_with_stateless_replay_authority_counts_and_progress(
+                    pool,
+                    &events,
+                    "block-derived normalized-event",
+                    STARTUP_ADAPTER_PROGRESS_PAGE_ROWS,
+                    Some(progress),
+                )
+                .await?
+            }
+            None => {
+                upsert_normalized_events_with_stateless_replay_authority_counts(
+                    pool,
+                    &events,
+                    "block-derived normalized-event",
+                )
+                .await?
+            }
+        }
     } else {
-        (
-            upsert_normalized_events_with_counts(pool, &events, "block-derived normalized-event")
-                .await?,
-            NormalizedEventReplayAuthoritySummary::default(),
-        )
+        let counts = match progress {
+            Some(progress) => {
+                upsert_normalized_events_in_chunks_with_counts_and_progress(
+                    pool,
+                    &events,
+                    "block-derived normalized-event",
+                    STARTUP_ADAPTER_PROGRESS_PAGE_ROWS,
+                    Some(progress),
+                )
+                .await?
+            }
+            None => {
+                upsert_normalized_events_with_counts(
+                    pool,
+                    &events,
+                    "block-derived normalized-event",
+                )
+                .await?
+            }
+        };
+        (counts, NormalizedEventReplayAuthoritySummary::default())
     };
     let persistence_ms = persistence_started.elapsed().as_millis();
 

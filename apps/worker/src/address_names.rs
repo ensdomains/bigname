@@ -8,10 +8,13 @@ mod relations;
 mod source_policy;
 mod util;
 
-pub(crate) use rebuild::rebuild_address_names_current_with_heartbeat;
 pub use rebuild::{
     rebuild_address_names_current, rebuild_address_names_current_logical_name,
     rebuild_address_names_current_logical_names,
+};
+pub(crate) use rebuild::{
+    rebuild_address_names_current_logical_names_with_heartbeat,
+    rebuild_address_names_current_with_heartbeat,
 };
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

@@ -1200,10 +1200,8 @@ the abort-status migration is installed, resume/complete the run or restore the
 database to a consistent pre-run snapshot before running migrations or writers.
 Guarded writer processes require at least two database pool connections so the
 held advisory lock connection cannot starve ordinary writer work. The indexer
-requires at least three: resolver-profile authority journaling shares its
-transaction with the bounded target cursor and keeps one connection available
-for bounded admission reads, while resolver-profile convergence keeps capacity
-for its guarded adapter writes and bounded journal/event reads. Each path
+requires at least four so its permanent runtime writer guard, nested bounded
+work guards, and progress-heartbeat writer cannot exhaust the pool. Each path
 rejects a smaller pool before starting that work.
 
 1. Stop the indexer and worker services, leaving PostgreSQL and the API online

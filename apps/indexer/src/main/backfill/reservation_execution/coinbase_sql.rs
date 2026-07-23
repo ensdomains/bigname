@@ -145,7 +145,6 @@ pub(crate) async fn run_resumable_coinbase_sql_backfill_job(
     );
 }
 
-// Reserved-range execution keeps lease, source, provider, and aggregate inputs explicit.
 #[expect(clippy::too_many_arguments)]
 pub(crate) async fn run_reserved_coinbase_sql_backfill_range(
     pool: &sqlx::PgPool,
@@ -298,6 +297,8 @@ pub(crate) async fn run_reserved_coinbase_sql_backfill_range(
         source_plan,
         super::coinbase_sql_uses_basenames_registry_scan_all(source_plan, topic_plan),
         "Coinbase SQL backfill range completion failed",
+        None,
+        &mut None,
     )
     .await
 }
@@ -318,7 +319,6 @@ fn next_coinbase_sql_window_blocks(
     }
 }
 
-// Window execution keeps selection, validation, evidence, and job inputs explicit.
 #[expect(clippy::too_many_arguments)]
 async fn run_coinbase_sql_backfill_window(
     pool: &sqlx::PgPool,
