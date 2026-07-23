@@ -483,9 +483,7 @@ pub(super) async fn run_startup_bootstrap_backfills_inner(
                 };
                 outcome.add_job(&job_outcome);
                 if replay_completed_raw_ranges && job_outcome.raw_log_count > 0 {
-                    let replay_outcome = replay_raw_fact_normalized_events(
-                    pool,
-                    RawFactNormalizedEventReplayRequest {
+                    let replay_request = RawFactNormalizedEventReplayRequest {
                         deployment_profile: deployment_profile.clone(),
                         chain: task.chain.clone(),
                         selection: RawFactNormalizedEventReplaySelection::ScopedBlockRange {
@@ -497,15 +495,22 @@ pub(super) async fn run_startup_bootstrap_backfills_inner(
                                 job_outcome.to_block,
                             ),
                         },
-                    },
-                )
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to replay normalized events after bootstrap raw backfill for chain {} range {}..={}",
-                        task.chain, job_outcome.from_block, job_outcome.to_block
+                    };
+                    let replay_heartbeat = heartbeat
+                        .as_deref_mut()
+                        .map(|heartbeat| (heartbeat, heartbeat_chain_ids.as_slice()));
+                    let replay_outcome = replay_completed_bootstrap_raw_range(
+                        pool,
+                        replay_request,
+                        replay_heartbeat,
                     )
-                })?;
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to replay normalized events after bootstrap raw backfill for chain {} range {}..={}",
+                            task.chain, job_outcome.from_block, job_outcome.to_block
+                        )
+                    })?;
                     log_raw_fact_normalized_event_replay_outcome(&replay_outcome);
                     outcome.normalized_replay_job_count += 1;
                     outcome.normalized_replay_synced_count +=
