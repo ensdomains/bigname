@@ -18,6 +18,7 @@ use super::{
     },
 };
 
+#[cfg(test)]
 pub async fn rebuild_all_current_projections(
     pool: &PgPool,
     text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,

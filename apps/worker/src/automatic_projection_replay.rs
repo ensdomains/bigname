@@ -21,6 +21,8 @@ mod bootstrap_attempt;
 mod bootstrap_replay;
 #[path = "automatic_projection_replay/invalidation_derive_loop.rs"]
 mod invalidation_derive_loop;
+#[path = "automatic_projection_replay/manual_replay.rs"]
+mod manual_replay;
 #[path = "automatic_projection_replay/primary_hydration.rs"]
 mod primary_hydration;
 #[path = "automatic_projection_replay/primary_hydration_loop.rs"]
@@ -35,6 +37,7 @@ mod subtask_supervision;
 #[cfg(test)]
 use bootstrap_replay::replay_all_current_projections_when_ready;
 use bootstrap_replay::replay_all_current_projections_when_ready_with_heartbeat;
+pub(crate) use manual_replay::replay_all_current_projections_manually;
 
 const CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS: &str = "raw_fact_normalized_events";
 const ALL_CURRENT_PROJECTIONS_MIN_DATABASE_CONNECTIONS: u32 = 64;

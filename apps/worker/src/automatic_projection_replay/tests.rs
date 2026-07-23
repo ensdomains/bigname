@@ -567,6 +567,85 @@ async fn restart_with_started_staging_keeps_the_original_target_when_chain_head_
 }
 
 #[tokio::test]
+async fn manual_replay_reuses_the_persisted_attempt_target() -> Result<()> {
+    let database = test_database().await?;
+    seed_ready_normalized_replay_cursor(database.pool(), 20).await?;
+    seed_chain_checkpoint(database.pool(), 20).await?;
+    bootstrap_attempt::start_projection_replay_attempt(
+        database.pool(),
+        Some(20),
+        projection_apply::NormalizedEventChangeCursor { change_id: 0 },
+    )
+    .await?;
+    advance_chain_checkpoint(database.pool(), 21).await?;
+
+    let attempt = manual_replay::resolve_manual_projection_replay_attempt(database.pool()).await?;
+    assert_eq!(
+        attempt.normalized_target_block,
+        Some(20),
+        "manual replay must join the existing attempt instead of replacing its target"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn manual_replay_fails_cleanly_when_automatic_replay_holds_the_lock() -> Result<()> {
+    let database = test_database().await?;
+    let mut replay_lock = try_acquire_replay_lock(database.pool())
+        .await?
+        .context("the test must acquire the automatic replay lock")?;
+
+    let error = manual_replay::replay_all_current_projections_manually(database.pool(), None, None)
+        .await
+        .expect_err("manual replay must fail fast while automatic replay owns the lock");
+    assert!(
+        format!("{error:#}").contains("automatic replay owns the cross-process replay lock"),
+        "unexpected manual replay lock error: {error:#}"
+    );
+
+    release_replay_lock(&mut replay_lock).await?;
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn manual_replay_markers_carry_the_real_target_and_satisfy_handoff() -> Result<()> {
+    let database = test_database().await?;
+    seed_ready_normalized_replay_cursor(database.pool(), 20).await?;
+    seed_chain_checkpoint(database.pool(), 20).await?;
+
+    manual_replay::replay_all_current_projections_manually(database.pool(), None, None).await?;
+    let target_marker_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM current_projection_replay_status
+        WHERE completed_normalized_target_block = 20
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        target_marker_count,
+        replay::ALL_CURRENT_PROJECTION_ORDER.len() as i64,
+        "manual replay must write a real target on every family marker"
+    );
+
+    let attempt = bootstrap_attempt::load_projection_replay_attempt(database.pool())
+        .await?
+        .context("manual replay must retain its attempt for automatic handoff")?;
+    let cursor_seed =
+        projection_bootstrap_apply_cursor_seed(false, attempt.apply_baseline_change_id);
+    bootstrap_attempt::finalize_projection_replay_attempt(database.pool(), attempt, cursor_seed)
+        .await?;
+    assert!(
+        projection_apply::normalized_event_cursor_exists(database.pool()).await?,
+        "the target-bearing manual markers must satisfy automatic handoff"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn completed_handoff_cleans_a_leftover_staging_checkpoint() -> Result<()> {
     let database = test_database().await?;
     seed_apply_cursor(database.pool()).await?;

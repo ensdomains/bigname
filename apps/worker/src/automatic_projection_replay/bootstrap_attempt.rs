@@ -63,10 +63,9 @@ pub(super) async fn start_projection_replay_attempt(
 
     let durable_targets =
         load_durable_progress_targets(&mut transaction, current_input_revision).await?;
-    let normalized_target_block = if durable_targets.len() == 1 {
-        durable_targets[0]
-    } else {
-        candidate_target_block
+    let normalized_target_block = match durable_targets.as_slice() {
+        [Some(target)] => Some(*target),
+        _ => candidate_target_block,
     };
     let apply_baseline_change_id = if durable_targets.is_empty() {
         captured_watermark.change_id
