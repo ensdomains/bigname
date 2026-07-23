@@ -121,13 +121,6 @@ async fn rebuild_all_resolvers(
     normalized_target_block: Option<i64>,
     mut loop_heartbeat: Option<&mut LoopHeartbeat>,
 ) -> Result<ResolverCurrentRebuildSummary> {
-    let profile_gate = run_rebuild_phase(
-        pool,
-        &mut loop_heartbeat,
-        "resolver_current.load_profile",
-        ResolverProfileGate::load(pool),
-    )
-    .await?;
     let previous_row_count = run_rebuild_phase(
         pool,
         &mut loop_heartbeat,
@@ -164,13 +157,22 @@ async fn rebuild_all_resolvers(
             )
             .await?;
             if page.is_empty() {
-                checkpoint.mark_staging_complete(pool, input_fence).await?;
-                break;
+                if checkpoint.mark_staging_complete(pool, input_fence).await? {
+                    break;
+                }
+                continue;
             }
             let last = page
                 .last()
                 .expect("resolver_current staging page must not be empty");
             let last_source_key = json!([last.chain_id, last.resolver_address]);
+            let profile_gate = run_rebuild_phase(
+                pool,
+                &mut loop_heartbeat,
+                "resolver_current.load_profile_page",
+                ResolverProfileGate::load(pool),
+            )
+            .await?;
             let rows = build_resolver_page(pool, &profile_gate, &page, &mut loop_heartbeat).await?;
             let mut transaction = pool.begin().await?;
             let staged =

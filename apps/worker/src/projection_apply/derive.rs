@@ -4,13 +4,19 @@ use sqlx::{PgPool, Postgres, Transaction, types::Uuid};
 
 use super::{NORMALIZED_EVENT_CURSOR, NormalizedEventChangeCursor};
 use crate::projection_apply::derive_queries::{
-    INVALIDATION_QUERY_PREFIXES, UPSERT_SUFFIX, current_projection_invalidation_prefix,
+    INVALIDATION_QUERY_PREFIXES, UPSERT_SUFFIX, current_projection_invalidation_prefixes,
 };
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ProjectionInvalidationDeriveSummary {
     pub(crate) scanned_event_count: i64,
     pub(crate) enqueued_invalidation_count: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ProjectionStagingInputWatermark {
+    pub(crate) normalized_change_id: i64,
+    pub(crate) direct_invalidation_revision: i64,
 }
 
 pub(crate) async fn normalized_event_cursor_exists(pool: &PgPool) -> Result<bool> {
@@ -94,25 +100,87 @@ pub(crate) async fn capture_normalized_event_change_watermark_in_transaction(
     .map(|change_id| NormalizedEventChangeCursor { change_id })
 }
 
+pub(crate) async fn capture_projection_staging_input_watermark_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<ProjectionStagingInputWatermark> {
+    let normalized_change_id =
+        capture_normalized_event_change_watermark_in_transaction(transaction)
+            .await?
+            .change_id;
+    let direct_invalidation_revision = sqlx::query_scalar::<_, i64>(
+        "SELECT public.capture_projection_direct_invalidation_watermark()",
+    )
+    .fetch_one(&mut **transaction)
+    .await
+    .context("failed to capture complete direct projection invalidation watermark")?;
+    Ok(ProjectionStagingInputWatermark {
+        normalized_change_id,
+        direct_invalidation_revision,
+    })
+}
+
 pub(crate) async fn completed_projection_sources_changed(
     transaction: &mut Transaction<'_, Postgres>,
     projection: &str,
-    lower_change_id: i64,
-    upper_change_id: i64,
+    lower: ProjectionStagingInputWatermark,
+    upper: ProjectionStagingInputWatermark,
     completed_range: CompletedProjectionSourceRange<'_>,
 ) -> Result<bool> {
-    if upper_change_id <= lower_change_id {
+    let prefixes = current_projection_invalidation_prefixes(projection)
+        .with_context(|| format!("unsupported staged projection {projection}"))?;
+    for prefix in prefixes {
+        if completed_candidate_keys_changed(
+            transaction,
+            projection,
+            lower.normalized_change_id,
+            upper.normalized_change_id,
+            completed_range,
+            prefix,
+        )
+        .await?
+        {
+            return Ok(true);
+        }
+    }
+    completed_candidate_keys_changed(
+        transaction,
+        projection,
+        lower.direct_invalidation_revision,
+        upper.direct_invalidation_revision,
+        completed_range,
+        DIRECT_INVALIDATION_REVISIONS_PREFIX,
+    )
+    .await
+}
+
+const DIRECT_INVALIDATION_REVISIONS_PREFIX: &str = r#"
+WITH candidate_keys AS (
+    SELECT projection, projection_key, key_payload
+    FROM projection_direct_invalidation_revisions
+    WHERE revision > $1
+      AND revision <= $2
+)
+"#;
+
+async fn completed_candidate_keys_changed(
+    transaction: &mut Transaction<'_, Postgres>,
+    projection: &str,
+    lower_revision: i64,
+    upper_revision: i64,
+    completed_range: CompletedProjectionSourceRange<'_>,
+    prefix: &str,
+) -> Result<bool> {
+    if upper_revision <= lower_revision {
         return Ok(false);
     }
-    let prefix = current_projection_invalidation_prefix(projection)
-        .with_context(|| format!("unsupported staged projection {projection}"))?;
     let last_source_key = match completed_range {
         CompletedProjectionSourceRange::Through(last_source_key) => last_source_key,
         CompletedProjectionSourceRange::Full => {
             let query = completed_change_query(prefix, "TRUE");
             return sqlx::query_scalar::<_, bool>(&query)
-                .bind(lower_change_id)
-                .bind(upper_change_id)
+                .bind(lower_revision)
+                .bind(upper_revision)
+                .bind(projection)
                 .fetch_one(&mut **transaction)
                 .await
                 .context("failed to detect a change in the completed projection source range");
@@ -121,10 +189,11 @@ pub(crate) async fn completed_projection_sources_changed(
     let changed = match projection {
         "name_current" => {
             let cursor = json_string(last_source_key, projection)?;
-            let query = completed_change_query(prefix, "key_payload ->> 'logical_name_id' <= $3");
+            let query = completed_change_query(prefix, "key_payload ->> 'logical_name_id' <= $4");
             sqlx::query_scalar::<_, bool>(&query)
-                .bind(lower_change_id)
-                .bind(upper_change_id)
+                .bind(lower_revision)
+                .bind(upper_revision)
+                .bind(projection)
                 .bind(cursor)
                 .fetch_one(&mut **transaction)
                 .await?
@@ -132,10 +201,11 @@ pub(crate) async fn completed_projection_sources_changed(
         "children_current" => {
             let cursor = json_string_array(last_source_key, 3, projection)?;
             let query =
-                completed_change_query(prefix, "key_payload ->> 'parent_logical_name_id' <= $3");
+                completed_change_query(prefix, "key_payload ->> 'parent_logical_name_id' <= $4");
             sqlx::query_scalar::<_, bool>(&query)
-                .bind(lower_change_id)
-                .bind(upper_change_id)
+                .bind(lower_revision)
+                .bind(upper_revision)
+                .bind(projection)
                 .bind(&cursor[0])
                 .fetch_one(&mut **transaction)
                 .await?
@@ -143,10 +213,11 @@ pub(crate) async fn completed_projection_sources_changed(
         "permissions_current" | "record_inventory_current" => {
             let cursor = Uuid::parse_str(json_string(last_source_key, projection)?)?;
             let query =
-                completed_change_query(prefix, "(key_payload ->> 'resource_id')::UUID <= $3");
+                completed_change_query(prefix, "(key_payload ->> 'resource_id')::UUID <= $4");
             sqlx::query_scalar::<_, bool>(&query)
-                .bind(lower_change_id)
-                .bind(upper_change_id)
+                .bind(lower_revision)
+                .bind(upper_revision)
+                .bind(projection)
                 .bind(cursor)
                 .fetch_one(&mut **transaction)
                 .await?
@@ -155,11 +226,12 @@ pub(crate) async fn completed_projection_sources_changed(
             let cursor = json_string_array(last_source_key, 2, projection)?;
             let query = completed_change_query(
                 prefix,
-                "(key_payload ->> 'chain_id', key_payload ->> 'resolver_address') <= ($3, $4)",
+                "(key_payload ->> 'chain_id', key_payload ->> 'resolver_address') <= ($4, $5)",
             );
             sqlx::query_scalar::<_, bool>(&query)
-                .bind(lower_change_id)
-                .bind(upper_change_id)
+                .bind(lower_revision)
+                .bind(upper_revision)
+                .bind(projection)
                 .bind(&cursor[0])
                 .bind(&cursor[1])
                 .fetch_one(&mut **transaction)
@@ -169,11 +241,12 @@ pub(crate) async fn completed_projection_sources_changed(
             let cursor = json_string_array(last_source_key, 2, projection)?;
             let query = completed_change_query(
                 prefix,
-                "key_payload ->> 'logical_name_id' IS NULL OR key_payload ->> 'logical_name_id' <= $3",
+                "key_payload ->> 'logical_name_id' IS NULL OR key_payload ->> 'logical_name_id' <= $4",
             );
             sqlx::query_scalar::<_, bool>(&query)
-                .bind(lower_change_id)
-                .bind(upper_change_id)
+                .bind(lower_revision)
+                .bind(upper_revision)
+                .bind(projection)
                 .bind(&cursor[0])
                 .fetch_one(&mut **transaction)
                 .await?
@@ -182,11 +255,12 @@ pub(crate) async fn completed_projection_sources_changed(
             let cursor = json_string_array(last_source_key, 3, projection)?;
             let query = completed_change_query(
                 prefix,
-                "(key_payload ->> 'address', key_payload ->> 'namespace', key_payload ->> 'coin_type') <= ($3, $4, $5)",
+                "(key_payload ->> 'address', key_payload ->> 'namespace', key_payload ->> 'coin_type') <= ($4, $5, $6)",
             );
             sqlx::query_scalar::<_, bool>(&query)
-                .bind(lower_change_id)
-                .bind(upper_change_id)
+                .bind(lower_revision)
+                .bind(upper_revision)
+                .bind(projection)
                 .bind(&cursor[0])
                 .bind(&cursor[1])
                 .bind(&cursor[2])
@@ -198,6 +272,7 @@ pub(crate) async fn completed_projection_sources_changed(
     Ok(changed)
 }
 
+#[derive(Clone, Copy)]
 pub(crate) enum CompletedProjectionSourceRange<'a> {
     Through(&'a Value),
     Full,
@@ -205,7 +280,7 @@ pub(crate) enum CompletedProjectionSourceRange<'a> {
 
 fn completed_change_query(prefix: &str, completed_predicate: &str) -> String {
     format!(
-        "{prefix} SELECT EXISTS (SELECT 1 FROM candidate_keys WHERE projection_key IS NOT NULL AND btrim(projection_key) <> '' AND ({completed_predicate}))"
+        "{prefix} SELECT EXISTS (SELECT 1 FROM candidate_keys WHERE projection = $3 AND projection_key IS NOT NULL AND btrim(projection_key) <> '' AND ({completed_predicate}))"
     )
 }
 
@@ -245,6 +320,18 @@ pub(super) async fn derive_normalized_event_invalidations_through(
         .begin()
         .await
         .context("failed to open projection invalidation transaction")?;
+    sqlx::query(
+        r#"
+        SELECT set_config(
+            'bigname.normalized_projection_invalidation_derive',
+            'on',
+            true
+        )
+        "#,
+    )
+    .execute(&mut *transaction)
+    .await
+    .context("failed to identify normalized-event projection invalidation derive")?;
     let lower = load_cursor(&mut transaction).await?;
     let Some(upper) =
         load_batch_watermark(&mut transaction, lower, complete_upper, batch_limit).await?

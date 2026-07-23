@@ -11,7 +11,8 @@ use support::*;
 
 #[test]
 fn current_projection_staging_contract_matches_schema_version_fingerprint() -> Result<()> {
-    let expected = r#"schema_version=2
+    let expected = r#"schema_version=3
+completion_fence=post_empty_page_full_range|channels=normalized_event,manifest_current,direct_invalidation_generation
 projection=name_current|cursor=logical_name_id:string
 stage=name_current|unique=logical_name_id|has_inserted_at=true
 projection=children_current|cursor=(parent_logical_name_id,canonical_display_name,child_logical_name_id):string_tuple
