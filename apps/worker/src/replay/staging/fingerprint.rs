@@ -8,7 +8,6 @@ use bigname_storage::projection_staging::{
 use super::{
     CURRENT_PROJECTION_STAGING_SCHEMA_VERSION, cursor::shape_tag, tables::projection_stage_specs,
 };
-use crate::projection_apply::projection_staging_input_channel_tags;
 #[path = "../../staged_rebuild.rs"]
 mod staged_rebuild_contract;
 use staged_rebuild_contract::{
@@ -27,7 +26,9 @@ const STAGED_PROJECTIONS: &[&str] = &[
     "primary_names_current",
 ];
 
-pub(crate) fn staging_contract_fingerprint() -> Result<String> {
+pub(crate) fn staging_contract_fingerprint(
+    channel_tags: impl Fn(&str) -> Option<Vec<&'static str>>,
+) -> Result<String> {
     let mut fingerprint = String::new();
     writeln!(
         fingerprint,
@@ -40,7 +41,7 @@ pub(crate) fn staging_contract_fingerprint() -> Result<String> {
     for projection in STAGED_PROJECTIONS {
         let cursor = shape_tag(projection)
             .with_context(|| format!("missing staging cursor contract for {projection}"))?;
-        let channels = projection_staging_input_channel_tags(projection)
+        let channels = channel_tags(projection)
             .with_context(|| format!("missing staging input channels for {projection}"))?;
         writeln!(
             fingerprint,
