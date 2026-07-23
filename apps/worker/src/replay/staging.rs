@@ -32,7 +32,7 @@ use tracing::info;
 /// Bump this for any incompatible source ordering, staged-row construction, stage-table shape,
 /// publication, or completed-range classification change. The full bump contract lives in
 /// `docs/projections.md` under "Replay status tracking".
-const CURRENT_PROJECTION_STAGING_SCHEMA_VERSION: i32 = 4;
+const CURRENT_PROJECTION_STAGING_SCHEMA_VERSION: i32 = 5;
 
 struct StoredCheckpoint {
     replay_version: i32,
@@ -41,6 +41,7 @@ struct StoredCheckpoint {
     full_replay_input_revision: i64,
     validated_normalized_change_id: i64,
     validated_direct_invalidation_revision: i64,
+    validated_permissions_resource_revision: i64,
     stage_tables: Vec<String>,
     last_source_key: Option<Value>,
     completed_source_count: i64,
@@ -55,6 +56,7 @@ pub(crate) struct ProjectionStagingCheckpoint {
     full_replay_input_revision: i64,
     validated_normalized_change_id: i64,
     validated_direct_invalidation_revision: i64,
+    validated_permissions_resource_revision: i64,
     stage_tables: Vec<String>,
     last_source_key: Option<Value>,
     completed_source_count: i64,
@@ -77,6 +79,7 @@ impl StoredCheckpoint {
         crate::projection_apply::ProjectionStagingInputWatermark {
             normalized_change_id: self.validated_normalized_change_id,
             direct_invalidation_revision: self.validated_direct_invalidation_revision,
+            permissions_resource_revision: self.validated_permissions_resource_revision,
         }
     }
 }
@@ -88,6 +91,7 @@ impl ProjectionStagingCheckpoint {
         crate::projection_apply::ProjectionStagingInputWatermark {
             normalized_change_id: self.validated_normalized_change_id,
             direct_invalidation_revision: self.validated_direct_invalidation_revision,
+            permissions_resource_revision: self.validated_permissions_resource_revision,
         }
     }
 
@@ -199,6 +203,8 @@ impl ProjectionStagingCheckpoint {
                 old_validated_normalized_change_id = checkpoint.validated_normalized_change_id,
                 old_validated_direct_invalidation_revision =
                     checkpoint.validated_direct_invalidation_revision,
+                old_validated_permissions_resource_revision =
+                    checkpoint.validated_permissions_resource_revision,
                 current_replay_version = CURRENT_PROJECTION_REPLAY_VERSION,
                 current_staging_schema_version = CURRENT_PROJECTION_STAGING_SCHEMA_VERSION,
                 normalized_target_block,
@@ -206,6 +212,8 @@ impl ProjectionStagingCheckpoint {
                 current_normalized_change_id = current_input_watermark.normalized_change_id,
                 current_direct_invalidation_revision =
                     current_input_watermark.direct_invalidation_revision,
+                current_permissions_resource_revision =
+                    current_input_watermark.permissions_resource_revision,
                 completed_sources_changed,
                 "stale all-current projection staging checkpoint discarded"
             );
@@ -222,9 +230,10 @@ impl ProjectionStagingCheckpoint {
                 full_replay_input_revision,
                 validated_normalized_change_id,
                 validated_direct_invalidation_revision,
+                validated_permissions_resource_revision,
                 stage_tables
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             "#,
         )
         .bind(projection)
@@ -234,6 +243,7 @@ impl ProjectionStagingCheckpoint {
         .bind(full_replay_input_revision)
         .bind(current_input_watermark.normalized_change_id)
         .bind(current_input_watermark.direct_invalidation_revision)
+        .bind(current_input_watermark.permissions_resource_revision)
         .bind(&stage_tables)
         .execute(&mut *transaction)
         .await
@@ -250,6 +260,8 @@ impl ProjectionStagingCheckpoint {
             validated_normalized_change_id: current_input_watermark.normalized_change_id,
             validated_direct_invalidation_revision: current_input_watermark
                 .direct_invalidation_revision,
+            validated_permissions_resource_revision: current_input_watermark
+                .permissions_resource_revision,
             stage_tables,
             last_source_key: None,
             completed_source_count: 0,
@@ -272,6 +284,8 @@ impl ProjectionStagingCheckpoint {
             validated_normalized_change_id: checkpoint.validated_normalized_change_id,
             validated_direct_invalidation_revision: checkpoint
                 .validated_direct_invalidation_revision,
+            validated_permissions_resource_revision: checkpoint
+                .validated_permissions_resource_revision,
             stage_tables: checkpoint.stage_tables,
             last_source_key: checkpoint.last_source_key,
             completed_source_count: checkpoint.completed_source_count,
@@ -378,6 +392,7 @@ async fn load_checkpoint(
             full_replay_input_revision,
             validated_normalized_change_id,
             validated_direct_invalidation_revision,
+            validated_permissions_resource_revision,
             stage_tables,
             last_source_key,
             completed_source_count,
@@ -402,6 +417,8 @@ async fn load_checkpoint(
             validated_normalized_change_id: row.try_get("validated_normalized_change_id")?,
             validated_direct_invalidation_revision: row
                 .try_get("validated_direct_invalidation_revision")?,
+            validated_permissions_resource_revision: row
+                .try_get("validated_permissions_resource_revision")?,
             stage_tables: row.try_get("stage_tables")?,
             last_source_key: row.try_get("last_source_key")?,
             completed_source_count: row.try_get("completed_source_count")?,

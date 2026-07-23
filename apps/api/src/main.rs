@@ -68,6 +68,7 @@ mod projection_apply {
     pub(crate) struct ProjectionStagingInputWatermark {
         pub(crate) normalized_change_id: i64,
         pub(crate) direct_invalidation_revision: i64,
+        pub(crate) permissions_resource_revision: i64,
     }
 
     pub(crate) async fn capture_projection_staging_input_watermark_in_transaction(
@@ -79,6 +80,12 @@ mod projection_apply {
         .fetch_one(&mut **transaction)
         .await
         .context("failed to capture complete normalized-event projection change watermark")?;
+        let permissions_resource_revision = sqlx::query_scalar::<_, i64>(
+            "SELECT public.capture_projection_permissions_resource_input_watermark()",
+        )
+        .fetch_one(&mut **transaction)
+        .await
+        .context("failed to capture complete permissions resource-input watermark")?;
         let direct_invalidation_revision = sqlx::query_scalar::<_, i64>(
             "SELECT public.capture_projection_direct_invalidation_watermark()",
         )
@@ -88,6 +95,7 @@ mod projection_apply {
         Ok(ProjectionStagingInputWatermark {
             normalized_change_id,
             direct_invalidation_revision,
+            permissions_resource_revision,
         })
     }
 
@@ -103,6 +111,7 @@ mod projection_apply {
         }
         if upper.normalized_change_id <= lower.normalized_change_id
             && upper.direct_invalidation_revision <= lower.direct_invalidation_revision
+            && upper.permissions_resource_revision <= lower.permissions_resource_revision
         {
             return Ok(false);
         }
@@ -121,6 +130,15 @@ mod projection_apply {
                   AND revision > $4
                   AND revision <= $5
             )
+            OR (
+                $3 = 'permissions_current'
+                AND EXISTS (
+                    SELECT 1
+                    FROM projection_permissions_resource_input_revisions
+                    WHERE revision > $6
+                      AND revision <= $7
+                )
+            )
             "#,
         )
         .bind(lower.normalized_change_id)
@@ -128,6 +146,8 @@ mod projection_apply {
         .bind(projection)
         .bind(lower.direct_invalidation_revision)
         .bind(upper.direct_invalidation_revision)
+        .bind(lower.permissions_resource_revision)
+        .bind(upper.permissions_resource_revision)
         .fetch_one(&mut **transaction)
         .await
         .context("failed to conservatively fence API fixture projection staging")
