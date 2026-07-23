@@ -296,8 +296,12 @@ primary-pool limit set by `BIGNAME_DATABASE_MAX_CONNECTIONS`.
 | `BIGNAME_API_TRUST_X_FORWARDED_FOR` | `false` | `true` |
 
 `BIGNAME_API_RPC_CONNECT_TIMEOUT_MS` must be less than
-`BIGNAME_API_RPC_TIMEOUT_MS`; this ordering ensures that a request still in the
-connect phase is classified as a retryable transport failure rather than a
+`BIGNAME_API_RPC_TIMEOUT_MS`; this ordering ensures that, per connection
+attempt, a request still in the connect phase is classified as a retryable
+transport failure rather than a persisted response timeout. The connect
+deadline restarts with each connection attempt while the total deadline does
+not, so a request that spends part of its total budget before re-entering the
+connect phase (for example a gateway redirect) can still surface as a
 persisted response timeout.
 
 The binary leaves IP rate limiting off because there is no authenticated stable
