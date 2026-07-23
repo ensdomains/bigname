@@ -5,9 +5,9 @@ const STAGE_TABLE_PREFIX: &str = "cprs_";
 
 #[derive(Clone, Debug)]
 pub(super) struct StageTableSpec {
-    target_table: &'static str,
-    unique_columns: &'static [&'static str],
-    has_inserted_at: bool,
+    pub(super) target_table: &'static str,
+    pub(super) unique_columns: &'static [&'static str],
+    pub(super) has_inserted_at: bool,
 }
 
 pub(super) async fn stage_tables_exist(
