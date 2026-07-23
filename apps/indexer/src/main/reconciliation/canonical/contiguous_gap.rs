@@ -87,10 +87,8 @@ pub(super) async fn reconcile_contiguous_checkpoint_gap(
             )
         })
         .collect::<Vec<_>>();
-    for lineage_chunk in lineage_blocks.chunks(LIVE_GAP_PROGRESS_BLOCKS) {
-        upsert_recanonicalized_lineage_blocks_without_snapshots(pool, lineage_chunk).await?;
-        record_progress(pool, progress).await?;
-    }
+    upsert_recanonicalized_lineage_blocks_without_snapshots(pool, &lineage_blocks).await?;
+    record_progress(pool, progress).await?;
 
     let status = if path.len() == 1 {
         CanonicalReconciliationStatus::Appended

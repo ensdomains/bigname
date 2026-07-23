@@ -2,11 +2,10 @@ use anyhow::{Context, Result};
 use bigname_adapters::StartupAdapterProgress;
 use bigname_storage::{
     ExecutionOutcomeInvalidationProgress, ExecutionOutcomeInvalidationProgressFuture,
-    IdentityOrphanCounts, RawFactOrphanCounts, invalidate_execution_outcomes_for_orphaned_blocks,
+    invalidate_execution_outcomes_for_orphaned_blocks,
     invalidate_execution_outcomes_for_orphaned_blocks_with_progress, load_chain_lineage_block,
-    load_raw_block, mark_block_derived_normalized_events_range_orphaned,
-    mark_chain_lineage_range_orphaned, mark_identity_rows_range_orphaned,
-    mark_raw_block_facts_range_orphaned,
+    mark_block_derived_normalized_events_range_orphaned, mark_chain_lineage_range_orphaned,
+    mark_identity_rows_range_orphaned, mark_raw_block_facts_range_orphaned,
 };
 use tracing::info;
 
@@ -121,42 +120,25 @@ async fn orphan_reorg_losing_branch_payloads_inner(
             progress,
         )
         .await?;
-        let losing_blocks = load_losing_raw_block_path(
+        let orphaned_raw_facts = mark_raw_block_facts_range_orphaned(
             pool,
             chain,
             current_canonical_hash,
             stop_before_hash,
-            progress,
         )
         .await?;
-
-        let mut orphaned_raw_facts = RawFactOrphanCounts::default();
-        for (block_hash, parent_hash) in &losing_blocks {
-            let counts = mark_raw_block_facts_range_orphaned(
-                pool,
-                chain,
-                block_hash,
-                parent_hash.as_deref(),
-            )
-            .await?;
-            add_raw_fact_counts(&mut orphaned_raw_facts, &counts);
-            record_live_progress(pool, progress).await?;
-        }
         if orphaned_raw_facts.code_hash_count > 0 {
             coverage_frontiers.invalidate_raw_code_baseline_frontier(chain);
         }
+        record_live_progress(pool, progress).await?;
 
-        let mut orphaned_normalized_event_count = 0u64;
-        for (block_hash, parent_hash) in &losing_blocks {
-            orphaned_normalized_event_count += mark_block_derived_normalized_events_range_orphaned(
-                pool,
-                chain,
-                block_hash,
-                parent_hash.as_deref(),
-            )
-            .await?;
-            record_live_progress(pool, progress).await?;
-        }
+        let orphaned_normalized_event_count = mark_block_derived_normalized_events_range_orphaned(
+            pool,
+            chain,
+            current_canonical_hash,
+            stop_before_hash,
+        )
+        .await?;
         if orphaned_normalized_event_count > 0 {
             info!(
                 service = "indexer",
@@ -165,15 +147,15 @@ async fn orphan_reorg_losing_branch_payloads_inner(
                 "block-derived normalized events orphaned for the losing branch"
             );
         }
+        record_live_progress(pool, progress).await?;
 
-        let mut orphaned_identity_counts = IdentityOrphanCounts::default();
-        for (block_hash, parent_hash) in &losing_blocks {
-            let counts =
-                mark_identity_rows_range_orphaned(pool, chain, block_hash, parent_hash.as_deref())
-                    .await?;
-            add_identity_counts(&mut orphaned_identity_counts, &counts);
-            record_live_progress(pool, progress).await?;
-        }
+        let orphaned_identity_counts = mark_identity_rows_range_orphaned(
+            pool,
+            chain,
+            current_canonical_hash,
+            stop_before_hash,
+        )
+        .await?;
         if orphaned_identity_counts.token_lineage_count > 0
             || orphaned_identity_counts.resource_count > 0
             || orphaned_identity_counts.name_surface_count > 0
@@ -189,6 +171,7 @@ async fn orphan_reorg_losing_branch_payloads_inner(
                 "identity rows orphaned for the losing branch"
             );
         }
+        record_live_progress(pool, progress).await?;
     }
 
     let execution_invalidation_summary = match progress.as_deref_mut() {
@@ -210,48 +193,4 @@ async fn orphan_reorg_losing_branch_payloads_inner(
     }
 
     Ok(())
-}
-
-async fn load_losing_raw_block_path(
-    pool: &sqlx::PgPool,
-    chain: &str,
-    from_hash: &str,
-    stop_before_hash: Option<&str>,
-    progress: &mut Option<&mut dyn StartupAdapterProgress>,
-) -> Result<Vec<(String, Option<String>)>> {
-    let mut blocks = Vec::new();
-    let mut cursor_hash = Some(from_hash.to_owned());
-    while let Some(block_hash) = cursor_hash {
-        if Some(block_hash.as_str()) == stop_before_hash {
-            break;
-        }
-        let raw_block = load_raw_block(pool, chain, &block_hash)
-            .await?
-            .with_context(|| {
-                format!(
-                    "missing stored raw block for chain {chain} block {block_hash} while orphaning losing-branch payloads"
-                )
-            })?;
-        cursor_hash = raw_block.parent_hash.clone();
-        blocks.push((raw_block.block_hash, raw_block.parent_hash));
-        record_live_progress(pool, progress).await?;
-    }
-    Ok(blocks)
-}
-
-fn add_raw_fact_counts(total: &mut RawFactOrphanCounts, next: &RawFactOrphanCounts) {
-    total.block_count += next.block_count;
-    total.code_hash_count += next.code_hash_count;
-    total.transaction_count += next.transaction_count;
-    total.receipt_count += next.receipt_count;
-    total.log_count += next.log_count;
-    total.call_snapshot_count += next.call_snapshot_count;
-    total.payload_cache_metadata_count += next.payload_cache_metadata_count;
-}
-
-fn add_identity_counts(total: &mut IdentityOrphanCounts, next: &IdentityOrphanCounts) {
-    total.token_lineage_count += next.token_lineage_count;
-    total.resource_count += next.resource_count;
-    total.name_surface_count += next.name_surface_count;
-    total.surface_binding_count += next.surface_binding_count;
 }

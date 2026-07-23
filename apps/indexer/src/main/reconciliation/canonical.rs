@@ -580,10 +580,8 @@ pub(super) async fn reconcile_canonical_head_with_progress(
             )
         })
         .collect::<Vec<_>>();
-    for block_chunk in lineage_blocks.chunks(32) {
-        upsert_recanonicalized_lineage_blocks_without_snapshots(pool, block_chunk).await?;
-        record_live_progress(pool, progress).await?;
-    }
+    upsert_recanonicalized_lineage_blocks_without_snapshots(pool, &lineage_blocks).await?;
+    record_live_progress(pool, progress).await?;
 
     Ok(CanonicalReconciliation {
         status,
