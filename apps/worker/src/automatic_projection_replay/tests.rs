@@ -732,6 +732,62 @@ async fn completed_handoff_cleans_a_leftover_staging_checkpoint() -> Result<()> 
 }
 
 #[tokio::test]
+async fn completed_handoff_cleanup_skips_manual_state_while_replay_lock_is_held() -> Result<()> {
+    let database = test_database().await?;
+    seed_apply_cursor(database.pool()).await?;
+    bootstrap_attempt::start_projection_replay_attempt(
+        database.pool(),
+        Some(20),
+        projection_apply::NormalizedEventChangeCursor { change_id: 7 },
+    )
+    .await?;
+    let checkpoint = replay::staging::ProjectionStagingCheckpoint::load_or_start(
+        database.pool(),
+        "name_current",
+        Some(20),
+    )
+    .await?;
+    let stage_table = checkpoint.stage_table(0)?.to_owned();
+    seed_replay_markers(database.pool(), 20).await?;
+    let mut replay_lock = try_acquire_replay_lock(database.pool())
+        .await?
+        .context("the test must acquire the manual replay lock")?;
+
+    assert!(
+        !projection_bootstrap_already_handed_off_to_apply(database.pool()).await?,
+        "startup must defer handoff cleanup while another process owns replay"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM current_projection_replay_attempt"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "startup must retain the admitted manual replay attempt"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM current_projection_staging_checkpoints"
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "startup must retain the manual replay checkpoint"
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>("SELECT to_regclass($1) IS NOT NULL")
+            .bind(stage_table)
+            .fetch_one(database.pool())
+            .await?,
+        "startup must retain the manual replay logged stage table"
+    );
+
+    release_replay_lock(&mut replay_lock).await?;
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn replay_handoff_rejects_an_input_revision_change_after_family_markers() -> Result<()> {
     let database = test_database().await?;
     let attempt = bootstrap_attempt::start_projection_replay_attempt(

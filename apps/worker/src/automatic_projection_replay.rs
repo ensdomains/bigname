@@ -7,12 +7,13 @@ use anyhow::{Context, Result};
 use bigname_storage::{
     DEFERRED_NORMALIZED_EVENT_INDEXES, DatabaseConfig, count_unready_normalized_event_indexes,
 };
-use sqlx::{PgPool, Postgres, pool::PoolConnection};
+use sqlx::PgPool;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
 use tracing::{debug, info, warn};
 
 use crate::primary_name::rebuild_heartbeat as heartbeat;
+use crate::replay::replay_lock::{release_replay_lock, try_acquire_replay_lock};
 use crate::{cli::RunArgs, primary_name, projection_apply, record_inventory, replay};
 
 #[path = "automatic_projection_replay/bootstrap_attempt.rs"]
@@ -41,7 +42,6 @@ pub(crate) use manual_replay::replay_all_current_projections_manually;
 
 const CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS: &str = "raw_fact_normalized_events";
 const ALL_CURRENT_PROJECTIONS_MIN_DATABASE_CONNECTIONS: u32 = 64;
-const ALL_CURRENT_PROJECTIONS_REPLAY_LOCK_KEY: i64 = 0x4249474e414d4501_i64;
 const ACTIVE_INDEX_BUILDS_QUERY: &str = r#"
     SELECT COUNT(*)::bigint
     FROM pg_stat_progress_create_index
@@ -414,14 +414,27 @@ async fn hydrate_record_inventory_text_values_after_bootstrap(
 }
 
 async fn projection_bootstrap_already_handed_off_to_apply(pool: &PgPool) -> Result<bool> {
-    let handed_off = projection_bootstrap_handoff_is_current(pool).await?;
-    if handed_off {
-        for projection in replay::ALL_CURRENT_PROJECTION_ORDER {
-            replay::staging::cleanup_projection_checkpoint(pool, projection).await?;
+    let Some(mut replay_lock) = try_acquire_replay_lock(pool).await? else {
+        info!(
+            service = "worker",
+            replay = "all_current_projections",
+            "automatic replay handoff inspection and residue cleanup skipped because another process owns the replay lock"
+        );
+        return Ok(false);
+    };
+    let cleanup_result = async {
+        let handed_off = projection_bootstrap_handoff_is_current(pool).await?;
+        if handed_off {
+            for projection in replay::ALL_CURRENT_PROJECTION_ORDER {
+                replay::staging::cleanup_projection_checkpoint(pool, projection).await?;
+            }
+            bootstrap_attempt::clear_projection_replay_attempt(pool).await?;
         }
-        bootstrap_attempt::clear_projection_replay_attempt(pool).await?;
+        Ok(handed_off)
     }
-    Ok(handed_off)
+    .await;
+    release_replay_lock(&mut replay_lock).await?;
+    cleanup_result
 }
 
 async fn projection_bootstrap_handoff_is_current(pool: &PgPool) -> Result<bool> {
@@ -558,36 +571,6 @@ async fn load_current_projection_replay_marker_count(
     .fetch_one(pool)
     .await
     .context("failed to inspect current projection replay markers")
-}
-
-async fn try_acquire_replay_lock(pool: &PgPool) -> Result<Option<PoolConnection<Postgres>>> {
-    let mut connection = pool
-        .acquire()
-        .await
-        .context("failed to acquire all-current replay lock connection")?;
-    let acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
-        .bind(ALL_CURRENT_PROJECTIONS_REPLAY_LOCK_KEY)
-        .fetch_one(&mut *connection)
-        .await
-        .context("failed to acquire all-current replay advisory lock")?;
-
-    Ok(acquired.then_some(connection))
-}
-
-async fn release_replay_lock(connection: &mut PoolConnection<Postgres>) -> Result<()> {
-    let released = sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock($1)")
-        .bind(ALL_CURRENT_PROJECTIONS_REPLAY_LOCK_KEY)
-        .fetch_one(&mut **connection)
-        .await
-        .context("failed to release all-current replay advisory lock")?;
-    if !released {
-        warn!(
-            service = "worker",
-            replay = "all_current_projections",
-            "all-current projection replay advisory lock was already released"
-        );
-    }
-    Ok(())
 }
 
 #[cfg(test)]

@@ -1,4 +1,6 @@
-use anyhow::{Context, Result};
+use std::future::Future;
+
+use anyhow::{Context, Result, bail};
 use tracing::info;
 
 mod execution_invalidation;
@@ -6,7 +8,7 @@ mod execution_invalidation;
 use crate::cli::*;
 use crate::{
     address_names, automatic_projection_replay, children, healthcheck, inspect, manifest_drift,
-    name_current, permissions, primary_name, raw_facts, record_inventory, resolver,
+    name_current, permissions, primary_name, raw_facts, record_inventory, replay, resolver,
 };
 use execution_invalidation::execution_command;
 
@@ -123,9 +125,12 @@ async fn resolver_current(args: ResolverCurrentArgs) -> Result<()> {
 
 async fn rebuild_name_current(args: NameCurrentRebuildArgs) -> Result<()> {
     let (pool, _rederive_guard) = connect_worker_writer(&args.database).await?;
-    clear_projection_replay_marker(&pool, "name_current").await?;
-    let summary =
-        name_current::rebuild_name_current(&pool, args.logical_name_id.as_deref()).await?;
+    let summary = run_standalone_projection_rebuild(
+        &pool,
+        "name_current",
+        name_current::rebuild_name_current(&pool, args.logical_name_id.as_deref()),
+    )
+    .await?;
 
     info!(
         service = "worker",
@@ -142,9 +147,12 @@ async fn rebuild_name_current(args: NameCurrentRebuildArgs) -> Result<()> {
 
 async fn rebuild_address_names_current(args: AddressNamesCurrentRebuildArgs) -> Result<()> {
     let (pool, _rederive_guard) = connect_worker_writer(&args.database).await?;
-    clear_projection_replay_marker(&pool, "address_names_current").await?;
-    let summary =
-        address_names::rebuild_address_names_current(&pool, args.address.as_deref()).await?;
+    let summary = run_standalone_projection_rebuild(
+        &pool,
+        "address_names_current",
+        address_names::rebuild_address_names_current(&pool, args.address.as_deref()),
+    )
+    .await?;
 
     info!(
         service = "worker",
@@ -161,9 +169,12 @@ async fn rebuild_address_names_current(args: AddressNamesCurrentRebuildArgs) -> 
 
 async fn rebuild_children_current(args: ChildrenCurrentRebuildArgs) -> Result<()> {
     let (pool, _rederive_guard) = connect_worker_writer(&args.database).await?;
-    clear_projection_replay_marker(&pool, "children_current").await?;
-    let summary =
-        children::rebuild_children_current(&pool, args.logical_name_id.as_deref()).await?;
+    let summary = run_standalone_projection_rebuild(
+        &pool,
+        "children_current",
+        children::rebuild_children_current(&pool, args.logical_name_id.as_deref()),
+    )
+    .await?;
 
     info!(
         service = "worker",
@@ -202,9 +213,12 @@ async fn import_ens_rainbow_label_preimages(
 
 async fn rebuild_permissions_current(args: PermissionsCurrentRebuildArgs) -> Result<()> {
     let (pool, _rederive_guard) = connect_worker_writer(&args.database).await?;
-    clear_projection_replay_marker(&pool, "permissions_current").await?;
-    let summary =
-        permissions::rebuild_permissions_current(&pool, args.resource_id.as_deref()).await?;
+    let summary = run_standalone_projection_rebuild(
+        &pool,
+        "permissions_current",
+        permissions::rebuild_permissions_current(&pool, args.resource_id.as_deref()),
+    )
+    .await?;
 
     info!(
         service = "worker",
@@ -221,12 +235,15 @@ async fn rebuild_permissions_current(args: PermissionsCurrentRebuildArgs) -> Res
 
 async fn rebuild_primary_names_current(args: PrimaryNamesCurrentRebuildArgs) -> Result<()> {
     let (pool, _rederive_guard) = connect_worker_writer(&args.database).await?;
-    clear_projection_replay_marker(&pool, "primary_names_current").await?;
-    let summary = primary_name::rebuild_primary_names_current(
+    let summary = run_standalone_projection_rebuild(
         &pool,
-        args.address.as_deref(),
-        args.namespace.as_deref(),
-        args.coin_type.as_deref(),
+        "primary_names_current",
+        primary_name::rebuild_primary_names_current(
+            &pool,
+            args.address.as_deref(),
+            args.namespace.as_deref(),
+            args.coin_type.as_deref(),
+        ),
     )
     .await?;
 
@@ -311,10 +328,12 @@ async fn replay_all_current_projections(args: AllCurrentProjectionsArgs) -> Resu
 
 async fn rebuild_record_inventory_current(args: RecordInventoryCurrentRebuildArgs) -> Result<()> {
     let (pool, _rederive_guard) = connect_worker_writer(&args.database).await?;
-    clear_projection_replay_marker(&pool, "record_inventory_current").await?;
-    let summary =
-        record_inventory::rebuild_record_inventory_current(&pool, args.resource_id.as_deref())
-            .await?;
+    let summary = run_standalone_projection_rebuild(
+        &pool,
+        "record_inventory_current",
+        record_inventory::rebuild_record_inventory_current(&pool, args.resource_id.as_deref()),
+    )
+    .await?;
 
     info!(
         service = "worker",
@@ -424,11 +443,14 @@ fn optional_primary_name_legacy_reverse_hydration_config(
 
 async fn rebuild_resolver_current(args: ResolverCurrentRebuildArgs) -> Result<()> {
     let (pool, _rederive_guard) = connect_worker_writer(&args.database).await?;
-    clear_projection_replay_marker(&pool, "resolver_current").await?;
-    let summary = resolver::rebuild_resolver_current(
+    let summary = run_standalone_projection_rebuild(
         &pool,
-        args.chain_id.as_deref(),
-        args.resolver_address.as_deref(),
+        "resolver_current",
+        resolver::rebuild_resolver_current(
+            &pool,
+            args.chain_id.as_deref(),
+            args.resolver_address.as_deref(),
+        ),
     )
     .await?;
 
@@ -446,6 +468,25 @@ async fn rebuild_resolver_current(args: ResolverCurrentRebuildArgs) -> Result<()
     Ok(())
 }
 
+async fn run_standalone_projection_rebuild<T>(
+    pool: &sqlx::PgPool,
+    projection: &'static str,
+    rebuild: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    let Some(mut replay_lock) = replay::replay_lock::try_acquire_replay_lock(pool).await? else {
+        bail!(
+            "standalone {projection} rebuild cannot start because another process owns the cross-process replay lock"
+        );
+    };
+    let rebuild_result = async {
+        clear_projection_replay_marker(pool, projection).await?;
+        rebuild.await
+    }
+    .await;
+    replay::replay_lock::release_replay_lock(&mut replay_lock).await?;
+    rebuild_result
+}
+
 async fn clear_projection_replay_marker(pool: &sqlx::PgPool, projection: &str) -> Result<()> {
     sqlx::query(
         r#"
@@ -461,75 +502,5 @@ async fn clear_projection_replay_marker(pool: &sqlx::PgPool, projection: &str) -
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    use anyhow::{Context, Result};
-    use bigname_storage::DatabaseConfig;
-    use sqlx::{ConnectOptions, postgres::PgConnectOptions};
-    use std::str::FromStr;
-    use uuid::Uuid;
-
-    fn database_config(database: &bigname_test_support::TestDatabase) -> Result<DatabaseConfig> {
-        let base_url = bigname_test_support::database_url_from_env();
-        let database_url = PgConnectOptions::from_str(&base_url)
-            .context("failed to parse test database URL")?
-            .database(database.database_name())
-            .to_url_lossy()
-            .to_string();
-        Ok(DatabaseConfig {
-            database_url: Some(database_url),
-            max_connections: 5,
-        })
-    }
-
-    #[tokio::test]
-    async fn one_shot_rebuild_clears_projection_replay_marker() -> Result<()> {
-        let database = bigname_test_support::TestDatabase::create_migrated(
-            bigname_test_support::TestDatabaseConfig::new(
-                "bigname_worker_command_marker_hygiene_test",
-            ),
-            &bigname_storage::MIGRATOR,
-            "failed to apply migrations for worker command marker hygiene test",
-        )
-        .await?;
-
-        sqlx::query(
-            r#"
-            INSERT INTO current_projection_replay_status (
-                projection,
-                replay_version,
-                completed_normalized_target_block,
-                requested_key_count,
-                upserted_row_count,
-                deleted_row_count
-            )
-            VALUES ('permissions_current', 4, 100, 1, 1, 0)
-            "#,
-        )
-        .execute(database.pool())
-        .await
-        .context("failed to seed permissions_current replay marker")?;
-
-        rebuild_permissions_current(PermissionsCurrentRebuildArgs {
-            database: database_config(&database)?,
-            resource_id: Some(Uuid::new_v4().to_string()),
-        })
-        .await?;
-
-        let marker_count = sqlx::query_scalar::<_, i64>(
-            r#"
-            SELECT COUNT(*)::BIGINT
-            FROM current_projection_replay_status
-            WHERE projection = 'permissions_current'
-            "#,
-        )
-        .fetch_one(database.pool())
-        .await
-        .context("failed to count permissions_current replay markers")?;
-        assert_eq!(marker_count, 0);
-
-        database.cleanup().await?;
-        Ok(())
-    }
-}
+#[path = "commands/tests.rs"]
+mod tests;
