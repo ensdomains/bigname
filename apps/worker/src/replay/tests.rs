@@ -403,6 +403,68 @@ async fn killed_name_staging_reuses_the_last_durable_page_when_inputs_are_unchan
 }
 
 #[tokio::test]
+async fn final_empty_page_fence_restarts_when_a_source_arrives_after_capture() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    seed_replay_inputs(database.pool()).await?;
+    let mut checkpoint = super::staging::ProjectionStagingCheckpoint::load_or_start(
+        database.pool(),
+        "name_current",
+        None,
+    )
+    .await?;
+    let page_fence = checkpoint.prepare_next_batch(database.pool()).await?;
+    let progress =
+        checkpoint.progress_after_batch(2, serde_json::json!("ens:bob.alice.eth"), 0, 0)?;
+    let mut transaction = database.pool().begin().await?;
+    checkpoint
+        .persist_progress(&mut transaction, &progress, &page_fence)
+        .await?;
+    transaction.commit().await?;
+    checkpoint.accept_progress(progress, page_fence);
+    let stale_stage_table = checkpoint.stage_table(0)?.to_owned();
+
+    let empty_page_fence = checkpoint.prepare_next_batch(database.pool()).await?;
+    let source_page_is_empty = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT NOT EXISTS (
+            SELECT 1
+            FROM name_surfaces
+            WHERE logical_name_id > 'ens:bob.alice.eth'
+              AND canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+        )
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert!(
+        source_page_is_empty,
+        "the fixture must capture an empty final source page"
+    );
+
+    append_name_source_after_completed_cursor(database.pool()).await?;
+    assert!(
+        !checkpoint
+            .mark_staging_complete(database.pool(), empty_page_fence)
+            .await?,
+        "a source appended after the pre-query capture must refuse completion"
+    );
+    assert!(!checkpoint.staging_complete());
+    assert_eq!(checkpoint.completed_source_count()?, 0);
+    assert_ne!(checkpoint.stage_table(0)?, stale_stage_table);
+    assert!(
+        !stage_table_exists(database.pool(), &stale_stage_table).await?,
+        "the final full-range fence must discard the stale stage before restaging"
+    );
+
+    super::staging::cleanup_projection_checkpoint(database.pool(), "name_current").await?;
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn manual_completed_stage_drift_restages_and_publishes_all_changed_sources() -> Result<()> {
     let database = TestDatabase::new().await?;
     seed_replay_inputs(database.pool()).await?;
@@ -480,6 +542,90 @@ async fn manual_completed_stage_drift_restages_and_publishes_all_changed_sources
         "manual replay must publish both the interior mutation and appended source"
     );
 
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn completed_manual_stage_restarts_for_manifest_sync_drift() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    seed_replay_inputs(database.pool()).await?;
+    install_name_publish_failure(database.pool()).await?;
+    rebuild_all_current_projections(database.pool(), None, None)
+        .await
+        .expect_err("the publish stop must retain a completed manual-replay stage");
+    let completed = load_name_staging_checkpoint(database.pool()).await?;
+    assert_eq!(completed.status, "staging_complete");
+
+    append_manifest_sync_change(database.pool()).await?;
+    let replacement = super::staging::ProjectionStagingCheckpoint::load_or_start(
+        database.pool(),
+        "name_current",
+        None,
+    )
+    .await?;
+    assert!(!replacement.staging_complete());
+    assert_ne!(replacement.stage_table(0)?, completed.stage_table);
+    assert!(
+        !stage_table_exists(database.pool(), &completed.stage_table).await?,
+        "manifest-derived affected keys must invalidate the completed manual stage"
+    );
+
+    remove_name_publish_failure(database.pool()).await?;
+    super::staging::cleanup_projection_checkpoint(database.pool(), "name_current").await?;
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn completed_manual_stage_restarts_for_a_consumed_direct_invalidation() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    seed_replay_inputs(database.pool()).await?;
+    install_name_publish_failure(database.pool()).await?;
+    rebuild_all_current_projections(database.pool(), None, None)
+        .await
+        .expect_err("the publish stop must retain a completed manual-replay stage");
+    let completed = load_name_staging_checkpoint(database.pool()).await?;
+    assert_eq!(completed.status, "staging_complete");
+
+    sqlx::query(
+        r#"
+        INSERT INTO projection_invalidations (
+            projection,
+            projection_key,
+            key_payload
+        )
+        VALUES (
+            'name_current',
+            'ens:alice.eth',
+            '{"logical_name_id":"ens:alice.eth"}'::JSONB
+        )
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        DELETE FROM projection_invalidations
+        WHERE projection = 'name_current'
+          AND projection_key = 'ens:alice.eth'
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    let replacement = super::staging::ProjectionStagingCheckpoint::load_or_start(
+        database.pool(),
+        "name_current",
+        None,
+    )
+    .await?;
+    assert!(!replacement.staging_complete());
+    assert_ne!(replacement.stage_table(0)?, completed.stage_table);
+    assert!(
+        !stage_table_exists(database.pool(), &completed.stage_table).await?,
+        "the durable generation ledger must reject reuse after the live queue row is consumed"
+    );
+
+    remove_name_publish_failure(database.pool()).await?;
+    super::staging::cleanup_projection_checkpoint(database.pool(), "name_current").await?;
     database.cleanup().await
 }
 

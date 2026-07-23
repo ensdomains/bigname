@@ -469,6 +469,34 @@ pub(super) async fn append_name_source_after_completed_cursor(pool: &PgPool) -> 
     Ok(())
 }
 
+pub(super) async fn append_manifest_sync_change(pool: &PgPool) -> Result<()> {
+    upsert_normalized_events(
+        pool,
+        &[NormalizedEvent {
+            event_identity: "worker-replay:manifest-stage-drift".to_owned(),
+            namespace: "ens".to_owned(),
+            logical_name_id: None,
+            resource_id: None,
+            event_kind: "SourceManifestUpdated".to_owned(),
+            source_family: "ens_v1_registry_l1".to_owned(),
+            manifest_version: 2,
+            source_manifest_id: None,
+            chain_id: Some("ethereum-mainnet".to_owned()),
+            block_number: None,
+            block_hash: None,
+            transaction_hash: None,
+            log_index: None,
+            raw_fact_ref: json!({}),
+            derivation_kind: "manifest_sync".to_owned(),
+            canonicality_state: CanonicalityState::Finalized,
+            before_state: json!({"manifest_version": 1}),
+            after_state: json!({"manifest_version": 2}),
+        }],
+    )
+    .await?;
+    Ok(())
+}
+
 pub(super) async fn insert_stale_projection_rows(pool: &PgPool) -> Result<()> {
     let stale_resource_id = Uuid::from_u128(0x9001);
     let stale_surface_binding_id = Uuid::from_u128(0x9002);
