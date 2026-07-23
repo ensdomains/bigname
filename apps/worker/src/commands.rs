@@ -473,7 +473,8 @@ async fn run_standalone_projection_rebuild<T>(
     projection: &'static str,
     rebuild: impl Future<Output = Result<T>>,
 ) -> Result<T> {
-    let Some(mut replay_lock) = replay::replay_lock::try_acquire_replay_lock(pool).await? else {
+    let Some(replay_lock) = replay::replay_lock::try_acquire_dedicated_replay_lock(pool).await?
+    else {
         bail!(
             "standalone {projection} rebuild cannot start because another process owns the cross-process replay lock"
         );
@@ -483,7 +484,7 @@ async fn run_standalone_projection_rebuild<T>(
         rebuild.await
     }
     .await;
-    replay::replay_lock::release_replay_lock(&mut replay_lock).await?;
+    replay::replay_lock::release_dedicated_replay_lock(replay_lock).await?;
     rebuild_result
 }
 

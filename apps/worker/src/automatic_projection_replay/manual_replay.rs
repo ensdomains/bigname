@@ -13,7 +13,8 @@ pub(crate) async fn replay_all_current_projections_manually(
     text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
     primary_hydration_config: Option<&primary_name::PrimaryNameLegacyReverseHydrationConfig>,
 ) -> Result<replay::AllCurrentProjectionsReplaySummary> {
-    let Some(mut replay_lock) = try_acquire_replay_lock(pool).await? else {
+    let Some(replay_lock) = replay::replay_lock::try_acquire_dedicated_replay_lock(pool).await?
+    else {
         bail!(
             "manual all-current projection replay cannot start because automatic replay owns the cross-process replay lock"
         );
@@ -45,7 +46,7 @@ pub(crate) async fn replay_all_current_projections_manually(
         .await
     }
     .await;
-    release_replay_lock(&mut replay_lock).await?;
+    replay::replay_lock::release_dedicated_replay_lock(replay_lock).await?;
     replay_result
 }
 

@@ -15,12 +15,12 @@ fn database_config(database: &bigname_test_support::TestDatabase) -> Result<Data
         .to_string();
     Ok(DatabaseConfig {
         database_url: Some(database_url),
-        max_connections: 5,
+        max_connections: 2,
     })
 }
 
 #[tokio::test]
-async fn one_shot_rebuild_clears_projection_replay_marker() -> Result<()> {
+async fn one_shot_rebuild_clears_projection_replay_marker_at_two_connections() -> Result<()> {
     let database = bigname_test_support::TestDatabase::create_migrated(
         bigname_test_support::TestDatabaseConfig::new("bigname_worker_command_marker_hygiene_test"),
         &bigname_storage::MIGRATOR,

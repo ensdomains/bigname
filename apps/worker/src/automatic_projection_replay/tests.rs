@@ -17,6 +17,25 @@ async fn test_database() -> Result<TestDatabase> {
     .await
 }
 
+async fn two_connection_test_database() -> Result<TestDatabase> {
+    TestDatabase::create_migrated(
+        TestDatabaseConfig::new("bigname_worker_auto_replay_two_connection_test")
+            .pool_max_connections(2)
+            .parse_context(
+                "failed to parse database URL for two-connection automatic projection replay test",
+            )
+            .admin_connect_context(
+                "failed to connect admin pool for two-connection automatic projection replay test",
+            )
+            .pool_connect_context(
+                "failed to connect two-connection automatic projection replay test pool",
+            ),
+        &bigname_storage::MIGRATOR,
+        "failed to apply migrations for two-connection automatic projection replay test",
+    )
+    .await
+}
+
 fn ready_status() -> ProjectionReplayReadiness {
     ProjectionReplayReadiness {
         normalized_replay_cursor_count: 1,
@@ -653,6 +672,31 @@ async fn manual_replay_without_attempt_or_head_proceeds_targetless() -> Result<(
         "target-less manual replay must not create an automatic handoff attempt"
     );
 
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn manual_replay_completes_with_two_pool_connections_and_writer_guard() -> Result<()> {
+    let database = two_connection_test_database().await?;
+    let writer_guard = bigname_storage::hold_base_normalized_rederive_runtime_shared_lock(
+        database.pool(),
+        "bigname-worker",
+    )
+    .await?;
+
+    let summary = tokio::time::timeout(
+        Duration::from_secs(10),
+        manual_replay::replay_all_current_projections_manually(database.pool(), None, None),
+    )
+    .await
+    .context("manual replay starved with the two-connection guarded-writer pool")??;
+    assert_eq!(
+        summary.steps.len(),
+        replay::ALL_CURRENT_PROJECTION_ORDER.len(),
+        "manual replay must complete every current projection family"
+    );
+
+    drop(writer_guard);
     database.cleanup().await
 }
 
