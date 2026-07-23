@@ -107,103 +107,107 @@ async fn rebuild_all_resources(
         normalized_target_block,
     )
     .await?;
-    if !checkpoint.staging_complete() {
-        loop {
-            let input_fence = checkpoint.prepare_next_batch(pool).await?;
-            let after_resource_id = checkpoint
-                .last_source_key()
-                .and_then(serde_json::Value::as_str)
-                .map(Uuid::parse_str)
-                .transpose()
-                .context("permissions_current staging source key must be a UUID")?;
-            let resource_ids = stream_target_resource_ids_after(
-                pool,
-                after_resource_id,
-                i64::try_from(PERMISSIONS_CURRENT_REBUILD_BATCH_SIZE)?,
-            );
-            pin_mut!(resource_ids);
-            let mut page = Vec::with_capacity(PERMISSIONS_CURRENT_REBUILD_BATCH_SIZE);
-            while page.len() < PERMISSIONS_CURRENT_REBUILD_BATCH_SIZE {
-                let Some(resource_id) = resource_ids.try_next().await? else {
-                    break;
-                };
-                page.push(resource_id);
-            }
-            if page.is_empty() {
-                if checkpoint.mark_staging_complete(pool, input_fence).await? {
-                    break;
-                }
-                continue;
-            }
-            let last_source_key = serde_json::Value::String(
-                page.last()
-                    .expect("permissions_current staging page must not be empty")
-                    .to_string(),
-            );
-            let projections = build_permissions_page(pool, &page, &mut loop_heartbeat).await?;
-            let mut rows = Vec::new();
-            let mut summaries = Vec::with_capacity(projections.len());
-            for projection in projections {
-                rows.extend(projection.rows);
-                if let Some(summary) = projection.summary {
-                    summaries.push(summary);
-                }
-            }
-            let mut transaction = pool.begin().await?;
-            let staged_rows =
-                stage_permissions_current_rows(&mut transaction, checkpoint.stage_table(0)?, &rows)
-                    .await?;
-            let staged_summaries = stage_permissions_current_resource_summaries(
-                &mut transaction,
-                checkpoint.stage_table(1)?,
-                &summaries,
-            )
-            .await?;
-            let progress = checkpoint.progress_after_batch(
-                page.len(),
-                last_source_key,
-                staged_rows,
-                staged_summaries,
-            )?;
-            checkpoint
-                .persist_progress(&mut transaction, &progress, &input_fence)
-                .await?;
-            transaction.commit().await?;
-            checkpoint.accept_progress(progress, input_fence);
-            let completed_resource_count = checkpoint.completed_source_count()?;
-            if completed_resource_count.is_multiple_of(5_000) {
-                tracing::info!(
-                    projection = "permissions_current",
-                    completed_resource_count,
-                    upserted_row_count = checkpoint.staged_row_count()?,
-                    "permissions_current rebuild resources processed"
+    loop {
+        if !checkpoint.staging_complete() {
+            loop {
+                let input_fence = checkpoint.prepare_next_batch(pool).await?;
+                let after_resource_id = checkpoint
+                    .last_source_key()
+                    .and_then(serde_json::Value::as_str)
+                    .map(Uuid::parse_str)
+                    .transpose()
+                    .context("permissions_current staging source key must be a UUID")?;
+                let resource_ids = stream_target_resource_ids_after(
+                    pool,
+                    after_resource_id,
+                    i64::try_from(PERMISSIONS_CURRENT_REBUILD_BATCH_SIZE)?,
                 );
+                pin_mut!(resource_ids);
+                let mut page = Vec::with_capacity(PERMISSIONS_CURRENT_REBUILD_BATCH_SIZE);
+                while page.len() < PERMISSIONS_CURRENT_REBUILD_BATCH_SIZE {
+                    let Some(resource_id) = resource_ids.try_next().await? else {
+                        break;
+                    };
+                    page.push(resource_id);
+                }
+                if page.is_empty() {
+                    if checkpoint.mark_staging_complete(pool, input_fence).await? {
+                        break;
+                    }
+                    continue;
+                }
+                let last_source_key = serde_json::Value::String(
+                    page.last()
+                        .expect("permissions_current staging page must not be empty")
+                        .to_string(),
+                );
+                let projections = build_permissions_page(pool, &page, &mut loop_heartbeat).await?;
+                let mut rows = Vec::new();
+                let mut summaries = Vec::with_capacity(projections.len());
+                for projection in projections {
+                    rows.extend(projection.rows);
+                    if let Some(summary) = projection.summary {
+                        summaries.push(summary);
+                    }
+                }
+                let mut transaction = pool.begin().await?;
+                let staged_rows = stage_permissions_current_rows(
+                    &mut transaction,
+                    checkpoint.stage_table(0)?,
+                    &rows,
+                )
+                .await?;
+                let staged_summaries = stage_permissions_current_resource_summaries(
+                    &mut transaction,
+                    checkpoint.stage_table(1)?,
+                    &summaries,
+                )
+                .await?;
+                let progress = checkpoint.progress_after_batch(
+                    page.len(),
+                    last_source_key,
+                    staged_rows,
+                    staged_summaries,
+                )?;
+                checkpoint
+                    .persist_progress(&mut transaction, &progress, &input_fence)
+                    .await?;
+                transaction.commit().await?;
+                checkpoint.accept_progress(progress, input_fence);
+                let completed_resource_count = checkpoint.completed_source_count()?;
+                if completed_resource_count.is_multiple_of(5_000) {
+                    tracing::info!(
+                        projection = "permissions_current",
+                        completed_resource_count,
+                        upserted_row_count = checkpoint.staged_row_count()?,
+                        "permissions_current rebuild resources processed"
+                    );
+                }
             }
         }
-    }
-    let requested_resource_count = checkpoint.completed_source_count()?;
-    let upserted_row_count = checkpoint.staged_row_count()?;
-    let staged_summary_count = checkpoint.staged_aux_row_count()?;
-    let (_deleted_row_count, published_row_count, published_summary_count) = run_rebuild_phase(
-        pool,
-        &mut loop_heartbeat,
-        "permissions_current.publish",
-        publish_permissions_current_stage_tables(
+        let requested_resource_count = checkpoint.completed_source_count()?;
+        let upserted_row_count = checkpoint.staged_row_count()?;
+        let staged_summary_count = checkpoint.staged_aux_row_count()?;
+        let published = run_rebuild_phase(
             pool,
-            checkpoint.stage_table(0)?,
-            checkpoint.stage_table(1)?,
-            checkpoint.full_replay_input_revision(),
-        ),
-    )
-    .await?;
-    debug_assert_eq!(published_row_count as usize, upserted_row_count);
-    debug_assert_eq!(published_summary_count as usize, staged_summary_count);
+            &mut loop_heartbeat,
+            "permissions_current.publish",
+            publish_permissions_current_stage_tables(pool, &mut checkpoint),
+        )
+        .await?;
+        let Some((_deleted_row_count, published_row_count, published_summary_count)) = published
+        else {
+            continue;
+        };
+        debug_assert_eq!(published_row_count as usize, upserted_row_count);
+        debug_assert_eq!(published_summary_count as usize, staged_summary_count);
 
-    Ok(PermissionsCurrentRebuildSummary {
-        requested_resource_count,
-        upserted_row_count,
-        deleted_row_count: previous_row_count,
-    })
+        return Ok(PermissionsCurrentRebuildSummary {
+            requested_resource_count,
+            upserted_row_count,
+            deleted_row_count: previous_row_count,
+        });
+    }
 }
 
 async fn build_permissions_page(

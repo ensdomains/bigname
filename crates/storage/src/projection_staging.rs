@@ -5,12 +5,52 @@ use sqlx::{Postgres, Transaction};
 
 pub use crate::address_names::{
     insert_address_names_current_full_rebuild_rows_in_transaction,
-    publish_address_names_current_full_rebuild_at_input_revision,
+    publish_address_names_current_full_rebuild_in_transaction,
 };
 pub use crate::children::stream_canonical_declared_child_sources_after;
 pub use crate::name_current::{
-    publish_name_current_replacement_table, stage_name_current_replacement_rows_in_transaction,
+    analyze_name_current_replacement_table, publish_name_current_replacement_table_in_transaction,
+    stage_name_current_replacement_rows_in_transaction,
 };
+
+pub const NAME_CURRENT_STAGING_COLUMNS: &[&str] = &[
+    "logical_name_id",
+    "namespace",
+    "canonical_display_name",
+    "normalized_name",
+    "namehash",
+    "surface_binding_id",
+    "resource_id",
+    "token_lineage_id",
+    "binding_kind",
+    "declared_summary",
+    "provenance",
+    "coverage",
+    "chain_positions",
+    "canonicality_summary",
+    "manifest_version",
+    "last_recomputed_at",
+];
+
+pub const ADDRESS_NAMES_CURRENT_STAGING_COLUMNS: &[&str] = &[
+    "address",
+    "logical_name_id",
+    "relation",
+    "namespace",
+    "canonical_display_name",
+    "normalized_name",
+    "namehash",
+    "surface_binding_id",
+    "resource_id",
+    "token_lineage_id",
+    "binding_kind",
+    "provenance",
+    "coverage",
+    "chain_positions",
+    "canonicality_summary",
+    "manifest_version",
+    "last_recomputed_at",
+];
 
 /// Lock and load the revision for direct source changes that require a full projection replay.
 pub async fn load_current_projection_full_replay_input_revision_in_transaction(

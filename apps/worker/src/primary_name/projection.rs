@@ -5,9 +5,7 @@ use bigname_storage::{
     VERIFIED_PRIMARY_NAME_REQUEST_TYPE, delete_primary_name_current_in_transaction,
     load_primary_name_current_snapshot_for_update_in_transaction,
     lock_primary_name_tuple_in_transaction, lock_primary_names_current_replacement_in_transaction,
-    normalize_evm_address,
-    projection_staging::ensure_current_projection_full_replay_input_revision_in_transaction,
-    publish_primary_names_current_full_rebuild_in_transaction,
+    normalize_evm_address, publish_primary_names_current_full_rebuild_in_transaction,
     upsert_primary_name_current_snapshots_in_transaction, verified_primary_name_claim_hooks,
 };
 use futures_util::{TryStreamExt, pin_mut};
@@ -102,131 +100,131 @@ async fn rebuild_all_primary_names(
         normalized_target_block,
     )
     .await?;
-    if !checkpoint.staging_complete() {
-        loop {
-            let input_fence = checkpoint.prepare_next_batch(pool).await?;
-            let cursor = primary_name_source_cursor(checkpoint.last_source_key())?;
-            let inputs = stream_primary_name_rebuild_inputs_after(
-                pool,
-                cursor
-                    .as_ref()
-                    .map(|parts| (parts[0].as_str(), parts[1].as_str(), parts[2].as_str())),
-                i64::try_from(PRIMARY_NAMES_CURRENT_REBUILD_BATCH_SIZE)?,
-            );
-            pin_mut!(inputs);
-            let mut page = Vec::with_capacity(PRIMARY_NAMES_CURRENT_REBUILD_BATCH_SIZE);
-            while page.len() < PRIMARY_NAMES_CURRENT_REBUILD_BATCH_SIZE {
-                let Some(input) = inputs.try_next().await? else {
-                    break;
-                };
-                page.push(input);
-            }
-            if page.is_empty() {
-                if checkpoint.mark_staging_complete(pool, input_fence).await? {
-                    break;
-                }
-                continue;
-            }
-            let last = page
-                .last()
-                .expect("primary_names_current staging page must not be empty");
-            let last_source_key = json!([
-                last.tuple.key.address,
-                last.tuple.key.namespace,
-                last.tuple.key.coin_type
-            ]);
-            let projections = page
-                .iter()
-                .map(|input| primary_name_row(&input.tuple, input.claim_observation.as_ref()))
-                .collect::<Result<Vec<_>>>()?;
-            record_rebuild_progress(pool, &mut loop_heartbeat).await;
-            let mut transaction = pool.begin().await?;
-            let staged = stage_primary_names_current_snapshots(
-                &mut transaction,
-                checkpoint.stage_table(0)?,
-                &projections,
-            )
-            .await?;
-            let progress =
-                checkpoint.progress_after_batch(page.len(), last_source_key, staged, 0)?;
-            checkpoint
-                .persist_progress(&mut transaction, &progress, &input_fence)
-                .await?;
-            transaction.commit().await?;
-            checkpoint.accept_progress(progress, input_fence);
-            let requested_tuple_count = checkpoint.completed_source_count()?;
-            if requested_tuple_count.is_multiple_of(5_000) {
-                tracing::info!(
-                    projection = "primary_names_current",
-                    completed_tuple_count = requested_tuple_count,
-                    upserted_row_count = checkpoint.staged_row_count()?,
-                    "primary_names_current rebuild tuples processed"
+    loop {
+        if !checkpoint.staging_complete() {
+            loop {
+                let input_fence = checkpoint.prepare_next_batch(pool).await?;
+                let cursor = primary_name_source_cursor(checkpoint.last_source_key())?;
+                let inputs = stream_primary_name_rebuild_inputs_after(
+                    pool,
+                    cursor
+                        .as_ref()
+                        .map(|parts| (parts[0].as_str(), parts[1].as_str(), parts[2].as_str())),
+                    i64::try_from(PRIMARY_NAMES_CURRENT_REBUILD_BATCH_SIZE)?,
                 );
+                pin_mut!(inputs);
+                let mut page = Vec::with_capacity(PRIMARY_NAMES_CURRENT_REBUILD_BATCH_SIZE);
+                while page.len() < PRIMARY_NAMES_CURRENT_REBUILD_BATCH_SIZE {
+                    let Some(input) = inputs.try_next().await? else {
+                        break;
+                    };
+                    page.push(input);
+                }
+                if page.is_empty() {
+                    if checkpoint.mark_staging_complete(pool, input_fence).await? {
+                        break;
+                    }
+                    continue;
+                }
+                let last = page
+                    .last()
+                    .expect("primary_names_current staging page must not be empty");
+                let last_source_key = json!([
+                    last.tuple.key.address,
+                    last.tuple.key.namespace,
+                    last.tuple.key.coin_type
+                ]);
+                let projections = page
+                    .iter()
+                    .map(|input| primary_name_row(&input.tuple, input.claim_observation.as_ref()))
+                    .collect::<Result<Vec<_>>>()?;
+                record_rebuild_progress(pool, &mut loop_heartbeat).await;
+                let mut transaction = pool.begin().await?;
+                let staged = stage_primary_names_current_snapshots(
+                    &mut transaction,
+                    checkpoint.stage_table(0)?,
+                    &projections,
+                )
+                .await?;
+                let progress =
+                    checkpoint.progress_after_batch(page.len(), last_source_key, staged, 0)?;
+                checkpoint
+                    .persist_progress(&mut transaction, &progress, &input_fence)
+                    .await?;
+                transaction.commit().await?;
+                checkpoint.accept_progress(progress, input_fence);
+                let requested_tuple_count = checkpoint.completed_source_count()?;
+                if requested_tuple_count.is_multiple_of(5_000) {
+                    tracing::info!(
+                        projection = "primary_names_current",
+                        completed_tuple_count = requested_tuple_count,
+                        upserted_row_count = checkpoint.staged_row_count()?,
+                        "primary_names_current rebuild tuples processed"
+                    );
+                }
             }
         }
-    }
-    let requested_tuple_count = checkpoint.completed_source_count()?;
-    let upserted_row_count = checkpoint.staged_row_count()?;
-    // Both long-operation phase markers are established before the replacement
-    // transaction starts and cleared after it commits. This preserves the
-    // invalidation and publication liveness evidence without writing a
-    // heartbeat while the replacement advisory lock is held.
-    let (_deleted_row_count, published_row_count) = run_rebuild_phases(
-        pool,
-        &mut loop_heartbeat,
-        &[
-            "primary_names_current.invalidate_execution_cache",
-            "primary_names_current.publish",
-        ],
-        async {
-            let mut transaction = pool.begin().await.context(
-                "failed to open primary_names_current full-rebuild publication transaction",
-            )?;
-            ensure_current_projection_full_replay_input_revision_in_transaction(
-                &mut transaction,
-                checkpoint.full_replay_input_revision(),
-            )
-            .await?;
-            // Full replacement takes the global advisory lock before
-            // invalidation. Tuple readers and writers first join the shared
-            // side of this fence, so no verified outcome can be persisted
-            // between invalidation and publication.
-            lock_primary_names_current_replacement_in_transaction(&mut transaction).await?;
-            invalidate_full_rebuild_verified_primary_name_claim_changes(
-                &mut transaction,
-                checkpoint.stage_table(0)?,
-            )
-            .await?;
-            #[cfg(test)]
-            test_hooks::run_full_rebuild_after_invalidation_hook(&test_database);
-            // Publish through the trigger-disabled path: the per-row
-            // identity-feed triggers take one advisory lock per address and
-            // exhaust the lock table at full-rebuild scale; the sidecars are
-            // rebuilt in bulk instead.
-            let published = publish_primary_names_current_full_rebuild_in_transaction(
-                &mut transaction,
-                checkpoint.stage_table(0)?,
-            )
-            .await?;
-            transaction
-                .commit()
-                .await
-                .context("failed to commit primary_names_current full-rebuild publication")?;
-            Ok(published)
-        },
-    )
-    .await?;
-    debug_assert_eq!(published_row_count as usize, upserted_row_count);
+        let requested_tuple_count = checkpoint.completed_source_count()?;
+        let upserted_row_count = checkpoint.staged_row_count()?;
+        // Both phase markers are established before the replacement transaction
+        // and cleared after it commits, without heartbeat writes while its locks are held.
+        let published = run_rebuild_phases(
+            pool,
+            &mut loop_heartbeat,
+            &[
+                "primary_names_current.invalidate_execution_cache",
+                "primary_names_current.publish",
+            ],
+            async {
+                let Some(mut transaction) =
+                    checkpoint.begin_fenced_publish_transaction(pool).await?
+                else {
+                    return Ok(None);
+                };
+                // Full replacement takes the global advisory lock before
+                // invalidation. Tuple readers and writers first join the shared
+                // side of this fence, so no verified outcome can be persisted
+                // between invalidation and publication.
+                lock_primary_names_current_replacement_in_transaction(&mut transaction).await?;
+                invalidate_full_rebuild_verified_primary_name_claim_changes(
+                    &mut transaction,
+                    checkpoint.stage_table(0)?,
+                )
+                .await?;
+                #[cfg(test)]
+                test_hooks::run_full_rebuild_after_invalidation_hook(&test_database);
+                // Publish through the trigger-disabled path: the per-row
+                // identity-feed triggers take one advisory lock per address and
+                // exhaust the lock table at full-rebuild scale; the sidecars are
+                // rebuilt in bulk instead.
+                let published = publish_primary_names_current_full_rebuild_in_transaction(
+                    &mut transaction,
+                    checkpoint.stage_table(0)?,
+                )
+                .await?;
+                transaction
+                    .commit()
+                    .await
+                    .context("failed to commit primary_names_current full-rebuild publication")?;
+                Ok(Some(published))
+            },
+        )
+        .await?;
+        let Some((_deleted_row_count, published_row_count)) = published else {
+            continue;
+        };
+        debug_assert_eq!(published_row_count as usize, upserted_row_count);
 
-    let status_counts = count_staged_statuses(pool, checkpoint.stage_table(0)?).await?;
-    Ok(PrimaryNamesCurrentRebuildSummary {
-        requested_tuple_count,
-        upserted_row_count,
-        deleted_row_count: previous_row_count,
-        success_row_count: status_counts.success_row_count,
-        not_found_row_count: status_counts.not_found_row_count,
-        invalid_name_row_count: status_counts.invalid_name_row_count,
-    })
+        let status_counts = count_staged_statuses(pool, checkpoint.stage_table(0)?).await?;
+        return Ok(PrimaryNamesCurrentRebuildSummary {
+            requested_tuple_count,
+            upserted_row_count,
+            deleted_row_count: previous_row_count,
+            success_row_count: status_counts.success_row_count,
+            not_found_row_count: status_counts.not_found_row_count,
+            invalid_name_row_count: status_counts.invalid_name_row_count,
+        });
+    }
 }
 
 fn primary_name_source_cursor(value: Option<&Value>) -> Result<Option<[String; 3]>> {

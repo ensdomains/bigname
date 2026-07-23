@@ -11,29 +11,31 @@ use support::*;
 
 #[test]
 fn current_projection_staging_contract_matches_schema_version_fingerprint() -> Result<()> {
-    let expected = r#"schema_version=3
-completion_fence=post_empty_page_full_range|channels=normalized_event,manifest_current,direct_invalidation_generation
-projection=name_current|cursor=logical_name_id:string
+    let expected = r#"schema_version=4
+completion_fence=post_empty_page_full_range|publish_fence=pre_replace_full_range
+projection=name_current|cursor=logical_name_id:string|channels=normalized_event,manifest_current,direct_invalidation_generation
 stage=name_current|unique=logical_name_id|has_inserted_at=true
-projection=children_current|cursor=(parent_logical_name_id,canonical_display_name,child_logical_name_id):string_tuple
+projection=children_current|cursor=(parent_logical_name_id,canonical_display_name,child_logical_name_id):string_tuple|channels=normalized_event,direct_invalidation_generation
 stage=children_current|unique=parent_logical_name_id,child_logical_name_id,surface_class|has_inserted_at=true
-projection=permissions_current|cursor=resource_id:uuid
+projection=permissions_current|cursor=resource_id:uuid|channels=normalized_event,direct_invalidation_generation
 stage=permissions_current|unique=resource_id,subject,scope|has_inserted_at=true
 stage=permissions_current_resource_summary|unique=resource_id|has_inserted_at=false
-projection=record_inventory_current|cursor=resource_id:uuid
+projection=record_inventory_current|cursor=resource_id:uuid|channels=normalized_event,manifest_current,direct_invalidation_generation
 stage=record_inventory_current|unique=resource_id,record_version_boundary_key|has_inserted_at=true
-projection=resolver_current|cursor=(chain_id,resolver_address):string_tuple
+projection=resolver_current|cursor=(chain_id,resolver_address):string_tuple|channels=normalized_event,manifest_current,direct_invalidation_generation
 stage=resolver_current|unique=chain_id,resolver_address|has_inserted_at=true
-projection=address_names_current|cursor=(logical_name_id,surface_binding_id):string_uuid_tuple
+projection=address_names_current|cursor=(logical_name_id,surface_binding_id):string_uuid_tuple|channels=normalized_event,direct_invalidation_generation
 stage=address_names_current|unique=address,logical_name_id,relation|has_inserted_at=true
-projection=primary_names_current|cursor=(address,namespace,coin_type):string_tuple
+projection=primary_names_current|cursor=(address,namespace,coin_type):string_tuple|channels=normalized_event,direct_invalidation_generation
 stage=primary_names_current|unique=address,coin_type,namespace|has_inserted_at=false
+columns=name_current|logical_name_id,namespace,canonical_display_name,normalized_name,namehash,surface_binding_id,resource_id,token_lineage_id,binding_kind,declared_summary,provenance,coverage,chain_positions,canonicality_summary,manifest_version,last_recomputed_at
 columns=children_current|parent_logical_name_id,child_logical_name_id,surface_class,namespace,canonical_display_name,normalized_name,namehash,labelhash,owner,registrant,provenance,chain_positions,canonicality_summary,manifest_version,last_recomputed_at
 columns=permissions_current|resource_id,subject,scope,scope_kind,scope_detail,effective_powers,grant_source,revocation_source,inheritance_path,transfer_behavior,provenance,coverage,chain_positions,canonicality_summary,manifest_version,last_recomputed_at
 columns=permissions_current_resource_summary|resource_id,authority_kind,root_resource_id,coverage,provenance,chain_positions,canonicality_summary,manifest_version,last_recomputed_at
 columns=primary_names_current|address,coin_type,namespace,claim_status,raw_claim_name,normalized_claim_name,claim_name_is_normalized,claim_provenance
 columns=record_inventory_current|resource_id,record_version_boundary_key,record_version_boundary,enumeration_basis,selectors,explicit_gaps,unsupported_families,last_change,entries,provenance,coverage,chain_positions,canonicality_summary,manifest_version,last_recomputed_at
 columns=resolver_current|chain_id,resolver_address,declared_summary,provenance,coverage,chain_positions,canonicality_summary,manifest_version,last_recomputed_at
+columns=address_names_current|address,logical_name_id,relation,namespace,canonical_display_name,normalized_name,namehash,surface_binding_id,resource_id,token_lineage_id,binding_kind,provenance,coverage,chain_positions,canonicality_summary,manifest_version,last_recomputed_at
 "#;
 
     assert_eq!(
@@ -458,6 +460,93 @@ async fn final_empty_page_fence_restarts_when_a_source_arrives_after_capture() -
     assert!(
         !stage_table_exists(database.pool(), &stale_stage_table).await?,
         "the final full-range fence must discard the stale stage before restaging"
+    );
+
+    super::staging::cleanup_projection_checkpoint(database.pool(), "name_current").await?;
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn publication_fence_restages_for_a_consumed_post_completion_invalidation() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    seed_replay_inputs(database.pool()).await?;
+    install_name_publish_failure(database.pool()).await?;
+    rebuild_all_current_projections(database.pool(), None, None)
+        .await
+        .expect_err("the publish stop must retain a completed manual-replay stage");
+    remove_name_publish_failure(database.pool()).await?;
+
+    let completed = load_name_staging_checkpoint(database.pool()).await?;
+    let mut checkpoint = super::staging::ProjectionStagingCheckpoint::load_or_start(
+        database.pool(),
+        "name_current",
+        None,
+    )
+    .await?;
+    assert_eq!(checkpoint.stage_table(0)?, completed.stage_table);
+    enqueue_and_consume_name_invalidation(database.pool()).await?;
+
+    assert!(
+        checkpoint
+            .begin_fenced_publish_transaction(database.pool())
+            .await?
+            .is_none(),
+        "publication must refuse a stage invalidated after completion"
+    );
+    assert!(!checkpoint.staging_complete());
+    assert_ne!(checkpoint.stage_table(0)?, completed.stage_table);
+    assert!(
+        !stage_table_exists(database.pool(), &completed.stage_table).await?,
+        "publication drift must discard the stale stage before touching the live projection"
+    );
+
+    super::staging::cleanup_projection_checkpoint(database.pool(), "name_current").await?;
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn publication_fence_without_drift_publishes_the_completed_stage_once() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    seed_replay_inputs(database.pool()).await?;
+    install_name_publish_failure(database.pool()).await?;
+    rebuild_all_current_projections(database.pool(), None, None)
+        .await
+        .expect_err("the publish stop must retain a completed manual-replay stage");
+    remove_name_publish_failure(database.pool()).await?;
+
+    let completed = load_name_staging_checkpoint(database.pool()).await?;
+    let mut checkpoint = super::staging::ProjectionStagingCheckpoint::load_or_start(
+        database.pool(),
+        "name_current",
+        None,
+    )
+    .await?;
+    let stage_table = checkpoint.stage_table(0)?.to_owned();
+    bigname_storage::projection_staging::analyze_name_current_replacement_table(
+        database.pool(),
+        &stage_table,
+    )
+    .await?;
+    let mut transaction = checkpoint
+        .begin_fenced_publish_transaction(database.pool())
+        .await?
+        .context("an unchanged completed stage must enter publication")?;
+    let (published_row_count, _) =
+        bigname_storage::projection_staging::publish_name_current_replacement_table_in_transaction(
+            &mut transaction,
+            &stage_table,
+        )
+        .await?;
+    transaction.commit().await?;
+
+    assert_eq!(published_row_count, checkpoint.staged_row_count()?);
+    assert_eq!(checkpoint.stage_table(0)?, completed.stage_table);
+    assert_eq!(
+        load_name_staging_checkpoint(database.pool())
+            .await?
+            .stage_table,
+        completed.stage_table,
+        "the no-drift publication fence must not create a replacement stage"
     );
 
     super::staging::cleanup_projection_checkpoint(database.pool(), "name_current").await?;
@@ -1388,6 +1477,35 @@ async fn remove_name_publish_failure(pool: &PgPool) -> Result<()> {
     sqlx::query("DROP FUNCTION fail_name_current_publish()")
         .execute(pool)
         .await?;
+    Ok(())
+}
+
+async fn enqueue_and_consume_name_invalidation(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO projection_invalidations (
+            projection,
+            projection_key,
+            key_payload
+        )
+        VALUES (
+            'name_current',
+            'ens:alice.eth',
+            '{"logical_name_id":"ens:alice.eth"}'::JSONB
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        DELETE FROM projection_invalidations
+        WHERE projection = 'name_current'
+          AND projection_key = 'ens:alice.eth'
+        "#,
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 

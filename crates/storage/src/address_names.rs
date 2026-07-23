@@ -23,7 +23,7 @@ pub use full_rebuild::{
     drop_address_names_current_full_rebuild, insert_address_names_current_full_rebuild_rows,
     insert_address_names_current_full_rebuild_rows_in_transaction,
     publish_address_names_current_full_rebuild,
-    publish_address_names_current_full_rebuild_at_input_revision,
+    publish_address_names_current_full_rebuild_in_transaction,
     rebuild_address_names_current_identity_sidecars,
 };
 pub use page::{

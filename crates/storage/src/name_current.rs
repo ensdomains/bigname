@@ -20,9 +20,10 @@ pub use row::NameCurrentRow;
 use row::decode_name_current_row;
 pub use snapshot::load_name_current_for_snapshot;
 pub use write::{
-    NameCurrentReplacement, clear_name_current, delete_name_current,
-    publish_name_current_replacement_table, replace_name_current_rows,
-    stage_name_current_replacement_rows_in_transaction, upsert_name_current_rows,
+    NameCurrentReplacement, analyze_name_current_replacement_table, clear_name_current,
+    delete_name_current, publish_name_current_replacement_table_in_transaction,
+    replace_name_current_rows, stage_name_current_replacement_rows_in_transaction,
+    upsert_name_current_rows,
 };
 
 pub(crate) const DEFAULT_NAME_CURRENT_READ_FILTER: &str = r#"

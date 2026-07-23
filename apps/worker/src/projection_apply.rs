@@ -23,6 +23,8 @@ pub(crate) use derive::{
     completed_projection_sources_changed, normalized_event_cursor_exists,
     seed_normalized_event_cursor_if_absent_in_transaction,
 };
+#[cfg(test)]
+pub(crate) use derive_queries::projection_staging_input_channel_tags;
 
 const NORMALIZED_EVENT_CURSOR: &str = "normalized_events_to_projection_invalidations";
 const NORMALIZED_EVENT_DERIVE_BATCH_LIMIT: i64 = 5_000;

@@ -7,6 +7,8 @@ mod cursor;
 pub(crate) mod fingerprint;
 #[path = "staging/input_fence.rs"]
 mod input_fence;
+#[path = "staging/publish_fence.rs"]
+mod publish_fence;
 #[path = "staging/tables.rs"]
 mod tables;
 
@@ -30,7 +32,7 @@ use tracing::info;
 /// Bump this for any incompatible source ordering, staged-row construction, stage-table shape,
 /// publication, or completed-range classification change. The full bump contract lives in
 /// `docs/projections.md` under "Replay status tracking".
-const CURRENT_PROJECTION_STAGING_SCHEMA_VERSION: i32 = 3;
+const CURRENT_PROJECTION_STAGING_SCHEMA_VERSION: i32 = 4;
 
 struct StoredCheckpoint {
     replay_version: i32,
@@ -312,10 +314,6 @@ impl ProjectionStagingCheckpoint {
 
     pub(crate) fn staging_complete(&self) -> bool {
         self.staging_complete
-    }
-
-    pub(crate) fn full_replay_input_revision(&self) -> i64 {
-        self.full_replay_input_revision
     }
 
     pub(crate) fn progress_after_batch(
