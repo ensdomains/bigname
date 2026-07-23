@@ -30,9 +30,10 @@ pub(crate) use adapter_sync::{
 };
 #[cfg(test)]
 pub(crate) use adapter_sync::{
-    install_after_stateless_failure, install_backlog_after_adapter_sync_test_hook,
-    install_ownership_release_test_hook, install_post_discovery_mutation_failure_for_test,
-    install_stateless_page_observer,
+    PersistedRawPayloadAdapterSyncModeForTest, install_after_stateless_failure,
+    install_backlog_after_adapter_sync_test_hook, install_ownership_release_test_hook,
+    install_post_discovery_mutation_failure_for_test, install_stateless_page_observer,
+    sync_ens_v2_registry_for_mode_for_test,
     sync_full_closure_normalized_events_from_persisted_raw_payloads,
     sync_live_adapter_backlog_after_normalized_replay,
     sync_manual_full_closure_normalized_events_from_persisted_raw_payloads,

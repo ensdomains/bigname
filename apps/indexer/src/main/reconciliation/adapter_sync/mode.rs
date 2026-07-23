@@ -5,7 +5,7 @@ use super::super::replay::{
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum PersistedRawPayloadAdapterSyncMode {
+pub(crate) enum PersistedRawPayloadAdapterSyncMode {
     LivePoll,
     LiveOrBackfill,
     RawFactReplay {

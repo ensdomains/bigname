@@ -74,6 +74,145 @@ async fn scoped_ens_v2_registry_sync_emits_registry_permission_events() -> Resul
 }
 
 #[tokio::test]
+async fn ens_v2_block_hash_dispatch_preserves_progress_for_large_live_chunks() -> Result<()> {
+    #[derive(Default)]
+    struct CountingProgress(usize);
+
+    impl bigname_adapters::StartupAdapterProgress for CountingProgress {
+        fn record<'a>(
+            &'a mut self,
+            _pool: &'a PgPool,
+        ) -> bigname_adapters::StartupAdapterProgressFuture<'a> {
+            self.0 += 1;
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    let database = TestDatabase::new().await?;
+    let chain = "ens-v2-block-hash-progress-chain";
+    let registry_contract_instance_id = Uuid::from_u128(0x346);
+    let registry_address = "0x0000000000000000000000000000000000000346";
+    let out_of_scope_block = provider_block(
+        "0xc5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5",
+        None,
+        63,
+    );
+    let block = provider_block(
+        "0xd6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6",
+        Some(&out_of_scope_block.block_hash),
+        64,
+    );
+
+    insert_active_replay_manifest_contract(
+        database.pool(),
+        1,
+        "ens",
+        "ens_v2_registry_l1",
+        chain,
+        "ens_v2",
+        registry_contract_instance_id,
+        registry_address,
+        "registry",
+    )
+    .await?;
+    sqlx::query("UPDATE manifest_versions SET manifest_payload = $2 WHERE manifest_id = $1")
+        .bind(1_i64)
+        .bind(test_manifest_payload())
+        .execute(database.pool())
+        .await?;
+    upsert_raw_blocks(
+        database.pool(),
+        &[
+            provider_block_to_raw_block(
+                chain,
+                &out_of_scope_block,
+                CanonicalityState::Canonical,
+            ),
+            provider_block_to_raw_block(chain, &block, CanonicalityState::Canonical),
+        ],
+    )
+    .await?;
+    let out_of_scope_logs = (0..2001)
+        .map(|log_index| RawLog {
+            chain_id: chain.to_owned(),
+            block_hash: out_of_scope_block.block_hash.clone(),
+            block_number: out_of_scope_block.block_number,
+            transaction_hash: transaction_hash_for_block(&out_of_scope_block),
+            transaction_index: 0,
+            log_index,
+            emitting_address: registry_address.to_owned(),
+            topics: vec![format!("0x{:064x}", 0xdead_u64)],
+            data: Vec::new(),
+            canonicality_state: CanonicalityState::Canonical,
+        })
+        .collect::<Vec<_>>();
+    upsert_raw_logs(database.pool(), &out_of_scope_logs).await?;
+    let logs = (0..1001)
+        .map(|log_index| RawLog {
+            chain_id: chain.to_owned(),
+            block_hash: block.block_hash.clone(),
+            block_number: block.block_number,
+            transaction_hash: transaction_hash_for_block(&block),
+            transaction_index: 0,
+            log_index,
+            emitting_address: registry_address.to_owned(),
+            topics: vec![format!("0x{:064x}", 0xdead_u64)],
+            data: Vec::new(),
+            canonicality_state: CanonicalityState::Canonical,
+        })
+        .collect::<Vec<_>>();
+    upsert_raw_logs(database.pool(), &logs).await?;
+
+    let mut progress = CountingProgress::default();
+    let mut progress_ref =
+        Some(&mut progress as &mut dyn bigname_adapters::StartupAdapterProgress);
+    let summary = sync_ens_v2_registry_for_mode_for_test(
+        database.pool(),
+        None,
+        chain,
+        std::slice::from_ref(&block.block_hash),
+        None,
+        PersistedRawPayloadAdapterSyncModeForTest::LiveOrBackfill,
+        false,
+        &mut progress_ref,
+    )
+    .await?;
+
+    assert_eq!(summary.scanned_log_count, 1001);
+    assert_eq!(
+        progress.0, 15,
+        "the dispatcher must preserve every emitter, raw-log, processing, and publication beat"
+    );
+
+    let source_scope = [(
+        "ens_v2_registry_l1".to_owned(),
+        registry_address.to_owned(),
+        0,
+        block.block_number,
+    )];
+    let mut scoped_progress = CountingProgress::default();
+    let mut scoped_progress_ref =
+        Some(&mut scoped_progress as &mut dyn bigname_adapters::StartupAdapterProgress);
+    let scoped_summary = sync_ens_v2_registry_for_mode_for_test(
+        database.pool(),
+        None,
+        chain,
+        std::slice::from_ref(&block.block_hash),
+        Some(&source_scope),
+        PersistedRawPayloadAdapterSyncModeForTest::LiveOrBackfill,
+        false,
+        &mut scoped_progress_ref,
+    )
+    .await?;
+    assert_eq!(scoped_summary.scanned_log_count, 1001);
+    assert_eq!(
+        scoped_progress.0, 15,
+        "the scoped LiveOrBackfill block-hash arm must preserve the same completed-work beats"
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn sync_adapter_owned_raw_log_state_backfills_reverse_claims_from_stored_raw_logs()
 -> Result<()> {
     let database = TestDatabase::new().await?;

@@ -5,7 +5,7 @@ use super::{
 };
 
 #[expect(clippy::too_many_arguments)]
-pub(super) async fn sync_ens_v2_registry_for_mode(
+pub(crate) async fn sync_ens_v2_registry_for_mode(
     pool: &sqlx::PgPool,
     live_deployment_profile: Option<&str>,
     chain: &str,
@@ -69,38 +69,92 @@ pub(super) async fn sync_ens_v2_registry_for_mode(
             }
         }
         (PersistedRawPayloadAdapterSyncMode::RawFactReplay { .. }, Some(source_scope)) => {
-            bigname_adapters::EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_source_scope_canonical_only(
-                pool,
-                chain,
-                block_hashes,
-                source_scope,
-            )
-            .await
+            match progress.as_deref_mut() {
+                Some(progress) => {
+                    bigname_adapters::EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_source_scope_canonical_only_and_progress(
+                        pool,
+                        chain,
+                        block_hashes,
+                        source_scope,
+                        progress,
+                    )
+                    .await
+                }
+                None => {
+                    bigname_adapters::EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_source_scope_canonical_only(
+                        pool,
+                        chain,
+                        block_hashes,
+                        source_scope,
+                    )
+                    .await
+                }
+            }
         }
         (PersistedRawPayloadAdapterSyncMode::RawFactReplay { .. }, None) => {
-            bigname_adapters::EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_canonical_only(
-                pool,
-                chain,
-                block_hashes,
-            )
-            .await
+            match progress.as_deref_mut() {
+                Some(progress) => {
+                    bigname_adapters::EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_canonical_only_with_progress(
+                        pool,
+                        chain,
+                        block_hashes,
+                        progress,
+                    )
+                    .await
+                }
+                None => {
+                    bigname_adapters::EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_canonical_only(
+                        pool,
+                        chain,
+                        block_hashes,
+                    )
+                    .await
+                }
+            }
         }
         (_, Some(source_scope)) => {
-            bigname_adapters::EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_source_scope(
-                pool,
-                chain,
-                block_hashes,
-                source_scope,
-            )
-            .await
+            match progress.as_deref_mut() {
+                Some(progress) => {
+                    bigname_adapters::EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_source_scope_and_progress(
+                        pool,
+                        chain,
+                        block_hashes,
+                        source_scope,
+                        progress,
+                    )
+                    .await
+                }
+                None => {
+                    bigname_adapters::EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_source_scope(
+                        pool,
+                        chain,
+                        block_hashes,
+                        source_scope,
+                    )
+                    .await
+                }
+            }
         }
         (_, None) => {
-            bigname_adapters::EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes(
-                pool,
-                chain,
-                block_hashes,
-            )
-            .await
+            match progress.as_deref_mut() {
+                Some(progress) => {
+                    bigname_adapters::EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_progress(
+                        pool,
+                        chain,
+                        block_hashes,
+                        progress,
+                    )
+                    .await
+                }
+                None => {
+                    bigname_adapters::EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes(
+                        pool,
+                        chain,
+                        block_hashes,
+                    )
+                    .await
+                }
+            }
         }
     }
 }
