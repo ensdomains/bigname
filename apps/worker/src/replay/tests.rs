@@ -11,7 +11,7 @@ use support::*;
 
 #[test]
 fn current_projection_staging_contract_matches_schema_version_fingerprint() -> Result<()> {
-    let expected = r#"schema_version=1
+    let expected = r#"schema_version=2
 projection=name_current|cursor=logical_name_id:string
 stage=name_current|unique=logical_name_id|has_inserted_at=true
 projection=children_current|cursor=(parent_logical_name_id,canonical_display_name,child_logical_name_id):string_tuple
@@ -395,6 +395,143 @@ async fn killed_name_staging_reuses_the_last_durable_page_when_inputs_are_unchan
     assert_eq!(resumed.stage_table, interrupted.stage_table);
     assert_eq!(resumed.completed_source_count, 2);
     assert_eq!(resumed.status, "staging_complete");
+
+    remove_name_publish_failure(database.pool()).await?;
+    super::staging::cleanup_projection_checkpoint(database.pool(), "name_current").await?;
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn manual_completed_stage_drift_restages_and_publishes_all_changed_sources() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    seed_replay_inputs(database.pool()).await?;
+    install_name_publish_failure(database.pool()).await?;
+
+    let error = rebuild_all_current_projections(database.pool(), None, None)
+        .await
+        .expect_err("the publish stop must retain the completed manual-replay stage");
+    assert!(format!("{error:#}").contains("injected name_current publish stop"));
+    let stale = load_name_staging_checkpoint(database.pool()).await?;
+    assert_eq!(stale.status, "staging_complete");
+    assert_eq!(stale.completed_source_count, 2);
+    assert_eq!(
+        stale.last_source_key,
+        Some(serde_json::json!("ens:bob.alice.eth"))
+    );
+
+    change_already_staged_name_source(database.pool()).await?;
+    append_name_source_after_completed_cursor(database.pool()).await?;
+    let error = rebuild_all_current_projections(database.pool(), None, None)
+        .await
+        .expect_err("the publish stop must retain the freshly restaged manual replay");
+    assert!(format!("{error:#}").contains("injected name_current publish stop"));
+
+    let replacement = load_name_staging_checkpoint(database.pool()).await?;
+    assert_ne!(
+        replacement.stage_table, stale.stage_table,
+        "completed-stage drift must discard and replace the stale manual-replay stage"
+    );
+    assert!(
+        !stage_table_exists(database.pool(), &stale.stage_table).await?,
+        "manual replay must drop the stale completed stage table"
+    );
+    assert_eq!(replacement.status, "staging_complete");
+    assert_eq!(replacement.completed_source_count, 3);
+    assert_eq!(
+        replacement.last_source_key,
+        Some(serde_json::json!(APPENDED_LOGICAL_NAME_ID))
+    );
+    let replacement_snapshot =
+        load_stage_snapshot(database.pool(), &replacement.stage_table).await?;
+    assert!(
+        replacement_snapshot.contains(r#""canonical_display_name": "Alice.eth""#),
+        "the replacement stage must include the strictly interior source change"
+    );
+    assert!(
+        replacement_snapshot.contains(&format!(
+            r#""logical_name_id": "{APPENDED_LOGICAL_NAME_ID}""#
+        )),
+        "the replacement stage must include the source appended after the completed cursor"
+    );
+
+    remove_name_publish_failure(database.pool()).await?;
+    rebuild_all_current_projections(database.pool(), None, None).await?;
+    let published_names = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT logical_name_id, canonical_display_name
+        FROM name_current
+        WHERE logical_name_id IN ('ens:alice.eth', $1)
+        ORDER BY logical_name_id
+        "#,
+    )
+    .bind(APPENDED_LOGICAL_NAME_ID)
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        published_names,
+        vec![
+            ("ens:alice.eth".to_owned(), "Alice.eth".to_owned()),
+            (
+                APPENDED_LOGICAL_NAME_ID.to_owned(),
+                APPENDED_DISPLAY_NAME.to_owned()
+            ),
+        ],
+        "manual replay must publish both the interior mutation and appended source"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn completed_stage_reuses_without_drift_but_restarts_for_an_appended_source() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    seed_replay_inputs(database.pool()).await?;
+    install_name_publish_failure(database.pool()).await?;
+
+    rebuild_all_current_projections(database.pool(), None, None)
+        .await
+        .expect_err("the publish stop must retain a completed manual-replay stage");
+    let completed = load_name_staging_checkpoint(database.pool()).await?;
+    assert_eq!(completed.status, "staging_complete");
+    let reused = super::staging::ProjectionStagingCheckpoint::load_or_start(
+        database.pool(),
+        "name_current",
+        None,
+    )
+    .await?;
+    assert!(reused.staging_complete());
+    assert_eq!(
+        reused.stage_table(0)?,
+        completed.stage_table,
+        "a completed stage with no drift must retain its staged output"
+    );
+
+    append_name_source_after_completed_cursor(database.pool()).await?;
+    assert!(
+        APPENDED_LOGICAL_NAME_ID
+            > completed
+                .last_source_key
+                .as_ref()
+                .and_then(Value::as_str)
+                .context("completed name stage must have a string cursor")?,
+        "the appended fixture key must sort strictly after the completed cursor"
+    );
+    let replacement = super::staging::ProjectionStagingCheckpoint::load_or_start(
+        database.pool(),
+        "name_current",
+        None,
+    )
+    .await?;
+    assert!(!replacement.staging_complete());
+    assert_ne!(
+        replacement.stage_table(0)?,
+        completed.stage_table,
+        "a source appended after the final cursor must discard the completed stage"
+    );
+    assert!(
+        !stage_table_exists(database.pool(), &completed.stage_table).await?,
+        "full-range completed-stage drift detection must drop the stale stage table"
+    );
 
     remove_name_publish_failure(database.pool()).await?;
     super::staging::cleanup_projection_checkpoint(database.pool(), "name_current").await?;

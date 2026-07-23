@@ -30,7 +30,7 @@ use tracing::info;
 /// Bump this for any incompatible source ordering, staged-row construction, stage-table shape,
 /// publication, or completed-range classification change. The full bump contract lives in
 /// `docs/projections.md` under "Replay status tracking".
-const CURRENT_PROJECTION_STAGING_SCHEMA_VERSION: i32 = 1;
+const CURRENT_PROJECTION_STAGING_SCHEMA_VERSION: i32 = 2;
 
 struct StoredCheckpoint {
     replay_version: i32,
@@ -106,21 +106,34 @@ impl ProjectionStagingCheckpoint {
             let checkpoint = existing
                 .as_ref()
                 .context("reusable staging checkpoint disappeared")?;
-            if checkpoint.status == "running" {
-                if let Some(last_source_key) = checkpoint.last_source_key.as_ref() {
+            match checkpoint.status.as_str() {
+                "running" => {
+                    if let Some(last_source_key) = checkpoint.last_source_key.as_ref() {
+                        crate::projection_apply::completed_projection_sources_changed(
+                            &mut transaction,
+                            projection,
+                            checkpoint.validated_normalized_change_id,
+                            current_change_id,
+                            crate::projection_apply::CompletedProjectionSourceRange::Through(
+                                last_source_key,
+                            ),
+                        )
+                        .await?
+                    } else {
+                        false
+                    }
+                }
+                "staging_complete" => {
                     crate::projection_apply::completed_projection_sources_changed(
                         &mut transaction,
                         projection,
                         checkpoint.validated_normalized_change_id,
                         current_change_id,
-                        last_source_key,
+                        crate::projection_apply::CompletedProjectionSourceRange::Full,
                     )
                     .await?
-                } else {
-                    false
                 }
-            } else {
-                false
+                _ => unreachable!("structurally reusable checkpoint has a supported status"),
             }
         } else {
             false

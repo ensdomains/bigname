@@ -16,7 +16,7 @@ use crate::primary_name::rebuild_heartbeat::LoopHeartbeat;
 use crate::record_inventory;
 
 pub(crate) use derive::{
-    ProjectionInvalidationDeriveSummary,
+    CompletedProjectionSourceRange, ProjectionInvalidationDeriveSummary,
     capture_normalized_event_change_watermark as load_normalized_event_change_watermark,
     capture_normalized_event_change_watermark_in_transaction, completed_projection_sources_changed,
     normalized_event_cursor_exists, seed_normalized_event_cursor_if_absent_in_transaction,
