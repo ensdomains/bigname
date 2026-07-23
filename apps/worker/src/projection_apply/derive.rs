@@ -99,13 +99,25 @@ pub(crate) async fn completed_projection_sources_changed(
     projection: &str,
     lower_change_id: i64,
     upper_change_id: i64,
-    last_source_key: &Value,
+    completed_range: CompletedProjectionSourceRange<'_>,
 ) -> Result<bool> {
     if upper_change_id <= lower_change_id {
         return Ok(false);
     }
     let prefix = current_projection_invalidation_prefix(projection)
         .with_context(|| format!("unsupported staged projection {projection}"))?;
+    let last_source_key = match completed_range {
+        CompletedProjectionSourceRange::Through(last_source_key) => last_source_key,
+        CompletedProjectionSourceRange::Full => {
+            let query = completed_change_query(prefix, "TRUE");
+            return sqlx::query_scalar::<_, bool>(&query)
+                .bind(lower_change_id)
+                .bind(upper_change_id)
+                .fetch_one(&mut **transaction)
+                .await
+                .context("failed to detect a change in the completed projection source range");
+        }
+    };
     let changed = match projection {
         "name_current" => {
             let cursor = json_string(last_source_key, projection)?;
@@ -184,6 +196,11 @@ pub(crate) async fn completed_projection_sources_changed(
         _ => unreachable!("projection prefix was accepted above"),
     };
     Ok(changed)
+}
+
+pub(crate) enum CompletedProjectionSourceRange<'a> {
+    Through(&'a Value),
+    Full,
 }
 
 fn completed_change_query(prefix: &str, completed_predicate: &str) -> String {

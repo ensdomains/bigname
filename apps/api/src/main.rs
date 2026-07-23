@@ -58,6 +58,11 @@ mod projection_apply {
     use serde_json::Value;
     use sqlx::{Postgres, Transaction};
 
+    pub(crate) enum CompletedProjectionSourceRange<'a> {
+        Through(&'a Value),
+        Full,
+    }
+
     pub(crate) struct NormalizedEventChangeCursor {
         pub(crate) change_id: i64,
     }
@@ -79,8 +84,11 @@ mod projection_apply {
         _projection: &str,
         lower_change_id: i64,
         upper_change_id: i64,
-        _last_source_key: &Value,
+        completed_range: CompletedProjectionSourceRange<'_>,
     ) -> Result<bool> {
+        if let CompletedProjectionSourceRange::Through(last_source_key) = completed_range {
+            let _ = last_source_key;
+        }
         if upper_change_id <= lower_change_id {
             return Ok(false);
         }

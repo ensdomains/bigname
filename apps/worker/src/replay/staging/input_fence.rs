@@ -52,7 +52,7 @@ impl ProjectionStagingCheckpoint {
                 self.projection,
                 self.validated_normalized_change_id,
                 upper,
-                last_source_key,
+                crate::projection_apply::CompletedProjectionSourceRange::Through(last_source_key),
             )
             .await?
         } else {

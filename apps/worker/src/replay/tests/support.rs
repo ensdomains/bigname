@@ -23,6 +23,8 @@ const LOGICAL_NAME_ID: &str = "ens:alice.eth";
 const DISPLAY_NAME: &str = "alice.eth";
 const CHILD_LOGICAL_NAME_ID: &str = "ens:bob.alice.eth";
 const CHILD_DISPLAY_NAME: &str = "bob.alice.eth";
+pub(super) const APPENDED_LOGICAL_NAME_ID: &str = "ens:zulu.eth";
+pub(super) const APPENDED_DISPLAY_NAME: &str = "zulu.eth";
 const HOLDER_ADDRESS: &str = "0x0000000000000000000000000000000000000abc";
 const RESOLVER_ADDRESS: &str = "0x0000000000000000000000000000000000000def";
 
@@ -427,6 +429,43 @@ pub(super) async fn seed_replay_inputs(pool: &PgPool) -> Result<()> {
     )
     .await?;
 
+    Ok(())
+}
+
+pub(super) async fn append_name_source_after_completed_cursor(pool: &PgPool) -> Result<()> {
+    upsert_name_surfaces(
+        pool,
+        &[name_surface(
+            APPENDED_LOGICAL_NAME_ID,
+            APPENDED_DISPLAY_NAME,
+            CanonicalityState::Finalized,
+        )],
+    )
+    .await?;
+    upsert_normalized_events(
+        pool,
+        &[NormalizedEvent {
+            event_identity: "worker-replay:appended-name-source".to_owned(),
+            namespace: "ens".to_owned(),
+            logical_name_id: Some(APPENDED_LOGICAL_NAME_ID.to_owned()),
+            resource_id: None,
+            event_kind: "ResolverChanged".to_owned(),
+            source_family: "ens_v1_registry_l1".to_owned(),
+            manifest_version: 1,
+            source_manifest_id: None,
+            chain_id: Some("ethereum-mainnet".to_owned()),
+            block_number: Some(107),
+            block_hash: Some("0xreplay0107".to_owned()),
+            transaction_hash: Some("0xreplaytx-appended-name".to_owned()),
+            log_index: Some(1),
+            raw_fact_ref: raw_fact_ref("0xreplay0107", 107, 1),
+            derivation_kind: "ens_v1_unwrapped_authority".to_owned(),
+            canonicality_state: CanonicalityState::Finalized,
+            before_state: json!({}),
+            after_state: json!({"resolver": RESOLVER_ADDRESS}),
+        }],
+    )
+    .await?;
     Ok(())
 }
 
