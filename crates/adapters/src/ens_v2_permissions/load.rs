@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
 use anyhow::{Context, Result};
 use bigname_manifests::{load_watched_contracts, load_watched_contracts_scoped_with_progress};
@@ -211,23 +211,11 @@ pub(super) async fn load_active_emitters(
     // `active_emitter_for_block`'s first-match selection nondeterministic for overlapping windows.
     // This matches the resolver path's earliest-activation-first ordering (ens_v2_common).
     let emitter_count = emitters.len();
-    let mut ordered = BTreeMap::new();
-    for (index, emitter) in emitters.into_iter().enumerate() {
-        ordered.insert(
-            (
-                emitter.address.clone(),
-                emitter.source_family.clone(),
-                emitter.active_from_block_number,
-                emitter.active_to_block_number,
-                emitter.source_manifest_id,
-                emitter.contract_instance_id,
-                index,
-            ),
-            emitter,
-        );
+    emitters.sort();
+    for index in 0..emitter_count {
         record_emitter_progress(pool, progress, index + 1, emitter_count).await?;
     }
-    Ok(ordered.into_values().collect())
+    Ok(emitters)
 }
 
 async fn load_registry_active_emitters(
@@ -327,4 +315,37 @@ fn source_scope_bindings(
         to_blocks.push(*to_block);
     }
     (addresses, from_blocks, to_blocks)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::types::Uuid;
+
+    fn tied_emitter(namespace: &str) -> ActiveEmitter {
+        ActiveEmitter {
+            address: "0xresolver".to_owned(),
+            source_family: SOURCE_FAMILY_ENS_V2_RESOLVER_L1.to_owned(),
+            active_from_block_number: Some(100),
+            active_to_block_number: Some(200),
+            source_manifest_id: 7,
+            contract_instance_id: Uuid::from_u128(1),
+            namespace: namespace.to_owned(),
+            manifest_version: 1,
+        }
+    }
+
+    #[test]
+    fn exact_sort_tie_has_the_same_winner_for_both_loader_orders() {
+        let preferred = tied_emitter("a-namespace");
+        let alternate = tied_emitter("z-namespace");
+        let mut non_progress = vec![preferred.clone(), alternate.clone()];
+        let mut progress = vec![alternate, preferred.clone()];
+
+        non_progress.sort();
+        progress.sort();
+
+        assert_eq!(progress, non_progress);
+        assert_eq!(active_emitter_for_block(&progress, 150), Some(&preferred));
+    }
 }
