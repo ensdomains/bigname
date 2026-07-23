@@ -141,84 +141,92 @@ async fn rebuild_all_resolvers(
         normalized_target_block,
     )
     .await?;
-    if !checkpoint.staging_complete() {
-        loop {
-            let input_fence = checkpoint.prepare_next_batch(pool).await?;
-            let cursor = resolver_source_cursor(checkpoint.last_source_key())?;
-            let page = run_rebuild_phase(
-                pool,
-                &mut loop_heartbeat,
-                "resolver_current.load_targets_page",
-                load_target_resolvers_page(
+    loop {
+        if !checkpoint.staging_complete() {
+            loop {
+                let input_fence = checkpoint.prepare_next_batch(pool).await?;
+                let cursor = resolver_source_cursor(checkpoint.last_source_key())?;
+                let page = run_rebuild_phase(
                     pool,
-                    cursor.as_ref(),
-                    RESOLVER_CURRENT_REBUILD_BATCH_SIZE,
-                ),
-            )
-            .await?;
-            if page.is_empty() {
-                if checkpoint.mark_staging_complete(pool, input_fence).await? {
-                    break;
-                }
-                continue;
-            }
-            let last = page
-                .last()
-                .expect("resolver_current staging page must not be empty");
-            let last_source_key = json!([last.chain_id, last.resolver_address]);
-            let profile_gate = run_rebuild_phase(
-                pool,
-                &mut loop_heartbeat,
-                "resolver_current.load_profile_page",
-                ResolverProfileGate::load(pool),
-            )
-            .await?;
-            let rows = build_resolver_page(pool, &profile_gate, &page, &mut loop_heartbeat).await?;
-            let mut transaction = pool.begin().await?;
-            let staged =
-                stage_resolver_current_rows(&mut transaction, checkpoint.stage_table(0)?, &rows)
-                    .await?;
-            let progress =
-                checkpoint.progress_after_batch(page.len(), last_source_key, staged, 0)?;
-            checkpoint
-                .persist_progress(&mut transaction, &progress, &input_fence)
+                    &mut loop_heartbeat,
+                    "resolver_current.load_targets_page",
+                    load_target_resolvers_page(
+                        pool,
+                        cursor.as_ref(),
+                        RESOLVER_CURRENT_REBUILD_BATCH_SIZE,
+                    ),
+                )
                 .await?;
-            transaction.commit().await?;
-            checkpoint.accept_progress(progress, input_fence);
-            let completed_resolver_count = checkpoint.completed_source_count()?;
-            if completed_resolver_count.is_multiple_of(RESOLVER_CURRENT_REBUILD_LOG_INTERVAL) {
-                tracing::info!(
-                    projection = "resolver_current",
-                    completed_resolver_count,
-                    upserted_row_count = checkpoint.staged_row_count()?,
-                    "resolver_current rebuild resolvers processed"
-                );
+                if page.is_empty() {
+                    if checkpoint.mark_staging_complete(pool, input_fence).await? {
+                        break;
+                    }
+                    continue;
+                }
+                let last = page
+                    .last()
+                    .expect("resolver_current staging page must not be empty");
+                let last_source_key = json!([last.chain_id, last.resolver_address]);
+                let profile_gate = run_rebuild_phase(
+                    pool,
+                    &mut loop_heartbeat,
+                    "resolver_current.load_profile_page",
+                    ResolverProfileGate::load(pool),
+                )
+                .await?;
+                let rows =
+                    build_resolver_page(pool, &profile_gate, &page, &mut loop_heartbeat).await?;
+                let mut transaction = pool.begin().await?;
+                let staged = stage_resolver_current_rows(
+                    &mut transaction,
+                    checkpoint.stage_table(0)?,
+                    &rows,
+                )
+                .await?;
+                let progress =
+                    checkpoint.progress_after_batch(page.len(), last_source_key, staged, 0)?;
+                checkpoint
+                    .persist_progress(&mut transaction, &progress, &input_fence)
+                    .await?;
+                transaction.commit().await?;
+                checkpoint.accept_progress(progress, input_fence);
+                let completed_resolver_count = checkpoint.completed_source_count()?;
+                if completed_resolver_count.is_multiple_of(RESOLVER_CURRENT_REBUILD_LOG_INTERVAL) {
+                    tracing::info!(
+                        projection = "resolver_current",
+                        completed_resolver_count,
+                        upserted_row_count = checkpoint.staged_row_count()?,
+                        "resolver_current rebuild resolvers processed"
+                    );
+                }
             }
         }
-    }
-    let requested_resolver_count = checkpoint.completed_source_count()?;
-    let upserted_row_count = checkpoint.staged_row_count()?;
-    let (_deleted_row_count, published_row_count) = run_rebuild_phase(
-        pool,
-        &mut loop_heartbeat,
-        "resolver_current.publish",
-        publish_stage_table(
+        let requested_resolver_count = checkpoint.completed_source_count()?;
+        let upserted_row_count = checkpoint.staged_row_count()?;
+        let published = run_rebuild_phase(
             pool,
-            "resolver_current",
-            checkpoint.stage_table(0)?,
-            RESOLVER_CURRENT_COLUMNS,
-            None,
-            checkpoint.full_replay_input_revision(),
-        ),
-    )
-    .await?;
-    debug_assert_eq!(published_row_count as usize, upserted_row_count);
+            &mut loop_heartbeat,
+            "resolver_current.publish",
+            publish_stage_table(
+                pool,
+                "resolver_current",
+                RESOLVER_CURRENT_COLUMNS,
+                None,
+                &mut checkpoint,
+            ),
+        )
+        .await?;
+        let Some((_deleted_row_count, published_row_count)) = published else {
+            continue;
+        };
+        debug_assert_eq!(published_row_count as usize, upserted_row_count);
 
-    Ok(ResolverCurrentRebuildSummary {
-        requested_resolver_count,
-        upserted_row_count,
-        deleted_row_count: previous_row_count,
-    })
+        return Ok(ResolverCurrentRebuildSummary {
+            requested_resolver_count,
+            upserted_row_count,
+            deleted_row_count: previous_row_count,
+        });
+    }
 }
 
 async fn build_resolver_page(

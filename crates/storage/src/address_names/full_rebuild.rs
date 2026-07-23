@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::projection_staging::ensure_current_projection_full_replay_input_revision_in_transaction;
+use crate::projection_staging::ADDRESS_NAMES_CURRENT_STAGING_COLUMNS;
 
 use super::{types::AddressNameCurrentRow, write};
 
@@ -168,42 +168,26 @@ pub async fn publish_address_names_current_full_rebuild(
     pool: &PgPool,
     rebuild: &AddressNamesCurrentFullRebuild,
 ) -> Result<(u64, u64)> {
-    publish_address_names_current_full_rebuild_inner(pool, rebuild, None).await
-}
-
-pub async fn publish_address_names_current_full_rebuild_at_input_revision(
-    pool: &PgPool,
-    rebuild: &AddressNamesCurrentFullRebuild,
-    full_replay_input_revision: i64,
-) -> Result<(u64, u64)> {
-    publish_address_names_current_full_rebuild_inner(
-        pool,
-        rebuild,
-        Some(full_replay_input_revision),
-    )
-    .await
-}
-
-async fn publish_address_names_current_full_rebuild_inner(
-    pool: &PgPool,
-    rebuild: &AddressNamesCurrentFullRebuild,
-    full_replay_input_revision: Option<i64>,
-) -> Result<(u64, u64)> {
-    let table_sql = rebuild.table_sql();
-
     let mut transaction = pool
         .begin()
         .await
         .context("failed to open transaction for address_names_current full rebuild publish")?;
-    if let Some(expected_revision) = full_replay_input_revision {
-        ensure_current_projection_full_replay_input_revision_in_transaction(
-            &mut transaction,
-            expected_revision,
-        )
-        .await?;
-    }
+    let counts =
+        publish_address_names_current_full_rebuild_in_transaction(&mut transaction, rebuild)
+            .await?;
+    transaction
+        .commit()
+        .await
+        .context("failed to commit address_names_current full rebuild publish")?;
+    Ok(counts)
+}
 
-    write::set_address_names_current_sidecar_triggers(&mut transaction, false).await?;
+pub async fn publish_address_names_current_full_rebuild_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    rebuild: &AddressNamesCurrentFullRebuild,
+) -> Result<(u64, u64)> {
+    let table_sql = rebuild.table_sql();
+    write::set_address_names_current_sidecar_triggers(transaction, false).await?;
 
     sqlx::query(
         r#"
@@ -213,64 +197,21 @@ async fn publish_address_names_current_full_rebuild_inner(
             address_names_current_identity_feed
         "#,
     )
-    .execute(&mut *transaction)
+    .execute(&mut **transaction)
     .await
     .context("failed to truncate address_names_current projection and identity sidecars")?;
 
+    let columns = ADDRESS_NAMES_CURRENT_STAGING_COLUMNS.join(", ");
     let inserted_row_count = sqlx::query(&format!(
-        r#"
-        INSERT INTO address_names_current (
-            address,
-            logical_name_id,
-            relation,
-            namespace,
-            canonical_display_name,
-            normalized_name,
-            namehash,
-            surface_binding_id,
-            resource_id,
-            token_lineage_id,
-            binding_kind,
-            provenance,
-            coverage,
-            chain_positions,
-            canonicality_summary,
-            manifest_version,
-            last_recomputed_at
-        )
-        SELECT
-            address,
-            logical_name_id,
-            relation,
-            namespace,
-            canonical_display_name,
-            normalized_name,
-            namehash,
-            surface_binding_id,
-            resource_id,
-            token_lineage_id,
-            binding_kind,
-            provenance,
-            coverage,
-            chain_positions,
-            canonicality_summary,
-            manifest_version,
-            last_recomputed_at
-        FROM {table_sql}
-        "#
+        "INSERT INTO address_names_current ({columns}) SELECT {columns} FROM {table_sql}"
     ))
-    .execute(&mut *transaction)
+    .execute(&mut **transaction)
     .await
     .context("failed to publish staged address_names_current rows")?
     .rows_affected();
 
-    write::set_address_names_current_sidecar_triggers(&mut transaction, true).await?;
-    rebuild_address_names_current_identity_sidecars_in_transaction(&mut transaction).await?;
-
-    transaction
-        .commit()
-        .await
-        .context("failed to commit address_names_current full rebuild publish")?;
+    write::set_address_names_current_sidecar_triggers(transaction, true).await?;
+    rebuild_address_names_current_identity_sidecars_in_transaction(transaction).await?;
 
     Ok((rebuild.previous_row_count, inserted_row_count))
 }

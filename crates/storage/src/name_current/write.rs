@@ -3,7 +3,7 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
 
 use crate::SurfaceBindingKind;
 use crate::address_names::rebuild_address_names_current_identity_sidecars_in_transaction;
-use crate::projection_staging::ensure_current_projection_full_replay_input_revision_in_transaction;
+use crate::projection_staging::NAME_CURRENT_STAGING_COLUMNS;
 
 use super::replacement_publish::publish_name_current_replacement_rows;
 use super::row::{NameCurrentRow, decode_name_current_row, validate_name_current_row};
@@ -91,38 +91,32 @@ pub async fn stage_name_current_replacement_rows_in_transaction(
     Ok(inserted)
 }
 
-/// Atomically publish a worker-owned durable exact-name replacement table.
-pub async fn publish_name_current_replacement_table(
+/// Analyze a worker-owned durable exact-name replacement table before publication.
+pub async fn analyze_name_current_replacement_table(
     pool: &PgPool,
     replacement_table: &str,
-    full_replay_input_revision: i64,
-) -> Result<(usize, u64)> {
+) -> Result<()> {
     let replacement_table = checked_staging_table(replacement_table)?;
     sqlx::query(&format!("ANALYZE {replacement_table}"))
         .execute(pool)
         .await
         .context("failed to analyze durable name_current replacement table")?;
-    let mut transaction = pool
-        .begin()
-        .await
-        .context("failed to open durable name_current replacement transaction")?;
-    ensure_current_projection_full_replay_input_revision_in_transaction(
-        &mut transaction,
-        full_replay_input_revision,
-    )
-    .await?;
-    set_name_current_sidecar_triggers(&mut transaction, false).await?;
+    Ok(())
+}
+
+/// Publish a durable exact-name replacement inside the caller's fenced transaction.
+pub async fn publish_name_current_replacement_table_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    replacement_table: &str,
+) -> Result<(usize, u64)> {
+    let replacement_table = checked_staging_table(replacement_table)?;
+    set_name_current_sidecar_triggers(transaction, false).await?;
     let upserted_row_count =
-        publish_name_current_replacement_rows(&mut transaction, &replacement_table).await?;
+        publish_name_current_replacement_rows(transaction, &replacement_table).await?;
     let deleted_row_count =
-        delete_stale_name_current_rows_from_replacement(&mut transaction, &replacement_table)
-            .await?;
-    set_name_current_sidecar_triggers(&mut transaction, true).await?;
-    rebuild_address_names_current_identity_sidecars_in_transaction(&mut transaction).await?;
-    transaction
-        .commit()
-        .await
-        .context("failed to commit durable name_current replacement")?;
+        delete_stale_name_current_rows_from_replacement(transaction, &replacement_table).await?;
+    set_name_current_sidecar_triggers(transaction, true).await?;
+    rebuild_address_names_current_identity_sidecars_in_transaction(transaction).await?;
     Ok((upserted_row_count, deleted_row_count))
 }
 
@@ -235,26 +229,8 @@ async fn insert_name_current_replacement_chunk(
         .map(encode_name_current_row)
         .collect::<Result<Vec<_>>>()?;
     let mut builder = QueryBuilder::<Postgres>::new(format!(
-        r#"
-        INSERT INTO {replacement_table} (
-            logical_name_id,
-            namespace,
-            canonical_display_name,
-            normalized_name,
-            namehash,
-            surface_binding_id,
-            resource_id,
-            token_lineage_id,
-            binding_kind,
-            declared_summary,
-            provenance,
-            coverage,
-            chain_positions,
-            canonicality_summary,
-            manifest_version,
-            last_recomputed_at
-        )
-        "#
+        "INSERT INTO {replacement_table} ({}) ",
+        NAME_CURRENT_STAGING_COLUMNS.join(", ")
     ));
 
     builder.push_values(encoded_rows.iter(), |mut row_builder, encoded| {

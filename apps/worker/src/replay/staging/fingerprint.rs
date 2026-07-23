@@ -1,10 +1,14 @@
 use std::fmt::Write as _;
 
 use anyhow::{Context, Result};
+use bigname_storage::projection_staging::{
+    ADDRESS_NAMES_CURRENT_STAGING_COLUMNS, NAME_CURRENT_STAGING_COLUMNS,
+};
 
 use super::{
     CURRENT_PROJECTION_STAGING_SCHEMA_VERSION, cursor::shape_tag, tables::projection_stage_specs,
 };
+use crate::projection_apply::projection_staging_input_channel_tags;
 #[path = "../../staged_rebuild.rs"]
 mod staged_rebuild_contract;
 use staged_rebuild_contract::{
@@ -31,12 +35,18 @@ pub(crate) fn staging_contract_fingerprint() -> Result<String> {
     )?;
     writeln!(
         fingerprint,
-        "completion_fence=post_empty_page_full_range|channels=normalized_event,manifest_current,direct_invalidation_generation"
+        "completion_fence=post_empty_page_full_range|publish_fence=pre_replace_full_range"
     )?;
     for projection in STAGED_PROJECTIONS {
         let cursor = shape_tag(projection)
             .with_context(|| format!("missing staging cursor contract for {projection}"))?;
-        writeln!(fingerprint, "projection={projection}|cursor={cursor}")?;
+        let channels = projection_staging_input_channel_tags(projection)
+            .with_context(|| format!("missing staging input channels for {projection}"))?;
+        writeln!(
+            fingerprint,
+            "projection={projection}|cursor={cursor}|channels={}",
+            channels.join(",")
+        )?;
         for spec in projection_stage_specs(projection)? {
             writeln!(
                 fingerprint,
@@ -49,6 +59,7 @@ pub(crate) fn staging_contract_fingerprint() -> Result<String> {
     }
 
     for (table, columns) in [
+        ("name_current", NAME_CURRENT_STAGING_COLUMNS),
         ("children_current", CHILDREN_CURRENT_COLUMNS),
         ("permissions_current", PERMISSIONS_CURRENT_COLUMNS),
         (
@@ -58,6 +69,10 @@ pub(crate) fn staging_contract_fingerprint() -> Result<String> {
         ("primary_names_current", PRIMARY_NAMES_CURRENT_COLUMNS),
         ("record_inventory_current", RECORD_INVENTORY_CURRENT_COLUMNS),
         ("resolver_current", RESOLVER_CURRENT_COLUMNS),
+        (
+            "address_names_current",
+            ADDRESS_NAMES_CURRENT_STAGING_COLUMNS,
+        ),
     ] {
         writeln!(fingerprint, "columns={table}|{}", columns.join(","))?;
     }

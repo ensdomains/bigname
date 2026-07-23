@@ -119,3 +119,21 @@ pub(super) fn current_projection_invalidation_prefixes(
         _ => None,
     }
 }
+
+#[cfg(test)]
+pub(crate) fn projection_staging_input_channel_tags(projection: &str) -> Option<Vec<&'static str>> {
+    let prefixes = current_projection_invalidation_prefixes(projection)?;
+    let mut channels = Vec::with_capacity(prefixes.len() + 1);
+    for prefix in prefixes {
+        let channel = if *prefix == MANIFEST_CURRENT_INVALIDATIONS_PREFIX {
+            "manifest_current"
+        } else {
+            "normalized_event"
+        };
+        if !channels.contains(&channel) {
+            channels.push(channel);
+        }
+    }
+    channels.push("direct_invalidation_generation");
+    Some(channels)
+}

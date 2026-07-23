@@ -94,92 +94,98 @@ async fn rebuild_all_parents(
         normalized_target_block,
     )
     .await?;
-    if !checkpoint.staging_complete() {
-        loop {
-            let input_fence = checkpoint.prepare_next_batch(pool).await?;
-            let cursor = children_source_cursor(checkpoint.last_source_key())?;
-            let sources = stream_canonical_declared_child_sources_after(
-                pool,
-                cursor
-                    .as_ref()
-                    .map(|parts| (parts[0].as_str(), parts[1].as_str(), parts[2].as_str())),
-                i64::try_from(CHILDREN_CURRENT_REBUILD_BATCH_SIZE)?,
-            );
-            pin_mut!(sources);
-            let mut page = Vec::with_capacity(CHILDREN_CURRENT_REBUILD_BATCH_SIZE);
-            while page.len() < CHILDREN_CURRENT_REBUILD_BATCH_SIZE {
-                let Some(source) = sources.try_next().await? else {
-                    break;
-                };
-                page.push(source);
-            }
-            if page.is_empty() {
-                if checkpoint.mark_staging_complete(pool, input_fence).await? {
-                    break;
-                }
-                continue;
-            }
-            let last = page
-                .last()
-                .expect("children_current staging page must not be empty");
-            let last_source_key = json!([
-                last.parent_logical_name_id,
-                last.canonical_display_name,
-                last.child_logical_name_id
-            ]);
-            let rows = build_children_page(pool, &page, &mut loop_heartbeat).await?;
-            let mut transaction = pool.begin().await?;
-            let staged =
-                stage_children_current_rows(&mut transaction, checkpoint.stage_table(0)?, &rows)
-                    .await?;
-            let progress =
-                checkpoint.progress_after_batch(page.len(), last_source_key, staged, 0)?;
-            checkpoint
-                .persist_progress(&mut transaction, &progress, &input_fence)
-                .await?;
-            transaction.commit().await?;
-            checkpoint.accept_progress(progress, input_fence);
-            let completed_source_count = checkpoint.completed_source_count()?;
-            if completed_source_count.is_multiple_of(5_000) {
-                tracing::info!(
-                    projection = "children_current",
-                    completed_source_count,
-                    upserted_row_count = checkpoint.staged_row_count()?,
-                    "children_current rebuild sources processed"
+    loop {
+        if !checkpoint.staging_complete() {
+            loop {
+                let input_fence = checkpoint.prepare_next_batch(pool).await?;
+                let cursor = children_source_cursor(checkpoint.last_source_key())?;
+                let sources = stream_canonical_declared_child_sources_after(
+                    pool,
+                    cursor
+                        .as_ref()
+                        .map(|parts| (parts[0].as_str(), parts[1].as_str(), parts[2].as_str())),
+                    i64::try_from(CHILDREN_CURRENT_REBUILD_BATCH_SIZE)?,
                 );
+                pin_mut!(sources);
+                let mut page = Vec::with_capacity(CHILDREN_CURRENT_REBUILD_BATCH_SIZE);
+                while page.len() < CHILDREN_CURRENT_REBUILD_BATCH_SIZE {
+                    let Some(source) = sources.try_next().await? else {
+                        break;
+                    };
+                    page.push(source);
+                }
+                if page.is_empty() {
+                    if checkpoint.mark_staging_complete(pool, input_fence).await? {
+                        break;
+                    }
+                    continue;
+                }
+                let last = page
+                    .last()
+                    .expect("children_current staging page must not be empty");
+                let last_source_key = json!([
+                    last.parent_logical_name_id,
+                    last.canonical_display_name,
+                    last.child_logical_name_id
+                ]);
+                let rows = build_children_page(pool, &page, &mut loop_heartbeat).await?;
+                let mut transaction = pool.begin().await?;
+                let staged = stage_children_current_rows(
+                    &mut transaction,
+                    checkpoint.stage_table(0)?,
+                    &rows,
+                )
+                .await?;
+                let progress =
+                    checkpoint.progress_after_batch(page.len(), last_source_key, staged, 0)?;
+                checkpoint
+                    .persist_progress(&mut transaction, &progress, &input_fence)
+                    .await?;
+                transaction.commit().await?;
+                checkpoint.accept_progress(progress, input_fence);
+                let completed_source_count = checkpoint.completed_source_count()?;
+                if completed_source_count.is_multiple_of(5_000) {
+                    tracing::info!(
+                        projection = "children_current",
+                        completed_source_count,
+                        upserted_row_count = checkpoint.staged_row_count()?,
+                        "children_current rebuild sources processed"
+                    );
+                }
             }
         }
-    }
-    let upserted_row_count = checkpoint.staged_row_count()?;
-    let (_deleted_row_count, published_row_count) = run_rebuild_phase(
-        pool,
-        &mut loop_heartbeat,
-        "children_current.publish",
-        publish_stage_table(
+        let upserted_row_count = checkpoint.staged_row_count()?;
+        let published = run_rebuild_phase(
             pool,
-            "children_current",
-            checkpoint.stage_table(0)?,
-            CHILDREN_CURRENT_COLUMNS,
-            Some("WHERE surface_class = 'declared'"),
-            checkpoint.full_replay_input_revision(),
-        ),
-    )
-    .await?;
-    debug_assert_eq!(published_row_count as usize, upserted_row_count);
+            &mut loop_heartbeat,
+            "children_current.publish",
+            publish_stage_table(
+                pool,
+                "children_current",
+                CHILDREN_CURRENT_COLUMNS,
+                Some("WHERE surface_class = 'declared'"),
+                &mut checkpoint,
+            ),
+        )
+        .await?;
+        let Some((_deleted_row_count, published_row_count)) = published else {
+            continue;
+        };
+        debug_assert_eq!(published_row_count as usize, upserted_row_count);
 
-    let requested_parent_count = run_rebuild_phase(
-        pool,
-        &mut loop_heartbeat,
-        "children_current.count_published_parents",
-        count_children_current_parents(pool),
-    )
-    .await?;
-
-    Ok(ChildrenCurrentRebuildSummary {
-        requested_parent_count,
-        upserted_row_count,
-        deleted_row_count: previous_row_count,
-    })
+        let requested_parent_count = run_rebuild_phase(
+            pool,
+            &mut loop_heartbeat,
+            "children_current.count_published_parents",
+            count_children_current_parents(pool),
+        )
+        .await?;
+        return Ok(ChildrenCurrentRebuildSummary {
+            requested_parent_count,
+            upserted_row_count,
+            deleted_row_count: previous_row_count,
+        });
+    }
 }
 
 async fn build_children_page(

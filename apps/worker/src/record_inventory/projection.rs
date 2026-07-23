@@ -6,20 +6,16 @@ use futures_util::{StreamExt, TryStreamExt, pin_mut, stream};
 use serde_json::{Value, json};
 use sqlx::{PgPool, types::time::OffsetDateTime};
 use uuid::Uuid;
-
 use crate::primary_name::rebuild_heartbeat::{
     LoopHeartbeat, record_rebuild_progress, run_rebuild_phase,
 };
-
 #[allow(clippy::duplicate_mod)]
 #[path = "../staged_rebuild.rs"]
 mod staged_rebuild;
-
 use staged_rebuild::{
     RECORD_INVENTORY_CURRENT_COLUMNS, count_rows, publish_stage_table,
     stage_record_inventory_current_rows,
 };
-
 use super::{
     chain_position::{
         build_chain_positions, build_record_version_boundary, collect_chain_position_events,
@@ -131,88 +127,92 @@ async fn rebuild_all_resources(
         normalized_target_block,
     )
     .await?;
-    if !checkpoint.staging_complete() {
-        loop {
-            let input_fence = checkpoint.prepare_next_batch(pool).await?;
-            let after_resource_id = checkpoint
-                .last_source_key()
-                .and_then(serde_json::Value::as_str)
-                .map(Uuid::parse_str)
-                .transpose()
-                .context("record_inventory_current staging source key must be a UUID")?;
-            let resource_ids = stream_target_resource_ids_after(
-                pool,
-                after_resource_id,
-                i64::try_from(RECORD_INVENTORY_CURRENT_REBUILD_BATCH_SIZE)?,
-            );
-            pin_mut!(resource_ids);
-            let mut page = Vec::with_capacity(RECORD_INVENTORY_CURRENT_REBUILD_BATCH_SIZE);
-            while page.len() < RECORD_INVENTORY_CURRENT_REBUILD_BATCH_SIZE {
-                let Some(resource_id) = resource_ids.try_next().await? else {
-                    break;
-                };
-                page.push(resource_id);
-            }
-            if page.is_empty() {
-                if checkpoint.mark_staging_complete(pool, input_fence).await? {
-                    break;
-                }
-                continue;
-            }
-            let last_source_key = serde_json::Value::String(
-                page.last()
-                    .expect("record_inventory_current staging page must not be empty")
-                    .to_string(),
-            );
-            let rows = build_record_inventory_page(pool, &page, &mut loop_heartbeat).await?;
-            let mut transaction = pool.begin().await?;
-            let staged = stage_record_inventory_current_rows(
-                &mut transaction,
-                checkpoint.stage_table(0)?,
-                &rows,
-            )
-            .await?;
-            let progress =
-                checkpoint.progress_after_batch(page.len(), last_source_key, staged, 0)?;
-            checkpoint
-                .persist_progress(&mut transaction, &progress, &input_fence)
-                .await?;
-            transaction.commit().await?;
-            checkpoint.accept_progress(progress, input_fence);
-            let completed_resource_count = checkpoint.completed_source_count()?;
-            if completed_resource_count.is_multiple_of(5_000) {
-                tracing::info!(
-                    projection = "record_inventory_current",
-                    completed_resource_count,
-                    upserted_row_count = checkpoint.staged_row_count()?,
-                    "record_inventory_current rebuild resources processed"
+    loop {
+        if !checkpoint.staging_complete() {
+            loop {
+                let input_fence = checkpoint.prepare_next_batch(pool).await?;
+                let after_resource_id = checkpoint
+                    .last_source_key()
+                    .and_then(serde_json::Value::as_str)
+                    .map(Uuid::parse_str)
+                    .transpose()
+                    .context("record_inventory_current staging source key must be a UUID")?;
+                let resource_ids = stream_target_resource_ids_after(
+                    pool,
+                    after_resource_id,
+                    i64::try_from(RECORD_INVENTORY_CURRENT_REBUILD_BATCH_SIZE)?,
                 );
+                pin_mut!(resource_ids);
+                let mut page = Vec::with_capacity(RECORD_INVENTORY_CURRENT_REBUILD_BATCH_SIZE);
+                while page.len() < RECORD_INVENTORY_CURRENT_REBUILD_BATCH_SIZE {
+                    let Some(resource_id) = resource_ids.try_next().await? else {
+                        break;
+                    };
+                    page.push(resource_id);
+                }
+                if page.is_empty() {
+                    if checkpoint.mark_staging_complete(pool, input_fence).await? {
+                        break;
+                    }
+                    continue;
+                }
+                let last_source_key = serde_json::Value::String(
+                    page.last()
+                        .expect("record_inventory_current staging page must not be empty")
+                        .to_string(),
+                );
+                let rows = build_record_inventory_page(pool, &page, &mut loop_heartbeat).await?;
+                let mut transaction = pool.begin().await?;
+                let staged = stage_record_inventory_current_rows(
+                    &mut transaction,
+                    checkpoint.stage_table(0)?,
+                    &rows,
+                )
+                .await?;
+                let progress =
+                    checkpoint.progress_after_batch(page.len(), last_source_key, staged, 0)?;
+                checkpoint
+                    .persist_progress(&mut transaction, &progress, &input_fence)
+                    .await?;
+                transaction.commit().await?;
+                checkpoint.accept_progress(progress, input_fence);
+                let completed_resource_count = checkpoint.completed_source_count()?;
+                if completed_resource_count.is_multiple_of(5_000) {
+                    tracing::info!(
+                        projection = "record_inventory_current",
+                        completed_resource_count,
+                        upserted_row_count = checkpoint.staged_row_count()?,
+                        "record_inventory_current rebuild resources processed"
+                    );
+                }
             }
         }
-    }
-    let requested_resource_count = checkpoint.completed_source_count()?;
-    let upserted_row_count = checkpoint.staged_row_count()?;
-    let (_deleted_row_count, published_row_count) = run_rebuild_phase(
-        pool,
-        &mut loop_heartbeat,
-        "record_inventory_current.publish",
-        publish_stage_table(
+        let requested_resource_count = checkpoint.completed_source_count()?;
+        let upserted_row_count = checkpoint.staged_row_count()?;
+        let published = run_rebuild_phase(
             pool,
-            "record_inventory_current",
-            checkpoint.stage_table(0)?,
-            RECORD_INVENTORY_CURRENT_COLUMNS,
-            None,
-            checkpoint.full_replay_input_revision(),
-        ),
-    )
-    .await?;
-    debug_assert_eq!(published_row_count as usize, upserted_row_count);
+            &mut loop_heartbeat,
+            "record_inventory_current.publish",
+            publish_stage_table(
+                pool,
+                "record_inventory_current",
+                RECORD_INVENTORY_CURRENT_COLUMNS,
+                None,
+                &mut checkpoint,
+            ),
+        )
+        .await?;
+        let Some((_deleted_row_count, published_row_count)) = published else {
+            continue;
+        };
+        debug_assert_eq!(published_row_count as usize, upserted_row_count);
 
-    Ok(RecordInventoryCurrentRebuildSummary {
-        requested_resource_count,
-        upserted_row_count,
-        deleted_row_count: previous_row_count,
-    })
+        return Ok(RecordInventoryCurrentRebuildSummary {
+            requested_resource_count,
+            upserted_row_count,
+            deleted_row_count: previous_row_count,
+        });
+    }
 }
 
 async fn build_record_inventory_page(

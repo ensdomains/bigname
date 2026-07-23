@@ -5,7 +5,6 @@ use anyhow::{Context, Result, bail};
 use bigname_storage::{
     ChildrenCurrentRow, PermissionsCurrentResourceSummary, PermissionsCurrentRow,
     PrimaryNameCurrentSnapshot, RecordInventoryCurrentRow, ResolverCurrentRow,
-    projection_staging::ensure_current_projection_full_replay_input_revision_in_transaction,
     publish_permissions_current_compatibility_in_transaction,
 };
 use serde_json::Value;
@@ -13,6 +12,8 @@ use sqlx::{
     PgPool, Postgres, QueryBuilder, Transaction,
     types::{Json, Uuid},
 };
+
+use crate::replay::staging::ProjectionStagingCheckpoint;
 
 const POSTGRES_MAX_BIND_PARAMETERS: usize = 65_535;
 
@@ -120,11 +121,11 @@ pub(crate) async fn count_rows(
 pub(crate) async fn publish_stage_table(
     pool: &PgPool,
     target_table: &str,
-    stage_table: &str,
     columns: &[&str],
     delete_where: Option<&str>,
-    full_replay_input_revision: i64,
-) -> Result<(u64, u64)> {
+    checkpoint: &mut ProjectionStagingCheckpoint,
+) -> Result<Option<(u64, u64)>> {
+    let stage_table = checkpoint.stage_table(0)?.to_owned();
     let column_list = columns.join(", ");
     let delete_sql = match delete_where {
         Some(delete_where) => format!("DELETE FROM {target_table} {delete_where}"),
@@ -133,15 +134,9 @@ pub(crate) async fn publish_stage_table(
     let insert_sql = format!(
         "INSERT INTO {target_table} ({column_list}) SELECT {column_list} FROM {stage_table}"
     );
-    let mut tx = pool
-        .begin()
-        .await
-        .with_context(|| format!("failed to open {target_table} replacement transaction"))?;
-    ensure_current_projection_full_replay_input_revision_in_transaction(
-        &mut tx,
-        full_replay_input_revision,
-    )
-    .await?;
+    let Some(mut tx) = checkpoint.begin_fenced_publish_transaction(pool).await? else {
+        return Ok(None);
+    };
     let deleted = sqlx::query(&delete_sql)
         .execute(&mut *tx)
         .await
@@ -155,27 +150,21 @@ pub(crate) async fn publish_stage_table(
     tx.commit()
         .await
         .with_context(|| format!("failed to commit {target_table} replacement"))?;
-    Ok((deleted, inserted))
+    Ok(Some((deleted, inserted)))
 }
 
 /// Atomically replace permission holder rows and the per-resource support summary projection.
 pub(crate) async fn publish_permissions_current_stage_tables(
     pool: &PgPool,
-    rows_stage_table: &str,
-    summaries_stage_table: &str,
-    full_replay_input_revision: i64,
-) -> Result<(u64, u64, u64)> {
+    checkpoint: &mut ProjectionStagingCheckpoint,
+) -> Result<Option<(u64, u64, u64)>> {
+    let rows_stage_table = checkpoint.stage_table(0)?.to_owned();
+    let summaries_stage_table = checkpoint.stage_table(1)?.to_owned();
     let row_columns = PERMISSIONS_CURRENT_COLUMNS.join(", ");
     let summary_columns = PERMISSIONS_CURRENT_RESOURCE_SUMMARY_COLUMNS.join(", ");
-    let mut tx = pool
-        .begin()
-        .await
-        .context("failed to open permissions_current replacement transaction")?;
-    ensure_current_projection_full_replay_input_revision_in_transaction(
-        &mut tx,
-        full_replay_input_revision,
-    )
-    .await?;
+    let Some(mut tx) = checkpoint.begin_fenced_publish_transaction(pool).await? else {
+        return Ok(None);
+    };
     let deleted_rows = sqlx::query("DELETE FROM permissions_current")
         .execute(&mut *tx)
         .await
@@ -205,7 +194,7 @@ pub(crate) async fn publish_permissions_current_stage_tables(
     tx.commit()
         .await
         .context("failed to commit permissions_current replacement")?;
-    Ok((deleted_rows, inserted_rows, inserted_summaries))
+    Ok(Some((deleted_rows, inserted_rows, inserted_summaries)))
 }
 
 pub(crate) async fn stage_children_current_rows(

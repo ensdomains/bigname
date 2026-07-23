@@ -9,7 +9,8 @@ mod wildcard;
 
 use anyhow::Result;
 use bigname_storage::projection_staging::{
-    publish_name_current_replacement_table, stage_name_current_replacement_rows_in_transaction,
+    analyze_name_current_replacement_table, publish_name_current_replacement_table_in_transaction,
+    stage_name_current_replacement_rows_in_transaction,
 };
 use bigname_storage::{NameCurrentRow, delete_name_current, upsert_name_current_rows};
 use coverage::build_exact_name_coverage;
@@ -163,89 +164,101 @@ async fn rebuild_all_name_current(
         normalized_target_block,
     )
     .await?;
-    if !checkpoint.staging_complete() {
-        loop {
-            let input_fence = checkpoint.prepare_next_batch(pool).await?;
-            let after_logical_name_id = checkpoint
-                .last_source_key()
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            let page = run_rebuild_phase(
-                pool,
-                &mut loop_heartbeat,
-                "name_current.load_inputs",
-                load_canonical_name_surfaces_after(
+    loop {
+        if !checkpoint.staging_complete() {
+            loop {
+                let input_fence = checkpoint.prepare_next_batch(pool).await?;
+                let after_logical_name_id = checkpoint
+                    .last_source_key()
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let page = run_rebuild_phase(
                     pool,
-                    after_logical_name_id.as_deref(),
-                    i64::try_from(NAME_CURRENT_REBUILD_STAGE_BATCH_SIZE)?,
-                ),
-            )
-            .await?;
-            if page.is_empty() {
-                if checkpoint.mark_staging_complete(pool, input_fence).await? {
-                    break;
-                }
-                continue;
-            }
-            let last_source_key = Value::String(
-                page.last()
-                    .expect("name_current staging page must not be empty")
-                    .logical_name_id
-                    .clone(),
-            );
-            let rows = build_name_current_page(pool, &page, &mut loop_heartbeat).await?;
-            let mut transaction = pool.begin().await?;
-            let staged = stage_name_current_replacement_rows_in_transaction(
-                &mut transaction,
-                checkpoint.stage_table(0)?,
-                &rows,
-            )
-            .await?;
-            let progress =
-                checkpoint.progress_after_batch(page.len(), last_source_key, staged, 0)?;
-            checkpoint
-                .persist_progress(&mut transaction, &progress, &input_fence)
+                    &mut loop_heartbeat,
+                    "name_current.load_inputs",
+                    load_canonical_name_surfaces_after(
+                        pool,
+                        after_logical_name_id.as_deref(),
+                        i64::try_from(NAME_CURRENT_REBUILD_STAGE_BATCH_SIZE)?,
+                    ),
+                )
                 .await?;
-            transaction.commit().await?;
-            checkpoint.accept_progress(progress, input_fence);
-            let completed_name_count = checkpoint.completed_source_count()?;
-            if completed_name_count.is_multiple_of(5_000) {
-                tracing::info!(
-                    projection = "name_current",
-                    completed_name_count,
-                    staged_row_count = checkpoint.staged_row_count()?,
-                    "name_current rebuild rows built"
+                if page.is_empty() {
+                    if checkpoint.mark_staging_complete(pool, input_fence).await? {
+                        break;
+                    }
+                    continue;
+                }
+                let last_source_key = Value::String(
+                    page.last()
+                        .expect("name_current staging page must not be empty")
+                        .logical_name_id
+                        .clone(),
                 );
+                let rows = build_name_current_page(pool, &page, &mut loop_heartbeat).await?;
+                let mut transaction = pool.begin().await?;
+                let staged = stage_name_current_replacement_rows_in_transaction(
+                    &mut transaction,
+                    checkpoint.stage_table(0)?,
+                    &rows,
+                )
+                .await?;
+                let progress =
+                    checkpoint.progress_after_batch(page.len(), last_source_key, staged, 0)?;
+                checkpoint
+                    .persist_progress(&mut transaction, &progress, &input_fence)
+                    .await?;
+                transaction.commit().await?;
+                checkpoint.accept_progress(progress, input_fence);
+                let completed_name_count = checkpoint.completed_source_count()?;
+                if completed_name_count.is_multiple_of(5_000) {
+                    tracing::info!(
+                        projection = "name_current",
+                        completed_name_count,
+                        staged_row_count = checkpoint.staged_row_count()?,
+                        "name_current rebuild rows built"
+                    );
+                }
             }
         }
+        let requested_name_count = checkpoint.completed_source_count()?;
+        let upserted_row_count = checkpoint.staged_row_count()?;
+        let stage_table = checkpoint.stage_table(0)?.to_owned();
+        analyze_name_current_replacement_table(pool, &stage_table).await?;
+        let published =
+            run_rebuild_phase(pool, &mut loop_heartbeat, "name_current.publish", async {
+                let Some(mut transaction) =
+                    checkpoint.begin_fenced_publish_transaction(pool).await?
+                else {
+                    return Ok(None);
+                };
+                let counts = publish_name_current_replacement_table_in_transaction(
+                    &mut transaction,
+                    &stage_table,
+                )
+                .await?;
+                transaction.commit().await?;
+                Ok(Some(counts))
+            })
+            .await?;
+        let Some((published_row_count, deleted_row_count)) = published else {
+            continue;
+        };
+        tracing::info!(
+            projection = "name_current",
+            requested_name_count,
+            completed_name_count = requested_name_count,
+            upserted_row_count,
+            published_row_count,
+            deleted_row_count,
+            "name_current rebuild replacement published"
+        );
+        return Ok(NameCurrentRebuildSummary {
+            requested_name_count,
+            upserted_row_count,
+            deleted_row_count,
+        });
     }
-    let requested_name_count = checkpoint.completed_source_count()?;
-    let upserted_row_count = checkpoint.staged_row_count()?;
-    let (published_row_count, deleted_row_count) = run_rebuild_phase(
-        pool,
-        &mut loop_heartbeat,
-        "name_current.publish",
-        publish_name_current_replacement_table(
-            pool,
-            checkpoint.stage_table(0)?,
-            checkpoint.full_replay_input_revision(),
-        ),
-    )
-    .await?;
-    tracing::info!(
-        projection = "name_current",
-        requested_name_count,
-        completed_name_count = requested_name_count,
-        upserted_row_count,
-        published_row_count,
-        deleted_row_count,
-        "name_current rebuild replacement published"
-    );
-    Ok(NameCurrentRebuildSummary {
-        requested_name_count,
-        upserted_row_count,
-        deleted_row_count,
-    })
 }
 
 async fn build_name_current_page(

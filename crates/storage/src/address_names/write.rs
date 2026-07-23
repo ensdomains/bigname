@@ -3,6 +3,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 
 use super::{decode::decode_address_name_current_row, types::AddressNameCurrentRow};
 use crate::projection_helpers::{require_json_object, serialize_jsonb_field};
+use crate::projection_staging::ADDRESS_NAMES_CURRENT_STAGING_COLUMNS;
 
 /// Insert or replace address-name relation rows for one or more address collection keys.
 pub async fn upsert_address_names_current_rows(
@@ -116,27 +117,10 @@ pub(super) async fn upsert_address_name_current_row_into_table(
         "failed to serialize address_names_current canonicality_summary",
     )?;
 
+    let columns = ADDRESS_NAMES_CURRENT_STAGING_COLUMNS.join(", ");
     let query = format!(
         r#"
-        INSERT INTO {target_table_sql} (
-            address,
-            logical_name_id,
-            relation,
-            namespace,
-            canonical_display_name,
-            normalized_name,
-            namehash,
-            surface_binding_id,
-            resource_id,
-            token_lineage_id,
-            binding_kind,
-            provenance,
-            coverage,
-            chain_positions,
-            canonicality_summary,
-            manifest_version,
-            last_recomputed_at
-        )
+        INSERT INTO {target_table_sql} ({columns})
         VALUES (
             $1,
             $2,
@@ -172,24 +156,7 @@ pub(super) async fn upsert_address_name_current_row_into_table(
             canonicality_summary = EXCLUDED.canonicality_summary,
             manifest_version = EXCLUDED.manifest_version,
             last_recomputed_at = EXCLUDED.last_recomputed_at
-        RETURNING
-            address,
-            logical_name_id,
-            relation,
-            namespace,
-            canonical_display_name,
-            normalized_name,
-            namehash,
-            surface_binding_id,
-            resource_id,
-            token_lineage_id,
-            binding_kind,
-            provenance,
-            coverage,
-            chain_positions,
-            canonicality_summary,
-            manifest_version,
-            last_recomputed_at
+        RETURNING {columns}
         "#,
     );
 

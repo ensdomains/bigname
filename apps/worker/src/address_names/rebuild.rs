@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use bigname_storage::projection_staging::{
     insert_address_names_current_full_rebuild_rows_in_transaction,
-    publish_address_names_current_full_rebuild_at_input_revision,
+    publish_address_names_current_full_rebuild_in_transaction,
 };
 use bigname_storage::{
     AddressNamesCurrentAddressReplacement, AddressNamesCurrentFullRebuild,
@@ -159,54 +159,67 @@ async fn rebuild_all_addresses(
         normalized_target_block,
     )
     .await?;
-    let mut rebuild = AddressNamesCurrentFullRebuild::from_durable_stage(
-        checkpoint.stage_table(0)?.to_owned(),
-        deleted_row_count,
-    )?;
     tracing::info!(
         projection = "address_names_current",
         deleted_row_count,
         "address_names_current full rebuild staging started"
     );
 
-    if !checkpoint.staging_complete() {
-        stage_all_address_rows(pool, &mut rebuild, &mut checkpoint, &mut loop_heartbeat).await?;
-    }
-    let staged = AddressNamesCurrentStagingSummary {
-        upserted_row_count: checkpoint.staged_row_count()?,
-    };
-
-    let (_deleted_row_count, published_row_count) = run_rebuild_phase(
-        pool,
-        &mut loop_heartbeat,
-        "address_names_current.publish",
-        publish_address_names_current_full_rebuild_at_input_revision(
+    loop {
+        let mut rebuild = AddressNamesCurrentFullRebuild::from_durable_stage(
+            checkpoint.stage_table(0)?.to_owned(),
+            deleted_row_count,
+        )?;
+        if !checkpoint.staging_complete() {
+            stage_all_address_rows(pool, &mut rebuild, &mut checkpoint, &mut loop_heartbeat)
+                .await?;
+        }
+        let staged = AddressNamesCurrentStagingSummary {
+            upserted_row_count: checkpoint.staged_row_count()?,
+        };
+        let published = run_rebuild_phase(
             pool,
-            &rebuild,
-            checkpoint.full_replay_input_revision(),
-        ),
-    )
-    .await?;
-    tracing::info!(
-        projection = "address_names_current",
-        upserted_row_count = staged.upserted_row_count,
-        published_row_count,
-        "address_names_current full rebuild published projection and refreshed identity sidecars"
-    );
+            &mut loop_heartbeat,
+            "address_names_current.publish",
+            async {
+                let Some(mut transaction) =
+                    checkpoint.begin_fenced_publish_transaction(pool).await?
+                else {
+                    return Ok(None);
+                };
+                let counts = publish_address_names_current_full_rebuild_in_transaction(
+                    &mut transaction,
+                    &rebuild,
+                )
+                .await?;
+                transaction.commit().await?;
+                Ok(Some(counts))
+            },
+        )
+        .await?;
+        let Some((_deleted_row_count, published_row_count)) = published else {
+            continue;
+        };
+        tracing::info!(
+            projection = "address_names_current",
+            upserted_row_count = staged.upserted_row_count,
+            published_row_count,
+            "address_names_current full rebuild published projection and refreshed identity sidecars"
+        );
 
-    let requested_address_count = run_rebuild_phase(
-        pool,
-        &mut loop_heartbeat,
-        "address_names_current.count_published_addresses",
-        count_address_names_current_addresses(pool),
-    )
-    .await?;
-
-    Ok(AddressNamesCurrentRebuildSummary {
-        requested_address_count,
-        upserted_row_count: staged.upserted_row_count,
-        deleted_row_count,
-    })
+        let requested_address_count = run_rebuild_phase(
+            pool,
+            &mut loop_heartbeat,
+            "address_names_current.count_published_addresses",
+            count_address_names_current_addresses(pool),
+        )
+        .await?;
+        return Ok(AddressNamesCurrentRebuildSummary {
+            requested_address_count,
+            upserted_row_count: staged.upserted_row_count,
+            deleted_row_count,
+        });
+    }
 }
 
 struct AddressNamesCurrentStagingSummary {
