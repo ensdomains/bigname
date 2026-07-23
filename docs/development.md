@@ -185,12 +185,14 @@ serving by definition, it is `ready` exactly when that query succeeds, and the
 HTTP status follows this field. Aggregate `status` additionally requires both
 service loops and may therefore be `degraded` in an HTTP 200 response.
 The API prefers the retained service instance with a currently healthy normal
-heartbeat or long-operation phase, using the newest stale evidence only when
-none is healthy. A deployment runs one active writer for each service; process
+heartbeat or named phase, using the newest stale evidence only when none is
+healthy. Indexer phases use the ordinary indexer heartbeat maximum; worker
+rebuild phases use their separate long-operation maximum. A deployment runs
+one active writer for each service; process
 rows retained across a restart make that selection robust during the handoff
 without authorizing concurrent workers. The indexer and worker `healthcheck`
-subcommands instead validate the process row for their own
-`BIGNAME_HEARTBEAT_INSTANCE_ID`. Local binaries fall
+subcommands instead validate their own `BIGNAME_HEARTBEAT_INSTANCE_ID`,
+including any active named phase. Local binaries fall
 back to `HOSTNAME`; the server compose file pins stable `indexer` and `worker`
 identities so a recreated container refreshes the same process row. The checks
 fail when the row is absent or older than the service-specific
@@ -219,3 +221,7 @@ limit.
 Failure to persist the phase start aborts that rebuild attempt before its
 monolithic operation begins; ordinary bounded-progress beat failures still
 warn and retry at the next progress boundary.
+[Full-closure replay](glossary.md) ownership waits set `loops.indexer.phase`
+and use the ordinary indexer heartbeat maximum. Lock poll ticks and
+finite-deadline retries do not refresh that phase; acquiring ownership removes
+it.

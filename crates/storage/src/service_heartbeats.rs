@@ -10,7 +10,6 @@ pub const DEFAULT_WORKER_REBUILD_PHASE_MAX_AGE_SECS: i64 = 43_200;
 const PROCESS_SCOPE_KIND: &str = "process";
 const PROCESS_SCOPE_ID: &str = "process";
 const CHAIN_SCOPE_KIND: &str = "chain";
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServiceLoopHeartbeat {
     pub service_name: String,
@@ -143,6 +142,7 @@ pub async fn record_service_loop_heartbeat(
             WHERE service_name = $1
               AND instance_id = $2
               AND scope_kind = 'phase'
+              AND service_name = 'worker'
               AND EXISTS (SELECT 1 FROM registered_process)
         ),
         observed AS (
@@ -193,7 +193,7 @@ pub async fn begin_service_loop_phase(
     phase: &str,
 ) -> Result<()> {
     validate_identity(service_name, instance_id)?;
-    validate_phase(service_name, phase)?;
+    validate_phase(phase)?;
 
     let recorded = sqlx::query(
         r#"
@@ -269,7 +269,7 @@ pub async fn finish_service_loop_phase(
     phase: &str,
 ) -> Result<()> {
     validate_identity(service_name, instance_id)?;
-    validate_phase(service_name, phase)?;
+    validate_phase(phase)?;
 
     sqlx::query(
         r#"
@@ -459,7 +459,7 @@ pub async fn load_preferred_service_loop_heartbeats(
     pool: &PgPool,
     service_names: &[&str],
     max_age_seconds: i64,
-    phase_max_age_seconds: i64,
+    worker_phase_max_age_seconds: i64,
 ) -> Result<Vec<ServiceLoopHeartbeat>> {
     for service_name in service_names {
         validate_service_name(service_name)?;
@@ -467,8 +467,8 @@ pub async fn load_preferred_service_loop_heartbeats(
     if max_age_seconds <= 0 {
         bail!("heartbeat maximum age must be greater than zero seconds");
     }
-    if phase_max_age_seconds <= 0 {
-        bail!("heartbeat phase maximum age must be greater than zero seconds");
+    if worker_phase_max_age_seconds <= 0 {
+        bail!("worker heartbeat phase maximum age must be greater than zero seconds");
     }
 
     let rows = sqlx::query_as::<_, ServiceLoopHeartbeatRow>(
@@ -515,7 +515,10 @@ pub async fn load_preferred_service_loop_heartbeats(
                     ORDER BY
                         CASE
                             WHEN phase_heartbeat_at IS NOT NULL
-                                THEN phase_age_seconds <= $5
+                                THEN phase_age_seconds <= CASE
+                                    WHEN service_name = 'worker' THEN $5
+                                    ELSE $4
+                                END
                             ELSE age_seconds <= $4
                         END DESC,
                         process_heartbeat_at DESC,
@@ -542,7 +545,7 @@ pub async fn load_preferred_service_loop_heartbeats(
     .bind(PROCESS_SCOPE_KIND)
     .bind(PROCESS_SCOPE_ID)
     .bind(max_age_seconds)
-    .bind(phase_max_age_seconds)
+    .bind(worker_phase_max_age_seconds)
     .fetch_all(pool)
     .await
     .context("failed to load preferred service loop heartbeats")?;
@@ -588,10 +591,7 @@ fn validate_service_name(service_name: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_phase(service_name: &str, phase: &str) -> Result<()> {
-    if service_name != WORKER_SERVICE_NAME {
-        bail!("only the worker service may register phase-scoped heartbeats");
-    }
+fn validate_phase(phase: &str) -> Result<()> {
     let phase = phase.trim();
     if phase.is_empty() || phase == PROCESS_SCOPE_ID {
         bail!("heartbeat phase must be non-blank and must not equal process");
