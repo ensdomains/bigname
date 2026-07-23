@@ -35,6 +35,13 @@ pub(crate) fn log_raw_fact_normalized_event_replay_outcome(
         matched_raw_log_count = outcome.matched_raw_log_count,
         normalized_event_sync_total_count = outcome.normalized_event_synced_count,
         normalized_event_inserted_total_count = outcome.normalized_event_inserted_count,
+        identities_examined = outcome.stateless_replay_authority.identities_examined,
+        identities_inserted = outcome.stateless_replay_authority.identities_inserted,
+        identities_unchanged = outcome.stateless_replay_authority.identities_unchanged,
+        identities_superseded = outcome.stateless_replay_authority.identities_superseded,
+        identities_skipped_non_canonical_source = outcome
+            .stateless_replay_authority
+            .identities_skipped_non_canonical_source,
         "raw-fact normalized-event replay completed"
     );
 }

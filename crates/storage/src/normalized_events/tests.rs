@@ -2168,6 +2168,22 @@ fn ens_v1_registry_resolver_observation_key_repair_event(observation_key: &str) 
     event
 }
 
+fn ens_v1_registry_active_resolver_reattribution_event(
+    observation_key: &str,
+    from_contract_instance_id: &str,
+) -> NormalizedEvent {
+    let mut event = ens_v1_registry_resolver_observation_key_repair_event(observation_key);
+    event.raw_fact_ref["data_hex"] =
+        json!("000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047");
+    event.after_state["resolver"] = json!("0xa2c122be93b0074270ebee7f6b7292c7deb45047");
+    event.after_state["raw_resolver"] = json!("0xa2c122be93b0074270ebee7f6b7292c7deb45047");
+    event.after_state["tombstone"] = json!(false);
+    event.after_state["from_contract_instance_id"] = json!(from_contract_instance_id);
+    event.after_state["to_contract_instance_id"] = json!("dddd47ac-de4f-41e9-b044-11458aa9ba77");
+    event.after_state["active_edge"] = json!(true);
+    event
+}
+
 fn ens_v1_renewal_event(event_identity: &str, resource_id: Uuid) -> NormalizedEvent {
     let mut event = normalized_event(
         event_identity,
@@ -2559,6 +2575,321 @@ async fn normalized_event_upsert_rejects_identity_mismatch() -> Result<()> {
             .to_string()
             .contains("normalized event identity mismatch for event manifest:1:source_manifest"),
         "unexpected error: {error:#}"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn stateless_replay_authority_supersedes_content_and_journals_once() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let mut stale = normalized_event(
+        "ens-v1-reverse-claim:stale-vintage",
+        "ReverseChanged",
+        CanonicalityState::Canonical,
+    );
+    stale.source_family = "ens_v1_reverse_l1".to_owned();
+    stale.derivation_kind = "ens_v1_reverse_claim".to_owned();
+    stale.after_state = json!({
+        "address": "0x1111111111111111111111111111111111111111",
+        "namespace": "ens",
+        "coin_type": "60",
+        "reverse_name": "stale.addr.reverse"
+    });
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&stale)).await?;
+    let stored_id = sqlx::query_scalar::<_, i64>(
+        "SELECT normalized_event_id FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(&stale.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+
+    let mut current = stale.clone();
+    current.after_state["reverse_name"] =
+        json!("1111111111111111111111111111111111111111.addr.reverse");
+    let summary = upsert_normalized_events_with_stateless_replay_authority(
+        database.pool(),
+        std::slice::from_ref(&current),
+    )
+    .await?;
+    assert_eq!(
+        summary,
+        NormalizedEventReplayAuthoritySummary {
+            identities_examined: 1,
+            identities_inserted: 0,
+            identities_unchanged: 0,
+            identities_superseded: 1,
+            ..NormalizedEventReplayAuthoritySummary::default()
+        }
+    );
+
+    let stored = sqlx::query_as::<_, (i64, serde_json::Value, i64, i64, i64)>(
+        r#"
+        SELECT
+            event.normalized_event_id,
+            event.after_state,
+            COUNT(change.change_id)::BIGINT,
+            COUNT(*) FILTER (
+                WHERE change.change_kind = 'content_update'
+            )::BIGINT,
+            COUNT(*) FILTER (
+                WHERE change.change_kind = 'canonicality_update'
+            )::BIGINT
+        FROM normalized_events event
+        JOIN projection_normalized_event_changes change
+          ON change.normalized_event_id = event.normalized_event_id
+        WHERE event.event_identity = $1
+        GROUP BY event.normalized_event_id, event.after_state
+        "#,
+    )
+    .bind(&current.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(stored.0, stored_id, "replay must retain the durable row ID");
+    assert_eq!(stored.1, current.after_state);
+    assert_eq!(
+        stored.2, 2,
+        "insert and supersession must each be journaled"
+    );
+    assert_eq!(
+        stored.3, 1,
+        "supersession must use the content journal kind"
+    );
+    assert_eq!(
+        stored.4, 0,
+        "content-only supersession must not claim a canonicality transition"
+    );
+
+    let idempotent = upsert_normalized_events_with_stateless_replay_authority(
+        database.pool(),
+        std::slice::from_ref(&current),
+    )
+    .await?;
+    assert_eq!(idempotent.identities_unchanged, 1);
+    assert_eq!(idempotent.identities_superseded, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM projection_normalized_event_changes change
+            JOIN normalized_events event
+              ON event.normalized_event_id = change.normalized_event_id
+            WHERE event.event_identity = $1
+            "#,
+        )
+        .bind(&current.event_identity)
+        .fetch_one(database.pool())
+        .await?,
+        2,
+        "an unchanged replay must not append another change"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn stateless_replay_authority_skips_observed_and_orphaned_source_content() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let mut stored = normalized_event(
+        "ens-v1-reverse-claim:orphaned-source",
+        "ReverseChanged",
+        CanonicalityState::Canonical,
+    );
+    stored.source_family = "ens_v1_reverse_l1".to_owned();
+    stored.derivation_kind = "ens_v1_reverse_claim".to_owned();
+    stored.after_state = json!({"reverse_name": "canonical.addr.reverse"});
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&stored)).await?;
+    let change_count_before = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM projection_normalized_event_changes change
+        JOIN normalized_events event
+          ON event.normalized_event_id = change.normalized_event_id
+        WHERE event.event_identity = $1
+        "#,
+    )
+    .bind(&stored.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+
+    let mut observed = stored.clone();
+    observed.canonicality_state = CanonicalityState::Observed;
+    observed.after_state = json!({"reverse_name": "observed.addr.reverse"});
+    let observed_summary = upsert_normalized_events_with_stateless_replay_authority(
+        database.pool(),
+        std::slice::from_ref(&observed),
+    )
+    .await?;
+
+    assert_eq!(observed_summary.identities_examined, 1);
+    assert_eq!(observed_summary.identities_superseded, 0);
+    assert_eq!(observed_summary.identities_skipped_non_canonical_source, 1);
+
+    let mut orphaned = stored.clone();
+    orphaned.canonicality_state = CanonicalityState::Orphaned;
+    orphaned.after_state = json!({"reverse_name": "orphaned.addr.reverse"});
+    let orphaned_summary = upsert_normalized_events_with_stateless_replay_authority(
+        database.pool(),
+        std::slice::from_ref(&orphaned),
+    )
+    .await?;
+    assert_eq!(orphaned_summary.identities_examined, 1);
+    assert_eq!(orphaned_summary.identities_superseded, 0);
+    assert_eq!(orphaned_summary.identities_skipped_non_canonical_source, 1);
+    let retained = sqlx::query_as::<_, (serde_json::Value, String, i64)>(
+        r#"
+        SELECT
+            event.after_state,
+            event.canonicality_state::TEXT,
+            COUNT(change.change_id)::BIGINT
+        FROM normalized_events event
+        JOIN projection_normalized_event_changes change
+          ON change.normalized_event_id = event.normalized_event_id
+        WHERE event.event_identity = $1
+        GROUP BY event.after_state, event.canonicality_state
+        "#,
+    )
+    .bind(&stored.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(retained.0, stored.after_state);
+    assert_eq!(retained.1, "canonical");
+    assert_eq!(retained.2, change_count_before);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn stateless_replay_authority_journals_canonicality_only_transition() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let mut observed = normalized_event(
+        "ens-v1-reverse-claim:canonicality-only",
+        "ReverseChanged",
+        CanonicalityState::Observed,
+    );
+    observed.source_family = "ens_v1_reverse_l1".to_owned();
+    observed.derivation_kind = "ens_v1_reverse_claim".to_owned();
+    observed.after_state = json!({"reverse_name": "same.addr.reverse"});
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&observed)).await?;
+
+    let mut canonical = observed.clone();
+    canonical.canonicality_state = CanonicalityState::Canonical;
+    let summary = upsert_normalized_events_with_stateless_replay_authority(
+        database.pool(),
+        std::slice::from_ref(&canonical),
+    )
+    .await?;
+    assert_eq!(summary.identities_unchanged, 1);
+    assert_eq!(summary.identities_superseded, 0);
+
+    let journal = sqlx::query_as::<_, (i64, i64, i64, String)>(
+        r#"
+        SELECT
+            COUNT(*) FILTER (WHERE change.change_kind = 'insert')::BIGINT,
+            COUNT(*) FILTER (WHERE change.change_kind = 'content_update')::BIGINT,
+            COUNT(*) FILTER (WHERE change.change_kind = 'canonicality_update')::BIGINT,
+            event.canonicality_state::TEXT
+        FROM normalized_events event
+        JOIN projection_normalized_event_changes change
+          ON change.normalized_event_id = event.normalized_event_id
+        WHERE event.event_identity = $1
+        GROUP BY event.canonicality_state
+        "#,
+    )
+    .bind(&canonical.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(journal, (1, 0, 1, "canonical".to_owned()));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn stateless_replay_authority_journals_content_and_canonicality_transitions() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let mut observed = normalized_event(
+        "ens-v1-reverse-claim:content-and-canonicality",
+        "ReverseChanged",
+        CanonicalityState::Observed,
+    );
+    observed.source_family = "ens_v1_reverse_l1".to_owned();
+    observed.derivation_kind = "ens_v1_reverse_claim".to_owned();
+    observed.after_state = json!({"reverse_name": "stale.addr.reverse"});
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&observed)).await?;
+
+    let mut canonical = observed.clone();
+    canonical.canonicality_state = CanonicalityState::Canonical;
+    canonical.after_state = json!({"reverse_name": "current.addr.reverse"});
+    let summary = upsert_normalized_events_with_stateless_replay_authority(
+        database.pool(),
+        std::slice::from_ref(&canonical),
+    )
+    .await?;
+    assert_eq!(summary.identities_superseded, 1);
+
+    let journal = sqlx::query_as::<_, (i64, i64, i64, String)>(
+        r#"
+        SELECT
+            COUNT(*) FILTER (WHERE change.change_kind = 'insert')::BIGINT,
+            COUNT(*) FILTER (WHERE change.change_kind = 'content_update')::BIGINT,
+            COUNT(*) FILTER (WHERE change.change_kind = 'canonicality_update')::BIGINT,
+            event.canonicality_state::TEXT
+        FROM normalized_events event
+        JOIN projection_normalized_event_changes change
+          ON change.normalized_event_id = event.normalized_event_id
+        WHERE event.event_identity = $1
+        GROUP BY event.canonicality_state
+        "#,
+    )
+    .bind(&canonical.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(journal, (1, 1, 1, "canonical".to_owned()));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn stateless_replay_authority_rejects_projection_key_change() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let mut stored = normalized_event(
+        "ens-v1-reverse-claim:projection-key-change",
+        "ReverseChanged",
+        CanonicalityState::Canonical,
+    );
+    stored.source_family = "ens_v1_reverse_l1".to_owned();
+    stored.derivation_kind = "ens_v1_reverse_claim".to_owned();
+    stored.after_state = json!({
+        "address": "0x1111111111111111111111111111111111111111",
+        "namespace": "ens",
+        "coin_type": "60",
+        "reverse_name": "1111111111111111111111111111111111111111.addr.reverse"
+    });
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&stored)).await?;
+
+    let mut incoming = stored.clone();
+    incoming.after_state["address"] = json!("0x2222222222222222222222222222222222222222");
+    let error = upsert_normalized_events_with_stateless_replay_authority(
+        database.pool(),
+        std::slice::from_ref(&incoming),
+    )
+    .await
+    .expect_err("stateless replay must not strand the old projection key");
+    assert!(
+        error
+            .to_string()
+            .contains("would change downstream projection identity"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT after_state FROM normalized_events WHERE event_identity = $1",
+        )
+        .bind(&stored.event_identity)
+        .fetch_one(database.pool())
+        .await?,
+        stored.after_state,
+        "a rejected supersession must leave the stored row untouched"
     );
 
     database.cleanup().await
@@ -3189,7 +3520,7 @@ async fn normalized_event_upsert_repairs_ens_v1_renewal_resource_id_transition()
         JOIN normalized_events event
           ON event.normalized_event_id = change.normalized_event_id
         WHERE event.event_identity = $1
-          AND change.change_kind = 'canonicality_update'
+          AND change.change_kind = 'content_update'
         "#,
     )
     .bind(&event.event_identity)
@@ -4309,7 +4640,7 @@ async fn normalized_event_count_only_upsert_repairs_ens_v1_registry_event_time_r
         JOIN normalized_events event
           ON event.normalized_event_id = change.normalized_event_id
         WHERE event.event_identity = $1
-          AND change.change_kind = 'canonicality_update'
+          AND change.change_kind = 'content_update'
         "#,
     )
     .bind(&event.event_identity)
@@ -7329,7 +7660,7 @@ async fn normalized_event_count_only_upsert_repairs_ens_v1_registry_resolver_bef
         JOIN normalized_events event
           ON event.normalized_event_id = change.normalized_event_id
         WHERE event.event_identity = $1
-          AND change.change_kind = 'canonicality_update'
+          AND change.change_kind = 'content_update'
         "#,
     )
     .bind(&event.event_identity)
@@ -7432,7 +7763,7 @@ async fn normalized_event_count_only_upsert_repairs_ens_v1_registry_resolver_bef
         JOIN normalized_events event
           ON event.normalized_event_id = change.normalized_event_id
         WHERE event.event_identity = $1
-          AND change.change_kind = 'canonicality_update'
+          AND change.change_kind = 'content_update'
         "#,
     )
     .bind(&event.event_identity)
@@ -7492,13 +7823,120 @@ async fn normalized_event_count_only_upsert_repairs_ens_v1_registry_resolver_obs
         JOIN normalized_events event
           ON event.normalized_event_id = change.normalized_event_id
         WHERE event.event_identity = $1
-          AND change.change_kind = 'canonicality_update'
+          AND change.change_kind = 'content_update'
         "#,
     )
     .bind(&event.event_identity)
     .fetch_one(database.pool())
     .await?;
     assert_eq!(queued_change_count, 1);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_count_only_upsert_rejects_active_resolver_reattribution_without_exact_discovery_edge()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let node = "0xdea316f9d0b5800de3e6b0d31743113b679d9d30d004a2d4f8e4f257a21173ea";
+    let stale_key = format!("resolver:0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e:{node}");
+    let repaired_key = format!("resolver:0x314159265dd8dbb310642f98f50c066173c1259b:{node}");
+    let stale = ens_v1_registry_active_resolver_reattribution_event(
+        &stale_key,
+        "bbbb47ac-de4f-41e9-b044-11458aa9ba77",
+    );
+    let repaired = ens_v1_registry_active_resolver_reattribution_event(
+        &repaired_key,
+        "cccc47ac-de4f-41e9-b044-11458aa9ba77",
+    );
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&stale)).await?;
+
+    let error =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&repaired))
+            .await
+            .expect_err("active resolver reattribution without an edge must fail closed");
+    assert!(
+        format!("{error:#}").contains("lacks a matching reconciled discovery edge"),
+        "unexpected missing-edge error: {error:#}"
+    );
+
+    for contract_instance_id in [
+        "cccc47ac-de4f-41e9-b044-11458aa9ba77",
+        "dddd47ac-de4f-41e9-b044-11458aa9ba77",
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO contract_instances (
+                contract_instance_id,
+                chain_id,
+                contract_kind,
+                provenance
+            )
+            VALUES ($1::UUID, 'ethereum-mainnet', 'contract', '{}'::JSONB)
+            "#,
+        )
+        .bind(contract_instance_id)
+        .execute(database.pool())
+        .await?;
+    }
+    sqlx::query(
+        r#"
+        INSERT INTO discovery_edges (
+            chain_id,
+            edge_kind,
+            from_contract_instance_id,
+            to_contract_instance_id,
+            discovery_source,
+            admission,
+            active_from_block_number,
+            active_from_block_hash,
+            provenance
+        )
+        VALUES (
+            'ethereum-mainnet',
+            'resolver',
+            'cccc47ac-de4f-41e9-b044-11458aa9ba77'::UUID,
+            'dddd47ac-de4f-41e9-b044-11458aa9ba77'::UUID,
+            'ens_v1_registry_resolver:ethereum-mainnet',
+            'reachable_from_root',
+            3745840,
+            '0xmismatchedblock',
+            jsonb_build_object('observation_key', $1::TEXT)
+        )
+        "#,
+    )
+    .bind(&repaired_key)
+    .execute(database.pool())
+    .await?;
+
+    let error =
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&repaired))
+            .await
+            .expect_err("active resolver reattribution with a mismatched edge must fail closed");
+    assert!(
+        format!("{error:#}").contains("lacks a matching reconciled discovery edge"),
+        "unexpected mismatched-edge error: {error:#}"
+    );
+
+    let stored = sqlx::query_as::<_, (serde_json::Value, i64)>(
+        r#"
+        SELECT
+            event.after_state,
+            COUNT(change.change_id) FILTER (
+                WHERE change.change_kind = 'content_update'
+            )::BIGINT
+        FROM normalized_events event
+        LEFT JOIN projection_normalized_event_changes change
+          ON change.normalized_event_id = event.normalized_event_id
+        WHERE event.event_identity = $1
+        GROUP BY event.after_state
+        "#,
+    )
+    .bind(&stale.event_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(stored.0, stale.after_state);
+    assert_eq!(stored.1, 0);
 
     database.cleanup().await
 }
@@ -8794,7 +9232,7 @@ async fn normalized_event_upsert_enriches_ens_v1_reverse_name_profile_source() -
          JOIN normalized_events event \
            ON event.normalized_event_id = change.normalized_event_id \
          WHERE event.event_identity = $1 \
-           AND change.change_kind = 'canonicality_update'",
+           AND change.change_kind = 'content_update'",
     )
     .bind(&without_source.event_identity)
     .fetch_one(database.pool())
@@ -8844,7 +9282,7 @@ async fn normalized_event_upsert_rejects_ens_v1_reverse_name_profile_source_remo
          FROM normalized_events event \
          LEFT JOIN projection_normalized_event_changes change \
            ON change.normalized_event_id = event.normalized_event_id \
-          AND change.change_kind = 'canonicality_update' \
+          AND change.change_kind = 'content_update' \
          WHERE event.event_identity = $1 \
          GROUP BY event.after_state",
     )
@@ -8977,7 +9415,7 @@ async fn normalized_event_upsert_repairs_basenames_primary_claim_source_transiti
         JOIN normalized_events event
           ON event.normalized_event_id = change.normalized_event_id
         WHERE event.event_identity = $1
-          AND change.change_kind = 'canonicality_update'
+          AND change.change_kind = 'content_update'
         "#,
     )
     .bind(&event.event_identity)

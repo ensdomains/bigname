@@ -510,14 +510,20 @@ async fn load_manifest_declared_active_emitters(
         WHERE mv.rollout_status = 'active'
           AND mv.chain = $1
           AND mv.source_family IN ($2, $3)
-          AND EXISTS (
-              SELECT 1
-              FROM unnest($4::TEXT[], $5::TEXT[]) AS scoped(
-                  source_family,
-                  address
+          AND (
+              EXISTS (
+                  SELECT 1
+                  FROM unnest($4::TEXT[], $5::TEXT[]) AS scoped(
+                      source_family,
+                      address
+                  )
+                  WHERE scoped.source_family = mv.source_family
+                    AND scoped.address = lower(cia.address)
               )
-              WHERE scoped.source_family = mv.source_family
-                AND scoped.address = lower(cia.address)
+              OR (
+                  mv.source_family = $2
+                  AND COALESCE(mci.role, manifest_contract_role.role) = 'registry'
+              )
           )
         ORDER BY lower(cia.address), source_rank, source_manifest_id, contract_instance_id
         "#,

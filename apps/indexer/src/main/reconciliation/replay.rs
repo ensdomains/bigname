@@ -45,6 +45,7 @@ pub(crate) use classification::{
 enum RawFactReplayExecution {
     Complete,
     StatelessBeforeFullClosure,
+    StatelessOnlyAuthoritative,
 }
 
 impl RawFactReplayExecution {
@@ -52,6 +53,7 @@ impl RawFactReplayExecution {
         match self {
             Self::Complete => "complete",
             Self::StatelessBeforeFullClosure => "stateless_before_full_closure",
+            Self::StatelessOnlyAuthoritative => "stateless_only_authoritative",
         }
     }
 
@@ -60,7 +62,7 @@ impl RawFactReplayExecution {
     }
 
     const fn validates_request_profile(self) -> bool {
-        matches!(self, Self::Complete)
+        !matches!(self, Self::StatelessBeforeFullClosure)
     }
 }
 
@@ -84,6 +86,18 @@ pub(crate) async fn replay_stateless_normalized_events_before_full_closure(
         pool,
         request,
         RawFactReplayExecution::StatelessBeforeFullClosure,
+    )
+    .await
+}
+
+pub(crate) async fn replay_stateless_only_raw_fact_normalized_events(
+    pool: &sqlx::PgPool,
+    request: RawFactNormalizedEventReplayRequest,
+) -> Result<RawFactNormalizedEventReplayOutcome> {
+    replay_raw_fact_normalized_events_with_execution(
+        pool,
+        request,
+        RawFactReplayExecution::StatelessOnlyAuthoritative,
     )
     .await
 }
@@ -142,6 +156,9 @@ async fn replay_raw_fact_normalized_events_with_execution(
         RawFactReplayExecution::StatelessBeforeFullClosure => {
             RawFactReplayContractPlan::full_closure()
         }
+        RawFactReplayExecution::StatelessOnlyAuthoritative => {
+            RawFactReplayContractPlan::stateless_only_authoritative()
+        }
     };
 
     let adapter_sync_started = Instant::now();
@@ -153,6 +170,8 @@ async fn replay_raw_fact_normalized_events_with_execution(
             matched_log_count: 0,
             total_synced_count: 0,
             total_inserted_count: 0,
+            stateless_replay_authority:
+                bigname_storage::NormalizedEventReplayAuthoritySummary::default(),
             resolver_profile_authority_epoch_guard_count: 0,
             resolver_profile_authority_scan_count: 0,
         }
@@ -221,6 +240,21 @@ async fn replay_raw_fact_normalized_events_with_execution(
         matched_raw_log_count = normalized_event_summary.matched_log_count,
         normalized_event_synced_count = normalized_event_summary.total_synced_count,
         normalized_event_inserted_count = normalized_event_summary.total_inserted_count,
+        identities_examined = normalized_event_summary
+            .stateless_replay_authority
+            .identities_examined,
+        identities_inserted = normalized_event_summary
+            .stateless_replay_authority
+            .identities_inserted,
+        identities_unchanged = normalized_event_summary
+            .stateless_replay_authority
+            .identities_unchanged,
+        identities_superseded = normalized_event_summary
+            .stateless_replay_authority
+            .identities_superseded,
+        identities_skipped_non_canonical_source = normalized_event_summary
+            .stateless_replay_authority
+            .identities_skipped_non_canonical_source,
         load_selection_ms,
         profile_scope_ms,
         source_scope_ms,
@@ -240,6 +274,7 @@ async fn replay_raw_fact_normalized_events_with_execution(
         matched_raw_log_count: normalized_event_summary.matched_log_count,
         normalized_event_synced_count: normalized_event_summary.total_synced_count,
         normalized_event_inserted_count: normalized_event_summary.total_inserted_count,
+        stateless_replay_authority: normalized_event_summary.stateless_replay_authority,
     })
 }
 

@@ -21,6 +21,49 @@ fn run_cli_parses_per_chain_code_fallback_urls() {
 }
 
 #[test]
+fn replay_normalized_events_cli_exposes_stateless_only_authority() {
+    let command = <Cli as clap::CommandFactory>::command();
+    let replay_command = command
+        .get_subcommands()
+        .find(|command| command.get_name() == "replay")
+        .expect("CLI must expose the replay command");
+    let normalized_events_command = replay_command
+        .get_subcommands()
+        .find(|command| command.get_name() == "normalized-events")
+        .expect("replay CLI must expose normalized-events");
+    let stateless_only_arg = normalized_events_command
+        .get_arguments()
+        .find(|arg| arg.get_id() == "stateless_only")
+        .expect("normalized-events replay must expose --stateless-only");
+    assert_eq!(
+        stateless_only_arg.get_env(),
+        Some(std::ffi::OsStr::new(
+            "BIGNAME_INDEXER_REPLAY_NORMALIZED_EVENTS_STATELESS_ONLY"
+        ))
+    );
+
+    let cli = Cli::try_parse_from([
+        "bigname-indexer",
+        "replay",
+        "normalized-events",
+        "--deployment-profile",
+        "mainnet",
+        "--chain",
+        "ethereum-mainnet",
+        "--block-hash",
+        "0xabc",
+        "--stateless-only",
+    ])
+    .expect("normalized-events replay CLI must accept --stateless-only");
+    let Command::Replay(replay) = cli.command else {
+        panic!("replay command must parse as Command::Replay");
+    };
+    let ReplayCommand::NormalizedEvents(args) = replay.command;
+    assert!(args.stateless_only);
+    assert_eq!(args.block_hashes, vec!["0xabc"]);
+}
+
+#[test]
 fn run_cli_parses_startup_discovery_page_logs() {
     let command = <Cli as clap::CommandFactory>::command();
     let run_command = command

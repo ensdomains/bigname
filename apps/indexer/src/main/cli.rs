@@ -485,6 +485,8 @@ pub(crate) struct ReplayNormalizedEventsArgs {
     pub(crate) to_block: Option<i64>,
     #[arg(long = "block-hash", value_name = "BLOCK_HASH")]
     pub(crate) block_hashes: Vec<String>,
+    #[arg(long, env = "BIGNAME_INDEXER_REPLAY_NORMALIZED_EVENTS_STATELESS_ONLY")]
+    pub(crate) stateless_only: bool,
 }
 
 #[derive(Args, Debug)]

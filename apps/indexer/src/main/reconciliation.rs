@@ -77,8 +77,8 @@ pub(crate) use replay::{
     chain_has_closure_or_dependency_replay_adapter,
     ensure_full_closure_retention_authority_for_adapters,
     ensure_legacy_registry_closure_retention_authority_for_adapters,
-    replay_raw_fact_normalized_events, select_log_bounded_replay_to_block,
-    unsupported_closure_replay_adapters,
+    replay_raw_fact_normalized_events, replay_stateless_only_raw_fact_normalized_events,
+    select_log_bounded_replay_to_block, unsupported_closure_replay_adapters,
 };
 #[allow(unused_imports)]
 pub(crate) use types::{

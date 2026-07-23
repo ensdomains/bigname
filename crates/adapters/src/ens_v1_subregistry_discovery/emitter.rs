@@ -16,7 +16,7 @@ use super::{
 
 const NORMALIZED_EVENT_UPSERT_CHUNK_SIZE: usize = 5_000;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct RegistryChangedEventEmitSummary {
     pub synced_count: usize,
     pub inserted_count: usize,

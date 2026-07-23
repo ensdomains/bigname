@@ -16,6 +16,8 @@ mod identity;
 mod metrics;
 #[path = "upsert/repair.rs"]
 mod repair;
+#[path = "upsert/replay_authority.rs"]
+mod replay_authority;
 #[path = "upsert/sanitize.rs"]
 mod sanitize;
 
@@ -28,6 +30,9 @@ use metrics::{count_normalized_events_by_event_kind, count_normalized_events_by_
 use repair::{
     repair_after_state_conflicts, repair_resource_id_conflicts,
     supersede_basenames_registry_boundary_derivation_change_events,
+};
+pub use replay_authority::{
+    NormalizedEventReplayAuthoritySummary, upsert_normalized_events_with_stateless_replay_authority,
 };
 use sanitize::jsonb_safe_normalized_event;
 pub use sanitize::serialize_jsonb_value;

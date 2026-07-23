@@ -563,6 +563,8 @@ async fn replay_full_closure_or_dependency_normalized_events(
     .await?;
     let stateless = replay.stateless;
     let closure = replay.closure;
+    let mut stateless_replay_authority = stateless.stateless_replay_authority.clone();
+    stateless_replay_authority.add(&closure.stateless_replay_authority);
 
     Ok(RawFactNormalizedEventReplayOutcome {
         deployment_profile: deployment_profile.to_owned(),
@@ -577,5 +579,6 @@ async fn replay_full_closure_or_dependency_normalized_events(
             + closure.total_synced_count,
         normalized_event_inserted_count: stateless.normalized_event_inserted_count
             + closure.total_inserted_count,
+        stateless_replay_authority,
     })
 }

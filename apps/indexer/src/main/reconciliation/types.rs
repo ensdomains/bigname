@@ -153,6 +153,7 @@ pub(crate) struct RawFactNormalizedEventReplayOutcome {
     pub(crate) matched_raw_log_count: usize,
     pub(crate) normalized_event_synced_count: usize,
     pub(crate) normalized_event_inserted_count: usize,
+    pub(crate) stateless_replay_authority: bigname_storage::NormalizedEventReplayAuthoritySummary,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -161,6 +162,7 @@ pub(crate) struct PersistedRawPayloadAdapterSyncSummary {
     pub(crate) matched_log_count: usize,
     pub(crate) total_synced_count: usize,
     pub(crate) total_inserted_count: usize,
+    pub(crate) stateless_replay_authority: bigname_storage::NormalizedEventReplayAuthoritySummary,
     /// Cheap per-chain discovery-epoch guards performed by this sync.
     pub(crate) resolver_profile_authority_epoch_guard_count: usize,
     /// Whole-authority scans performed only after a discovery mutation.
@@ -179,5 +181,12 @@ impl PersistedRawPayloadAdapterSyncSummary {
         self.matched_log_count += matched_log_count;
         self.total_synced_count += total_synced_count;
         self.total_inserted_count += total_inserted_count;
+    }
+
+    pub(super) fn add_stateless_replay_authority(
+        &mut self,
+        summary: &bigname_storage::NormalizedEventReplayAuthoritySummary,
+    ) {
+        self.stateless_replay_authority.add(summary);
     }
 }

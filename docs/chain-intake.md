@@ -355,7 +355,7 @@ For ENSv2, “retained-history metadata proves the raw-log replay boundary is co
 
 Selected-target replay scopes are operational scan bounds. For ENSv1 generic resolver-local events, replay may narrow which persisted raw logs the adapter resubmits, but the scope does not promote any coverage to supported, mutate resolver profiles, suppress otherwise retained generic resolver observations, or make resolver-profile state the source of truth for observed selector/cache facts.[^bigname-replay-source][^bigname-coverage-source]
 
-Replay does not delete stale `normalized_events`, purge rows derived from selected blocks, or replace existing payloads for an already persisted normalized-event identity. Existing identities refresh only through the storage upsert canonicality path; stale conflicting payloads stay a hard storage mismatch rather than being rewritten by replay. Raw facts and lineage stay immutable, projection rebuild stays downstream worker-owned, and API responses keep reading projections and execution output rather than the replay runner.[^bigname-replay-source][^bigname-projection-source]
+Ordinary replay does not delete stale `normalized_events` or purge rows derived from selected blocks, and an unratified payload conflict for an already persisted normalized-event identity remains a hard storage mismatch. Replacement is limited to the field-level adapter repairs documented in the storage contract and the explicit `--stateless-only` authority. A documented adapter repair may replace only its enumerated fields after its closure and contextual proofs succeed. From a canonical source, `--stateless-only` may replace projection-key-preserving content only for producers classified `stateless_raw_fact`. Both paths journal semantic replacement for downstream re-derivation. Raw facts and lineage stay immutable, projection rebuild stays downstream worker-owned, and API responses keep reading projections and execution output rather than the replay runner.[^bigname-replay-source][^bigname-projection-source]
 
 ## Atomicity boundary
 
@@ -370,7 +370,7 @@ The raw admission transaction boundary is one block. That transaction writes:[^b
 - durable resolver-profile input changes when the effective non-orphaned code hash changes
 - invalidation signals required by downstream workers
 
-The canonical head pointer writes last inside that admission unit. Projection workers stay downstream and asynchronous, but they consume deterministic block-scoped invalidation and replay inputs through `projection_normalized_event_changes` and `projection_invalidations` so reorg repair stays reproducible. Normalized-event inserts and canonicality-state updates both append projection-consumable changes.[^bigname-atomicity-source][^bigname-projection-source]
+The canonical head pointer writes last inside that admission unit. Projection workers stay downstream and asynchronous, but they consume deterministic block-scoped invalidation and replay inputs through `projection_normalized_event_changes` and `projection_invalidations` so reorg repair stays reproducible. Normalized-event inserts, admitted semantic content updates, and canonicality-state updates append projection-consumable changes.[^bigname-atomicity-source][^bigname-projection-source]
 
 ## Traces, pending, optional capabilities
 
@@ -395,7 +395,7 @@ The intake contract is acceptable when the storage, projection, API, and executi
 - Block-scoped data ingestion never depends on ambiguous number-only reads when a block-hash-scoped primitive exists.
 - Raw facts are sufficient to rebuild canonical declared state after a reorg or decoder rewrite.
 - Backfill reuses the same downstream semantics as live ingestion.
-- Raw-fact normalized-event replay upserts normalized events only from persisted canonical selected replay facts without payload replacement, stale-row purge, projection rebuild, public API exposure, or chain/backfill checkpoint mutation.
+- Raw-fact normalized-event replay upserts normalized events only from persisted canonical selected replay facts without stale-row purge, projection rebuild, public API exposure, or chain/backfill checkpoint mutation. Ordinary replay rejects payload conflicts except for the field-level adapter repairs ratified in the storage contract; `--stateless-only` may replace only projection-key-preserving content for `stateless_raw_fact` producers. Every admitted replacement must publish through the normalized-event change journal.
 - Any explicit replay cache refill uses provider re-fetch only as a block-hash-scoped, retained-digest-checked, fail-closed cache-fill path; missing digests, mismatched bytes, or unavailable historical payloads fail closed, and selected replay facts never depend on provider history.
 
 ---

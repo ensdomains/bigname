@@ -85,7 +85,7 @@ pub(crate) async fn repair_primary_claim_source_after_states(
             SELECT
                 normalized_event_id,
                 now(),
-                'canonicality_update',
+                'content_update',
                 canonicality_state
             FROM updated
             RETURNING

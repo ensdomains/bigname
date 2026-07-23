@@ -25,6 +25,7 @@ pub use block_derived_normalized_events::{
     BlockDerivedNormalizedEventKindSyncSummary, BlockDerivedNormalizedEventSyncSummary,
     sync_block_derived_normalized_events,
     sync_block_derived_normalized_events_with_scanned_log_count,
+    sync_block_derived_normalized_events_with_stateless_replay_authority,
 };
 pub use checkpoint_context::{
     ReplayAdapterCheckpointContext, StartupAdapterCheckpointContext, StartupAdapterProgress,

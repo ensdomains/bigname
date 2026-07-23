@@ -74,7 +74,7 @@ pub(super) async fn sync_ens_v1_subregistry_discovery_with_checkpoint_context(
     let raw_log_guard = acquire_raw_log_staging_read_guard(pool, chain).await?;
     let mut checkpoint = checkpoint.clone();
     let summary = loop {
-        let (summary, repeat_checkpoint_replay) = sync_ens_v1_subregistry_discovery_with_scope(
+        let (summary, repeat_checkpoint_replay, _) = sync_ens_v1_subregistry_discovery_with_scope(
             pool,
             chain,
             false,

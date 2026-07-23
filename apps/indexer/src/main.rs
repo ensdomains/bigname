@@ -485,16 +485,16 @@ async fn run_replay_normalized_events(args: ReplayNormalizedEventsArgs) -> Resul
             "bigname-indexer",
         )
         .await?;
-    let outcome = replay_raw_fact_normalized_events(
-        &pool,
-        RawFactNormalizedEventReplayRequest {
-            deployment_profile: args.deployment_profile,
-            chain: args.chain,
-            selection,
-        },
-    )
-    .await?;
-
+    let request = RawFactNormalizedEventReplayRequest {
+        deployment_profile: args.deployment_profile,
+        chain: args.chain,
+        selection,
+    };
+    let outcome = if args.stateless_only {
+        replay_stateless_only_raw_fact_normalized_events(&pool, request).await?
+    } else {
+        replay_raw_fact_normalized_events(&pool, request).await?
+    };
     log_raw_fact_normalized_event_replay_outcome(&outcome);
     Ok(())
 }

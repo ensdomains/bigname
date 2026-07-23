@@ -367,6 +367,7 @@ async fn update_text_record_after_states(
         r#"
         UPDATE normalized_events AS events
         SET after_state = input.after_state::jsonb,
+            canonicality_state = events.canonicality_state,
             observed_at = now()
         FROM unnest($1::BIGINT[], $2::TEXT[]) AS input(
             normalized_event_id,

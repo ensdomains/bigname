@@ -25,7 +25,7 @@ pub async fn sync_ens_v1_subregistry_discovery(
         &mut None,
     )
     .await
-    .map(|(summary, _)| summary)
+    .map(|(summary, _, _)| summary)
 }
 
 /// Reconcile the complete retained ENSv1/Basenames registry source through an
@@ -53,7 +53,7 @@ pub async fn sync_ens_v1_subregistry_discovery_through_block(
         &mut None,
     )
     .await
-    .map(|(summary, _)| summary)
+    .map(|(summary, _, _)| summary)
 }
 
 /// Target-bounded complete-source reconciliation which accepts absence only
@@ -80,7 +80,7 @@ pub async fn sync_ens_v1_subregistry_discovery_through_block_with_expected_admis
         &mut None,
     )
     .await
-    .map(|(summary, _)| summary)
+    .map(|(summary, _, _)| summary)
 }
 
 impl EnsV1SubregistryDiscoverySyncSummary {
@@ -105,7 +105,7 @@ impl EnsV1SubregistryDiscoverySyncSummary {
             &mut None,
         )
         .await
-        .map(|(summary, _)| summary)
+        .map(|(summary, _, _)| summary)
     }
 
     pub async fn sync_for_block_hashes_with_source_scope_without_discovery_reconciliation(
@@ -129,7 +129,7 @@ impl EnsV1SubregistryDiscoverySyncSummary {
             &mut None,
         )
         .await
-        .map(|(summary, _)| summary)
+        .map(|(summary, _, _)| summary)
     }
 
     pub async fn sync_for_block_hashes_without_discovery_reconciliation(
@@ -152,6 +152,6 @@ impl EnsV1SubregistryDiscoverySyncSummary {
             &mut None,
         )
         .await
-        .map(|(summary, _)| summary)
+        .map(|(summary, _, _)| summary)
     }
 }

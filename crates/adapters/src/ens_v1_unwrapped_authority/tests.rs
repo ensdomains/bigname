@@ -12014,19 +12014,21 @@ async fn sync_ens_v1_reverse_name_observation_converges_across_profile_reclassif
         "orphaned"
     );
 
-    let repaired_change_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)::BIGINT \
+    let (content_change_count, canonicality_change_count): (i64, i64) = sqlx::query_as(
+        "SELECT \
+             COUNT(*) FILTER (WHERE change.change_kind = 'content_update')::BIGINT, \
+             COUNT(*) FILTER (WHERE change.change_kind = 'canonicality_update')::BIGINT \
          FROM projection_normalized_event_changes change \
          JOIN normalized_events event \
            ON event.normalized_event_id = change.normalized_event_id \
          WHERE event.event_kind = 'RecordChanged' \
            AND event.logical_name_id IS NULL \
-           AND event.after_state->>'record_key' = 'name' \
-           AND change.change_kind = 'canonicality_update'",
+           AND event.after_state->>'record_key' = 'name'",
     )
     .fetch_one(database.pool())
     .await?;
-    assert_eq!(repaired_change_count, 2);
+    assert_eq!(content_change_count, 1);
+    assert_eq!(canonicality_change_count, 1);
     let (generation, key_payload): (i64, Value) = sqlx::query_as(
         "SELECT generation, key_payload \
          FROM projection_invalidations \

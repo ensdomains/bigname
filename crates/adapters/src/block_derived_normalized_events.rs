@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::Result;
+use bigname_storage::NormalizedEventReplayAuthoritySummary;
 use sqlx::PgPool;
 use tracing::info;
 
@@ -21,6 +22,7 @@ mod types;
 
 use crate::normalized_event_support::{
     NormalizedEventSyncCounts, count_events_by_kind, upsert_normalized_events_with_counts,
+    upsert_normalized_events_with_stateless_replay_authority_counts,
 };
 use event_builders::build_preimage_observed_events;
 use loading::{RawLogCanonicalityFilter, load_scanned_log_count, load_watched_raw_logs};
@@ -58,8 +60,10 @@ pub async fn sync_block_derived_normalized_events(
         source_scope,
         RawLogCanonicalityFilter::IncludeObserved,
         None,
+        false,
     )
     .await
+    .map(|(summary, _)| summary)
 }
 
 /// Sync block-derived normalized events when the caller already knows how many
@@ -78,6 +82,31 @@ pub async fn sync_block_derived_normalized_events_with_scanned_log_count(
         source_scope,
         RawLogCanonicalityFilter::CanonicalOnly,
         Some(scanned_log_count),
+        false,
+    )
+    .await
+    .map(|(summary, _)| summary)
+}
+
+/// Sync selected block-derived rows with explicit stateless replay authority.
+pub async fn sync_block_derived_normalized_events_with_stateless_replay_authority(
+    pool: &PgPool,
+    chain: &str,
+    block_hashes: &[String],
+    source_scope: Option<&[(String, String, i64, i64)]>,
+    scanned_log_count: usize,
+) -> Result<(
+    BlockDerivedNormalizedEventSyncSummary,
+    NormalizedEventReplayAuthoritySummary,
+)> {
+    sync_block_derived_normalized_events_inner(
+        pool,
+        chain,
+        block_hashes,
+        source_scope,
+        RawLogCanonicalityFilter::CanonicalOnly,
+        Some(scanned_log_count),
+        true,
     )
     .await
 }
@@ -89,9 +118,16 @@ async fn sync_block_derived_normalized_events_inner(
     source_scope: Option<&[(String, String, i64, i64)]>,
     canonicality_filter: RawLogCanonicalityFilter,
     known_scanned_log_count: Option<usize>,
-) -> Result<BlockDerivedNormalizedEventSyncSummary> {
+    stateless_replay_authority: bool,
+) -> Result<(
+    BlockDerivedNormalizedEventSyncSummary,
+    NormalizedEventReplayAuthoritySummary,
+)> {
     if block_hashes.is_empty() {
-        return Ok(empty_summary(known_scanned_log_count.unwrap_or(0)));
+        return Ok((
+            empty_summary(known_scanned_log_count.unwrap_or(0)),
+            NormalizedEventReplayAuthoritySummary::default(),
+        ));
     }
 
     let total_started = Instant::now();
@@ -124,7 +160,7 @@ async fn sync_block_derived_normalized_events_inner(
             0,
             total_started.elapsed().as_millis(),
         );
-        return Ok(summary);
+        return Ok((summary, NormalizedEventReplayAuthoritySummary::default()));
     }
 
     let build_started = Instant::now();
@@ -171,14 +207,25 @@ async fn sync_block_derived_normalized_events_inner(
             0,
             total_started.elapsed().as_millis(),
         );
-        return Ok(summary);
+        return Ok((summary, NormalizedEventReplayAuthoritySummary::default()));
     }
 
     let event_kind_counts = count_events_by_kind(&events);
     let persistence_started = Instant::now();
-    let counts =
-        upsert_normalized_events_with_counts(pool, &events, "block-derived normalized-event")
-            .await?;
+    let (counts, authority) = if stateless_replay_authority {
+        upsert_normalized_events_with_stateless_replay_authority_counts(
+            pool,
+            &events,
+            "block-derived normalized-event",
+        )
+        .await?
+    } else {
+        (
+            upsert_normalized_events_with_counts(pool, &events, "block-derived normalized-event")
+                .await?,
+            NormalizedEventReplayAuthoritySummary::default(),
+        )
+    };
     let persistence_ms = persistence_started.elapsed().as_millis();
 
     let summary = build_summary(scanned_log_count, matched_log_refs.len(), counts);
@@ -197,7 +244,7 @@ async fn sync_block_derived_normalized_events_inner(
         total_started.elapsed().as_millis(),
     );
 
-    Ok(summary)
+    Ok((summary, authority))
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

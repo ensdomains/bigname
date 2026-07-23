@@ -206,12 +206,7 @@ pub use name_current::{
     load_name_current_list_row_by_namehash, name_current_list_cursor_from_row,
     replace_name_current_rows, upsert_name_current_rows,
 };
-pub use normalized_events::{
-    NormalizedEvent, NormalizedEventUpsertSummary, load_normalized_event_counts_by_kind,
-    load_normalized_events_by_namespace, mark_block_derived_normalized_events_range_orphaned,
-    serialize_jsonb_value, upsert_normalized_events, upsert_normalized_events_count_only,
-    upsert_normalized_events_count_only_in_transaction, upsert_normalized_events_with_summary,
-};
+pub use normalized_events::*;
 pub use permissions::{
     PERMISSIONS_CURRENT_PUBLICATION_VERSION, PermissionCoverageExhaustiveness,
     PermissionCoverageStatus, PermissionCoverageUnsupportedReason, PermissionScope,

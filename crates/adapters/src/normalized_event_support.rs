@@ -4,7 +4,10 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use bigname_storage::{NormalizedEvent, upsert_normalized_events};
+use bigname_storage::{
+    NormalizedEvent, NormalizedEventReplayAuthoritySummary, upsert_normalized_events,
+    upsert_normalized_events_with_stateless_replay_authority,
+};
 use sqlx::PgPool;
 use tracing::info;
 
@@ -101,6 +104,32 @@ pub(crate) async fn upsert_normalized_events_with_counts(
     Ok(counts)
 }
 
+pub(crate) async fn upsert_normalized_events_with_stateless_replay_authority_counts(
+    pool: &PgPool,
+    events: &[NormalizedEvent],
+    adapter_label: &str,
+) -> Result<(
+    NormalizedEventSyncCounts,
+    NormalizedEventReplayAuthoritySummary,
+)> {
+    let total_started = Instant::now();
+    let authority = upsert_normalized_events_with_stateless_replay_authority(pool, events).await?;
+    let counts = stateless_replay_counts(events, &authority);
+    info!(
+        service = "adapters",
+        adapter = adapter_label,
+        total_synced_count = counts.total_synced_count,
+        total_inserted_count = counts.total_inserted_count,
+        identities_examined = authority.identities_examined,
+        identities_unchanged = authority.identities_unchanged,
+        identities_superseded = authority.identities_superseded,
+        identities_skipped_non_canonical_source = authority.identities_skipped_non_canonical_source,
+        elapsed_ms = total_started.elapsed().as_millis(),
+        "adapter stateless replay authority persistence completed"
+    );
+    Ok((counts, authority))
+}
+
 pub(crate) async fn upsert_normalized_events_in_chunks_with_counts(
     pool: &PgPool,
     events: &[NormalizedEvent],
@@ -115,6 +144,52 @@ pub(crate) async fn upsert_normalized_events_in_chunks_with_counts(
         None,
     )
     .await
+}
+
+pub(crate) async fn upsert_normalized_events_in_chunks_with_stateless_replay_authority_counts(
+    pool: &PgPool,
+    events: &[NormalizedEvent],
+    adapter_label: &str,
+    chunk_size: usize,
+) -> Result<(
+    NormalizedEventSyncCounts,
+    NormalizedEventReplayAuthoritySummary,
+)> {
+    if chunk_size == 0 {
+        bail!("normalized event upsert chunk size must be positive");
+    }
+
+    let mut authority = NormalizedEventReplayAuthoritySummary::default();
+    for chunk in events.chunks(chunk_size) {
+        authority
+            .add(&upsert_normalized_events_with_stateless_replay_authority(pool, chunk).await?);
+    }
+    let counts = stateless_replay_counts(events, &authority);
+    info!(
+        service = "adapters",
+        adapter = adapter_label,
+        chunk_size,
+        total_synced_count = counts.total_synced_count,
+        total_inserted_count = counts.total_inserted_count,
+        identities_examined = authority.identities_examined,
+        identities_unchanged = authority.identities_unchanged,
+        identities_superseded = authority.identities_superseded,
+        identities_skipped_non_canonical_source = authority.identities_skipped_non_canonical_source,
+        "adapter chunked stateless replay authority persistence completed"
+    );
+    Ok((counts, authority))
+}
+
+fn stateless_replay_counts(
+    events: &[NormalizedEvent],
+    authority: &NormalizedEventReplayAuthoritySummary,
+) -> NormalizedEventSyncCounts {
+    NormalizedEventSyncCounts {
+        synced_by_kind: count_events_by_kind(events),
+        inserted_by_kind: authority.inserted_by_event_kind.clone(),
+        total_synced_count: events.len(),
+        total_inserted_count: authority.identities_inserted,
+    }
 }
 
 pub(crate) async fn upsert_normalized_events_in_chunks_with_counts_and_progress(

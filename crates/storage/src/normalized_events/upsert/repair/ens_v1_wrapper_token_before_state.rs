@@ -79,7 +79,7 @@ pub(crate) async fn repair_ens_v1_wrapper_token_before_states(
             SELECT
                 normalized_event_id,
                 now(),
-                'canonicality_update',
+                'content_update',
                 canonicality_state
             FROM updated
             RETURNING normalized_event_id
