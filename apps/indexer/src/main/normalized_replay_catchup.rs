@@ -44,6 +44,8 @@ pub(crate) use test_hook::{
     install_before_cursor_failure_record as install_before_cursor_failure_record_test_hook,
 };
 
+#[cfg(test)]
+pub(crate) use coverage_recovery::recover_ens_v2_live_coverage_requirement_for_replay;
 use coverage_recovery::replay_full_closure_with_coverage_recovery;
 use cursors::{
     advance_cursor, ensure_cursor, record_cursor_failure,

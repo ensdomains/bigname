@@ -137,11 +137,13 @@ impl UnwrappedAuthorityReplayCheckpoint {
                     &events,
                 )
                 .await?;
-            delete_checkpoint_items(
+            delete_checkpoint_items_with_progress(
+                pool,
                 &mut transaction,
                 self,
                 ITEM_KIND_STARTUP_PENDING_EVENT,
                 &item_keys,
+                startup_progress,
             )
             .await?;
             let next_inserted_count = staged_events
