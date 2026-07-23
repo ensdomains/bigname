@@ -43,7 +43,6 @@ pub(super) async fn orphan_canonical_branch_with_progress(
     stop_before_hash: Option<&str>,
     progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<usize> {
-    let mut orphaned_block_count = 0usize;
     let mut cursor_hash = Some(from_hash.to_owned());
 
     while let Some(block_hash) = cursor_hash {
@@ -58,16 +57,13 @@ pub(super) async fn orphan_canonical_branch_with_progress(
                     "missing stored lineage row for chain {chain} block {block_hash} while orphaning the losing branch"
                 )
             })?;
-        let parent_hash = block.parent_hash.clone();
-        let snapshots =
-            mark_chain_lineage_range_orphaned(pool, chain, &block_hash, parent_hash.as_deref())
-                .await?;
-        orphaned_block_count += snapshots.len();
-        cursor_hash = parent_hash;
+        cursor_hash = block.parent_hash;
         record_live_progress(pool, progress).await?;
     }
 
-    Ok(orphaned_block_count)
+    let snapshots =
+        mark_chain_lineage_range_orphaned(pool, chain, from_hash, stop_before_hash).await?;
+    Ok(snapshots.len())
 }
 
 #[allow(dead_code)]
