@@ -596,6 +596,7 @@ and must be allowed to make the heartbeat stale.
 | indexer startup adapter sync | ENSv2 permissions | covered (#221/#237) | Completed raw-log/processing pages and bounded resource/event writes. |
 | indexer startup | plan source identities, targets, segments, reservations, and coverage for hash-pinned bootstrap | newly-covered (#229) | Completed 1,000-target planning/identity pages, durable reservation and coverage pages, and completed worker-result handling. |
 | indexer startup | execute hash-pinned bootstrap provider units | covered (#213) | Provider-backed ranges are divided into at-most-32-block progress units; a beat follows only a fully persisted unit. Worker completion and failure remain coordinator-owned. |
+| indexer startup | replay normalized events from each completed hash-pinned bootstrap range | newly-covered (#229) | Reuses the normalized-event replay progress entrypoint so completed raw-log, processing, and persistence pages beat before the enclosing bootstrap segment completes. |
 | indexer startup | post-bootstrap adapter synchronization | covered (#213/#221/#237) | Reuses every adapter's page progress route and records completed family boundaries. |
 | indexer startup | widen bootstrap admission to the live watch plan | newly-covered (#229) | Reuses manifest/discovery page progress and records each 10,000-address plan/task copy or comparison chunk. |
 | indexer startup | initial resolver authority journal and resolver-profile convergence | newly-covered (#229) | Uses the authority and convergence boundaries described below. |

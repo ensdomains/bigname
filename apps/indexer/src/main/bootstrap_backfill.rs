@@ -18,7 +18,6 @@ use crate::{
     reconciliation::{
         HeaderAuditMode, RawFactNormalizedEventReplayRequest,
         RawFactNormalizedEventReplaySelection, log_raw_fact_normalized_event_replay_outcome,
-        replay_raw_fact_normalized_events,
     },
     run::startup_heartbeat::{StartupAdapterHeartbeat, StartupHeartbeat},
     runtime::{IntakeChainTask, validate_provider_registry_for_intake_tasks},
@@ -40,6 +39,8 @@ mod planning;
 mod progress;
 #[path = "bootstrap_backfill/recovery.rs"]
 mod recovery;
+#[path = "bootstrap_backfill/replay.rs"]
+mod replay;
 
 use checkpoints::{load_bootstrap_segment_checkpoint, load_bootstrap_target_checkpoint};
 #[cfg(test)]
@@ -78,6 +79,10 @@ pub(crate) use recovery::{
     automatic_backfill_retention_snapshot_is_stable,
     converge_ens_v2_retained_history_through_block, load_bootstrap_retention_snapshot,
 };
+#[cfg(not(test))]
+use replay::replay_completed_bootstrap_raw_range;
+#[cfg(test)]
+pub(crate) use replay::replay_completed_bootstrap_raw_range;
 const BOOTSTRAP_BACKFILL_LEASE_DURATION_SECS: u64 = 300;
 pub(crate) const DEFAULT_BOOTSTRAP_BACKFILL_WORKERS: usize = 0;
 pub(crate) const DEFAULT_BOOTSTRAP_BACKFILL_RANGE_BLOCKS: i64 = 50_000;

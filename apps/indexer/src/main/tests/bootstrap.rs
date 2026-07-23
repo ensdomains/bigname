@@ -69,6 +69,93 @@ fn bootstrap_planning_uses_finalized_head_and_fails_closed_without_it() -> Resul
     Ok(())
 }
 
+#[tokio::test]
+async fn post_bootstrap_normalized_replay_preserves_per_page_heartbeats() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let reverse_address = "0x0000000000000000000000000000000000000229";
+    let block = provider_block(
+        "0x2290229022902290229022902290229022902290229022902290229022902290",
+        None,
+        229,
+    );
+    insert_active_replay_manifest_contract(
+        database.pool(),
+        229,
+        "ens",
+        "ens_v1_reverse_l1",
+        chain,
+        "ens_v1",
+        Uuid::from_u128(0x229),
+        reverse_address,
+        "reverse_registrar",
+    )
+    .await?;
+    upsert_raw_blocks(
+        database.pool(),
+        &[provider_block_to_raw_block(
+            chain,
+            &block,
+            CanonicalityState::Canonical,
+        )],
+    )
+    .await?;
+    let raw_logs = (0_i64..1_001)
+        .map(|log_index| RawLog {
+            chain_id: chain.to_owned(),
+            block_hash: block.block_hash.clone(),
+            block_number: block.block_number,
+            transaction_hash:
+                "0x2291229122912291229122912291229122912291229122912291229122912291"
+                    .to_owned(),
+            transaction_index: 0,
+            log_index,
+            emitting_address: reverse_address.to_owned(),
+            topics: Vec::new(),
+            data: Vec::new(),
+            canonicality_state: CanonicalityState::Canonical,
+        })
+        .collect::<Vec<_>>();
+    upsert_raw_logs(database.pool(), &raw_logs).await?;
+
+    let instance_id = "post-bootstrap-normalized-replay-progress-test";
+    install_stale_indexer_heartbeat(database.pool(), instance_id).await?;
+    let mut heartbeat = crate::run::startup_heartbeat::StartupHeartbeat::new(
+        instance_id.to_owned(),
+        tokio::time::Duration::ZERO,
+    );
+    let chain_ids = vec![chain.to_owned()];
+    let progress_before = heartbeat.adapter_progress_count();
+    let outcome = replay_completed_bootstrap_raw_range(
+        database.pool(),
+        RawFactNormalizedEventReplayRequest {
+            deployment_profile: "mainnet".to_owned(),
+            chain: chain.to_owned(),
+            selection: RawFactNormalizedEventReplaySelection::ScopedBlockRange {
+                from_block: block.block_number,
+                to_block: block.block_number,
+                source_scope: vec![crate::source_scope::SourceScopeTarget {
+                    source_family: "ens_v1_reverse_l1".to_owned(),
+                    address: reverse_address.to_owned(),
+                    from_block: block.block_number,
+                    to_block: block.block_number,
+                }],
+            },
+        },
+        Some((&mut heartbeat, &chain_ids)),
+    )
+    .await?;
+    let replay_progress_count = heartbeat.adapter_progress_count() - progress_before;
+
+    assert_eq!(outcome.canonical_raw_log_count, 1_001);
+    assert!(
+        replay_progress_count >= 4,
+        "1,001 reverse-claim inputs must report both raw-log pages and both processing pages through the post-bootstrap caller, got {replay_progress_count} beats"
+    );
+
+    database.cleanup().await
+}
+
 #[test]
 fn ensure_manifest_root_ready_accepts_loaded_root() -> Result<()> {
     ensure_manifest_root_ready(&manifest_load_summary(ManifestLoadStatus::Loaded))
