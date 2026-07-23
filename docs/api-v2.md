@@ -395,14 +395,15 @@ Rules:
 - `unsupported` is `422`.
 - Verified record-resolution failures surface as `status: "failed"` on the
   affected section with `failure_reason`, or as `stale` when the RPC provider
-  cannot serve the selected block. Provider connect and response timeouts for
-  that path use the existing in-band execution-failure behavior; they are not
-  whole-request `408` responses. Other provider transport failures during
-  verified record resolution surface as `stale` and do not cache an execution
-  outcome. The ENS/60 primary-name fallback uses the same transport split:
-  configured provider timeouts remain persisted in-band failures, while DNS,
-  TLS, connection-reset, and other non-timeout transport failures return
-  whole-request `409 stale` before persistence.
+  cannot serve the selected block. Provider response timeouts for that path use
+  the existing in-band execution-failure behavior; they are not whole-request
+  `408` responses. Provider connect-phase timeouts and other transport failures
+  during verified record resolution surface as `stale` and do not cache an
+  execution outcome. The ENS/60 primary-name fallback uses the same transport
+  split with its CCIP-Read gateway leg: configured provider or gateway response
+  timeouts remain persisted in-band failures, while provider or gateway
+  connect-phase timeouts, DNS failures, TLS failures, connection resets, and
+  other transport failures return whole-request `409 stale` before persistence.
 - Every route has a whole-request deadline. `/healthz`, `/v1/status`, and
   `/v2/status` retain that deadline as their final backstop. `/healthz` bypasses
   the process-wide concurrency limiter and load shedding, uses a reserved

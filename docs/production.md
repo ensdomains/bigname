@@ -85,7 +85,7 @@ recommended starting point before the public edge is undrained.
 | `BIGNAME_API_MAX_IN_FLIGHT` | `1024` | `256` | Shared process-wide in-flight ceiling; excess work is load-shed as `503 overloaded`. `/healthz` bypasses it. |
 | `BIGNAME_API_HEALTH_MAX_IN_FLIGHT` | `4` | `4` | Independent in-flight ceiling reserved for `/healthz`; excess health work is load-shed as `503 overloaded`. |
 | `BIGNAME_API_VERIFIED_EXECUTION_MAX_IN_FLIGHT` | `128` | `16` | Separate ceiling for requests that can initiate verified resolution or primary-name fallback; it must be lower than the global ceiling. |
-| `BIGNAME_API_RPC_CONNECT_TIMEOUT_MS` | `2000` | `2000` | Connect deadline for API-triggered execution JSON-RPC calls. |
+| `BIGNAME_API_RPC_CONNECT_TIMEOUT_MS` | `2000` | `2000` | Connect deadline for API-triggered execution JSON-RPC calls; it must be less than `BIGNAME_API_RPC_TIMEOUT_MS`. |
 | `BIGNAME_API_RPC_TIMEOUT_MS` | `8000` | `8000` | Total deadline for each API-triggered execution JSON-RPC call. |
 | `BIGNAME_API_VERIFIED_RATE_LIMIT_PER_SECOND` | `0` (off) | `1` | Per-client token refill rate for verified-execution-triggering routes, keyed by an IPv4 address or IPv6 `/64`; excess requests return `429 rate_limited`. |
 | `BIGNAME_API_VERIFIED_RATE_LIMIT_BURST` | `10` | `5` | Maximum tokens in each client bucket when rate limiting is enabled. |

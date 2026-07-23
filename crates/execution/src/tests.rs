@@ -1,4 +1,5 @@
 use std::{
+    net::SocketAddr,
     path::PathBuf,
     process::Command,
     str::FromStr,
@@ -51,6 +52,21 @@ use uuid::Uuid;
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 static WORKER_CARGO_LOCK: Mutex<()> = Mutex::new(());
+
+struct TimeoutOnceDnsResolver {
+    recovery_address: SocketAddr,
+    attempts: Arc<AtomicU64>,
+}
+
+impl reqwest::dns::Resolve for TimeoutOnceDnsResolver {
+    fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Box::pin(std::future::pending());
+        }
+        let address = self.recovery_address;
+        Box::pin(async move { Ok(Box::new(std::iter::once(address)) as reqwest::dns::Addrs) })
+    }
+}
 
 struct ResolutionMockRpcResponse {
     code: i64,
@@ -3490,6 +3506,110 @@ async fn on_demand_transient_transport_error_is_not_persisted_and_next_attempt_r
 }
 
 #[tokio::test]
+async fn on_demand_rpc_connect_timeout_is_not_persisted_and_next_attempt_retries() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let seed_request = success_request();
+    seed_supported_resolution_storage(&database, &seed_request).await?;
+    let resource_id = boundary_resource_id(&seed_request.outcome.cache_key.record_version_boundary);
+    let row = bigname_storage::load_name_current(database.pool(), "ens:alice.eth")
+        .await?
+        .context("RPC connect-timeout test must load name_current row")?;
+    let record_inventory_row = bigname_storage::load_record_inventory_current(
+        database.pool(),
+        resource_id,
+        &seed_request.outcome.cache_key.record_version_boundary,
+    )
+    .await?
+    .context("RPC connect-timeout test must load record_inventory_current row")?;
+    let (recovery_url, rpc) = spawn_resolution_mock_rpc(vec![ResolutionMockRpcResponse {
+        code: 3,
+        message: "execution reverted",
+        data: None,
+    }])
+    .await?;
+    let recovery_address = recovery_url
+        .strip_prefix("http://")
+        .context("mock RPC URL must be HTTP")?
+        .parse::<SocketAddr>()
+        .context("mock RPC URL must contain a socket address")?;
+    let dns_attempts = Arc::new(AtomicU64::new(0));
+    let connect_timeout = Duration::from_millis(25);
+    let response_timeout = Duration::from_secs(1);
+    let client = reqwest::Client::builder()
+        .connect_timeout(connect_timeout)
+        .timeout(response_timeout)
+        .no_proxy()
+        .dns_resolver(TimeoutOnceDnsResolver {
+            recovery_address,
+            attempts: Arc::clone(&dns_attempts),
+        })
+        .build()
+        .context("failed to build connect-timeout test RPC client")?;
+    let chain_rpc_urls = ChainRpcUrls::from_entries(&[format!(
+        "{ETHEREUM_MAINNET_CHAIN_ID}=http://rpc-persistence.connect-timeout.test"
+    )])?
+    .with_test_http_client(client, connect_timeout, response_timeout)?;
+    let records = vec![EnsResolutionRecord::new(
+        "addr:60",
+        "addr",
+        Some("60".to_owned()),
+    )];
+    let request = || OnDemandEnsResolutionRequest {
+        row: &row,
+        records: &records,
+        record_inventory_row: Some(&record_inventory_row),
+        chain_positions: row.chain_positions.clone(),
+        chain_rpc_urls: &chain_rpc_urls,
+        use_latest_block_tag: false,
+        persist_execution: true,
+    };
+
+    let error = execute_ens_universal_resolver_verified_resolution(database.pool(), request())
+        .await
+        .expect_err("provider connect timeout must abort before persistence");
+    assert_eq!(error.kind(), OnDemandEnsResolutionErrorKind::Configuration);
+    assert!(
+        load_execution_outcome(database.pool(), &seed_request.outcome.cache_key)
+            .await?
+            .is_none(),
+        "provider connect timeout must not persist an execution outcome"
+    );
+    let trace_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM execution_traces WHERE request_type = 'verified_resolution' AND request_key = 'ens:alice.eth:addr:60'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        trace_count, 0,
+        "provider connect timeout must not persist a trace"
+    );
+
+    let recovered = execute_ens_universal_resolver_verified_resolution(database.pool(), request())
+        .await
+        .context("the next identical request must retry after provider recovery")?;
+    assert_eq!(join_resolution_mock_requests(rpc).await?.len(), 1);
+    assert!(
+        dns_attempts.load(Ordering::SeqCst) >= 2,
+        "the identical request must retry provider connection establishment"
+    );
+    assert_eq!(
+        recovered
+            .failure_payload
+            .as_ref()
+            .and_then(|payload| payload.get("failure_reason")),
+        Some(&json!("resolver_call_reverted"))
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &recovered.cache_key)
+            .await?
+            .is_some(),
+        "the recovered provider response must persist"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn on_demand_gateway_connect_failure_is_not_persisted_and_next_attempt_retries() -> Result<()>
 {
     let database = TestDatabase::new().await?;
@@ -3583,7 +3703,99 @@ async fn on_demand_gateway_connect_failure_is_not_persisted_and_next_attempt_ret
 }
 
 #[tokio::test]
-async fn on_demand_configured_gateway_timeout_remains_persisted_in_band_failure() -> Result<()> {
+async fn on_demand_gateway_connect_timeout_is_not_persisted_and_next_attempt_retries() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let seed_request = success_request();
+    seed_supported_resolution_storage(&database, &seed_request).await?;
+    let resource_id = boundary_resource_id(&seed_request.outcome.cache_key.record_version_boundary);
+    let row = bigname_storage::load_name_current(database.pool(), "ens:alice.eth")
+        .await?
+        .context("gateway connect-timeout test must load name_current row")?;
+    let record_inventory_row = bigname_storage::load_record_inventory_current(
+        database.pool(),
+        resource_id,
+        &seed_request.outcome.cache_key.record_version_boundary,
+    )
+    .await?
+    .context("gateway connect-timeout test must load record_inventory_current row")?;
+    let offchain_lookup = encoded_resolution_offchain_lookup(
+        "http://gateway-persistence.connect-timeout.test:9/{data}".to_owned(),
+    )?;
+    let (rpc_url, rpc) = spawn_resolution_mock_rpc(vec![
+        ResolutionMockRpcResponse {
+            code: 3,
+            message: "execution reverted",
+            data: Some(json!(offchain_lookup)),
+        },
+        ResolutionMockRpcResponse {
+            code: 3,
+            message: "execution reverted",
+            data: None,
+        },
+    ])
+    .await?;
+    let chain_rpc_urls =
+        ChainRpcUrls::from_entries(&[format!("{ETHEREUM_MAINNET_CHAIN_ID}={rpc_url}")])?;
+    let records = vec![EnsResolutionRecord::new(
+        "addr:60",
+        "addr",
+        Some("60".to_owned()),
+    )];
+    let request = || OnDemandEnsResolutionRequest {
+        row: &row,
+        records: &records,
+        record_inventory_row: Some(&record_inventory_row),
+        chain_positions: row.chain_positions.clone(),
+        chain_rpc_urls: &chain_rpc_urls,
+        use_latest_block_tag: true,
+        persist_execution: true,
+    };
+
+    let error = execute_ens_universal_resolver_verified_resolution(database.pool(), request())
+        .await
+        .expect_err("gateway connect timeout must abort before persistence");
+    assert_eq!(error.kind(), OnDemandEnsResolutionErrorKind::Configuration);
+    assert!(error.message().contains("CCIP gateway transport failed"));
+    assert!(
+        load_execution_outcome(database.pool(), &seed_request.outcome.cache_key)
+            .await?
+            .is_none(),
+        "gateway connect timeout must not persist an execution outcome"
+    );
+    let trace_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM execution_traces WHERE request_type = 'verified_resolution' AND request_key = 'ens:alice.eth:addr:60'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        trace_count, 0,
+        "gateway connect timeout must not persist a trace"
+    );
+
+    let recovered = execute_ens_universal_resolver_verified_resolution(database.pool(), request())
+        .await
+        .context("the next identical request must retry after gateway recovery")?;
+    assert_eq!(join_resolution_mock_requests(rpc).await?.len(), 2);
+    assert_eq!(
+        recovered
+            .failure_payload
+            .as_ref()
+            .and_then(|payload| payload.get("failure_reason")),
+        Some(&json!("resolver_call_reverted"))
+    );
+    assert!(
+        load_execution_outcome(database.pool(), &recovered.cache_key)
+            .await?
+            .is_some(),
+        "the recovered gateway path must persist its completed response"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn on_demand_gateway_response_timeout_remains_persisted_in_band_failure() -> Result<()> {
     let database = TestDatabase::new().await?;
     let seed_request = success_request();
     seed_supported_resolution_storage(&database, &seed_request).await?;
@@ -3627,7 +3839,7 @@ async fn on_demand_configured_gateway_timeout_remains_persisted_in_band_failure(
         },
     )
     .await
-    .context("configured gateway timeout must remain an in-band failure")?;
+    .context("gateway response timeout must remain an in-band failure")?;
     assert_eq!(join_resolution_mock_requests(rpc).await?.len(), 1);
     gateway.abort();
 
@@ -3640,10 +3852,10 @@ async fn on_demand_configured_gateway_timeout_remains_persisted_in_band_failure(
     );
     let persisted = load_execution_outcome(database.pool(), &outcome.cache_key)
         .await?
-        .context("configured gateway timeout outcome must persist")?;
+        .context("gateway response timeout outcome must persist")?;
     let trace = load_execution_trace(database.pool(), persisted.execution_trace_id)
         .await?
-        .context("configured gateway timeout trace must persist")?;
+        .context("gateway response timeout trace must persist")?;
     assert_eq!(trace.gateway_digests, json!([]));
     assert_eq!(
         trace.steps[1].step_payload["ccip_read"]["failure"]["configured_timeout"],
@@ -3661,7 +3873,7 @@ async fn on_demand_configured_gateway_timeout_remains_persisted_in_band_failure(
 }
 
 #[tokio::test]
-async fn on_demand_configured_transport_timeout_remains_persisted_in_band_failure() -> Result<()> {
+async fn on_demand_rpc_response_timeout_remains_persisted_in_band_failure() -> Result<()> {
     let database = TestDatabase::new().await?;
     let seed_request = success_request();
     seed_supported_resolution_storage(&database, &seed_request).await?;
@@ -3699,7 +3911,7 @@ async fn on_demand_configured_transport_timeout_remains_persisted_in_band_failur
         },
     )
     .await
-    .context("configured timeout must remain an in-band execution result")?;
+    .context("RPC response timeout must remain an in-band execution result")?;
     handle.abort();
 
     assert_eq!(
@@ -3711,7 +3923,7 @@ async fn on_demand_configured_transport_timeout_remains_persisted_in_band_failur
     );
     let persisted = load_execution_outcome(database.pool(), &outcome.cache_key)
         .await?
-        .context("configured timeout outcome must persist")?;
+        .context("RPC response timeout outcome must persist")?;
     assert_eq!(persisted.execution_trace_id, outcome.execution_trace_id);
 
     database.cleanup().await

@@ -484,12 +484,12 @@ Field ownership:
   with `status=not_found` and `failure_reason=claim_name_not_normalizable` when
   the verified source is included. Missing provider configuration, a completed
   JSON-RPC failure, malformed response data, or expiration of the configured
-  provider connect/response deadline produces in-band `status=stale` with
-  `failure_reason=resolver_call_failed` for each requested source; it is not an
-  in-band `not_found`. DNS, TLS, connection-reset, and other non-timeout
-  transport failures return whole-request `409 stale` before trace or outcome
-  persistence, so the next read retries. Malformed addresses return
-  `400 invalid_input`.
+  provider or CCIP-Read gateway response deadline produces in-band
+  `status=stale` with `failure_reason=resolver_call_failed` for each requested
+  source; it is not an in-band `not_found`. A provider or gateway connect-phase
+  timeout, DNS failure, TLS failure, connection reset, or other transport
+  failure returns whole-request `409 stale` before trace or outcome persistence,
+  so the next read retries. Malformed addresses return `400 invalid_input`.
 - Replaces (v1): `GET /v1/primary-names/{address}`.
 
 ### `GET /v2/addresses/{address}/history`

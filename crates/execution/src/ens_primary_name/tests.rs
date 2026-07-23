@@ -1,6 +1,14 @@
 use super::*;
 use alloy_primitives::{Bytes, FixedBytes, hex};
 use alloy_sol_types::{SolError, SolValue, sol};
+use std::{
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -8,6 +16,36 @@ use tokio::{
 };
 
 const TEST_BLOCK_HASH: &str = "0x1234000000000000000000000000000000000000000000000000000000000000";
+
+struct PrimaryNameTimeoutDnsResolver {
+    recovery_address: SocketAddr,
+    attempts: Arc<AtomicU64>,
+}
+
+impl reqwest::dns::Resolve for PrimaryNameTimeoutDnsResolver {
+    fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Box::pin(std::future::pending());
+        }
+        let address = self.recovery_address;
+        Box::pin(async move { Ok(Box::new(std::iter::once(address)) as reqwest::dns::Addrs) })
+    }
+}
+
+struct PrimaryNameCallbackTimeoutDnsResolver {
+    rpc_address: SocketAddr,
+    attempts: Arc<AtomicU64>,
+}
+
+impl reqwest::dns::Resolve for PrimaryNameCallbackTimeoutDnsResolver {
+    fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        if self.attempts.fetch_add(1, Ordering::SeqCst) > 0 {
+            return Box::pin(std::future::pending());
+        }
+        let address = self.rpc_address;
+        Box::pin(async move { Ok(Box::new(std::iter::once(address)) as reqwest::dns::Addrs) })
+    }
+}
 
 fn test_block_selector() -> Value {
     json!({
@@ -242,6 +280,40 @@ async fn spawn_hanging_ccip_gateway() -> Result<(String, JoinHandle<Result<()>>)
             .accept()
             .await
             .context("failed to accept hanging CCIP gateway request")?;
+        std::future::pending::<()>().await;
+        Ok(())
+    });
+    Ok((url, handle))
+}
+
+async fn spawn_callback_hanging_rpc(
+    offchain_lookup: String,
+) -> Result<(String, JoinHandle<Result<()>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("failed to bind callback-timeout RPC listener")?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let handle = tokio::spawn(async move {
+        let (mut initial_socket, _) = listener
+            .accept()
+            .await
+            .context("failed to accept initial callback-timeout RPC request")?;
+        read_http_json_body(&mut initial_socket).await?;
+        write_json_rpc_response(
+            &mut initial_socket,
+            MockRpcResponse::Error {
+                code: 3,
+                message: "execution reverted".to_owned(),
+                data: json!(offchain_lookup),
+            },
+        )
+        .await?;
+
+        let (mut callback_socket, _) = listener
+            .accept()
+            .await
+            .context("failed to accept hanging callback RPC request")?;
+        read_http_json_body(&mut callback_socket).await?;
         std::future::pending::<()>().await;
         Ok(())
     });
@@ -567,7 +639,152 @@ async fn verified_primary_name_exposes_ccip_trace_evidence() -> Result<()> {
 }
 
 #[tokio::test]
-async fn primary_name_gateway_timeout_is_configured_transport_with_evidence() -> Result<()> {
+async fn primary_name_rpc_connect_timeout_is_transient_transport() -> Result<()> {
+    let connect_timeout = Duration::from_millis(25);
+    let response_timeout = Duration::from_secs(1);
+    let attempts = Arc::new(AtomicU64::new(0));
+    let client = reqwest::Client::builder()
+        .connect_timeout(connect_timeout)
+        .timeout(response_timeout)
+        .no_proxy()
+        .dns_resolver(PrimaryNameTimeoutDnsResolver {
+            recovery_address: "127.0.0.1:9".parse()?,
+            attempts: Arc::clone(&attempts),
+        })
+        .build()
+        .context("failed to build primary-name connect-timeout RPC client")?;
+    let chain_rpc_urls = ChainRpcUrls::from_entries(&[format!(
+        "{ETHEREUM_MAINNET_CHAIN_ID}=http://primary-rpc.connect-timeout.test"
+    )])?
+    .with_test_http_client(client, connect_timeout, response_timeout)?;
+
+    let error = lookup_ens_reverse_primary_name(OnDemandEnsPrimaryNameRequest {
+        normalized_address: "0x8e8db5ccef88cca9d624701db544989c996e3216",
+        chain_rpc_urls: &chain_rpc_urls,
+        block_hash: TEST_BLOCK_HASH,
+    })
+    .await
+    .expect_err("primary-name provider connect timeout must remain transient");
+
+    assert!(error.is_transport_failure());
+    assert!(!error.is_configured_timeout());
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn primary_name_ccip_callback_rpc_connect_timeout_is_transient() -> Result<()> {
+    let (rpc_url, rpc) = spawn_mock_rpc_responses(vec![MockRpcResponse::Error {
+        code: 3,
+        message: "execution reverted".to_owned(),
+        data: json!(encoded_local_batch_offchain_lookup_error()),
+    }])
+    .await?;
+    let rpc_address = rpc_url
+        .strip_prefix("http://")
+        .context("mock RPC URL must be HTTP")?
+        .parse::<SocketAddr>()?;
+    let attempts = Arc::new(AtomicU64::new(0));
+    let connect_timeout = Duration::from_millis(25);
+    let response_timeout = Duration::from_secs(1);
+    let client = reqwest::Client::builder()
+        .connect_timeout(connect_timeout)
+        .timeout(response_timeout)
+        .no_proxy()
+        .dns_resolver(PrimaryNameCallbackTimeoutDnsResolver {
+            rpc_address,
+            attempts: Arc::clone(&attempts),
+        })
+        .build()?;
+    let endpoint = "http://primary-callback.connect-timeout.test";
+    let chain_rpc_urls =
+        ChainRpcUrls::from_entries(&[format!("{ETHEREUM_MAINNET_CHAIN_ID}={endpoint}")])?
+            .with_test_http_client(client, connect_timeout, response_timeout)?;
+
+    let error = lookup_ens_forward_address_at_block(EnsForwardAddressLookupRequest {
+        normalized_name: "taytems.eth",
+        chain_rpc_urls: &chain_rpc_urls,
+        block_number: 123,
+        block_hash: TEST_BLOCK_HASH,
+        follow_ccip_read: true,
+    })
+    .await
+    .expect_err("a CCIP callback provider connect timeout must remain transient");
+
+    assert!(error.is_transport_failure());
+    assert!(!error.is_configured_timeout());
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(join_requests(rpc).await?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn primary_name_ccip_callback_rpc_response_timeout_is_configured_transport() -> Result<()> {
+    let (rpc_url, rpc) =
+        spawn_callback_hanging_rpc(encoded_local_batch_offchain_lookup_error()).await?;
+    let chain_rpc_urls =
+        ChainRpcUrls::from_entries(&[format!("{ETHEREUM_MAINNET_CHAIN_ID}={rpc_url}")])?
+            .with_http_timeouts(Duration::from_millis(10), Duration::from_millis(25))?;
+
+    let error = lookup_ens_forward_address_at_block(EnsForwardAddressLookupRequest {
+        normalized_name: "taytems.eth",
+        chain_rpc_urls: &chain_rpc_urls,
+        block_number: 123,
+        block_hash: TEST_BLOCK_HASH,
+        follow_ccip_read: true,
+    })
+    .await
+    .expect_err("a CCIP callback provider response timeout must remain durable");
+    rpc.abort();
+
+    assert!(error.is_transport_failure());
+    assert!(error.is_configured_timeout());
+    assert_eq!(error.evidence().ccip_step_payloads.len(), 2);
+    assert_eq!(
+        error.evidence().ccip_step_payloads[1]["configured_timeout"],
+        json!(true)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn primary_name_gateway_connect_timeout_is_transient_transport_with_evidence() -> Result<()> {
+    let (rpc_url, rpc) = spawn_mock_rpc_responses(vec![MockRpcResponse::Error {
+        code: 3,
+        message: "execution reverted".to_owned(),
+        data: json!(encoded_standard_offchain_lookup_error(
+            "http://primary-gateway.connect-timeout.test:9/{data}".to_owned()
+        )),
+    }])
+    .await?;
+    let chain_rpc_urls =
+        ChainRpcUrls::from_entries(&[format!("{ETHEREUM_MAINNET_CHAIN_ID}={rpc_url}")])?;
+
+    let error = lookup_ens_forward_address_at_block(EnsForwardAddressLookupRequest {
+        normalized_name: "taytems.eth",
+        chain_rpc_urls: &chain_rpc_urls,
+        block_number: 123,
+        block_hash: TEST_BLOCK_HASH,
+        follow_ccip_read: true,
+    })
+    .await
+    .expect_err("primary-name gateway connect timeout must remain transient");
+
+    assert!(error.is_transport_failure());
+    assert!(!error.is_configured_timeout());
+    assert_eq!(error.evidence().contracts_called.len(), 1);
+    assert_eq!(error.evidence().ccip_step_payloads.len(), 1);
+    assert_eq!(
+        error.evidence().ccip_step_payloads[0]["configured_timeout"],
+        json!(false)
+    );
+    assert_eq!(join_requests(rpc).await?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn primary_name_gateway_response_timeout_is_configured_transport_with_evidence() -> Result<()>
+{
     let (gateway_url, gateway) = spawn_hanging_ccip_gateway().await?;
     let (rpc_url, rpc) = spawn_mock_rpc_responses(vec![MockRpcResponse::Error {
         code: 3,
@@ -588,7 +805,7 @@ async fn primary_name_gateway_timeout_is_configured_transport_with_evidence() ->
         follow_ccip_read: true,
     })
     .await
-    .expect_err("configured gateway timeout must remain an in-band transport failure");
+    .expect_err("gateway response timeout must remain an in-band transport failure");
     gateway.abort();
 
     assert!(error.is_transport_failure());

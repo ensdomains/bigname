@@ -223,14 +223,14 @@ the latest stored Ethereum checkpoint, not provider latest. Missing API provider
 configuration or a JSON-RPC response recognized as unable to serve the selected
 block must fail closed; v1 returns `409 stale`, while v2 product routes return
 their documented in-band `status=stale`/`failure_reason` envelope. For on-demand
-verified record resolution, expiration of an API-configured provider connect or
-total-response deadline instead returns and persists the affected selector's
-in-band execution-failure class. Other record-resolution transport failures,
-including DNS, TLS, and connection-reset errors, abort without persisting an
-outcome so the next read retries. Neither generation may fall back to declared
-record cache for verified values. The indexer RPC setting and Reth DB source
-settings do not satisfy this API live-execution provider requirement by
-themselves.
+verified record resolution, expiration of an API-configured provider response
+deadline instead returns and persists the affected selector's in-band
+execution-failure class. A provider connect-phase timeout or other
+record-resolution transport failure, including DNS, TLS, and connection-reset
+errors, aborts without persisting an outcome so the next read retries. Neither
+generation may fall back to declared record cache for verified values. The
+indexer RPC setting and Reth DB source settings do not satisfy this API
+live-execution provider requirement by themselves.
 
 When `GET /v1/primary-names/{address}` defaults to
 `namespace=ens&coin_type=60` and the persisted tuple is missing, a configured
@@ -240,19 +240,19 @@ latest stored checkpoint and, in verified modes, validate the claimed name's
 zero resolver, empty name, wrong namespace, unnormalizable reverse name, or
 empty forward `addr` is a supported fallback miss. Missing provider
 configuration, a completed reverse-provider JSON-RPC failure, a malformed
-response, or a configured provider timeout returns the route's in-band
-execution-failure class instead of being reported as `not_found`. In verified modes, the API
-persists the reverse result, normalization gate, optional forward call, and
-outcome before responding; an identical request at the same selected checkpoint
-can reuse that trace without another provider call. Forward-verification
-completed JSON-RPC failure, malformed response, or configured timeout after a
-reverse claim likewise returns `verified_primary_name.status=execution_failed`.
-A configured RPC deadline that
-expires remains a persisted in-band execution failure; DNS, TLS, connection
-reset, and other non-timeout transport failures abort before persistence so the
-next request retries. On a freshly migrated database with no stored Ethereum
-checkpoint, an eligible tuple-miss request returns `409 stale` until indexing
-publishes its first checkpoint.
+response, or a configured provider response timeout returns the route's in-band
+execution-failure class instead of being reported as `not_found`. In verified
+modes, the API persists the reverse result, normalization gate, optional forward
+call, and outcome before responding; an identical request at the same selected
+checkpoint can reuse that trace without another provider call.
+Forward-verification completed JSON-RPC failure, malformed response, or
+configured provider or CCIP-Read gateway response timeout after a reverse claim
+likewise returns `verified_primary_name.status=execution_failed`. Provider or
+gateway connect-phase timeouts, DNS failures, TLS failures, connection resets,
+and other transport failures abort before persistence so the next request
+retries. On a freshly migrated database with no stored Ethereum checkpoint, an
+eligible tuple-miss request returns `409 stale` until indexing publishes its
+first checkpoint.
 
 The worker bounds route-local primary-name execution storage with
 `BIGNAME_WORKER_PRIMARY_NAME_ROUTE_CACHE_RETENTION_CHECKPOINTS` (default
@@ -294,6 +294,11 @@ primary-pool limit set by `BIGNAME_DATABASE_MAX_CONNECTIONS`.
 | `BIGNAME_API_VERIFIED_RATE_LIMIT_BURST` | `10` | `5` |
 | `BIGNAME_API_VERIFIED_RATE_LIMIT_MAX_CLIENTS` | `65536` | `65536` |
 | `BIGNAME_API_TRUST_X_FORWARDED_FOR` | `false` | `true` |
+
+`BIGNAME_API_RPC_CONNECT_TIMEOUT_MS` must be less than
+`BIGNAME_API_RPC_TIMEOUT_MS`; this ordering ensures that a request still in the
+connect phase is classified as a retryable transport failure rather than a
+persisted response timeout.
 
 The binary leaves IP rate limiting off because there is no authenticated stable
 client identifier and shared addresses are common. The public-undrain values

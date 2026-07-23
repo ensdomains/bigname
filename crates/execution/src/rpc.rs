@@ -28,8 +28,8 @@ impl RpcHttpTimeouts {
             "RPC total timeout must be greater than zero"
         );
         ensure!(
-            connect <= total,
-            "RPC connect timeout must not exceed RPC total timeout"
+            connect < total,
+            "RPC connect timeout must be less than RPC total timeout"
         );
         Ok(Self { connect, total })
     }
@@ -123,6 +123,18 @@ impl ChainRpcUrls {
             client: build_json_rpc_http_client(timeouts)?,
             timeouts,
         });
+        Ok(self)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_http_client(
+        mut self,
+        client: reqwest::Client,
+        connect_timeout: Duration,
+        total_timeout: Duration,
+    ) -> Result<Self> {
+        let timeouts = RpcHttpTimeouts::new(connect_timeout, total_timeout)?;
+        self.configured_http_client = Some(ConfiguredRpcHttpClient { client, timeouts });
         Ok(self)
     }
 
@@ -229,7 +241,7 @@ impl JsonRpcHttpClient {
             && error.chain().any(|cause| {
                 cause
                     .downcast_ref::<reqwest::Error>()
-                    .is_some_and(reqwest::Error::is_timeout)
+                    .is_some_and(|error| error.is_timeout() && !error.is_connect())
             })
     }
 
@@ -307,6 +319,7 @@ mod tests {
         assert!(
             RpcHttpTimeouts::new(Duration::from_millis(8_001), Duration::from_secs(8)).is_err()
         );
+        assert!(RpcHttpTimeouts::new(Duration::from_secs(8), Duration::from_secs(8)).is_err());
         assert_eq!(
             RpcHttpTimeouts::new(Duration::from_secs(2), Duration::from_secs(8))
                 .expect("timeouts must parse"),
@@ -356,6 +369,12 @@ mod tests {
             .call("eth_call", vec![])
             .await
             .expect_err("API-configured RPC client must enforce its deadline");
+        let reqwest_error = api_error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<reqwest::Error>())
+            .context("RPC response timeout must retain its reqwest error")?;
+        assert!(reqwest_error.is_timeout());
+        assert!(!reqwest_error.is_connect());
         assert!(api_rpc.is_configured_timeout(&api_error));
 
         let worker_result = worker_rpc.call("eth_call", vec![]).await?;

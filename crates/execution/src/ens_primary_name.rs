@@ -369,7 +369,7 @@ async fn eth_call_following_ccip_with_block_selector(
                 outcome.result
             }
             Ok(None) => result,
-            Err(error) if error.is_gateway_transport_failure() => {
+            Err(error) if error.is_transport_failure() => {
                 let configured_timeout = error.is_configured_timeout();
                 if let Some(summary) = error.summary().cloned() {
                     record_ccip_summary(evidence, summary);

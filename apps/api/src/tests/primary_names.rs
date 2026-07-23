@@ -272,6 +272,128 @@ async fn spawn_hanging_primary_name_gateway()
     Ok((url, handle))
 }
 
+async fn spawn_successful_primary_name_gateway()
+-> Result<(String, tokio::task::JoinHandle<Result<()>>)> {
+    use tokio::io::AsyncWriteExt;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("failed to bind successful mock primary-name gateway")?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let handle = tokio::spawn(async move {
+        let (mut socket, _) = listener
+            .accept()
+            .await
+            .context("failed to accept successful mock primary-name gateway request")?;
+        let body = br#"{"data":"0xabcd"}"#;
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await?;
+        socket.write_all(body).await?;
+        Ok(())
+    });
+    Ok((url, handle))
+}
+
+async fn spawn_primary_name_callback_drop_then_recovery_rpc(
+    offchain_lookup: String,
+    recovered_address: &str,
+) -> Result<(String, tokio::task::JoinHandle<Result<Vec<Value>>>)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("failed to bind callback-recovery primary-name RPC listener")?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let recovered_address = recovered_address.to_owned();
+    let handle = tokio::spawn(async move {
+        let resolver =
+            json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047");
+        let reverse_name = primary_name_reverse_name_response("taytems.eth");
+        let mut requests = Vec::new();
+        for response in [
+            PrimaryNameMockRpcResponse::Result(resolver.clone()),
+            PrimaryNameMockRpcResponse::Result(reverse_name.clone()),
+            PrimaryNameMockRpcResponse::Error {
+                code: 3,
+                message: "execution reverted".to_owned(),
+                data: json!(offchain_lookup),
+            },
+        ] {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .context("failed to accept pre-callback primary-name RPC request")?;
+            requests.push(read_primary_name_mock_rpc_request(&mut socket).await?);
+            write_primary_name_mock_rpc_response_kind(&mut socket, response).await?;
+        }
+
+        let (mut dropped_callback, _) = listener
+            .accept()
+            .await
+            .context("failed to accept dropped callback RPC request")?;
+        requests.push(read_primary_name_mock_rpc_request(&mut dropped_callback).await?);
+        drop(dropped_callback);
+
+        for response in [
+            resolver,
+            reverse_name,
+            primary_name_universal_resolver_addr60_response(&recovered_address),
+        ] {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .context("failed to accept recovered primary-name RPC request")?;
+            requests.push(read_primary_name_mock_rpc_request(&mut socket).await?);
+            write_primary_name_mock_rpc_response(&mut socket, response).await?;
+        }
+        Ok(requests)
+    });
+    Ok((url, handle))
+}
+
+async fn spawn_hanging_primary_name_callback_rpc(
+    offchain_lookup: String,
+) -> Result<(String, tokio::task::JoinHandle<Result<()>>)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("failed to bind hanging callback primary-name RPC listener")?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let handle = tokio::spawn(async move {
+        for response in [
+            PrimaryNameMockRpcResponse::Result(
+                json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
+            ),
+            PrimaryNameMockRpcResponse::Result(primary_name_reverse_name_response("taytems.eth")),
+            PrimaryNameMockRpcResponse::Error {
+                code: 3,
+                message: "execution reverted".to_owned(),
+                data: json!(offchain_lookup),
+            },
+        ] {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .context("failed to accept pre-timeout primary-name RPC request")?;
+            read_primary_name_mock_rpc_request(&mut socket).await?;
+            write_primary_name_mock_rpc_response_kind(&mut socket, response).await?;
+        }
+
+        let (mut callback_socket, _) = listener
+            .accept()
+            .await
+            .context("failed to accept hanging callback RPC request")?;
+        read_primary_name_mock_rpc_request(&mut callback_socket).await?;
+        std::future::pending::<()>().await;
+        Ok(())
+    });
+    Ok((url, handle))
+}
+
 async fn spawn_primary_name_mock_rpc_with_last_response_gate(
     responses: Vec<Value>,
 ) -> Result<(
@@ -1894,7 +2016,81 @@ async fn get_primary_names_does_not_persist_gateway_connect_failure_and_retries(
 }
 
 #[tokio::test]
-async fn get_primary_names_persists_configured_transport_timeout_in_band() -> Result<()> {
+async fn get_primary_names_does_not_persist_callback_transport_failure_and_retries()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
+    let address = "0x8e8db5ccef88cca9d624701db544989c996e3216";
+    let (gateway_url, gateway) = spawn_successful_primary_name_gateway().await?;
+    let offchain_lookup =
+        encoded_primary_name_offchain_lookup(format!("{gateway_url}/{{data}}"))?;
+    let (rpc_url, rpc) =
+        spawn_primary_name_callback_drop_then_recovery_rpc(offchain_lookup, address).await?;
+    let chain_rpc_urls = bigname_execution::ChainRpcUrls::from_entries(&[format!(
+        "ethereum-mainnet={rpc_url}"
+    )])?;
+    let uri = format!("/v1/primary-names/{address}?mode=both");
+
+    let first_response = app_router(
+        database.app_state_with_chain_rpc_urls(chain_rpc_urls.clone()),
+    )
+    .oneshot(
+        Request::builder()
+            .uri(&uri)
+            .body(Body::empty())
+            .expect("request must build"),
+    )
+    .await
+    .context("callback-transport-failure primary-name request failed")?;
+    assert_eq!(first_response.status(), StatusCode::CONFLICT);
+    gateway.await??;
+
+    let persisted_after_failure: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM execution_cache_outcomes WHERE request_type = 'verified_primary_name' AND namespace = 'ens' AND request_key = 'ens:0x8e8db5ccef88cca9d624701db544989c996e3216:60'",
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(persisted_after_failure, 0);
+    let trace_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM execution_traces WHERE request_type = 'verified_primary_name' AND namespace = 'ens' AND request_key = 'ens:0x8e8db5ccef88cca9d624701db544989c996e3216:60'",
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(trace_count, 0, "callback transport failure must not persist a trace");
+
+    let recovered_response = app_router(database.app_state_with_chain_rpc_urls(chain_rpc_urls))
+        .oneshot(
+            Request::builder()
+                .uri(&uri)
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("recovered callback primary-name retry failed")?;
+    assert_eq!(recovered_response.status(), StatusCode::OK);
+    let recovered_payload: PrimaryNameResponse = read_json(recovered_response).await?;
+    assert_eq!(
+        primary_name_verified_state_without_provenance(&recovered_payload)
+            ["verified_primary_name"]["status"],
+        json!("success")
+    );
+    assert_eq!(join_primary_name_mock_rpc_requests(rpc).await?.len(), 7);
+
+    let persisted_after_retry: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM execution_cache_outcomes WHERE request_type = 'verified_primary_name' AND namespace = 'ens' AND request_key = 'ens:0x8e8db5ccef88cca9d624701db544989c996e3216:60'",
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(persisted_after_retry, 1);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_primary_names_persists_provider_response_timeout_in_band() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     database
         .seed_default_ens_primary_name_fallback_context()
@@ -1916,7 +2112,7 @@ async fn get_primary_names_persists_configured_transport_timeout_in_band() -> Re
                 .expect("request must build"),
         )
         .await
-        .context("timed-out primary-name request failed")?;
+        .context("provider-response-timeout primary-name request failed")?;
     rpc_handle.abort();
     assert_eq!(response.status(), StatusCode::OK);
     let payload: PrimaryNameResponse = read_json(response).await?;
@@ -1947,7 +2143,63 @@ async fn get_primary_names_persists_configured_transport_timeout_in_band() -> Re
 }
 
 #[tokio::test]
-async fn get_primary_names_persists_configured_gateway_timeout_in_band() -> Result<()> {
+async fn get_primary_names_persists_callback_response_timeout_in_band() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    database
+        .seed_default_ens_primary_name_fallback_context()
+        .await?;
+    let (gateway_url, gateway) = spawn_successful_primary_name_gateway().await?;
+    let offchain_lookup =
+        encoded_primary_name_offchain_lookup(format!("{gateway_url}/{{data}}"))?;
+    let (rpc_url, rpc) = spawn_hanging_primary_name_callback_rpc(offchain_lookup).await?;
+    let chain_rpc_urls = bigname_execution::ChainRpcUrls::from_entries(&[format!(
+        "ethereum-mainnet={rpc_url}"
+    )])?
+    .with_http_timeouts(
+        std::time::Duration::from_millis(10),
+        std::time::Duration::from_millis(25),
+    )?;
+
+    let response = app_router(database.app_state_with_chain_rpc_urls(chain_rpc_urls))
+        .oneshot(
+            Request::builder()
+                .uri("/v1/primary-names/0x8e8db5ccef88cca9d624701db544989c996e3216?mode=both")
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("callback-response-timeout primary-name request failed")?;
+    rpc.abort();
+    gateway.await??;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: PrimaryNameResponse = read_json(response).await?;
+    assert_eq!(
+        primary_name_verified_state_without_provenance(&payload)["verified_primary_name"],
+        json!({
+            "status": "execution_failed",
+            "failure_reason": "resolver_call_failed",
+        })
+    );
+    assert_persisted_primary_name_fallback_metadata(&payload);
+    let execution_trace_id = payload.provenance["execution_trace_id"]
+        .as_str()
+        .context("callback response timeout must expose a persisted execution trace")?
+        .parse::<Uuid>()?;
+    let trace = bigname_storage::load_execution_trace(&database.pool, execution_trace_id)
+        .await?
+        .context("callback response timeout trace must persist")?;
+    assert!(trace.steps.iter().any(|step| {
+        step.step_kind == "ccip_offchain_lookup"
+            && step.step_payload["configured_timeout"] == json!(true)
+            && step.step_payload["provider_callback"] == json!(true)
+    }));
+
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn get_primary_names_persists_gateway_response_timeout_in_band() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     database
         .seed_default_ens_primary_name_fallback_context()
@@ -1981,7 +2233,7 @@ async fn get_primary_names_persists_configured_gateway_timeout_in_band() -> Resu
             .expect("request must build"),
     )
     .await
-    .context("gateway-timeout primary-name request failed")?;
+    .context("gateway-response-timeout primary-name request failed")?;
     gateway_handle.abort();
     assert_eq!(response.status(), StatusCode::OK);
     let payload: PrimaryNameResponse = read_json(response).await?;
@@ -1995,11 +2247,11 @@ async fn get_primary_names_persists_configured_gateway_timeout_in_band() -> Resu
     assert_persisted_primary_name_fallback_metadata(&payload);
     let execution_trace_id = payload.provenance["execution_trace_id"]
         .as_str()
-        .context("gateway timeout must expose a persisted execution trace")?
+        .context("gateway response timeout must expose a persisted execution trace")?
         .parse::<Uuid>()?;
     let trace = bigname_storage::load_execution_trace(&database.pool, execution_trace_id)
         .await?
-        .context("gateway timeout trace must persist")?;
+        .context("gateway response timeout trace must persist")?;
     assert!(trace.steps.iter().any(|step| {
         step.step_kind == "ccip_offchain_lookup"
             && step.step_payload["configured_timeout"] == json!(true)
@@ -2013,7 +2265,7 @@ async fn get_primary_names_persists_configured_gateway_timeout_in_band() -> Resu
                 .expect("request must build"),
         )
         .await
-        .context("cached gateway-timeout primary-name request failed")?;
+        .context("cached gateway-response-timeout primary-name request failed")?;
     assert_eq!(cached_response.status(), StatusCode::OK);
     let cached_payload: PrimaryNameResponse = read_json(cached_response).await?;
     assert_eq!(

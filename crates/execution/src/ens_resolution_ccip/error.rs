@@ -12,7 +12,14 @@ impl CcipReadSummary {
 }
 
 #[derive(Debug)]
-struct GatewayTransportFailure {
+enum CcipTransportLeg {
+    Gateway,
+    ProviderCallback,
+}
+
+#[derive(Debug)]
+struct CcipTransportFailure {
+    leg: CcipTransportLeg,
     configured_timeout: bool,
     summary: CcipReadSummary,
 }
@@ -20,7 +27,7 @@ struct GatewayTransportFailure {
 #[derive(Debug)]
 pub(crate) struct CcipReadError {
     inner: Error,
-    gateway_transport: Option<GatewayTransportFailure>,
+    transport: Option<CcipTransportFailure>,
 }
 
 impl CcipReadError {
@@ -31,27 +38,52 @@ impl CcipReadError {
     ) -> Self {
         Self {
             inner,
-            gateway_transport: Some(GatewayTransportFailure {
+            transport: Some(CcipTransportFailure {
+                leg: CcipTransportLeg::Gateway,
                 configured_timeout,
                 summary,
             }),
         }
     }
 
+    pub(super) fn provider_callback_transport(
+        inner: Error,
+        configured_timeout: bool,
+        summary: CcipReadSummary,
+    ) -> Self {
+        Self {
+            inner,
+            transport: Some(CcipTransportFailure {
+                leg: CcipTransportLeg::ProviderCallback,
+                configured_timeout,
+                summary,
+            }),
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) const fn is_gateway_transport_failure(&self) -> bool {
-        self.gateway_transport.is_some()
+        matches!(
+            self.transport,
+            Some(CcipTransportFailure {
+                leg: CcipTransportLeg::Gateway,
+                ..
+            })
+        )
+    }
+
+    pub(crate) const fn is_transport_failure(&self) -> bool {
+        self.transport.is_some()
     }
 
     pub(crate) fn is_configured_timeout(&self) -> bool {
-        self.gateway_transport
+        self.transport
             .as_ref()
             .is_some_and(|failure| failure.configured_timeout)
     }
 
     pub(crate) fn summary(&self) -> Option<&CcipReadSummary> {
-        self.gateway_transport
-            .as_ref()
-            .map(|failure| &failure.summary)
+        self.transport.as_ref().map(|failure| &failure.summary)
     }
 }
 
@@ -59,18 +91,32 @@ impl From<Error> for CcipReadError {
     fn from(inner: Error) -> Self {
         Self {
             inner,
-            gateway_transport: None,
+            transport: None,
         }
     }
 }
 
 impl std::fmt::Display for CcipReadError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.gateway_transport {
-            Some(failure) if failure.configured_timeout => {
-                formatter.write_str("configured CCIP gateway timeout expired")
-            }
-            Some(_) => formatter.write_str("CCIP gateway transport failed"),
+        match &self.transport {
+            Some(CcipTransportFailure {
+                leg: CcipTransportLeg::Gateway,
+                configured_timeout: true,
+                ..
+            }) => formatter.write_str("configured CCIP gateway response timeout expired"),
+            Some(CcipTransportFailure {
+                leg: CcipTransportLeg::Gateway,
+                ..
+            }) => formatter.write_str("CCIP gateway transport failed"),
+            Some(CcipTransportFailure {
+                leg: CcipTransportLeg::ProviderCallback,
+                configured_timeout: true,
+                ..
+            }) => formatter.write_str("configured CCIP callback provider response timeout expired"),
+            Some(CcipTransportFailure {
+                leg: CcipTransportLeg::ProviderCallback,
+                ..
+            }) => formatter.write_str("CCIP callback provider transport failed"),
             None => write!(formatter, "{}", self.inner),
         }
     }
@@ -86,7 +132,7 @@ pub(super) fn gateway_transport_classification(error: &Error) -> Option<bool> {
     error.chain().find_map(|cause| {
         let error = cause.downcast_ref::<reqwest::Error>()?;
         if error.is_timeout() {
-            return Some(true);
+            return Some(!error.is_connect());
         }
         (error.is_connect()
             || error.is_body()
