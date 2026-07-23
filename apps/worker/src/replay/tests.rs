@@ -39,7 +39,9 @@ columns=address_names_current|address,logical_name_id,relation,namespace,canonic
 "#;
 
     assert_eq!(
-        super::staging::fingerprint::staging_contract_fingerprint()?,
+        super::staging::fingerprint::staging_contract_fingerprint(
+            crate::projection_apply::projection_staging_input_channel_tags,
+        )?,
         expected,
         "if intentional, bump CURRENT_PROJECTION_STAGING_SCHEMA_VERSION and update this fingerprint."
     );
