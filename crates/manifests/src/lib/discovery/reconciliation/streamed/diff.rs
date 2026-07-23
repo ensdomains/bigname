@@ -119,6 +119,33 @@ const STREAMED_STARTS_NO_LATER_SQL: &str = r#"
     )
 "#;
 
+const STREAMED_SUCCESSOR_IDENTITY_SQL: &str = r#"
+    de.provenance ->> 'observation_key' = desired.observation_key
+    AND de.chain_id = desired.chain_id
+    AND de.edge_kind = desired.edge_kind
+    AND de.from_contract_instance_id = desired.from_contract_instance_id
+"#;
+
+const STREAMED_STARTS_AFTER_SQL: &str = r#"
+    (
+        de.active_from_block_number > desired.active_from_block_number
+        OR (
+            de.active_from_block_number = desired.active_from_block_number
+            AND desired.active_from_transaction_index IS NOT NULL
+            AND desired.active_from_log_index IS NOT NULL
+            AND (de.provenance ->> 'transaction_index')::BIGINT IS NOT NULL
+            AND (de.provenance ->> 'log_index')::BIGINT IS NOT NULL
+            AND (
+                (de.provenance ->> 'transaction_index')::BIGINT,
+                (de.provenance ->> 'log_index')::BIGINT
+            ) > (
+                desired.active_from_transaction_index,
+                desired.active_from_log_index
+            )
+        )
+    )
+"#;
+
 pub(super) struct StreamedDeactivationSourcePage {
     pub(super) last_edge_id: Option<i64>,
     pub(super) candidates: Vec<ExistingReconciledDiscoveryEdge>,
@@ -424,6 +451,13 @@ where
             FROM pg_temp.reconcile_desired_edges desired
             WHERE desired.desired_row_id > $2
               AND desired.active_from_block_number IS NOT NULL
+              AND EXISTS (
+                  SELECT 1
+                  {STREAMED_ACTIVE_EDGE_FROM_SQL}
+                    AND {STREAMED_SUCCESSOR_IDENTITY_SQL}
+                    AND NOT {STREAMED_EDGE_IS_ORPHANED_SQL}
+                    AND {STREAMED_STARTS_AFTER_SQL}
+              )
             ORDER BY desired.desired_row_id
             LIMIT $3
             "#
@@ -480,28 +514,9 @@ where
                     (de.provenance ->> 'transaction_index')::BIGINT AS transaction_index,
                     (de.provenance ->> 'log_index')::BIGINT AS log_index
                 {STREAMED_ACTIVE_EDGE_FROM_SQL}
-                  AND de.provenance ->> 'observation_key' = desired.observation_key
-                  AND de.chain_id = desired.chain_id
-                  AND de.edge_kind = desired.edge_kind
-                  AND de.from_contract_instance_id = desired.from_contract_instance_id
+                  AND {STREAMED_SUCCESSOR_IDENTITY_SQL}
                   AND NOT {STREAMED_EDGE_IS_ORPHANED_SQL}
-                  AND (
-                      de.active_from_block_number > desired.active_from_block_number
-                      OR (
-                          de.active_from_block_number = desired.active_from_block_number
-                          AND desired.active_from_transaction_index IS NOT NULL
-                          AND desired.active_from_log_index IS NOT NULL
-                          AND (de.provenance ->> 'transaction_index')::BIGINT IS NOT NULL
-                          AND (de.provenance ->> 'log_index')::BIGINT IS NOT NULL
-                          AND (
-                              (de.provenance ->> 'transaction_index')::BIGINT,
-                              (de.provenance ->> 'log_index')::BIGINT
-                          ) > (
-                              desired.active_from_transaction_index,
-                              desired.active_from_log_index
-                          )
-                      )
-                  )
+                  AND {STREAMED_STARTS_AFTER_SQL}
                 ORDER BY
                     de.active_from_block_number,
                     (de.provenance ->> 'transaction_index')::BIGINT NULLS FIRST,
