@@ -1,7 +1,9 @@
 use super::digest::{
-    keccak256_json_value_digest_with_progress, keccak256_selected_targets_digest_with_progress,
+    fnv1a64_json_value_digest_with_progress, keccak256_json_value_digest_with_progress,
+    keccak256_selected_targets_digest_with_progress,
 };
 use super::*;
+use bigname_manifests::WatchedSourceSelectorKind;
 
 pub(crate) fn backfill_job_source_identity_payload(
     source_plan: &WatchedSourceSelectorPlan,
@@ -13,7 +15,9 @@ pub(crate) fn backfill_job_source_identity_payload(
         return generic_topic_scan_source_identity_payload(source_plan);
     }
 
-    if source_plan.selected_targets.len() <= COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD {
+    if source_plan.selector_kind != WatchedSourceSelectorKind::SourceFamily
+        || source_plan.selected_targets.len() <= COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD
+    {
         return Ok(source_plan.source_identity_payload());
     }
 
@@ -57,6 +61,9 @@ pub(crate) async fn backfill_job_source_identity_payload_with_progress(
         )
         .await;
     }
+    if source_plan.selector_kind != WatchedSourceSelectorKind::SourceFamily {
+        return source_identity_payload_with_progress(pool, source_plan, progress).await;
+    }
     if source_plan.selected_targets.len() <= COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD {
         return Ok(source_plan.source_identity_payload());
     }
@@ -94,6 +101,61 @@ pub(crate) async fn backfill_job_source_identity_payload_with_progress(
     Ok(payload)
 }
 
+async fn source_identity_payload_with_progress(
+    pool: &sqlx::PgPool,
+    source_plan: &WatchedSourceSelectorPlan,
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<Value> {
+    let requested_watched_targets =
+        requested_watched_targets_value_with_progress(pool, source_plan, progress).await?;
+    let selected_targets =
+        selected_targets_value_with_progress(pool, source_plan, progress).await?;
+    let mut full_payload = json!({
+        "selector_kind": source_plan.selector_kind.as_str(),
+        "source_family": &source_plan.source_family,
+        "requested_watched_targets": requested_watched_targets,
+        "selected_targets": selected_targets,
+    });
+    let source_identity_hash =
+        fnv1a64_json_value_digest_with_progress(pool, &full_payload, progress)
+            .await
+            .context("failed to digest backfill source identity")?;
+
+    if source_plan.selector_kind == WatchedSourceSelectorKind::WholeActiveWatchedChain
+        && source_plan.selected_targets.len() > COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD
+    {
+        let selected_targets_digest = keccak256_json_value_digest_with_progress(
+            pool,
+            full_payload
+                .get("selected_targets")
+                .expect("full source identity payload must contain selected targets"),
+            progress,
+        )
+        .await
+        .context("failed to digest whole-active backfill source selected targets")?;
+        return Ok(json!({
+            "selector_kind": source_plan.selector_kind.as_str(),
+            "source_family": &source_plan.source_family,
+            "requested_watched_targets": &source_plan.requested_watched_targets,
+            "selected_target_count": source_plan.selected_targets.len(),
+            "selected_targets_digest_algorithm": "keccak256",
+            "selected_targets_digest": selected_targets_digest,
+            "selected_targets_sample": selected_targets_sample(&source_plan.selected_targets),
+            "source_identity_payload_format": "selected_targets_digest_v1",
+            "source_identity_hash": source_identity_hash,
+        }));
+    }
+
+    full_payload
+        .as_object_mut()
+        .expect("full source identity payload must be an object")
+        .insert(
+            "source_identity_hash".to_owned(),
+            Value::String(source_identity_hash),
+        );
+    Ok(full_payload)
+}
+
 pub(super) async fn requested_watched_targets_value_with_progress(
     pool: &sqlx::PgPool,
     source_plan: &WatchedSourceSelectorPlan,
@@ -105,6 +167,28 @@ pub(super) async fn requested_watched_targets_value_with_progress(
         targets.push(
             serde_json::to_value(target)
                 .context("failed to serialize requested watched target identity")?,
+        );
+        if targets.len().is_multiple_of(PROGRESS_TARGETS) {
+            progress.record(pool).await?;
+        }
+    }
+    if !targets.is_empty() && !targets.len().is_multiple_of(PROGRESS_TARGETS) {
+        progress.record(pool).await?;
+    }
+    Ok(Value::Array(targets))
+}
+
+async fn selected_targets_value_with_progress(
+    pool: &sqlx::PgPool,
+    source_plan: &WatchedSourceSelectorPlan,
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<Value> {
+    const PROGRESS_TARGETS: usize = 1_000;
+    let mut targets = Vec::with_capacity(source_plan.selected_targets.len());
+    for target in &source_plan.selected_targets {
+        targets.push(
+            serde_json::to_value(target)
+                .context("failed to serialize selected backfill target identity")?,
         );
         if targets.len().is_multiple_of(PROGRESS_TARGETS) {
             progress.record(pool).await?;
