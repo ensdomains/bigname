@@ -41,11 +41,14 @@ where
             SELECT discovery_edge_id
             FROM discovery_edges
             WHERE discovery_edge_id > $1
+              AND discovery_source = $2
+              AND deactivated_at IS NULL
             ORDER BY discovery_edge_id
-            LIMIT $2
+            LIMIT $3
             "#,
         )
         .bind(after_edge_id)
+        .bind(discovery_source)
         .bind(page_limit.max(1))
         .fetch_all(&mut *executor)
         .await
@@ -77,3 +80,7 @@ where
     }
     Ok((active_edge_count, chains))
 }
+
+#[cfg(test)]
+#[path = "progress/tests.rs"]
+mod tests;

@@ -420,20 +420,20 @@ async fn deactivate_discovery_edges_without_active_source_manifest(
     let mut deactivated_edge_count = 0usize;
     let mut mutated_chains = BTreeSet::new();
     loop {
-        let page = sqlx::query_as::<_, (i64, String, bool)>(
+        let page = sqlx::query_as::<_, (i64, String)>(
             r#"
             SELECT
                 de.discovery_edge_id,
-                de.chain_id,
-                de.deactivated_at IS NULL
-                AND NOT EXISTS (
-                        SELECT 1
-                        FROM manifest_versions mv
-                        WHERE mv.manifest_id = de.source_manifest_id
-                          AND mv.rollout_status = 'active'
-                    ) AS stale_source
+                de.chain_id
             FROM discovery_edges de
             WHERE de.discovery_edge_id > $1
+              AND de.deactivated_at IS NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM manifest_versions mv
+                  WHERE mv.manifest_id = de.source_manifest_id
+                    AND mv.rollout_status = 'active'
+              )
             ORDER BY de.discovery_edge_id
             LIMIT $2
             "#,
@@ -443,14 +443,11 @@ async fn deactivate_discovery_edges_without_active_source_manifest(
         .fetch_all(&mut *executor)
         .await
         .context("failed to scan discovery edges for inactive source manifests")?;
-        let Some((last_id, _, _)) = page.last() else {
+        let Some((last_id, _)) = page.last() else {
             break;
         };
         cursor = *last_id;
-        let stale_ids = page
-            .iter()
-            .filter_map(|(edge_id, _, stale)| stale.then_some(*edge_id))
-            .collect::<Vec<_>>();
+        let stale_ids = page.iter().map(|(edge_id, _)| *edge_id).collect::<Vec<_>>();
         if !stale_ids.is_empty() {
             let result = sqlx::query(
                 r#"
@@ -465,11 +462,7 @@ async fn deactivate_discovery_edges_without_active_source_manifest(
             .await
             .context("failed to deactivate discovery edges without an active source manifest")?;
             deactivated_edge_count += result.rows_affected() as usize;
-            mutated_chains.extend(
-                page.iter()
-                    .filter(|(_, _, stale)| *stale)
-                    .map(|(_, chain, _)| chain.clone()),
-            );
+            mutated_chains.extend(page.iter().map(|(_, chain)| chain.clone()));
         }
         record_progress(pool, progress).await?;
     }
@@ -487,3 +480,7 @@ async fn record_progress(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "source_graph/tests.rs"]
+mod tests;

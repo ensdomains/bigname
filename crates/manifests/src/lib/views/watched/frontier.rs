@@ -83,28 +83,35 @@ pub async fn load_earliest_known_watched_block_with_progress(
         .await
         .context("failed to acquire earliest watched-block scan connection")?;
     let mut earliest = None;
-    for (source_table, source_id_column, watched_branch) in [
-        (
-            "contract_instance_addresses",
-            "contract_instance_address_id",
-            "manifest_watched_intervals",
-        ),
-        (
-            "discovery_edges",
-            "discovery_edge_id",
-            "discovery_watched_intervals",
-        ),
-    ] {
+    for watched_branch in ["manifest_watched_intervals", "discovery_watched_intervals"] {
         let mut after_id = 0i64;
         loop {
-            let source_ids = sqlx::query_scalar::<_, i64>(&format!(
-                "SELECT {source_id_column} FROM {source_table} WHERE {source_id_column} > $1 ORDER BY {source_id_column} LIMIT $2"
-            ))
-            .bind(after_id)
-            .bind(COVERAGE_SOURCE_PAGE_ROWS)
-            .fetch_all(&mut *connection)
-            .await
-            .with_context(|| format!("failed to page {source_table} for earliest watched block"))?;
+            let source_page_query = super::intervals::with_streaming_watched_intervals(&format!(
+                r#"
+                SELECT DISTINCT watched.source_row_id
+                FROM {watched_branch} watched
+                WHERE watched.source_row_id > $3
+                  AND {historical_predicate}
+                  AND watched.chain = $1
+                  AND watched.source_family = ANY($4::TEXT[])
+                  AND watched.active_from_block_number IS NOT NULL
+                  AND watched.active_from_block_number <= $2
+                ORDER BY watched.source_row_id
+                LIMIT $5
+                "#,
+                historical_predicate = super::intervals::HISTORICAL_WATCHED_INTERVAL_PREDICATE,
+            ));
+            let source_ids = sqlx::query_scalar::<_, i64>(&source_page_query)
+                .bind(chain)
+                .bind(through_block)
+                .bind(after_id)
+                .bind(log_producing_source_families)
+                .bind(COVERAGE_SOURCE_PAGE_ROWS)
+                .fetch_all(&mut *connection)
+                .await
+                .with_context(|| {
+                    format!("failed to page {watched_branch} for earliest watched block")
+                })?;
             let Some(last_id) = source_ids.last().copied() else {
                 break;
             };
@@ -285,8 +292,6 @@ pub async fn materialize_stored_lineage_coverage_candidate_with_progress(
         verified_from_block,
         verified_through_block,
         log_producing_source_families,
-        "contract_instance_addresses",
-        "contract_instance_address_id",
         "manifest_watched_intervals",
         progress,
     )
@@ -298,8 +303,6 @@ pub async fn materialize_stored_lineage_coverage_candidate_with_progress(
         verified_from_block,
         verified_through_block,
         log_producing_source_families,
-        "discovery_edges",
-        "discovery_edge_id",
         "discovery_watched_intervals",
         progress,
     )

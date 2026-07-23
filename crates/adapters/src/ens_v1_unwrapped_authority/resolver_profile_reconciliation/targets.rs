@@ -312,13 +312,24 @@ async fn load_resolver_emitter_replay_range(
     loop {
         let raw_log_ids = sqlx::query_scalar::<_, i64>(
             r#"
-            SELECT raw_log_id
-            FROM raw_logs
-            WHERE raw_log_id > $1
-            ORDER BY raw_log_id
-            LIMIT $2
+            SELECT raw_log.raw_log_id
+            FROM raw_logs raw_log
+            JOIN resolver_profile_reconciliation_targets target
+              ON target.run_id = $2
+             AND target.resolver_address = LOWER(raw_log.emitting_address)
+            WHERE raw_log.chain_id = $1
+              AND raw_log.raw_log_id > $3
+              AND raw_log.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+            ORDER BY raw_log.raw_log_id
+            LIMIT $4
             "#,
         )
+        .bind(chain)
+        .bind(run_id)
         .bind(after_raw_log_id)
         .bind(i64::try_from(TARGET_BATCH_SIZE)?)
         .fetch_all(transaction.as_mut())
@@ -415,3 +426,7 @@ async fn load_resolver_emitter_replay_range(
         resolver_block_count,
     }))
 }
+
+#[cfg(test)]
+#[path = "targets/tests.rs"]
+mod tests;

@@ -48,13 +48,37 @@ pub(super) async fn load_active_discovered_parent_rows_with_progress(
     loop {
         let edge_ids = sqlx::query_scalar::<_, i64>(
             r#"
-            SELECT discovery_edge_id
-            FROM discovery_edges
-            WHERE discovery_edge_id > $1
-            ORDER BY discovery_edge_id
-            LIMIT $2
+            SELECT de.discovery_edge_id
+            FROM discovery_edges de
+            JOIN manifest_versions mv ON mv.manifest_id = de.source_manifest_id
+            WHERE de.discovery_edge_id > $5
+              AND mv.rollout_status = 'active'
+              AND de.deactivated_at IS NULL
+              AND de.edge_kind = $4
+              AND de.admission = $1
+              AND de.provenance ? $2
+              AND ($3::TEXT IS NULL OR de.discovery_source <> $3)
+              AND EXISTS (
+                  SELECT 1
+                  FROM contract_instance_addresses cia
+                  WHERE cia.contract_instance_id = de.to_contract_instance_id
+                    AND cia.deactivated_at IS NULL
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM chain_lineage start_block
+                  WHERE start_block.chain_id = de.chain_id
+                    AND start_block.block_hash = de.active_from_block_hash
+                    AND start_block.canonicality_state = 'orphaned'::canonicality_state
+              )
+            ORDER BY de.discovery_edge_id
+            LIMIT $6
             "#,
         )
+        .bind(REACHABLE_FROM_ROOT_ADMISSION)
+        .bind(PROPAGATED_ROLE_PROVENANCE_FIELD)
+        .bind(excluded_discovery_source)
+        .bind(TRANSITIVE_DISCOVERY_EDGE_KIND)
         .bind(after_id)
         .bind(ADMISSION_LOAD_PAGE_SIZE)
         .fetch_all(&mut *executor)
@@ -202,3 +226,7 @@ fn candidate_precedes(left: KnownAddressCandidate, right: KnownAddressCandidate)
         || (left.admitted_at == right.admitted_at
             && left.contract_instance_id < right.contract_instance_id)
 }
+
+#[cfg(test)]
+#[path = "progress/tests.rs"]
+mod tests;
