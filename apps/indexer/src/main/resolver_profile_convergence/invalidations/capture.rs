@@ -132,35 +132,12 @@ async fn materialize_bound_names(
             r#"
             WITH source_page AS MATERIALIZED (
                 SELECT
-                    normalized_event_id,
-                    chain_id,
-                    logical_name_id,
-                    event_kind,
-                    canonicality_state,
-                    before_state,
-                    after_state
-                FROM normalized_events
-                WHERE normalized_event_id > $1
-                  AND normalized_event_id <= $2
-                ORDER BY normalized_event_id
-                LIMIT $3
-            ),
-            page_end AS (
-                SELECT MAX(normalized_event_id) AS last_id
-                FROM source_page
-            ),
-            bound_names AS (
-                SELECT DISTINCT event.logical_name_id
-                FROM source_page event
-                JOIN LATERAL (
-                    VALUES
-                        (event.before_state ->> 'resolver'),
-                        (event.after_state ->> 'resolver')
-                ) resolver(resolver_address) ON TRUE
-                JOIN resolver_profile_reconciliation_targets target
-                  ON target.run_id = $4
-                 AND target.resolver_address = lower(resolver.resolver_address)
-                WHERE event.chain_id = $5
+                    event.normalized_event_id,
+                    event.logical_name_id
+                FROM normalized_events event
+                WHERE event.normalized_event_id > $1
+                  AND event.normalized_event_id <= $2
+                  AND event.chain_id = $5
                   AND event.event_kind = 'ResolverChanged'
                   AND event.logical_name_id IS NOT NULL
                   AND event.canonicality_state IN (
@@ -168,6 +145,25 @@ async fn materialize_bound_names(
                       'safe'::canonicality_state,
                       'finalized'::canonicality_state
                   )
+                  AND EXISTS (
+                      SELECT 1
+                      FROM resolver_profile_reconciliation_targets target
+                      WHERE target.run_id = $4
+                        AND target.resolver_address IN (
+                            lower(event.before_state ->> 'resolver'),
+                            lower(event.after_state ->> 'resolver')
+                        )
+                  )
+                ORDER BY event.normalized_event_id
+                LIMIT $3
+            ),
+            page_end AS (
+                SELECT MAX(normalized_event_id) AS last_id
+                FROM source_page
+            ),
+            bound_names AS (
+                SELECT DISTINCT logical_name_id
+                FROM source_page
             )
             SELECT page_end.last_id, bound.logical_name_id
             FROM page_end
@@ -212,25 +208,15 @@ async fn stage_event_resources(
         let rows = sqlx::query_as::<_, (Option<i64>, Option<Uuid>)>(&format!(
             r#"
             WITH source_page AS MATERIALIZED (
-                SELECT normalized_event_id, logical_name_id, resource_id, canonicality_state
-                FROM normalized_events
-                WHERE normalized_event_id > $1
-                  AND normalized_event_id <= $2
-                ORDER BY normalized_event_id
-                LIMIT $3
-            ),
-            page_end AS (
-                SELECT MAX(normalized_event_id) AS last_id
-                FROM source_page
-            ),
-            resources AS (
-                SELECT DISTINCT event.resource_id
-                FROM source_page event
+                SELECT event.normalized_event_id, event.resource_id
+                FROM normalized_events event
                 JOIN {TEMP_BOUND_NAMES} name
                   ON name.logical_name_id = event.logical_name_id
                 JOIN resources resource
                   ON resource.resource_id = event.resource_id
-                WHERE event.resource_id IS NOT NULL
+                WHERE event.normalized_event_id > $1
+                  AND event.normalized_event_id <= $2
+                  AND event.resource_id IS NOT NULL
                   AND event.canonicality_state IN (
                       'canonical'::canonicality_state,
                       'safe'::canonicality_state,
@@ -241,6 +227,16 @@ async fn stage_event_resources(
                       'safe'::canonicality_state,
                       'finalized'::canonicality_state
                   )
+                ORDER BY event.normalized_event_id
+                LIMIT $3
+            ),
+            page_end AS (
+                SELECT MAX(normalized_event_id) AS last_id
+                FROM source_page
+            ),
+            resources AS (
+                SELECT DISTINCT resource_id
+                FROM source_page
             )
             SELECT page_end.last_id, resource.resource_id
             FROM page_end
@@ -282,29 +278,15 @@ async fn stage_binding_resources(
             r#"
             WITH source_page AS MATERIALIZED (
                 SELECT
-                    surface_binding_id,
-                    logical_name_id,
-                    resource_id,
-                    canonicality_state
-                FROM surface_bindings
-                WHERE ($1::UUID IS NULL OR surface_binding_id > $1)
-                ORDER BY surface_binding_id
-                LIMIT $2
-            ),
-            page_end AS (
-                SELECT surface_binding_id AS last_id
-                FROM source_page
-                ORDER BY surface_binding_id DESC
-                LIMIT 1
-            ),
-            resources AS (
-                SELECT DISTINCT binding.resource_id
-                FROM source_page binding
+                    binding.surface_binding_id,
+                    binding.resource_id
+                FROM surface_bindings binding
                 JOIN {TEMP_BOUND_NAMES} name
                   ON name.logical_name_id = binding.logical_name_id
                 JOIN resources resource
                   ON resource.resource_id = binding.resource_id
-                WHERE binding.canonicality_state IN (
+                WHERE ($1::UUID IS NULL OR binding.surface_binding_id > $1)
+                  AND binding.canonicality_state IN (
                       'canonical'::canonicality_state,
                       'safe'::canonicality_state,
                       'finalized'::canonicality_state
@@ -314,6 +296,18 @@ async fn stage_binding_resources(
                       'safe'::canonicality_state,
                       'finalized'::canonicality_state
                   )
+                ORDER BY binding.surface_binding_id
+                LIMIT $2
+            ),
+            page_end AS (
+                SELECT surface_binding_id AS last_id
+                FROM source_page
+                ORDER BY surface_binding_id DESC
+                LIMIT 1
+            ),
+            resources AS (
+                SELECT DISTINCT resource_id
+                FROM source_page
             )
             SELECT page_end.last_id, resource.resource_id
             FROM page_end

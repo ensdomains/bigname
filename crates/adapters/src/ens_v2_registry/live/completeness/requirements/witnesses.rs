@@ -100,7 +100,8 @@ async fn requirement_indexes(
                 .push(interval);
             addresses.entry(address).or_default().push(interval);
         }
-        if (index + 1).is_multiple_of(WITNESS_PAGE_ROWS as usize) {
+        if index + 1 < requirements.len() && (index + 1).is_multiple_of(WITNESS_PAGE_ROWS as usize)
+        {
             record_progress(pool, progress).await?;
         }
     }
@@ -127,9 +128,23 @@ async fn verify_event_witnesses(
     let mut after_id = 0i64;
     loop {
         let ids = sqlx::query_scalar::<_, i64>(
-            "SELECT normalized_event_id FROM normalized_events WHERE normalized_event_id > $1 ORDER BY normalized_event_id LIMIT $2",
+            r#"
+            SELECT normalized_event_id
+            FROM normalized_events
+            WHERE normalized_event_id > $1
+              AND chain_id = $2
+              AND derivation_kind = $3
+              AND raw_fact_ref ->> 'kind' = 'raw_log'
+              AND block_number <= $4
+              AND canonicality_state IN ('canonical', 'safe', 'finalized')
+            ORDER BY normalized_event_id
+            LIMIT $5
+            "#,
         )
         .bind(after_id)
+        .bind(chain)
+        .bind(DERIVATION_KIND_ENS_V2_REGISTRY_RESOURCE_SURFACE)
+        .bind(through_block)
         .bind(WITNESS_PAGE_ROWS)
         .fetch_all(&mut *connection)
         .await
@@ -211,9 +226,21 @@ async fn verify_discovery_witnesses(
     let mut after_id = 0i64;
     loop {
         let ids = sqlx::query_scalar::<_, i64>(
-            "SELECT discovery_edge_id FROM discovery_edges WHERE discovery_edge_id > $1 ORDER BY discovery_edge_id LIMIT $2",
+            r#"
+            SELECT discovery_edge_id
+            FROM discovery_edges
+            WHERE discovery_edge_id > $1
+              AND chain_id = $2
+              AND discovery_source LIKE 'ens_v2_registry_%'
+              AND provenance ->> 'source' = 'raw_log'
+              AND active_from_block_number <= $3
+            ORDER BY discovery_edge_id
+            LIMIT $4
+            "#,
         )
         .bind(after_id)
+        .bind(chain)
+        .bind(through_block)
         .bind(WITNESS_PAGE_ROWS)
         .fetch_all(&mut *connection)
         .await
@@ -295,3 +322,7 @@ async fn record_progress(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "witnesses/tests.rs"]
+mod tests;

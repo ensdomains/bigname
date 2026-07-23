@@ -352,20 +352,8 @@ async fn publish_resolver_profile_events(
         let (last_event_id, page_orphaned_count) = sqlx::query_as::<_, (Option<i64>, i64)>(
             r#"
         WITH source_page AS MATERIALIZED (
-            SELECT *
-            FROM normalized_events
-            WHERE normalized_event_id > $5
-              AND normalized_event_id <= $6
-            ORDER BY normalized_event_id
-            LIMIT 1000
-        ),
-        page_end AS (
-            SELECT MAX(normalized_event_id) AS last_event_id
-            FROM source_page
-        ),
-        stale AS (
-            SELECT DISTINCT event.normalized_event_id
-            FROM source_page event
+            SELECT event.normalized_event_id
+            FROM normalized_events event
             JOIN raw_logs raw_log
               ON raw_log.chain_id = event.chain_id
              AND raw_log.block_hash = event.block_hash
@@ -377,7 +365,9 @@ async fn publish_resolver_profile_events(
             JOIN resolver_profile_reconciliation_targets target
               ON target.run_id = $4
              AND target.resolver_address = LOWER(raw_log.emitting_address)
-            WHERE event.chain_id = $1
+            WHERE event.normalized_event_id > $5
+              AND event.normalized_event_id <= $6
+              AND event.chain_id = $1
               AND event.derivation_kind = 'ens_v1_unwrapped_authority'
               AND event.source_family IN ('ens_v1_resolver_l1', 'basenames_base_resolver')
               AND event.raw_fact_ref->>'kind' = 'raw_log'
@@ -392,12 +382,18 @@ async fn publish_resolver_profile_events(
               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
               AND raw_log.canonicality_state IN ('canonical', 'safe', 'finalized')
               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+            ORDER BY event.normalized_event_id
+            LIMIT 1000
+        ),
+        page_end AS (
+            SELECT MAX(normalized_event_id) AS last_event_id
+            FROM source_page
         ),
         updated AS (
             UPDATE normalized_events event
             SET canonicality_state = 'orphaned'::canonicality_state, observed_at = now()
-            FROM stale
-            WHERE event.normalized_event_id = stale.normalized_event_id
+            FROM source_page
+            WHERE event.normalized_event_id = source_page.normalized_event_id
             RETURNING 1
         )
         SELECT
@@ -442,3 +438,7 @@ async fn record_progress(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "resolver_profile_reconciliation/progress_tests.rs"]
+mod progress_tests;

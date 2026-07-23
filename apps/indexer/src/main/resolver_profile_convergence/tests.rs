@@ -11,7 +11,23 @@ use super::{
     drain_resolver_profile_input_changes, drain_resolver_profile_input_changes_with_progress,
     expanded_reconciliation_targets, expanded_reconciliation_targets_with_family_count,
     input_requires_reconciliation,
+    invalidations::stage_resolver_profile_projection_invalidations_with_progress,
 };
+
+#[derive(Default)]
+struct CountingStartupProgress {
+    count: usize,
+}
+
+impl bigname_adapters::StartupAdapterProgress for CountingStartupProgress {
+    fn record<'a>(
+        &'a mut self,
+        _pool: &'a sqlx::PgPool,
+    ) -> bigname_adapters::StartupAdapterProgressFuture<'a> {
+        self.count += 1;
+        Box::pin(async { Ok(()) })
+    }
+}
 
 #[test]
 fn completion_guard_refuses_only_the_deferred_chain() {
@@ -92,6 +108,338 @@ fn entry(
 
 fn authority_index(authority: ResolverProfileAuthoritySnapshot) -> ResolverProfileAuthorityIndex {
     ResolverProfileAuthorityIndex::from_snapshot(authority)
+}
+
+#[tokio::test]
+async fn invalidation_capture_pages_only_bound_names_and_their_resources() -> anyhow::Result<()> {
+    let database = TestDatabase::create_migrated(
+        TestDatabaseConfig::new("resolver_invalidation_scoped_pages"),
+        &bigname_storage::MIGRATOR,
+        "failed to migrate resolver invalidation paging test database",
+    )
+    .await?;
+    let pool = database.pool();
+    let chain = "resolver-invalidation-chain";
+    let resolver = "0x0000000000000000000000000000000000000d01";
+    let run_id = Uuid::from_u128(0xd01);
+    let target_resource = Uuid::from_u128(0xd02);
+    let other_resource = Uuid::from_u128(0xd03);
+
+    sqlx::query(
+        r#"
+        INSERT INTO resolver_profile_reconciliation_runs (
+            run_id,
+            chain_id,
+            first_block_number,
+            last_block_number,
+            resolver_address_count,
+            resolver_address_set_digest
+        )
+        VALUES ($1, $2, 0, 0, 1, 'test-digest')
+        "#,
+    )
+    .bind(run_id)
+    .bind(chain)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO name_surfaces (
+            logical_name_id,
+            namespace,
+            input_name,
+            canonical_display_name,
+            normalized_name,
+            dns_encoded_name,
+            namehash,
+            labelhashes,
+            normalizer_version,
+            chain_id,
+            block_hash,
+            block_number,
+            canonicality_state
+        )
+        SELECT
+            'ens:other-' || value,
+            'ens',
+            'other-' || value,
+            'other-' || value,
+            'other-' || value,
+            '\x00',
+            'other-namehash-' || value,
+            ARRAY[]::TEXT[],
+            'test',
+            'other-chain',
+            'other-block',
+            1,
+            'canonical'::canonicality_state
+        FROM generate_series(1, 2001) value
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO resolver_profile_reconciliation_targets (run_id, resolver_address) VALUES ($1, $2)",
+    )
+    .bind(run_id)
+    .bind(resolver)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_events (
+            event_identity,
+            namespace,
+            event_kind,
+            source_family,
+            manifest_version,
+            chain_id,
+            raw_fact_ref,
+            derivation_kind,
+            canonicality_state
+        )
+        SELECT
+            'out-of-scope-invalidation-event-' || value,
+            'ens',
+            'Other',
+            'other_family',
+            1,
+            'other-chain',
+            '{}'::JSONB,
+            'other_derivation',
+            'canonical'::canonicality_state
+        FROM generate_series(1, 2001) value
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO name_surfaces (
+            logical_name_id,
+            namespace,
+            input_name,
+            canonical_display_name,
+            normalized_name,
+            dns_encoded_name,
+            namehash,
+            labelhashes,
+            normalizer_version,
+            chain_id,
+            block_hash,
+            block_number,
+            canonicality_state
+        )
+        VALUES
+            (
+                'ens:target',
+                'ens',
+                'target',
+                'target',
+                'target',
+                '\x00',
+                'target-namehash',
+                ARRAY[]::TEXT[],
+                'test',
+                $1,
+                'target-block',
+                10,
+                'canonical'::canonicality_state
+            ),
+            (
+                'ens:other',
+                'ens',
+                'other',
+                'other',
+                'other',
+                '\x00',
+                'other-namehash',
+                ARRAY[]::TEXT[],
+                'test',
+                'other-chain',
+                'other-block',
+                1,
+                'canonical'::canonicality_state
+            )
+        "#,
+    )
+    .bind(chain)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO resources (
+            resource_id,
+            chain_id,
+            block_hash,
+            block_number,
+            canonicality_state
+        )
+        VALUES
+            ($1, $3, 'target-block', 10, 'canonical'::canonicality_state),
+            ($2, 'other-chain', 'other-block', 1, 'canonical'::canonicality_state)
+        "#,
+    )
+    .bind(target_resource)
+    .bind(other_resource)
+    .bind(chain)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_events (
+            event_identity,
+            namespace,
+            logical_name_id,
+            event_kind,
+            source_family,
+            manifest_version,
+            chain_id,
+            raw_fact_ref,
+            derivation_kind,
+            canonicality_state,
+            before_state,
+            after_state
+        )
+        VALUES (
+            'target-resolver-change',
+            'ens',
+            'ens:target',
+            'ResolverChanged',
+            'ens_v1_resolver_l1',
+            1,
+            $1,
+            '{}'::JSONB,
+            'ens_v1_unwrapped_authority',
+            'canonical'::canonicality_state,
+            '{}'::JSONB,
+            jsonb_build_object('resolver', $2)
+        )
+        "#,
+    )
+    .bind(chain)
+    .bind(resolver)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_events (
+            event_identity,
+            namespace,
+            logical_name_id,
+            resource_id,
+            event_kind,
+            source_family,
+            manifest_version,
+            chain_id,
+            raw_fact_ref,
+            derivation_kind,
+            canonicality_state
+        )
+        VALUES (
+            'target-resource-event',
+            'ens',
+            'ens:target',
+            $1,
+            'RecordChanged',
+            'ens_v1_resolver_l1',
+            1,
+            $2,
+            '{}'::JSONB,
+            'ens_v1_unwrapped_authority',
+            'canonical'::canonicality_state
+        )
+        "#,
+    )
+    .bind(target_resource)
+    .bind(chain)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO surface_bindings (
+            surface_binding_id,
+            logical_name_id,
+            resource_id,
+            binding_kind,
+            active_from,
+            chain_id,
+            block_hash,
+            block_number,
+            canonicality_state
+        )
+        SELECT
+            md5('out-of-scope-binding-' || value)::UUID,
+            'ens:other-' || value,
+            $1,
+            'observed_only',
+            now(),
+            'other-chain',
+            'other-block',
+            1,
+            'canonical'::canonicality_state
+        FROM generate_series(1, 2001) value
+        "#,
+    )
+    .bind(other_resource)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO surface_bindings (
+            surface_binding_id,
+            logical_name_id,
+            resource_id,
+            binding_kind,
+            active_from,
+            chain_id,
+            block_hash,
+            block_number,
+            canonicality_state
+        )
+        VALUES (
+            $1,
+            'ens:target',
+            $2,
+            'observed_only',
+            now(),
+            $3,
+            'target-block',
+            10,
+            'canonical'::canonicality_state
+        )
+        "#,
+    )
+    .bind(Uuid::from_u128(0xd04))
+    .bind(target_resource)
+    .bind(chain)
+    .execute(pool)
+    .await?;
+
+    let mut progress = CountingStartupProgress::default();
+    stage_resolver_profile_projection_invalidations_with_progress(
+        pool,
+        run_id,
+        chain,
+        &mut progress,
+    )
+    .await?;
+
+    assert_eq!(
+        progress.count, 4,
+        "one target, bound-name, event-resource, and binding-resource page must beat"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM resolver_profile_reconciliation_invalidation_keys WHERE chain_id = $1",
+        )
+        .bind(chain)
+        .fetch_one(pool)
+        .await?,
+        2,
+        "the resolver and record-inventory keys must be staged once"
+    );
+    database.cleanup().await
 }
 
 #[test]

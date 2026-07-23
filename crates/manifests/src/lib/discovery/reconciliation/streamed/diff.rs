@@ -132,13 +132,22 @@ pub(super) async fn load_streamed_deactivation_source_page(
 ) -> Result<StreamedDeactivationSourcePage> {
     let edge_ids = sqlx::query_scalar::<_, i64>(
         r#"
-        SELECT discovery_edge_id
-        FROM discovery_edges
-        WHERE discovery_edge_id > $1
-        ORDER BY discovery_edge_id
-        LIMIT $2
+        SELECT de.discovery_edge_id
+        FROM discovery_edges de
+        WHERE de.discovery_source = $1
+          AND de.deactivated_at IS NULL
+          AND de.discovery_edge_id > $2
+          AND EXISTS (
+              SELECT 1
+              FROM contract_instance_addresses cia
+              WHERE cia.contract_instance_id = de.to_contract_instance_id
+                AND cia.deactivated_at IS NULL
+          )
+        ORDER BY de.discovery_edge_id
+        LIMIT $3
         "#,
     )
+    .bind(discovery_source)
     .bind(after_edge_id)
     .bind(limit)
     .fetch_all(&mut *executor)
@@ -553,3 +562,7 @@ where
     }
     Ok(historical_edges)
 }
+
+#[cfg(test)]
+#[path = "diff/tests.rs"]
+mod tests;
