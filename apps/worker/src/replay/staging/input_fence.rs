@@ -35,6 +35,8 @@ impl ProjectionStagingCheckpoint {
                 && stored.validated_normalized_change_id == self.validated_normalized_change_id
                 && stored.validated_direct_invalidation_revision
                     == self.validated_direct_invalidation_revision
+                && stored.validated_permissions_resource_revision
+                    == self.validated_permissions_resource_revision
                 && stored.last_source_key == self.last_source_key
                 && stored.completed_source_count == self.completed_source_count
                 && stored.status == "running",
@@ -117,6 +119,8 @@ impl ProjectionStagingCheckpoint {
                 && stored.validated_normalized_change_id == self.validated_normalized_change_id
                 && stored.validated_direct_invalidation_revision
                     == self.validated_direct_invalidation_revision
+                && stored.validated_permissions_resource_revision
+                    == self.validated_permissions_resource_revision
                 && stored.last_source_key == self.last_source_key
                 && stored.completed_source_count == self.completed_source_count
                 && stored.staged_row_count == self.staged_row_count
@@ -127,7 +131,7 @@ impl ProjectionStagingCheckpoint {
         );
 
         // This fence is intentionally captured after the empty source-page query. The capture
-        // locks both generation journals through this transaction, so the full-range check and
+        // locks all three input journals through this transaction, so the full-range check and
         // completion update share one finite input boundary.
         let final_watermark =
             crate::projection_apply::capture_projection_staging_input_watermark_in_transaction(
@@ -137,7 +141,9 @@ impl ProjectionStagingCheckpoint {
         ensure!(
             final_watermark.normalized_change_id >= input_fence.watermark.normalized_change_id
                 && final_watermark.direct_invalidation_revision
-                    >= input_fence.watermark.direct_invalidation_revision,
+                    >= input_fence.watermark.direct_invalidation_revision
+                && final_watermark.permissions_resource_revision
+                    >= input_fence.watermark.permissions_resource_revision,
             "{} staging input watermarks moved backwards before completion",
             self.projection
         );
@@ -187,6 +193,8 @@ impl ProjectionStagingCheckpoint {
                 final_normalized_change_id = final_watermark.normalized_change_id,
                 final_direct_invalidation_revision =
                     final_watermark.direct_invalidation_revision,
+                final_permissions_resource_revision =
+                    final_watermark.permissions_resource_revision,
                 "all-current projection final staging fence detected drift; fresh restage started"
             );
             *self = replacement;
@@ -201,14 +209,16 @@ impl ProjectionStagingCheckpoint {
                 staging_completed_at = now(),
                 validated_normalized_change_id = $6,
                 validated_direct_invalidation_revision = $7,
+                validated_permissions_resource_revision = $8,
                 updated_at = now()
             WHERE projection = $1
               AND replay_version = $2
               AND staging_schema_version = $3
               AND completed_normalized_target_block IS NOT DISTINCT FROM $4
               AND full_replay_input_revision = $5
-              AND validated_normalized_change_id = $8
-              AND validated_direct_invalidation_revision = $9
+              AND validated_normalized_change_id = $9
+              AND validated_direct_invalidation_revision = $10
+              AND validated_permissions_resource_revision = $11
               AND status = 'running'
             "#,
         )
@@ -219,8 +229,10 @@ impl ProjectionStagingCheckpoint {
         .bind(self.full_replay_input_revision)
         .bind(final_watermark.normalized_change_id)
         .bind(final_watermark.direct_invalidation_revision)
+        .bind(final_watermark.permissions_resource_revision)
         .bind(self.validated_normalized_change_id)
         .bind(self.validated_direct_invalidation_revision)
+        .bind(self.validated_permissions_resource_revision)
         .execute(&mut *transaction)
         .await
         .with_context(|| {
@@ -242,6 +254,8 @@ impl ProjectionStagingCheckpoint {
         self.staging_complete = true;
         self.validated_normalized_change_id = final_watermark.normalized_change_id;
         self.validated_direct_invalidation_revision = final_watermark.direct_invalidation_revision;
+        self.validated_permissions_resource_revision =
+            final_watermark.permissions_resource_revision;
         Ok(true)
     }
 
@@ -266,14 +280,16 @@ impl ProjectionStagingCheckpoint {
                 staged_aux_row_count = $8,
                 validated_normalized_change_id = $9,
                 validated_direct_invalidation_revision = $10,
+                validated_permissions_resource_revision = $11,
                 updated_at = now()
             WHERE projection = $1
               AND replay_version = $2
               AND staging_schema_version = $3
               AND full_replay_input_revision = $4
-              AND completed_source_count = $11
-              AND validated_normalized_change_id = $12
-              AND validated_direct_invalidation_revision = $13
+              AND completed_source_count = $12
+              AND validated_normalized_change_id = $13
+              AND validated_direct_invalidation_revision = $14
+              AND validated_permissions_resource_revision = $15
               AND status = 'running'
             "#,
         )
@@ -287,9 +303,11 @@ impl ProjectionStagingCheckpoint {
         .bind(progress.staged_aux_row_count)
         .bind(input_fence.watermark.normalized_change_id)
         .bind(input_fence.watermark.direct_invalidation_revision)
+        .bind(input_fence.watermark.permissions_resource_revision)
         .bind(self.completed_source_count)
         .bind(self.validated_normalized_change_id)
         .bind(self.validated_direct_invalidation_revision)
+        .bind(self.validated_permissions_resource_revision)
         .execute(&mut **transaction)
         .await
         .with_context(|| {
@@ -319,5 +337,7 @@ impl ProjectionStagingCheckpoint {
         self.validated_normalized_change_id = input_fence.watermark.normalized_change_id;
         self.validated_direct_invalidation_revision =
             input_fence.watermark.direct_invalidation_revision;
+        self.validated_permissions_resource_revision =
+            input_fence.watermark.permissions_resource_revision;
     }
 }

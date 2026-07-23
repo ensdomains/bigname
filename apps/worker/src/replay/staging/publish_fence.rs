@@ -35,6 +35,8 @@ impl ProjectionStagingCheckpoint {
                 && stored.validated_normalized_change_id == self.validated_normalized_change_id
                 && stored.validated_direct_invalidation_revision
                     == self.validated_direct_invalidation_revision
+                && stored.validated_permissions_resource_revision
+                    == self.validated_permissions_resource_revision
                 && stored.stage_tables == self.stage_tables
                 && stored.last_source_key == self.last_source_key
                 && stored.completed_source_count == self.completed_source_count
@@ -45,7 +47,7 @@ impl ProjectionStagingCheckpoint {
             self.projection
         );
 
-        // The capture functions take SHARE locks on both generation journals. Retaining those
+        // The capture functions take SHARE locks on all three input journals. Retaining those
         // locks in the replacement transaction prevents an in-flight invalidation writer from
         // landing between this full-range check and the live-table commit.
         let publish_watermark =
@@ -102,6 +104,8 @@ impl ProjectionStagingCheckpoint {
             publish_normalized_change_id = publish_watermark.normalized_change_id,
             publish_direct_invalidation_revision =
                 publish_watermark.direct_invalidation_revision,
+            publish_permissions_resource_revision =
+                publish_watermark.permissions_resource_revision,
             "all-current projection publication fence detected drift; fresh restage started"
         );
         *self = replacement;

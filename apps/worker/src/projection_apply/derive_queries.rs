@@ -123,7 +123,7 @@ pub(super) fn current_projection_invalidation_prefixes(
 #[cfg(test)]
 pub(crate) fn projection_staging_input_channel_tags(projection: &str) -> Option<Vec<&'static str>> {
     let prefixes = current_projection_invalidation_prefixes(projection)?;
-    let mut channels = Vec::with_capacity(prefixes.len() + 1);
+    let mut channels = Vec::with_capacity(prefixes.len() + 3);
     for prefix in prefixes {
         let channel = if *prefix == MANIFEST_CURRENT_INVALIDATIONS_PREFIX {
             "manifest_current"
@@ -134,6 +134,12 @@ pub(crate) fn projection_staging_input_channel_tags(projection: &str) -> Option<
             channels.push(channel);
         }
     }
+    if projection == "children_current" {
+        channels.push("parent_changed_full_restage");
+    }
     channels.push("direct_invalidation_generation");
+    if projection == "permissions_current" {
+        channels.push("permissions_resource_input_revision");
+    }
     Some(channels)
 }

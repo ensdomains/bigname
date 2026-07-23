@@ -7,16 +7,20 @@ use crate::projection_apply::derive_queries::{
     INVALIDATION_QUERY_PREFIXES, UPSERT_SUFFIX, current_projection_invalidation_prefixes,
 };
 
+mod staging_inputs;
+
+use staging_inputs::{
+    DIRECT_INVALIDATION_REVISIONS_PREFIX, PERMISSIONS_RESOURCE_INPUT_REVISIONS_PREFIX,
+    children_parent_changed_requires_full_restage,
+};
+pub(crate) use staging_inputs::{
+    ProjectionStagingInputWatermark, capture_projection_staging_input_watermark_in_transaction,
+};
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ProjectionInvalidationDeriveSummary {
     pub(crate) scanned_event_count: i64,
     pub(crate) enqueued_invalidation_count: u64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ProjectionStagingInputWatermark {
-    pub(crate) normalized_change_id: i64,
-    pub(crate) direct_invalidation_revision: i64,
 }
 
 pub(crate) async fn normalized_event_cursor_exists(pool: &PgPool) -> Result<bool> {
@@ -100,25 +104,6 @@ pub(crate) async fn capture_normalized_event_change_watermark_in_transaction(
     .map(|change_id| NormalizedEventChangeCursor { change_id })
 }
 
-pub(crate) async fn capture_projection_staging_input_watermark_in_transaction(
-    transaction: &mut Transaction<'_, Postgres>,
-) -> Result<ProjectionStagingInputWatermark> {
-    let normalized_change_id =
-        capture_normalized_event_change_watermark_in_transaction(transaction)
-            .await?
-            .change_id;
-    let direct_invalidation_revision = sqlx::query_scalar::<_, i64>(
-        "SELECT public.capture_projection_direct_invalidation_watermark()",
-    )
-    .fetch_one(&mut **transaction)
-    .await
-    .context("failed to capture complete direct projection invalidation watermark")?;
-    Ok(ProjectionStagingInputWatermark {
-        normalized_change_id,
-        direct_invalidation_revision,
-    })
-}
-
 pub(crate) async fn completed_projection_sources_changed(
     transaction: &mut Transaction<'_, Postgres>,
     projection: &str,
@@ -128,6 +113,16 @@ pub(crate) async fn completed_projection_sources_changed(
 ) -> Result<bool> {
     let prefixes = current_projection_invalidation_prefixes(projection)
         .with_context(|| format!("unsupported staged projection {projection}"))?;
+    if projection == "children_current"
+        && children_parent_changed_requires_full_restage(
+            transaction,
+            lower.normalized_change_id,
+            upper.normalized_change_id,
+        )
+        .await?
+    {
+        return Ok(true);
+    }
     for prefix in prefixes {
         if completed_candidate_keys_changed(
             transaction,
@@ -142,7 +137,7 @@ pub(crate) async fn completed_projection_sources_changed(
             return Ok(true);
         }
     }
-    completed_candidate_keys_changed(
+    if completed_candidate_keys_changed(
         transaction,
         projection,
         lower.direct_invalidation_revision,
@@ -150,17 +145,23 @@ pub(crate) async fn completed_projection_sources_changed(
         completed_range,
         DIRECT_INVALIDATION_REVISIONS_PREFIX,
     )
-    .await
+    .await?
+    {
+        return Ok(true);
+    }
+    if projection == "permissions_current" {
+        return completed_candidate_keys_changed(
+            transaction,
+            projection,
+            lower.permissions_resource_revision,
+            upper.permissions_resource_revision,
+            completed_range,
+            PERMISSIONS_RESOURCE_INPUT_REVISIONS_PREFIX,
+        )
+        .await;
+    }
+    Ok(false)
 }
-
-const DIRECT_INVALIDATION_REVISIONS_PREFIX: &str = r#"
-WITH candidate_keys AS (
-    SELECT projection, projection_key, key_payload
-    FROM projection_direct_invalidation_revisions
-    WHERE revision > $1
-      AND revision <= $2
-)
-"#;
 
 async fn completed_candidate_keys_changed(
     transaction: &mut Transaction<'_, Postgres>,
