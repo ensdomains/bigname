@@ -160,6 +160,7 @@ async fn repair_ens_v1_text_records_escapes_nul_text_values_for_jsonb() -> Resul
 #[tokio::test]
 async fn repair_ens_v1_text_records_fills_selectorized_rows_missing_value() -> Result<()> {
     let database = TestDatabase::new().await?;
+    create_projection_normalized_event_change_tables(database.pool()).await?;
     let chain = "ethereum-mainnet";
     let resolver_address = "0x0000000000000000000000000000000000004976";
     let block = provider_block(
@@ -226,6 +227,26 @@ async fn repair_ens_v1_text_records_fills_selectorized_rows_missing_value() -> R
     assert_eq!(after_state["record_key"], "text:avatar");
     assert_eq!(after_state["selector_key"], "avatar");
     assert_eq!(after_state["value"], "https://euc.li/selector.eth");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)
+            FROM projection_normalized_event_changes change
+            JOIN normalized_events event
+              ON event.normalized_event_id = change.normalized_event_id
+            WHERE event.event_identity = $1
+              AND change.change_kind = 'content_update'
+            "#,
+        )
+        .bind(format!(
+            "ens_v1_unwrapped_authority:RecordChanged:record-change:{}:{}:3",
+            block.block_hash,
+            transaction_hash_for_block(&block)
+        ))
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
 
     server.abort();
     database.cleanup().await

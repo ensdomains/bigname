@@ -77,23 +77,9 @@ impl NormalizedEventReplayAdapter {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum StatelessReplayLane {
-    WholeAdapter,
-    NormalizedEventsOnly,
-    Unsupported,
-}
-
-impl StatelessReplayLane {
-    const fn supported(self) -> bool {
-        !matches!(self, Self::Unsupported)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct AdapterReplayContract {
     pub(crate) adapter: NormalizedEventReplayAdapter,
     pub(crate) model: ReplayDependencyModel,
-    pub(crate) stateless_replay_lane: StatelessReplayLane,
     pub(crate) raw_fact_replay_participant: bool,
     pub(crate) source_families: &'static [&'static str],
     pub(crate) closure_source_families: &'static [&'static str],
@@ -142,7 +128,7 @@ impl RawFactReplayContractPlan {
         match self.0 {
             RawFactReplayContractMode::StatelessRestricted => true,
             RawFactReplayContractMode::StatelessOnlyAuthoritative => {
-                replay_contract(adapter).stateless_replay_lane.supported()
+                replay_contract(adapter).model.restricted_replay_supported()
             }
             RawFactReplayContractMode::FullClosure => !full_closure_reemits_adapter(adapter),
         }
@@ -160,12 +146,13 @@ impl RawFactReplayContractPlan {
             );
         }
         if self.uses_stateless_replay_authority() {
-            if contract.stateless_replay_lane.supported() {
+            if contract.model.restricted_replay_supported() {
                 return Ok(());
             }
             bail!(
-                "normalized-event replay adapter {} has no centrally classified stateless replay lane",
-                adapter.as_str()
+                "normalized-event replay adapter {} is classified as {}; stateless-only replay is unavailable",
+                adapter.as_str(),
+                contract.model.as_str()
             );
         }
         if contract.model.restricted_replay_supported() {

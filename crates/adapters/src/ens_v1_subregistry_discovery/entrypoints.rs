@@ -1,5 +1,4 @@
 use anyhow::Result;
-use bigname_storage::NormalizedEventReplayAuthoritySummary;
 use sqlx::PgPool;
 
 use super::{
@@ -154,52 +153,5 @@ impl EnsV1SubregistryDiscoverySyncSummary {
         )
         .await
         .map(|(summary, _, _)| summary)
-    }
-
-    pub async fn sync_for_block_hashes_with_source_scope_and_stateless_replay_authority(
-        pool: &PgPool,
-        chain: &str,
-        block_hashes: &[String],
-        source_scope: &[(String, String, i64, i64)],
-    ) -> Result<(Self, NormalizedEventReplayAuthoritySummary)> {
-        sync_ens_v1_subregistry_discovery_with_scope(
-            pool,
-            chain,
-            true,
-            block_hashes,
-            Some(source_scope),
-            DiscoveryEdgeMutation::SkipWithStatelessReplayAuthority,
-            None,
-            None,
-            None,
-            checkpoint::PAGE_LIMIT,
-            None,
-            &mut None,
-        )
-        .await
-        .map(|(summary, _, authority)| (summary, authority))
-    }
-
-    pub async fn sync_for_block_hashes_with_stateless_replay_authority(
-        pool: &PgPool,
-        chain: &str,
-        block_hashes: &[String],
-    ) -> Result<(Self, NormalizedEventReplayAuthoritySummary)> {
-        sync_ens_v1_subregistry_discovery_with_scope(
-            pool,
-            chain,
-            true,
-            block_hashes,
-            None,
-            DiscoveryEdgeMutation::SkipWithStatelessReplayAuthority,
-            None,
-            None,
-            None,
-            checkpoint::PAGE_LIMIT,
-            None,
-            &mut None,
-        )
-        .await
-        .map(|(summary, _, authority)| (summary, authority))
     }
 }

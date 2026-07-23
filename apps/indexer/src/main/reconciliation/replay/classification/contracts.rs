@@ -1,8 +1,6 @@
 use crate::ens_v1_resolver::SOURCE_FAMILY_ENS_V1_RESOLVER_L1;
 
-use super::{
-    AdapterReplayContract, NormalizedEventReplayAdapter, ReplayDependencyModel, StatelessReplayLane,
-};
+use super::{AdapterReplayContract, NormalizedEventReplayAdapter, ReplayDependencyModel};
 
 const SOURCE_FAMILY_ENS_V2_ROOT_L1: &str = "ens_v2_root_l1";
 pub(crate) const SOURCE_FAMILY_ENS_V2_REGISTRY_L1: &str = "ens_v2_registry_l1";
@@ -44,7 +42,6 @@ pub(crate) const NORMALIZED_EVENT_REPLAY_CONTRACTS: &[AdapterReplayContract] = &
     AdapterReplayContract {
         adapter: NormalizedEventReplayAdapter::BlockDerivedNormalizedEvents,
         model: ReplayDependencyModel::StatelessRawFact,
-        stateless_replay_lane: StatelessReplayLane::WholeAdapter,
         raw_fact_replay_participant: true,
         source_families: BLOCK_DERIVED_SOURCE_FAMILIES,
         closure_source_families: BLOCK_DERIVED_SOURCE_FAMILIES,
@@ -61,7 +58,6 @@ pub(crate) const NORMALIZED_EVENT_REPLAY_CONTRACTS: &[AdapterReplayContract] = &
     AdapterReplayContract {
         adapter: NormalizedEventReplayAdapter::EnsV1ReverseClaim,
         model: ReplayDependencyModel::StatelessRawFact,
-        stateless_replay_lane: StatelessReplayLane::WholeAdapter,
         raw_fact_replay_participant: true,
         source_families: ENS_V1_REVERSE_CLAIM_SOURCE_FAMILIES,
         closure_source_families: ENS_V1_REVERSE_CLAIM_SOURCE_FAMILIES,
@@ -78,23 +74,18 @@ pub(crate) const NORMALIZED_EVENT_REPLAY_CONTRACTS: &[AdapterReplayContract] = &
     AdapterReplayContract {
         adapter: NormalizedEventReplayAdapter::EnsV1SubregistryDiscovery,
         model: ReplayDependencyModel::ContextualDependencyRequired,
-        stateless_replay_lane: StatelessReplayLane::NormalizedEventsOnly,
         raw_fact_replay_participant: true,
         source_families: ENS_V1_SUBREGISTRY_DISCOVERY_SOURCE_FAMILIES,
         closure_source_families: ENS_V1_SUBREGISTRY_DISCOVERY_SOURCE_FAMILIES,
         dependency_adapters: NO_DEPENDENCIES,
         producer_paths: &["crates/adapters/src/ens_v1_subregistry_discovery"],
-        stateless_replay_proof_tests: &[
-            "block_hash_replay_sync_skips_discovery_reconciliation_and_unselected_registry_logs",
-            "replay_normalized_events_stateless_only_supersedes_stale_registry_row_without_touching_closure",
-        ],
+        stateless_replay_proof_tests: &[],
         closure_replay_supported: true,
-        replay_note: "the adapter's discovery reconciliation is contextual, while its selected normalized-event lane can read already-stable contract-instance context without mutating discovery",
+        replay_note: "normalized-event attribution reads manifest contract instances, discovery-derived contract addresses and edges, prior migration state, and the reconciled observation edge",
     },
     AdapterReplayContract {
         adapter: NormalizedEventReplayAdapter::EnsV1UnwrappedAuthority,
         model: ReplayDependencyModel::StatefulClosureRequired,
-        stateless_replay_lane: StatelessReplayLane::Unsupported,
         raw_fact_replay_participant: true,
         source_families: ENS_V1_UNWRAPPED_AUTHORITY_SOURCE_FAMILIES,
         closure_source_families: ENS_V1_UNWRAPPED_AUTHORITY_SOURCE_FAMILIES,
@@ -107,7 +98,6 @@ pub(crate) const NORMALIZED_EVENT_REPLAY_CONTRACTS: &[AdapterReplayContract] = &
     AdapterReplayContract {
         adapter: NormalizedEventReplayAdapter::EnsV2RegistryResourceSurface,
         model: ReplayDependencyModel::StatefulClosureRequired,
-        stateless_replay_lane: StatelessReplayLane::Unsupported,
         raw_fact_replay_participant: true,
         source_families: ENS_V2_REGISTRY_SOURCE_FAMILIES,
         closure_source_families: ENS_V2_REGISTRY_SOURCE_FAMILIES,
@@ -120,7 +110,6 @@ pub(crate) const NORMALIZED_EVENT_REPLAY_CONTRACTS: &[AdapterReplayContract] = &
     AdapterReplayContract {
         adapter: NormalizedEventReplayAdapter::EnsV2Registrar,
         model: ReplayDependencyModel::ContextualDependencyRequired,
-        stateless_replay_lane: StatelessReplayLane::Unsupported,
         raw_fact_replay_participant: true,
         source_families: ENS_V2_REGISTRAR_SOURCE_FAMILIES,
         closure_source_families: ENS_V2_REGISTRAR_DEPENDENCY_SOURCE_FAMILIES,
@@ -133,7 +122,6 @@ pub(crate) const NORMALIZED_EVENT_REPLAY_CONTRACTS: &[AdapterReplayContract] = &
     AdapterReplayContract {
         adapter: NormalizedEventReplayAdapter::EnsV2Resolver,
         model: ReplayDependencyModel::ContextualDependencyRequired,
-        stateless_replay_lane: StatelessReplayLane::Unsupported,
         raw_fact_replay_participant: true,
         source_families: ENS_V2_RESOLVER_SOURCE_FAMILIES,
         closure_source_families: ENS_V2_RESOLVER_DEPENDENCY_SOURCE_FAMILIES,
@@ -146,7 +134,6 @@ pub(crate) const NORMALIZED_EVENT_REPLAY_CONTRACTS: &[AdapterReplayContract] = &
     AdapterReplayContract {
         adapter: NormalizedEventReplayAdapter::EnsV2Permissions,
         model: ReplayDependencyModel::StatefulClosureRequired,
-        stateless_replay_lane: StatelessReplayLane::Unsupported,
         raw_fact_replay_participant: true,
         source_families: ENS_V2_PERMISSIONS_SOURCE_FAMILIES,
         closure_source_families: ENS_V2_PERMISSIONS_SOURCE_FAMILIES,
@@ -159,7 +146,6 @@ pub(crate) const NORMALIZED_EVENT_REPLAY_CONTRACTS: &[AdapterReplayContract] = &
     AdapterReplayContract {
         adapter: NormalizedEventReplayAdapter::ManifestNormalizedEvents,
         model: ReplayDependencyModel::ContextualDependencyRequired,
-        stateless_replay_lane: StatelessReplayLane::Unsupported,
         raw_fact_replay_participant: false,
         source_families: &[],
         closure_source_families: &[],

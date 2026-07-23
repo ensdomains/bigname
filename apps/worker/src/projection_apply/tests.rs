@@ -117,7 +117,7 @@ async fn stateless_replay_supersession_invalidates_and_rederives_projection() ->
             JOIN normalized_events event
               ON event.normalized_event_id = change.normalized_event_id
             WHERE event.event_identity = $1
-              AND change.change_kind = 'canonicality_update'
+              AND change.change_kind = 'content_update'
             "#,
         )
         .bind(&event.event_identity)

@@ -13,20 +13,12 @@ fn normalized_event_producer_inventory_is_classified() {
 }
 
 #[test]
-fn centrally_classified_stateless_replay_lanes_have_proofs() {
+fn stateless_models_have_proofs() {
     for contract in NORMALIZED_EVENT_REPLAY_CONTRACTS {
-        if contract.raw_fact_replay_participant && contract.stateless_replay_lane.supported() {
+        if contract.raw_fact_replay_participant && contract.model.restricted_replay_supported() {
             assert!(
                 !contract.stateless_replay_proof_tests.is_empty(),
-                "{} must name tests proving its stateless replay lane",
-                contract.adapter.as_str()
-            );
-        }
-        if contract.model == ReplayDependencyModel::StatelessRawFact {
-            assert_eq!(
-                contract.stateless_replay_lane,
-                StatelessReplayLane::WholeAdapter,
-                "{} must expose its whole adapter as the stateless lane",
+                "{} must name tests proving its stateless replay model",
                 contract.adapter.as_str()
             );
         }
@@ -34,9 +26,9 @@ fn centrally_classified_stateless_replay_lanes_have_proofs() {
 }
 
 #[test]
-fn adapters_without_stateless_lanes_do_not_claim_stateless_replay_proofs() {
+fn nonstateless_models_do_not_claim_stateless_replay_proofs() {
     for contract in NORMALIZED_EVENT_REPLAY_CONTRACTS {
-        if contract.stateless_replay_lane == StatelessReplayLane::Unsupported {
+        if !contract.model.restricted_replay_supported() {
             assert!(
                 contract.stateless_replay_proof_tests.is_empty(),
                 "{} must not cite stateless replay tests",
@@ -61,7 +53,6 @@ fn stateless_only_plan_reuses_the_central_replay_contract() {
         BTreeSet::from([
             NormalizedEventReplayAdapter::BlockDerivedNormalizedEvents,
             NormalizedEventReplayAdapter::EnsV1ReverseClaim,
-            NormalizedEventReplayAdapter::EnsV1SubregistryDiscovery,
         ])
     );
 }

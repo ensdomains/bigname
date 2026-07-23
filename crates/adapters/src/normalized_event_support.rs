@@ -123,6 +123,7 @@ pub(crate) async fn upsert_normalized_events_with_stateless_replay_authority_cou
         identities_examined = authority.identities_examined,
         identities_unchanged = authority.identities_unchanged,
         identities_superseded = authority.identities_superseded,
+        identities_skipped_non_canonical_source = authority.identities_skipped_non_canonical_source,
         elapsed_ms = total_started.elapsed().as_millis(),
         "adapter stateless replay authority persistence completed"
     );
@@ -173,6 +174,7 @@ pub(crate) async fn upsert_normalized_events_in_chunks_with_stateless_replay_aut
         identities_examined = authority.identities_examined,
         identities_unchanged = authority.identities_unchanged,
         identities_superseded = authority.identities_superseded,
+        identities_skipped_non_canonical_source = authority.identities_skipped_non_canonical_source,
         "adapter chunked stateless replay authority persistence completed"
     );
     Ok((counts, authority))

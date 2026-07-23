@@ -160,7 +160,7 @@ pub(crate) async fn repair_ens_v1_unwrapped_authority_registry_event_time_null_r
             SELECT
                 normalized_event_id,
                 now(),
-                'canonicality_update',
+                'content_update',
                 canonicality_state
             FROM updated
             RETURNING

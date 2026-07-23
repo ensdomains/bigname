@@ -242,7 +242,8 @@ pub(crate) async fn repair_ens_v1_same_tx_registration_setup_before_states(
                 normalized_event_id,
                 logical_name_id,
                 resource_id,
-                canonicality_state
+                canonicality_state,
+                'content_update'::TEXT AS change_kind
             FROM updated_registration
 
             UNION ALL
@@ -251,7 +252,8 @@ pub(crate) async fn repair_ens_v1_same_tx_registration_setup_before_states(
                 normalized_event_id,
                 logical_name_id,
                 resource_id,
-                canonicality_state
+                canonicality_state,
+                'canonicality_update'::TEXT AS change_kind
             FROM orphaned_setup_events
         ),
         queued_changes AS (
@@ -264,7 +266,7 @@ pub(crate) async fn repair_ens_v1_same_tx_registration_setup_before_states(
             SELECT
                 normalized_event_id,
                 now(),
-                'canonicality_update',
+                change_kind,
                 canonicality_state
             FROM changed_events
             RETURNING

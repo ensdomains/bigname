@@ -402,13 +402,7 @@ async fn sync_ens_v1_subregistry_discovery_with_scope(
         )
         .await?
     } else {
-        emit_registry_changed_events(
-            pool,
-            &latest_assignments,
-            &discovery_sources,
-            discovery_edge_mutation.uses_stateless_replay_authority(),
-        )
-        .await?
+        emit_registry_changed_events(pool, &latest_assignments, &discovery_sources).await?
     };
     reconciliation.total_normalized_event_count = event_summary.synced_count;
     reconciliation.total_normalized_event_inserted_count = event_summary.inserted_count;
@@ -421,7 +415,7 @@ async fn sync_ens_v1_subregistry_discovery_with_scope(
     Ok((
         reconciliation,
         false,
-        event_summary.stateless_replay_authority,
+        bigname_storage::NormalizedEventReplayAuthoritySummary::default(),
     ))
 }
 

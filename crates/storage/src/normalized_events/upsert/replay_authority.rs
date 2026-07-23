@@ -32,6 +32,7 @@ pub struct NormalizedEventReplayAuthoritySummary {
     pub identities_inserted: usize,
     pub identities_unchanged: usize,
     pub identities_superseded: usize,
+    pub identities_skipped_non_canonical_source: usize,
     pub inserted_by_event_kind: BTreeMap<String, usize>,
 }
 
@@ -41,6 +42,8 @@ impl NormalizedEventReplayAuthoritySummary {
         self.identities_inserted += other.identities_inserted;
         self.identities_unchanged += other.identities_unchanged;
         self.identities_superseded += other.identities_superseded;
+        self.identities_skipped_non_canonical_source +=
+            other.identities_skipped_non_canonical_source;
         for (event_kind, count) in &other.inserted_by_event_kind {
             *self
                 .inserted_by_event_kind
@@ -62,8 +65,8 @@ struct ReplayIdentityLog {
 ///
 /// This is intentionally separate from ordinary adapter upsert. Ordinary writes still
 /// fail closed when a stable event identity resolves to different content. The caller
-/// must already have restricted derivation to centrally classified stateless replay
-/// lanes before using this function.
+/// must already have restricted derivation to producers whose central replay
+/// dependency model is `stateless_raw_fact` before using this function.
 pub async fn upsert_normalized_events_with_stateless_replay_authority(
     pool: &PgPool,
     events: &[NormalizedEvent],
@@ -98,14 +101,21 @@ pub async fn upsert_normalized_events_with_stateless_replay_authority(
 
     for chunk in safe_events.chunks(NORMALIZED_EVENT_FAST_INSERT_BATCH_SIZE) {
         persist_authoritative_chunk(&mut transaction, chunk, &mut summary, &mut row_logs).await?;
-        upsert_label_preimages_from_normalized_events(&mut transaction, chunk).await?;
+        let authoritative_events = chunk
+            .iter()
+            .filter(|event| source_canonicality_supports_authoritative_replay(event))
+            .cloned()
+            .collect::<Vec<_>>();
+        upsert_label_preimages_from_normalized_events(&mut transaction, &authoritative_events)
+            .await?;
     }
 
     ensure!(
         summary.identities_examined
             == summary.identities_inserted
                 + summary.identities_unchanged
-                + summary.identities_superseded,
+                + summary.identities_superseded
+                + summary.identities_skipped_non_canonical_source,
         "stateless normalized-event replay authority outcome counts do not cover every identity"
     );
     transaction
@@ -131,6 +141,7 @@ pub async fn upsert_normalized_events_with_stateless_replay_authority(
         identities_inserted = summary.identities_inserted,
         identities_unchanged = summary.identities_unchanged,
         identities_superseded = summary.identities_superseded,
+        identities_skipped_non_canonical_source = summary.identities_skipped_non_canonical_source,
         elapsed_ms = total_started.elapsed().as_millis(),
         "stateless-only normalized-event replay authority completed"
     );
@@ -144,8 +155,29 @@ async fn persist_authoritative_chunk(
     summary: &mut NormalizedEventReplayAuthoritySummary,
     row_logs: &mut Vec<ReplayIdentityLog>,
 ) -> Result<()> {
-    let mut existing_by_identity = load_existing_for_update(transaction, events).await?;
-    let missing_events = events
+    let authoritative_events = events
+        .iter()
+        .filter(|event| source_canonicality_supports_authoritative_replay(event))
+        .cloned()
+        .collect::<Vec<_>>();
+    for event in events
+        .iter()
+        .filter(|event| !source_canonicality_supports_authoritative_replay(event))
+    {
+        summary.identities_skipped_non_canonical_source += 1;
+        row_logs.push(replay_identity_log(
+            event,
+            "skipped_non_canonical_source",
+            Vec::new(),
+        ));
+    }
+    if authoritative_events.is_empty() {
+        return Ok(());
+    }
+
+    let mut existing_by_identity =
+        load_existing_for_update(transaction, &authoritative_events).await?;
+    let missing_events = authoritative_events
         .iter()
         .filter(|event| !existing_by_identity.contains_key(&event.event_identity))
         .cloned()
@@ -162,7 +194,7 @@ async fn persist_authoritative_chunk(
         existing_by_identity.extend(load_existing_for_update(transaction, &raced_events).await?);
     }
 
-    for incoming in events {
+    for incoming in &authoritative_events {
         if inserted_identities.contains(&incoming.event_identity) {
             summary.identities_inserted += 1;
             *summary
@@ -197,12 +229,7 @@ async fn persist_authoritative_chunk(
 
         ensure_stateless_replay_projection_identity_matches(existing, &replayed)?;
 
-        supersede_normalized_event(
-            transaction,
-            &replayed,
-            merged_canonicality == existing.canonicality_state,
-        )
-        .await?;
+        supersede_normalized_event(transaction, &replayed).await?;
         summary.identities_superseded += 1;
         row_logs.push(replay_identity_log(
             incoming,
@@ -245,7 +272,6 @@ async fn load_existing_for_update(
 async fn supersede_normalized_event(
     transaction: &mut Transaction<'_, Postgres>,
     event: &NormalizedEvent,
-    journal_content_change: bool,
 ) -> Result<()> {
     let raw_fact_ref = serialize_jsonb_value(
         &event.raw_fact_ref,
@@ -259,7 +285,7 @@ async fn supersede_normalized_event(
         &event.after_state,
         "failed to serialize stateless replay after_state",
     )?;
-    let normalized_event_id = sqlx::query_scalar::<_, i64>(
+    let rows_affected = sqlx::query(
         r#"
         UPDATE normalized_events
         SET
@@ -282,7 +308,6 @@ async fn supersede_normalized_event(
             after_state = $18::JSONB,
             observed_at = now()
         WHERE event_identity = $1
-        RETURNING normalized_event_id
         "#,
     )
     .bind(&event.event_identity)
@@ -303,35 +328,31 @@ async fn supersede_normalized_event(
     .bind(event.canonicality_state.as_str())
     .bind(before_state)
     .bind(after_state)
-    .fetch_one(&mut **transaction)
+    .execute(&mut **transaction)
     .await
     .with_context(|| {
         format!(
             "failed to supersede normalized event {} with stateless replay authority",
             event.event_identity
         )
-    })?;
-
-    if journal_content_change {
-        sqlx::query(
-            r#"
-            INSERT INTO projection_normalized_event_changes (
-                normalized_event_id,
-                changed_at,
-                change_kind,
-                canonicality_state
-            )
-            VALUES ($1, now(), 'canonicality_update', $2::canonicality_state)
-            "#,
-        )
-        .bind(normalized_event_id)
-        .bind(event.canonicality_state.as_str())
-        .execute(&mut **transaction)
-        .await
-        .context("failed to journal stateless normalized-event replay supersession")?;
-    }
+    })?
+    .rows_affected();
+    ensure!(
+        rows_affected == 1,
+        "stateless normalized-event replay supersession updated {rows_affected} rows for identity {}",
+        event.event_identity
+    );
 
     Ok(())
+}
+
+fn source_canonicality_supports_authoritative_replay(event: &NormalizedEvent) -> bool {
+    matches!(
+        event.canonicality_state,
+        crate::CanonicalityState::Canonical
+            | crate::CanonicalityState::Safe
+            | crate::CanonicalityState::Finalized
+    )
 }
 
 fn replay_identity_log(

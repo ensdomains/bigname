@@ -252,6 +252,9 @@ async fn replay_raw_fact_normalized_events_with_execution(
         identities_superseded = normalized_event_summary
             .stateless_replay_authority
             .identities_superseded,
+        identities_skipped_non_canonical_source = normalized_event_summary
+            .stateless_replay_authority
+            .identities_skipped_non_canonical_source,
         load_selection_ms,
         profile_scope_ms,
         source_scope_ms,

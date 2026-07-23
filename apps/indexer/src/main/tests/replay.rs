@@ -2259,7 +2259,7 @@ async fn replay_normalized_events_full_closure_mutates_selected_discovery_only()
 }
 
 #[tokio::test]
-async fn replay_normalized_events_stateless_only_supersedes_stale_registry_row_without_touching_closure()
+async fn replay_normalized_events_full_closure_repairs_stale_registry_row_after_stateless_exclusion()
 -> Result<()> {
     let database = TestDatabase::new().await?;
     create_normalized_replay_adapter_checkpoint_tables(database.pool()).await?;
@@ -2447,7 +2447,7 @@ async fn replay_normalized_events_stateless_only_supersedes_stale_registry_row_w
             .fetch_one(database.pool())
             .await?;
 
-    let outcome = replay_stateless_only_raw_fact_normalized_events(
+    let stateless_outcome = replay_stateless_only_raw_fact_normalized_events(
         database.pool(),
         RawFactNormalizedEventReplayRequest {
             deployment_profile: "mainnet".to_owned(),
@@ -2459,10 +2459,53 @@ async fn replay_normalized_events_stateless_only_supersedes_stale_registry_row_w
     )
     .await?;
 
-    assert_eq!(outcome.stateless_replay_authority.identities_examined, 1);
-    assert_eq!(outcome.stateless_replay_authority.identities_inserted, 0);
-    assert_eq!(outcome.stateless_replay_authority.identities_unchanged, 0);
-    assert_eq!(outcome.stateless_replay_authority.identities_superseded, 1);
+    assert_eq!(
+        stateless_outcome
+            .stateless_replay_authority
+            .identities_examined,
+        0,
+        "the contextual subregistry adapter must not run in stateless-only replay"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT after_state FROM normalized_events WHERE event_identity = $1"
+        )
+        .bind(&registry_event.1)
+        .fetch_one(database.pool())
+        .await?,
+        stale_after_state,
+        "stateless-only replay must not use closure-derived registry context"
+    );
+    assert_eq!(
+        normalized_event_change_count(database.pool(), &registry_event.1).await?,
+        registry_change_count_before
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM discovery_edges")
+            .fetch_one(database.pool())
+            .await?,
+        discovery_edge_count_before,
+        "stateless-only replay must not reconcile discovery"
+    );
+
+    let full_closure_outcome = replay_raw_fact_normalized_events(
+        database.pool(),
+        RawFactNormalizedEventReplayRequest {
+            deployment_profile: "mainnet".to_owned(),
+            chain: chain.to_owned(),
+            selection: RawFactNormalizedEventReplaySelection::BlockRange {
+                from_block: block.block_number,
+                to_block: block.block_number,
+            },
+        },
+    )
+    .await?;
+    assert_eq!(
+        full_closure_outcome
+            .stateless_replay_authority
+            .identities_examined,
+        0
+    );
     let repaired = sqlx::query_as::<_, (i64, serde_json::Value)>(
         "SELECT normalized_event_id, after_state FROM normalized_events WHERE event_identity = $1",
     )
@@ -2483,7 +2526,7 @@ async fn replay_normalized_events_stateless_only_supersedes_stale_registry_row_w
             JOIN normalized_events event
               ON event.normalized_event_id = change.normalized_event_id
             WHERE event.event_identity = $1
-              AND change.change_kind = 'canonicality_update'
+              AND change.change_kind = 'content_update'
             "#,
         )
         .bind(&registry_event.1)
@@ -2509,7 +2552,7 @@ async fn replay_normalized_events_stateless_only_supersedes_stale_registry_row_w
             .fetch_one(database.pool())
             .await?,
         discovery_edge_count_before,
-        "the stateless event lane must not reconcile discovery"
+        "idempotent full-closure replay must preserve the reconciled edge set"
     );
 
     let error = replay_raw_fact_normalized_events(

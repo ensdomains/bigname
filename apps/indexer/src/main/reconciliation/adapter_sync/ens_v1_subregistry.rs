@@ -82,26 +82,6 @@ pub(super) async fn sync_ens_v1_subregistry_for_mode(
                 )
             })
         }
-        PersistedRawPayloadAdapterSyncMode::RawFactReplay { .. }
-            if mode.uses_stateless_replay_authority() =>
-        {
-            if let Some(source_scope) = source_scope {
-                bigname_adapters::EnsV1SubregistryDiscoverySyncSummary::sync_for_block_hashes_with_source_scope_and_stateless_replay_authority(
-                    pool,
-                    chain,
-                    block_hashes,
-                    source_scope,
-                )
-                .await
-            } else {
-                bigname_adapters::EnsV1SubregistryDiscoverySyncSummary::sync_for_block_hashes_with_stateless_replay_authority(
-                    pool,
-                    chain,
-                    block_hashes,
-                )
-                .await
-            }
-        }
         PersistedRawPayloadAdapterSyncMode::RawFactReplay { .. } => {
             if let Some(source_scope) = source_scope {
                 bigname_adapters::EnsV1SubregistryDiscoverySyncSummary::sync_for_block_hashes_with_source_scope_without_discovery_reconciliation(

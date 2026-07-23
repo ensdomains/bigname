@@ -1228,7 +1228,8 @@ async fn create_projection_normalized_event_change_tables(pool: &PgPool) -> Resu
                 normalized_event_id BIGINT NOT NULL
                     REFERENCES normalized_events(normalized_event_id),
                 changed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                change_kind TEXT NOT NULL CHECK (
+                change_kind TEXT NOT NULL,
+                CONSTRAINT projection_normalized_event_changes_kind_check CHECK (
                     change_kind IN ('insert', 'canonicality_update')
                 ),
                 canonicality_state canonicality_state NOT NULL
@@ -1279,6 +1280,28 @@ async fn create_projection_normalized_event_change_tables(pool: &PgPool) -> Resu
         .execute(pool)
         .await
         .context("failed to create projection normalized-event change test fixture")?;
+
+        sqlx::raw_sql(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../migrations/20260723120000_normalized_event_content_update_kind_constraint.sql"
+        )))
+        .execute(pool)
+        .await
+        .context("failed to add content-update change kind to projection change fixture")?;
+        sqlx::raw_sql(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../migrations/20260723120100_normalized_event_content_update_kind_validate.sql"
+        )))
+        .execute(pool)
+        .await
+        .context("failed to validate content-update change kind in projection change fixture")?;
+        sqlx::raw_sql(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../migrations/20260723120200_normalized_event_content_update_journal.sql"
+        )))
+        .execute(pool)
+        .await
+        .context("failed to update projection change fixture for content journaling")?;
     }
     Ok(())
 }
