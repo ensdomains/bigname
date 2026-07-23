@@ -30,7 +30,7 @@ use tracing::info;
 /// Bump this for any incompatible source ordering, staged-row construction, stage-table shape,
 /// publication, or completed-range classification change. The full bump contract lives in
 /// `docs/projections.md` under "Replay status tracking".
-const CURRENT_PROJECTION_STAGING_SCHEMA_VERSION: i32 = 2;
+const CURRENT_PROJECTION_STAGING_SCHEMA_VERSION: i32 = 3;
 
 struct StoredCheckpoint {
     replay_version: i32,
@@ -38,6 +38,7 @@ struct StoredCheckpoint {
     normalized_target_block: Option<i64>,
     full_replay_input_revision: i64,
     validated_normalized_change_id: i64,
+    validated_direct_invalidation_revision: i64,
     stage_tables: Vec<String>,
     last_source_key: Option<Value>,
     completed_source_count: i64,
@@ -51,6 +52,7 @@ pub(crate) struct ProjectionStagingCheckpoint {
     normalized_target_block: Option<i64>,
     full_replay_input_revision: i64,
     validated_normalized_change_id: i64,
+    validated_direct_invalidation_revision: i64,
     stage_tables: Vec<String>,
     last_source_key: Option<Value>,
     completed_source_count: i64,
@@ -66,9 +68,27 @@ pub(crate) struct StagingBatchProgress {
     staged_aux_row_count: i64,
 }
 
-pub(crate) use input_fence::StagingBatchInputFence;
+impl StoredCheckpoint {
+    fn validated_input_watermark(
+        &self,
+    ) -> crate::projection_apply::ProjectionStagingInputWatermark {
+        crate::projection_apply::ProjectionStagingInputWatermark {
+            normalized_change_id: self.validated_normalized_change_id,
+            direct_invalidation_revision: self.validated_direct_invalidation_revision,
+        }
+    }
+}
 
 impl ProjectionStagingCheckpoint {
+    fn validated_input_watermark(
+        &self,
+    ) -> crate::projection_apply::ProjectionStagingInputWatermark {
+        crate::projection_apply::ProjectionStagingInputWatermark {
+            normalized_change_id: self.validated_normalized_change_id,
+            direct_invalidation_revision: self.validated_direct_invalidation_revision,
+        }
+    }
+
     pub(crate) async fn load_or_start(
         pool: &PgPool,
         projection: &'static str,
@@ -82,12 +102,11 @@ impl ProjectionStagingCheckpoint {
         let full_replay_input_revision =
             load_current_projection_full_replay_input_revision_in_transaction(&mut transaction)
                 .await?;
-        let current_change_id =
-            crate::projection_apply::capture_normalized_event_change_watermark_in_transaction(
+        let current_input_watermark =
+            crate::projection_apply::capture_projection_staging_input_watermark_in_transaction(
                 &mut transaction,
             )
-            .await?
-            .change_id;
+            .await?;
         let existing = load_checkpoint(&mut transaction, projection).await?;
         let structurally_reusable = match existing.as_ref() {
             Some(checkpoint) => {
@@ -112,8 +131,8 @@ impl ProjectionStagingCheckpoint {
                         crate::projection_apply::completed_projection_sources_changed(
                             &mut transaction,
                             projection,
-                            checkpoint.validated_normalized_change_id,
-                            current_change_id,
+                            checkpoint.validated_input_watermark(),
+                            current_input_watermark,
                             crate::projection_apply::CompletedProjectionSourceRange::Through(
                                 last_source_key,
                             ),
@@ -127,8 +146,8 @@ impl ProjectionStagingCheckpoint {
                     crate::projection_apply::completed_projection_sources_changed(
                         &mut transaction,
                         projection,
-                        checkpoint.validated_normalized_change_id,
-                        current_change_id,
+                        checkpoint.validated_input_watermark(),
+                        current_input_watermark,
                         crate::projection_apply::CompletedProjectionSourceRange::Full,
                     )
                     .await?
@@ -176,11 +195,15 @@ impl ProjectionStagingCheckpoint {
                 old_normalized_target_block = checkpoint.normalized_target_block,
                 old_full_replay_input_revision = checkpoint.full_replay_input_revision,
                 old_validated_normalized_change_id = checkpoint.validated_normalized_change_id,
+                old_validated_direct_invalidation_revision =
+                    checkpoint.validated_direct_invalidation_revision,
                 current_replay_version = CURRENT_PROJECTION_REPLAY_VERSION,
                 current_staging_schema_version = CURRENT_PROJECTION_STAGING_SCHEMA_VERSION,
                 normalized_target_block,
                 full_replay_input_revision,
-                current_normalized_change_id = current_change_id,
+                current_normalized_change_id = current_input_watermark.normalized_change_id,
+                current_direct_invalidation_revision =
+                    current_input_watermark.direct_invalidation_revision,
                 completed_sources_changed,
                 "stale all-current projection staging checkpoint discarded"
             );
@@ -196,9 +219,10 @@ impl ProjectionStagingCheckpoint {
                 completed_normalized_target_block,
                 full_replay_input_revision,
                 validated_normalized_change_id,
+                validated_direct_invalidation_revision,
                 stage_tables
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             "#,
         )
         .bind(projection)
@@ -206,7 +230,8 @@ impl ProjectionStagingCheckpoint {
         .bind(CURRENT_PROJECTION_STAGING_SCHEMA_VERSION)
         .bind(normalized_target_block)
         .bind(full_replay_input_revision)
-        .bind(current_change_id)
+        .bind(current_input_watermark.normalized_change_id)
+        .bind(current_input_watermark.direct_invalidation_revision)
         .bind(&stage_tables)
         .execute(&mut *transaction)
         .await
@@ -220,7 +245,9 @@ impl ProjectionStagingCheckpoint {
             projection,
             normalized_target_block,
             full_replay_input_revision,
-            validated_normalized_change_id: current_change_id,
+            validated_normalized_change_id: current_input_watermark.normalized_change_id,
+            validated_direct_invalidation_revision: current_input_watermark
+                .direct_invalidation_revision,
             stage_tables,
             last_source_key: None,
             completed_source_count: 0,
@@ -241,6 +268,8 @@ impl ProjectionStagingCheckpoint {
             normalized_target_block: checkpoint.normalized_target_block,
             full_replay_input_revision: checkpoint.full_replay_input_revision,
             validated_normalized_change_id: checkpoint.validated_normalized_change_id,
+            validated_direct_invalidation_revision: checkpoint
+                .validated_direct_invalidation_revision,
             stage_tables: checkpoint.stage_tables,
             last_source_key: checkpoint.last_source_key,
             completed_source_count: checkpoint.completed_source_count,
@@ -322,73 +351,6 @@ impl ProjectionStagingCheckpoint {
                 .context("projection auxiliary staging row count overflow")?,
         })
     }
-
-    pub(crate) async fn mark_staging_complete(
-        &mut self,
-        pool: &PgPool,
-        input_fence: StagingBatchInputFence,
-    ) -> Result<()> {
-        if self.staging_complete {
-            return Ok(());
-        }
-        let mut transaction = pool.begin().await.with_context(|| {
-            format!(
-                "failed to open {} staging completion transaction",
-                self.projection
-            )
-        })?;
-        lock_projection_checkpoint(&mut transaction, self.projection).await?;
-        ensure_current_projection_full_replay_input_revision_in_transaction(
-            &mut transaction,
-            self.full_replay_input_revision,
-        )
-        .await?;
-        let updated = sqlx::query(
-            r#"
-            UPDATE current_projection_staging_checkpoints
-            SET
-                status = 'staging_complete',
-                staging_completed_at = now(),
-                validated_normalized_change_id = $6,
-                updated_at = now()
-            WHERE projection = $1
-              AND replay_version = $2
-              AND staging_schema_version = $3
-              AND completed_normalized_target_block IS NOT DISTINCT FROM $4
-              AND full_replay_input_revision = $5
-              AND validated_normalized_change_id = $7
-              AND status = 'running'
-            "#,
-        )
-        .bind(self.projection)
-        .bind(CURRENT_PROJECTION_REPLAY_VERSION)
-        .bind(CURRENT_PROJECTION_STAGING_SCHEMA_VERSION)
-        .bind(self.normalized_target_block)
-        .bind(self.full_replay_input_revision)
-        .bind(input_fence.validated_normalized_change_id)
-        .bind(self.validated_normalized_change_id)
-        .execute(&mut *transaction)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to mark {} projection staging complete",
-                self.projection
-            )
-        })?
-        .rows_affected();
-        ensure!(
-            updated == 1,
-            "{} projection staging checkpoint changed before completion",
-            self.projection
-        );
-        transaction
-            .commit()
-            .await
-            .with_context(|| format!("failed to commit {} staging completion", self.projection))?;
-        self.staging_complete = true;
-        self.validated_normalized_change_id = input_fence.validated_normalized_change_id;
-        Ok(())
-    }
 }
 
 async fn lock_projection_checkpoint(
@@ -417,6 +379,7 @@ async fn load_checkpoint(
             completed_normalized_target_block,
             full_replay_input_revision,
             validated_normalized_change_id,
+            validated_direct_invalidation_revision,
             stage_tables,
             last_source_key,
             completed_source_count,
@@ -439,6 +402,8 @@ async fn load_checkpoint(
             normalized_target_block: row.try_get("completed_normalized_target_block")?,
             full_replay_input_revision: row.try_get("full_replay_input_revision")?,
             validated_normalized_change_id: row.try_get("validated_normalized_change_id")?,
+            validated_direct_invalidation_revision: row
+                .try_get("validated_direct_invalidation_revision")?,
             stage_tables: row.try_get("stage_tables")?,
             last_source_key: row.try_get("last_source_key")?,
             completed_source_count: row.try_get("completed_source_count")?,

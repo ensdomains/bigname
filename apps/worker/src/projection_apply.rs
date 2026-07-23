@@ -17,9 +17,11 @@ use crate::record_inventory;
 
 pub(crate) use derive::{
     CompletedProjectionSourceRange, ProjectionInvalidationDeriveSummary,
+    ProjectionStagingInputWatermark,
     capture_normalized_event_change_watermark as load_normalized_event_change_watermark,
-    capture_normalized_event_change_watermark_in_transaction, completed_projection_sources_changed,
-    normalized_event_cursor_exists, seed_normalized_event_cursor_if_absent_in_transaction,
+    capture_projection_staging_input_watermark_in_transaction,
+    completed_projection_sources_changed, normalized_event_cursor_exists,
+    seed_normalized_event_cursor_if_absent_in_transaction,
 };
 
 const NORMALIZED_EVENT_CURSOR: &str = "normalized_events_to_projection_invalidations";

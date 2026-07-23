@@ -84,15 +84,38 @@ pub(super) const INVALIDATION_QUERY_PREFIXES: &[&str] = &[
     MANIFEST_CURRENT_INVALIDATIONS_PREFIX,
 ];
 
-pub(super) fn current_projection_invalidation_prefix(projection: &str) -> Option<&'static str> {
+const NAME_CURRENT_COMPLETED_CHANGE_PREFIXES: &[&str] = &[
+    NAME_CURRENT_INVALIDATIONS_PREFIX,
+    MANIFEST_CURRENT_INVALIDATIONS_PREFIX,
+];
+const CHILDREN_CURRENT_COMPLETED_CHANGE_PREFIXES: &[&str] =
+    &[CHILDREN_CURRENT_INVALIDATIONS_PREFIX];
+const PERMISSIONS_CURRENT_COMPLETED_CHANGE_PREFIXES: &[&str] =
+    &[PERMISSIONS_CURRENT_INVALIDATIONS_PREFIX];
+const RECORD_INVENTORY_CURRENT_COMPLETED_CHANGE_PREFIXES: &[&str] = &[
+    RECORD_INVENTORY_CURRENT_INVALIDATIONS_PREFIX,
+    MANIFEST_CURRENT_INVALIDATIONS_PREFIX,
+];
+const RESOLVER_CURRENT_COMPLETED_CHANGE_PREFIXES: &[&str] = &[
+    RESOLVER_CURRENT_INVALIDATIONS_PREFIX,
+    MANIFEST_CURRENT_INVALIDATIONS_PREFIX,
+];
+const ADDRESS_NAMES_CURRENT_COMPLETED_CHANGE_PREFIXES: &[&str] =
+    &[ADDRESS_NAMES_CURRENT_INVALIDATIONS_PREFIX];
+const PRIMARY_NAMES_CURRENT_COMPLETED_CHANGE_PREFIXES: &[&str] =
+    &[PRIMARY_NAMES_CURRENT_INVALIDATIONS_PREFIX];
+
+pub(super) fn current_projection_invalidation_prefixes(
+    projection: &str,
+) -> Option<&'static [&'static str]> {
     match projection {
-        "name_current" => Some(NAME_CURRENT_INVALIDATIONS_PREFIX),
-        "children_current" => Some(CHILDREN_CURRENT_INVALIDATIONS_PREFIX),
-        "permissions_current" => Some(PERMISSIONS_CURRENT_INVALIDATIONS_PREFIX),
-        "record_inventory_current" => Some(RECORD_INVENTORY_CURRENT_INVALIDATIONS_PREFIX),
-        "resolver_current" => Some(RESOLVER_CURRENT_INVALIDATIONS_PREFIX),
-        "address_names_current" => Some(ADDRESS_NAMES_CURRENT_INVALIDATIONS_PREFIX),
-        "primary_names_current" => Some(PRIMARY_NAMES_CURRENT_INVALIDATIONS_PREFIX),
+        "name_current" => Some(NAME_CURRENT_COMPLETED_CHANGE_PREFIXES),
+        "children_current" => Some(CHILDREN_CURRENT_COMPLETED_CHANGE_PREFIXES),
+        "permissions_current" => Some(PERMISSIONS_CURRENT_COMPLETED_CHANGE_PREFIXES),
+        "record_inventory_current" => Some(RECORD_INVENTORY_CURRENT_COMPLETED_CHANGE_PREFIXES),
+        "resolver_current" => Some(RESOLVER_CURRENT_COMPLETED_CHANGE_PREFIXES),
+        "address_names_current" => Some(ADDRESS_NAMES_CURRENT_COMPLETED_CHANGE_PREFIXES),
+        "primary_names_current" => Some(PRIMARY_NAMES_CURRENT_COMPLETED_CHANGE_PREFIXES),
         _ => None,
     }
 }

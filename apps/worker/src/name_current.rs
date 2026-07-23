@@ -182,8 +182,10 @@ async fn rebuild_all_name_current(
             )
             .await?;
             if page.is_empty() {
-                checkpoint.mark_staging_complete(pool, input_fence).await?;
-                break;
+                if checkpoint.mark_staging_complete(pool, input_fence).await? {
+                    break;
+                }
+                continue;
             }
             let last_source_key = Value::String(
                 page.last()

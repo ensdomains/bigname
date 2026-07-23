@@ -159,7 +159,7 @@ async fn rebuild_all_addresses(
         normalized_target_block,
     )
     .await?;
-    let rebuild = AddressNamesCurrentFullRebuild::from_durable_stage(
+    let mut rebuild = AddressNamesCurrentFullRebuild::from_durable_stage(
         checkpoint.stage_table(0)?.to_owned(),
         deleted_row_count,
     )?;
@@ -170,7 +170,7 @@ async fn rebuild_all_addresses(
     );
 
     if !checkpoint.staging_complete() {
-        stage_all_address_rows(pool, &rebuild, &mut checkpoint, &mut loop_heartbeat).await?;
+        stage_all_address_rows(pool, &mut rebuild, &mut checkpoint, &mut loop_heartbeat).await?;
     }
     let staged = AddressNamesCurrentStagingSummary {
         upserted_row_count: checkpoint.staged_row_count()?,
@@ -215,7 +215,7 @@ struct AddressNamesCurrentStagingSummary {
 
 async fn stage_all_address_rows(
     pool: &PgPool,
-    rebuild: &AddressNamesCurrentFullRebuild,
+    rebuild: &mut AddressNamesCurrentFullRebuild,
     checkpoint: &mut crate::replay::staging::ProjectionStagingCheckpoint,
     loop_heartbeat: &mut Option<&mut LoopHeartbeat>,
 ) -> Result<AddressNamesCurrentStagingSummary> {
@@ -238,8 +238,14 @@ async fn stage_all_address_rows(
             page.push(binding);
         }
         if page.is_empty() {
-            checkpoint.mark_staging_complete(pool, input_fence).await?;
-            break;
+            if checkpoint.mark_staging_complete(pool, input_fence).await? {
+                break;
+            }
+            *rebuild = AddressNamesCurrentFullRebuild::from_durable_stage(
+                checkpoint.stage_table(0)?.to_owned(),
+                rebuild.previous_row_count(),
+            )?;
+            continue;
         }
         let last = page
             .last()

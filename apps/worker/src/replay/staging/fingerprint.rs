@@ -29,6 +29,10 @@ pub(crate) fn staging_contract_fingerprint() -> Result<String> {
         fingerprint,
         "schema_version={CURRENT_PROJECTION_STAGING_SCHEMA_VERSION}"
     )?;
+    writeln!(
+        fingerprint,
+        "completion_fence=post_empty_page_full_range|channels=normalized_event,manifest_current,direct_invalidation_generation"
+    )?;
     for projection in STAGED_PROJECTIONS {
         let cursor = shape_tag(projection)
             .with_context(|| format!("missing staging cursor contract for {projection}"))?;
