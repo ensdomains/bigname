@@ -20,8 +20,8 @@ use crate::checkpoint_codec::JsonbCheckpointCodec;
 use items::{checkpoint_item_rows, checkpoint_pending_observation_delete_keys};
 use items::{
     checkpoint_item_rows_with_progress, checkpoint_pending_observation_delete_keys_with_progress,
-    delete_checkpoint_items, delete_checkpoint_items_with_progress,
-    insert_checkpoint_items_with_progress, update_checkpoint_progress,
+    delete_checkpoint_items_with_progress, insert_checkpoint_items_with_progress,
+    update_checkpoint_progress,
 };
 pub(super) use payload::{decode_item, encode_item};
 use payload::{flushed_events_from_payload, summary_from_payload, summary_payload};

@@ -309,6 +309,110 @@ async fn spawned_normalized_replay_beats_on_progress_and_exposes_a_later_wedge()
 }
 
 #[tokio::test]
+async fn normalized_replay_coverage_recovery_preserves_per_page_heartbeats() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let chain = "normalized-replay-coverage-progress-chain";
+    let source_family = "ens_v2_registry_l1";
+    let address = "0x0000000000000000000000000000000000005230";
+    let contract_instance_id = Uuid::from_u128(52_300);
+    let through_block = crate::backfill::DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS + 1;
+    insert_active_replay_manifest_contract(
+        database.pool(),
+        52_300,
+        "ens",
+        source_family,
+        chain,
+        "ens_v2",
+        contract_instance_id,
+        address,
+        "registry",
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET active_from_block_number = 1
+        WHERE contract_instance_id = $1
+        "#,
+    )
+    .bind(contract_instance_id)
+    .execute(database.pool())
+    .await?;
+    create_complete_raw_log_staging_input_fixture(database.pool(), chain, 0).await?;
+    sqlx::query(
+        "INSERT INTO discovery_admission_epochs (chain_id, epoch) VALUES ($1, 0)",
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+
+    let fixtures = linear_provider_blocks(through_block)
+        .into_iter()
+        .map(|block| ProviderBlockFixture {
+            block,
+            logs: Vec::new(),
+        })
+        .collect();
+    let (provider, server) = bundle_provider_with_fixtures(fixtures).await?;
+    let instance_id = "normalized-replay-coverage-progress-test";
+    install_stale_indexer_heartbeat(database.pool(), instance_id).await?;
+    let mut heartbeat = crate::run::startup_heartbeat::NormalizedReplayHeartbeat::new(
+        instance_id.to_owned(),
+        tokio::time::Duration::ZERO,
+        vec![chain.to_owned()],
+    );
+    let progress_before = heartbeat.adapter_progress_count().await;
+    let requirement = bigname_adapters::EnsV2MissingCoverage {
+        chain: chain.to_owned(),
+        retention_generation: 0,
+        source_family: source_family.to_owned(),
+        address: address.to_owned(),
+        required_from_block: 1,
+        required_to_block: through_block,
+    };
+    let status = {
+        let mut progress = Some(&mut heartbeat);
+        normalized_replay_catchup::recover_ens_v2_live_coverage_requirement_for_replay(
+            database.pool(),
+            "sepolia",
+            &provider,
+            HeaderAuditMode::Minimal,
+            &requirement,
+            &mut progress,
+        )
+        .await?
+    };
+    let recovery_progress_count = heartbeat.adapter_progress_count().await - progress_before;
+
+    assert_eq!(status, EnsV2LiveCoverageRecoveryStatus::Recovered);
+    assert!(
+        recovery_progress_count >= 2,
+        "a 1,025-block generation-bound recovery must preserve at least two chunk-page beats through the normalized-replay caller, got {recovery_progress_count}"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64)>(
+            r#"
+            SELECT covered_from_block, covered_to_block
+            FROM backfill_coverage_facts
+            WHERE chain_id = $1
+              AND source_family = $2
+              AND address = $3
+            "#,
+        )
+        .bind(chain)
+        .bind(source_family)
+        .bind(address)
+        .fetch_one(database.pool())
+        .await?,
+        (1, through_block)
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn normalized_replay_failure_journal_keeps_child_heartbeat_ownership() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_normalized_replay_cursor_table(database.pool()).await?;

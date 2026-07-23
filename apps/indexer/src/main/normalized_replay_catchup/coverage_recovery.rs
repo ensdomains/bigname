@@ -11,10 +11,44 @@ use crate::{
     reconciliation::{
         EnsV2LiveCoverageRecoveryStatus, HeaderAuditMode, RawFactNormalizedEventReplayOutcome,
         automatic_stateless_replay_completed, recover_ens_v2_live_coverage_requirement,
+        recover_ens_v2_live_coverage_requirement_with_progress,
     },
 };
 
 const MAX_COVERAGE_RECOVERY_ATTEMPTS: usize = 32;
+
+pub(crate) async fn recover_ens_v2_live_coverage_requirement_for_replay(
+    pool: &sqlx::PgPool,
+    deployment_profile: &str,
+    provider: &(impl ChainProviderOps + ?Sized),
+    header_audit_mode: HeaderAuditMode,
+    requirement: &bigname_adapters::EnsV2MissingCoverage,
+    progress: &mut Option<&mut NormalizedReplayHeartbeat>,
+) -> Result<EnsV2LiveCoverageRecoveryStatus> {
+    match progress.as_deref_mut() {
+        Some(progress) => {
+            recover_ens_v2_live_coverage_requirement_with_progress(
+                pool,
+                deployment_profile,
+                provider,
+                header_audit_mode,
+                requirement,
+                progress,
+            )
+            .await
+        }
+        None => {
+            recover_ens_v2_live_coverage_requirement(
+                pool,
+                deployment_profile,
+                provider,
+                header_audit_mode,
+                requirement,
+            )
+            .await
+        }
+    }
+}
 
 #[expect(clippy::too_many_arguments)]
 pub(super) async fn replay_full_closure_with_coverage_recovery(
@@ -67,12 +101,13 @@ pub(super) async fn replay_full_closure_with_coverage_recovery(
         };
 
         recovery_attempt += 1;
-        let status = match recover_ens_v2_live_coverage_requirement(
+        let status = match recover_ens_v2_live_coverage_requirement_for_replay(
             pool,
             deployment_profile,
             provider,
             header_audit_mode,
             &requirement,
+            progress,
         )
         .await
         {

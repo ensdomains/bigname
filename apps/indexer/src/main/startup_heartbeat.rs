@@ -70,6 +70,11 @@ impl NormalizedReplayHeartbeat {
             chain_ids: Arc::new(chain_ids),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) async fn adapter_progress_count(&self) -> usize {
+        self.heartbeat.lock().await.adapter_progress_count()
+    }
 }
 
 impl<'a> StartupAdapterHeartbeat<'a> {
@@ -117,11 +122,12 @@ impl bigname_adapters::StartupAdapterProgress for NormalizedReplayHeartbeat {
         pool: &'a PgPool,
     ) -> bigname_adapters::StartupAdapterProgressFuture<'a> {
         Box::pin(async move {
-            self.heartbeat
-                .lock()
-                .await
-                .record_if_due(pool, &self.chain_ids)
-                .await
+            let mut heartbeat = self.heartbeat.lock().await;
+            #[cfg(test)]
+            {
+                heartbeat.adapter_progress_count += 1;
+            }
+            heartbeat.record_if_due(pool, &self.chain_ids).await
         })
     }
 }

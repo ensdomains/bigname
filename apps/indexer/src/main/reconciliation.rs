@@ -47,6 +47,7 @@ pub(crate) use canonical::{
     poll_provider_heads_with_adapter_sync, poll_provider_heads_with_adapter_sync_and_progress,
     reconcile_canonical_head, reconcile_fetched_heads, reconcile_fetched_heads_with_adapter_sync,
     reconcile_intake_chain_task, recover_ens_v2_live_coverage_requirement,
+    recover_ens_v2_live_coverage_requirement_with_progress,
 };
 #[allow(unused_imports)]
 pub(crate) use lineage::{

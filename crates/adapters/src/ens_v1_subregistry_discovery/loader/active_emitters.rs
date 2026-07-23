@@ -39,12 +39,13 @@ pub(in crate::ens_v1_subregistry_discovery) async fn load_active_emitters(
 
     if has_source_scope {
         let mut manifest_emitters =
-            load_manifest_declared_active_emitters(pool, chain, source_scope).await?;
+            load_manifest_declared_active_emitters(pool, chain, source_scope, progress).await?;
         if source_scope_covered_by_emitters(source_scope, &manifest_emitters) {
             return Ok(manifest_emitters);
         }
-        manifest_emitters
-            .extend(load_scoped_discovery_active_emitters(pool, chain, source_scope).await?);
+        manifest_emitters.extend(
+            load_scoped_discovery_active_emitters(pool, chain, source_scope, progress).await?,
+        );
         sort_active_emitters(&mut manifest_emitters);
         return Ok(manifest_emitters);
     }
@@ -231,6 +232,7 @@ async fn load_scoped_discovery_active_emitters(
     pool: &PgPool,
     chain: &str,
     source_scope: &[RegistryRawLogSourceScopeTarget],
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<Vec<ActiveEmitter>> {
     let scoped_targets = source_scope
         .iter()
@@ -471,13 +473,17 @@ async fn load_scoped_discovery_active_emitters(
         format!("failed to load scoped discovery ENSv1 registry emitters for {chain}")
     })?;
 
-    active_emitters_from_rows(rows)
+    match progress.as_deref_mut() {
+        Some(progress) => active_emitters_from_rows_with_progress(pool, rows, progress).await,
+        None => active_emitters_from_rows(rows),
+    }
 }
 
 async fn load_manifest_declared_active_emitters(
     pool: &PgPool,
     chain: &str,
     source_scope: &[RegistryRawLogSourceScopeTarget],
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<Vec<ActiveEmitter>> {
     let scoped_source_families = source_scope
         .iter()
@@ -571,5 +577,8 @@ async fn load_manifest_declared_active_emitters(
         format!("failed to load manifest-declared ENSv1 registry emitters for {chain}")
     })?;
 
-    active_emitters_from_rows(rows)
+    match progress.as_deref_mut() {
+        Some(progress) => active_emitters_from_rows_with_progress(pool, rows, progress).await,
+        None => active_emitters_from_rows(rows),
+    }
 }

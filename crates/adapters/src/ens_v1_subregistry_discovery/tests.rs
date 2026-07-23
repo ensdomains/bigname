@@ -807,6 +807,43 @@ async fn canonical_new_owner_log_persists_one_active_subregistry_edge_and_expand
 }
 
 #[tokio::test]
+async fn source_scoped_emitter_loading_preserves_startup_progress() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let registry_address = "0x00000000000C2E074eC69A0dFb2997BA6C7d2E1E";
+
+    test_dir.write_manifest("ens", "ens_v1_registry_l1", "v1", &manifest_contents(true))?;
+    sync_repository(database.pool(), &load_repository(&test_dir.path)?).await?;
+    let source_scope = normalized_registry_source_scope_targets(&[(
+        ENS_V1_REGISTRY_SOURCE_FAMILY.to_owned(),
+        registry_address.to_owned(),
+        42,
+        42,
+    )]);
+    let mut progress = CountingStartupAdapterProgress::default();
+    let emitters = {
+        let mut progress_ref = Some(&mut progress as &mut dyn StartupAdapterProgress);
+        load_active_emitters(
+            database.pool(),
+            chain,
+            Some(&source_scope),
+            false,
+            &mut progress_ref,
+        )
+        .await?
+    };
+
+    assert!(!emitters.is_empty());
+    assert!(
+        progress.record_count > 0,
+        "source-scoped emitter loading must preserve the progress-aware row path"
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn startup_checkpointed_subregistry_matches_uncheckpointed_edges_and_events() -> Result<()> {
     let _permit = crate::acquire_test_db_permit().await;
     let test_dir = TestDir::new()?;
