@@ -1085,6 +1085,475 @@ async fn losing_branch_orphaning_rolls_back_every_block_on_mid_branch_failure() 
 }
 
 #[tokio::test]
+async fn losing_branch_payload_families_roll_back_every_block_on_mid_branch_failure() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let ancestor = provider_block(
+        "0x4111111111111111111111111111111111111111111111111111111111111111",
+        None,
+        1,
+    );
+    let losing_parent = provider_block(
+        "0x4222222222222222222222222222222222222222222222222222222222222222",
+        Some(&ancestor.block_hash),
+        2,
+    );
+    let losing_middle = provider_block(
+        "0x4333333333333333333333333333333333333333333333333333333333333333",
+        Some(&losing_parent.block_hash),
+        3,
+    );
+    let losing_head = provider_block(
+        "0x4444444444444444444444444444444444444444444444444444444444444444",
+        Some(&losing_middle.block_hash),
+        4,
+    );
+    let losing_blocks = [
+        losing_parent.clone(),
+        losing_middle.clone(),
+        losing_head.clone(),
+    ];
+    let raw_blocks = std::iter::once(&ancestor)
+        .chain(losing_blocks.iter())
+        .map(|block| provider_block_to_raw_block(chain, block, CanonicalityState::Canonical))
+        .collect::<Vec<_>>();
+    upsert_raw_blocks(database.pool(), &raw_blocks).await?;
+
+    let raw_logs = losing_blocks
+        .iter()
+        .map(|block| RawLog {
+            chain_id: chain.to_owned(),
+            block_hash: block.block_hash.clone(),
+            block_number: block.block_number,
+            transaction_hash: transaction_hash_for_block(block),
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: "0x0000000000000000000000000000000000000444".to_owned(),
+            topics: vec![
+                "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_owned(),
+            ],
+            data: Vec::new(),
+            canonicality_state: CanonicalityState::Canonical,
+        })
+        .collect::<Vec<_>>();
+    upsert_raw_logs(database.pool(), &raw_logs).await?;
+
+    for block in &losing_blocks {
+        sqlx::query(
+            r#"
+            INSERT INTO normalized_events (
+                event_identity,
+                namespace,
+                event_kind,
+                source_family,
+                manifest_version,
+                source_manifest_id,
+                chain_id,
+                block_number,
+                block_hash,
+                transaction_hash,
+                log_index,
+                raw_fact_ref,
+                derivation_kind,
+                canonicality_state,
+                before_state,
+                after_state
+            )
+            VALUES (
+                $1,
+                'ens',
+                'AtomicityTest',
+                'ens_test',
+                1,
+                NULL,
+                $2,
+                $3,
+                $4,
+                $5,
+                0,
+                '{"kind":"raw_log"}'::jsonb,
+                'raw_log_preimage_observation',
+                'canonical'::canonicality_state,
+                '{}'::jsonb,
+                '{}'::jsonb
+            )
+            "#,
+        )
+        .bind(format!("payload-atomicity:{}", block.block_hash))
+        .bind(chain)
+        .bind(block.block_number)
+        .bind(&block.block_hash)
+        .bind(transaction_hash_for_block(block))
+        .execute(database.pool())
+        .await?;
+    }
+
+    let token_lineages = losing_blocks
+        .iter()
+        .zip(0_u128..)
+        .map(|(block, index)| TokenLineage {
+            token_lineage_id: Uuid::from_u128(0x4400 + index),
+            chain_id: chain.to_owned(),
+            block_hash: block.block_hash.clone(),
+            block_number: block.block_number,
+            provenance: json!({"test": "payload_atomicity"}),
+            canonicality_state: CanonicalityState::Canonical,
+        })
+        .collect::<Vec<_>>();
+    upsert_token_lineages(database.pool(), &token_lineages).await?;
+    let resources = losing_blocks
+        .iter()
+        .zip(token_lineages.iter())
+        .zip(0_u128..)
+        .map(|((block, token_lineage), index)| Resource {
+            resource_id: Uuid::from_u128(0x4500 + index),
+            token_lineage_id: Some(token_lineage.token_lineage_id),
+            chain_id: chain.to_owned(),
+            block_hash: block.block_hash.clone(),
+            block_number: block.block_number,
+            provenance: json!({"test": "payload_atomicity"}),
+            canonicality_state: CanonicalityState::Canonical,
+        })
+        .collect::<Vec<_>>();
+    upsert_resources(database.pool(), &resources).await?;
+
+    sqlx::raw_sql(
+        r#"
+        CREATE TABLE payload_atomicity_failure_target (
+            singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK (singleton),
+            table_name TEXT NOT NULL
+        );
+        INSERT INTO payload_atomicity_failure_target (table_name)
+        VALUES ('raw_logs');
+
+        CREATE FUNCTION fail_middle_payload_orphaning()
+        RETURNS TRIGGER
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            IF TG_TABLE_NAME = (
+                    SELECT table_name
+                    FROM payload_atomicity_failure_target
+                    WHERE singleton
+                )
+               AND NEW.block_hash =
+                   '0x4333333333333333333333333333333333333333333333333333333333333333'
+               AND NEW.canonicality_state = 'orphaned'::canonicality_state
+            THEN
+                RAISE EXCEPTION 'injected mid-branch payload failure in %', TG_TABLE_NAME;
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+
+        CREATE TRIGGER fail_middle_raw_log_orphaning
+        BEFORE UPDATE OF canonicality_state ON raw_logs
+        FOR EACH ROW
+        EXECUTE FUNCTION fail_middle_payload_orphaning();
+
+        CREATE TRIGGER fail_middle_normalized_event_orphaning
+        BEFORE UPDATE OF canonicality_state ON normalized_events
+        FOR EACH ROW
+        EXECUTE FUNCTION fail_middle_payload_orphaning();
+
+        CREATE TRIGGER fail_middle_resource_orphaning
+        BEFORE UPDATE OF canonicality_state ON resources
+        FOR EACH ROW
+        EXECUTE FUNCTION fail_middle_payload_orphaning();
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    let expected_canonical = losing_blocks
+        .iter()
+        .map(|block| (block.block_hash.clone(), "canonical".to_owned()))
+        .collect::<Vec<_>>();
+    let expected_orphaned = losing_blocks
+        .iter()
+        .map(|block| (block.block_hash.clone(), "orphaned".to_owned()))
+        .collect::<Vec<_>>();
+    let coverage_frontiers = ChainCoverageFrontiers::default();
+
+    let raw_error = orphan_reorg_losing_branch_payloads(
+        database.pool(),
+        chain,
+        Some(&losing_head.block_hash),
+        Some(&ancestor.block_hash),
+        &coverage_frontiers,
+    )
+    .await
+    .expect_err("the injected raw-log failure must abort whole-branch raw-fact orphaning");
+    assert!(
+        format!("{raw_error:#}").contains("injected mid-branch payload failure in raw_logs"),
+        "unexpected raw-fact orphaning error: {raw_error:#}"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, String)>(
+            r#"
+            SELECT block_hash, canonicality_state::TEXT
+            FROM raw_logs
+            WHERE chain_id = $1
+            ORDER BY block_number
+            "#,
+        )
+        .bind(chain)
+        .fetch_all(database.pool())
+        .await?,
+        expected_canonical,
+        "raw-fact orphaning must update the complete losing branch or none of it"
+    );
+
+    sqlx::query(
+        "UPDATE payload_atomicity_failure_target SET table_name = 'normalized_events' WHERE singleton",
+    )
+    .execute(database.pool())
+    .await?;
+    let event_error = orphan_reorg_losing_branch_payloads(
+        database.pool(),
+        chain,
+        Some(&losing_head.block_hash),
+        Some(&ancestor.block_hash),
+        &coverage_frontiers,
+    )
+    .await
+    .expect_err("the injected normalized-event failure must abort whole-branch event orphaning");
+    assert!(
+        format!("{event_error:#}")
+            .contains("injected mid-branch payload failure in normalized_events"),
+        "unexpected normalized-event orphaning error: {event_error:#}"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, String)>(
+            r#"
+            SELECT block_hash, canonicality_state::TEXT
+            FROM normalized_events
+            WHERE chain_id = $1
+            ORDER BY block_number
+            "#,
+        )
+        .bind(chain)
+        .fetch_all(database.pool())
+        .await?,
+        expected_canonical,
+        "normalized-event orphaning must update the complete losing branch or none of it"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, String)>(
+            r#"
+            SELECT block_hash, canonicality_state::TEXT
+            FROM raw_logs
+            WHERE chain_id = $1
+            ORDER BY block_number
+            "#,
+        )
+        .bind(chain)
+        .fetch_all(database.pool())
+        .await?,
+        expected_orphaned,
+        "the preceding raw-fact family retains its independently committed range transaction"
+    );
+
+    sqlx::query(
+        "UPDATE payload_atomicity_failure_target SET table_name = 'resources' WHERE singleton",
+    )
+    .execute(database.pool())
+    .await?;
+    let identity_error = orphan_reorg_losing_branch_payloads(
+        database.pool(),
+        chain,
+        Some(&losing_head.block_hash),
+        Some(&ancestor.block_hash),
+        &coverage_frontiers,
+    )
+    .await
+    .expect_err("the injected resource failure must abort whole-branch identity orphaning");
+    assert!(
+        format!("{identity_error:#}").contains("injected mid-branch payload failure in resources"),
+        "unexpected identity orphaning error: {identity_error:#}"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, String)>(
+            r#"
+            SELECT block_hash, canonicality_state::TEXT
+            FROM resources
+            WHERE chain_id = $1
+            ORDER BY block_number
+            "#,
+        )
+        .bind(chain)
+        .fetch_all(database.pool())
+        .await?,
+        expected_canonical,
+        "identity orphaning must update the complete losing branch or none of it"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, String)>(
+            r#"
+            SELECT block_hash, canonicality_state::TEXT
+            FROM token_lineages
+            WHERE chain_id = $1
+            ORDER BY block_number
+            "#,
+        )
+        .bind(chain)
+        .fetch_all(database.pool())
+        .await?,
+        expected_canonical,
+        "a later identity-table failure must roll back earlier tables in the same branch transaction"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn contiguous_winning_branch_recanonicalization_rolls_back_prior_chunks_on_failure()
+-> Result<()> {
+    assert_winning_branch_recanonicalization_rolls_back_prior_chunks(false).await
+}
+
+#[tokio::test]
+async fn reorg_winning_branch_recanonicalization_rolls_back_prior_chunks_on_failure() -> Result<()>
+{
+    assert_winning_branch_recanonicalization_rolls_back_prior_chunks(true).await
+}
+
+async fn assert_winning_branch_recanonicalization_rolls_back_prior_chunks(
+    force_reorg_walk: bool,
+) -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let ancestor = provider_block(
+        "0x5100000000000000000000000000000000000000000000000000000000000000",
+        None,
+        100,
+    );
+    let mut parent_hash = ancestor.block_hash.clone();
+    let mut winning_blocks = Vec::new();
+    for block_number in 101_i64..=133 {
+        let block_hash = format!("0x52{block_number:062x}");
+        let block = provider_block(&block_hash, Some(&parent_hash), block_number);
+        parent_hash = block.block_hash.clone();
+        winning_blocks.push(block);
+    }
+    let losing_checkpoint = force_reorg_walk.then(|| {
+        provider_block(
+            "0x5300000000000000000000000000000000000000000000000000000000000065",
+            Some(&ancestor.block_hash),
+            101,
+        )
+    });
+    let mut lineage_blocks = vec![provider_block_to_lineage(
+        chain,
+        &ancestor,
+        CanonicalityState::Canonical,
+    )];
+    if let Some(losing_checkpoint) = &losing_checkpoint {
+        lineage_blocks.push(provider_block_to_lineage(
+            chain,
+            losing_checkpoint,
+            CanonicalityState::Canonical,
+        ));
+    }
+    lineage_blocks.extend(winning_blocks.iter().map(|block| {
+        provider_block_to_lineage(chain, block, CanonicalityState::Orphaned)
+    }));
+    upsert_chain_lineage_blocks(database.pool(), &lineage_blocks).await?;
+
+    let failing_hash = &winning_blocks
+        .last()
+        .expect("winning branch must have a final block")
+        .block_hash;
+    sqlx::raw_sql(&format!(
+        r#"
+        CREATE FUNCTION fail_late_winning_branch_recanonicalization()
+        RETURNS TRIGGER
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            IF NEW.block_hash = '{failing_hash}'
+               AND OLD.canonicality_state = 'orphaned'::canonicality_state
+               AND NEW.canonicality_state = 'canonical'::canonicality_state
+            THEN
+                RAISE EXCEPTION 'injected failure in the second winning-branch chunk';
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+
+        CREATE TRIGGER fail_late_winning_branch_recanonicalization
+        BEFORE UPDATE OF canonicality_state ON chain_lineage
+        FOR EACH ROW
+        EXECUTE FUNCTION fail_late_winning_branch_recanonicalization();
+        "#,
+    ))
+    .execute(database.pool())
+    .await?;
+
+    let latest_head = winning_blocks
+        .last()
+        .expect("winning branch must have a head")
+        .clone();
+    let checkpoint_block = losing_checkpoint.as_ref().unwrap_or(&ancestor);
+    let (provider, server) = bundle_provider(winning_blocks.clone()).await?;
+    let error = reconcile_canonical_head(
+        database.pool(),
+        &provider,
+        chain,
+        &ChainCheckpoint {
+            chain_id: chain.to_owned(),
+            canonical_block_hash: Some(checkpoint_block.block_hash.clone()),
+            canonical_block_number: Some(checkpoint_block.block_number),
+            safe_block_hash: None,
+            safe_block_number: None,
+            finalized_block_hash: None,
+            finalized_block_number: None,
+        },
+        &latest_head,
+        HeaderAuditMode::Minimal,
+        &[],
+        &ChainCoverageFrontiers::default(),
+    )
+    .await
+    .expect_err("the injected late failure must abort winning-branch re-canonicalization");
+    assert!(
+        format!("{error:#}").contains("injected failure in the second winning-branch chunk"),
+        "unexpected winning-branch error: {error:#}"
+    );
+
+    let states = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT block_hash, canonicality_state::TEXT
+        FROM chain_lineage
+        WHERE chain_id = $1
+          AND block_hash = ANY($2::TEXT[])
+        ORDER BY block_number
+        "#,
+    )
+    .bind(chain)
+    .bind(
+        winning_blocks
+            .iter()
+            .map(|block| block.block_hash.clone())
+            .collect::<Vec<_>>(),
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(states.len(), 33);
+    assert!(
+        states
+            .iter()
+            .all(|(_, state)| state == CanonicalityState::Orphaned.as_str()),
+        "a failed winning-branch transaction must leave every prior application chunk orphaned: {states:?}"
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn awaiting_ancestor_raw_persistence_preserves_walked_orphaned_lineage() -> Result<()> {
     let database = TestDatabase::new().await?;
     let old_head = provider_block(

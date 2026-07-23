@@ -606,9 +606,9 @@ and must be allowed to make the heartbeat stale.
 | indexer live poll | full-corpus adapter refresh after manifest/discovery changes | newly-covered (#229) | Existing adapter page callbacks now remain connected through live reconciliation; completed family, reconciliation, and finalization boundaries also beat. |
 | indexer live poll | post-replay adapter backlog and cursor publication | newly-covered (#229) | Completed adapter families and bounded publication/cursor units; publication beats only after its transaction commits. |
 | indexer live poll | fetch the provider head, safe head, and finalized head | n-a | A fixed set of atomic RPC results is required before reconciliation can advance. A provider call taking more than 20 seconds represents no completed progress and must not receive a beat. |
-| indexer canonical reconciliation | walk provider parents and fill a contiguous gap | newly-covered (#229) | Each fetched parent and each completed block-persistence unit; non-reorg adapter work is split into at-most-32-block chunks. |
+| indexer canonical reconciliation | walk provider parents and fill a contiguous gap | newly-covered (#229) | Each fetched parent and each completed block-persistence unit; non-reorg adapter work is split into at-most-32-block chunks, while winning-branch lineage re-canonicalization beats after its branch-atomic transaction commits. |
 | indexer canonical reconciliation | prove stored lineage and retained-history coverage | newly-covered (#229) | Completed lineage blocks and bounded coverage candidate, companion, fork, and delta pages. |
-| indexer canonical reconciliation | orphan the losing branch | newly-covered (#229) | Each losing block plus bounded raw-fact, normalized-event, identity, and execution-invalidation pages. |
+| indexer canonical reconciliation | orphan the losing branch | newly-covered (#229) | Each losing block during read-only path validation, each committed branch-wide raw-fact, normalized-event, or identity transaction, and each bounded execution-invalidation page. |
 | indexer canonical reconciliation | persist winning raw blocks, transactions, receipts, logs, and event-silent calls | newly-covered (#229) | Each block and each 1,000-row persistence page. |
 | indexer canonical reconciliation | observe code hashes and replay adapter-owned state | newly-covered (#229) | Completed code-observation pages, at-most-32-block adapter chunks, and internal raw-log/processing/persistence pages for block-derived events and all selected ENSv1/ENSv2 adapter families, including ENSv2 registry block-hash entrypoints. |
 | indexer canonical reconciliation | recover exact missing retained-history coverage | newly-covered (#229) | Exact watched-target pages and provider-backed sequential backfill units of at most 32 blocks; coverage is recorded before the beat. |
@@ -983,6 +983,13 @@ Rules:
 ## Reorg repair
 
 Reorg repair preserves audit truth: orphaned rows persist for explanation and rebuild, not deletion. The losing branch's lineage, identity rows, and normalized events stay canonical-state `orphaned` so explain and history routes can still reconstruct what was observed.
+
+Reconciliation validates the complete losing path before changing canonicality.
+The selected lineage branch, each dependent raw-fact, normalized-event, or
+identity storage family, and winning-lineage re-canonicalization each commit
+their complete branch range in one transaction. Progress heartbeats occur
+during the read-only path walk and after those transactions commit, never
+inside a write window that could expose only part of one branch.
 
 Registry discovery authority is repaired before the winning chain checkpoint advances. Reconciliation forces complete canonical ENSv1, Basenames, and ENSv2 registry-source passes through the winning head even when that head is event-silent, so a losing `NewOwner`, `NewResolver`, `SubregistryUpdated`, or resolver assignment cannot remain in active discovery edges, contract addresses, or the watch plan merely because log-derived live scope is empty. ENSv1 and Basenames replay closed historical registry-emitter intervals through that boundary so a canonical subregistry branch closed by the losing fork can be restored in full. Raw facts after the winning head do not enter the repair, and existing non-orphaned later discovery assignments are preserved. Discovery mutations remain manifest/discovery-owned and use the normal reachability cascade and admission-epoch fence. Generation-zero retained input is replayable from its original boundary. After destructive retention rotation, ENSv1 and Basenames may recover this target-bounded repair only from gap-free current-generation coverage for every required registry-emitter interval under an unchanged discovery-admission epoch; ENSv2 uses its generation-bound root/registry proof. Missing or stale coverage, topic drift, generation drift, or epoch drift leaves the winning checkpoint unpublished for retry. Other stateful ENSv1 replay still requires its own documented generation-bound proof or versioned snapshot.
 
