@@ -67,6 +67,11 @@ async fn run_continuous_projection_invalidation_derivation(
                 }
             }
             Err(error) => {
+                if bigname_storage::projection_staging::is_outdated_projection_replay_version_error(
+                    &error,
+                ) {
+                    return Err(error);
+                }
                 warn!(
                     service = "worker",
                     projection_apply = true,

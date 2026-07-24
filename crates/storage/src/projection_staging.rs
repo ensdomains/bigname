@@ -1,7 +1,12 @@
 //! Durable full-projection staging primitives used by worker replay.
 
+use std::fmt;
+
 use anyhow::{Context, Result, ensure};
 use sqlx::{Postgres, Transaction};
+
+const PROJECTION_REPLAY_VERSION_SETTING: &str = "bigname.projection_replay_version";
+const FATAL_PROJECTION_REPLAY_VERSION_FENCE: &str = "fatal projection replay version fence";
 
 pub use crate::address_names::{
     insert_address_names_current_full_rebuild_rows_in_transaction,
@@ -52,6 +57,159 @@ pub const ADDRESS_NAMES_CURRENT_STAGING_COLUMNS: &[&str] = &[
     "last_recomputed_at",
 ];
 
+/// Fatal error returned when an outdated process reaches projection-owned write state.
+#[derive(Debug)]
+pub struct OutdatedProjectionReplayVersionError {
+    process_replay_version: i32,
+    persisted_replay_version: i32,
+}
+
+impl fmt::Display for OutdatedProjectionReplayVersionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{FATAL_PROJECTION_REPLAY_VERSION_FENCE}: process replay version {} is older than \
+             persisted replay version {}; refusing projection writes from the outdated process",
+            self.process_replay_version, self.persisted_replay_version
+        )
+    }
+}
+
+impl std::error::Error for OutdatedProjectionReplayVersionError {}
+
+/// Whether an error chain says this process is too old to write projection-owned state.
+pub fn is_outdated_projection_replay_version_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<OutdatedProjectionReplayVersionError>()
+        .is_some()
+        || error.chain().any(|cause| {
+            cause
+                .to_string()
+                .contains(FATAL_PROJECTION_REPLAY_VERSION_FENCE)
+        })
+}
+
+/// Hold the shared replay-version fence for a projection write transaction.
+///
+/// See `docs/glossary.md#projection-replay-version-fence`.
+///
+/// New replay-state writers take the conflicting row lock before raising the durable version
+/// floor. A projection writer that was admitted first therefore finishes before cutover, while a
+/// writer arriving after cutover fails instead of publishing older semantics.
+pub async fn lock_current_projection_replay_version_for_projection_write_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<()> {
+    stamp_current_projection_replay_version_in_transaction(transaction).await?;
+    let floor = lock_projection_replay_version_floor(transaction, "FOR SHARE").await?;
+    ensure_process_replay_version_is_current(transaction, floor).await
+}
+
+/// Hold the exclusive replay-version fence and admit this binary's replay-state write.
+///
+/// The first fence-aware replay owner activates enforcement; a newer owner also advances the
+/// floor. Applying the migration alone therefore installs the writer triggers without cutting off
+/// a transaction that began under a pre-fence binary.
+pub async fn lock_current_projection_replay_version_for_replay_write_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<()> {
+    stamp_current_projection_replay_version_in_transaction(transaction).await?;
+    let floor = lock_projection_replay_version_floor(transaction, "FOR UPDATE").await?;
+    ensure_process_replay_version_is_current(transaction, floor).await?;
+    let fence_active = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT projection_replay_version_fence_active
+        FROM current_projection_full_replay_input_revision
+        WHERE singleton
+        "#,
+    )
+    .fetch_one(&mut **transaction)
+    .await
+    .context("failed to inspect current-projection replay-version fence activation")?;
+    if !fence_active || floor < crate::CURRENT_PROJECTION_REPLAY_VERSION {
+        sqlx::query(
+            r#"
+            UPDATE current_projection_full_replay_input_revision
+            SET
+                projection_replay_version_floor = GREATEST(
+                    projection_replay_version_floor,
+                    $1
+                ),
+                projection_replay_version_fence_active = true
+            WHERE singleton
+            "#,
+        )
+        .bind(crate::CURRENT_PROJECTION_REPLAY_VERSION)
+        .execute(&mut **transaction)
+        .await
+        .context("failed to advance the current-projection replay-version fence")?;
+    }
+    Ok(())
+}
+
+async fn stamp_current_projection_replay_version_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<()> {
+    sqlx::query("SELECT set_config($1, $2, true)")
+        .bind(PROJECTION_REPLAY_VERSION_SETTING)
+        .bind(crate::CURRENT_PROJECTION_REPLAY_VERSION.to_string())
+        .execute(&mut **transaction)
+        .await
+        .context("failed to stamp the process projection replay version")
+        .map(|_| ())
+}
+
+async fn lock_projection_replay_version_floor(
+    transaction: &mut Transaction<'_, Postgres>,
+    lock_clause: &str,
+) -> Result<i32> {
+    let query = format!(
+        r#"
+        SELECT projection_replay_version_floor
+        FROM current_projection_full_replay_input_revision
+        WHERE singleton
+        {lock_clause}
+        "#
+    );
+    sqlx::query_scalar(&query)
+        .fetch_one(&mut **transaction)
+        .await
+        .context("failed to lock the current-projection replay-version fence")
+}
+
+async fn ensure_process_replay_version_is_current(
+    transaction: &mut Transaction<'_, Postgres>,
+    floor: i32,
+) -> Result<()> {
+    let persisted_version = sqlx::query_scalar::<_, Option<i32>>(
+        r#"
+        SELECT MAX(replay_version)
+        FROM (
+            SELECT replay_version
+            FROM current_projection_replay_status
+            UNION ALL
+            SELECT replay_version
+            FROM current_projection_replay_attempt
+            UNION ALL
+            SELECT replay_version
+            FROM current_projection_staging_checkpoints
+        ) AS persisted_replay_versions
+        "#,
+    )
+    .fetch_one(&mut **transaction)
+    .await
+    .context("failed to inspect persisted current-projection replay versions")?
+    .unwrap_or(floor)
+    .max(floor);
+    if crate::CURRENT_PROJECTION_REPLAY_VERSION < persisted_version {
+        return Err(OutdatedProjectionReplayVersionError {
+            process_replay_version: crate::CURRENT_PROJECTION_REPLAY_VERSION,
+            persisted_replay_version: persisted_version,
+        }
+        .into());
+    }
+    Ok(())
+}
+
 /// Lock and load the revision for direct source changes that require a full projection replay.
 pub async fn load_current_projection_full_replay_input_revision_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
@@ -87,6 +245,7 @@ pub async fn ensure_current_projection_full_replay_input_revision_in_transaction
 pub async fn advance_current_projection_full_replay_input_revision_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> Result<i64> {
+    lock_current_projection_replay_version_for_replay_write_in_transaction(transaction).await?;
     let revision = sqlx::query_scalar(
         r#"
         UPDATE current_projection_full_replay_input_revision

@@ -38,6 +38,14 @@ pub(super) async fn clear_projection_replay_completed(
     pool: &PgPool,
     projection: &str,
 ) -> Result<()> {
+    let mut transaction = pool
+        .begin()
+        .await
+        .with_context(|| format!("failed to open replay-status clear for {projection}"))?;
+    bigname_storage::projection_staging::lock_current_projection_replay_version_for_replay_write_in_transaction(
+        &mut transaction,
+    )
+    .await?;
     sqlx::query(
         r#"
         DELETE FROM current_projection_replay_status
@@ -45,9 +53,13 @@ pub(super) async fn clear_projection_replay_completed(
         "#,
     )
     .bind(projection)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .with_context(|| format!("failed to clear replay status for {projection}"))?;
+    transaction
+        .commit()
+        .await
+        .with_context(|| format!("failed to commit replay-status clear for {projection}"))?;
 
     Ok(())
 }
