@@ -39,6 +39,14 @@ fn nonstateless_models_do_not_claim_stateless_replay_proofs() {
 }
 
 #[test]
+fn ens_v2_permissions_declares_block_derived_preimage_dependency() {
+    assert_eq!(
+        replay_contract(NormalizedEventReplayAdapter::EnsV2Permissions).dependency_adapters,
+        &[NormalizedEventReplayAdapter::BlockDerivedNormalizedEvents]
+    );
+}
+
+#[test]
 fn stateless_only_plan_reuses_the_central_replay_contract() {
     let plan = RawFactReplayContractPlan::stateless_only_authoritative();
     let selected = NORMALIZED_EVENT_REPLAY_CONTRACTS

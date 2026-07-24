@@ -261,8 +261,13 @@ async fn sync_ens_v2_permissions_with_scope(
                 let key = (raw_log.emitting_address.clone(), resource.clone());
                 let hint = if let Some(hint) = hints.get(&key) {
                     hint.clone()
-                } else if let Some(hint) =
-                    load_persisted_resolver_resource_hint(pool, raw_log, &resource).await?
+                } else if let Some(hint) = load_persisted_resolver_resource_hint(
+                    pool,
+                    raw_log,
+                    &resource,
+                    &active_emitters,
+                )
+                .await?
                 {
                     hint
                 } else {
