@@ -1,6 +1,9 @@
 use super::*;
 use anyhow::ensure;
-use bigname_storage::projection_staging::load_current_projection_full_replay_input_revision_in_transaction;
+use bigname_storage::projection_staging::{
+    load_current_projection_full_replay_input_revision_in_transaction,
+    lock_current_projection_replay_version_for_replay_write_in_transaction,
+};
 use sqlx::{Postgres, Row};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -17,6 +20,8 @@ pub(super) async fn load_projection_replay_attempt(
         .begin()
         .await
         .context("failed to open current-projection replay attempt transaction")?;
+    lock_current_projection_replay_version_for_replay_write_in_transaction(&mut transaction)
+        .await?;
     let current_input_revision =
         load_current_projection_full_replay_input_revision_in_transaction(&mut transaction).await?;
     let stored = load_stored_attempt(&mut transaction).await?;
@@ -46,6 +51,8 @@ pub(super) async fn start_projection_replay_attempt(
         .begin()
         .await
         .context("failed to open current-projection replay attempt start transaction")?;
+    lock_current_projection_replay_version_for_replay_write_in_transaction(&mut transaction)
+        .await?;
     let current_input_revision =
         load_current_projection_full_replay_input_revision_in_transaction(&mut transaction).await?;
     if let Some((version, attempt)) = load_stored_attempt(&mut transaction).await? {
@@ -104,10 +111,20 @@ pub(super) async fn start_projection_replay_attempt(
 }
 
 pub(super) async fn clear_projection_replay_attempt(pool: &PgPool) -> Result<()> {
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to open current-projection replay attempt clear transaction")?;
+    lock_current_projection_replay_version_for_replay_write_in_transaction(&mut transaction)
+        .await?;
     sqlx::query("DELETE FROM current_projection_replay_attempt WHERE singleton")
-        .execute(pool)
+        .execute(&mut *transaction)
         .await
         .context("failed to clear completed current-projection replay attempt")?;
+    transaction
+        .commit()
+        .await
+        .context("failed to commit current-projection replay attempt clear")?;
     Ok(())
 }
 
@@ -120,6 +137,8 @@ pub(super) async fn finalize_projection_replay_attempt(
         .begin()
         .await
         .context("failed to open current-projection replay handoff transaction")?;
+    lock_current_projection_replay_version_for_replay_write_in_transaction(&mut transaction)
+        .await?;
     let current_input_revision =
         load_current_projection_full_replay_input_revision_in_transaction(&mut transaction).await?;
     ensure!(

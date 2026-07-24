@@ -45,8 +45,10 @@ impl TestDatabase {
         let database_url = std::env::var("BIGNAME_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| default_database_url().to_owned());
-        let base_options = PgConnectOptions::from_str(&database_url)
-            .context("failed to parse database URL for worker replay tests")?;
+        let base_options = bigname_storage::stamp_projection_replay_version(
+            PgConnectOptions::from_str(&database_url)
+                .context("failed to parse database URL for worker replay tests")?,
+        );
         let sequence = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
         let database_name = format!(
             "bg_wr_replay_{}_{}_{}",

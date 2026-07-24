@@ -4134,9 +4134,11 @@ async fn seed_out_of_scope_event_referencing_scoped_identity(
 }
 
 async fn runtime_named_pool(database_name: &str, application_name: &str) -> Result<PgPool> {
-    let options = PgConnectOptions::from_str(&database_url_from_env())?
-        .database(database_name)
-        .application_name(application_name);
+    let options = crate::stamp_projection_replay_version(
+        PgConnectOptions::from_str(&database_url_from_env())?
+            .database(database_name)
+            .application_name(application_name),
+    );
     PgPoolOptions::new()
         .max_connections(1)
         .connect_with(options)
@@ -4146,6 +4148,7 @@ async fn runtime_named_pool(database_name: &str, application_name: &str) -> Resu
 
 async fn single_connection_pool(database_name: &str) -> Result<PgPool> {
     let options = PgConnectOptions::from_str(&database_url_from_env())?.database(database_name);
+    let options = crate::stamp_projection_replay_version(options);
     PgPoolOptions::new()
         .max_connections(1)
         .connect_with(options)

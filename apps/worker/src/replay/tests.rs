@@ -556,6 +556,106 @@ async fn publication_fence_without_drift_publishes_the_completed_stage_once() ->
 }
 
 #[tokio::test]
+async fn newer_replay_attempt_fatally_refuses_stage_publish_and_completion_marker() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    seed_replay_inputs(database.pool()).await?;
+    install_name_publish_failure(database.pool()).await?;
+    rebuild_all_current_projections(database.pool(), None, None)
+        .await
+        .expect_err("the injected publish stop must retain a completed stage");
+    remove_name_publish_failure(database.pool()).await?;
+
+    let retained = load_name_staging_checkpoint(database.pool()).await?;
+    let mut checkpoint = super::staging::ProjectionStagingCheckpoint::load_or_start(
+        database.pool(),
+        "name_current",
+        None,
+    )
+    .await?;
+    let newer_replay_version = super::progress::CURRENT_PROJECTION_REPLAY_VERSION + 1;
+    let mut newer_replay = database.pool().begin().await?;
+    sqlx::query("SELECT set_config('bigname.projection_replay_version', $1, true)")
+        .bind(newer_replay_version.to_string())
+        .execute(&mut *newer_replay)
+        .await?;
+    sqlx::query(
+        r#"
+        UPDATE current_projection_full_replay_input_revision
+        SET
+            projection_replay_version_floor = $1,
+            projection_replay_version_fence_active = true
+        WHERE singleton
+        "#,
+    )
+    .bind(newer_replay_version)
+    .execute(&mut *newer_replay)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO current_projection_replay_attempt (
+            singleton,
+            replay_version,
+            normalized_target_block,
+            full_replay_input_revision,
+            apply_baseline_change_id
+        )
+        VALUES (true, $1, NULL, 0, 0)
+        "#,
+    )
+    .bind(newer_replay_version)
+    .execute(&mut *newer_replay)
+    .await?;
+    newer_replay.commit().await?;
+
+    let publish_error = checkpoint
+        .begin_fenced_publish_transaction(database.pool())
+        .await
+        .expect_err("an outdated worker must not enter projection publication");
+    assert!(
+        bigname_storage::projection_staging::is_outdated_projection_replay_version_error(
+            &publish_error
+        ),
+        "publication must return the process-fatal version error, got: {publish_error:#}"
+    );
+
+    let marker_error = super::progress::mark_projection_replay_completed(
+        database.pool(),
+        &CurrentProjectionReplayStepSummary {
+            projection: "name_current",
+            requested_key_count: 2,
+            upserted_row_count: 2,
+            deleted_row_count: 0,
+        },
+        None,
+    )
+    .await
+    .expect_err("an outdated worker must not write a replay completion marker");
+    assert!(
+        bigname_storage::projection_staging::is_outdated_projection_replay_version_error(
+            &marker_error
+        ),
+        "completion must return the process-fatal version error, got: {marker_error:#}"
+    );
+    let after = load_name_staging_checkpoint(database.pool()).await?;
+    assert_eq!(
+        after.stage_table, retained.stage_table,
+        "refused publish and marker transactions must retain the completed stage"
+    );
+    assert_eq!(after.status, "staging_complete");
+    let attempt_version: i32 = sqlx::query_scalar(
+        "SELECT replay_version FROM current_projection_replay_attempt WHERE singleton",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(
+        attempt_version, newer_replay_version,
+        "the outdated worker must not replace newer replay state"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn manual_completed_stage_drift_restages_and_publishes_all_changed_sources() -> Result<()> {
     let database = TestDatabase::new().await?;
     seed_replay_inputs(database.pool()).await?;

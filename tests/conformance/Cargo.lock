@@ -761,6 +761,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "tokio",
  "tracing",
  "uuid",
 ]
@@ -797,6 +798,7 @@ name = "bigname-test-support"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bigname-storage",
  "sqlx",
 ]
 

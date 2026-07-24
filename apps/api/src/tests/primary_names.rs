@@ -1022,9 +1022,11 @@ async fn get_primary_names_verifies_default_tuple_miss_with_on_demand_rpc() -> R
         .or_else(|_| std::env::var("DATABASE_URL"))
         .unwrap_or_else(|_| default_database_url().to_owned());
     let projection_pool = PgPool::connect_with(
-        PgConnectOptions::from_str(&database_url)?
-            .database(&database.database_name)
-            .disable_statement_logging(),
+        bigname_storage::stamp_projection_replay_version(
+            PgConnectOptions::from_str(&database_url)?
+                .database(&database.database_name)
+                .disable_statement_logging(),
+        ),
     )
     .await?;
     let mut unrelated_projection_write = projection_pool.begin().await?;
@@ -1209,9 +1211,11 @@ async fn get_primary_names_serves_projection_that_wins_route_local_persistence_f
         .or_else(|_| std::env::var("DATABASE_URL"))
         .unwrap_or_else(|_| default_database_url().to_owned());
     let projection_pool = PgPool::connect_with(
-        PgConnectOptions::from_str(&database_url)?
-            .database(&database.database_name)
-            .disable_statement_logging(),
+        bigname_storage::stamp_projection_replay_version(
+            PgConnectOptions::from_str(&database_url)?
+                .database(&database.database_name)
+                .disable_statement_logging(),
+        ),
     )
     .await?;
     let request_state = database.app_state_with_chain_rpc_urls(chain_rpc_urls);
@@ -2312,9 +2316,11 @@ async fn primary_name_readback_treats_concurrent_route_cache_pruning_as_a_miss()
         .or_else(|_| std::env::var("DATABASE_URL"))
         .unwrap_or_else(|_| default_database_url().to_owned());
     let prune_pool = PgPool::connect_with(
-        PgConnectOptions::from_str(&database_url)?
-            .database(&database.database_name)
-            .disable_statement_logging(),
+        bigname_storage::stamp_projection_replay_version(
+            PgConnectOptions::from_str(&database_url)?
+                .database(&database.database_name)
+                .disable_statement_logging(),
+        ),
     )
     .await?;
     let (_hook_guard, hook_control) =

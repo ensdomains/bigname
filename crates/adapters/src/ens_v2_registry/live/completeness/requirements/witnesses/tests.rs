@@ -20,8 +20,11 @@ impl StartupAdapterProgress for CountingProgress {
 
 #[tokio::test]
 async fn requirement_index_exact_page_records_one_progress_beat() -> Result<()> {
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .connect_lazy("postgres://postgres:postgres@localhost/bigname_test")?;
+    let pool = sqlx::postgres::PgPoolOptions::new().connect_lazy_with(
+        bigname_storage::stamp_projection_replay_version(
+            "postgres://postgres:postgres@localhost/bigname_test".parse()?,
+        ),
+    );
     let requirements = (0..WITNESS_PAGE_ROWS)
         .map(|index| RequiredWatchedTuple {
             source_family: "ens_v2_registry_l1".to_owned(),

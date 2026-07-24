@@ -55,6 +55,7 @@ impl TestDatabase {
             .unwrap_or_else(|_| default_database_url().to_owned());
         let base_options = PgConnectOptions::from_str(&database_url)
             .context("failed to parse database URL for worker name_current tests")?;
+        let base_options = bigname_storage::stamp_projection_replay_version(base_options);
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .context("system clock is before unix epoch")?

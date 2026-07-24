@@ -489,6 +489,14 @@ async fn run_standalone_projection_rebuild<T>(
 }
 
 async fn clear_projection_replay_marker(pool: &sqlx::PgPool, projection: &str) -> Result<()> {
+    let mut transaction = pool
+        .begin()
+        .await
+        .with_context(|| format!("failed to open replay-marker clear for {projection}"))?;
+    bigname_storage::projection_staging::lock_current_projection_replay_version_for_replay_write_in_transaction(
+        &mut transaction,
+    )
+    .await?;
     sqlx::query(
         r#"
         DELETE FROM current_projection_replay_status
@@ -496,9 +504,13 @@ async fn clear_projection_replay_marker(pool: &sqlx::PgPool, projection: &str) -
         "#,
     )
     .bind(projection)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .with_context(|| format!("failed to clear replay marker for {projection}"))?;
+    transaction
+        .commit()
+        .await
+        .with_context(|| format!("failed to commit replay-marker clear for {projection}"))?;
     Ok(())
 }
 

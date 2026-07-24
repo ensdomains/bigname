@@ -252,6 +252,61 @@ Reorg repair uses the same machinery after canonicality updates enqueue key-scop
 
 `current_projection_replay_status` records durable worker-owned completion markers per projection family after a family publishes successfully. Columns: `projection`, `replay_version`, `completed_normalized_target_block`, `full_replay_input_revision`, `requested_key_count`, `upserted_row_count`, `deleted_row_count`, `completed_at`.
 
+The [projection replay-version fence](glossary.md#projection-replay-version-fence)
+stores its minimum admitted version and activation flag on
+`current_projection_full_replay_input_revision`. Every new database connection
+carries the process's compiled replay version; explicit claim, hydration, and
+replay transactions stamp it again locally. Applying the migration does not
+activate enforcement. The first fence-aware transaction that writes replay
+state takes an exclusive singleton lock, compares the compiled version with the
+minimum and every persisted attempt, checkpoint, and marker version, then
+activates the fence and raises the minimum. This includes automatic or manual
+replay, a one-shot rebuild clearing its marker, and a direct-input repair
+advancing the full-replay input revision.
+
+Statement triggers on every static protected writer table normally take the
+shared singleton lock before mutation. This covers binaries that predate the
+Rust check: after activation, a missing connection stamp is fatal just like a
+stamp below the minimum. A write that acquired the shared lock before activation
+commits first, and the activating replay rebuilds from that state. A later
+outdated writer fails before it can claim, publish, or advance durable worker
+state. A worker that implements the check exits on this error. A pre-fence
+binary remains unable to commit protected writes but may keep retrying until it
+is replaced. Because PostgreSQL takes a statement's table lock before running
+its trigger, an unfenced statement normally fails immediately when a replay
+transaction already owns the singleton instead of creating a reverse lock-order
+deadlock. A current stamped statement that loses this non-waiting race receives
+a retryable admission error, not the fatal outdated-process error.
+
+Stamped `projection_invalidations` DML at `READ COMMITTED` is the narrow
+exception: it checks the committed activation state and version floor without
+locking the singleton. Ingestion may already hold a staging input journal lock
+when it enqueues, so a singleton wait here would deadlock with replay holding
+the singleton while capturing that journal. An enqueue committed before
+journal capture is visible to the replay drift check; one committed afterward
+remains durable queue work, with a retained direct-invalidation revision, for
+post-replay apply. A stamped enqueue may therefore cross a concurrent floor
+raise using the previously committed floor, but it does not publish projection
+or replay state. The trigger rejects queue-writing transactions at isolation
+levels with a longer-lived snapshot so the next statement cannot keep seeing a
+stale floor. Queue `TRUNCATE` and unstamped queue writers remain non-waiting.
+Dynamic `cprs_*` staging tables are covered by the checkpoint mutation
+committed in the same transaction.
+
+The protected writer set is:
+
+| Writer path | Protected mutation |
+| --- | --- |
+| indexer/storage direct invalidation producers | invalidation queue generation; stamped DML checks the committed version floor without waiting for replay admission |
+| normalized-event invalidation derivation | invalidation queue rows and the derivation cursor |
+| invalidation claim | claim token and lease timestamp |
+| claimed invalidation apply | keyed projection publication and projection companion-table writes, followed by queue completion, retry, or dead-lettering |
+| record-inventory text and primary-name legacy hydration | hydrated projection publication; primary-name changes include coupled execution-cache invalidation |
+| automatic or manual replay attempt | attempt creation, replacement, final apply-cursor handoff, and consumption |
+| durable family staging | checkpoint creation, page progress, completion, replacement publication, and cleanup |
+| replay completion | family-marker clear or write, with completed checkpoint and stage-table consumption |
+| direct-input replay reset | input-revision advance plus attempt and marker invalidation |
+
 `current_projection_staging_checkpoints` and their worker-owned logged `cprs_*` tables preserve in-progress full-rebuild output before publication. All seven replayed families use full staging checkpoints; none falls back to a publish-time completion marker only:
 
 - `name_current` advances by `logical_name_id`.

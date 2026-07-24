@@ -27,6 +27,7 @@ impl MaterializationTestDatabase {
             .unwrap_or_else(|_| default_database_url().to_owned());
         let base_options = PgConnectOptions::from_str(&database_url)
             .context("failed to parse database URL for materialization tests")?;
+        let base_options = bigname_storage::stamp_projection_replay_version(base_options);
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .context("system clock is before unix epoch")?
@@ -557,6 +558,127 @@ async fn overlap_closure_queues_projection_invalidations_for_repaired_binding() 
         "0x2222222222222222222222222222222222222222:ens:closed.eth",
     )
     .await?;
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn overlap_closure_retries_while_replay_admission_holds_fence() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = MaterializationTestDatabase::new().await?;
+
+    let existing = adapter_binding_with_authority(
+        Uuid::from_u128(0x3050),
+        "ens:retry-closure.eth",
+        1_695_230_399,
+        "registry_only",
+        "registry-only:ethereum-mainnet:retry-closure",
+        "0x3050305030503050305030503050305030503050305030503050305030503050",
+    );
+    let incoming = adapter_binding_with_authority(
+        Uuid::from_u128(0x3051),
+        "ens:retry-closure.eth",
+        1_695_284_247,
+        "registrar",
+        "registrar:ethereum-mainnet:retry-closure",
+        "0x3051305130513051305130513051305130513051305130513051305130513051",
+    );
+
+    upsert_name_surfaces_without_snapshots(
+        database.pool(),
+        &[test_surface(
+            "ens:retry-closure.eth",
+            "retry-closure.eth",
+            "0x5050505050505050505050505050505050505050505050505050505050505050",
+        )],
+    )
+    .await?;
+    upsert_resources_without_snapshots(
+        database.pool(),
+        &[test_resource(
+            existing.resource_id,
+            "0x6050605060506050605060506050605060506050605060506050605060506050",
+        )],
+    )
+    .await?;
+    upsert_surface_bindings_without_snapshots(database.pool(), std::slice::from_ref(&existing))
+        .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO address_names_current (
+            address,
+            logical_name_id,
+            relation,
+            namespace,
+            canonical_display_name,
+            normalized_name,
+            namehash,
+            surface_binding_id,
+            resource_id,
+            token_lineage_id,
+            binding_kind,
+            provenance,
+            coverage,
+            chain_positions,
+            canonicality_summary,
+            manifest_version
+        )
+        VALUES (
+            '0x3333333333333333333333333333333333333333',
+            'ens:retry-closure.eth',
+            'registrant',
+            'ens',
+            'retry-closure.eth',
+            'retry-closure.eth',
+            'namehash:retry-closure.eth',
+            $1,
+            $2,
+            NULL,
+            'declared_registry_path',
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            '{}'::jsonb,
+            1
+        )
+        "#,
+    )
+    .bind(existing.surface_binding_id)
+    .bind(existing.resource_id)
+    .execute(database.pool())
+    .await?;
+
+    let mut replay_admission = database.pool().begin().await?;
+    bigname_storage::projection_staging::lock_current_projection_replay_version_for_replay_write_in_transaction(
+        &mut replay_admission,
+    )
+    .await?;
+
+    let expected_active_to = incoming.active_from;
+    let repair_pool = database.pool().clone();
+    let mut repair = tokio::spawn(async move {
+        close_weaker_overlapping_existing_surface_bindings(
+            &repair_pool,
+            std::slice::from_ref(&incoming),
+        )
+        .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    assert!(
+        !repair.is_finished(),
+        "adapter repair should retry while replay admission holds the fence"
+    );
+
+    replay_admission.commit().await?;
+    let repaired_count = tokio::time::timeout(std::time::Duration::from_secs(5), &mut repair)
+        .await
+        .context("adapter repair retry did not finish after replay admission committed")?
+        .context("adapter repair retry task panicked")??;
+    assert_eq!(repaired_count, 1);
+    assert_eq!(
+        surface_binding_active_to(database.pool(), existing.surface_binding_id).await?,
+        Some(expected_active_to)
+    );
 
     database.cleanup().await
 }

@@ -217,6 +217,11 @@ async fn run_automatic_current_projection_replay_loop(
                 }
                 Ok(false) => {}
                 Err(error) => {
+                    if bigname_storage::projection_staging::is_fatal_projection_replay_version_fence_error(
+                        &error,
+                    ) {
+                        return Err(error);
+                    }
                     warn!(
                         service = "worker",
                         replay = "all_current_projections",
@@ -246,6 +251,11 @@ async fn run_automatic_current_projection_replay_loop(
                 }
                 Ok(false) => {}
                 Err(error) => {
+                    if bigname_storage::projection_staging::is_fatal_projection_replay_version_fence_error(
+                        &error,
+                    ) {
+                        return Err(error);
+                    }
                     warn!(
                         service = "worker",
                         replay = "all_current_projections",
@@ -315,6 +325,11 @@ async fn run_automatic_current_projection_replay_loop(
                         progressed = true;
                     }
                     Err(error) => {
+                        if bigname_storage::projection_staging::is_fatal_projection_replay_version_fence_error(
+                            &error,
+                        ) {
+                            return Err(error);
+                        }
                         warn!(
                             service = "worker",
                             projection = "record_inventory_current",
@@ -349,6 +364,11 @@ async fn run_automatic_current_projection_replay_loop(
                     progressed |= apply_progressed;
                 }
                 Err(error) => {
+                    if bigname_storage::projection_staging::is_fatal_projection_replay_version_fence_error(
+                        &error,
+                    ) {
+                        return Err(error);
+                    }
                     warn!(
                         service = "worker",
                         projection_apply = true,

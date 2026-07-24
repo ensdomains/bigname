@@ -305,8 +305,11 @@ mod indexing_status_tests {
             dead_letter_count: 0,
         };
         let state = AppState::new(
-            PgPool::connect_lazy("postgres://bigname:bigname@127.0.0.1:5432/bigname")
-                .expect("status builder test does not use the database"),
+            PgPool::connect_lazy_with(bigname_storage::stamp_projection_replay_version(
+                "postgres://bigname:bigname@127.0.0.1:5432/bigname"
+                    .parse()
+                    .expect("static test database URL must parse"),
+            )),
             bigname_execution::ChainRpcUrls::default(),
         );
 

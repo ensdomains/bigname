@@ -6734,7 +6734,9 @@ async fn reconcile_fetched_heads_revalidates_admission_epoch_before_checkpoint_a
     // pool's two connections.
     let admission_pool = PgPoolOptions::new()
         .max_connections(1)
-        .connect_with((*database.pool().connect_options()).clone())
+        .connect_with(bigname_storage::stamp_projection_replay_version(
+            (*database.pool().connect_options()).clone(),
+        ))
         .await
         .context("failed to connect the concurrent admission test pool")?;
     let admission_chain = chain.to_owned();

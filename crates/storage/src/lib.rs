@@ -6,6 +6,7 @@ mod backfill_jobs;
 mod base_normalized_rederive;
 mod checkpoints;
 mod children;
+mod connection;
 mod evm_primitives;
 mod execution;
 mod history;
@@ -105,6 +106,7 @@ pub use children::{
     stream_canonical_declared_child_sources, upsert_children_current_rows,
 };
 use clap::Args;
+pub use connection::{PROJECTION_REPLAY_VERSION_SETTING, stamp_projection_replay_version};
 pub use evm_primitives::{ens_namehash_label_bytes, normalize_evm_address, normalize_evm_b256};
 pub use execution::{
     ExecutionBoundaryInvalidation, ExecutionCacheKey, ExecutionManifestInvalidation,
@@ -400,7 +402,7 @@ pub async fn connect_reserved_readiness_pool(
         .acquire_timeout(check_timeout)
         .idle_timeout(None)
         .max_lifetime(None)
-        .connect_with(options)
+        .connect_with(stamp_projection_replay_version(options))
         .await
         .context("failed to connect reserved PostgreSQL readiness pool")
 }
@@ -430,7 +432,7 @@ async fn connect_inner(
     let options = connect_options(config, application_name, statement_timeout)?;
     PgPoolOptions::new()
         .max_connections(config.max_connections)
-        .connect_with(options)
+        .connect_with(stamp_projection_replay_version(options))
         .await
         .context("failed to connect to PostgreSQL")
 }
@@ -446,8 +448,10 @@ fn connect_options(
         .or_else(|| std::env::var("DATABASE_URL").ok())
         .unwrap_or_else(|| default_database_url().to_owned());
 
-    let mut options = PgConnectOptions::from_str(&database_url)
-        .context("failed to parse PostgreSQL database URL")?;
+    let mut options = stamp_projection_replay_version(
+        PgConnectOptions::from_str(&database_url)
+            .context("failed to parse PostgreSQL database URL")?,
+    );
     if let Some(application_name) = application_name {
         options = options.application_name(application_name);
     }

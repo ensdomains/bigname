@@ -34,9 +34,12 @@ impl HarnessDb {
         let name = unique_database_name("bigname_e2e")?;
         let url = replace_database(&base_url, &name)?;
 
-        let mut admin = PgConnection::connect(&base_url).await.with_context(|| {
-            format!("connect admin database at {base_url}; is scripts/test-db running?")
-        })?;
+        let admin_options = bigname_storage::stamp_projection_replay_version(base_url.parse()?);
+        let mut admin = PgConnection::connect_with(&admin_options)
+            .await
+            .with_context(|| {
+                format!("connect admin database at {base_url}; is scripts/test-db running?")
+            })?;
         // All processes using this harness share a server-side lock while they
         // validate/create the template and clone from it. This prevents a
         // second process from connecting to the template while PostgreSQL is
@@ -65,7 +68,9 @@ impl HarnessDb {
         admin.close().await?;
         let pool = PgPoolOptions::new()
             .max_connections(5)
-            .connect(&url)
+            .connect_with(bigname_storage::stamp_projection_replay_version(
+                url.parse()?,
+            ))
             .await?;
         Ok(Self {
             url,
@@ -140,7 +145,8 @@ impl Drop for DatabaseCleanupGuard {
 }
 
 async fn drop_database(admin_url: &str, name: &str) -> Result<()> {
-    let mut admin = PgConnection::connect(admin_url).await?;
+    let admin_options = bigname_storage::stamp_projection_replay_version(admin_url.parse()?);
+    let mut admin = PgConnection::connect_with(&admin_options).await?;
     drop_database_with_connection(&mut admin, name).await?;
     admin.close().await?;
     Ok(())
@@ -290,7 +296,9 @@ async fn setup_migration_template(
     let build_url = replace_database(base_url, build_name)?;
     let build_pool = PgPoolOptions::new()
         .max_connections(1)
-        .connect(&build_url)
+        .connect_with(bigname_storage::stamp_projection_replay_version(
+            build_url.parse()?,
+        ))
         .await
         .context("connect e2e migration template build database")?;
     let migration_result = bigname_storage::MIGRATOR
@@ -414,7 +422,9 @@ mod tests {
         let name = database.cleanup_guard.name.clone();
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)
-            .connect(&admin_url)
+            .connect_with(bigname_storage::stamp_projection_replay_version(
+                admin_url.parse()?,
+            ))
             .await?;
         let exists: bool =
             sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
