@@ -484,7 +484,12 @@ async fn ops_catchup_resumes_ensv2_finalization_after_proof_publication_restart(
 
     let blocks = provider_blocks(1, 5);
     // These recovery fixtures mirror the pinned ENSv2 registry, resolver-record,
-    // resource-name, and permission events.
+    // resource-name, and permission events. A PermissionedRegistry constructor grants
+    // its initial root roles before the parent later emits the attachment event.
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L112 @ ens_v2@48b3e2d)
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L115 @ ens_v2@48b3e2d)
+    // (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L250 @ ens_v2@48b3e2d)
+    // (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L274 @ ens_v2@48b3e2d)
     // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L66 @ ens_v2@48b3e2d)
     // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L679 @ ens_v2@48b3e2d)
     // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L142 @ ens_v2@48b3e2d)
@@ -532,7 +537,7 @@ async fn ops_catchup_resumes_ensv2_finalization_after_proof_publication_restart(
                 "block_number": 2,
                 "transaction_hash": transaction_hash_for_block(&blocks[1]),
                 "transaction_index": 0,
-                "log_index": 0,
+                "log_index": 1,
                 "tombstone": false,
             }),
         }]],
@@ -569,19 +574,26 @@ async fn ops_catchup_resumes_ensv2_finalization_after_proof_publication_restart(
         ProviderBlockFixture {
             block: blocks[1].clone(),
             logs: vec![
+                ops_ens_v2_eac_roles_changed_log_payload(
+                    &blocks[1],
+                    child_address,
+                    0,
+                    permission_account,
+                    0,
+                ),
                 ops_ens_v2_subregistry_updated_log_payload(
                     &blocks[1],
                     registry_address,
                     child_address,
                     1,
-                    0,
+                    1,
                 ),
                 ops_ens_v2_resolver_updated_log_payload(
                     &blocks[1],
                     registry_address,
                     closed_resolver_address,
                     1,
-                    1,
+                    2,
                 ),
             ],
         },
@@ -904,21 +916,34 @@ async fn ops_catchup_resumes_ensv2_finalization_after_proof_publication_restart(
         "finalization must preserve a resolver resource-name hint across recovery chunk boundaries"
     );
     assert_eq!(
-        sqlx::query_as::<_, (String, Option<String>)>(
+        sqlx::query_as::<_, (String, Option<String>, Value)>(
             r#"
             SELECT
                 event_kind,
-                after_state #>> '{selector,normalized_name}'
+                after_state #>> '{selector,normalized_name}',
+                after_state -> 'effective_powers'
             FROM normalized_events
             WHERE derivation_kind = 'ens_v2_permissions'
               AND lower(raw_fact_ref ->> 'emitting_address') = lower($1)
+            ORDER BY block_number, log_index
             "#,
         )
         .bind(child_address)
         .fetch_all(database.pool())
         .await?,
-        vec![("PermissionChanged".to_owned(), None)],
-        "full-closure finalization must derive only the child registry role event before its same-block close"
+        vec![
+            (
+                "RootPermissionChanged".to_owned(),
+                None,
+                json!(["registrar", "register_reserved"]),
+            ),
+            (
+                "PermissionChanged".to_owned(),
+                None,
+                json!(["registrar", "register_reserved"]),
+            ),
+        ],
+        "provider-backed full closure must retain the initial root-role state derived from the pre-attach constructor grant"
     );
     assert_eq!(
         sqlx::query_as::<_, (Option<String>, Option<String>)>(

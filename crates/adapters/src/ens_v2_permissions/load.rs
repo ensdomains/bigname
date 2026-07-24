@@ -356,18 +356,74 @@ async fn load_registry_discovery_log_boundaries(
         SELECT
             de.to_contract_instance_id,
             de.source_manifest_id,
-            de.active_from_block_number,
-            de.active_to_block_number,
-            (de.provenance ->> 'transaction_index')::BIGINT
-                AS active_from_transaction_index,
-            (de.provenance ->> 'log_index')::BIGINT AS active_from_log_index,
-            (de.provenance ->> 'active_to_transaction_index')::BIGINT
-                AS active_to_transaction_index,
-            (de.provenance ->> 'active_to_log_index')::BIGINT AS active_to_log_index
+            CASE
+                WHEN de.active_from_block_number IS NULL THEN cia.active_from_block_number
+                WHEN cia.active_from_block_number IS NULL THEN de.active_from_block_number
+                ELSE GREATEST(de.active_from_block_number, cia.active_from_block_number)
+            END AS active_from_block_number,
+            CASE
+                WHEN de.active_to_block_number IS NULL THEN cia.active_to_block_number
+                WHEN cia.active_to_block_number IS NULL THEN de.active_to_block_number
+                ELSE LEAST(de.active_to_block_number, cia.active_to_block_number)
+            END AS active_to_block_number,
+            CASE
+                WHEN de.active_from_block_number IS NOT NULL
+                 AND (
+                     cia.active_from_block_number IS NULL
+                     OR de.active_from_block_number >= cia.active_from_block_number
+                 )
+                    THEN (de.provenance ->> 'transaction_index')::BIGINT
+                ELSE NULL
+            END AS active_from_transaction_index,
+            CASE
+                WHEN de.active_from_block_number IS NOT NULL
+                 AND (
+                     cia.active_from_block_number IS NULL
+                     OR de.active_from_block_number >= cia.active_from_block_number
+                 )
+                    THEN (de.provenance ->> 'log_index')::BIGINT
+                ELSE NULL
+            END AS active_from_log_index,
+            CASE
+                WHEN de.active_to_block_number IS NOT NULL
+                 AND (
+                     cia.active_to_block_number IS NULL
+                     OR de.active_to_block_number <= cia.active_to_block_number
+                 )
+                    THEN (de.provenance ->> 'active_to_transaction_index')::BIGINT
+                ELSE NULL
+            END AS active_to_transaction_index,
+            CASE
+                WHEN de.active_to_block_number IS NOT NULL
+                 AND (
+                     cia.active_to_block_number IS NULL
+                     OR de.active_to_block_number <= cia.active_to_block_number
+                 )
+                    THEN (de.provenance ->> 'active_to_log_index')::BIGINT
+                ELSE NULL
+            END AS active_to_log_index
         FROM discovery_edges de
+        JOIN contract_instance_addresses cia
+          ON cia.contract_instance_id = de.to_contract_instance_id
+         AND cia.chain_id = de.chain_id
         WHERE de.chain_id = $1
           AND de.edge_kind = 'subregistry'
           AND (de.deactivated_at IS NULL OR de.active_to_block_number IS NOT NULL)
+          AND (
+              cia.deactivated_at IS NULL
+              OR cia.active_to_block_number IS NOT NULL
+              OR de.active_to_block_number IS NOT NULL
+          )
+          AND (
+              de.active_from_block_number IS NULL
+              OR cia.active_to_block_number IS NULL
+              OR de.active_from_block_number <= cia.active_to_block_number
+          )
+          AND (
+              cia.active_from_block_number IS NULL
+              OR de.active_to_block_number IS NULL
+              OR cia.active_from_block_number <= de.active_to_block_number
+          )
         "#,
     )
     .bind(chain)

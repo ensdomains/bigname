@@ -714,6 +714,375 @@ async fn sync_ens_v2_permissions_consumes_registry_root_eac_roles_changed() -> R
 }
 
 #[tokio::test]
+async fn cia_narrowed_registry_interval_keeps_positioned_close_boundary() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-sepolia";
+    let registry_address = "0x0000000000000000000000000000000000000270";
+    let registry_contract_instance_id = Uuid::from_u128(0x270);
+    let account = "0x1111111111111111111111111111111111111111";
+    let close_block = 11_163_700;
+    let close_block_hash = permission_test_block_hash(close_block);
+
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+    insert_test_discovered_registry(
+        database.pool(),
+        chain,
+        registry_contract_instance_id,
+        registry_address,
+        close_block - 99,
+        &[TestRegistryDiscoveryEdge {
+            active_from_block_number: close_block - 100,
+            active_from_log_index: 2,
+            active_to_block_number: Some(close_block),
+            active_to_log_index: Some(5),
+            active: false,
+        }],
+    )
+    .await?;
+    upsert_raw_blocks(
+        database.pool(),
+        &[permissions_test_raw_block(
+            chain,
+            &close_block_hash,
+            close_block,
+        )],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            eac_roles_changed_permission_raw_log_at(
+                chain,
+                &close_block_hash,
+                close_block,
+                registry_address,
+                &topic_word(0x2701),
+                account,
+                0,
+                4,
+            ),
+            eac_roles_changed_permission_raw_log_at(
+                chain,
+                &close_block_hash,
+                close_block,
+                registry_address,
+                &topic_word(0x2702),
+                account,
+                0,
+                5,
+            ),
+            eac_roles_changed_permission_raw_log_at(
+                chain,
+                &close_block_hash,
+                close_block,
+                registry_address,
+                &topic_word(0x2703),
+                account,
+                0,
+                6,
+            ),
+        ],
+    )
+    .await?;
+
+    let summary =
+        super::sync_ens_v2_permissions_through_block(database.pool(), chain, close_block).await?;
+    assert_eq!(summary.scanned_log_count, 1);
+    assert_eq!(summary.matched_log_count, 1);
+    assert_eq!(summary.total_synced_count, 1);
+    assert_eq!(
+        permission_log_indices_for_emitter(database.pool(), registry_address).await?,
+        vec![4],
+        "the contract-address lower bound must not make the discovery-edge close position disappear"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn cia_terminal_block_does_not_reuse_later_edge_close_position() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-sepolia";
+    let registry_address = "0x0000000000000000000000000000000000000272";
+    let registry_contract_instance_id = Uuid::from_u128(0x272);
+    let account = "0x1111111111111111111111111111111111111111";
+    let close_block = 11_163_750;
+    let close_block_hash = permission_test_block_hash(close_block);
+
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+    insert_test_discovered_registry(
+        database.pool(),
+        chain,
+        registry_contract_instance_id,
+        registry_address,
+        close_block - 100,
+        &[TestRegistryDiscoveryEdge {
+            active_from_block_number: close_block - 100,
+            active_from_log_index: 2,
+            active_to_block_number: Some(close_block + 10),
+            active_to_log_index: Some(5),
+            active: false,
+        }],
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET active_to_block_number = $2,
+            active_to_block_hash = $3
+        WHERE contract_instance_id = $1
+        "#,
+    )
+    .bind(registry_contract_instance_id)
+    .bind(close_block)
+    .bind(&close_block_hash)
+    .execute(database.pool())
+    .await?;
+    upsert_raw_blocks(
+        database.pool(),
+        &[permissions_test_raw_block(
+            chain,
+            &close_block_hash,
+            close_block,
+        )],
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            eac_roles_changed_permission_raw_log_at(
+                chain,
+                &close_block_hash,
+                close_block,
+                registry_address,
+                &topic_word(0x2721),
+                account,
+                0,
+                4,
+            ),
+            eac_roles_changed_permission_raw_log_at(
+                chain,
+                &close_block_hash,
+                close_block,
+                registry_address,
+                &topic_word(0x2722),
+                account,
+                0,
+                5,
+            ),
+            eac_roles_changed_permission_raw_log_at(
+                chain,
+                &close_block_hash,
+                close_block,
+                registry_address,
+                &topic_word(0x2723),
+                account,
+                0,
+                6,
+            ),
+        ],
+    )
+    .await?;
+
+    let summary =
+        super::sync_ens_v2_permissions_through_block(database.pool(), chain, close_block).await?;
+    assert_eq!(summary.scanned_log_count, 3);
+    assert_eq!(summary.matched_log_count, 3);
+    assert_eq!(summary.total_synced_count, 3);
+    assert_eq!(
+        permission_log_indices_for_emitter(database.pool(), registry_address).await?,
+        vec![4, 5, 6],
+        "an address-supplied terminal block has no exact edge close position and must retain the whole block"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn same_block_registry_close_then_reattach_has_no_derivation_gap_or_overlap() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-sepolia";
+    let registry_address = "0x0000000000000000000000000000000000000271";
+    let registry_contract_instance_id = Uuid::from_u128(0x271);
+    let account = "0x1111111111111111111111111111111111111111";
+    let attach_block = 11_163_800;
+    let attach_block_hash = permission_test_block_hash(attach_block);
+
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+    insert_test_discovered_registry(
+        database.pool(),
+        chain,
+        registry_contract_instance_id,
+        registry_address,
+        attach_block - 100,
+        &[
+            TestRegistryDiscoveryEdge {
+                active_from_block_number: attach_block - 100,
+                active_from_log_index: 1,
+                active_to_block_number: Some(attach_block),
+                active_to_log_index: Some(5),
+                active: false,
+            },
+            TestRegistryDiscoveryEdge {
+                active_from_block_number: attach_block,
+                active_from_log_index: 10,
+                active_to_block_number: None,
+                active_to_log_index: None,
+                active: true,
+            },
+        ],
+    )
+    .await?;
+    upsert_raw_blocks(
+        database.pool(),
+        &[permissions_test_raw_block(
+            chain,
+            &attach_block_hash,
+            attach_block,
+        )],
+    )
+    .await?;
+    let log_indices = [4, 5, 9, 10, 11];
+    let logs = log_indices
+        .iter()
+        .enumerate()
+        .map(|(offset, log_index)| {
+            eac_roles_changed_permission_raw_log_at(
+                chain,
+                &attach_block_hash,
+                attach_block,
+                registry_address,
+                &topic_word(0x2710 + offset as u64),
+                account,
+                0,
+                *log_index,
+            )
+        })
+        .collect::<Vec<_>>();
+    upsert_raw_logs(database.pool(), &logs).await?;
+
+    let summary =
+        super::sync_ens_v2_permissions_through_block(database.pool(), chain, attach_block).await?;
+    assert_eq!(summary.scanned_log_count, log_indices.len());
+    assert_eq!(summary.matched_log_count, log_indices.len());
+    assert_eq!(summary.total_synced_count, log_indices.len());
+    assert_eq!(
+        permission_log_indices_for_emitter(database.pool(), registry_address).await?,
+        log_indices,
+        "the predecessor close position must partition the block without dropping or duplicating a role fact"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn cia_narrowed_resolver_interval_excludes_uncovered_raw_logs() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-sepolia";
+    let resolver_address = "0x0000000000000000000000000000000000000273";
+    let account = "0x1111111111111111111111111111111111111111";
+    let active_from_block = 11_163_900;
+    let active_to_block = active_from_block + 10;
+    let resolver_contract_instance_id = {
+        let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+        sync_repository(database.pool(), &repository).await?;
+        insert_test_discovered_resolver(
+            database.pool(),
+            chain,
+            resolver_address,
+            active_from_block - 10,
+            &permission_test_block_hash(active_from_block - 10),
+        )
+        .await?
+    };
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET active_from_block_number = $2,
+            active_from_block_hash = $3,
+            active_to_block_number = $4,
+            active_to_block_hash = $5
+        WHERE contract_instance_id = $1
+        "#,
+    )
+    .bind(resolver_contract_instance_id)
+    .bind(active_from_block)
+    .bind(permission_test_block_hash(active_from_block))
+    .bind(active_to_block)
+    .bind(permission_test_block_hash(active_to_block))
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE discovery_edges
+        SET deactivated_at = now(),
+            active_to_block_number = $2,
+            active_to_block_hash = $3
+        WHERE to_contract_instance_id = $1
+        "#,
+    )
+    .bind(resolver_contract_instance_id)
+    .bind(active_to_block + 10)
+    .bind(permission_test_block_hash(active_to_block + 10))
+    .execute(database.pool())
+    .await?;
+
+    let block_numbers = [
+        active_from_block - 1,
+        active_from_block,
+        active_to_block,
+        active_to_block + 1,
+    ];
+    let blocks = block_numbers
+        .iter()
+        .map(|block_number| {
+            permissions_test_raw_block(
+                chain,
+                &permission_test_block_hash(*block_number),
+                *block_number,
+            )
+        })
+        .collect::<Vec<_>>();
+    let logs = block_numbers
+        .iter()
+        .enumerate()
+        .map(|(offset, block_number)| {
+            eac_roles_changed_permission_raw_log(
+                chain,
+                &permission_test_block_hash(*block_number),
+                *block_number,
+                resolver_address,
+                &topic_word(0x2730 + offset as u64),
+                account,
+            )
+        })
+        .collect::<Vec<_>>();
+    upsert_raw_blocks(database.pool(), &blocks).await?;
+    upsert_raw_logs(database.pool(), &logs).await?;
+
+    let summary =
+        super::sync_ens_v2_permissions_through_block(database.pool(), chain, active_to_block + 1)
+            .await?;
+    assert_eq!(summary.scanned_log_count, 2);
+    assert_eq!(summary.matched_log_count, 2);
+    assert_eq!(summary.total_synced_count, 2);
+    assert_eq!(
+        permission_block_numbers_for_emitter(database.pool(), resolver_address).await?,
+        vec![active_from_block, active_to_block],
+        "resolver replay must use the same address-intersected interval as the watched provider range"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn sync_ens_v2_permissions_reuses_persisted_resolver_hints_across_calls() -> Result<()> {
     let _permit = crate::acquire_test_db_permit().await;
     let database = TestDatabase::new().await?;
@@ -1645,6 +2014,172 @@ async fn insert_test_discovered_resolver(
     Ok(resolver_contract_instance_id)
 }
 
+#[derive(Clone, Copy)]
+struct TestRegistryDiscoveryEdge {
+    active_from_block_number: i64,
+    active_from_log_index: i64,
+    active_to_block_number: Option<i64>,
+    active_to_log_index: Option<i64>,
+    active: bool,
+}
+
+async fn insert_test_discovered_registry(
+    pool: &PgPool,
+    chain: &str,
+    registry_contract_instance_id: Uuid,
+    registry_address: &str,
+    address_active_from_block_number: i64,
+    edges: &[TestRegistryDiscoveryEdge],
+) -> Result<()> {
+    let (source_manifest_id, from_contract_instance_id) = sqlx::query_as::<_, (i64, Uuid)>(
+        r#"
+        SELECT mv.manifest_id, mci.contract_instance_id
+        FROM manifest_versions mv
+        JOIN manifest_contract_instances mci USING (manifest_id)
+        WHERE mv.chain = $1
+          AND mv.source_family = $2
+          AND mv.rollout_status = 'active'
+        ORDER BY mv.manifest_id, mci.contract_instance_id
+        LIMIT 1
+        "#,
+    )
+    .bind(chain)
+    .bind(SOURCE_FAMILY_ENS_V2_REGISTRY_L1)
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instances (
+            contract_instance_id,
+            chain_id,
+            contract_kind,
+            provenance
+        )
+        VALUES ($1, $2, 'registry', '{}'::JSONB)
+        "#,
+    )
+    .bind(registry_contract_instance_id)
+    .bind(chain)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instance_addresses (
+            contract_instance_id,
+            chain_id,
+            address,
+            active_from_block_number,
+            active_from_block_hash,
+            source_manifest_id,
+            provenance
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, '{}'::JSONB)
+        "#,
+    )
+    .bind(registry_contract_instance_id)
+    .bind(chain)
+    .bind(normalize_address(registry_address))
+    .bind(address_active_from_block_number)
+    .bind(permission_test_block_hash(address_active_from_block_number))
+    .bind(source_manifest_id)
+    .execute(pool)
+    .await?;
+
+    for edge in edges {
+        sqlx::query(
+            r#"
+            INSERT INTO discovery_edges (
+                chain_id,
+                edge_kind,
+                from_contract_instance_id,
+                to_contract_instance_id,
+                discovery_source,
+                source_manifest_id,
+                admission,
+                deactivated_at,
+                active_from_block_number,
+                active_from_block_hash,
+                active_to_block_number,
+                active_to_block_hash,
+                provenance
+            )
+            VALUES (
+                $1,
+                'subregistry',
+                $2,
+                $3,
+                $4,
+                $5,
+                'admitted',
+                CASE WHEN $6::BOOLEAN THEN NULL ELSE now() END,
+                $7,
+                $8,
+                $9,
+                $10,
+                jsonb_build_object(
+                    'transaction_index', 0,
+                    'log_index', $11::BIGINT,
+                    'active_to_transaction_index',
+                        CASE WHEN $9::BIGINT IS NULL THEN NULL ELSE 0 END,
+                    'active_to_log_index', $12::BIGINT,
+                    'to_address', $13::TEXT
+                )
+            )
+            "#,
+        )
+        .bind(chain)
+        .bind(from_contract_instance_id)
+        .bind(registry_contract_instance_id)
+        .bind(format!(
+            "ens_v2_permissions:test-registry:{registry_contract_instance_id}"
+        ))
+        .bind(source_manifest_id)
+        .bind(edge.active)
+        .bind(edge.active_from_block_number)
+        .bind(permission_test_block_hash(edge.active_from_block_number))
+        .bind(edge.active_to_block_number)
+        .bind(edge.active_to_block_number.map(permission_test_block_hash))
+        .bind(edge.active_from_log_index)
+        .bind(edge.active_to_log_index)
+        .bind(normalize_address(registry_address))
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn permission_log_indices_for_emitter(pool: &PgPool, address: &str) -> Result<Vec<i64>> {
+    sqlx::query_scalar(
+        r#"
+        SELECT log_index
+        FROM normalized_events
+        WHERE derivation_kind = 'ens_v2_permissions'
+          AND LOWER(raw_fact_ref ->> 'emitting_address') = LOWER($1)
+        ORDER BY log_index
+        "#,
+    )
+    .bind(address)
+    .fetch_all(pool)
+    .await
+    .context("failed to load derived ENSv2 permission log positions")
+}
+
+async fn permission_block_numbers_for_emitter(pool: &PgPool, address: &str) -> Result<Vec<i64>> {
+    sqlx::query_scalar(
+        r#"
+        SELECT block_number
+        FROM normalized_events
+        WHERE derivation_kind = 'ens_v2_permissions'
+          AND LOWER(raw_fact_ref ->> 'emitting_address') = LOWER($1)
+        ORDER BY block_number
+        "#,
+    )
+    .bind(address)
+    .fetch_all(pool)
+    .await
+    .context("failed to load derived ENSv2 permission block numbers")
+}
+
 async fn permission_selector_for_upstream_resource(
     pool: &PgPool,
     upstream_resource: &str,
@@ -1773,13 +2308,36 @@ fn eac_roles_changed_permission_raw_log(
     resource: &str,
     account: &str,
 ) -> RawLog {
+    eac_roles_changed_permission_raw_log_at(
+        chain,
+        block_hash,
+        block_number,
+        emitting_address,
+        resource,
+        account,
+        0,
+        0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn eac_roles_changed_permission_raw_log_at(
+    chain: &str,
+    block_hash: &str,
+    block_number: i64,
+    emitting_address: &str,
+    resource: &str,
+    account: &str,
+    transaction_index: i64,
+    log_index: i64,
+) -> RawLog {
     RawLog {
         chain_id: chain.to_owned(),
         block_hash: block_hash.to_owned(),
         block_number,
         transaction_hash: format!("0xeacroles{block_number}"),
-        transaction_index: 0,
-        log_index: 0,
+        transaction_index,
+        log_index,
         emitting_address: normalize_address(emitting_address),
         topics: vec![
             keccak_signature_hex(ABI_EVENT_EAC_ROLES_CHANGED_SIGNATURE),

@@ -172,10 +172,10 @@ pub use label_preimages::{
 };
 pub use lineage::{
     CanonicalityState, ChainLineageBlock, chain_lineage_contains_ancestor,
-    chain_lineage_contains_canonical_ancestor_position, load_chain_lineage_block,
-    load_chain_lineage_canonical_child_path, load_highest_canonical_chain_lineage_block,
-    mark_chain_lineage_range_orphaned, upsert_chain_lineage_blocks,
-    upsert_chain_lineage_blocks_recanonicalizing_orphaned,
+    chain_lineage_contains_ancestor_at_block, chain_lineage_contains_canonical_ancestor_position,
+    load_chain_lineage_block, load_chain_lineage_canonical_child_path,
+    load_highest_canonical_chain_lineage_block, mark_chain_lineage_range_orphaned,
+    upsert_chain_lineage_blocks, upsert_chain_lineage_blocks_recanonicalizing_orphaned,
     upsert_chain_lineage_blocks_without_snapshots,
     upsert_chain_lineage_blocks_without_snapshots_recanonicalizing_orphaned,
 };
