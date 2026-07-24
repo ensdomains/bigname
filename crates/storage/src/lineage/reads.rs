@@ -222,11 +222,50 @@ pub async fn chain_lineage_contains_ancestor(
     chain_lineage_contains_ancestor_internal(pool, chain_id, descendant_hash, ancestor_hash).await
 }
 
+/// Prove parent-hash ancestry using the caller's already-known ancestor height
+/// as the recursive walk floor.
+pub async fn chain_lineage_contains_ancestor_at_block(
+    pool: &PgPool,
+    chain_id: &str,
+    descendant_hash: &str,
+    ancestor_hash: &str,
+    ancestor_block_number: i64,
+) -> Result<bool> {
+    chain_lineage_contains_ancestor_with_floor(
+        pool,
+        chain_id,
+        descendant_hash,
+        ancestor_hash,
+        Some(ancestor_block_number),
+    )
+    .await
+}
+
 pub(crate) async fn chain_lineage_contains_ancestor_internal<'e, E>(
     executor: E,
     chain_id: &str,
     descendant_hash: &str,
     ancestor_hash: &str,
+) -> Result<bool>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    chain_lineage_contains_ancestor_with_floor(
+        executor,
+        chain_id,
+        descendant_hash,
+        ancestor_hash,
+        None,
+    )
+    .await
+}
+
+async fn chain_lineage_contains_ancestor_with_floor<'e, E>(
+    executor: E,
+    chain_id: &str,
+    descendant_hash: &str,
+    ancestor_hash: &str,
+    known_ancestor_block_number: Option<i64>,
 ) -> Result<bool>
 where
     E: Executor<'e, Database = Postgres>,
@@ -238,37 +277,58 @@ where
             FROM chain_lineage
             WHERE chain_id = $1
               AND block_hash = $3
+              AND ($4::BIGINT IS NULL OR block_number = $4)
               AND canonicality_state <> 'orphaned'::canonicality_state
         ),
         lineage_path AS (
-            SELECT chain_id, block_hash, parent_hash, block_number
-            FROM chain_lineage
-            WHERE chain_id = $1
-              AND block_hash = $2
-              AND canonicality_state <> 'orphaned'::canonicality_state
+            SELECT
+                descendant.chain_id,
+                descendant.block_hash,
+                descendant.parent_hash,
+                descendant.block_number,
+                0::BIGINT AS depth,
+                ancestor.block_number AS floor_block_number,
+                descendant.block_number - ancestor.block_number AS max_depth
+            FROM chain_lineage AS descendant
+            CROSS JOIN ancestor
+            WHERE descendant.chain_id = $1
+              AND descendant.block_hash = $2
+              AND descendant.block_number >= ancestor.block_number
+              AND descendant.canonicality_state <> 'orphaned'::canonicality_state
 
             UNION ALL
 
-            SELECT parent.chain_id, parent.block_hash, parent.parent_hash, parent.block_number
+            SELECT
+                parent.chain_id,
+                parent.block_hash,
+                parent.parent_hash,
+                parent.block_number,
+                lineage_path.depth + 1,
+                lineage_path.floor_block_number,
+                lineage_path.max_depth
             FROM chain_lineage AS parent
             JOIN lineage_path
               ON parent.chain_id = lineage_path.chain_id
              AND parent.block_hash = lineage_path.parent_hash
-            JOIN ancestor
-              ON lineage_path.block_number > ancestor.block_number
             WHERE lineage_path.block_hash <> $3
+              AND lineage_path.block_number > lineage_path.floor_block_number
+              AND lineage_path.depth < lineage_path.max_depth
+              AND parent.block_number >= lineage_path.floor_block_number
+              AND parent.block_number < lineage_path.block_number
               AND parent.canonicality_state <> 'orphaned'::canonicality_state
         )
         SELECT EXISTS (
             SELECT 1
             FROM lineage_path
             WHERE block_hash = $3
+              AND block_number = floor_block_number
         )
         "#,
     )
     .bind(chain_id)
     .bind(descendant_hash)
     .bind(ancestor_hash)
+    .bind(known_ancestor_block_number)
     .fetch_one(executor)
     .await
     .with_context(|| {

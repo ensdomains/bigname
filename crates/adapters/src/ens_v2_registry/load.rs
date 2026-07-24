@@ -18,6 +18,10 @@ use super::{
     util::normalize_address,
 };
 
+mod history;
+
+pub(super) use history::load_registry_raw_log_prefix;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum RawLogCanonicalityFilter {
     IncludeObserved,
@@ -31,6 +35,7 @@ impl RawLogCanonicalityFilter {
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn load_registry_raw_logs(
     pool: &PgPool,
     chain: &str,

@@ -15,6 +15,8 @@ pub(crate) use config::{
     DEFAULT_OPS_CATCHUP_FOLLOW_POLL_INTERVAL_SECS, DEFAULT_OPS_CATCHUP_LEASE_DURATION_SECS,
     OpsCatchupConfig,
 };
+#[cfg(test)]
+pub(crate) use runner::install_after_ens_v2_proof_publication_failure;
 #[allow(unused_imports)]
 pub(crate) use runner::ops_catchup_idempotency_key;
 pub(crate) use runner::run_ops_finalized_catchup;

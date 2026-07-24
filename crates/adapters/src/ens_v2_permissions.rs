@@ -25,7 +25,10 @@ mod types;
 mod util;
 
 use decode::build_permissions_observation;
-use hints::{fallback_resource_hint, resolver_resource_hint};
+use hints::{
+    fallback_resource_hint, load_persisted_resolver_resource_hint,
+    load_same_batch_resolver_resource_hint, resolver_resource_hint,
+};
 use load::{load_active_emitters, load_permissions_raw_logs};
 use normalized::{build_resource, permission_changed_event, remember_hint_and_resource};
 use types::{PermissionsObservation, ResolverResourceHint};
@@ -171,7 +174,16 @@ async fn sync_ens_v2_permissions_with_scope(
     max_block_number: Option<i64>,
     mut progress: Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<EnsV2PermissionsSyncSummary> {
-    let mut active_emitters = load_active_emitters(pool, chain, &mut progress).await?;
+    // A through-block call is the full-closure entrypoint. Unlike live and restricted repair
+    // calls, it must admit registry/root emitters whose retained active interval has closed.
+    let include_historical_registry_emitters = max_block_number.is_some();
+    let mut active_emitters = load_active_emitters(
+        pool,
+        chain,
+        include_historical_registry_emitters,
+        &mut progress,
+    )
+    .await?;
     if let Some(source_scope) = source_scope {
         active_emitters.retain(|emitter| permissions_scope_includes_emitter(source_scope, emitter));
     }
@@ -210,7 +222,7 @@ async fn sync_ens_v2_permissions_with_scope(
     }
 
     let mut matched_log_count = 0usize;
-    let mut hints = HashMap::<(String, String), ResolverResourceHint>::new();
+    let mut hints = HashMap::<(String, String), Vec<ResolverResourceHint>>::new();
     let mut resources = BTreeMap::<Uuid, (Resource, ResolverResourceHint)>::new();
     let mut events = Vec::new();
 
@@ -257,9 +269,25 @@ async fn sync_ens_v2_permissions_with_scope(
                 new_role_bitmap,
             } => {
                 let key = (raw_log.emitting_address.clone(), resource.clone());
-                let hint = hints.get(&key).cloned().unwrap_or_else(|| {
+                let same_batch_hint = if let Some(candidates) = hints.get(&key) {
+                    load_same_batch_resolver_resource_hint(pool, raw_log, candidates).await?
+                } else {
+                    None
+                };
+                let hint = if let Some(hint) = same_batch_hint {
+                    hint
+                } else if let Some(hint) = load_persisted_resolver_resource_hint(
+                    pool,
+                    raw_log,
+                    &resource,
+                    &active_emitters,
+                )
+                .await?
+                {
+                    hint
+                } else {
                     fallback_resource_hint(raw_log, resource.clone(), resource_is_root(&resource))
-                });
+                };
                 let resource_row =
                     build_resource(pool, raw_log, &hint)
                         .await

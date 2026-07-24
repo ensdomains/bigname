@@ -55,7 +55,9 @@ use ens_v2_tail::sync_ens_v2_tail_adapters;
 #[allow(unused_imports)]
 pub(crate) use entrypoints::{
     sync_adapter_state_from_persisted_raw_payloads,
+    sync_adapter_state_from_persisted_raw_payloads_without_ens_v2_adapters,
     sync_adapter_state_from_scoped_persisted_raw_payloads,
+    sync_adapter_state_from_scoped_persisted_raw_payloads_without_ens_v2_adapters,
     sync_live_adapter_state_from_persisted_raw_payloads,
     sync_live_adapter_state_from_persisted_raw_payloads_after_reorg,
     sync_live_adapter_state_from_persisted_raw_payloads_after_reorg_with_progress,
@@ -93,6 +95,7 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
     block_hashes: &[String],
     source_scope: Option<&[(String, String, i64, i64)]>,
     mode: PersistedRawPayloadAdapterSyncMode,
+    defer_ens_v2_adapters: bool,
     reload_live_source_scope: bool,
     full_source_reconciliation: entrypoints::FullSourceReconciliationScope,
     progress: &mut Option<&mut dyn StartupAdapterProgress>,
@@ -266,11 +269,12 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
             chain, "ENSv1 unwrapped-authority adapter sync skipped outside selected source scope"
         );
     }
-    if ens_v2_full_source
-        || mode.selects_adapter(
-            source_scope,
-            NormalizedEventReplayAdapter::EnsV2RegistryResourceSurface,
-        )
+    if !defer_ens_v2_adapters
+        && (ens_v2_full_source
+            || mode.selects_adapter(
+                source_scope,
+                NormalizedEventReplayAdapter::EnsV2RegistryResourceSurface,
+            ))
     {
         ensure_raw_fact_adapter_allowed(
             mode,
@@ -327,11 +331,20 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
                 Some(load_live_adapter_source_scope(pool, chain, block_hashes).await?);
         }
     }
+    if defer_ens_v2_adapters {
+        info!(
+            service = "indexer",
+            chain, "ENSv2 adapter sync deferred until retained-history recovery completes"
+        );
+    }
     let source_scope = active_source_scope.as_deref();
     let source_scope_target_count = source_scope.map_or(0, <[_]>::len);
-    if let Some(source_scope) = source_scope.filter(|scope| {
-        mode.selects_adapter(Some(*scope), NormalizedEventReplayAdapter::EnsV2Registrar)
-    }) {
+    if let Some(source_scope) = source_scope
+        .filter(|_| !defer_ens_v2_adapters)
+        .filter(|scope| {
+            mode.selects_adapter(Some(*scope), NormalizedEventReplayAdapter::EnsV2Registrar)
+        })
+    {
         ensure_raw_fact_adapter_allowed(mode, NormalizedEventReplayAdapter::EnsV2Registrar)?;
         let adapter_started = Instant::now();
         info!(
@@ -372,7 +385,7 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
             ens_v2_registrar_summary.total_inserted_count,
         );
         record_adapter_progress(pool, progress).await?;
-    } else if source_scope.is_none() {
+    } else if !defer_ens_v2_adapters && source_scope.is_none() {
         ensure_raw_fact_adapter_allowed(mode, NormalizedEventReplayAdapter::EnsV2Registrar)?;
         let adapter_started = Instant::now();
         info!(
@@ -408,16 +421,18 @@ async fn sync_adapter_state_from_persisted_raw_payloads_with_mode(
         );
         record_adapter_progress(pool, progress).await?;
     }
-    sync_ens_v2_tail_adapters(
-        pool,
-        chain,
-        block_hashes,
-        source_scope,
-        mode,
-        &mut aggregate,
-        progress,
-    )
-    .await?;
+    if !defer_ens_v2_adapters {
+        sync_ens_v2_tail_adapters(
+            pool,
+            chain,
+            block_hashes,
+            source_scope,
+            mode,
+            &mut aggregate,
+            progress,
+        )
+        .await?;
+    }
     if mode == PersistedRawPayloadAdapterSyncMode::LivePoll {
         log_live_poll_adapter_sync_completion(
             chain,

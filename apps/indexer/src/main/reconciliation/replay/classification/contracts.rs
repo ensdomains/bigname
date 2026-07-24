@@ -35,6 +35,8 @@ const ENS_V2_REGISTRAR_DEPENDENCY_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS
 const ENS_V2_RESOLVER_DEPENDENCY_SOURCE_FAMILIES: &[&str] = &[SOURCE_FAMILY_ENS_V2_ROOT_L1, SOURCE_FAMILY_ENS_V2_REGISTRY_L1, SOURCE_FAMILY_ENS_V2_RESOLVER_L1];
 
 const NO_DEPENDENCIES: &[NormalizedEventReplayAdapter] = &[];
+const BLOCK_DERIVED_DEPENDENCY: &[NormalizedEventReplayAdapter] =
+    &[NormalizedEventReplayAdapter::BlockDerivedNormalizedEvents];
 const ENS_V2_REGISTRY_DEPENDENCY: &[NormalizedEventReplayAdapter] =
     &[NormalizedEventReplayAdapter::EnsV2RegistryResourceSurface];
 
@@ -137,11 +139,11 @@ pub(crate) const NORMALIZED_EVENT_REPLAY_CONTRACTS: &[AdapterReplayContract] = &
         raw_fact_replay_participant: true,
         source_families: ENS_V2_PERMISSIONS_SOURCE_FAMILIES,
         closure_source_families: ENS_V2_PERMISSIONS_SOURCE_FAMILIES,
-        dependency_adapters: NO_DEPENDENCIES,
+        dependency_adapters: BLOCK_DERIVED_DEPENDENCY,
         producer_paths: &["crates/adapters/src/ens_v2_permissions"],
         stateless_replay_proof_tests: &[],
         closure_replay_supported: true,
-        replay_note: "permission resources and role events are stateful within root, registry, and resolver emitter histories",
+        replay_note: "permission resources and role events are stateful within root, registry, and resolver emitter histories; legacy resolver-resource hints recover exact DNS bytes from block-derived preimage observations",
     },
     AdapterReplayContract {
         adapter: NormalizedEventReplayAdapter::ManifestNormalizedEvents,

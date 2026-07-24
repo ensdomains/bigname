@@ -5,7 +5,9 @@ use sqlx::{PgPool, Postgres, QueryBuilder, types::Uuid};
 
 use super::{
     super::{TargetRequest, TransferHydrationKey, TransferRequest},
-    POSTGRES_BIND_PARAMETER_LIMIT, load_declared_registry_authorities,
+    POSTGRES_BIND_PARAMETER_LIMIT,
+    ancestry::{SelectedPathAnchor, ensure_selected_paths_reach_stable_boundaries},
+    load_declared_registry_authorities,
 };
 use crate::ens_v2_registry::constants::SOURCE_FAMILY_ENS_V2_ROOT_L1;
 
@@ -120,6 +122,18 @@ async fn load_discovered_registry_suffixes(
         debug_assert!(
             registry_suffix_query_bind_count(requests.len()) < POSTGRES_BIND_PARAMETER_LIMIT
         );
+        let anchors = requests
+            .iter()
+            .enumerate()
+            .map(|(request_index, (position, _))| SelectedPathAnchor {
+                request_index: i64::try_from(request_index).expect("request index must fit i64"),
+                chain_id: &position.chain_id,
+                block_number: position.block_number,
+                block_hash: &position.block_hash,
+            })
+            .collect::<Vec<_>>();
+        ensure_selected_paths_reach_stable_boundaries(pool, "registry-parent hydration", &anchors)
+            .await?;
         let mut query = build_registry_suffix_history_query(requests);
         let mut names = query
             .build_query_as::<(i64, Option<String>)>()
@@ -199,11 +213,17 @@ fn build_registry_suffix_history_query<'args>(
              AND parent.block_hash = child.parent_hash
              AND parent.block_number = child.block_number - 1
              AND parent.canonicality_state <> 'orphaned'::canonicality_state
-            WHERE child.canonicality_state = 'observed'::canonicality_state
+            WHERE child.canonicality_state NOT IN (
+                'safe'::canonicality_state,
+                'finalized'::canonicality_state
+            )
         ), selected_boundaries AS (
             SELECT requested.request_index,
                    COALESCE(MAX(tail.block_number) FILTER (
-                       WHERE tail.canonicality_state <> 'observed'::canonicality_state
+                       WHERE tail.canonicality_state IN (
+                           'safe'::canonicality_state,
+                           'finalized'::canonicality_state
+                       )
                    ), -1) AS stable_through_block
             FROM requested LEFT JOIN selected_tail tail
               ON tail.request_index = requested.request_index
@@ -272,10 +292,13 @@ fn build_registry_suffix_history_query<'args>(
     query
 }
 
-/// Load discovery intervals from the selected canonical/safe/finalized prefix
-/// plus the exact parent chain of an `Observed` event block. A bounded interval
-/// stays eligible after deactivation, but an `Observed` sibling cannot supply
-/// either its start or its closing boundary to the selected branch.
+/// Load discovery intervals from the stable canonical prefix plus the exact
+/// parent chain above a safe or finalized boundary. A bounded interval stays
+/// eligible after deactivation, but above the stable boundary a sibling
+/// cannot supply either its start or its closing boundary to the selected
+/// branch. Below the boundary, canonical rows are trusted by state under the
+/// reconciler invariant that no non-orphaned sibling survives at or below a
+/// safe or finalized height.
 pub(in crate::ens_v2_registry::events::hydration) async fn load_subregistry_target_rows(
     pool: &PgPool,
     requests: &[TargetRequest],
@@ -287,6 +310,21 @@ pub(in crate::ens_v2_registry::events::hydration) async fn load_subregistry_targ
     let mut rows = Vec::new();
     for requests in requests.chunks(SUBREGISTRY_REQUEST_CHUNK_SIZE) {
         debug_assert!(subregistry_query_bind_count(requests.len()) < POSTGRES_BIND_PARAMETER_LIMIT);
+        let anchors = requests
+            .iter()
+            .map(|request| SelectedPathAnchor {
+                request_index: request.event_index,
+                chain_id: &request.chain_id,
+                block_number: request.block_number,
+                block_hash: &request.block_hash,
+            })
+            .collect::<Vec<_>>();
+        ensure_selected_paths_reach_stable_boundaries(
+            pool,
+            "subregistry-target hydration",
+            &anchors,
+        )
+        .await?;
         let mut query = build_subregistry_target_query(requests);
         rows.extend(
             query
@@ -361,14 +399,19 @@ fn build_subregistry_target_query(requests: &[TargetRequest]) -> QueryBuilder<'_
              AND parent.block_hash = child.parent_hash
              AND parent.block_number = child.block_number - 1
              AND parent.canonicality_state <> 'orphaned'::canonicality_state
-            WHERE child.canonicality_state = 'observed'::canonicality_state
+            WHERE child.canonicality_state NOT IN (
+                'safe'::canonicality_state,
+                'finalized'::canonicality_state
+            )
         ), selected_boundaries AS (
             SELECT
                 requested.event_index,
                 COALESCE(
                     MAX(selected_tail.block_number) FILTER (
-                        WHERE selected_tail.canonicality_state
-                            <> 'observed'::canonicality_state
+                        WHERE selected_tail.canonicality_state IN (
+                            'safe'::canonicality_state,
+                            'finalized'::canonicality_state
+                        )
                     ),
                     -1
                 ) AS stable_through_block

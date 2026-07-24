@@ -16,11 +16,11 @@ use crate::{
         provider_block_to_lineage_with_header_audit_mode,
         provider_block_to_raw_block_with_header_audit_mode,
         provider_code_observation_to_raw_code_hash, provider_raw_payload_cache_metadata_to_upserts,
-        sync_adapter_state_from_persisted_raw_payloads,
-        sync_adapter_state_from_scoped_persisted_raw_payloads,
     },
 };
 
+#[path = "fetching/adapter_sync.rs"]
+mod adapter_sync;
 #[path = "fetching/canonicality.rs"]
 mod canonicality;
 #[path = "fetching/historical.rs"]
@@ -40,6 +40,7 @@ use super::{
 };
 use crate::source_scope::SourceScope;
 
+use adapter_sync::sync_inline_adapters;
 pub(crate) use canonicality::{BackfillCanonicalityEvidence, load_backfill_canonicality_evidence};
 pub(crate) use historical::{
     fill_log_payloads_from_validation_provider, materialize_historical_payload_range,
@@ -333,12 +334,14 @@ pub(crate) async fn run_hash_pinned_backfill_range(
     upsert_raw_receipts(pool, &receipts).await?;
     upsert_raw_logs(pool, &logs).await?;
     upsert_raw_code_hashes(pool, &code_hashes).await?;
-    if !logs.is_empty() && adapter_sync_mode == BackfillAdapterSyncMode::Inline {
+    if !logs.is_empty() && adapter_sync_mode.runs_inline_adapters() {
         if source_plan.selector_kind == WatchedSourceSelectorKind::WholeActiveWatchedChain {
-            sync_adapter_state_from_persisted_raw_payloads(
+            sync_inline_adapters(
                 pool,
                 &watched_chain.chain,
                 &block_hashes,
+                None,
+                adapter_sync_mode,
             )
             .await?;
         } else {
@@ -350,11 +353,13 @@ pub(crate) async fn run_hash_pinned_backfill_range(
                 range.from_block,
                 range.to_block,
             );
-            sync_adapter_state_from_scoped_persisted_raw_payloads(
+            let adapter_sync_scope = source_scope.adapter_sync_scope();
+            sync_inline_adapters(
                 pool,
                 &watched_chain.chain,
                 &block_hashes,
-                &source_scope.adapter_sync_scope(),
+                Some(&adapter_sync_scope),
+                adapter_sync_mode,
             )
             .await?;
         }
