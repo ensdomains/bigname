@@ -19,7 +19,7 @@ pub(super) async fn remember_hint_and_resource(
     pool: &PgPool,
     raw_log: &PermissionsRawLogRow,
     hint: ResolverResourceHint,
-    hints: &mut HashMap<(String, String), ResolverResourceHint>,
+    hints: &mut HashMap<(String, String), Vec<ResolverResourceHint>>,
     resources: &mut BTreeMap<Uuid, (Resource, ResolverResourceHint)>,
 ) -> Result<()> {
     let key = (
@@ -30,7 +30,7 @@ pub(super) async fn remember_hint_and_resource(
     resources
         .entry(resource.resource_id)
         .or_insert((resource, hint.clone()));
-    hints.insert(key, hint);
+    hints.entry(key).or_default().push(hint);
     Ok(())
 }
 
