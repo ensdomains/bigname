@@ -2270,8 +2270,8 @@ async fn silent_winning_reorg_removes_losing_ensv2_discovery_authority() -> Resu
         &provider,
         &ProviderHeadSnapshot {
             canonical: caught_up_block.clone(),
-            safe: None,
-            finalized: None,
+            safe: Some(caught_up_block.clone()),
+            finalized: Some(caught_up_block.clone()),
         },
     )
     .await?
@@ -2299,8 +2299,8 @@ async fn silent_winning_reorg_removes_losing_ensv2_discovery_authority() -> Resu
         &provider,
         &ProviderHeadSnapshot {
             canonical: losing_block.clone(),
-            safe: None,
-            finalized: None,
+            safe: Some(caught_up_block.clone()),
+            finalized: Some(caught_up_block.clone()),
         },
     )
     .await?
@@ -2341,8 +2341,8 @@ async fn silent_winning_reorg_removes_losing_ensv2_discovery_authority() -> Resu
         &provider,
         &ProviderHeadSnapshot {
             canonical: winning_block.clone(),
-            safe: None,
-            finalized: None,
+            safe: Some(caught_up_block.clone()),
+            finalized: Some(caught_up_block.clone()),
         },
     )
     .await?
@@ -2427,8 +2427,8 @@ async fn silent_winning_reorg_removes_losing_ensv2_discovery_authority() -> Resu
         &provider,
         &ProviderHeadSnapshot {
             canonical: later_block,
-            safe: None,
-            finalized: None,
+            safe: Some(caught_up_block.clone()),
+            finalized: Some(caught_up_block),
         },
     )
     .await?
