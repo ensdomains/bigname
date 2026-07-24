@@ -37,6 +37,7 @@ impl TestDatabase {
             .unwrap_or_else(|_| default_database_url().to_owned());
         let base_options = PgConnectOptions::from_str(&database_url)
             .context("failed to parse database URL for worker permissions_current tests")?;
+        let base_options = bigname_storage::stamp_projection_replay_version(base_options);
         let sequence = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
         let database_name = format!(
             "bg_wp_{}_{}_{}",

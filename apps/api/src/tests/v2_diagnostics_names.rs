@@ -963,8 +963,11 @@ async fn v2_diagnostics_name_routes_honor_namespace_override() -> Result<()> {
 #[tokio::test]
 async fn v2_diagnostics_name_routes_reject_malformed_name() -> Result<()> {
     let state = AppState::new(
-        PgPool::connect_lazy("postgres://bigname:bigname@127.0.0.1:5432/bigname")
-            .expect("name normalization rejection does not use the database"),
+        PgPool::connect_lazy_with(bigname_storage::stamp_projection_replay_version(
+            "postgres://bigname:bigname@127.0.0.1:5432/bigname"
+                .parse()
+                .expect("static test database URL must parse"),
+        )),
         bigname_execution::ChainRpcUrls::default(),
     );
 
@@ -991,8 +994,11 @@ async fn v2_diagnostics_name_routes_reject_malformed_name() -> Result<()> {
 #[tokio::test]
 async fn v2_diagnostics_name_routes_reject_undocumented_query_params() -> Result<()> {
     let state = AppState::new(
-        PgPool::connect_lazy("postgres://bigname:bigname@127.0.0.1:5432/bigname")
-            .expect("query rejection does not use the database"),
+        PgPool::connect_lazy_with(bigname_storage::stamp_projection_replay_version(
+            "postgres://bigname:bigname@127.0.0.1:5432/bigname"
+                .parse()
+                .expect("static test database URL must parse"),
+        )),
         bigname_execution::ChainRpcUrls::default(),
     );
 
@@ -1058,8 +1064,11 @@ async fn v2_diagnostics_name_routes_reject_undocumented_query_params() -> Result
 async fn v2_diagnostics_name_records_rejects_malformed_duplicate_and_unknown_query_params()
 -> Result<()> {
     let state = AppState::new(
-        PgPool::connect_lazy("postgres://bigname:bigname@127.0.0.1:5432/bigname")
-            .expect("query rejection does not use the database"),
+        PgPool::connect_lazy_with(bigname_storage::stamp_projection_replay_version(
+            "postgres://bigname:bigname@127.0.0.1:5432/bigname"
+                .parse()
+                .expect("static test database URL must parse"),
+        )),
         bigname_execution::ChainRpcUrls::default(),
     );
 
@@ -1134,8 +1143,11 @@ async fn v2_diagnostics_name_routes_reject_invalid_namespace_and_at() -> Result<
 #[tokio::test]
 async fn v2_diagnostics_name_execution_requires_keys() -> Result<()> {
     let state = AppState::new(
-        PgPool::connect_lazy("postgres://bigname:bigname@127.0.0.1:5432/bigname")
-            .expect("keys rejection does not use the database"),
+        PgPool::connect_lazy_with(bigname_storage::stamp_projection_replay_version(
+            "postgres://bigname:bigname@127.0.0.1:5432/bigname"
+                .parse()
+                .expect("static test database URL must parse"),
+        )),
         bigname_execution::ChainRpcUrls::default(),
     );
 
@@ -1170,8 +1182,11 @@ async fn v2_diagnostics_name_execution_requires_keys() -> Result<()> {
 async fn v2_diagnostics_name_execution_rejects_malformed_duplicate_and_unknown_query_params()
 -> Result<()> {
     let state = AppState::new(
-        PgPool::connect_lazy("postgres://bigname:bigname@127.0.0.1:5432/bigname")
-            .expect("query rejection does not use the database"),
+        PgPool::connect_lazy_with(bigname_storage::stamp_projection_replay_version(
+            "postgres://bigname:bigname@127.0.0.1:5432/bigname"
+                .parse()
+                .expect("static test database URL must parse"),
+        )),
         bigname_execution::ChainRpcUrls::default(),
     );
 

@@ -414,9 +414,10 @@ mod tests {
         let database_url = std::env::var("BIGNAME_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| bigname_storage::default_database_url().to_owned());
+        let options = bigname_storage::stamp_projection_replay_version(database_url.parse()?);
         let pool = PgPoolOptions::new()
             .max_connections(1)
-            .connect(&database_url)
+            .connect_with(options)
             .await
             .context("failed to connect name-surface normalization storage test database")?;
         create_temp_repair_tables(&pool).await?;
