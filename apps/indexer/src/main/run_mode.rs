@@ -32,7 +32,10 @@ impl IndexerRunMode {
         let normalized_replay_catchup_enabled = normalized_replay_catchup_requested
             && adapter_sync_mode == BackfillAdapterSyncMode::Auto;
         let bootstrap_watch_scope = match adapter_sync_mode {
-            BackfillAdapterSyncMode::Inline => RuntimeWatchScope::ActiveWatchedChain,
+            BackfillAdapterSyncMode::Inline
+            | BackfillAdapterSyncMode::InlineWithoutEnsV2Adapters => {
+                RuntimeWatchScope::ActiveWatchedChain
+            }
             BackfillAdapterSyncMode::Auto | BackfillAdapterSyncMode::RawOnly => {
                 RuntimeWatchScope::ManifestDeclaredOnly
             }

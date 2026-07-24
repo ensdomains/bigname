@@ -25,7 +25,9 @@ mod types;
 mod util;
 
 use decode::build_permissions_observation;
-use hints::{fallback_resource_hint, resolver_resource_hint};
+use hints::{
+    fallback_resource_hint, load_persisted_resolver_resource_hint, resolver_resource_hint,
+};
 use load::{load_active_emitters, load_permissions_raw_logs};
 use normalized::{build_resource, permission_changed_event, remember_hint_and_resource};
 use types::{PermissionsObservation, ResolverResourceHint};
@@ -257,9 +259,15 @@ async fn sync_ens_v2_permissions_with_scope(
                 new_role_bitmap,
             } => {
                 let key = (raw_log.emitting_address.clone(), resource.clone());
-                let hint = hints.get(&key).cloned().unwrap_or_else(|| {
+                let hint = if let Some(hint) = hints.get(&key) {
+                    hint.clone()
+                } else if let Some(hint) =
+                    load_persisted_resolver_resource_hint(pool, raw_log, &resource).await?
+                {
+                    hint
+                } else {
                     fallback_resource_hint(raw_log, resource.clone(), resource_is_root(&resource))
-                });
+                };
                 let resource_row =
                     build_resource(pool, raw_log, &hint)
                         .await

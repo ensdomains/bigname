@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail, ensure};
-use bigname_storage::{NormalizedEvent, ens_v2_registry_resource_id, sql_row};
+use bigname_storage::{CanonicalityState, NormalizedEvent, ens_v2_registry_resource_id, sql_row};
 use serde_json::Value;
 use sqlx::{PgPool, postgres::PgRow, types::Uuid};
 
@@ -197,6 +197,25 @@ pub(in crate::ens_v2_registry) async fn hydrate_subregistry_event_target_ids(
             .get_mut(usize::try_from(event_index).context("negative event index")?)
             .context("historical discovery target returned an unknown event index")?;
         event.after_state["to_contract_instance_id"] = Value::String(target_id.to_string());
+    }
+    for request in &requests {
+        let event = events
+            .get(usize::try_from(request.event_index).context("negative event index")?)
+            .context("historical discovery request has an unknown event index")?;
+        if event.after_state["to_contract_instance_id"].is_null()
+            && matches!(
+                event.canonicality_state,
+                CanonicalityState::Canonical
+                    | CanonicalityState::Safe
+                    | CanonicalityState::Finalized
+            )
+        {
+            bail!(
+                "canonical SubregistryChanged event {} has no matching selected-path discovery edge for target {}",
+                event.event_identity,
+                request.target_address
+            );
+        }
     }
 
     hydrate_cold_token_control_events(pool, events).await?;

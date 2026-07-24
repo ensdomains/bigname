@@ -13,11 +13,50 @@ use bigname_storage::{
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
-use super::discovery::reconcile_discovery_observation_history_by_source;
 use super::*;
+use super::{
+    discovery::{
+        ens_v2_subregistry_discovery_source, reconcile_discovery_observation_history_by_source,
+    },
+    names::discovery_observation_key,
+};
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 const LIVE_TEST_DEPLOYMENT_PROFILE: &str = "sepolia";
+
+struct PauseAfterNormalizedEventProgress {
+    event_kind: &'static str,
+    reached_publication: Option<tokio::sync::oneshot::Sender<()>>,
+    resume: Option<tokio::sync::oneshot::Receiver<()>>,
+}
+
+impl StartupAdapterProgress for PauseAfterNormalizedEventProgress {
+    fn record<'a>(
+        &'a mut self,
+        pool: &'a PgPool,
+    ) -> crate::checkpoint_context::StartupAdapterProgressFuture<'a> {
+        Box::pin(async move {
+            let event_is_published = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM normalized_events WHERE event_kind = $1)",
+            )
+            .bind(self.event_kind)
+            .fetch_one(pool)
+            .await?;
+            if event_is_published && let Some(reached_publication) = self.reached_publication.take()
+            {
+                reached_publication.send(()).map_err(|_| {
+                    anyhow::anyhow!("publication-fence test observer stopped waiting")
+                })?;
+                self.resume
+                    .take()
+                    .context("publication-fence test resume signal is missing")?
+                    .await
+                    .context("publication-fence test resume sender was dropped")?;
+            }
+            Ok(())
+        })
+    }
+}
 
 async fn sync_ens_v2_registry_resource_surface_live_poll(
     pool: &PgPool,
@@ -449,7 +488,7 @@ async fn ens_v2_reorg_reanchors_orphaned_stable_identity_rows_to_winning_block()
         .insert_registration_at_hash(database.pool(), &losing_hash, 10, 1, 101, "alice")
         .await?;
     fixture
-        .sync_hashes(database.pool(), &[losing_hash.clone()], 10, 10)
+        .sync_hashes(database.pool(), std::slice::from_ref(&losing_hash), 10, 10)
         .await?;
 
     let losing_binding =
@@ -477,7 +516,7 @@ async fn ens_v2_reorg_reanchors_orphaned_stable_identity_rows_to_winning_block()
         .insert_registration_at_hash(database.pool(), &winning_hash, 10, 1, 101, "alice")
         .await?;
     fixture
-        .sync_hashes(database.pool(), &[winning_hash.clone()], 10, 10)
+        .sync_hashes(database.pool(), std::slice::from_ref(&winning_hash), 10, 10)
         .await?;
 
     let winning_surface = load_name_surface(database.pool(), "ens:fleeting.eth")
@@ -590,7 +629,7 @@ async fn ens_v2_reorg_reopens_reanchored_binding_closed_only_on_losing_branch() 
     fixture
         .sync_hashes(
             database.pool(),
-            &[winning_registration_hash.clone()],
+            std::slice::from_ref(&winning_registration_hash),
             10,
             10,
         )
@@ -1255,14 +1294,15 @@ async fn ens_v2_subregistry_target_hydration_respects_same_block_edge_positions(
         reference: after_boundary,
     })?;
 
-    hydrate_subregistry_event_target_ids(database.pool(), &mut harness.graph_events).await?;
-    let targets = harness
-        .graph_events
-        .iter()
-        .filter(|event| event.event_kind == EVENT_KIND_SUBREGISTRY_CHANGED)
-        .map(|event| event.after_state["to_contract_instance_id"].clone())
-        .collect::<Vec<_>>();
-    assert_eq!(targets, vec![Value::Null, Value::Null]);
+    let error = hydrate_subregistry_event_target_ids(database.pool(), &mut harness.graph_events)
+        .await
+        .expect_err("canonical events outside an edge's active position must fail loudly");
+    assert!(
+        error
+            .to_string()
+            .contains("has no matching selected-path discovery edge"),
+        "unexpected hydration error: {error:#}"
+    );
 
     database.cleanup().await
 }
@@ -1652,6 +1692,369 @@ async fn ens_v2_scoped_backfill_sync_only_normalizes_selected_registry_targets()
 }
 
 #[tokio::test]
+async fn ens_v2_incremental_batches_match_full_replay_normalized_events() -> Result<()> {
+    let incremental = TestDatabase::new().await?;
+    let full_replay = TestDatabase::new().await?;
+    let chain = "ethereum-sepolia";
+    let registry = "0x00000000000000000000000000000000000000aa";
+    let child_registry = "0x00000000000000000000000000000000000000b0";
+    let incremental_hashes =
+        insert_incremental_equivalence_fixture(incremental.pool(), chain, registry, child_registry)
+            .await?;
+    let full_replay_hashes =
+        insert_incremental_equivalence_fixture(full_replay.pool(), chain, registry, child_registry)
+            .await?;
+    assert_eq!(incremental_hashes, full_replay_hashes);
+
+    let mut incremental_matched_log_count = 0;
+    let incremental_batches = [
+        (
+            vec![incremental_hashes[0].clone()],
+            vec![
+                (
+                    SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+                    registry.to_owned(),
+                    9,
+                    9,
+                ),
+                (
+                    SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+                    child_registry.to_owned(),
+                    9,
+                    9,
+                ),
+            ],
+        ),
+        (
+            vec![incremental_hashes[2].clone(), incremental_hashes[4].clone()],
+            vec![(
+                SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+                registry.to_owned(),
+                11,
+                13,
+            )],
+        ),
+        (
+            vec![
+                incremental_hashes[3].clone(),
+                incremental_hashes[5].clone(),
+                incremental_hashes[6].clone(),
+            ],
+            vec![(
+                SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+                registry.to_owned(),
+                12,
+                15,
+            )],
+        ),
+    ];
+    for (block_hashes, source_scope) in incremental_batches {
+        let summary =
+            EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_source_scope_canonical_only(
+                incremental.pool(),
+                chain,
+                &block_hashes,
+                &source_scope,
+            )
+            .await?;
+        incremental_matched_log_count += summary.matched_log_count;
+        if summary.discovery_admission_epoch_bump_count > 0 {
+            refresh_test_raw_log_closure_proof(incremental.pool(), chain, 15).await?;
+        }
+    }
+
+    let full_summary =
+        sync_ens_v2_registry_resource_surface_through_block(full_replay.pool(), chain, 15).await?;
+    assert_eq!(incremental_matched_log_count, 10);
+    assert_eq!(full_summary.matched_log_count, 10);
+
+    let incremental_rows = normalized_event_rows_for_equivalence(incremental.pool()).await?;
+    let full_replay_rows = normalized_event_rows_for_equivalence(full_replay.pool()).await?;
+    assert!(
+        !incremental_rows.is_empty(),
+        "the differential fixture must derive normalized events"
+    );
+    assert_eq!(
+        incremental_rows, full_replay_rows,
+        "adversarial incremental batches must derive the exact normalized-event set produced by full replay"
+    );
+    assert_eq!(
+        pending_registration_event_identity(incremental.pool(), "ens:alice.parent.eth").await?,
+        pending_registration_event_identity(full_replay.pool(), "ens:alice.parent.eth").await?,
+        "cold incremental replay must preserve the full-replay event identity immediately after a same-block parent edge opens"
+    );
+
+    let expected_corner_sources = BTreeSet::from([
+        "ExpiryUpdated".to_owned(),
+        "LabelUnregistered".to_owned(),
+        "ResolverUpdated".to_owned(),
+        "SubregistryUpdated".to_owned(),
+        "TokenRegenerated".to_owned(),
+    ]);
+    assert_eq!(
+        normalized_event_source_events(incremental.pool(), &expected_corner_sources).await?,
+        expected_corner_sources,
+        "every cold-state event named by the equivalence contract must contribute normalized output"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM discovery_edges
+            WHERE chain_id = $1
+              AND edge_kind IN ('resolver', 'subregistry')
+              AND active_to_block_number = 15
+              AND deactivated_at IS NOT NULL
+              AND lower(provenance ->> 'from_address') = $2
+            "#,
+        )
+        .bind(chain)
+        .bind(normalize_address(registry))
+        .fetch_one(incremental.pool())
+        .await?,
+        2,
+        "terminal replay must retain bounded resolver and subregistry discovery history"
+    );
+
+    incremental.cleanup().await?;
+    full_replay.cleanup().await
+}
+
+#[tokio::test]
+async fn ens_v2_cold_incremental_reconstruction_requires_retained_history_proof() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-sepolia";
+    let registry = "0x00000000000000000000000000000000000000aa";
+    let manifest_id = insert_test_registry_manifest(database.pool(), chain).await?;
+    insert_test_registry_contract(
+        database.pool(),
+        manifest_id,
+        "registry",
+        Uuid::from_u128(0x161f),
+        registry,
+        0,
+    )
+    .await?;
+    let block_hashes = [lifecycle_block_hash(10), lifecycle_block_hash(11)];
+    let mut blocks = [
+        test_raw_block(chain, &block_hashes[0], 10),
+        test_raw_block(chain, &block_hashes[1], 11),
+    ];
+    blocks[1].parent_hash = Some(block_hashes[0].clone());
+    upsert_raw_blocks(database.pool(), &blocks).await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            label_registered_raw_log(
+                chain,
+                &block_hashes[0],
+                10,
+                registry,
+                0,
+                "alice",
+                1,
+                "alice",
+            ),
+            token_resource_raw_log(chain, &block_hashes[0], 10, registry, 1, 1, 101),
+            expiry_updated_raw_log(chain, &block_hashes[1], 11, registry, 0, 1, 2_000_000_000),
+        ],
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE raw_log_staging_input_revisions
+        SET retained_history_complete = false,
+            incomplete_since = clock_timestamp(),
+            proven_retention_generation = NULL,
+            proven_discovery_admission_epoch = NULL,
+            proven_through_block = NULL
+        WHERE chain_id = $1
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+
+    let error =
+        EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_source_scope_canonical_only(
+            database.pool(),
+            chain,
+            std::slice::from_ref(&block_hashes[1]),
+            &[(
+                SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+                registry.to_owned(),
+                11,
+                11,
+            )],
+        )
+        .await
+        .err()
+        .context("cold state reconstruction must reject unproven retained history")?;
+    assert!(
+        format!("{error:#}").contains(
+            "incremental prior-state reconstruction requires a current retained-history proof"
+        ),
+        "unexpected retained-history error: {error:#}"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn ens_v2_cold_incremental_reconstruction_requires_complete_selected_ancestry() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-sepolia";
+    let registry = "0x00000000000000000000000000000000000000aa";
+    let block_hash = lifecycle_block_hash(11);
+    let manifest_id = insert_test_registry_manifest(database.pool(), chain).await?;
+    insert_test_registry_contract(
+        database.pool(),
+        manifest_id,
+        "registry",
+        Uuid::from_u128(0x1620),
+        registry,
+        0,
+    )
+    .await?;
+    let mut block = test_raw_block(chain, &block_hash, 11);
+    block.parent_hash = Some(lifecycle_block_hash(10));
+    block.canonicality_state = CanonicalityState::Observed;
+    upsert_raw_blocks(database.pool(), &[block]).await?;
+    let mut raw_log = expiry_updated_raw_log(chain, &block_hash, 11, registry, 0, 1, 2_000_000_000);
+    raw_log.canonicality_state = CanonicalityState::Observed;
+    upsert_raw_logs(database.pool(), &[raw_log]).await?;
+
+    let error = EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_source_scope(
+        database.pool(),
+        chain,
+        std::slice::from_ref(&block_hash),
+        &[(
+            SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+            registry.to_owned(),
+            11,
+            11,
+        )],
+    )
+    .await
+    .err()
+    .context("cold state reconstruction must reject an observed ancestry gap")?;
+    assert!(
+        format!("{error:#}").contains("cannot prove selected-path ancestry"),
+        "unexpected selected-ancestry error: {error:#}"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn ens_v2_cold_incremental_holds_raw_log_fence_through_publication() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-sepolia";
+    let registry = "0x00000000000000000000000000000000000000aa";
+    let manifest_id = insert_test_registry_manifest(database.pool(), chain).await?;
+    insert_test_registry_contract(
+        database.pool(),
+        manifest_id,
+        "registry",
+        Uuid::from_u128(0x1621),
+        registry,
+        0,
+    )
+    .await?;
+    let block_hashes = [lifecycle_block_hash(10), lifecycle_block_hash(11)];
+    let mut blocks = [
+        test_raw_block(chain, &block_hashes[0], 10),
+        test_raw_block(chain, &block_hashes[1], 11),
+    ];
+    blocks[1].parent_hash = Some(block_hashes[0].clone());
+    upsert_raw_blocks(database.pool(), &blocks).await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            label_registered_raw_log(
+                chain,
+                &block_hashes[0],
+                10,
+                registry,
+                0,
+                "alice",
+                1,
+                "alice",
+            ),
+            token_resource_raw_log(chain, &block_hashes[0], 10, registry, 1, 1, 101),
+            expiry_updated_raw_log(chain, &block_hashes[1], 11, registry, 0, 1, 2_000_000_000),
+        ],
+    )
+    .await?;
+    refresh_test_raw_log_closure_proof(database.pool(), chain, 11).await?;
+
+    let (reached_publication, publication_reached) = tokio::sync::oneshot::channel();
+    let (resume_publication, resume) = tokio::sync::oneshot::channel();
+    let sync_pool = database.pool().clone();
+    let selected_hash = block_hashes[1].clone();
+    let selected_registry = registry.to_owned();
+    let sync = tokio::spawn(async move {
+        let mut progress = PauseAfterNormalizedEventProgress {
+            event_kind: EVENT_KIND_EXPIRY_CHANGED,
+            reached_publication: Some(reached_publication),
+            resume: Some(resume),
+        };
+        EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_source_scope_canonical_only_and_progress(
+            &sync_pool,
+            chain,
+            &[selected_hash],
+            &[(
+                SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+                selected_registry,
+                11,
+                11,
+            )],
+            &mut progress,
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), publication_reached)
+        .await
+        .context("restricted ENSv2 sync did not reach normalized-event publication")?
+        .context("restricted ENSv2 sync stopped before publication")?;
+
+    let mutation_pool = database.pool().clone();
+    let prefix_hash = block_hashes[0].clone();
+    let mut mutation = tokio::spawn(async move {
+        sqlx::query(
+            "UPDATE raw_logs SET data = '0x01' \
+             WHERE chain_id = $1 AND block_hash = $2 AND log_index = 0",
+        )
+        .bind(chain)
+        .bind(prefix_hash)
+        .execute(&mutation_pool)
+        .await
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(150), &mut mutation)
+            .await
+            .is_err(),
+        "same-chain semantic raw-log mutation must wait through restricted publication"
+    );
+
+    resume_publication
+        .send(())
+        .map_err(|_| anyhow::anyhow!("restricted ENSv2 sync stopped before test resume"))?;
+    let summary = tokio::time::timeout(std::time::Duration::from_secs(2), sync)
+        .await
+        .context("restricted ENSv2 sync did not release its publication fence")??
+        .context("restricted ENSv2 sync failed")?;
+    assert_eq!(summary.matched_log_count, 1);
+    tokio::time::timeout(std::time::Duration::from_secs(2), mutation)
+        .await
+        .context("raw-log mutation did not resume after restricted publication")??
+        .context("raw-log mutation failed after restricted publication")?;
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn ens_v2_scoped_loader_preserves_same_address_disjoint_effective_ranges() -> Result<()> {
     let database = TestDatabase::new().await?;
     let chain = "ethereum-sepolia";
@@ -1894,6 +2297,17 @@ fn ens_v2_token_regeneration_preserves_resource_identity() -> Result<()> {
             })
         })
         .context("initial synthetic ExpiryChanged event should be emitted")?;
+    let initial_registration_event = linked_resource_states
+        .values()
+        .next()
+        .and_then(|state| {
+            state.resource.as_ref().and_then(|link| {
+                build_resource_events(state, link)
+                    .into_iter()
+                    .find(|event| event.event_kind == EVENT_KIND_REGISTRATION_GRANTED)
+            })
+        })
+        .context("initial RegistrationGranted event should be emitted")?;
     {
         let mut context = RegistryObservationContext {
             registry_suffix_by_address: &mut registry_suffix_by_address,
@@ -2001,6 +2415,14 @@ fn ens_v2_token_regeneration_preserves_resource_identity() -> Result<()> {
     assert_eq!(
         synthetic_after_renewal, initial_expiry_event,
         "real expiry updates must not rewrite the link-time expiry fact"
+    );
+    let registration_after_renewal = build_resource_events(renewed_state, &link)
+        .into_iter()
+        .find(|event| event.event_kind == EVENT_KIND_REGISTRATION_GRANTED)
+        .context("RegistrationGranted should remain present after renewal")?;
+    assert_eq!(
+        registration_after_renewal, initial_registration_event,
+        "real expiry updates must not rewrite the registration-time grant fact"
     );
     assert!(graph_events.iter().any(|event| {
         event.event_kind == EVENT_KIND_EXPIRY_CHANGED
@@ -2481,15 +2903,14 @@ async fn ens_v2_subregistry_change_retains_historical_endpoint_id_after_replacem
     );
 
     let replay_source = harness.graph_events.clone();
-    hydrate_subregistry_event_target_ids(database.pool(), &mut harness.graph_events).await?;
-    assert_eq!(
-        harness
-            .graph_events
-            .iter()
-            .find(|event| event.event_kind == EVENT_KIND_SUBREGISTRY_CHANGED)
-            .context("unadmitted SubregistryChanged should remain present")?
-            .after_state["to_contract_instance_id"],
-        Value::Null
+    let error = hydrate_subregistry_event_target_ids(database.pool(), &mut harness.graph_events)
+        .await
+        .expect_err("an unadmitted canonical subregistry target must fail loudly");
+    assert!(
+        error
+            .to_string()
+            .contains("has no matching selected-path discovery edge"),
+        "unexpected hydration error: {error:#}"
     );
 
     let target_id = Uuid::from_u128(0xc1);
@@ -2634,15 +3055,14 @@ async fn ens_v2_subregistry_change_retains_historical_endpoint_id_after_replacem
     .execute(database.pool())
     .await?;
     let mut stale_only = replay_source.clone();
-    hydrate_subregistry_event_target_ids(database.pool(), &mut stale_only).await?;
-    assert_eq!(
-        stale_only
-            .iter()
-            .find(|event| event.event_kind == EVENT_KIND_SUBREGISTRY_CHANGED)
-            .context("stale-only SubregistryChanged should remain present")?
-            .after_state["to_contract_instance_id"],
-        Value::Null,
-        "a deactivated unbounded losing-fork edge must not hydrate the canonical event"
+    let error = hydrate_subregistry_event_target_ids(database.pool(), &mut stale_only)
+        .await
+        .expect_err("a canonical event with only an unbounded retracted edge must fail loudly");
+    assert!(
+        error
+            .to_string()
+            .contains("has no matching selected-path discovery edge"),
+        "unexpected hydration error: {error:#}"
     );
     sqlx::query(
         "UPDATE discovery_edges SET deactivated_at = NULL WHERE to_contract_instance_id = $1",
@@ -3795,7 +4215,7 @@ async fn ens_v2_overweight_live_checkpoint_advances_and_preserves_completed_stat
         database.pool(),
         manifest_id,
         "registry",
-        Uuid::from_u128(0x1752_1),
+        Uuid::from_u128(0x0001_7521),
         registry,
         0,
     )
@@ -5158,7 +5578,7 @@ async fn raw_log_payload_update_rotates_retention_but_canonicality_update_does_n
         .await?;
     assert_eq!(after_payload.0, after_canonicality.0 + 1);
     assert_eq!(after_payload.1, after_canonicality.1 + 1);
-    assert_eq!(after_payload.2, false);
+    assert!(!after_payload.2);
     assert_eq!(
         (after_payload.3, after_payload.4, after_payload.5),
         (None, None, None)
@@ -5777,9 +6197,7 @@ async fn ens_v2_full_closure_rebuilds_retired_registry_lifecycle_output() -> Res
     let retired_registry = "0x00000000000000000000000000000000000000a1";
     let current_registry = "0x00000000000000000000000000000000000000b2";
     let registry_id = Uuid::from_u128(0x1741);
-    let block_hashes = (10..=13)
-        .map(|block_number| lifecycle_block_hash(block_number))
-        .collect::<Vec<_>>();
+    let block_hashes = (10..=13).map(lifecycle_block_hash).collect::<Vec<_>>();
     let manifest_id = insert_test_registry_manifest(database.pool(), chain).await?;
     insert_test_registry_contract(
         database.pool(),
@@ -5848,6 +6266,7 @@ async fn ens_v2_full_closure_rebuilds_retired_registry_lifecycle_output() -> Res
         &root_scope,
     )
     .await?;
+    refresh_test_raw_log_closure_proof(database.pool(), chain, 13).await?;
     EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_source_scope(
         database.pool(),
         chain,
@@ -5863,6 +6282,7 @@ async fn ens_v2_full_closure_rebuilds_retired_registry_lifecycle_output() -> Res
         ],
     )
     .await?;
+    refresh_test_raw_log_closure_proof(database.pool(), chain, 13).await?;
     assert_eq!(
         normalized_event_count_for_emitter(database.pool(), retired_registry).await?,
         1
@@ -6617,6 +7037,202 @@ impl RegistryHarness {
     }
 }
 
+async fn insert_incremental_equivalence_fixture(
+    pool: &PgPool,
+    chain: &str,
+    registry: &str,
+    child_registry: &str,
+) -> Result<Vec<String>> {
+    let resolver = "0x00000000000000000000000000000000000000b1";
+    let subregistry = "0x00000000000000000000000000000000000000c1";
+    let manifest_id = insert_test_registry_manifest(pool, chain).await?;
+    insert_test_resolver_manifest(pool, chain).await?;
+    insert_test_registry_contract(
+        pool,
+        manifest_id,
+        "registry",
+        Uuid::from_u128(0x1610),
+        registry,
+        0,
+    )
+    .await?;
+    let child_contract_instance_id = Uuid::from_u128(0x1611);
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instances (
+            contract_instance_id,
+            chain_id,
+            contract_kind,
+            provenance
+        )
+        VALUES ($1, $2, 'registry', '{}'::JSONB)
+        "#,
+    )
+    .bind(child_contract_instance_id)
+    .bind(chain)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instance_addresses (
+            contract_instance_id,
+            chain_id,
+            address,
+            active_from_block_number,
+            active_from_block_hash,
+            source_manifest_id,
+            provenance
+        )
+        VALUES ($1, $2, $3, 9, $4, $5, '{}'::JSONB)
+        "#,
+    )
+    .bind(child_contract_instance_id)
+    .bind(chain)
+    .bind(normalize_address(child_registry))
+    .bind(lifecycle_block_hash(9))
+    .bind(manifest_id)
+    .execute(pool)
+    .await?;
+
+    let block_hashes = (9..=15).map(lifecycle_block_hash).collect::<Vec<_>>();
+    let mut blocks = Vec::with_capacity(block_hashes.len());
+    for (offset, block_hash) in block_hashes.iter().enumerate() {
+        let block_number = 9 + i64::try_from(offset).context("fixture offset exceeds i64")?;
+        let mut block = test_raw_block(chain, block_hash, block_number);
+        if offset > 0 {
+            block.parent_hash = Some(block_hashes[offset - 1].clone());
+        }
+        blocks.push(block);
+    }
+    upsert_raw_blocks(pool, &blocks).await?;
+    upsert_raw_logs(
+        pool,
+        &[
+            label_registered_raw_log(
+                chain,
+                &block_hashes[0],
+                9,
+                registry,
+                0,
+                "parent",
+                1,
+                "alice",
+            ),
+            token_resource_raw_log(chain, &block_hashes[0], 9, registry, 1, 1, 101),
+            subregistry_updated_raw_log(chain, &block_hashes[0], 9, registry, 2, 1, child_registry),
+            label_registered_raw_log(
+                chain,
+                &block_hashes[0],
+                9,
+                child_registry,
+                3,
+                "alice",
+                10,
+                "alice",
+            ),
+            token_resource_raw_log(chain, &block_hashes[0], 9, child_registry, 4, 10, 110),
+            expiry_updated_raw_log(chain, &block_hashes[2], 11, registry, 0, 1, 2_000_000_000),
+            resolver_updated_raw_log(chain, &block_hashes[3], 12, registry, 0, 1, resolver),
+            subregistry_updated_raw_log(chain, &block_hashes[4], 13, registry, 0, 1, subregistry),
+            token_regenerated_raw_log(chain, &block_hashes[5], 14, registry, 0, 1, 2),
+            label_unregistered_raw_log(chain, &block_hashes[6], 15, registry, 0, 2),
+        ],
+    )
+    .await?;
+    let discovery_source = ens_v2_subregistry_discovery_source(chain);
+    let token_id = format!("0x{:064x}", 1);
+    let observation_key = discovery_observation_key(registry, &token_id);
+    bigname_manifests::reconcile_scoped_discovery_observation_transitions(
+        pool,
+        &discovery_source,
+        &[vec![DiscoveryObservation {
+            chain: chain.to_owned(),
+            from_address: normalize_address(registry),
+            to_address: normalize_address(child_registry),
+            edge_kind: SUBREGISTRY_EDGE_KIND.to_owned(),
+            discovery_source: discovery_source.clone(),
+            active_from_block_number: Some(9),
+            active_from_block_hash: Some(block_hashes[0].clone()),
+            active_to_block_number: None,
+            active_to_block_hash: None,
+            provenance: json!({
+                "source": "raw_log",
+                "source_event": "SubregistryUpdated",
+                "observation_key": observation_key,
+                "token_id": token_id,
+                "from_address": normalize_address(registry),
+                "to_address": normalize_address(child_registry),
+                "logical_name_id": "ens:parent.eth",
+                "resource_id": Value::Null,
+                "chain_id": chain,
+                "block_hash": block_hashes[0],
+                "block_number": 9,
+                "transaction_hash": "0xsubregistry9",
+                "transaction_index": 0,
+                "log_index": 2,
+                "tombstone": false,
+            }),
+        }]],
+    )
+    .await?;
+    let admitted_child_contract_instance_id = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT to_contract_instance_id
+        FROM discovery_edges
+        WHERE discovery_source = $1
+          AND lower(provenance ->> 'to_address') = $2
+        "#,
+    )
+    .bind(&discovery_source)
+    .bind(normalize_address(child_registry))
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(
+        admitted_child_contract_instance_id,
+        child_contract_instance_id
+    );
+    sqlx::query(
+        r#"
+        UPDATE discovery_edges
+        SET active_to_block_number = 13,
+            active_to_block_hash = $2,
+            deactivated_at = clock_timestamp()
+        WHERE discovery_source = $1
+          AND to_contract_instance_id = $3
+        "#,
+    )
+    .bind(&discovery_source)
+    .bind(&block_hashes[4])
+    .bind(admitted_child_contract_instance_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET deactivated_at = clock_timestamp()
+        WHERE contract_instance_id = $1
+        "#,
+    )
+    .bind(child_contract_instance_id)
+    .execute(pool)
+    .await?;
+    insert_completed_registry_coverage(
+        pool,
+        chain,
+        &[
+            (SOURCE_FAMILY_ENS_V2_REGISTRY_L1, registry),
+            (SOURCE_FAMILY_ENS_V2_REGISTRY_L1, child_registry),
+            (SOURCE_FAMILY_ENS_V2_REGISTRY_L1, subregistry),
+            (SOURCE_FAMILY_ENS_V2_RESOLVER_L1, resolver),
+        ],
+        0,
+        15,
+    )
+    .await?;
+    refresh_test_raw_log_closure_proof(pool, chain, 15).await?;
+    Ok(block_hashes)
+}
+
 async fn insert_test_registry_manifest(pool: &PgPool, chain: &str) -> Result<i64> {
     let manifest_id = sqlx::query_scalar::<_, i64>(
         r#"
@@ -6674,41 +7290,7 @@ async fn insert_test_registry_manifest(pool: &PgPool, chain: &str) -> Result<i64
     .execute(pool)
     .await
     .context("failed to insert scoped registry test discovery rules")?;
-    // Unit fixtures insert already-complete raw-log pages directly instead of
-    // running the indexer's generation-bound bootstrap. Establish the proof
-    // tuple explicitly so tests which are not about bootstrap closure can use
-    // the production full-source guard.
-    sqlx::query(
-        r#"
-        INSERT INTO discovery_admission_epochs (chain_id, epoch)
-        VALUES ($1, 0)
-        ON CONFLICT (chain_id) DO NOTHING
-        "#,
-    )
-    .bind(chain)
-    .execute(pool)
-    .await
-    .context("failed to establish test discovery-admission epoch")?;
-    sqlx::query(
-        r#"
-        INSERT INTO raw_log_staging_input_revisions (
-            chain_id,
-            revision,
-            retention_generation,
-            retained_history_complete,
-            incomplete_since,
-            proven_retention_generation,
-            proven_discovery_admission_epoch,
-            proven_through_block
-        )
-        VALUES ($1, 0, 0, true, NULL, 0, 0, 9223372036854775807)
-        ON CONFLICT (chain_id) DO NOTHING
-        "#,
-    )
-    .bind(chain)
-    .execute(pool)
-    .await
-    .context("failed to establish test raw-log closure proof")?;
+    establish_test_raw_log_closure_proof(pool, chain).await?;
     Ok(manifest_id)
 }
 
@@ -6716,7 +7298,7 @@ async fn insert_test_root_manifest(pool: &PgPool, chain: &str) -> Result<i64> {
     let mut payload = test_registry_manifest_payload(chain);
     payload["source_family"] = json!(SOURCE_FAMILY_ENS_V2_ROOT_L1);
     payload["deployment_epoch"] = json!("ens_v2_root_scope_test");
-    sqlx::query_scalar::<_, i64>(
+    let manifest_id = sqlx::query_scalar::<_, i64>(
         r#"
         INSERT INTO manifest_versions (
             manifest_version,
@@ -6753,7 +7335,9 @@ async fn insert_test_root_manifest(pool: &PgPool, chain: &str) -> Result<i64> {
     .bind(serde_json::to_string(&payload)?)
     .fetch_one(pool)
     .await
-    .context("failed to insert root registry test manifest")
+    .context("failed to insert root registry test manifest")?;
+    establish_test_raw_log_closure_proof(pool, chain).await?;
+    Ok(manifest_id)
 }
 
 async fn insert_test_resolver_manifest(pool: &PgPool, chain: &str) -> Result<i64> {
@@ -6800,6 +7384,45 @@ async fn insert_test_resolver_manifest(pool: &PgPool, chain: &str) -> Result<i64
     .fetch_one(pool)
     .await
     .context("failed to insert resolver-history test manifest")
+}
+
+async fn establish_test_raw_log_closure_proof(pool: &PgPool, chain: &str) -> Result<()> {
+    // Unit fixtures insert already-complete raw-log pages directly instead of
+    // running the indexer's generation-bound bootstrap. Establish the proof
+    // tuple explicitly so tests which are not about bootstrap closure can use
+    // the production reconstruction and full-source guards.
+    sqlx::query(
+        r#"
+        INSERT INTO discovery_admission_epochs (chain_id, epoch)
+        VALUES ($1, 0)
+        ON CONFLICT (chain_id) DO NOTHING
+        "#,
+    )
+    .bind(chain)
+    .execute(pool)
+    .await
+    .context("failed to establish test discovery-admission epoch")?;
+    sqlx::query(
+        r#"
+        INSERT INTO raw_log_staging_input_revisions (
+            chain_id,
+            revision,
+            retention_generation,
+            retained_history_complete,
+            incomplete_since,
+            proven_retention_generation,
+            proven_discovery_admission_epoch,
+            proven_through_block
+        )
+        VALUES ($1, 0, 0, true, NULL, 0, 0, 9223372036854775807)
+        ON CONFLICT (chain_id) DO NOTHING
+        "#,
+    )
+    .bind(chain)
+    .execute(pool)
+    .await
+    .context("failed to establish test raw-log closure proof")?;
+    Ok(())
 }
 
 async fn refresh_test_raw_log_closure_proof(
@@ -7341,6 +7964,63 @@ fn token_resource_raw_log(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn expiry_updated_raw_log(
+    chain: &str,
+    block_hash: &str,
+    block_number: i64,
+    emitting_address: &str,
+    log_index: i64,
+    token_id: u64,
+    new_expiry: u64,
+) -> RawLog {
+    RawLog {
+        chain_id: chain.to_owned(),
+        block_hash: block_hash.to_owned(),
+        block_number,
+        transaction_hash: format!("0xexpiry{block_number}"),
+        transaction_index: 0,
+        log_index,
+        emitting_address: normalize_address(emitting_address),
+        topics: vec![
+            keccak_signature_hex("ExpiryUpdated(uint256,uint64,address)"),
+            topic_word(token_id),
+            topic_word(new_expiry),
+            topic_address("0x0000000000000000000000000000000000000dad"),
+        ],
+        data: Vec::new(),
+        canonicality_state: CanonicalityState::Finalized,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn token_regenerated_raw_log(
+    chain: &str,
+    block_hash: &str,
+    block_number: i64,
+    emitting_address: &str,
+    log_index: i64,
+    old_token_id: u64,
+    new_token_id: u64,
+) -> RawLog {
+    RawLog {
+        chain_id: chain.to_owned(),
+        block_hash: block_hash.to_owned(),
+        block_number,
+        transaction_hash: format!("0xregenerated{block_number}"),
+        transaction_index: 0,
+        log_index,
+        emitting_address: normalize_address(emitting_address),
+        topics: vec![
+            keccak_signature_hex("TokenRegenerated(uint256,uint256)"),
+            topic_word(old_token_id),
+            topic_word(new_token_id),
+        ],
+        data: Vec::new(),
+        canonicality_state: CanonicalityState::Finalized,
+    }
+}
+
 async fn load_live_registry_checkpoint_position(
     pool: &PgPool,
     chain: &str,
@@ -7668,6 +8348,122 @@ async fn normalized_event_count(pool: &PgPool) -> Result<i64> {
         .fetch_one(pool)
         .await
         .context("failed to count scoped registry normalized events")
+}
+
+async fn pending_registration_event_identity(pool: &PgPool, name: &str) -> Result<String> {
+    sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT event_identity
+        FROM normalized_events
+        WHERE logical_name_id = $1
+          AND event_kind = 'RegistrationGranted'
+          AND after_state ->> 'resource_pending' = 'true'
+        "#,
+    )
+    .bind(name)
+    .fetch_one(pool)
+    .await
+    .context("failed to load same-block registration event identity")
+}
+
+async fn normalized_event_rows_for_equivalence(pool: &PgPool) -> Result<Vec<String>> {
+    let rows = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT jsonb_build_object(
+            'event_identity', event_identity,
+            'namespace', namespace,
+            'logical_name_id', logical_name_id,
+            'resource_id', resource_id::TEXT,
+            'event_kind', event_kind,
+            'source_family', source_family,
+            'manifest_version', manifest_version,
+            'source_manifest_id', source_manifest_id,
+            'chain_id', chain_id,
+            'block_number', block_number,
+            'block_hash', block_hash,
+            'transaction_hash', transaction_hash,
+            'log_index', log_index,
+            'raw_fact_ref', raw_fact_ref,
+            'derivation_kind', derivation_kind,
+            'canonicality_state', canonicality_state::TEXT,
+            'before_state', before_state,
+            'after_state', after_state
+        )::TEXT
+        FROM normalized_events
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    let contract_instances = contract_instance_stable_keys_for_equivalence(pool).await?;
+    let mut normalized = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut value = serde_json::from_str::<Value>(&row)?;
+        normalize_contract_instance_ids_for_equivalence(&mut value, &contract_instances);
+        normalized.push(serde_json::to_string(&value)?);
+    }
+    normalized.sort();
+    Ok(normalized)
+}
+
+async fn contract_instance_stable_keys_for_equivalence(
+    pool: &PgPool,
+) -> Result<BTreeMap<String, String>> {
+    let rows = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT DISTINCT ON (contract_instance_id)
+            contract_instance_id::TEXT,
+            chain_id || ':' || lower(address)
+        FROM contract_instance_addresses
+        ORDER BY contract_instance_id, (deactivated_at IS NULL) DESC, admitted_at DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().collect())
+}
+
+fn normalize_contract_instance_ids_for_equivalence(
+    value: &mut Value,
+    contract_instances: &BTreeMap<String, String>,
+) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                normalize_contract_instance_ids_for_equivalence(value, contract_instances);
+            }
+        }
+        Value::Object(fields) => {
+            for value in fields.values_mut() {
+                normalize_contract_instance_ids_for_equivalence(value, contract_instances);
+            }
+        }
+        Value::String(value) => {
+            for (id, stable_key) in contract_instances {
+                if value.contains(id) {
+                    *value = value.replace(id, &format!("<contract:{stable_key}>"));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+async fn normalized_event_source_events(
+    pool: &PgPool,
+    expected: &BTreeSet<String>,
+) -> Result<BTreeSet<String>> {
+    let expected = expected.iter().cloned().collect::<Vec<_>>();
+    let rows = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT DISTINCT after_state ->> 'source_event'
+        FROM normalized_events
+        WHERE after_state ->> 'source_event' = ANY($1::TEXT[])
+        "#,
+    )
+    .bind(expected)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().collect())
 }
 
 fn labelhash(label: &str) -> String {

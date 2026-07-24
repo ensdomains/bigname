@@ -21,6 +21,7 @@ mod load;
 mod names;
 mod normalized;
 mod recovery;
+mod restricted;
 mod startup;
 mod types;
 mod util;
@@ -53,6 +54,7 @@ use live::{
 };
 use load::{RawLogCanonicalityFilter, load_registry_raw_logs_with_progress};
 use names::initial_registry_suffixes;
+use restricted::{reconstruct_prior_registry_state, requires_prior_registry_state};
 use startup::persist_registry_outputs_with_progress;
 use types::*;
 use util::normalize_address;
@@ -104,6 +106,7 @@ pub struct EnsV2RegistryResourceSurfaceSyncSummary {
     pub by_kind: BTreeMap<String, usize>,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn sync_ens_v2_registry_resource_surface_with_scope(
     pool: &PgPool,
     chain: &str,
@@ -118,6 +121,14 @@ async fn sync_ens_v2_registry_resource_surface_with_scope(
     // Non-live entrypoints may rewrite persisted state behind the process-local live cache.
     invalidate_live_registry_replay_state(pool, chain);
     clear_live_registry_replay_checkpoints_for_chain(pool, chain).await?;
+    let restricted_source_guard = if restrict_to_block_hashes {
+        let fence = registry_sync_fence
+            .take()
+            .context("ENSv2 registry sync fence is absent before restricted-source upgrade")?;
+        Some(FullSourceRawLogHistoryGuard::acquire(fence, chain).await?)
+    } else {
+        None
+    };
     let full_source_guard = if !restrict_to_block_hashes {
         let full_source_target = if let Some(target) = max_block_number {
             target
@@ -202,7 +213,7 @@ async fn sync_ens_v2_registry_resource_surface_with_scope(
         canonicality_filter,
         max_block_number,
         None,
-        !restrict_to_block_hashes,
+        true,
         !restrict_to_block_hashes,
         expected_discovery_admission_epoch,
         reborrow_startup_adapter_progress(&mut progress),
@@ -213,7 +224,7 @@ async fn sync_ens_v2_registry_resource_surface_with_scope(
             Ok((summary, replay_state)),
             Some((guard, proof, full_source_target, pre_sync_requirements)),
         ) => {
-            match progress.as_deref_mut() {
+            match progress {
                 Some(progress) => {
                     guard
                         .finish_with_progress(
@@ -248,6 +259,16 @@ async fn sync_ens_v2_registry_resource_surface_with_scope(
             Err(error)
         }
         (Err(error), None) => Err(error),
+    };
+    let result = if let Some(guard) = restricted_source_guard {
+        let guard_result = if result.is_ok() {
+            guard.release().await
+        } else {
+            guard.abort().await
+        };
+        prioritize_operation_error(result, guard_result)
+    } else {
+        result
     };
     let release = if let Some(registry_sync_fence) = registry_sync_fence {
         release_registry_sync_fence(registry_sync_fence, chain).await
@@ -335,38 +356,48 @@ async fn sync_ens_v2_registry_resource_surface_with_scope_and_state(
     )
     .await?;
     let scanned_log_count = raw_logs.len();
-    let mut matched_log_count = 0usize;
+    let observations_by_log = raw_logs
+        .iter()
+        .map(|raw_log| build_registry_observations(raw_log, &event_topics))
+        .collect::<Result<Vec<_>>>()?;
+    let matched_log_count = observations_by_log
+        .iter()
+        .filter(|observations| !observations.is_empty())
+        .count();
     initialize_registry_suffixes(&mut replay_state, &active_emitters, is_resumed_replay);
     replay_state.registry_contract_by_address = active_emitters
         .iter()
         .map(|emitter| (emitter.address.clone(), emitter.contract_instance_id))
         .collect();
-    let RegistryReplayState {
-        mut registry_suffix_by_address,
-        mut registry_contract_by_address,
-        mut states_by_registry_token,
-        mut state_keys_by_registry_namehash,
-        mut token_aliases,
-        mut current_token_alias_by_canonical_key,
-    } = replay_state;
+    let reconstruct_each_selected_log = !is_resumed_replay
+        && restrict_to_block_hashes
+        && !reconcile_full_sources
+        && requires_prior_registry_state(&observations_by_log);
     let mut linked_resource_states = BTreeMap::<Uuid, RegistryNameState>::new();
     let mut closed_bindings = BTreeMap::<Uuid, SurfaceBinding>::new();
     let mut observations = Vec::<DiscoveryObservation>::new();
     let mut graph_events = Vec::<NormalizedEvent>::new();
 
-    for (index, raw_log) in raw_logs.iter().enumerate() {
-        let observations_for_log = build_registry_observations(raw_log, &event_topics)?;
+    for (index, (raw_log, observations_for_log)) in raw_logs
+        .iter()
+        .zip(observations_by_log.into_iter())
+        .enumerate()
+    {
+        if reconstruct_each_selected_log && !observations_for_log.is_empty() {
+            replay_state =
+                reconstruct_prior_registry_state(pool, chain, raw_log, &mut progress).await?;
+        }
         if !observations_for_log.is_empty() {
-            matched_log_count += 1;
             let mut context = RegistryObservationContext {
-                registry_suffix_by_address: &mut registry_suffix_by_address,
-                registry_contract_by_address: &mut registry_contract_by_address,
-                states_by_registry_token: &mut states_by_registry_token,
-                state_keys_by_registry_namehash: &mut state_keys_by_registry_namehash,
+                registry_suffix_by_address: &mut replay_state.registry_suffix_by_address,
+                registry_contract_by_address: &mut replay_state.registry_contract_by_address,
+                states_by_registry_token: &mut replay_state.states_by_registry_token,
+                state_keys_by_registry_namehash: &mut replay_state.state_keys_by_registry_namehash,
                 linked_resource_states: &mut linked_resource_states,
                 closed_bindings: &mut closed_bindings,
-                token_aliases: &mut token_aliases,
-                current_token_alias_by_canonical_key: &mut current_token_alias_by_canonical_key,
+                token_aliases: &mut replay_state.token_aliases,
+                current_token_alias_by_canonical_key: &mut replay_state
+                    .current_token_alias_by_canonical_key,
                 observations: &mut observations,
                 graph_events: &mut graph_events,
             };
@@ -482,17 +513,7 @@ async fn sync_ens_v2_registry_resource_surface_with_scope_and_state(
         discovery_admission_epoch_bump_count: reconciliation.admission_epoch_bump_count,
         by_kind,
     };
-    Ok((
-        summary,
-        RegistryReplayState {
-            registry_suffix_by_address,
-            registry_contract_by_address,
-            states_by_registry_token,
-            state_keys_by_registry_namehash,
-            token_aliases,
-            current_token_alias_by_canonical_key,
-        },
-    ))
+    Ok((summary, replay_state))
 }
 
 fn initialize_registry_suffixes(
