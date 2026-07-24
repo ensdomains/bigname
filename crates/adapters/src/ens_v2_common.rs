@@ -2,7 +2,9 @@ use bigname_storage::sql_row;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{Context, Result};
-use bigname_manifests::{load_watched_contracts, load_watched_contracts_scoped_with_progress};
+use bigname_manifests::{
+    WatchedContractSource, load_watched_contracts, load_watched_contracts_scoped_with_progress,
+};
 use futures_util::TryStreamExt;
 use sqlx::{PgPool, Row, types::Uuid};
 
@@ -17,23 +19,35 @@ use crate::{
     startup_progress::{STARTUP_ADAPTER_PROGRESS_PAGE_ROWS, StartupManifestProgress},
 };
 
+mod interval;
+#[cfg(test)]
+pub(crate) use interval::active_emitter_for_block;
+pub(crate) use interval::{LogPosition, active_emitter_for_log};
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct ActiveEmitter {
     pub(crate) address: String,
     pub(crate) source_family: String,
     pub(crate) active_from_block_number: Option<i64>,
     pub(crate) active_to_block_number: Option<i64>,
+    pub(crate) active_from_log_position: Option<LogPosition>,
+    pub(crate) active_to_log_position: Option<LogPosition>,
+    pub(crate) discovery_interval: bool,
     pub(crate) source_manifest_id: i64,
     pub(crate) contract_instance_id: Uuid,
     pub(crate) namespace: String,
     pub(crate) manifest_version: i64,
 }
 
-/// Identifies one distinct discovery/watched interval for an emitting address:
-/// `(address, active_from_block_number, active_to_block_number)`. Two rows that share this key are
-/// the same interval reported by different sources and are deduplicated; rows that differ are kept
-/// as separate [`ActiveEmitter`]s so disjoint windows survive (see [`insert_distinct_emitter`]).
-type EmitterScopeKey = (String, Option<i64>, Option<i64>);
+/// Identifies one watched interval, including within-block discovery positions. Exact duplicate
+/// intervals deduplicate while disjoint windows remain separate.
+type EmitterScopeKey = (
+    String,
+    Option<i64>,
+    Option<LogPosition>,
+    Option<i64>,
+    Option<LogPosition>,
+);
 
 pub(crate) fn source_scope_bindings(
     source_scope: Option<&[(String, String, i64, i64)]>,
@@ -79,7 +93,9 @@ fn insert_distinct_emitter(
     let scope_key = (
         emitter.address.clone(),
         emitter.active_from_block_number,
+        emitter.active_from_log_position,
         emitter.active_to_block_number,
+        emitter.active_to_log_position,
     );
     match emitters_by_scope.entry(scope_key) {
         Entry::Vacant(entry) => {
@@ -105,26 +121,6 @@ pub(crate) fn emitters_by_address(
             .push(emitter);
     }
     output
-}
-
-/// Find the interval covering `block_number`, matching the half-open range `[active_from,
-/// active_to)`. The upper bound is EXCLUSIVE on purpose and must not be "reconciled" with the
-/// inclusive bound used by `ens_v2_registry::emitter_active_at_block`: a superseded discovery
-/// edge's `active_to` is written as the successor edge's `active_from` (the repoint block), so two
-/// adjacent edges `[from, X)` and `[X, ..)` partition cleanly — block `X` belongs to the successor
-/// only. An inclusive bound would match both edges at `X` and double-attribute the repoint log.
-pub(crate) fn active_emitter_for_block(
-    emitters: &[ActiveEmitter],
-    block_number: i64,
-) -> Option<&ActiveEmitter> {
-    emitters.iter().find(|emitter| {
-        emitter
-            .active_from_block_number
-            .is_none_or(|active_from| block_number >= active_from)
-            && emitter
-                .active_to_block_number
-                .is_none_or(|active_to| block_number < active_to)
-    })
 }
 
 pub(crate) async fn load_active_emitters(
@@ -172,6 +168,9 @@ pub(crate) async fn load_active_emitters(
     let watched_contract_count = watched_contracts.len();
     let mut emitters_by_scope = BTreeMap::<EmitterScopeKey, ActiveEmitter>::new();
     for (index, watched_contract) in watched_contracts.into_iter().enumerate() {
+        if watched_contract.source == WatchedContractSource::DiscoveryEdge {
+            continue;
+        }
         let (source_manifest_id, manifest) =
             active_manifest_for_watched_contract(&active_manifests, &watched_contract)?;
         if manifest.source_family != source_family {
@@ -190,6 +189,9 @@ pub(crate) async fn load_active_emitters(
                 manifest_version: manifest.manifest_version,
                 active_from_block_number: watched_contract.active_from_block_number,
                 active_to_block_number: watched_contract.active_to_block_number,
+                active_from_log_position: None,
+                active_to_log_position: None,
+                discovery_interval: false,
             },
         );
         record_common_progress(pool, progress, index + 1, watched_contract_count).await?;
@@ -221,7 +223,11 @@ async fn load_discovered_resolver_emitters(
             cia.address,
             de.to_contract_instance_id,
             de.active_from_block_number,
-            de.active_to_block_number
+            de.active_to_block_number,
+            (de.provenance ->> 'transaction_index')::BIGINT AS active_from_transaction_index,
+            (de.provenance ->> 'log_index')::BIGINT AS active_from_log_index,
+            (de.provenance ->> 'active_to_transaction_index')::BIGINT AS active_to_transaction_index,
+            (de.provenance ->> 'active_to_log_index')::BIGINT AS active_to_log_index
         FROM discovery_edges de
         JOIN manifest_versions source_mv
           ON source_mv.manifest_id = de.source_manifest_id
@@ -254,6 +260,15 @@ async fn load_discovered_resolver_emitters(
             manifest_version: manifest.manifest_version,
             active_from_block_number: sql_row::get(&row, "active_from_block_number")?,
             active_to_block_number: sql_row::get(&row, "active_to_block_number")?,
+            active_from_log_position: LogPosition::optional(
+                sql_row::get(&row, "active_from_transaction_index")?,
+                sql_row::get(&row, "active_from_log_index")?,
+            )?,
+            active_to_log_position: LogPosition::optional(
+                sql_row::get(&row, "active_to_transaction_index")?,
+                sql_row::get(&row, "active_to_log_index")?,
+            )?,
+            discovery_interval: true,
         });
         if emitters
             .len()
@@ -340,6 +355,9 @@ mod tests {
             manifest_version: 1,
             active_from_block_number: active_from,
             active_to_block_number: active_to,
+            active_from_log_position: None,
+            active_to_log_position: None,
+            discovery_interval: true,
         }
     }
 
@@ -350,7 +368,6 @@ mod tests {
     #[test]
     fn insert_distinct_emitter_preserves_disjoint_intervals_per_address() {
         let mut by_scope = BTreeMap::new();
-
         // Two genuinely disjoint discovery edges for the same resolver address, discovered in
         // arbitrary order. They must NOT collapse into one envelope [100, 600): the gap [200, 500)
         // is covered by neither edge, and each edge keeps its own manifest/instance identity.
@@ -369,7 +386,6 @@ mod tests {
             emitter_with("0xresolver", 9, 9, Some(100), Some(200)),
         );
         assert_eq!(by_scope.len(), 2);
-
         let emitters = by_scope.into_values().collect::<Vec<_>>();
         let by_address = emitters_by_address(&emitters);
         let resolver = by_address.get("0xresolver").expect("address present");

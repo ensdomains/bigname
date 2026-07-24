@@ -3,11 +3,11 @@ use std::collections::HashMap;
 use alloy_primitives::hex;
 use anyhow::{Context, Result};
 use bigname_domain::normalization::normalize_name;
-use bigname_storage::load_resource;
+use bigname_storage::{chain_lineage_contains_ancestor, load_resource};
 use serde_json::Value;
 
 use crate::ens_v2_common::{
-    ActiveEmitter, active_emitter_for_block, emitters_by_address, normalize_address,
+    ActiveEmitter, active_emitter_for_log, emitters_by_address, normalize_address,
 };
 use crate::{
     adapter_manifest::ActiveManifestEventTopic0sBySignature, evm_abi::keccak_signature_hex,
@@ -361,6 +361,18 @@ async fn load_durable_dns_encoded_name(
         after_state,
     ) in rows
     {
+        // The durable event supplies exact DNS bytes, so canonicality alone is insufficient:
+        // a still-canonical sibling can normalize to the same name with different bytes.
+        if !chain_lineage_contains_ancestor(
+            pool,
+            &raw_log.chain_id,
+            &raw_log.block_hash,
+            &block_hash,
+        )
+        .await?
+        {
+            continue;
+        }
         let Some(transaction_index) = required_i64(&raw_fact_ref, "transaction_index") else {
             continue;
         };
@@ -368,9 +380,12 @@ async fn load_durable_dns_encoded_name(
             continue;
         };
         let emitting_address = normalize_address(emitting_address);
-        let Some(emitter) = active_emitters_by_address
-            .get(&emitting_address)
-            .and_then(|emitters| active_emitter_for_block(emitters, block_number))
+        let Some(emitter) =
+            active_emitters_by_address
+                .get(&emitting_address)
+                .and_then(|emitters| {
+                    active_emitter_for_log(emitters, block_number, transaction_index, log_index)
+                })
         else {
             continue;
         };

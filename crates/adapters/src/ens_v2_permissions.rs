@@ -173,7 +173,16 @@ async fn sync_ens_v2_permissions_with_scope(
     max_block_number: Option<i64>,
     mut progress: Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<EnsV2PermissionsSyncSummary> {
-    let mut active_emitters = load_active_emitters(pool, chain, &mut progress).await?;
+    // A through-block call is the full-closure entrypoint. Unlike live and restricted repair
+    // calls, it must admit registry/root emitters whose retained active interval has closed.
+    let include_historical_registry_emitters = max_block_number.is_some();
+    let mut active_emitters = load_active_emitters(
+        pool,
+        chain,
+        include_historical_registry_emitters,
+        &mut progress,
+    )
+    .await?;
     if let Some(source_scope) = source_scope {
         active_emitters.retain(|emitter| permissions_scope_includes_emitter(source_scope, emitter));
     }

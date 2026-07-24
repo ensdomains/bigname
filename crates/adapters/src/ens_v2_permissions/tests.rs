@@ -754,7 +754,17 @@ async fn sync_ens_v2_permissions_reuses_persisted_resolver_hints_across_calls() 
         .iter()
         .enumerate()
         .map(|(offset, block_hash)| {
-            permissions_test_raw_block(chain, block_hash, first_block + offset as i64)
+            permissions_fork_raw_block(
+                chain,
+                block_hash,
+                Some(if offset == 0 {
+                    unadmitted_block_hash.as_str()
+                } else {
+                    block_hashes[offset - 1].as_str()
+                }),
+                first_block + offset as i64,
+                CanonicalityState::Finalized,
+            )
         })
         .collect::<Vec<_>>();
     upsert_raw_blocks(
@@ -1235,6 +1245,269 @@ async fn sync_ens_v2_permissions_reuses_persisted_resolver_hints_across_calls() 
     database.cleanup().await
 }
 
+#[tokio::test]
+async fn forked_preimages_require_current_ancestry() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-sepolia";
+    let resolver_address = "0x0000000000000000000000000000000000000261";
+    let account = "0x1111111111111111111111111111111111111111";
+    let common_block_numbers = [11_163_600, 11_163_601, 11_163_602];
+    let fork_a_block_numbers = [11_163_603, 11_163_604, 11_163_605];
+    let fork_b_block_numbers = [
+        11_163_603, 11_163_604, 11_163_605, 11_163_606, 11_163_607, 11_163_608,
+    ];
+    let common_hashes =
+        common_block_numbers.map(|block_number| permission_fork_block_hash("c", block_number));
+    let fork_a_hashes =
+        fork_a_block_numbers.map(|block_number| permission_fork_block_hash("a", block_number));
+    let fork_b_hashes =
+        fork_b_block_numbers.map(|block_number| permission_fork_block_hash("b", block_number));
+    let resources = [topic_word(0x201), topic_word(0x202), topic_word(0x203)];
+    let alice_name = dns_name("Alice", "ETH");
+    let bob_name = dns_name("Bob", "ETH");
+    let cross_branch_alice_name = dns_name("ALICE", "eth");
+    let avatar_hash = topic_word(0xab);
+    let url_hash = topic_word(0xcd);
+
+    // NamedTextResource and EACRolesChanged are the upstream evidence/current-log pair exercised
+    // across the fork below.
+    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L149 @ ens_v2@48b3e2d)
+    // (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L22 @ ens_v2@48b3e2d)
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+    insert_test_discovered_resolver(
+        database.pool(),
+        chain,
+        resolver_address,
+        common_block_numbers[0],
+        &common_hashes[0],
+    )
+    .await?;
+
+    let mut blocks = Vec::new();
+    for (index, block_number) in common_block_numbers.into_iter().enumerate() {
+        blocks.push(permissions_fork_raw_block(
+            chain,
+            &common_hashes[index],
+            (index > 0).then(|| common_hashes[index - 1].as_str()),
+            block_number,
+            CanonicalityState::Canonical,
+        ));
+    }
+    for (index, block_number) in fork_a_block_numbers.into_iter().enumerate() {
+        blocks.push(permissions_fork_raw_block(
+            chain,
+            &fork_a_hashes[index],
+            Some(if index == 0 {
+                common_hashes[2].as_str()
+            } else {
+                fork_a_hashes[index - 1].as_str()
+            }),
+            block_number,
+            CanonicalityState::Canonical,
+        ));
+    }
+    for (index, block_number) in fork_b_block_numbers.into_iter().enumerate() {
+        blocks.push(permissions_fork_raw_block(
+            chain,
+            &fork_b_hashes[index],
+            Some(if index == 0 {
+                common_hashes[2].as_str()
+            } else {
+                fork_b_hashes[index - 1].as_str()
+            }),
+            block_number,
+            if index == fork_b_block_numbers.len() - 1 {
+                CanonicalityState::Observed
+            } else {
+                CanonicalityState::Canonical
+            },
+        ));
+    }
+    upsert_raw_blocks(database.pool(), &blocks).await?;
+
+    let common_named_logs = resources
+        .iter()
+        .enumerate()
+        .map(|(index, resource)| {
+            let mut raw_log = named_text_permission_raw_log(
+                chain,
+                &common_hashes[index],
+                common_block_numbers[index],
+                resolver_address,
+                resource,
+                &alice_name,
+                &avatar_hash,
+                "avatar",
+            );
+            raw_log.canonicality_state = CanonicalityState::Canonical;
+            raw_log
+        })
+        .collect::<Vec<_>>();
+    upsert_raw_logs(database.pool(), &common_named_logs).await?;
+    let common_hints = super::EnsV2PermissionsSyncSummary::sync_for_block_hashes(
+        database.pool(),
+        chain,
+        &common_hashes,
+    )
+    .await?;
+    assert_eq!(common_hints.matched_log_count, resources.len());
+    assert_eq!(common_hints.total_synced_count, 0);
+    let legacy_update = sqlx::query(
+        r#"
+        UPDATE resources
+        SET provenance = provenance - 'dns_encoded_name'
+        WHERE provenance ->> 'adapter' = 'ens_v2_permissions'
+          AND provenance ->> 'upstream_resource' = ANY($1)
+        "#,
+    )
+    .bind(resources.to_vec())
+    .execute(database.pool())
+    .await?;
+    assert_eq!(legacy_update.rows_affected(), resources.len() as u64);
+
+    let mut wrong_name = named_text_permission_raw_log(
+        chain,
+        &fork_a_hashes[0],
+        fork_a_block_numbers[0],
+        resolver_address,
+        &resources[0],
+        &bob_name,
+        &avatar_hash,
+        "avatar",
+    );
+    wrong_name.canonicality_state = CanonicalityState::Canonical;
+    let mut wrong_selector = named_text_permission_raw_log(
+        chain,
+        &fork_a_hashes[1],
+        fork_a_block_numbers[1],
+        resolver_address,
+        &resources[1],
+        &alice_name,
+        &url_hash,
+        "url",
+    );
+    wrong_selector.canonicality_state = CanonicalityState::Canonical;
+    let mut matching_cross_branch = named_text_permission_raw_log(
+        chain,
+        &fork_a_hashes[2],
+        fork_a_block_numbers[2],
+        resolver_address,
+        &resources[2],
+        &cross_branch_alice_name,
+        &avatar_hash,
+        "avatar",
+    );
+    matching_cross_branch.canonicality_state = CanonicalityState::Canonical;
+    upsert_raw_logs(
+        database.pool(),
+        &[wrong_name, wrong_selector, matching_cross_branch],
+    )
+    .await?;
+    let preimages =
+        crate::sync_block_derived_normalized_events(database.pool(), chain, &fork_a_hashes, None)
+            .await?;
+    assert_eq!(preimages.matched_log_count, resources.len());
+    assert_eq!(preimages.total_synced_count, resources.len());
+
+    let mut wrong_name_role = eac_roles_changed_permission_raw_log(
+        chain,
+        &fork_b_hashes[2],
+        fork_b_block_numbers[2],
+        resolver_address,
+        &resources[0],
+        account,
+    );
+    wrong_name_role.canonicality_state = CanonicalityState::Canonical;
+    let mut wrong_selector_role = eac_roles_changed_permission_raw_log(
+        chain,
+        &fork_b_hashes[3],
+        fork_b_block_numbers[3],
+        resolver_address,
+        &resources[1],
+        account,
+    );
+    wrong_selector_role.canonicality_state = CanonicalityState::Canonical;
+    let mut matching_cross_branch_role = eac_roles_changed_permission_raw_log(
+        chain,
+        &fork_b_hashes[4],
+        fork_b_block_numbers[4],
+        resolver_address,
+        &resources[2],
+        account,
+    );
+    matching_cross_branch_role.canonicality_state = CanonicalityState::Canonical;
+    let mut observed_role = eac_roles_changed_permission_raw_log(
+        chain,
+        &fork_b_hashes[5],
+        fork_b_block_numbers[5],
+        resolver_address,
+        &resources[2],
+        account,
+    );
+    observed_role.canonicality_state = CanonicalityState::Observed;
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            wrong_name_role,
+            wrong_selector_role,
+            matching_cross_branch_role,
+            observed_role,
+        ],
+    )
+    .await?;
+
+    let canonical_roles = super::EnsV2PermissionsSyncSummary::sync_for_block_hashes(
+        database.pool(),
+        chain,
+        &fork_b_hashes[2..5],
+    )
+    .await?;
+    assert_eq!(canonical_roles.matched_log_count, resources.len());
+    assert_eq!(canonical_roles.total_synced_count, resources.len());
+    for resource in &resources {
+        assert_eq!(
+            permission_selector_for_upstream_resource(database.pool(), resource).await?,
+            json!({
+                "kind": "unknown",
+                "key": null,
+                "hash": null,
+                "normalized_name": null,
+                "dns_encoded_name": null,
+            }),
+            "mismatched or matching sibling-branch evidence must not repair the selector"
+        );
+    }
+
+    let observed = super::EnsV2PermissionsSyncSummary::sync_for_block_hashes(
+        database.pool(),
+        chain,
+        std::slice::from_ref(&fork_b_hashes[5]),
+    )
+    .await?;
+    assert_eq!(observed.scanned_log_count, 0);
+    assert_eq!(observed.matched_log_count, 0);
+    assert_eq!(observed.total_synced_count, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM normalized_events
+            WHERE derivation_kind = 'ens_v2_permissions'
+              AND block_hash = $1
+            "#,
+        )
+        .bind(&fork_b_hashes[5])
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "an observed current role log cannot consume even matching canonical evidence"
+    );
+
+    database.cleanup().await
+}
+
 async fn assert_registry_and_root_eac_roles_changed_are_admitted(
     pool: &PgPool,
     chain: &str,
@@ -1414,6 +1687,28 @@ fn permissions_test_raw_block(chain: &str, block_hash: &str, block_number: i64) 
 
 fn permission_test_block_hash(block_number: i64) -> String {
     format!("0x{block_number:064x}")
+}
+
+fn permission_fork_block_hash(branch: &str, block_number: i64) -> String {
+    let branch_byte = branch
+        .as_bytes()
+        .first()
+        .copied()
+        .expect("test branch label must not be empty");
+    format!("0x{branch_byte:02x}{block_number:062x}")
+}
+
+fn permissions_fork_raw_block(
+    chain: &str,
+    block_hash: &str,
+    parent_hash: Option<&str>,
+    block_number: i64,
+    canonicality_state: CanonicalityState,
+) -> RawBlock {
+    let mut block = permissions_test_raw_block(chain, block_hash, block_number);
+    block.parent_hash = parent_hash.map(ToOwned::to_owned);
+    block.canonicality_state = canonicality_state;
+    block
 }
 
 #[allow(clippy::too_many_arguments)]

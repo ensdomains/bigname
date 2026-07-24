@@ -1,16 +1,23 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
-use bigname_manifests::{load_watched_contracts, load_watched_contracts_scoped_with_progress};
+use bigname_manifests::{
+    WatchedContractSource, load_historical_watched_contracts_by_chain,
+    load_historical_watched_contracts_scoped_with_progress, load_watched_contracts,
+    load_watched_contracts_scoped_with_progress,
+};
 use bigname_storage::sql_row;
-use sqlx::PgPool;
+use futures_util::TryStreamExt;
+use sqlx::{PgPool, Row, types::Uuid};
 
 use crate::adapter_manifest::{
     active_manifest_for_watched_contract, ensure_watched_contract_manifest_chain,
     load_active_manifest_metadata, required_source_manifest_id,
 };
+#[cfg(test)]
+use crate::ens_v2_common::active_emitter_for_block;
 use crate::ens_v2_common::{
-    ActiveEmitter, active_emitter_for_block, emitters_by_address, normalize_address,
+    ActiveEmitter, LogPosition, active_emitter_for_log, emitters_by_address, normalize_address,
 };
 use crate::{
     checkpoint_context::{StartupAdapterProgress, record_startup_adapter_progress},
@@ -154,9 +161,14 @@ pub(super) async fn load_permissions_raw_logs(
             let emitting_address =
                 normalize_address(&sql_row::get::<String>(&row, "emitting_address")?);
             let block_number = sql_row::get(&row, "block_number")?;
-            let Some(emitter) = active_emitters_by_address
-                .get(&emitting_address)
-                .and_then(|emitters| active_emitter_for_block(emitters, block_number))
+            let transaction_index = sql_row::get(&row, "transaction_index")?;
+            let log_index = sql_row::get(&row, "log_index")?;
+            let Some(emitter) =
+                active_emitters_by_address
+                    .get(&emitting_address)
+                    .and_then(|emitters| {
+                        active_emitter_for_log(emitters, block_number, transaction_index, log_index)
+                    })
             else {
                 continue;
             };
@@ -165,8 +177,8 @@ pub(super) async fn load_permissions_raw_logs(
                 block_hash: sql_row::get(&row, "block_hash")?,
                 block_number,
                 transaction_hash: sql_row::get(&row, "transaction_hash")?,
-                transaction_index: sql_row::get(&row, "transaction_index")?,
-                log_index: sql_row::get(&row, "log_index")?,
+                transaction_index,
+                log_index,
                 emitting_address,
                 emitting_contract_instance_id: emitter.contract_instance_id,
                 topics: sql_row::get(&row, "topics")?,
@@ -192,6 +204,7 @@ pub(super) async fn load_permissions_raw_logs(
 pub(super) async fn load_active_emitters(
     pool: &PgPool,
     chain: &str,
+    include_historical_registry_emitters: bool,
     progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<Vec<ActiveEmitter>> {
     let mut emitters = crate::ens_v2_common::load_active_emitters(
@@ -203,7 +216,10 @@ pub(super) async fn load_active_emitters(
         progress,
     )
     .await?;
-    emitters.extend(load_registry_active_emitters(pool, chain, progress).await?);
+    emitters.extend(
+        load_registry_active_emitters(pool, chain, include_historical_registry_emitters, progress)
+            .await?,
+    );
     // Order intervals by activation within each (address, source_family) group, then by identity.
     // Including active_from/active_to keeps this sort TOTAL: one address can now carry several
     // distinct intervals that share a (source_manifest_id, contract_instance_id) — without the
@@ -221,6 +237,7 @@ pub(super) async fn load_active_emitters(
 async fn load_registry_active_emitters(
     pool: &PgPool,
     chain: &str,
+    include_historical_emitters: bool,
     progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<Vec<ActiveEmitter>> {
     let source_families = vec![
@@ -229,14 +246,29 @@ async fn load_registry_active_emitters(
     ];
     let watched_contracts = if let Some(progress) = progress.as_deref_mut() {
         let mut manifest_progress = StartupManifestProgress::new(progress);
-        load_watched_contracts_scoped_with_progress(
-            pool,
-            Some(chain),
-            &source_families,
-            &mut manifest_progress,
-        )
-        .await
-        .context("failed to load watched contracts for ENSv2 registry permissions")?
+        if include_historical_emitters {
+            load_historical_watched_contracts_scoped_with_progress(
+                pool,
+                chain,
+                &source_families,
+                &mut manifest_progress,
+            )
+            .await
+            .context("failed to load historical watched contracts for ENSv2 registry permissions")?
+        } else {
+            load_watched_contracts_scoped_with_progress(
+                pool,
+                Some(chain),
+                &source_families,
+                &mut manifest_progress,
+            )
+            .await
+            .context("failed to load watched contracts for ENSv2 registry permissions")?
+        }
+    } else if include_historical_emitters {
+        load_historical_watched_contracts_by_chain(pool, chain)
+            .await
+            .context("failed to load historical watched contracts for ENSv2 registry permissions")?
     } else {
         load_watched_contracts(pool)
             .await
@@ -244,11 +276,15 @@ async fn load_registry_active_emitters(
     };
     let watched_contracts = watched_contracts
         .into_iter()
-        .filter(|contract| contract.chain == chain)
+        .filter(|contract| {
+            contract.chain == chain && source_families.contains(&contract.source_family)
+        })
         .collect::<Vec<_>>();
     if watched_contracts.is_empty() {
         return Ok(Vec::new());
     }
+    let discovery_boundaries =
+        load_registry_discovery_log_boundaries(pool, chain, progress).await?;
 
     let mut manifest_ids = HashSet::new();
     for (index, contract) in watched_contracts.iter().enumerate() {
@@ -270,7 +306,7 @@ async fn load_registry_active_emitters(
             continue;
         }
         ensure_watched_contract_manifest_chain(&watched_contract, manifest, source_manifest_id)?;
-        emitters.push(ActiveEmitter {
+        let mut emitter = ActiveEmitter {
             address: watched_contract.address,
             contract_instance_id: watched_contract.contract_instance_id,
             source_manifest_id,
@@ -279,10 +315,101 @@ async fn load_registry_active_emitters(
             manifest_version: manifest.manifest_version,
             active_from_block_number: watched_contract.active_from_block_number,
             active_to_block_number: watched_contract.active_to_block_number,
-        });
+            active_from_log_position: None,
+            active_to_log_position: None,
+            discovery_interval: false,
+        };
+        let key = (
+            emitter.contract_instance_id,
+            emitter.source_manifest_id,
+            emitter.active_from_block_number,
+            emitter.active_to_block_number,
+        );
+        if watched_contract.source == WatchedContractSource::DiscoveryEdge
+            && let Some(boundaries) = discovery_boundaries.get(&key)
+        {
+            for (active_from, active_to) in boundaries {
+                emitter.active_from_log_position = *active_from;
+                emitter.active_to_log_position = *active_to;
+                emitter.discovery_interval = true;
+                emitters.push(emitter.clone());
+            }
+        } else {
+            emitters.push(emitter);
+        }
         record_emitter_progress(pool, progress, index + 1, watched_contract_count).await?;
     }
     Ok(emitters)
+}
+
+type RegistryDiscoveryIntervalKey = (Uuid, i64, Option<i64>, Option<i64>);
+type RegistryDiscoveryLogBoundaries =
+    HashMap<RegistryDiscoveryIntervalKey, Vec<(Option<LogPosition>, Option<LogPosition>)>>;
+
+async fn load_registry_discovery_log_boundaries(
+    pool: &PgPool,
+    chain: &str,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<RegistryDiscoveryLogBoundaries> {
+    let mut rows = sqlx::query(
+        r#"
+        SELECT
+            de.to_contract_instance_id,
+            de.source_manifest_id,
+            de.active_from_block_number,
+            de.active_to_block_number,
+            (de.provenance ->> 'transaction_index')::BIGINT
+                AS active_from_transaction_index,
+            (de.provenance ->> 'log_index')::BIGINT AS active_from_log_index,
+            (de.provenance ->> 'active_to_transaction_index')::BIGINT
+                AS active_to_transaction_index,
+            (de.provenance ->> 'active_to_log_index')::BIGINT AS active_to_log_index
+        FROM discovery_edges de
+        WHERE de.chain_id = $1
+          AND de.edge_kind = 'subregistry'
+          AND (de.deactivated_at IS NULL OR de.active_to_block_number IS NOT NULL)
+        "#,
+    )
+    .bind(chain)
+    .fetch(pool);
+    let mut boundaries = RegistryDiscoveryLogBoundaries::new();
+    let mut row_count = 0usize;
+    while let Some(row) = rows
+        .try_next()
+        .await
+        .context("failed to stream ENSv2 registry discovery log boundaries")?
+    {
+        let key = (
+            row.try_get("to_contract_instance_id")
+                .context("missing registry discovery contract_instance_id")?,
+            row.try_get("source_manifest_id")
+                .context("missing registry discovery source_manifest_id")?,
+            sql_row::get(&row, "active_from_block_number")?,
+            sql_row::get(&row, "active_to_block_number")?,
+        );
+        boundaries.entry(key).or_default().push((
+            LogPosition::optional(
+                sql_row::get(&row, "active_from_transaction_index")?,
+                sql_row::get(&row, "active_from_log_index")?,
+            )?,
+            LogPosition::optional(
+                sql_row::get(&row, "active_to_transaction_index")?,
+                sql_row::get(&row, "active_to_log_index")?,
+            )?,
+        ));
+        row_count += 1;
+        if row_count.is_multiple_of(STARTUP_ADAPTER_PROGRESS_PAGE_ROWS) {
+            record_startup_adapter_progress(pool, progress).await?;
+        }
+    }
+    if row_count > 0 && !row_count.is_multiple_of(STARTUP_ADAPTER_PROGRESS_PAGE_ROWS) {
+        record_startup_adapter_progress(pool, progress).await?;
+    }
+    for variants in boundaries.values_mut() {
+        variants.sort_unstable();
+        variants.dedup();
+    }
+    Ok(boundaries)
 }
 
 async fn record_emitter_progress(
@@ -328,6 +455,9 @@ mod tests {
             source_family: SOURCE_FAMILY_ENS_V2_RESOLVER_L1.to_owned(),
             active_from_block_number: Some(100),
             active_to_block_number: Some(200),
+            active_from_log_position: None,
+            active_to_log_position: None,
+            discovery_interval: true,
             source_manifest_id: 7,
             contract_instance_id: Uuid::from_u128(1),
             namespace: namespace.to_owned(),

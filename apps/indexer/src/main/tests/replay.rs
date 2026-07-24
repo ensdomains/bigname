@@ -1509,8 +1509,8 @@ async fn replay_normalized_events_block_range_rebuilds_ens_v2_proof_for_closed_e
 
     assert_eq!(outcome.canonical_raw_log_count, 1);
     assert_eq!(
-        outcome.scanned_raw_log_count, 2,
-        "the stateless boundary and ENSv2 full-closure boundary must each see the retained closed-emitter fact"
+        outcome.scanned_raw_log_count, 3,
+        "the stateless boundary plus the ENSv2 registry and permissions full-closure passes must each see the retained closed-emitter fact"
     );
     assert_eq!(
         sqlx::query_as::<_, (bool, Option<i64>, Option<i64>)>(
