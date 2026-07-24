@@ -239,11 +239,12 @@ async fn live_adapter_scope_includes_bounded_deactivated_discovery_history() -> 
             block_hash,
             block_number,
             block_timestamp,
+            parent_hash,
             canonicality_state
         )
         VALUES
-            ($1, $2, 10, now(), 'canonical'),
-            ($1, $3, 11, now(), 'canonical')
+            ($1, $2, 10, now(), NULL, 'safe'),
+            ($1, $3, 11, now(), $2, 'canonical')
         "#,
     )
     .bind(chain)

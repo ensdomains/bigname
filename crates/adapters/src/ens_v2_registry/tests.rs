@@ -1371,6 +1371,98 @@ async fn ens_v2_cold_transfer_hydration_uses_only_its_selected_ancestor_path() -
 }
 
 #[tokio::test]
+async fn ens_v2_cold_replay_rejects_canonical_sibling_registration_prefix() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let fixture = RegistryLifecycleFixture::insert(database.pool()).await?;
+    let common_hash = lifecycle_branch_block_hash(9, 0);
+    let sibling_registration_hash = lifecycle_branch_block_hash(10, 1);
+    let selected_parent_hash = lifecycle_branch_block_hash(10, 2);
+    let expiry_hash = lifecycle_branch_block_hash(11, 2);
+
+    let common_block = test_raw_block(fixture.chain, &common_hash, 9);
+    let mut sibling_registration_block =
+        test_raw_block(fixture.chain, &sibling_registration_hash, 10);
+    sibling_registration_block.parent_hash = Some(common_hash.clone());
+    sibling_registration_block.canonicality_state = CanonicalityState::Canonical;
+    let mut selected_parent_block = test_raw_block(fixture.chain, &selected_parent_hash, 10);
+    selected_parent_block.parent_hash = Some(common_hash);
+    selected_parent_block.canonicality_state = CanonicalityState::Canonical;
+    let mut expiry_block = test_raw_block(fixture.chain, &expiry_hash, 11);
+    expiry_block.parent_hash = Some(selected_parent_hash);
+    expiry_block.canonicality_state = CanonicalityState::Canonical;
+    upsert_raw_blocks(
+        database.pool(),
+        &[
+            common_block,
+            sibling_registration_block,
+            selected_parent_block,
+            expiry_block,
+        ],
+    )
+    .await?;
+
+    let mut sibling_registration = label_registered_raw_log(
+        fixture.chain,
+        &sibling_registration_hash,
+        10,
+        fixture.address,
+        0,
+        "fleeting",
+        1,
+        "alice",
+    );
+    sibling_registration.canonicality_state = CanonicalityState::Canonical;
+    let mut sibling_resource = token_resource_raw_log(
+        fixture.chain,
+        &sibling_registration_hash,
+        10,
+        fixture.address,
+        1,
+        1,
+        101,
+    );
+    sibling_resource.canonicality_state = CanonicalityState::Canonical;
+    let mut expiry = expiry_updated_raw_log(
+        fixture.chain,
+        &expiry_hash,
+        11,
+        fixture.address,
+        0,
+        1,
+        2_000_000_000,
+    );
+    expiry.canonicality_state = CanonicalityState::Canonical;
+    upsert_raw_logs(
+        database.pool(),
+        &[sibling_registration, sibling_resource, expiry],
+    )
+    .await?;
+    refresh_test_raw_log_closure_proof(database.pool(), fixture.chain, 11).await?;
+
+    let summary =
+        EnsV2RegistryResourceSurfaceSyncSummary::sync_for_block_hashes_with_source_scope_canonical_only(
+            database.pool(),
+            fixture.chain,
+            &[expiry_hash],
+            &[(
+                SOURCE_FAMILY_ENS_V2_REGISTRY_L1.to_owned(),
+                fixture.address.to_owned(),
+                11,
+                11,
+            )],
+        )
+        .await?;
+    assert_eq!(summary.matched_log_count, 1);
+    assert_eq!(
+        summary.total_normalized_event_count, 0,
+        "an expiry on the selected path must not find registration state from a canonical-marked sibling"
+    );
+    assert_eq!(normalized_event_count(database.pool()).await?, 0);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn ens_v2_cold_transfer_hydration_filters_unrelated_token_history_before_decode() -> Result<()>
 {
     let database = TestDatabase::new().await?;
@@ -6068,12 +6160,11 @@ async fn ens_v2_full_closure_removes_losing_only_discovery_watch_target() -> Res
         0,
     )
     .await?;
+    let mut losing_11 = test_raw_block(chain, &losing_11_hash, 11);
+    losing_11.parent_hash = Some(block_10_hash.clone());
     upsert_raw_blocks(
         database.pool(),
-        &[
-            test_raw_block(chain, &block_10_hash, 10),
-            test_raw_block(chain, &losing_11_hash, 11),
-        ],
+        &[test_raw_block(chain, &block_10_hash, 10), losing_11],
     )
     .await?;
     upsert_raw_logs(
@@ -6108,7 +6199,7 @@ async fn ens_v2_full_closure_removes_losing_only_discovery_watch_target() -> Res
             database.pool(),
             chain,
             &losing_11_hash,
-            None,
+            Some(&block_10_hash),
         )
         .await?;
     assert!(
@@ -6119,16 +6210,19 @@ async fn ens_v2_full_closure_removes_losing_only_discovery_watch_target() -> Res
         database.pool(),
         chain,
         &losing_11_hash,
-        None,
+        Some(&block_10_hash),
     )
     .await?;
-    bigname_storage::mark_raw_block_range_orphaned(database.pool(), chain, &losing_11_hash, None)
-        .await?;
-    upsert_raw_blocks(
+    bigname_storage::mark_raw_block_range_orphaned(
         database.pool(),
-        &[test_raw_block(chain, &winning_11_hash, 11)],
+        chain,
+        &losing_11_hash,
+        Some(&block_10_hash),
     )
     .await?;
+    let mut winning_11 = test_raw_block(chain, &winning_11_hash, 11);
+    winning_11.parent_hash = Some(block_10_hash.clone());
+    upsert_raw_blocks(database.pool(), &[winning_11]).await?;
 
     refresh_test_raw_log_closure_proof(database.pool(), chain, 11).await?;
     sync_ens_v2_registry_resource_surface_through_block(database.pool(), chain, 11).await?;
@@ -6220,15 +6314,17 @@ async fn ens_v2_full_closure_rebuilds_retired_registry_lifecycle_output() -> Res
         0,
     )
     .await?;
-    upsert_raw_blocks(
-        database.pool(),
-        &(10..=13)
-            .map(|block_number| {
-                test_raw_block(chain, &lifecycle_block_hash(block_number), block_number)
-            })
-            .collect::<Vec<_>>(),
-    )
-    .await?;
+    let blocks = (10..=13)
+        .map(|block_number| {
+            let mut block =
+                test_raw_block(chain, &lifecycle_block_hash(block_number), block_number);
+            if block_number > 10 {
+                block.parent_hash = Some(lifecycle_block_hash(block_number - 1));
+            }
+            block
+        })
+        .collect::<Vec<_>>();
+    upsert_raw_blocks(database.pool(), &blocks).await?;
     upsert_raw_logs(
         database.pool(),
         &[

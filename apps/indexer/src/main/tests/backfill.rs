@@ -6605,6 +6605,26 @@ async fn establish_backfill_ens_v2_retained_history_proof(
     chain: &str,
     through_block: i64,
 ) -> Result<()> {
+    let stable_block_number = through_block
+        .checked_sub(1)
+        .context("ENSv2 retained-history proof needs a block below the replay target")?;
+    sqlx::query(
+        r#"
+        INSERT INTO chain_lineage (
+            chain_id,
+            block_hash,
+            block_number,
+            block_timestamp,
+            canonicality_state
+        )
+        VALUES ($1, $2, $3, to_timestamp($3), 'safe')
+        "#,
+    )
+    .bind(chain)
+    .bind(repeated_byte_hash("99"))
+    .bind(stable_block_number)
+    .execute(pool)
+    .await?;
     sqlx::query(
         r#"
         INSERT INTO discovery_admission_epochs (chain_id, epoch)

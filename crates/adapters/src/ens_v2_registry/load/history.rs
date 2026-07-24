@@ -87,12 +87,18 @@ pub(in crate::ens_v2_registry) async fn load_registry_raw_log_prefix(
                  AND parent.block_hash = child.parent_hash
                  AND parent.block_number = child.block_number - 1
                  AND parent.canonicality_state <> 'orphaned'::canonicality_state
-                WHERE child.canonicality_state = 'observed'::canonicality_state
+                WHERE child.canonicality_state NOT IN (
+                    'safe'::canonicality_state,
+                    'finalized'::canonicality_state
+                )
             ),
             selected_boundary AS (
                 SELECT COALESCE(
                     MAX(block_number) FILTER (
-                        WHERE canonicality_state <> 'observed'::canonicality_state
+                        WHERE canonicality_state IN (
+                            'safe'::canonicality_state,
+                            'finalized'::canonicality_state
+                        )
                     ),
                     -1
                 ) AS stable_through_block
@@ -218,9 +224,10 @@ pub(in crate::ens_v2_registry) async fn load_registry_raw_log_prefix(
         let last_position =
             RawLogPagePosition::from_row(rows.last().expect("non-empty registry history page"))?;
         for row in rows {
+            let block_hash = sql_row::get::<String>(&row, "block_hash")?;
+            let block_number = sql_row::get(&row, "block_number")?;
             let emitting_address =
                 normalize_address(&sql_row::get::<String>(&row, "emitting_address")?);
-            let block_number = sql_row::get(&row, "block_number")?;
             let emitter = emitters_by_address
                 .get(&emitting_address)
                 .and_then(|emitters| emitter_for_block_and_scope(emitters, block_number, None))
@@ -231,7 +238,7 @@ pub(in crate::ens_v2_registry) async fn load_registry_raw_log_prefix(
                 })?;
             output.push(RegistryRawLogRow {
                 chain_id: sql_row::get(&row, "chain_id")?,
-                block_hash: sql_row::get(&row, "block_hash")?,
+                block_hash,
                 block_number,
                 block_timestamp: sql_row::get(&row, "block_timestamp")?,
                 transaction_hash: sql_row::get(&row, "transaction_hash")?,
@@ -295,12 +302,18 @@ async fn ensure_selected_path_reaches_stable_boundary(
              AND parent.block_hash = child.parent_hash
              AND parent.block_number = child.block_number - 1
              AND parent.canonicality_state <> 'orphaned'::canonicality_state
-            WHERE child.canonicality_state = 'observed'::canonicality_state
+            WHERE child.canonicality_state NOT IN (
+                'safe'::canonicality_state,
+                'finalized'::canonicality_state
+            )
         )
         SELECT EXISTS (
             SELECT 1
             FROM selected_tail
-            WHERE canonicality_state <> 'observed'::canonicality_state
+            WHERE canonicality_state IN (
+                'safe'::canonicality_state,
+                'finalized'::canonicality_state
+            )
         )
         "#,
     )
@@ -318,7 +331,7 @@ async fn ensure_selected_path_reaches_stable_boundary(
     ensure!(
         reaches_stable_boundary,
         "ENSv2 incremental prior-state reconstruction cannot prove selected-path ancestry from \
-         block {} ({}) to a stable canonical boundary on {chain}",
+         block {} ({}) to a safe or finalized boundary on {chain}",
         before.block_number,
         before.block_hash
     );
