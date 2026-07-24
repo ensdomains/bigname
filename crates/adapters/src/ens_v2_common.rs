@@ -71,7 +71,7 @@ pub(crate) fn source_scope_bindings(
 /// collapsing them. A discovered resolver carries one discovery edge per (name, registry) that
 /// referenced it, and those edges can be disjoint in block space (a name points at the resolver,
 /// drops it, and a different name points at it again later). Keeping each edge as its own
-/// [`ActiveEmitter`] lets [`active_emitter_for_block`] match the interval that actually covers a
+/// [`ActiveEmitter`] lets [`active_emitter_for_log`] match the interval that actually covers a
 /// log — and skip blocks that fall in the GAPS between edges — while still honouring every edge
 /// (the bug this guards against was keeping a single arbitrary edge, which dropped logs covered
 /// only by the others). Two sources reporting the identical interval are deduplicated, preferring
@@ -81,10 +81,10 @@ pub(crate) fn source_scope_bindings(
 ///
 /// This mirrors the *keying* of `ens_v2_registry::preferred_emitters_by_scope`
 /// (`(source_family, address, active_from, active_to)`); it deliberately does NOT match its
-/// selection bound or tie-break. The registry selects with an inclusive upper bound and breaks
-/// ties by `source_rank`; here selection is exclusive (`active_emitter_for_block`, correct for
-/// discovery-edge `active_to`) and the dedup tie-break is plain id ordering — `ActiveEmitter` here
-/// carries no `source_rank`, and a collision only happens on an exact identical interval.
+/// selection bound or tie-break. The registry selects with an inclusive upper block bound and
+/// breaks ties by `source_rank`; log attribution uses exact stored close positions where available,
+/// and the dedup tie-break is plain id ordering. `ActiveEmitter` here carries no `source_rank`, and
+/// a collision only happens on an exact identical interval.
 fn insert_distinct_emitter(
     emitters_by_scope: &mut BTreeMap<EmitterScopeKey, ActiveEmitter>,
     emitter: ActiveEmitter,
@@ -222,20 +222,77 @@ async fn load_discovered_resolver_emitters(
         SELECT
             cia.address,
             de.to_contract_instance_id,
-            de.active_from_block_number,
-            de.active_to_block_number,
-            (de.provenance ->> 'transaction_index')::BIGINT AS active_from_transaction_index,
-            (de.provenance ->> 'log_index')::BIGINT AS active_from_log_index,
-            (de.provenance ->> 'active_to_transaction_index')::BIGINT AS active_to_transaction_index,
-            (de.provenance ->> 'active_to_log_index')::BIGINT AS active_to_log_index
+            CASE
+                WHEN de.active_from_block_number IS NULL THEN cia.active_from_block_number
+                WHEN cia.active_from_block_number IS NULL THEN de.active_from_block_number
+                ELSE GREATEST(de.active_from_block_number, cia.active_from_block_number)
+            END AS active_from_block_number,
+            CASE
+                WHEN de.active_to_block_number IS NULL THEN cia.active_to_block_number
+                WHEN cia.active_to_block_number IS NULL THEN de.active_to_block_number
+                ELSE LEAST(de.active_to_block_number, cia.active_to_block_number)
+            END AS active_to_block_number,
+            CASE
+                WHEN de.active_from_block_number IS NOT NULL
+                 AND (
+                     cia.active_from_block_number IS NULL
+                     OR de.active_from_block_number >= cia.active_from_block_number
+                 )
+                    THEN (de.provenance ->> 'transaction_index')::BIGINT
+                ELSE NULL
+            END AS active_from_transaction_index,
+            CASE
+                WHEN de.active_from_block_number IS NOT NULL
+                 AND (
+                     cia.active_from_block_number IS NULL
+                     OR de.active_from_block_number >= cia.active_from_block_number
+                 )
+                    THEN (de.provenance ->> 'log_index')::BIGINT
+                ELSE NULL
+            END AS active_from_log_index,
+            CASE
+                WHEN de.active_to_block_number IS NOT NULL
+                 AND (
+                     cia.active_to_block_number IS NULL
+                     OR de.active_to_block_number <= cia.active_to_block_number
+                 )
+                    THEN (de.provenance ->> 'active_to_transaction_index')::BIGINT
+                ELSE NULL
+            END AS active_to_transaction_index,
+            CASE
+                WHEN de.active_to_block_number IS NOT NULL
+                 AND (
+                     cia.active_to_block_number IS NULL
+                     OR de.active_to_block_number <= cia.active_to_block_number
+                 )
+                    THEN (de.provenance ->> 'active_to_log_index')::BIGINT
+                ELSE NULL
+            END AS active_to_log_index
         FROM discovery_edges de
         JOIN manifest_versions source_mv
           ON source_mv.manifest_id = de.source_manifest_id
          AND source_mv.rollout_status = 'active'
         JOIN contract_instance_addresses cia
           ON cia.contract_instance_id = de.to_contract_instance_id
+         AND cia.chain_id = de.chain_id
         WHERE de.chain_id = $1
           AND de.edge_kind = $2
+          AND (de.deactivated_at IS NULL OR de.active_to_block_number IS NOT NULL)
+          AND (
+              cia.deactivated_at IS NULL
+              OR cia.active_to_block_number IS NOT NULL
+              OR de.active_to_block_number IS NOT NULL
+          )
+          AND (
+              de.active_from_block_number IS NULL
+              OR cia.active_to_block_number IS NULL
+              OR de.active_from_block_number <= cia.active_to_block_number
+          )
+          AND (
+              cia.active_from_block_number IS NULL
+              OR de.active_to_block_number IS NULL
+              OR cia.active_from_block_number <= de.active_to_block_number
+          )
         "#,
     )
     .bind(chain)
