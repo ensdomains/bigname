@@ -688,6 +688,53 @@ async fn committed_floor_enqueue_survives_concurrent_newer_replay_admission() ->
     database.cleanup().await
 }
 
+#[tokio::test]
+async fn committed_floor_queue_rejects_repeatable_read_producer() -> Result<()> {
+    let database = test_database().await?;
+    let indexer_options = bigname_storage::stamp_projection_replay_version(
+        database.pool().connect_options().as_ref().clone(),
+    );
+    let mut connection = sqlx::PgConnection::connect_with(&indexer_options).await?;
+    let mut transaction = connection.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *transaction)
+        .await?;
+
+    let error = sqlx::query(
+        r#"
+        INSERT INTO projection_invalidations (
+            projection,
+            projection_key,
+            key_payload
+        )
+        VALUES ('name_current', 'ens:repeatable-read.eth', '{}'::jsonb)
+        "#,
+    )
+    .execute(&mut *transaction)
+    .await
+    .expect_err("the committed-floor queue branch must reject a stale transaction snapshot");
+    let error = anyhow::Error::from(error);
+    assert!(
+        error
+            .to_string()
+            .contains("requires READ COMMITTED transaction isolation"),
+        "the isolation failure must explain the queue requirement, got: {error:#}"
+    );
+    assert!(
+        bigname_storage::projection_staging::is_fatal_projection_replay_version_fence_error(&error),
+        "unsupported queue isolation must remain a fatal fence error"
+    );
+    assert!(
+        !bigname_storage::projection_staging::is_retryable_projection_replay_admission_error(
+            &error
+        ),
+        "unsupported queue isolation must not enter the admission retry loop"
+    );
+    transaction.rollback().await?;
+
+    database.cleanup().await
+}
+
 #[derive(Clone, Copy)]
 enum ReplayJournalLockOrdering {
     JournalFirst,
