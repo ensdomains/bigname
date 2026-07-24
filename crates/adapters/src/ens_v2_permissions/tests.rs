@@ -1083,6 +1083,150 @@ async fn cia_narrowed_resolver_interval_excludes_uncovered_raw_logs() -> Result<
 }
 
 #[tokio::test]
+async fn resolver_emitter_loader_excludes_deactivated_edge_without_close_bound() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-sepolia";
+    let resolver_address = "0x0000000000000000000000000000000000000274";
+    let closed_from_block = 11_163_950;
+    let closed_log_block = closed_from_block + 1;
+    let closed_to_block = closed_from_block + 2;
+    let losing_from_block = closed_from_block + 3;
+    let losing_log_block = closed_from_block + 4;
+
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+    let resolver_contract_instance_id = insert_test_discovered_resolver(
+        database.pool(),
+        chain,
+        resolver_address,
+        closed_from_block,
+        &permission_test_block_hash(closed_from_block),
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE discovery_edges
+        SET deactivated_at = now(),
+            active_to_block_number = $2,
+            active_to_block_hash = $3
+        WHERE to_contract_instance_id = $1
+        "#,
+    )
+    .bind(resolver_contract_instance_id)
+    .bind(closed_to_block)
+    .bind(permission_test_block_hash(closed_to_block))
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO discovery_edges (
+            chain_id,
+            edge_kind,
+            from_contract_instance_id,
+            to_contract_instance_id,
+            discovery_source,
+            source_manifest_id,
+            admission,
+            admitted_at,
+            deactivated_at,
+            active_from_block_number,
+            active_from_block_hash,
+            provenance
+        )
+        SELECT
+            chain_id,
+            edge_kind,
+            from_contract_instance_id,
+            to_contract_instance_id,
+            'ens_v2_permissions:test-losing-fork-resolver',
+            source_manifest_id,
+            admission,
+            now(),
+            now(),
+            $2,
+            $3,
+            jsonb_build_object('to_address', $4::TEXT)
+        FROM discovery_edges
+        WHERE to_contract_instance_id = $1
+        ORDER BY discovery_edge_id
+        LIMIT 1
+        "#,
+    )
+    .bind(resolver_contract_instance_id)
+    .bind(losing_from_block)
+    .bind(permission_test_block_hash(losing_from_block))
+    .bind(normalize_address(resolver_address))
+    .execute(database.pool())
+    .await?;
+
+    let block_numbers = [closed_log_block, losing_log_block];
+    let blocks = block_numbers
+        .iter()
+        .map(|block_number| {
+            permissions_test_raw_block(
+                chain,
+                &permission_test_block_hash(*block_number),
+                *block_number,
+            )
+        })
+        .collect::<Vec<_>>();
+    let logs = block_numbers
+        .iter()
+        .enumerate()
+        .map(|(offset, block_number)| RawLog {
+            chain_id: chain.to_owned(),
+            block_hash: permission_test_block_hash(*block_number),
+            block_number: *block_number,
+            transaction_hash: format!("0xresolverversion{block_number}"),
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: normalize_address(resolver_address),
+            topics: vec![
+                keccak_signature_hex("VersionChanged(bytes32,uint64)"),
+                topic_word(0x2740 + offset as u64),
+            ],
+            data: hex_word(1 + offset as u64),
+            canonicality_state: CanonicalityState::Finalized,
+        })
+        .collect::<Vec<_>>();
+    upsert_raw_blocks(database.pool(), &blocks).await?;
+    upsert_raw_logs(database.pool(), &logs).await?;
+
+    let summary = crate::ens_v2_resolver::sync_ens_v2_resolver_through_block(
+        database.pool(),
+        chain,
+        losing_log_block,
+    )
+    .await?;
+    assert_eq!(summary.scanned_log_count, 1);
+    assert_eq!(summary.matched_log_count, 1);
+    assert_eq!(summary.total_synced_count, 1);
+    let (closed_event_count, losing_event_count) = sqlx::query_as::<_, (i64, i64)>(
+        r#"
+        SELECT
+            COUNT(*) FILTER (WHERE block_number = $2)::BIGINT,
+            COUNT(*) FILTER (WHERE block_number = $3)::BIGINT
+        FROM normalized_events
+        WHERE derivation_kind = 'ens_v2_resolver'
+          AND LOWER(raw_fact_ref ->> 'emitting_address') = LOWER($1)
+        "#,
+    )
+    .bind(resolver_address)
+    .bind(closed_log_block)
+    .bind(losing_log_block)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(closed_event_count, 1);
+    assert_eq!(
+        losing_event_count, 0,
+        "a deactivated resolver edge without a close bound must not authorize any log"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn sync_ens_v2_permissions_reuses_persisted_resolver_hints_across_calls() -> Result<()> {
     let _permit = crate::acquire_test_db_permit().await;
     let database = TestDatabase::new().await?;
