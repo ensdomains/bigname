@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use bigname_manifests::{
+    load_ens_v2_authoritative_discovery_bootstrap_targets,
     load_ens_v2_retained_history_recovery_targets, load_watched_contracts_by_chain,
 };
 use tokio::time::sleep;
@@ -247,6 +248,18 @@ async fn run_ops_finalized_catchup_iteration(
                 )
                 .await?;
                 merge_retained_history_recovery_targets(&mut planned_targets, &recovery_targets);
+                // Resolver intervals are an admission fence rather than part of the root/registry
+                // proof tuple. Their known-start bootstrap targets still need provider coverage
+                // before closure; the loader clamps every target to its historical active interval
+                // and this finalized head.
+                let mut discovery_targets = load_ens_v2_authoritative_discovery_bootstrap_targets(
+                    pool,
+                    &task.chain,
+                    finalized_head.block_number,
+                )
+                .await?;
+                discovery_targets.retain(|target| target.source_family == "ens_v2_resolver_l1");
+                merge_retained_history_recovery_targets(&mut planned_targets, &discovery_targets);
             }
             let required_ranges = retry_required_ranges(
                 completed_pass.as_ref(),

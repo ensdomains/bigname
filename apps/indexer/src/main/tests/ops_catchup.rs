@@ -376,7 +376,11 @@ async fn ops_catchup_resumes_ensv2_finalization_after_proof_publication_restart(
     let child_address = "0x0000000000000000000000000000000000001303";
     let registrar_address = "0x0000000000000000000000000000000000001304";
     let resolver_address = "0x0000000000000000000000000000000000001305";
+    let closed_resolver_address = "0x0000000000000000000000000000000000001306";
     let permission_account = "0x0000000000000000000000000000000000000a11";
+    let record_address = "0x000000000000000000000000000000000000beef";
+    let alice_dns_name = b"\x05alice\x03eth\x00";
+    let alice_namehash = namehash_for_dns_name(alice_dns_name);
     insert_ops_ens_v2_registry_manifests(
         database.pool(),
         chain,
@@ -479,6 +483,61 @@ async fn ops_catchup_resumes_ensv2_finalization_after_proof_publication_restart(
     .await?;
 
     let blocks = provider_blocks(1, 5);
+    // These recovery fixtures mirror the pinned ENSv2 registry, resolver-record,
+    // resource-name, and permission events.
+    // (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L66 @ ens_v2@48b3e2d)
+    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L679 @ ens_v2@48b3e2d)
+    // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L142 @ ens_v2@48b3e2d)
+    // (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L22 @ ens_v2@48b3e2d)
+    sqlx::query("DELETE FROM discovery_edges WHERE chain_id = $1 AND to_contract_instance_id = $2")
+        .bind(chain)
+        .bind(child_contract_instance_id)
+        .execute(database.pool())
+        .await?;
+    let subregistry_discovery_source = format!("ens_v2_registry_subregistry:{chain}");
+    let token_id = format!("0x{:064x}", 1);
+    let observation_key = format!(
+        "{}:0x0000000000000000000000000000000000000000000000000000000000000000",
+        registry_address.to_ascii_lowercase()
+    );
+    let registry_resource_id = bigname_storage::ens_v2_registry_resource_id(
+        chain,
+        registry_contract_instance_id,
+        &format!("0x{:064x}", 101),
+    );
+    bigname_manifests::reconcile_scoped_discovery_observation_transitions(
+        database.pool(),
+        &subregistry_discovery_source,
+        &[vec![bigname_manifests::DiscoveryObservation {
+            chain: chain.to_owned(),
+            from_address: registry_address.to_ascii_lowercase(),
+            to_address: child_address.to_ascii_lowercase(),
+            edge_kind: "subregistry".to_owned(),
+            discovery_source: subregistry_discovery_source.clone(),
+            active_from_block_number: Some(2),
+            active_from_block_hash: Some(blocks[1].block_hash.clone()),
+            active_to_block_number: None,
+            active_to_block_hash: None,
+            provenance: json!({
+                "source": "raw_log",
+                "source_event": "SubregistryUpdated",
+                "observation_key": observation_key,
+                "token_id": token_id,
+                "from_address": registry_address.to_ascii_lowercase(),
+                "to_address": child_address.to_ascii_lowercase(),
+                "logical_name_id": "ens:alice.eth",
+                "resource_id": registry_resource_id.to_string(),
+                "chain_id": chain,
+                "block_hash": blocks[1].block_hash,
+                "block_number": 2,
+                "transaction_hash": transaction_hash_for_block(&blocks[1]),
+                "transaction_index": 0,
+                "log_index": 0,
+                "tombstone": false,
+            }),
+        }]],
+    )
+    .await?;
     let fixtures = vec![
         ProviderBlockFixture {
             block: blocks[0].clone(),
@@ -509,13 +568,22 @@ async fn ops_catchup_resumes_ensv2_finalization_after_proof_publication_restart(
         },
         ProviderBlockFixture {
             block: blocks[1].clone(),
-            logs: vec![ops_ens_v2_subregistry_updated_log_payload(
-                &blocks[1],
-                registry_address,
-                child_address,
-                1,
-                0,
-            )],
+            logs: vec![
+                ops_ens_v2_subregistry_updated_log_payload(
+                    &blocks[1],
+                    registry_address,
+                    child_address,
+                    1,
+                    0,
+                ),
+                ops_ens_v2_resolver_updated_log_payload(
+                    &blocks[1],
+                    registry_address,
+                    closed_resolver_address,
+                    1,
+                    1,
+                ),
+            ],
         },
         ProviderBlockFixture {
             block: blocks[2].clone(),
@@ -532,13 +600,80 @@ async fn ops_catchup_resumes_ensv2_finalization_after_proof_publication_restart(
         },
         ProviderBlockFixture {
             block: blocks[3].clone(),
-            logs: vec![ops_ens_v2_subregistry_updated_log_payload(
-                &blocks[3],
-                registry_address,
-                "0x0000000000000000000000000000000000000000",
-                1,
-                0,
-            )],
+            logs: vec![
+                ops_ens_v2_eac_roles_changed_log_payload(
+                    &blocks[3],
+                    child_address,
+                    2,
+                    permission_account,
+                    0,
+                ),
+                ops_ens_v2_resolver_address_changed_log_payload(
+                    &blocks[3],
+                    closed_resolver_address,
+                    &alice_namehash,
+                    60,
+                    record_address,
+                    1,
+                ),
+                ops_ens_v2_named_resource_log_payload(
+                    &blocks[3],
+                    closed_resolver_address,
+                    601,
+                    alice_dns_name,
+                    2,
+                ),
+                ops_ens_v2_eac_roles_changed_log_payload(
+                    &blocks[3],
+                    closed_resolver_address,
+                    601,
+                    permission_account,
+                    3,
+                ),
+                ops_ens_v2_subregistry_updated_log_payload(
+                    &blocks[3],
+                    registry_address,
+                    "0x0000000000000000000000000000000000000000",
+                    1,
+                    4,
+                ),
+                ops_ens_v2_resolver_updated_log_payload(
+                    &blocks[3],
+                    registry_address,
+                    "0x0000000000000000000000000000000000000000",
+                    1,
+                    5,
+                ),
+                ops_ens_v2_eac_roles_changed_log_payload(
+                    &blocks[3],
+                    child_address,
+                    3,
+                    permission_account,
+                    6,
+                ),
+                ops_ens_v2_resolver_address_changed_log_payload(
+                    &blocks[3],
+                    closed_resolver_address,
+                    &alice_namehash,
+                    60,
+                    "0x000000000000000000000000000000000000cafe",
+                    7,
+                ),
+                ops_ens_v2_named_resource_log_payload(
+                    &blocks[3],
+                    closed_resolver_address,
+                    602,
+                    alice_dns_name,
+                    8,
+                ),
+                ops_ens_v2_eac_roles_changed_log_payload(
+                    &blocks[3],
+                    closed_resolver_address,
+                    602,
+                    permission_account,
+                    9,
+                ),
+            ],
         },
         ProviderBlockFixture {
             block: blocks[4].clone(),
@@ -570,6 +705,28 @@ async fn ops_catchup_resumes_ensv2_finalization_after_proof_publication_restart(
             .await?
             .requires_ens_v2_history_recovery,
         "the injected failure must occur after retained-history proof publication"
+    );
+    assert!(
+        !bigname_manifests::load_watched_contracts_by_chain(database.pool(), chain)
+            .await?
+            .iter()
+            .any(|contract| contract.address.eq_ignore_ascii_case(child_address)),
+        "the pre-deactivation child registry must be absent from the current watch plan"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM normalized_events
+            WHERE derivation_kind = 'ens_v2_permissions'
+              AND lower(raw_fact_ref ->> 'emitting_address') = lower($1)
+            "#,
+        )
+        .bind(child_address)
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "history collection and proof publication must leave closed-registry permission derivation to resumable finalization"
     );
     assert!(
         sqlx::query_scalar::<_, i64>(
@@ -745,6 +902,110 @@ async fn ops_catchup_resumes_ensv2_finalization_after_proof_publication_restart(
             Some("alice.eth".to_owned())
         ),
         "finalization must preserve a resolver resource-name hint across recovery chunk boundaries"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, Option<String>)>(
+            r#"
+            SELECT
+                event_kind,
+                after_state #>> '{selector,normalized_name}'
+            FROM normalized_events
+            WHERE derivation_kind = 'ens_v2_permissions'
+              AND lower(raw_fact_ref ->> 'emitting_address') = lower($1)
+            "#,
+        )
+        .bind(child_address)
+        .fetch_all(database.pool())
+        .await?,
+        vec![("PermissionChanged".to_owned(), None)],
+        "full-closure finalization must derive only the child registry role event before its same-block close"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (Option<String>, Option<String>)>(
+            r#"
+            SELECT
+                logical_name_id,
+                after_state ->> 'source_event'
+            FROM normalized_events
+            WHERE derivation_kind = 'ens_v2_resolver'
+              AND event_kind = 'RecordChanged'
+              AND lower(raw_fact_ref ->> 'emitting_address') = lower($1)
+            "#,
+        )
+        .bind(closed_resolver_address)
+        .fetch_all(database.pool())
+        .await?,
+        vec![(
+            Some("ens:alice.eth".to_owned()),
+            Some("AddressChanged".to_owned())
+        )],
+        "retained-history recovery must derive only the resolver record before its same-block close"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (Option<String>, Option<String>)>(
+            r#"
+            SELECT
+                logical_name_id,
+                after_state #>> '{selector,normalized_name}'
+            FROM normalized_events
+            WHERE derivation_kind = 'ens_v2_permissions'
+              AND event_kind = 'PermissionChanged'
+              AND lower(raw_fact_ref ->> 'emitting_address') = lower($1)
+            "#,
+        )
+        .bind(closed_resolver_address)
+        .fetch_all(database.pool())
+        .await?,
+        vec![(
+            Some("ens:alice.eth".to_owned()),
+            Some("alice.eth".to_owned())
+        )],
+        "retained-history recovery must derive only the resolver permission before its same-block close"
+    );
+    let closed_resolver_fetch_ranges = requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .iter()
+        .filter(|request| request.method == "eth_getLogs")
+        .filter_map(|request| request.params.first())
+        .filter_map(Value::as_object)
+        .filter(|filter| {
+            filter
+                .get("address")
+                .is_some_and(|addresses| match addresses {
+                    Value::String(address) => address.eq_ignore_ascii_case(closed_resolver_address),
+                    Value::Array(addresses) => addresses.iter().any(|address| {
+                        address.as_str().is_some_and(|address| {
+                            address.eq_ignore_ascii_case(closed_resolver_address)
+                        })
+                    }),
+                    _ => false,
+                })
+        })
+        .map(|filter| {
+            (
+                support_parse_rpc_block_number(
+                    filter["fromBlock"]
+                        .as_str()
+                        .expect("fromBlock must be a hex string"),
+                ),
+                support_parse_rpc_block_number(
+                    filter["toBlock"]
+                        .as_str()
+                        .expect("toBlock must be a hex string"),
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !closed_resolver_fetch_ranges.is_empty(),
+        "recovery must issue a provider fetch for the closed resolver"
+    );
+    assert!(
+        closed_resolver_fetch_ranges
+            .iter()
+            .all(|(from_block, to_block)| *from_block >= 2 && *to_block <= 4),
+        "closed-resolver provider fetches must stay inside the historical 2..=4 interval: {closed_resolver_fetch_ranges:?}"
     );
 
     server.abort();
@@ -1191,6 +1452,32 @@ fn ops_ens_v2_subregistry_updated_log_payload(
     })
 }
 
+fn ops_ens_v2_resolver_updated_log_payload(
+    block: &ProviderBlock,
+    address: &str,
+    resolver: &str,
+    token_id: u64,
+    log_index: u64,
+) -> Value {
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": format!("0x{log_index:x}"),
+        "address": address,
+        "topics": [
+            keccak256_hex(b"ResolverUpdated(uint256,address,address)"),
+            hex_string(&abi_word_u64(token_id)),
+            hex_string(&abi_word_address(resolver)),
+            hex_string(&abi_word_address(
+                "0x0000000000000000000000000000000000000dad"
+            )),
+        ],
+        "data": "0x"
+    })
+}
+
 fn ops_ens_v2_label_registered_log_payload(
     block: &ProviderBlock,
     address: &str,
@@ -1320,6 +1607,32 @@ fn ops_ens_v2_named_resource_log_payload(
             hex_string(&abi_word_u64(resource)),
         ],
         "data": hex_string(&data),
+    })
+}
+
+fn ops_ens_v2_resolver_address_changed_log_payload(
+    block: &ProviderBlock,
+    address: &str,
+    node: &str,
+    coin_type: u64,
+    record_address: &str,
+    log_index: u64,
+) -> Value {
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": format!("0x{log_index:x}"),
+        "address": address,
+        "topics": [
+            keccak256_hex(b"AddressChanged(bytes32,uint256,bytes)"),
+            node,
+        ],
+        "data": encode_ens_v2_resolver_address_changed_log_data(
+            coin_type,
+            &decode_hex_string(record_address),
+        ),
     })
 }
 
@@ -1488,6 +1801,10 @@ async fn insert_ops_ens_v1_registry_manifest_contract(
         }],
         "discovery_rules": [{
             "edge_kind": "subregistry",
+            "from_role": "registry",
+            "admission": "reachable_from_root"
+        }, {
+            "edge_kind": "resolver",
             "from_role": "registry",
             "admission": "reachable_from_root"
         }],
@@ -1665,6 +1982,14 @@ async fn insert_ops_ens_v2_registry_manifests(
         pool,
         registry_manifest_id,
         "subregistry",
+        "registry",
+        "reachable_from_root",
+    )
+    .await?;
+    insert_manifest_discovery_rule(
+        pool,
+        registry_manifest_id,
+        "resolver",
         "registry",
         "reachable_from_root",
     )
