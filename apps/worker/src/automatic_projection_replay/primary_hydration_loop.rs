@@ -115,7 +115,7 @@ async fn run(
                     }
                 }
                 Err(error) => {
-                    if bigname_storage::projection_staging::is_outdated_projection_replay_version_error(
+                    if bigname_storage::projection_staging::is_fatal_projection_replay_version_fence_error(
                         &error,
                     ) {
                         return Err(error);
@@ -150,7 +150,7 @@ async fn run(
                     progressed |= summary.upserted_row_count > 0 || summary.deleted_row_count > 0;
                 }
                 Err(error) => {
-                    if bigname_storage::projection_staging::is_outdated_projection_replay_version_error(
+                    if bigname_storage::projection_staging::is_fatal_projection_replay_version_fence_error(
                         &error,
                     ) {
                         return Err(error);

@@ -6,6 +6,13 @@ use anyhow::{Context, Result, ensure};
 use sqlx::{Postgres, Transaction};
 
 const FATAL_PROJECTION_REPLAY_VERSION_FENCE: &str = "fatal projection replay version fence";
+const UNFENCED_REPLAY_ADMISSION: &str =
+    "fatal projection replay version fence: unfenced writer crossed in-progress replay admission";
+const UNSTAMPED_REPLAY_VERSION: &str =
+    "fatal projection replay version fence: process replay version is unstamped";
+const OUTDATED_REPLAY_VERSION_COMPARISON: &str = " is older than persisted replay version ";
+const MISSING_REPLAY_VERSION_FENCE_SINGLETON: &str = "fatal projection replay version fence: \
+    singleton state is missing; refusing projection-owned write";
 
 pub use crate::address_names::{
     insert_address_names_current_full_rebuild_rows_in_transaction,
@@ -78,6 +85,24 @@ impl std::error::Error for OutdatedProjectionReplayVersionError {}
 
 /// Whether an error chain says this process is too old to write projection-owned state.
 pub fn is_outdated_projection_replay_version_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<OutdatedProjectionReplayVersionError>()
+        .is_some()
+        || error.chain().any(|cause| {
+            let message = cause.to_string();
+            message.contains(UNFENCED_REPLAY_ADMISSION)
+                || message.contains(UNSTAMPED_REPLAY_VERSION)
+                || (message.contains(FATAL_PROJECTION_REPLAY_VERSION_FENCE)
+                    && message.contains(OUTDATED_REPLAY_VERSION_COMPARISON))
+        })
+}
+
+/// Whether an error chain reports a replay-version fence failure that must stop the process.
+///
+/// The current-version admission-race error deliberately lacks the fatal prefix and remains
+/// retryable. Missing singleton state and invalid stamps are fatal without being classified as an
+/// outdated process.
+pub fn is_fatal_projection_replay_version_fence_error(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<OutdatedProjectionReplayVersionError>()
         .is_some()
@@ -169,10 +194,11 @@ async fn lock_projection_replay_version_floor(
         {lock_clause}
         "#
     );
-    sqlx::query_scalar(&query)
-        .fetch_one(&mut **transaction)
+    let floor = sqlx::query_scalar(&query)
+        .fetch_optional(&mut **transaction)
         .await
-        .context("failed to lock the current-projection replay-version fence")
+        .context("failed to lock the current-projection replay-version fence")?;
+    floor.ok_or_else(|| anyhow::Error::msg(MISSING_REPLAY_VERSION_FENCE_SINGLETON))
 }
 
 async fn ensure_process_replay_version_is_current(
@@ -265,4 +291,60 @@ pub async fn advance_current_projection_full_replay_input_revision_in_transactio
         .await
         .context("failed to invalidate the current-projection replay attempt")?;
     Ok(revision)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outdated_replay_version_classifier_excludes_other_fence_failures() {
+        for message in [
+            "projection replay admission is in progress; retry protected write",
+            "fatal projection replay version fence: singleton state is missing",
+            "fatal projection replay version fence: process replay version stamp 'bad' is invalid",
+        ] {
+            let error = anyhow::anyhow!("{message}");
+            assert!(
+                !is_outdated_projection_replay_version_error(&error),
+                "unexpected outdated-process classification for {message}"
+            );
+        }
+
+        for message in [
+            UNFENCED_REPLAY_ADMISSION,
+            "fatal projection replay version fence: process replay version is unstamped and predates the fence",
+            "fatal projection replay version fence: process replay version 9 is older than persisted replay version 10",
+        ] {
+            let error = anyhow::anyhow!("{message}");
+            assert!(
+                is_outdated_projection_replay_version_error(&error),
+                "missing outdated-process classification for {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn fatal_replay_version_fence_classifier_excludes_only_retryable_admission_races() {
+        let retryable =
+            anyhow::anyhow!("projection replay admission is in progress; retry protected write");
+        assert!(
+            !is_fatal_projection_replay_version_fence_error(&retryable),
+            "a current stamped admission race must remain retryable"
+        );
+
+        for message in [
+            "fatal projection replay version fence: singleton state is missing",
+            "fatal projection replay version fence: process replay version stamp 'bad' is invalid",
+            UNFENCED_REPLAY_ADMISSION,
+            "fatal projection replay version fence: process replay version is unstamped and predates the fence",
+            "fatal projection replay version fence: process replay version 9 is older than persisted replay version 10",
+        ] {
+            let error = anyhow::anyhow!("{message}");
+            assert!(
+                is_fatal_projection_replay_version_fence_error(&error),
+                "missing fatal-fence classification for {message}"
+            );
+        }
+    }
 }

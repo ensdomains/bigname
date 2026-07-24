@@ -73,6 +73,49 @@ async fn newer_replay_marker_fatally_refuses_projection_invalidation_claim() -> 
 }
 
 #[tokio::test]
+async fn missing_replay_version_singleton_fatally_refuses_projection_invalidation_claim()
+-> Result<()> {
+    let database = test_database().await?;
+    insert_unclaimed_invalidation(&database, "name_current", "ens:missing-fence.eth").await?;
+    sqlx::query(
+        r#"
+        DELETE FROM current_projection_full_replay_input_revision
+        WHERE singleton
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    let error = claim_pending_invalidations(database.pool(), 10, Uuid::new_v4())
+        .await
+        .expect_err("a worker must stop when the replay-version singleton is missing");
+    assert!(
+        bigname_storage::projection_staging::is_fatal_projection_replay_version_fence_error(&error),
+        "missing singleton state must return a process-fatal fence error, got: {error:#}"
+    );
+    assert!(
+        !bigname_storage::projection_staging::is_outdated_projection_replay_version_error(&error),
+        "missing singleton state is fatal corruption, not an outdated process"
+    );
+    let claim_token = sqlx::query_scalar::<_, Option<Uuid>>(
+        r#"
+        SELECT claim_token
+        FROM projection_invalidations
+        WHERE projection = 'name_current'
+          AND projection_key = 'ens:missing-fence.eth'
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert!(
+        claim_token.is_none(),
+        "the failed claim transaction must leave the invalidation unclaimed"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn current_replay_marker_allows_projection_invalidation_claim() -> Result<()> {
     let database = test_database().await?;
     insert_unclaimed_invalidation(&database, "name_current", "ens:current.eth").await?;
@@ -455,13 +498,44 @@ async fn legacy_table_lock_cannot_deadlock_replay_admission() -> Result<()> {
             .contains("fatal projection replay version fence"),
         "legacy table-lock refusal must be loud and fatal, got: {error}"
     );
+    let error = anyhow::Error::from(error);
+    assert!(
+        bigname_storage::projection_staging::is_outdated_projection_replay_version_error(&error),
+        "an unstamped admission failure must retain the typed outdated-process classification"
+    );
+
+    let current_options = bigname_storage::stamp_projection_replay_version(
+        database.pool().connect_options().as_ref().clone(),
+    );
+    let mut current_connection = sqlx::PgConnection::connect_with(&current_options).await?;
+    let current_error = tokio::time::timeout(
+        Duration::from_secs(1),
+        sqlx::query("TRUNCATE TABLE primary_names_current").execute(&mut current_connection),
+    )
+    .await
+    .context("current stamped writer waited behind replay admission")?
+    .expect_err("a current stamped writer must retry after losing the NOWAIT admission race");
+    assert!(
+        current_error
+            .to_string()
+            .contains("projection replay admission is in progress; retry protected write"),
+        "current stamped admission refusal must explain that it is retryable, got: {current_error}"
+    );
+    let current_error = anyhow::Error::from(current_error);
+    assert!(
+        !bigname_storage::projection_staging::is_outdated_projection_replay_version_error(
+            &current_error
+        ),
+        "a current stamped admission race must not be classified as an outdated process"
+    );
 
     replay_admission.commit().await?;
     database.cleanup().await
 }
 
 #[tokio::test]
-async fn current_indexer_invalidation_upsert_waits_for_replay_admission() -> Result<()> {
+async fn current_indexer_invalidation_upsert_checks_floor_without_waiting_for_replay_admission()
+-> Result<()> {
     let database = test_database().await?;
     insert_unclaimed_invalidation(&database, "name_current", "ens:indexer-overlap.eth").await?;
     let mut replay_admission = database.pool().begin().await?;
@@ -496,19 +570,12 @@ async fn current_indexer_invalidation_upsert_waits_for_replay_admission() -> Res
         .await?;
         Ok::<(), sqlx::Error>(())
     });
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), &mut indexer_write)
-            .await
-            .is_err(),
-        "a current-version indexer invalidation must wait for replay admission"
-    );
-
-    replay_admission.commit().await?;
-    tokio::time::timeout(Duration::from_secs(5), indexer_write)
+    tokio::time::timeout(Duration::from_secs(1), &mut indexer_write)
         .await
-        .context("current-version indexer invalidation stayed blocked after replay admission")?
+        .context("current-version indexer invalidation waited for replay admission")?
         .context("current-version indexer invalidation task failed")?
         .context("current-version indexer invalidation was rejected")?;
+    replay_admission.commit().await?;
     let generation: i64 = sqlx::query_scalar(
         r#"
         SELECT generation
@@ -522,6 +589,278 @@ async fn current_indexer_invalidation_upsert_waits_for_replay_admission() -> Res
     assert_eq!(generation, 1);
 
     database.cleanup().await
+}
+
+#[tokio::test]
+async fn committed_floor_enqueue_survives_concurrent_newer_replay_admission() -> Result<()> {
+    let database = test_database().await?;
+    let current_version = bigname_storage::CURRENT_PROJECTION_REPLAY_VERSION;
+    let newer_version = current_version + 1;
+    admit_replay_version(&database, current_version).await?;
+
+    let indexer_options = bigname_storage::stamp_projection_replay_version(
+        database.pool().connect_options().as_ref().clone(),
+    );
+    let mut indexer_connection = sqlx::PgConnection::connect_with(&indexer_options).await?;
+
+    let mut newer_admission = database.pool().begin().await?;
+    sqlx::query("SELECT set_config('bigname.projection_replay_version', $1, true)")
+        .bind(newer_version.to_string())
+        .execute(&mut *newer_admission)
+        .await?;
+    sqlx::query(
+        r#"
+        SELECT projection_replay_version_floor
+        FROM current_projection_full_replay_input_revision
+        WHERE singleton
+        FOR UPDATE
+        "#,
+    )
+    .execute(&mut *newer_admission)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE current_projection_full_replay_input_revision
+        SET projection_replay_version_floor = $1
+        WHERE singleton
+        "#,
+    )
+    .bind(newer_version)
+    .execute(&mut *newer_admission)
+    .await?;
+
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        sqlx::query(
+            r#"
+            INSERT INTO projection_invalidations (
+                projection,
+                projection_key,
+                key_payload
+            )
+            VALUES ('name_current', 'ens:crossing-floor-raise.eth', '{}'::jsonb)
+            "#,
+        )
+        .execute(&mut indexer_connection),
+    )
+    .await
+    .context("current-at-committed-floor enqueue waited for newer replay admission")?
+    .context("current-at-committed-floor enqueue was rejected")?;
+
+    newer_admission.commit().await?;
+
+    let persisted: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM projection_invalidations
+            WHERE projection = 'name_current'
+              AND projection_key = 'ens:crossing-floor-raise.eth'
+        )
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert!(
+        persisted,
+        "the enqueue admitted against the committed floor must remain durable after the raise"
+    );
+
+    let error = sqlx::query(
+        r#"
+        INSERT INTO projection_invalidations (
+            projection,
+            projection_key,
+            key_payload
+        )
+        VALUES ('name_current', 'ens:after-floor-raise.eth', '{}'::jsonb)
+        "#,
+    )
+    .execute(&mut indexer_connection)
+    .await
+    .expect_err("the same process stamp must be rejected after the newer floor commits");
+    let error = anyhow::Error::from(error);
+    assert!(
+        bigname_storage::projection_staging::is_outdated_projection_replay_version_error(&error),
+        "post-raise enqueue must be classified as an outdated process, got: {error:#}"
+    );
+
+    database.cleanup().await
+}
+
+#[derive(Clone, Copy)]
+enum ReplayJournalLockOrdering {
+    JournalFirst,
+    ReplayFirst,
+}
+
+#[tokio::test]
+async fn replay_admission_and_ingestion_journal_locks_do_not_deadlock() -> Result<()> {
+    let database = test_database().await?;
+    admit_replay_version(
+        &database,
+        bigname_storage::CURRENT_PROJECTION_REPLAY_VERSION,
+    )
+    .await?;
+
+    // Production capture bounds journal waits at 100 ms. Extend only that timeout in this
+    // isolated database so the test can inspect the blocked lock edge before releasing it.
+    sqlx::query(
+        r#"
+        ALTER FUNCTION public.capture_projection_permissions_resource_input_watermark()
+        SET lock_timeout = '5s'
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    for (ordering, suffix) in [
+        (ReplayJournalLockOrdering::JournalFirst, "journal-first"),
+        (ReplayJournalLockOrdering::ReplayFirst, "replay-first"),
+    ] {
+        assert_replay_admission_and_ingestion_journal_complete(&database, ordering, suffix).await?;
+    }
+
+    database.cleanup().await
+}
+
+async fn assert_replay_admission_and_ingestion_journal_complete(
+    database: &TestDatabase,
+    ordering: ReplayJournalLockOrdering,
+    suffix: &str,
+) -> Result<()> {
+    let mut producer = database.pool().begin().await?;
+    sqlx::query("SELECT set_config('bigname.projection_replay_version', $1, true)")
+        .bind(bigname_storage::CURRENT_PROJECTION_REPLAY_VERSION.to_string())
+        .execute(&mut *producer)
+        .await?;
+    let producer_pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+        .fetch_one(&mut *producer)
+        .await?;
+
+    let mut replay = database.pool().begin().await?;
+    let replay_pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+        .fetch_one(&mut *replay)
+        .await?;
+
+    if matches!(ordering, ReplayJournalLockOrdering::JournalFirst) {
+        insert_resource_to_lock_permissions_journal(&mut producer).await?;
+    }
+    bigname_storage::projection_staging::lock_current_projection_replay_version_for_replay_write_in_transaction(
+        &mut replay,
+    )
+    .await?;
+    if matches!(ordering, ReplayJournalLockOrdering::ReplayFirst) {
+        insert_resource_to_lock_permissions_journal(&mut producer).await?;
+    }
+
+    let mut capture = tokio::spawn(async move {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT public.capture_projection_normalized_event_change_watermark()",
+        )
+        .fetch_one(&mut *replay)
+        .await?;
+        sqlx::query_scalar::<_, i64>(
+            "SELECT public.capture_projection_permissions_resource_input_watermark()",
+        )
+        .fetch_one(&mut *replay)
+        .await?;
+        sqlx::query_scalar::<_, i64>(
+            "SELECT public.capture_projection_direct_invalidation_watermark()",
+        )
+        .fetch_one(&mut *replay)
+        .await?;
+        replay.commit().await?;
+        Ok::<(), sqlx::Error>(())
+    });
+    wait_for_backend_blocked_by(
+        database.pool(),
+        replay_pid,
+        producer_pid,
+        "replay capture did not wait for the ingestion journal writer",
+    )
+    .await?;
+
+    // Under the former queue-side FOR SHARE behavior this statement introduced the reverse edge:
+    // producer -> singleton-owning replay, while replay already waited producer -> journal. The
+    // database then had to abort one transaction as a deadlock victim.
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        sqlx::query(
+            r#"
+            INSERT INTO projection_invalidations (
+                projection,
+                projection_key,
+                key_payload
+            )
+            VALUES ('name_current', $1, '{}'::jsonb)
+            "#,
+        )
+        .bind(format!("ens:{suffix}.eth"))
+        .execute(&mut *producer),
+    )
+    .await
+    .with_context(|| {
+        format!("{suffix} invalidation enqueue waited behind replay admission and deadlocked")
+    })??;
+    producer.commit().await?;
+
+    tokio::time::timeout(Duration::from_secs(5), &mut capture)
+        .await
+        .with_context(|| format!("{suffix} replay capture stayed blocked after producer commit"))?
+        .with_context(|| format!("{suffix} replay capture task failed"))?
+        .with_context(|| format!("{suffix} replay capture transaction failed"))?;
+
+    Ok(())
+}
+
+async fn insert_resource_to_lock_permissions_journal(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<()> {
+    let resource_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO resources (
+            resource_id,
+            chain_id,
+            block_hash,
+            block_number,
+            canonicality_state
+        )
+        VALUES (
+            $1,
+            'ethereum-mainnet',
+            $2,
+            1,
+            'finalized'
+        )
+        "#,
+    )
+    .bind(resource_id)
+    .bind(format!("0x{}", resource_id.simple()))
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn wait_for_backend_blocked_by(
+    pool: &PgPool,
+    blocked_pid: i32,
+    blocker_pid: i32,
+    failure: &str,
+) -> Result<()> {
+    for _ in 0..500 {
+        let blocked = sqlx::query_scalar::<_, bool>("SELECT $2 = ANY(pg_blocking_pids($1))")
+            .bind(blocked_pid)
+            .bind(blocker_pid)
+            .fetch_one(pool)
+            .await?;
+        if blocked {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    bail!("{failure}")
 }
 
 #[tokio::test]

@@ -136,7 +136,14 @@ workers during this handoff. An indexer from the same release may continue
 ingesting while workers are stopped and during replay; its durable changes will
 be consumed after replay handoff. Replace an indexer from before this change
 before admitting the new worker because its unstamped writes are rejected once
-enforcement activates.
+enforcement activates. Apply the migrations for the
+[projection replay-version fence](glossary.md#projection-replay-version-fence)
+at a staging-quiet moment: the installing migration's `ALTER TABLE` must wait
+behind any in-flight projection publication transaction. Between the successful
+migration and the process swap, run no repair tooling. A pre-fence repair can
+hold the singleton row exclusively; for that interval, every unstamped
+protected statement that reaches the trigger's non-waiting lock path fails with
+SQLSTATE `55000`.
 
 The database also enforces this version boundary with the
 [projection replay-version fence](glossary.md#projection-replay-version-fence).
@@ -145,23 +152,35 @@ The singleton
 projection replay version admitted to projection writes and whether enforcement
 has been activated. Every new process stamps its compiled replay version on
 each database connection. Applying the migration leaves enforcement inactive;
-the first replay transaction from the new release activates it and raises the
-minimum under an exclusive row lock. Database triggers on the invalidation queue
-and cursor, current projection tables and companion tables, and durable replay
-state take the shared side of that lock before every write. An older write that
-began first therefore commits before activation and is included in the new
-replay. After activation, a lower version or a connection with no stamp from a
-pre-fence binary receives a loud database error before it can claim, extend a
-claim lease, publish, complete queue work, or change replay state. Workers that
-implement this check treat the error as process-fatal and exit. A binary from
-before the check existed cannot be retrofitted: its protected writes remain
-blocked, but it may keep retrying and may continue updating its health heartbeat
-until the operator or supervisor terminates and replaces it. The invalidation
-queue is also an indexer-to-worker handoff, so DML from a stamped connection
-waits for in-progress replay admission and then performs the same version check.
-Its ordinary table lock is compatible with replay queue DML; this keeps
-matching-version indexer intake live without weakening the rejection of a
-lower-version or unstamped writer.
+the first fence-aware replay-write transaction from the new release activates
+it and raises the minimum under an exclusive row lock. This is not limited to
+the automatic worker's first replay-loop pass. It also includes a standalone
+one-shot rebuild clearing its family marker and an indexer-side repair advancing
+the full-replay input revision, including name-surface repair and a Base
+normalized-event rederive reset.
+
+Database triggers on the invalidation queue and cursor, current projection
+tables and companion tables, and durable replay state normally take the shared
+side of that lock before every write. An older write that began first therefore
+commits before activation and is included in the new replay. After activation,
+a lower version or a connection with no stamp from a pre-fence binary receives
+a loud database error before it can claim, extend a claim lease, publish,
+complete queue work, or change replay state. Fence-aware workers treat this and
+every other fatal fence error, including missing singleton state or an invalid
+stamp, as process-fatal and exit. A binary from before the check existed cannot
+be retrofitted: its protected writes remain blocked, but it may keep retrying
+and may continue updating its health heartbeat until the operator or supervisor
+terminates and replaces it. A current, validly stamped statement that finds
+replay admission holding the singleton receives the one retryable admission
+error instead of a fatal fence error.
+
+The invalidation queue is also an indexer-to-worker handoff. Its stamped DML
+reads the committed activation state and version floor without taking the
+singleton row lock, avoiding a lock-order cycle when ingestion already owns a
+staging input journal lock. An enqueue that commits before replay captures the
+journals participates in the replay drift check; an enqueue that commits after
+that capture remains durable post-replay apply work. Queue `TRUNCATE` and
+unstamped queue writers retain the non-waiting singleton-lock path.
 
 The worker also compares its compiled version with the durable minimum and
 every persisted attempt, checkpoint, and marker inside claim and replay
@@ -171,6 +190,95 @@ deployed before the check existed. This turns accidental mixed-version overlap
 into a database-enforced stop, but it does not remove the API drain: operators
 must still wait for current markers and an empty invalidation queue before
 serving reads.
+
+#### Manual protected-table repair sessions
+
+Before changing any protected table from `psql`, read the active floor:
+
+```sql
+SELECT
+    projection_replay_version_floor,
+    projection_replay_version_fence_active
+FROM current_projection_full_replay_input_revision
+WHERE singleton;
+```
+
+Stamp only the repair transaction at that floor or a higher version:
+
+```sql
+BEGIN;
+SET LOCAL bigname.projection_replay_version = '<floor-or-higher>';
+-- supervised protected-table repair
+COMMIT;
+```
+
+`SET LOCAL` clears the stamp at commit or rollback, including after a repair
+error. The stamp admits that transaction to the same database boundary as a
+process; it does not authorize a repair or make unsafe SQL correct. Do not lower
+or deactivate the fence merely to make a manual write succeed.
+
+#### Emergency rollback after activation
+
+A previous fence-aware release with a lower compiled replay version is rejected
+before it writes, just as a pre-fence binary with no stamp is rejected. Lowering
+an activated floor is destructive operator surgery, not a normal image rollback.
+Stop API traffic and every indexer, worker, and repair session; take a restorable
+database backup; and verify that the target binary accepts the current schema
+and migration set. If it does not, restore a compatible database instead.
+
+The cooperative version check reads the floor plus persisted versions from
+exactly `current_projection_replay_status`,
+`current_projection_replay_attempt`, and
+`current_projection_staging_checkpoints`. Lowering the singleton alone is
+therefore insufficient. In one supervised transaction, stamp the session at the
+current floor or higher, lock the singleton, remove every row newer than the
+rollback target from all three tables, and only then lower the floor while
+leaving enforcement active:
+
+```sql
+\set rollback_version 9
+\set operator_version 10
+
+SELECT projection, replay_version, stage_tables
+FROM current_projection_staging_checkpoints
+WHERE replay_version > :rollback_version;
+
+BEGIN;
+SET LOCAL bigname.projection_replay_version = :'operator_version';
+
+SELECT projection_replay_version_floor
+FROM current_projection_full_replay_input_revision
+WHERE singleton
+FOR UPDATE;
+
+DELETE FROM current_projection_replay_status
+WHERE replay_version > :rollback_version;
+
+DELETE FROM current_projection_replay_attempt
+WHERE replay_version > :rollback_version;
+
+DELETE FROM current_projection_staging_checkpoints
+WHERE replay_version > :rollback_version;
+
+UPDATE current_projection_full_replay_input_revision
+SET
+    projection_replay_version_floor = :rollback_version,
+    projection_replay_version_fence_active = true
+WHERE singleton;
+
+COMMIT;
+```
+
+Record the checkpoint `stage_tables` values before deletion and remove those
+exact logged staging tables while all processes remain stopped; deleting the
+checkpoint rows does not drop them. If any target-or-older progress cannot be
+proven compatible with the rollback release, discard that progress too rather
+than letting it satisfy replay. Start only the target fence-aware worker, force
+all current projection families through that release's replay, drain
+`projection_invalidations`, and validate reads before undraining the API.
+This surgery discards replay progress and can temporarily leave projection rows
+written with newer semantics. It does not reverse schema migrations, repair raw
+or normalized inputs, or prove that the older release is data-compatible.
 
 Replay version 9 is such an upgrade: it forces the full permission cutover that
 discovers canonical zero-event resources and seeds
