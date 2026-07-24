@@ -433,6 +433,29 @@ async fn ancestry_proof_rejects_orphaned_path_rows() -> Result<()> {
     )
     .await?;
 
+    assert!(
+        chain_lineage_contains_ancestor_at_block(
+            database.pool(),
+            "eth-mainnet",
+            "0x003",
+            "0x001",
+            1,
+        )
+        .await?,
+        "the evidence height must bound and still admit the stored parent path"
+    );
+    assert!(
+        !chain_lineage_contains_ancestor_at_block(
+            database.pool(),
+            "eth-mainnet",
+            "0x003",
+            "0x001",
+            0,
+        )
+        .await?,
+        "an ancestor hash at a different evidence height must fail closed"
+    );
+
     mark_chain_lineage_range_orphaned(database.pool(), "eth-mainnet", "0x003", Some("0x001"))
         .await?;
 
@@ -443,6 +466,65 @@ async fn ancestry_proof_rejects_orphaned_path_rows() -> Result<()> {
     assert!(
         !chain_lineage_contains_ancestor(database.pool(), "eth-mainnet", "0x003", "0x003").await?,
         "orphaned exact-match rows must not prove canonical ancestry"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn ancestry_proofs_remain_complete_beyond_the_live_parent_fetch_limit() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let permission_depth_limit = 131_072_i64;
+    let descendant_block_number = permission_depth_limit + 1;
+    sqlx::query(
+        r#"
+        INSERT INTO chain_lineage (
+            chain_id,
+            block_hash,
+            parent_hash,
+            block_number,
+            block_timestamp,
+            canonicality_state
+        )
+        SELECT
+            'depth-bound-test',
+            '0x' || LPAD(TO_HEX(block_number), 16, '0'),
+            CASE
+                WHEN block_number = 0 THEN NULL
+                ELSE '0x' || LPAD(TO_HEX(block_number - 1), 16, '0')
+            END,
+            block_number,
+            TO_TIMESTAMP(block_number),
+            'canonical'::canonicality_state
+        FROM GENERATE_SERIES(0, $1::BIGINT) AS blocks(block_number)
+        "#,
+    )
+    .bind(descendant_block_number)
+    .execute(database.pool())
+    .await?;
+    let ancestor_hash = "0x0000000000000000";
+    let descendant_hash = format!("0x{descendant_block_number:016x}");
+
+    assert!(
+        chain_lineage_contains_ancestor(
+            database.pool(),
+            "depth-bound-test",
+            &descendant_hash,
+            ancestor_hash,
+        )
+        .await?,
+        "general lineage and operator rewind checks must retain complete stored-path semantics"
+    );
+    assert!(
+        chain_lineage_contains_ancestor_at_block(
+            database.pool(),
+            "depth-bound-test",
+            &descendant_hash,
+            ancestor_hash,
+            0,
+        )
+        .await?,
+        "stored permission evidence must remain authoritative across a valid deep lineage path"
     );
 
     database.cleanup().await

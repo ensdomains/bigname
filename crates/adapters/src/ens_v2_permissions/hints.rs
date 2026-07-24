@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use alloy_primitives::hex;
 use anyhow::{Context, Result};
 use bigname_domain::normalization::normalize_name;
-use bigname_storage::{chain_lineage_contains_ancestor, load_resource};
+use bigname_storage::{chain_lineage_contains_ancestor_at_block, load_resource};
 use serde_json::Value;
 
 use crate::ens_v2_common::{
@@ -363,11 +363,12 @@ async fn load_durable_dns_encoded_name(
     {
         // The durable event supplies exact DNS bytes, so canonicality alone is insufficient:
         // a still-canonical sibling can normalize to the same name with different bytes.
-        if !chain_lineage_contains_ancestor(
+        if !chain_lineage_contains_ancestor_at_block(
             pool,
             &raw_log.chain_id,
             &raw_log.block_hash,
             &block_hash,
+            block_number,
         )
         .await?
         {
