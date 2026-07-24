@@ -2052,6 +2052,52 @@ async fn ens_v2_cold_incremental_reconstruction_requires_complete_selected_ances
 }
 
 #[tokio::test]
+async fn ens_v2_registry_raw_log_prefix_rejects_canonical_only_ancestry() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-sepolia";
+    let registry = "0x00000000000000000000000000000000000000aa";
+    let parent_hash = lifecycle_branch_block_hash(10, 0);
+    let selected_hash = lifecycle_branch_block_hash(11, 0);
+    let mut parent = test_raw_block(chain, &parent_hash, 10);
+    parent.canonicality_state = CanonicalityState::Canonical;
+    let mut selected = test_raw_block(chain, &selected_hash, 11);
+    selected.parent_hash = Some(parent_hash);
+    selected.canonicality_state = CanonicalityState::Canonical;
+    upsert_raw_blocks(database.pool(), &[parent, selected]).await?;
+
+    let mut before_raw =
+        expiry_updated_raw_log(chain, &selected_hash, 11, registry, 0, 1, 2_000_000_000);
+    before_raw.canonicality_state = CanonicalityState::Canonical;
+    upsert_raw_logs(database.pool(), std::slice::from_ref(&before_raw)).await?;
+    let before = registry_raw_log_row(before_raw);
+    let emitters = [test_active_emitter(
+        registry,
+        Uuid::from_u128(0x1622),
+        7,
+        Some(0),
+        None,
+    )];
+    let mut progress = None;
+
+    let error =
+        load_registry_raw_log_prefix(database.pool(), chain, &emitters, &before, &mut progress)
+            .await
+            .err()
+            .context("registry raw-log prefix must reject canonical-only ancestry")?;
+    assert!(
+        format!("{error:#}")
+            .contains("incremental prior-state reconstruction cannot prove selected-path ancestry"),
+        "unexpected canonical-only ancestry refusal: {error:#}"
+    );
+    assert!(
+        format!("{error:#}").contains("safe or finalized boundary"),
+        "canonical-only ancestry must not self-certify as a stable boundary: {error:#}"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn ens_v2_cold_incremental_holds_raw_log_fence_through_publication() -> Result<()> {
     let database = TestDatabase::new().await?;
     let chain = "ethereum-sepolia";
@@ -3489,6 +3535,158 @@ async fn ens_v2_subregistry_hydration_ignores_bounded_observed_sibling_edge() ->
 }
 
 #[tokio::test]
+async fn ens_v2_subregistry_hydration_requires_stable_ancestry_and_excludes_canonical_sibling()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-sepolia";
+    let registry = "0x00000000000000000000000000000000000000aa";
+    let child = "0x00000000000000000000000000000000000000c1";
+    let registry_id = Uuid::from_u128(0x1754);
+    let selected_target_id = Uuid::from_u128(0x1755);
+    let sibling_target_id = Uuid::from_u128(0x1756);
+    let common_hash = lifecycle_branch_block_hash(9, 0);
+    let selected_start_hash = lifecycle_branch_block_hash(10, 1);
+    let sibling_start_hash = lifecycle_branch_block_hash(10, 2);
+    let event_hash = lifecycle_branch_block_hash(11, 1);
+
+    let mut common = test_raw_block(chain, &common_hash, 9);
+    common.canonicality_state = CanonicalityState::Canonical;
+    let mut selected_start = test_raw_block(chain, &selected_start_hash, 10);
+    selected_start.parent_hash = Some(common_hash.clone());
+    selected_start.canonicality_state = CanonicalityState::Canonical;
+    let mut sibling_start = test_raw_block(chain, &sibling_start_hash, 10);
+    sibling_start.parent_hash = Some(common_hash.clone());
+    sibling_start.canonicality_state = CanonicalityState::Canonical;
+    let mut event_block = test_raw_block(chain, &event_hash, 11);
+    event_block.parent_hash = Some(selected_start_hash.clone());
+    event_block.canonicality_state = CanonicalityState::Canonical;
+    upsert_raw_blocks(
+        database.pool(),
+        &[common, selected_start, sibling_start, event_block],
+    )
+    .await?;
+
+    let token_id = format!("0x{:064x}", 0xa2);
+    let mut harness = RegistryHarness::new(registry, registry_id, "eth");
+    let mut registration_ref = reference(registry, registry_id, 9, 0);
+    registration_ref.block_hash = common_hash.clone();
+    registration_ref.canonicality_state = CanonicalityState::Canonical;
+    harness.apply(RegistryObservation::LabelRegistered {
+        token_id: token_id.clone(),
+        labelhash: labelhash("alice"),
+        label: "alice".to_owned(),
+        owner: "0x0000000000000000000000000000000000000a11".to_owned(),
+        expiry: 1_900_000_000,
+        sender: "0x0000000000000000000000000000000000000dad".to_owned(),
+        reference: registration_ref,
+    })?;
+    let mut subregistry_ref = reference(registry, registry_id, 11, 0);
+    subregistry_ref.block_hash = event_hash;
+    subregistry_ref.canonicality_state = CanonicalityState::Canonical;
+    harness.apply(RegistryObservation::SubregistryUpdated {
+        token_id,
+        subregistry: child.to_owned(),
+        sender: "0x0000000000000000000000000000000000000dad".to_owned(),
+        reference: subregistry_ref,
+    })?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instances (
+            contract_instance_id,
+            chain_id,
+            contract_kind
+        )
+        VALUES ($1, $4, 'registry'),
+               ($2, $4, 'contract'),
+               ($3, $4, 'contract')
+        "#,
+    )
+    .bind(registry_id)
+    .bind(selected_target_id)
+    .bind(sibling_target_id)
+    .bind(chain)
+    .execute(database.pool())
+    .await
+    .context("failed to insert canonical-sibling subregistry contract instances")?;
+    sqlx::query(
+        r#"
+        INSERT INTO discovery_edges (
+            chain_id,
+            edge_kind,
+            from_contract_instance_id,
+            to_contract_instance_id,
+            discovery_source,
+            admission,
+            active_from_block_number,
+            active_from_block_hash,
+            provenance
+        )
+        VALUES (
+            $1,
+            'subregistry',
+            $2,
+            $3,
+            'ens_v2_registry_l1:selected-canonical-history',
+            'admitted',
+            10,
+            $4,
+            jsonb_build_object('to_address', $5::text)
+        ), (
+            $1,
+            'subregistry',
+            $2,
+            $6,
+            'ens_v2_registry_l1:sibling-canonical-history',
+            'admitted',
+            10,
+            $7,
+            jsonb_build_object('to_address', $5::text)
+        )
+        "#,
+    )
+    .bind(chain)
+    .bind(registry_id)
+    .bind(selected_target_id)
+    .bind(&selected_start_hash)
+    .bind(child)
+    .bind(sibling_target_id)
+    .bind(sibling_start_hash)
+    .execute(database.pool())
+    .await
+    .context("failed to insert selected and canonical-sibling discovery edges")?;
+
+    let error = hydrate_subregistry_event_target_ids(database.pool(), &mut harness.graph_events)
+        .await
+        .err()
+        .context("subregistry hydration must reject canonical-only ancestry")?;
+    assert!(
+        format!("{error:#}")
+            .contains("subregistry-target hydration cannot prove selected-path ancestry"),
+        "unexpected canonical-only subregistry ancestry refusal: {error:#}"
+    );
+    assert!(
+        format!("{error:#}").contains("safe or finalized boundary"),
+        "canonical-only subregistry ancestry must fail at the stable-boundary guard: {error:#}"
+    );
+
+    upsert_raw_blocks(database.pool(), &[test_raw_block(chain, &common_hash, 9)]).await?;
+    hydrate_subregistry_event_target_ids(database.pool(), &mut harness.graph_events).await?;
+    let hydrated = harness
+        .graph_events
+        .iter()
+        .find(|event| event.event_kind == EVENT_KIND_SUBREGISTRY_CHANGED)
+        .context("hydrated SubregistryChanged should remain present")?;
+    assert_eq!(
+        hydrated.after_state["to_contract_instance_id"],
+        selected_target_id.to_string(),
+        "a finalized boundary must admit only the selected-path edge, not its canonical sibling"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn ens_v2_full_history_replay_retains_each_subregistry_transition() -> Result<()> {
     let database = TestDatabase::new().await?;
     let chain = "ethereum-sepolia";
@@ -4016,6 +4214,7 @@ async fn ens_v2_live_poll_cache_is_incremental_and_rehydrates_on_unsafe_anchors(
     let child_a = "0x00000000000000000000000000000000000000c1";
     let child_b = "0x00000000000000000000000000000000000000c2";
     let registry_id = Uuid::from_u128(0x1751);
+    let block_9_hash = lifecycle_branch_block_hash(9, 0);
     let block_10_hash = lifecycle_branch_block_hash(10, 0);
     let losing_11_hash = lifecycle_branch_block_hash(11, 1);
     let winning_11_hash = lifecycle_branch_block_hash(11, 2);
@@ -4037,6 +4236,7 @@ async fn ens_v2_live_poll_cache_is_incremental_and_rehydrates_on_unsafe_anchors(
     .execute(database.pool())
     .await?;
     let mut observed_block_10 = test_raw_block(chain, &block_10_hash, 10);
+    observed_block_10.parent_hash = Some(block_9_hash.clone());
     observed_block_10.canonicality_state = CanonicalityState::Observed;
     let mut observed_registration =
         label_registered_raw_log(chain, &block_10_hash, 10, registry, 0, "parent", 1, "alice");
@@ -4046,7 +4246,15 @@ async fn ens_v2_live_poll_cache_is_incremental_and_rehydrates_on_unsafe_anchors(
     observed_subregistry.canonicality_state = CanonicalityState::Observed;
     let mut losing_block_11 = test_raw_block(chain, &losing_11_hash, 11);
     losing_block_11.parent_hash = Some(block_10_hash.clone());
-    upsert_raw_blocks(database.pool(), &[observed_block_10, losing_block_11]).await?;
+    upsert_raw_blocks(
+        database.pool(),
+        &[
+            test_raw_block(chain, &block_9_hash, 9),
+            observed_block_10,
+            losing_block_11,
+        ],
+    )
+    .await?;
     upsert_raw_logs(
         database.pool(),
         &[observed_registration, observed_subregistry],

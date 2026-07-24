@@ -81,7 +81,7 @@ use bigname_storage::{CanonicalityState, upsert_surface_bindings};
 #[cfg(test)]
 use emitters::{preferred_emitters_by_scope, source_rank};
 #[cfg(test)]
-use load::load_registry_raw_logs;
+use load::{load_registry_raw_log_prefix, load_registry_raw_logs};
 #[cfg(test)]
 use serde_json::{Value, json};
 #[cfg(test)]
