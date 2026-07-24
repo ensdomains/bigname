@@ -494,7 +494,7 @@ For ENSv2, `resource_id` keys by `(chain_id, registry_contract_instance_id, upst
 | `projection_direct_invalidation_revisions` | storage trigger on direct invalidation generations; projection workers consume | durable latest revision and key payload for every direct queue generation, retained after the live queue row is consumed and captured through a finite, bounded-wait watermark |
 | `projection_permissions_resource_input_revisions` | storage trigger on staging-relevant `resources` changes; projection workers consume | durable latest resource-keyed revision for permission target discovery and zero-event resource summaries, retained independently of normalized events |
 | `projection_apply_cursors`, `projection_invalidations`, `projection_invalidation_dead_letters` | projection workers; storage trigger for projection-relevant `surface_bindings` repairs; bounded normalized-event adapter repair invalidations | durable projection apply watermarks, live key-scoped projection invalidation queue, and terminal operator-visible dead-letter records |
-| `service_loop_heartbeats` | indexer and worker main loops | durable per-process loop liveness, per-chain indexer loop liveness, and named worker long-operation phases; operational health evidence only, not chain progress or API read-model data |
+| `service_loop_heartbeats` | indexer and worker main loops | durable per-process loop liveness, per-chain indexer loop liveness, and named service-operation phases; operational health evidence only, not chain progress or API read-model data |
 | `execution_*` | execution workers; API on-demand verified-resolution cache misses for documented product routes; synchronous indexer/reorg repair for orphan-block cache outcome deletes only | durable traces and steps, normal `execution_cache_outcomes` writes, invalidation records |
 
 The API process is otherwise read-only against storage.
@@ -502,7 +502,7 @@ The API process is otherwise read-only against storage.
 `service_loop_heartbeats` identifies a service instance by `service_name` and
 `instance_id`. Registering the process-scoped row retires every same-service
 non-process row before it resets `started_at`; stale chain scopes and a prior
-worker's unfinished phase therefore cannot survive a single-writer service
+service instance's unfinished phase therefore cannot survive a single-writer service
 handoff. Process rows remain available to rank instances during that handoff.
 The supported deployment has one active writer for each service. Each main-loop tick
 advances `heartbeat_at` for its process row. The indexer registers this row
@@ -529,9 +529,11 @@ could mask a stuck operation. A missing
 process-scoped row therefore means that instance's loop never registered or
 gracefully deregistered, while a present row older than the configured maximum
 age means the loop stopped or wedged after starting. For each service, the API
-prefers an instance whose normal heartbeat or active long-operation phase is
-within its configured age, then falls back to the newest stale evidence when
-none is healthy. One live instance can therefore satisfy shared readiness
+prefers an instance whose normal heartbeat or active phase is within that
+service's configured age, then falls back to the newest stale evidence when
+none is healthy. Indexer phases use the ordinary indexer maximum; worker
+rebuild phases use their separate long-operation maximum. One live instance
+can therefore satisfy shared readiness
 without being hidden by a newer retained instance that stopped. Each
 container's `healthcheck` subcommand reads its own instance row, so another
 instance cannot hide a stopped process. These rows are mutable operational signals. They are
@@ -623,25 +625,27 @@ and must be allowed to make the heartbeat stale.
 | indexer resolver-profile convergence | compare and advance the authority journal | newly-covered (#229) | Completed authority-entry, seed-family expansion, staged-diff, mutation, and forced-target pages. |
 | indexer resolver-profile convergence | drain input changes and materialize reconciliation targets | newly-covered (#229) | Each 1,000-input page and each completed target/family page. A progress-enabled drain rejects pools below four connections, reserving capacity for the runtime writer guard, reconciliation guard, bounded authority/event reads, and heartbeat writes. |
 | indexer resolver-profile convergence | replay resolver targets, stage/publish events, and enqueue invalidations | newly-covered (#229) | Completed target/log/state pages, 1,000-row staged-event and invalidation pages, family publication, and acknowledged input pages. |
+| indexer spawned task | wait for full-closure replay ownership | newly-covered (#156) | The first failed nonblocking lock attempt starts `full_closure_replay_lock.wait`; 50-millisecond poll ticks never beat. The phase timestamp ages while periodic holder-identifying warnings expose contention, and acquisition finishes the phase. |
 | indexer spawned task | automatic normalized-event replay catch-up | newly-covered (#229) | Completed stateless replay pages, adapter-internal pages, full-closure adapter boundaries, replay chunks, durable cursor publications, and checkpoint cleanup advance the shared process row. Parent work and the spawned iteration mutually exclude each other's heartbeat writes while either owns a work unit, including failure journaling, so neither can mask the other's wedge; idle catch-up sleep releases ownership. Exit and panic remain supervised (#242). |
 | indexer spawned task | normalized-replay projection-index preparation and restoration DDL statements | n-a | Each PostgreSQL catalog check and `CREATE INDEX` or `DROP INDEX` statement is atomic at the application boundary, with no safe successful progress callback inside the statement. The replay iteration retains heartbeat ownership, so a slow or stuck statement intentionally ages the process row instead of receiving a synthetic beat. |
 | indexer one-shot modes | manual backfill, replay, rewind, repair, and operational catch-up commands | n-a | These commands do not run inside the registered `indexer run` service loop, so service-loop heartbeat coverage does not describe their completion. Backfill range leases retain their separate ownership heartbeat. |
 
-A named phase is a distinct `scope_kind='phase'` row for the worker instance.
+A named phase is a distinct `scope_kind='phase'` row for a service instance.
 Its `heartbeat_at` is the phase start rather than a free-running timer, so a
-crash or wedge still ages out. Worker and API checks use the separately
-environment-tunable phase maximum (default 43,200 seconds) only while that row
-exists; completing the phase removes it and refreshes ordinary process
-evidence. Graceful worker shutdown first deletes its process row as a write
-fence, then deletes the instance's remaining heartbeat rows; a new same-service
-registration also clears phases left by a predecessor that exited without
-running the hook. Ordinary worker heartbeat-write failures warn and
+crash or wedge still ages out. Worker rebuild phases use the separately
+environment-tunable phase maximum (default 43,200 seconds), while an indexer
+phase uses the ordinary indexer heartbeat maximum. Completing either kind of
+phase removes it and refreshes ordinary process evidence. Graceful worker
+shutdown first deletes its process row as a write fence, then deletes the
+instance's remaining heartbeat rows; a new same-service registration also
+clears phases left by a predecessor that exited without running the hook.
+Ordinary worker heartbeat-write failures warn and
 continue so a transient database write failure degrades liveness evidence and
 remains due for retry, rather than converting the database blip into worker
 restart churn. A
 named phase is different: if its start marker cannot be persisted, the current
-rebuild attempt fails before starting the monolithic work, so the worker never
-runs a many-hour operation without the evidence used to interpret it.
+operation fails before entering the work, so it never runs without the evidence
+used to interpret it.
 
 Within `execution_*`, the API may write traces, steps, and normal
 `execution_cache_outcomes` only for documented on-demand verified-resolution
@@ -1081,6 +1085,34 @@ The `post_replay_live_adapter_backlog` cursor stores the raw-log retention gener
 Full-closure replay may persist adapter-private checkpoints under `normalized_replay_adapter_checkpoints` and `normalized_replay_adapter_checkpoint_items`. These rows are replay orchestration state: they may contain staged adapter observations, scan watermarks, and versioned payloads needed to resume an in-progress closure pass, but they are not raw facts, manifest truth, identity rows, projection input, or API state.
 
 A checkpoint can make process restarts resumable only for the adapter and checkpoint payload version that wrote it. One cross-process ownership fence per deployment profile and chain serializes automatic and operator full-closure sessions. Automatic catch-up owns the `raw_fact_normalized_events` checkpoint namespace; an unscoped operator block-range replay may use full closure only from the retained closure boundary and uses a deterministic range-scoped `manual_raw_fact_normalized_events:<from>:<to>` namespace. That manual session loads historically watched emitters, including closed canonical discovery intervals, retains its checkpoint after failure for an exact-range retry, and clears it only after successful completion. Source-restricted and block-hash selections remain restricted repair sessions.
+
+The [full-closure](glossary.md) ownership fence polls a dedicated PostgreSQL
+connection with a nonblocking lock attempt every 50 milliseconds, so contention
+does not leave a blocking statement or long-lived snapshot behind. The first
+failed attempt and then every
+`BIGNAME_INDEXER_FULL_CLOSURE_REPLAY_LOCK_WAIT_LOG_INTERVAL_SECS` seconds
+(default 60) emit a warning with the deployment profile, chain, elapsed time,
+and the holder's PostgreSQL process ID and application name; acquisition logs
+the total wait duration. The optional
+`BIGNAME_INDEXER_FULL_CLOSURE_REPLAY_LOCK_WAIT_DEADLINE_SECS` is unlimited when
+unset or zero. A positive value fails the waiting session with a typed error
+without entering the fenced operation or disturbing the holder. An operator
+replay exits with its resumable checkpoint intact, while automatic catch-up
+records the iteration failure and retries on a later loop.
+
+When automatic catch-up has the registered indexer heartbeat handle, its first
+failed lock attempt starts the named `full_closure_replay_lock.wait` phase.
+Polling never advances that phase or the process heartbeat: its initial
+timestamp ages under the ordinary indexer health threshold and remains visible
+to startup readiness. Acquisition removes the phase and records the completed
+transition. A deadline or other wait failure leaves the phase aging; repeated
+automatic retries do not refresh it because retrying is not forward progress.
+Unresolved waits are tracked by deployment profile and chain, so work or lock
+acquisition on another chain cannot clear or refresh the oldest wait evidence.
+The later attempt that acquires the final unresolved ownership removes the
+phase, including when that acquisition is uncontended. One-shot operator replay
+has no service-loop heartbeat row and relies on the same warnings and terminal
+error.
 
 The post-bootstrap startup adapter sync uses the separate
 `startup_adapter_owned_raw_log_state` cursor namespace and

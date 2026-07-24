@@ -44,6 +44,9 @@ use heartbeat::{
 #[cfg(test)]
 pub(crate) use ownership::install_ownership_release_test_hook;
 use ownership::with_full_closure_replay_lock;
+pub(crate) use ownership::{
+    FullClosureReplayLockWaitDeadlineExceeded, FullClosureReplayLockWaitHeartbeat,
+};
 use reverse_claim::sync_ens_v1_reverse_claim_range_in_pages;
 
 #[cfg(test)]
@@ -68,6 +71,7 @@ pub(crate) async fn sync_full_closure_normalized_events_from_persisted_raw_paylo
         adapters,
         max_raw_logs_per_page,
         FullClosureCheckpointCompletion::Retain,
+        &mut None,
         &mut None,
     )
     .await
@@ -95,6 +99,7 @@ pub(crate) async fn sync_manual_full_closure_normalized_events_from_persisted_ra
         max_raw_logs_per_page,
         FullClosureCheckpointCompletion::ClearOnSuccess,
         &mut None,
+        &mut None,
     )
     .await?
     .summary)
@@ -121,6 +126,7 @@ async fn sync_full_closure_with_checkpoint_completion(
     adapters: &[NormalizedEventReplayAdapter],
     max_raw_logs_per_page: usize,
     checkpoint_completion: FullClosureCheckpointCompletion,
+    lock_wait_heartbeat: &mut Option<&mut dyn FullClosureReplayLockWaitHeartbeat>,
     progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<FullClosureSyncResult> {
     let (result, ()) = sync_full_closure_with_checkpoint_completion_and_prelude(
@@ -133,6 +139,7 @@ async fn sync_full_closure_with_checkpoint_completion(
         adapters,
         max_raw_logs_per_page,
         checkpoint_completion,
+        lock_wait_heartbeat,
         progress,
         || async { Ok(()) },
     )
@@ -151,6 +158,7 @@ async fn sync_full_closure_with_checkpoint_completion_and_prelude<T, Prelude, Pr
     adapters: &[NormalizedEventReplayAdapter],
     max_raw_logs_per_page: usize,
     checkpoint_completion: FullClosureCheckpointCompletion,
+    lock_wait_heartbeat: &mut Option<&mut dyn FullClosureReplayLockWaitHeartbeat>,
     progress: &mut Option<&mut dyn StartupAdapterProgress>,
     prelude: Prelude,
 ) -> Result<(FullClosureSyncResult, T)>
@@ -162,79 +170,85 @@ where
         !checkpoint_cursor_kind.trim().is_empty(),
         "full-closure replay checkpoint cursor kind must not be empty"
     );
-    with_full_closure_replay_lock(pool, deployment_profile, chain, || async {
-        let raw_log_input_version = if adapters.is_empty() {
-            RawLogStagingInputVersion::default()
-        } else {
-            load_raw_log_staging_input_version(pool, chain).await?
-        };
-        if !adapters.is_empty() {
-            ensure_full_closure_retention_authority_for_adapters(
-                pool,
-                chain,
-                adapters,
-                target_block_number,
-            )
-            .await?;
-        }
-        let prelude_output = prelude().await?;
-        if !adapters.is_empty() {
-            ensure_full_closure_retention_authority_for_adapters(
-                pool,
-                chain,
-                adapters,
-                target_block_number,
-            )
-            .await?;
-        }
-        let summary = sync_full_closure_normalized_events_without_lock(
-            pool,
-            deployment_profile,
-            chain,
-            checkpoint_cursor_kind,
-            range_start_block_number,
-            target_block_number,
-            adapters,
-            max_raw_logs_per_page,
-            progress,
-        )
-        .await?;
-        let raw_log_guard = if adapters.is_empty() {
-            None
-        } else {
-            let mut guard = acquire_raw_log_staging_read_guard(pool, chain).await?;
-            guard
-                .accept_newer_revisions_after(raw_log_input_version, target_block_number)
-                .await
-                .with_context(|| {
-                    format!(
-                        "raw-log staging input changed during full-closure replay for {chain} through block {target_block_number}"
-                    )
-                })?;
-            Some(guard)
-        };
-        if matches!(
-            checkpoint_completion,
-            FullClosureCheckpointCompletion::ClearOnSuccess
-        ) {
-            bigname_adapters::clear_replay_adapter_checkpoints(
+    with_full_closure_replay_lock(
+        pool,
+        deployment_profile,
+        chain,
+        lock_wait_heartbeat,
+        || async {
+            let raw_log_input_version = if adapters.is_empty() {
+                RawLogStagingInputVersion::default()
+            } else {
+                load_raw_log_staging_input_version(pool, chain).await?
+            };
+            if !adapters.is_empty() {
+                ensure_full_closure_retention_authority_for_adapters(
+                    pool,
+                    chain,
+                    adapters,
+                    target_block_number,
+                )
+                .await?;
+            }
+            let prelude_output = prelude().await?;
+            if !adapters.is_empty() {
+                ensure_full_closure_retention_authority_for_adapters(
+                    pool,
+                    chain,
+                    adapters,
+                    target_block_number,
+                )
+                .await?;
+            }
+            let summary = sync_full_closure_normalized_events_without_lock(
                 pool,
                 deployment_profile,
                 chain,
                 checkpoint_cursor_kind,
+                range_start_block_number,
+                target_block_number,
+                adapters,
+                max_raw_logs_per_page,
+                progress,
             )
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to clear successful manual full-closure replay checkpoints for {deployment_profile}/{chain}/{checkpoint_cursor_kind}"
+            .await?;
+            let raw_log_guard = if adapters.is_empty() {
+                None
+            } else {
+                let mut guard = acquire_raw_log_staging_read_guard(pool, chain).await?;
+                guard
+                    .accept_newer_revisions_after(raw_log_input_version, target_block_number)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "raw-log staging input changed during full-closure replay for {chain} through block {target_block_number}"
+                        )
+                    })?;
+                Some(guard)
+            };
+            if matches!(
+                checkpoint_completion,
+                FullClosureCheckpointCompletion::ClearOnSuccess
+            ) {
+                bigname_adapters::clear_replay_adapter_checkpoints(
+                    pool,
+                    deployment_profile,
+                    chain,
+                    checkpoint_cursor_kind,
                 )
-            })?;
-        }
-        if let Some(guard) = raw_log_guard {
-            guard.release().await?;
-        }
-        Ok((FullClosureSyncResult { summary }, prelude_output))
-    })
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to clear successful manual full-closure replay checkpoints for {deployment_profile}/{chain}/{checkpoint_cursor_kind}"
+                    )
+                })?;
+            }
+            if let Some(guard) = raw_log_guard {
+                guard.release().await?;
+            }
+            Ok((FullClosureSyncResult { summary }, prelude_output))
+        },
+    )
     .await
 }
 
