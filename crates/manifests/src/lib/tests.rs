@@ -9267,6 +9267,7 @@ async fn assert_streamed_reconciliation_parity_with_seqscans_disabled(
             coarse_deactivation_cap_override: None,
             observation_page_limit: 2,
             mutation_batch_size: 2,
+            deactivation_page_size: 2,
             fail_after_deactivation_source_pages: None,
         },
     )
@@ -9356,6 +9357,70 @@ async fn streamed_reconciliation_parity_fresh_inserts() -> Result<()> {
     assert_eq!(summary.deactivated_edge_count, 0);
     assert_eq!(summary.active_edge_count, 3);
     assert_eq!(edges.len(), 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn streamed_reconciliation_parity_hub_skew_keeps_key_selectivity() -> Result<()> {
+    const HUB_EDGE_COUNT: usize = 128;
+
+    let seed_observations = (0..HUB_EDGE_COUNT)
+        .map(|index| {
+            let key = format!("hub-key-{index:04}");
+            let to_address = format!("0x{:040x}", index + 0x1_000);
+            streamed_parity_observation(
+                &key,
+                STREAMED_PARITY_REGISTRY,
+                &to_address,
+                "subregistry",
+                100 + index as i64,
+                0,
+                index as i64,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(seed_observations.iter().all(|observation| {
+        observation
+            .from_address
+            .eq_ignore_ascii_case(STREAMED_PARITY_REGISTRY)
+    }));
+    assert_eq!(
+        seed_observations
+            .iter()
+            .map(|observation| {
+                observation.provenance["observation_key"]
+                    .as_str()
+                    .expect("hub fixture key")
+            })
+            .collect::<BTreeSet<_>>()
+            .len(),
+        HUB_EDGE_COUNT,
+        "the hub fixture must keep one selective observation key per edge"
+    );
+
+    let mut observations = seed_observations.clone();
+    observations.pop();
+    observations[HUB_EDGE_COUNT - 2].to_address = format!("0x{:040x}", 0x2_000_000);
+    observations.push(streamed_parity_observation(
+        "hub-key-new",
+        STREAMED_PARITY_REGISTRY,
+        &format!("0x{:040x}", 0x2_000_001),
+        "subregistry",
+        1_000,
+        0,
+        0,
+    ));
+
+    let (summary, edges) = assert_streamed_reconciliation_parity(StreamedParityFixture {
+        seed_observation_sets: vec![seed_observations],
+        observations,
+    })
+    .await?;
+
+    assert_eq!(summary.inserted_edge_count, 2);
+    assert_eq!(summary.deactivated_edge_count, 2);
+    assert_eq!(summary.active_edge_count, HUB_EDGE_COUNT);
+    assert_eq!(edges.len(), HUB_EDGE_COUNT + 2);
     Ok(())
 }
 
@@ -9977,6 +10042,7 @@ async fn streamed_reconcile_guard_aborts_deactivation_floods_unless_overridden()
             coarse_deactivation_cap_override: None,
             observation_page_limit: 2,
             mutation_batch_size: 2,
+            deactivation_page_size: 2,
             fail_after_deactivation_source_pages: None,
         },
     )
@@ -10007,6 +10073,7 @@ async fn streamed_reconcile_guard_aborts_deactivation_floods_unless_overridden()
             coarse_deactivation_cap_override: None,
             observation_page_limit: 2,
             mutation_batch_size: 2,
+            deactivation_page_size: 2,
             fail_after_deactivation_source_pages: None,
         },
     )
@@ -10055,6 +10122,7 @@ async fn streamed_reconcile_guard_ignores_chronology_retained_candidates() -> Re
             coarse_deactivation_cap_override: None,
             observation_page_limit: 2,
             mutation_batch_size: 2,
+            deactivation_page_size: 2,
             fail_after_deactivation_source_pages: None,
         },
     )
@@ -10140,6 +10208,7 @@ async fn streamed_reconcile_guard_ignores_cascade_protected_descendants() -> Res
             coarse_deactivation_cap_override: None,
             observation_page_limit: 2,
             mutation_batch_size: 2,
+            deactivation_page_size: 2,
             fail_after_deactivation_source_pages: None,
         },
     )
@@ -10207,6 +10276,7 @@ async fn streamed_reconcile_coarse_cap_aborts_before_loading_candidates() -> Res
             coarse_deactivation_cap_override: Some(1),
             observation_page_limit: 2,
             mutation_batch_size: 1,
+            deactivation_page_size: 1,
             fail_after_deactivation_source_pages: Some(1),
         },
     )

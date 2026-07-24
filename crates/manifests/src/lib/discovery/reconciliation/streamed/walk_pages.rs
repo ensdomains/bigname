@@ -21,6 +21,14 @@ use super::staging::{
 use super::{DiscoveryObservationPageSource, StreamedDiscoveryReconciliationOptions};
 use crate::normalize_address;
 
+const POSTGRES_MAX_BIND_PARAMETERS: usize = 65_535;
+const DESIRED_EDGE_INSERT_BIND_PARAMETERS_PER_ROW: usize = 13;
+const ADMITTED_EDGE_INSERT_BIND_PARAMETERS_PER_ROW: usize = 10;
+const DESIRED_EDGE_INSERT_BATCH_SIZE: usize =
+    POSTGRES_MAX_BIND_PARAMETERS / DESIRED_EDGE_INSERT_BIND_PARAMETERS_PER_ROW;
+const ADMITTED_EDGE_INSERT_BATCH_SIZE: usize =
+    POSTGRES_MAX_BIND_PARAMETERS / ADMITTED_EDGE_INSERT_BIND_PARAMETERS_PER_ROW;
+
 /// Fixed-point admission walk over the staged observations. Pass 1 pages the
 /// complete staged set; passes >= 2 revisit only observations emitted from
 /// addresses whose active-contract set grew (matching the in-memory walk's
@@ -225,70 +233,72 @@ async fn flush_desired_edge_buffer(
     if buffer.is_empty() {
         return Ok(());
     }
-    let mut builder = QueryBuilder::<Postgres>::new(
-        r#"
-        INSERT INTO pg_temp.reconcile_desired_edges (
-            observation_key,
-            chain_id,
-            edge_kind,
-            from_contract_instance_id,
-            to_contract_instance_id,
-            discovery_source,
-            source_manifest_id,
-            admission,
-            active_from_block_number,
-            active_from_block_hash,
-            active_from_transaction_index,
-            active_from_log_index,
-            provenance_json
-        )
-        "#,
-    );
-    builder.push_values(buffer.iter(), |mut row, edge| {
-        row.push_bind(&edge.observation_key)
-            .push_bind(&edge.chain)
-            .push_bind(&edge.edge_kind)
-            .push_bind(edge.from_contract_instance_id)
-            .push_bind(edge.to_contract_instance_id)
-            .push_bind(&edge.discovery_source)
-            .push_bind(edge.source_manifest_id)
-            .push_bind(&edge.admission)
-            .push_bind(edge.active_from_block_number)
-            .push_bind(edge.active_from_block_hash.as_deref())
-            .push_bind(
-                edge.active_from_event_position
-                    .map(|position| position.transaction_index),
+    for chunk in buffer.chunks(DESIRED_EDGE_INSERT_BATCH_SIZE) {
+        let mut builder = QueryBuilder::<Postgres>::new(
+            r#"
+            INSERT INTO pg_temp.reconcile_desired_edges (
+                observation_key,
+                chain_id,
+                edge_kind,
+                from_contract_instance_id,
+                to_contract_instance_id,
+                discovery_source,
+                source_manifest_id,
+                admission,
+                active_from_block_number,
+                active_from_block_hash,
+                active_from_transaction_index,
+                active_from_log_index,
+                provenance_json
             )
-            .push_bind(
-                edge.active_from_event_position
-                    .map(|position| position.log_index),
-            )
-            .push_bind(&edge.provenance_json);
-    });
-    builder.push(
-        r#"
-        ON CONFLICT (
-            observation_key,
-            chain_id,
-            edge_kind,
-            from_contract_instance_id,
-            to_contract_instance_id,
-            discovery_source,
-            source_manifest_id,
-            admission,
-            active_from_block_number,
-            active_from_block_hash,
-            active_from_transaction_index,
-            active_from_log_index,
-            provenance_json
-        ) DO NOTHING
-        "#,
-    );
-    builder
-        .build()
-        .execute(&mut *executor)
-        .await
-        .context("failed to stage streamed desired discovery edges")?;
+            "#,
+        );
+        builder.push_values(chunk, |mut row, edge| {
+            row.push_bind(&edge.observation_key)
+                .push_bind(&edge.chain)
+                .push_bind(&edge.edge_kind)
+                .push_bind(edge.from_contract_instance_id)
+                .push_bind(edge.to_contract_instance_id)
+                .push_bind(&edge.discovery_source)
+                .push_bind(edge.source_manifest_id)
+                .push_bind(&edge.admission)
+                .push_bind(edge.active_from_block_number)
+                .push_bind(edge.active_from_block_hash.as_deref())
+                .push_bind(
+                    edge.active_from_event_position
+                        .map(|position| position.transaction_index),
+                )
+                .push_bind(
+                    edge.active_from_event_position
+                        .map(|position| position.log_index),
+                )
+                .push_bind(&edge.provenance_json);
+        });
+        builder.push(
+            r#"
+            ON CONFLICT (
+                observation_key,
+                chain_id,
+                edge_kind,
+                from_contract_instance_id,
+                to_contract_instance_id,
+                discovery_source,
+                source_manifest_id,
+                admission,
+                active_from_block_number,
+                active_from_block_hash,
+                active_from_transaction_index,
+                active_from_log_index,
+                provenance_json
+            ) DO NOTHING
+            "#,
+        );
+        builder
+            .build()
+            .execute(&mut *executor)
+            .await
+            .context("failed to stage streamed desired discovery edges")?;
+    }
     buffer.clear();
     Ok(())
 }
@@ -300,51 +310,124 @@ async fn flush_admitted_edge_buffer(
     if buffer.is_empty() {
         return Ok(0);
     }
-    let mut builder = QueryBuilder::<Postgres>::new(
-        r#"
-        INSERT INTO pg_temp.reconcile_admitted_edges (
-            source_manifest_id,
-            chain_id,
-            from_contract_instance_id,
-            to_contract_instance_id,
-            from_address,
-            to_address,
-            edge_kind,
-            discovery_source,
-            admission,
-            from_role
-        )
-        "#,
-    );
-    builder.push_values(buffer.iter(), |mut row, edge| {
-        row.push_bind(edge.source_manifest_id)
-            .push_bind(&edge.chain)
-            .push_bind(edge.from_contract_instance_id)
-            .push_bind(
-                edge.to_contract_instance_id
-                    .expect("admitted discovery edges are resolved before buffering"),
+    let mut inserted_count = 0_u64;
+    for chunk in buffer.chunks(ADMITTED_EDGE_INSERT_BATCH_SIZE) {
+        let mut builder = QueryBuilder::<Postgres>::new(
+            r#"
+            INSERT INTO pg_temp.reconcile_admitted_edges (
+                source_manifest_id,
+                chain_id,
+                from_contract_instance_id,
+                to_contract_instance_id,
+                from_address,
+                to_address,
+                edge_kind,
+                discovery_source,
+                admission,
+                from_role
             )
-            .push_bind(&edge.from_address)
-            .push_bind(&edge.to_address)
-            .push_bind(&edge.edge_kind)
-            .push_bind(&edge.discovery_source)
-            .push_bind(&edge.admission)
-            .push_bind(&edge.from_role);
-    });
-    builder.push(" ON CONFLICT DO NOTHING ");
-    let inserted_count = builder
-        .build()
-        .execute(&mut *executor)
-        .await
-        .context("failed to stage streamed admitted discovery edges")?
-        .rows_affected();
+            "#,
+        );
+        builder.push_values(chunk, |mut row, edge| {
+            row.push_bind(edge.source_manifest_id)
+                .push_bind(&edge.chain)
+                .push_bind(edge.from_contract_instance_id)
+                .push_bind(
+                    edge.to_contract_instance_id
+                        .expect("admitted discovery edges are resolved before buffering"),
+                )
+                .push_bind(&edge.from_address)
+                .push_bind(&edge.to_address)
+                .push_bind(&edge.edge_kind)
+                .push_bind(&edge.discovery_source)
+                .push_bind(&edge.admission)
+                .push_bind(&edge.from_role);
+        });
+        builder.push(" ON CONFLICT DO NOTHING ");
+        inserted_count += builder
+            .build()
+            .execute(&mut *executor)
+            .await
+            .context("failed to stage streamed admitted discovery edges")?
+            .rows_affected();
+    }
     buffer.clear();
     usize::try_from(inserted_count).context("staged admitted discovery-edge count exceeds usize")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::derived_observation_page_query;
+    use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+    use uuid::Uuid;
+
+    use super::{
+        AdmittedDiscoveryEdge, ReconciledDiscoveryEdgeSpec, derived_observation_page_query,
+        flush_admitted_edge_buffer, flush_desired_edge_buffer,
+    };
+    use crate::discovery::reconciliation::streamed::staging::create_streamed_reconcile_temp_tables;
+
+    #[tokio::test]
+    async fn walk_edge_flushes_stay_below_postgres_bind_limit() -> anyhow::Result<()> {
+        let database = TestDatabase::create_migrated(
+            TestDatabaseConfig::new("streamed_desired_edge_bind_limit"),
+            &bigname_storage::MIGRATOR,
+            "failed to migrate streamed desired-edge bind-limit test database",
+        )
+        .await?;
+        let mut transaction = database.pool().begin().await?;
+        create_streamed_reconcile_temp_tables(transaction.as_mut()).await?;
+
+        // One more row than a single PostgreSQL statement can carry at 13
+        // bind parameters per desired edge.
+        let mut buffer = (0..=65_535 / 13)
+            .map(|index| ReconciledDiscoveryEdgeSpec {
+                observation_key: format!("bind-limit-{index:05}"),
+                chain: "bind-limit-chain".to_owned(),
+                edge_kind: "test".to_owned(),
+                from_contract_instance_id: Uuid::from_u128(1),
+                to_contract_instance_id: Uuid::from_u128(2),
+                discovery_source: "bind-limit-source".to_owned(),
+                source_manifest_id: 1,
+                admission: "test".to_owned(),
+                active_from_block_number: None,
+                active_from_block_hash: None,
+                active_from_event_position: None,
+                provenance_json: "{}".to_owned(),
+            })
+            .collect();
+
+        flush_desired_edge_buffer(transaction.as_mut(), &mut buffer).await?;
+
+        assert!(buffer.is_empty());
+        let staged_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM pg_temp.reconcile_desired_edges")
+                .fetch_one(transaction.as_mut())
+                .await?;
+        assert_eq!(staged_count, 65_535 / 13 + 1);
+
+        // The admitted-edge writer has ten bind parameters per row and must
+        // independently split its buffered statement at that limit.
+        let mut buffer = (0..=65_535 / 10)
+            .map(|index| AdmittedDiscoveryEdge {
+                source_manifest_id: i64::from(index),
+                chain: "bind-limit-chain".to_owned(),
+                from_contract_instance_id: Uuid::from_u128(1),
+                to_contract_instance_id: Some(Uuid::from_u128(2)),
+                from_address: "0x0000000000000000000000000000000000000001".to_owned(),
+                to_address: "0x0000000000000000000000000000000000000002".to_owned(),
+                edge_kind: "test".to_owned(),
+                discovery_source: "bind-limit-source".to_owned(),
+                admission: "test".to_owned(),
+                from_role: "test".to_owned(),
+            })
+            .collect();
+
+        let inserted_count = flush_admitted_edge_buffer(transaction.as_mut(), &mut buffer).await?;
+
+        assert!(buffer.is_empty());
+        assert_eq!(inserted_count, 65_535 / 10 + 1);
+        Ok(())
+    }
 
     #[test]
     fn derived_observation_pages_join_the_staged_set_without_array_binds() {

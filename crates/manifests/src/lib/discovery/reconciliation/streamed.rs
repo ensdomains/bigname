@@ -56,10 +56,7 @@ use self::diff::{
     load_streamed_deactivation_source_page, load_streamed_insert_candidate_page,
     materialize_streamed_insert_candidate_page,
 };
-use self::guard::{
-    default_max_deactivation_candidates, default_max_deactivations,
-    max_deactivations_override_from_env,
-};
+use self::guard::{default_max_deactivation_candidates, default_max_deactivations};
 pub(crate) use self::options::StreamedDiscoveryReconciliationOptions;
 use self::progress::{PageSourceManifestProgress, load_active_edge_summary_with_progress};
 use self::staging::{
@@ -122,10 +119,7 @@ pub async fn reconcile_discovery_observations_streamed(
     discovery_source: &str,
     source: &(impl DiscoveryObservationPageSource + Sync),
 ) -> Result<DiscoveryReconciliationSummary> {
-    let options = StreamedDiscoveryReconciliationOptions {
-        max_deactivations_override: max_deactivations_override_from_env()?,
-        ..StreamedDiscoveryReconciliationOptions::default()
-    };
+    let options = StreamedDiscoveryReconciliationOptions::from_env()?;
     reconcile_discovery_observations_streamed_inner(
         pool,
         discovery_source,
@@ -142,10 +136,7 @@ pub async fn reconcile_discovery_observations_streamed_with_full_options(
     source: &(impl DiscoveryObservationPageSource + Sync),
     full_options: FullDiscoveryReconciliationOptions<'_>,
 ) -> Result<DiscoveryReconciliationSummary> {
-    let options = StreamedDiscoveryReconciliationOptions {
-        max_deactivations_override: max_deactivations_override_from_env()?,
-        ..StreamedDiscoveryReconciliationOptions::default()
-    };
+    let options = StreamedDiscoveryReconciliationOptions::from_env()?;
     reconcile_discovery_observations_streamed_inner(
         pool,
         discovery_source,
@@ -203,6 +194,10 @@ async fn reconcile_discovery_observations_streamed_inner(
         .execute(transaction.as_mut())
         .await
         .context("failed to pin the streamed reconcile transaction snapshot")?;
+    sqlx::query("SET LOCAL plan_cache_mode = force_custom_plan")
+        .execute(transaction.as_mut())
+        .await
+        .context("failed to force custom plans for streamed discovery reconciliation")?;
     lock_discovery_reconciliation(transaction.as_mut(), discovery_source).await?;
     create_streamed_reconcile_temp_tables(transaction.as_mut()).await?;
 
@@ -253,12 +248,20 @@ async fn reconcile_discovery_observations_streamed_inner(
         run_streamed_admission_walk(transaction.as_mut(), &admission_state, &options, source)
             .await?;
 
+    sqlx::query("ANALYZE discovery_edges")
+        .execute(transaction.as_mut())
+        .await
+        .context("failed to refresh discovery-edge statistics before the streamed diff")?;
+    source.record_progress().await?;
+
     // Everything below diffs against the pre-mutation edge snapshot, exactly
     // like the in-memory reconcile computes its whole plan from one
     // `load_active_reconciled_discovery_edges` read before mutating.
     create_streamed_insert_candidate_table(transaction.as_mut()).await?;
-    let diff_page_limit = i64::try_from(options.mutation_batch_size.max(1))
+    let mutation_page_limit = i64::try_from(options.mutation_batch_size)
         .context("streamed reconcile mutation batch size overflowed i64")?;
+    let deactivation_page_limit = i64::try_from(options.deactivation_page_size)
+        .context("streamed reconcile deactivation page size overflowed i64")?;
     let mut insert_candidate_count = 0usize;
     let mut desired_edge_count = 0usize;
     let mut after_desired_row_id = 0i64;
@@ -267,7 +270,7 @@ async fn reconcile_discovery_observations_streamed_inner(
             transaction.as_mut(),
             discovery_source,
             after_desired_row_id,
-            diff_page_limit,
+            mutation_page_limit,
         )
         .await?;
         let Some(last_row_id) = last_row_id else {
@@ -294,7 +297,7 @@ async fn reconcile_discovery_observations_streamed_inner(
             transaction.as_mut(),
             discovery_source,
             after_edge_id,
-            diff_page_limit,
+            deactivation_page_limit,
         )
         .await?;
         let Some(last_edge_id) = page.last_edge_id else {
