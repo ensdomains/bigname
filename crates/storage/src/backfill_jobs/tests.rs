@@ -36,6 +36,7 @@ impl TestDatabase {
             .unwrap_or_else(|_| default_database_url().to_owned());
         let base_options = PgConnectOptions::from_str(&database_url)
             .context("failed to parse database URL for backfill job tests")?;
+        let base_options = crate::stamp_projection_replay_version(base_options);
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .context("system clock is before unix epoch")?
@@ -109,7 +110,9 @@ impl TestDatabase {
     async fn dedicated_single_connection_pool(&self) -> Result<PgPool> {
         let pool = PgPoolOptions::new()
             .max_connections(1)
-            .connect_with(self.connect_options.clone())
+            .connect_with(crate::stamp_projection_replay_version(
+                self.connect_options.clone(),
+            ))
             .await
             .context("failed to connect dedicated single-connection test pool")?;
         drop(

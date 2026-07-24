@@ -28,6 +28,7 @@ impl TestDatabase {
             .unwrap_or_else(|_| default_database_url().to_owned());
         let base_options = PgConnectOptions::from_str(&database_url)
             .context("failed to parse database URL for children_current tests")?;
+        let base_options = crate::stamp_projection_replay_version(base_options);
         let database_name = format!(
             "bn_st_children_{}_{}",
             std::process::id(),

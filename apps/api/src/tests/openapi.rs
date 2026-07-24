@@ -1413,8 +1413,11 @@ async fn openapi_docs_route_serves_viewer() -> Result<()> {
 
 fn openapi_docs_test_state() -> AppState {
     AppState::new(
-        PgPool::connect_lazy("postgres://bigname:bigname@127.0.0.1:5432/bigname")
-            .expect("OpenAPI helper route tests only need a lazily parsed pool"),
+        PgPool::connect_lazy_with(bigname_storage::stamp_projection_replay_version(
+            "postgres://bigname:bigname@127.0.0.1:5432/bigname"
+                .parse()
+                .expect("static test database URL must parse"),
+        )),
         bigname_execution::ChainRpcUrls::default(),
     )
 }

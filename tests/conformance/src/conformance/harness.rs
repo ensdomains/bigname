@@ -22,8 +22,7 @@
             NameSurface, NormalizedEvent, PermissionScope, PermissionsCurrentRow,
             PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot, RawBlock,
             RecordInventoryCurrentRow, ResolverCurrentRow, Resource, SurfaceBinding,
-            SurfaceBindingKind, TokenLineage, CURRENT_PROJECTION_REPLAY_VERSION,
-            default_database_url,
+            SurfaceBindingKind, TokenLineage, default_database_url,
             invalidate_execution_outcomes_for_manifest_version,
             invalidate_execution_outcomes_for_manifest_version_and_request_key,
             invalidate_execution_outcomes_for_record_boundary,
@@ -325,8 +324,10 @@
                 let database_url = std::env::var("BIGNAME_DATABASE_URL")
                     .or_else(|_| std::env::var("DATABASE_URL"))
                     .unwrap_or_else(|_| default_database_url().to_owned());
-                let base_options = PgConnectOptions::from_str(&database_url)
-                    .context("failed to parse database URL for conformance harness")?;
+                let base_options = bigname_storage::stamp_projection_replay_version(
+                    PgConnectOptions::from_str(&database_url)
+                        .context("failed to parse database URL for conformance harness")?,
+                );
                 let unique = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .context("system clock is before unix epoch")?
@@ -352,13 +353,7 @@
                         format!("failed to create conformance database {database_name}")
                     })?;
 
-                let pool_options = base_options
-                    .clone()
-                    .database(&database_name)
-                    .options([(
-                        "bigname.projection_replay_version",
-                        CURRENT_PROJECTION_REPLAY_VERSION.to_string(),
-                    )]);
+                let pool_options = base_options.clone().database(&database_name);
                 let database_url = pool_options.to_url_lossy().to_string();
                 let pool = PgPoolOptions::new()
                     .max_connections(1)

@@ -10,6 +10,11 @@ use sqlx::Connection;
 async fn test_database() -> Result<TestDatabase> {
     TestDatabase::create_migrated(
         TestDatabaseConfig::new("bigname_worker_projection_apply_claim_test")
+            // This module explicitly emulates processes that predate the
+            // [projection replay-version fence](../../../../../docs/glossary.md#projection-replay-version-fence)
+            // and selected replay versions. All ordinary test databases retain the default
+            // connection stamp.
+            .without_projection_replay_version_stamp()
             .admin_database("postgres")
             .pool_max_connections(5)
             .parse_context("failed to parse database URL for projection apply claim tests")
@@ -189,15 +194,9 @@ async fn pre_fence_publish_sql_is_rejected_after_newer_replay_admission() -> Res
         "legacy publish refusal must be loud and fatal, got: {error}"
     );
 
-    let outdated_options = database
-        .pool()
-        .connect_options()
-        .as_ref()
-        .clone()
-        .options([(
-            "bigname.projection_replay_version",
-            bigname_storage::CURRENT_PROJECTION_REPLAY_VERSION.to_string(),
-        )]);
+    let outdated_options = bigname_storage::stamp_projection_replay_version(
+        database.pool().connect_options().as_ref().clone(),
+    );
     let mut outdated_connection = sqlx::PgConnection::connect_with(&outdated_options).await?;
     let error = sqlx::query(LEGACY_PUBLISH_SQL)
         .execute(&mut outdated_connection)
@@ -471,15 +470,9 @@ async fn current_indexer_invalidation_upsert_waits_for_replay_admission() -> Res
     )
     .await?;
 
-    let indexer_options = database
-        .pool()
-        .connect_options()
-        .as_ref()
-        .clone()
-        .options([(
-            "bigname.projection_replay_version",
-            bigname_storage::CURRENT_PROJECTION_REPLAY_VERSION.to_string(),
-        )]);
+    let indexer_options = bigname_storage::stamp_projection_replay_version(
+        database.pool().connect_options().as_ref().clone(),
+    );
     let mut indexer_write = tokio::spawn(async move {
         let mut connection = sqlx::PgConnection::connect_with(&indexer_options).await?;
         sqlx::query(
@@ -539,15 +532,9 @@ async fn outdated_stamped_invalidation_producer_is_rejected() -> Result<()> {
         bigname_storage::CURRENT_PROJECTION_REPLAY_VERSION + 1,
     )
     .await?;
-    let outdated_options = database
-        .pool()
-        .connect_options()
-        .as_ref()
-        .clone()
-        .options([(
-            "bigname.projection_replay_version",
-            bigname_storage::CURRENT_PROJECTION_REPLAY_VERSION.to_string(),
-        )]);
+    let outdated_options = bigname_storage::stamp_projection_replay_version(
+        database.pool().connect_options().as_ref().clone(),
+    );
     let mut outdated_connection = sqlx::PgConnection::connect_with(&outdated_options).await?;
 
     let error = sqlx::query(

@@ -9,3 +9,8 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 sqlx.workspace = true
+
+bigname-storage.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

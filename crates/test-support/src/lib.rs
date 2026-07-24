@@ -46,7 +46,7 @@ pub struct TestDatabaseConfig {
     admin_database: Option<String>,
     admin_max_connections: u32,
     pool_max_connections: u32,
-    connection_options: Vec<(String, String)>,
+    stamp_projection_replay_version: bool,
     parse_context: String,
     admin_connect_context: String,
     pool_connect_context: String,
@@ -59,7 +59,7 @@ impl TestDatabaseConfig {
             admin_database: Some("postgres".to_owned()),
             admin_max_connections: 1,
             pool_max_connections: 5,
-            connection_options: Vec::new(),
+            stamp_projection_replay_version: true,
             parse_context: "failed to parse database URL for tests".to_owned(),
             admin_connect_context: "failed to connect admin pool for tests".to_owned(),
             pool_connect_context: "failed to connect test pool".to_owned(),
@@ -86,8 +86,13 @@ impl TestDatabaseConfig {
         self
     }
 
-    pub fn connection_option(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        self.connection_options.push((name.into(), value.into()));
+    /// Leave the writable test pool unstamped to exercise behavior from before the
+    /// [projection replay-version fence](../../../docs/glossary.md#projection-replay-version-fence).
+    ///
+    /// Normal test databases must keep the default stamp. This escape hatch exists only for
+    /// replay-version fence tests that deliberately emulate an old process.
+    pub fn without_projection_replay_version_stamp(mut self) -> Self {
+        self.stamp_projection_replay_version = false;
         self
     }
 
@@ -119,10 +124,12 @@ impl TestDatabase {
         let base_options =
             PgConnectOptions::from_str(&database_url).context(config.parse_context.clone())?;
         let database_name = unique_database_name(&config.name_prefix)?;
-        let admin_options = match config.admin_database.as_deref() {
-            Some(database) => base_options.clone().database(database),
-            None => base_options.clone(),
-        };
+        let admin_options = bigname_storage::stamp_projection_replay_version(
+            match config.admin_database.as_deref() {
+                Some(database) => base_options.clone().database(database),
+                None => base_options.clone(),
+            },
+        );
 
         let admin_pool = PgPoolOptions::new()
             .max_connections(config.admin_max_connections)
@@ -144,13 +151,15 @@ impl TestDatabase {
         .await
         .with_context(|| format!("failed to create test database {database_name}"))?;
 
+        let database_options = base_options.database(&database_name);
+        let database_options = if config.stamp_projection_replay_version {
+            bigname_storage::stamp_projection_replay_version(database_options)
+        } else {
+            explicitly_unstamped_projection_replay_version_options_for_test(database_options)
+        };
         let pool = PgPoolOptions::new()
             .max_connections(config.pool_max_connections)
-            .connect_with(
-                base_options
-                    .database(&database_name)
-                    .options(config.connection_options),
-            )
+            .connect_with(database_options)
             .await
             .context(config.pool_connect_context)?;
 
@@ -207,6 +216,16 @@ impl TestDatabase {
     }
 }
 
+/// Mark the sole test-harness escape hatch from the process connection stamp.
+///
+/// Keeping this marker in the options expression lets the workspace constructor audit distinguish
+/// deliberate pre-fence fixtures from accidental unstamped connections.
+fn explicitly_unstamped_projection_replay_version_options_for_test(
+    options: PgConnectOptions,
+) -> PgConnectOptions {
+    options
+}
+
 fn unique_database_name(prefix: &str) -> Result<String> {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -238,4 +257,25 @@ fn truncate_identifier_prefix(prefix: &str, max_bytes: usize) -> String {
 
 fn quote_identifier(identifier: &str) -> String {
     format!(r#""{}""#, identifier.replace('"', r#""""#))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn writable_test_database_connections_carry_projection_replay_version() -> Result<()> {
+        let database =
+            TestDatabase::create(TestDatabaseConfig::new("bigname_test_support_stamp")).await?;
+        let replay_version: String = sqlx::query_scalar("SELECT current_setting($1, true)")
+            .bind(bigname_storage::PROJECTION_REPLAY_VERSION_SETTING)
+            .fetch_one(database.pool())
+            .await?;
+
+        assert_eq!(
+            replay_version,
+            bigname_storage::CURRENT_PROJECTION_REPLAY_VERSION.to_string()
+        );
+        database.cleanup().await
+    }
 }

@@ -44,8 +44,10 @@ impl TestDatabase {
         let database_url = std::env::var("BIGNAME_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| default_database_url().to_owned());
-        let base_options = PgConnectOptions::from_str(&database_url)
-            .context("failed to parse database URL for worker address_names tests")?;
+        let base_options = bigname_storage::stamp_projection_replay_version(
+            PgConnectOptions::from_str(&database_url)
+                .context("failed to parse database URL for worker address_names tests")?,
+        );
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .context("system clock is before unix epoch")?
@@ -69,13 +71,9 @@ impl TestDatabase {
             .await
             .with_context(|| format!("failed to create test database {database_name}"))?;
 
-        let database_options = base_options.database(&database_name).options([(
-            "bigname.projection_replay_version",
-            bigname_storage::CURRENT_PROJECTION_REPLAY_VERSION.to_string(),
-        )]);
         let pool = PgPoolOptions::new()
             .max_connections(5)
-            .connect_with(database_options)
+            .connect_with(base_options.database(&database_name))
             .await
             .context("failed to connect worker address_names test pool")?;
 

@@ -138,7 +138,9 @@ async fn healthz_reports_degraded_within_probe_window_when_health_pool_is_exhaus
     let health_pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
         .acquire_timeout(std::time::Duration::from_secs(10))
-        .connect(&database_url)
+        .connect_with(bigname_storage::stamp_projection_replay_version(
+            database_url.parse()?,
+        ))
         .await?;
     let held_health_connection = health_pool.acquire().await?;
 

@@ -5,7 +5,6 @@ use std::fmt;
 use anyhow::{Context, Result, ensure};
 use sqlx::{Postgres, Transaction};
 
-const PROJECTION_REPLAY_VERSION_SETTING: &str = "bigname.projection_replay_version";
 const FATAL_PROJECTION_REPLAY_VERSION_FENCE: &str = "fatal projection replay version fence";
 
 pub use crate::address_names::{
@@ -150,7 +149,7 @@ async fn stamp_current_projection_replay_version_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> Result<()> {
     sqlx::query("SELECT set_config($1, $2, true)")
-        .bind(PROJECTION_REPLAY_VERSION_SETTING)
+        .bind(crate::PROJECTION_REPLAY_VERSION_SETTING)
         .bind(crate::CURRENT_PROJECTION_REPLAY_VERSION.to_string())
         .execute(&mut **transaction)
         .await

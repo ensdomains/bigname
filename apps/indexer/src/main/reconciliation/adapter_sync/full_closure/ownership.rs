@@ -19,7 +19,9 @@ where
     // processes already retain one pool connection for the Base correction
     // writer guard, and full-closure adapters need the pool while this
     // cross-process ownership fence is held.
-    let mut connection = PgConnection::connect_with(pool.connect_options().as_ref())
+    let connect_options =
+        bigname_storage::stamp_projection_replay_version(pool.connect_options().as_ref().clone());
+    let mut connection = PgConnection::connect_with(&connect_options)
         .await
         .context("failed to connect the full-closure replay ownership fence")?;
     let lock_identity = format!("bigname:indexer:full-closure-replay:{deployment_profile}:{chain}");

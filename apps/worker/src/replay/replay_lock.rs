@@ -27,7 +27,8 @@ pub(crate) async fn release_replay_lock(connection: &mut PoolConnection<Postgres
 pub(crate) async fn try_acquire_dedicated_replay_lock(
     pool: &PgPool,
 ) -> Result<Option<PgConnection>> {
-    let connect_options = pool.connect_options();
+    let connect_options =
+        bigname_storage::stamp_projection_replay_version(pool.connect_options().as_ref().clone());
     let mut connection = timeout(
         REPLAY_LOCK_CONNECT_TIMEOUT,
         PgConnection::connect_with(&connect_options),

@@ -27,7 +27,9 @@ async fn main() -> Result<()> {
         .context("DATABASE_URL or BIGNAME_DATABASE_URL must be set")?;
     let pool = PgPoolOptions::new()
         .max_connections(5)
-        .connect(&database_url)
+        .connect_with(bigname_storage::stamp_projection_replay_version(
+            database_url.parse()?,
+        ))
         .await
         .context("failed to connect to database")?;
 

@@ -490,22 +490,21 @@ async fn normalization_repair_racing_publication_cannot_leave_a_fresh_marker_on_
     });
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            let revision_advance_is_waiting = sqlx::query_scalar::<_, bool>(
+            let repair_is_waiting_at_replay_fence = sqlx::query_scalar::<_, bool>(
                 r#"
                 SELECT EXISTS (
                     SELECT 1
                     FROM pg_stat_activity
                     WHERE datname = current_database()
                       AND pid <> pg_backend_pid()
-                      AND query LIKE
-                          '%UPDATE current_projection_full_replay_input_revision%'
+                      AND query LIKE '%current_projection_full_replay_input_revision%'
                       AND wait_event_type = 'Lock'
                 )
                 "#,
             )
             .fetch_one(database.pool())
             .await?;
-            if revision_advance_is_waiting {
+            if repair_is_waiting_at_replay_fence {
                 return Ok::<_, anyhow::Error>(());
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;

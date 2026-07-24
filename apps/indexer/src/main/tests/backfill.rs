@@ -427,7 +427,9 @@ async fn large_backfill_source_identities_match_pre_heartbeat_values() -> Result
         "source_identity_hash": "fnv1a64:8be4681e2c671f3a",
     });
 
-    let pool = PgPoolOptions::new().connect_lazy(default_database_url())?;
+    let pool = PgPoolOptions::new().connect_lazy_with(
+        bigname_storage::stamp_projection_replay_version(default_database_url().parse()?),
+    );
     let mut progress = CountingSourceIdentityProgress::default();
 
     source_plan.selector_kind = WatchedSourceSelectorKind::SourceFamily;

@@ -42,7 +42,8 @@ pub(super) async fn acquire_invalidation_apply_locks_with_timeout(
         &mut version_fence,
     )
     .await?;
-    let connect_options = pool.connect_options();
+    let connect_options =
+        bigname_storage::stamp_projection_replay_version(pool.connect_options().as_ref().clone());
     let mut conn = timeout(
         APPLY_LOCK_CONNECT_TIMEOUT,
         PgConnection::connect_with(&connect_options),
@@ -139,7 +140,9 @@ pub(super) async fn ensure_invalidation_apply_locks_probe_alive_for_test(
 pub(super) async fn open_invalidation_apply_locks_connection_for_test(
     pool: &PgPool,
 ) -> Result<PgConnection> {
-    PgConnection::connect_with(&pool.connect_options())
+    let connect_options =
+        bigname_storage::stamp_projection_replay_version(pool.connect_options().as_ref().clone());
+    PgConnection::connect_with(&connect_options)
         .await
         .context("failed to open projection invalidation apply lock test connection")
 }

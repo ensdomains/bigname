@@ -38,8 +38,10 @@ impl TestDatabase {
         let database_url = std::env::var("BIGNAME_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| default_database_url().to_owned());
-        let base_options = PgConnectOptions::from_str(&database_url)
-            .context("failed to parse database URL for worker primary_names_current tests")?;
+        let base_options = bigname_storage::stamp_projection_replay_version(
+            PgConnectOptions::from_str(&database_url)
+                .context("failed to parse database URL for worker primary_names_current tests")?,
+        );
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .context("system clock is before unix epoch")?
@@ -58,10 +60,7 @@ impl TestDatabase {
             .await
             .with_context(|| format!("failed to create test database {database_name}"))?;
 
-        let connect_options = base_options.database(&database_name).options([(
-            "bigname.projection_replay_version",
-            bigname_storage::CURRENT_PROJECTION_REPLAY_VERSION.to_string(),
-        )]);
+        let connect_options = base_options.database(&database_name);
         let pool = PgPoolOptions::new()
             .max_connections(max_connections)
             .connect_with(connect_options.clone())
@@ -94,7 +93,9 @@ impl TestDatabase {
     pub(super) fn independent_pool(&self, max_connections: u32) -> PgPool {
         PgPoolOptions::new()
             .max_connections(max_connections)
-            .connect_lazy_with(self.connect_options.clone())
+            .connect_lazy_with(bigname_storage::stamp_projection_replay_version(
+                self.connect_options.clone(),
+            ))
     }
 
     pub(super) async fn cleanup(self) -> Result<()> {
