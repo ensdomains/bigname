@@ -46,6 +46,7 @@ pub struct TestDatabaseConfig {
     admin_database: Option<String>,
     admin_max_connections: u32,
     pool_max_connections: u32,
+    connection_options: Vec<(String, String)>,
     parse_context: String,
     admin_connect_context: String,
     pool_connect_context: String,
@@ -58,6 +59,7 @@ impl TestDatabaseConfig {
             admin_database: Some("postgres".to_owned()),
             admin_max_connections: 1,
             pool_max_connections: 5,
+            connection_options: Vec::new(),
             parse_context: "failed to parse database URL for tests".to_owned(),
             admin_connect_context: "failed to connect admin pool for tests".to_owned(),
             pool_connect_context: "failed to connect test pool".to_owned(),
@@ -81,6 +83,11 @@ impl TestDatabaseConfig {
 
     pub fn pool_max_connections(mut self, max_connections: u32) -> Self {
         self.pool_max_connections = max_connections;
+        self
+    }
+
+    pub fn connection_option(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.connection_options.push((name.into(), value.into()));
         self
     }
 
@@ -139,7 +146,11 @@ impl TestDatabase {
 
         let pool = PgPoolOptions::new()
             .max_connections(config.pool_max_connections)
-            .connect_with(base_options.database(&database_name))
+            .connect_with(
+                base_options
+                    .database(&database_name)
+                    .options(config.connection_options),
+            )
             .await
             .context(config.pool_connect_context)?;
 

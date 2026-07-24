@@ -6,6 +6,10 @@ use tokio::time::{Duration, sleep};
 async fn test_database() -> Result<TestDatabase> {
     TestDatabase::create_migrated(
         TestDatabaseConfig::new("bigname_worker_auto_replay_test")
+            .connection_option(
+                "bigname.projection_replay_version",
+                bigname_storage::CURRENT_PROJECTION_REPLAY_VERSION.to_string(),
+            )
             .parse_context("failed to parse database URL for automatic projection replay tests")
             .admin_connect_context(
                 "failed to connect admin pool for automatic projection replay tests",
@@ -21,6 +25,10 @@ async fn two_connection_test_database() -> Result<TestDatabase> {
     TestDatabase::create_migrated(
         TestDatabaseConfig::new("bigname_worker_auto_replay_two_connection_test")
             .pool_max_connections(2)
+            .connection_option(
+                "bigname.projection_replay_version",
+                bigname_storage::CURRENT_PROJECTION_REPLAY_VERSION.to_string(),
+            )
             .parse_context(
                 "failed to parse database URL for two-connection automatic projection replay test",
             )

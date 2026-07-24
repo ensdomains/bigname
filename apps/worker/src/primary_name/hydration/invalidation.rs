@@ -17,6 +17,10 @@ pub(super) async fn upsert_changed_hydration_snapshots(
         .begin()
         .await
         .context("failed to open legacy reverse hydration publish transaction")?;
+    bigname_storage::projection_staging::lock_current_projection_replay_version_for_projection_write_in_transaction(
+        &mut transaction,
+    )
+    .await?;
     let mut ordered_snapshots = snapshots.iter().collect::<Vec<_>>();
     ordered_snapshots.sort_by(|left, right| {
         (
@@ -74,6 +78,10 @@ pub(super) async fn delete_verified_primary_name_hydration_row(
         .begin()
         .await
         .context("failed to open legacy reverse hydration delete transaction")?;
+    bigname_storage::projection_staging::lock_current_projection_replay_version_for_projection_write_in_transaction(
+        &mut transaction,
+    )
+    .await?;
     lock_primary_name_tuple_in_transaction(
         &mut transaction,
         &key.address,

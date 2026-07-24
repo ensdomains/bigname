@@ -321,6 +321,10 @@ pub(super) async fn derive_normalized_event_invalidations_through(
         .begin()
         .await
         .context("failed to open projection invalidation transaction")?;
+    bigname_storage::projection_staging::lock_current_projection_replay_version_for_projection_write_in_transaction(
+        &mut transaction,
+    )
+    .await?;
     sqlx::query(
         r#"
         SELECT set_config(

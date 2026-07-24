@@ -54,6 +54,14 @@ pub(super) async fn refresh_claimed_invalidation_claim(
     pool: &PgPool,
     invalidation: &ClaimedInvalidation,
 ) -> Result<()> {
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to open projection invalidation claim-heartbeat transaction")?;
+    bigname_storage::projection_staging::lock_current_projection_replay_version_for_projection_write_in_transaction(
+        &mut transaction,
+    )
+    .await?;
     sqlx::query(
         r#"
         UPDATE projection_invalidations
@@ -66,7 +74,7 @@ pub(super) async fn refresh_claimed_invalidation_claim(
     .bind(&invalidation.projection)
     .bind(&invalidation.projection_key)
     .bind(invalidation.claim_token)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .with_context(|| {
         format!(
@@ -75,7 +83,10 @@ pub(super) async fn refresh_claimed_invalidation_claim(
         )
     })?;
 
-    Ok(())
+    transaction
+        .commit()
+        .await
+        .context("failed to commit projection invalidation claim heartbeat")
 }
 
 pub(super) async fn claim_pending_invalidations(
@@ -83,6 +94,14 @@ pub(super) async fn claim_pending_invalidations(
     batch_limit: i64,
     claim_token: Uuid,
 ) -> Result<Vec<ClaimedInvalidation>> {
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to open projection invalidation claim transaction")?;
+    bigname_storage::projection_staging::lock_current_projection_replay_version_for_projection_write_in_transaction(
+        &mut transaction,
+    )
+    .await?;
     let rows = sqlx::query(
         r#"
         WITH unclaimed_candidates AS (
@@ -203,9 +222,13 @@ pub(super) async fn claim_pending_invalidations(
     .bind(FAILURE_RETRY_DELAY)
     .bind(CLAIM_RETRY_DELAY)
     .bind(claim_token)
-    .fetch_all(pool)
+    .fetch_all(&mut *transaction)
     .await
     .context("failed to claim projection invalidations")?;
+    transaction
+        .commit()
+        .await
+        .context("failed to commit projection invalidation claim")?;
 
     rows.into_iter()
         .map(|row| {
