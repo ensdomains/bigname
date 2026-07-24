@@ -1341,8 +1341,30 @@ and retained direct-invalidation revision make it post-replay incremental apply
 work. A stamped enqueue can therefore cross a concurrent floor raise based on
 the previously committed floor, but it publishes no projection or replay state;
 the current worker reapplies the requested key, and a later statement from a
-now-lower version is rejected. Queue `TRUNCATE` and unstamped queue writers
-remain non-waiting.
+now-lower version is rejected. The trigger enforces `READ COMMITTED` for this
+exception so that the next queue-writing statement sees a newly committed
+floor; a transaction using a longer-lived snapshot fails fatally rather than
+widening the crossing-write window. Queue `TRUNCATE` and unstamped queue
+writers remain non-waiting.
+
+Identity canonicality and readability changes on `resources`,
+`name_surfaces`, `surface_bindings`, and `token_lineages` can recompute
+`address_names_current_identity_counts` and
+`address_names_current_identity_feed`. Those mutable sidecars do not use the
+queue's committed-floor exception. Address-name full replay truncates and
+rebuilds both from the published projection and current identity state, but an
+older statement snapshot allowed to cross publication could later overwrite
+that rebuild without leaving a durable work item for another recomputation.
+Waiting for the singleton is also unsafe: the identity transaction can already
+hold a normalized-event, permission-resource, or direct-invalidation journal
+lock while the replay owner holds the singleton and waits to take `SHARE` on
+that journal. The sidecar triggers therefore retain the non-waiting admission
+check. Current-version indexer identity transactions retry the entire failed
+transaction with a fresh `READ COMMITTED` snapshot and bounded backoff; an
+admission collision is not recorded as a cursor or range failure unless that
+retry budget is exhausted. Canonicality flips may consequently retry during
+full-replay admission windows without publishing partial identity or sidecar
+state.
 
 `current_projection_staging_checkpoints` is the earlier, per-family stage of that worker progress. One row records the projection replay version, a staging-schema version, the exact normalized target, the `current_projection_full_replay_input_revision` value, the normalized-event change-log prefix, direct-invalidation revision, and permission-resource revision validated for its completed source range, dynamically named logged stage tables, the last completed ordered source key, source and output counts, and `running` or `staging_complete` state. Before each fresh keyset-paged source query, the worker captures complete watermarks and checks projection-relevant keys through the stored cursor. A page transaction commits its stage rows, cursor, counts, and new validated watermarks together. After an empty final page, it captures fresh watermarks and repeats the check across the full source range before marking the stage complete. Immediately before replacing the live projection, the publication transaction captures fresh watermarks and repeats that full-range check again. Its `SHARE` locks on all three input journals remain held through the live-table commit, so a relevant invalidation or permission-resource change that was in flight after staging completion either commits first and forces a fresh stage or waits until publication commits and remains incremental apply work. The dynamic tables intentionally survive connection loss and worker or database-backend termination; they are not temporary or unlogged tables. Their extra `inserted_at` value is stage-only and uses a deterministic epoch default, while publication selects only the declared projection columns and lets the target table own its insertion timestamp.
 

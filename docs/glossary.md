@@ -232,14 +232,16 @@ transaction holds the exclusive side while it activates or raises the minimum.
 This exclusive step is called *replay admission*, and a process that implements
 the connection stamp and transaction checks is *fence-aware*. A stamp below the
 committed minimum or a missing stamp cannot commit protected writes. Stamped
-invalidation-queue DML is the narrow lock-free exception: it checks the
-committed minimum without waiting for concurrent replay admission because its
-durable row and generation journal make it post-replay apply work. A
-fence-aware worker exits on an outdated-version refusal or any other fatal fence
-failure, including missing singleton state and an invalid stamp. Only a current,
-validly stamped writer that loses the non-waiting admission race retries. A
-binary from before the fence existed cannot acquire a stamp and remains blocked,
-but may keep retrying until its operator or supervisor replaces it.
+invalidation-queue DML running at `READ COMMITTED` is the narrow lock-free
+exception: it checks the committed minimum without waiting for concurrent
+replay admission because its durable row and generation journal make it
+post-replay apply work. The database rejects this exception at transaction
+isolation levels with a longer-lived snapshot. A fence-aware worker exits on an
+outdated-version refusal or any other fatal fence failure, including missing
+singleton state and an invalid stamp. Only a current, validly stamped writer
+that loses the non-waiting admission race retries. A binary from before the
+fence existed cannot acquire a stamp and remains blocked, but may keep retrying
+until its operator or supervisor replaces it.
 
 **Raw-code baseline** — the capped per-chain sweep that records at least one
 non-orphaned code observation for each address in the active watch plan. Each

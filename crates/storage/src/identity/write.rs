@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, future::Future};
 
 use anyhow::{Context, Result};
 use sqlx::{Error as SqlxError, PgPool};
@@ -26,11 +26,24 @@ pub async fn upsert_token_lineages(
     pool: &PgPool,
     token_lineages: &[TokenLineage],
 ) -> Result<Vec<TokenLineage>> {
+    crate::projection_staging::retry_projection_replay_admission(|| {
+        retry_identity_row_path_upsert(|| upsert_token_lineages_once(pool, token_lineages))
+    })
+    .await
+}
+
+async fn retry_identity_row_path_upsert<T, Operation, OperationFuture>(
+    mut operation: Operation,
+) -> Result<T>
+where
+    Operation: FnMut() -> OperationFuture,
+    OperationFuture: Future<Output = Result<T>>,
+{
     let mut attempt = 1;
     loop {
-        match upsert_token_lineages_once(pool, token_lineages).await {
-            Ok(snapshots) => return Ok(snapshots),
-            Err(error) if retry_identity_row_path_upsert(&error, attempt) => {
+        match operation().await {
+            Ok(value) => return Ok(value),
+            Err(error) if should_retry_identity_row_path_upsert(&error, attempt) => {
                 attempt += 1;
             }
             Err(error) => return Err(error),
@@ -79,34 +92,38 @@ pub async fn upsert_token_lineages_without_snapshots(
     token_lineages: &[TokenLineage],
 ) -> Result<()> {
     for chunk in token_lineages.chunks(IDENTITY_UPSERT_WITHOUT_SNAPSHOTS_BATCH_SIZE) {
-        let mut transaction = pool
-            .begin()
-            .await
-            .context("failed to open transaction for token-lineage no-snapshot upsert")?;
-        for token_lineage in chunk {
-            validate_token_lineage(token_lineage)?;
-        }
-        bulk_upsert_token_lineages_without_snapshots(&mut transaction, chunk).await?;
-        transaction
-            .commit()
-            .await
-            .context("failed to commit token-lineage no-snapshot upsert")?;
+        crate::projection_staging::retry_projection_replay_admission(|| {
+            upsert_token_lineages_without_snapshots_chunk(pool, chunk)
+        })
+        .await?;
     }
     Ok(())
 }
 
+async fn upsert_token_lineages_without_snapshots_chunk(
+    pool: &PgPool,
+    token_lineages: &[TokenLineage],
+) -> Result<()> {
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to open transaction for token-lineage no-snapshot upsert")?;
+    for token_lineage in token_lineages {
+        validate_token_lineage(token_lineage)?;
+    }
+    bulk_upsert_token_lineages_without_snapshots(&mut transaction, token_lineages).await?;
+    transaction
+        .commit()
+        .await
+        .context("failed to commit token-lineage no-snapshot upsert")
+}
+
 /// Insert missing resource rows or anchor an existing resource to a token lineage.
 pub async fn upsert_resources(pool: &PgPool, resources: &[Resource]) -> Result<Vec<Resource>> {
-    let mut attempt = 1;
-    loop {
-        match upsert_resources_once(pool, resources).await {
-            Ok(snapshots) => return Ok(snapshots),
-            Err(error) if retry_identity_row_path_upsert(&error, attempt) => {
-                attempt += 1;
-            }
-            Err(error) => return Err(error),
-        }
-    }
+    crate::projection_staging::retry_projection_replay_admission(|| {
+        retry_identity_row_path_upsert(|| upsert_resources_once(pool, resources))
+    })
+    .await
 }
 
 async fn upsert_resources_once(pool: &PgPool, resources: &[Resource]) -> Result<Vec<Resource>> {
@@ -146,20 +163,30 @@ pub async fn upsert_resources_without_snapshots(
     resources: &[Resource],
 ) -> Result<()> {
     for chunk in resources.chunks(IDENTITY_UPSERT_WITHOUT_SNAPSHOTS_BATCH_SIZE) {
-        let mut transaction = pool
-            .begin()
-            .await
-            .context("failed to open transaction for resource no-snapshot upsert")?;
-        for resource in chunk {
-            validate_resource(resource)?;
-        }
-        bulk_upsert_resources_without_snapshots(&mut transaction, chunk).await?;
-        transaction
-            .commit()
-            .await
-            .context("failed to commit resource no-snapshot upsert")?;
+        crate::projection_staging::retry_projection_replay_admission(|| {
+            upsert_resources_without_snapshots_chunk(pool, chunk)
+        })
+        .await?;
     }
     Ok(())
+}
+
+async fn upsert_resources_without_snapshots_chunk(
+    pool: &PgPool,
+    resources: &[Resource],
+) -> Result<()> {
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to open transaction for resource no-snapshot upsert")?;
+    for resource in resources {
+        validate_resource(resource)?;
+    }
+    bulk_upsert_resources_without_snapshots(&mut transaction, resources).await?;
+    transaction
+        .commit()
+        .await
+        .context("failed to commit resource no-snapshot upsert")
 }
 
 /// Insert missing canonical surface rows or refresh canonicality on re-observation.
@@ -167,16 +194,10 @@ pub async fn upsert_name_surfaces(
     pool: &PgPool,
     name_surfaces: &[NameSurface],
 ) -> Result<Vec<NameSurface>> {
-    let mut attempt = 1;
-    loop {
-        match upsert_name_surfaces_once(pool, name_surfaces).await {
-            Ok(snapshots) => return Ok(snapshots),
-            Err(error) if retry_identity_row_path_upsert(&error, attempt) => {
-                attempt += 1;
-            }
-            Err(error) => return Err(error),
-        }
-    }
+    crate::projection_staging::retry_projection_replay_admission(|| {
+        retry_identity_row_path_upsert(|| upsert_name_surfaces_once(pool, name_surfaces))
+    })
+    .await
 }
 
 async fn upsert_name_surfaces_once(
@@ -229,27 +250,40 @@ pub async fn upsert_name_surfaces_without_snapshots(
     name_surfaces: &[NameSurface],
 ) -> Result<()> {
     for chunk in name_surfaces.chunks(IDENTITY_UPSERT_WITHOUT_SNAPSHOTS_BATCH_SIZE) {
-        let mut transaction = pool
-            .begin()
-            .await
-            .context("failed to open transaction for name-surface no-snapshot upsert")?;
-        for name_surface in chunk {
-            validate_name_surface(name_surface)?;
-        }
-        bulk_upsert_name_surfaces_without_snapshots(&mut transaction, chunk).await?;
-        crate::label_preimages::upsert_label_preimages_from_name_surfaces(&mut transaction, chunk)
-            .await?;
-        crate::children::enqueue_children_current_invalidations_for_parent_surfaces(
-            &mut transaction,
-            chunk,
-        )
+        crate::projection_staging::retry_projection_replay_admission(|| {
+            upsert_name_surfaces_without_snapshots_chunk(pool, chunk)
+        })
         .await?;
-        transaction
-            .commit()
-            .await
-            .context("failed to commit name-surface no-snapshot upsert")?;
     }
     Ok(())
+}
+
+async fn upsert_name_surfaces_without_snapshots_chunk(
+    pool: &PgPool,
+    name_surfaces: &[NameSurface],
+) -> Result<()> {
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to open transaction for name-surface no-snapshot upsert")?;
+    for name_surface in name_surfaces {
+        validate_name_surface(name_surface)?;
+    }
+    bulk_upsert_name_surfaces_without_snapshots(&mut transaction, name_surfaces).await?;
+    crate::label_preimages::upsert_label_preimages_from_name_surfaces(
+        &mut transaction,
+        name_surfaces,
+    )
+    .await?;
+    crate::children::enqueue_children_current_invalidations_for_parent_surfaces(
+        &mut transaction,
+        name_surfaces,
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .context("failed to commit name-surface no-snapshot upsert")
 }
 
 /// Insert missing surface-binding rows or close an existing open interval.
@@ -257,16 +291,10 @@ pub async fn upsert_surface_bindings(
     pool: &PgPool,
     bindings: &[SurfaceBinding],
 ) -> Result<Vec<SurfaceBinding>> {
-    let mut attempt = 1;
-    loop {
-        match upsert_surface_bindings_once(pool, bindings).await {
-            Ok(snapshots) => return Ok(snapshots),
-            Err(error) if retry_identity_row_path_upsert(&error, attempt) => {
-                attempt += 1;
-            }
-            Err(error) => return Err(error),
-        }
-    }
+    crate::projection_staging::retry_projection_replay_admission(|| {
+        retry_identity_row_path_upsert(|| upsert_surface_bindings_once(pool, bindings))
+    })
+    .await
 }
 
 async fn upsert_surface_bindings_once(
@@ -322,7 +350,7 @@ async fn upsert_surface_bindings_once(
     Ok(snapshots)
 }
 
-fn retry_identity_row_path_upsert(error: &anyhow::Error, attempt: usize) -> bool {
+fn should_retry_identity_row_path_upsert(error: &anyhow::Error, attempt: usize) -> bool {
     attempt < IDENTITY_ROW_PATH_UPSERT_MAX_ATTEMPTS
         && error.chain().any(|cause| {
             matches!(
@@ -339,35 +367,45 @@ pub async fn upsert_surface_bindings_without_snapshots(
     bindings: &[SurfaceBinding],
 ) -> Result<()> {
     for chunk in bindings.chunks(IDENTITY_UPSERT_WITHOUT_SNAPSHOTS_BATCH_SIZE) {
-        let mut transaction = pool
-            .begin()
-            .await
-            .context("failed to open transaction for surface-binding no-snapshot upsert")?;
-        for binding in chunk {
-            validate_surface_binding(binding)?;
-        }
-        let existing_ids = load_existing_surface_binding_ids(&mut transaction, chunk).await?;
-        let mut existing_bindings = Vec::new();
-        let mut new_bindings = Vec::new();
-        for binding in chunk {
-            if existing_ids.contains(&binding.surface_binding_id) {
-                existing_bindings.push(binding.clone());
-            } else {
-                new_bindings.push(binding.clone());
-            }
-        }
-
-        if !existing_bindings.is_empty() {
-            bulk_upsert_surface_bindings_without_snapshots(&mut transaction, &existing_bindings)
-                .await?;
-        }
-        if !new_bindings.is_empty() {
-            bulk_upsert_surface_bindings_without_snapshots(&mut transaction, &new_bindings).await?;
-        }
-        transaction
-            .commit()
-            .await
-            .context("failed to commit surface-binding no-snapshot upsert")?;
+        crate::projection_staging::retry_projection_replay_admission(|| {
+            upsert_surface_bindings_without_snapshots_chunk(pool, chunk)
+        })
+        .await?;
     }
     Ok(())
+}
+
+async fn upsert_surface_bindings_without_snapshots_chunk(
+    pool: &PgPool,
+    bindings: &[SurfaceBinding],
+) -> Result<()> {
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to open transaction for surface-binding no-snapshot upsert")?;
+    for binding in bindings {
+        validate_surface_binding(binding)?;
+    }
+    let existing_ids = load_existing_surface_binding_ids(&mut transaction, bindings).await?;
+    let mut existing_bindings = Vec::new();
+    let mut new_bindings = Vec::new();
+    for binding in bindings {
+        if existing_ids.contains(&binding.surface_binding_id) {
+            existing_bindings.push(binding.clone());
+        } else {
+            new_bindings.push(binding.clone());
+        }
+    }
+
+    if !existing_bindings.is_empty() {
+        bulk_upsert_surface_bindings_without_snapshots(&mut transaction, &existing_bindings)
+            .await?;
+    }
+    if !new_bindings.is_empty() {
+        bulk_upsert_surface_bindings_without_snapshots(&mut transaction, &new_bindings).await?;
+    }
+    transaction
+        .commit()
+        .await
+        .context("failed to commit surface-binding no-snapshot upsert")
 }

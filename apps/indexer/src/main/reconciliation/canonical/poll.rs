@@ -121,6 +121,9 @@ async fn poll_provider_heads_with_adapter_sync_inner(
             continue;
         };
         let mut coverage_recovery_attempt = 0_usize;
+        // Keep replay-admission collisions out of the live-poll failure path. Each retry starts
+        // fresh storage transactions and retains the unchanged intake task.
+        let mut replay_admission_attempt = 1_usize;
         loop {
             match reconcile_intake_chain_task_with_adapter_sync_and_progress(
                 pool,
@@ -147,6 +150,15 @@ async fn poll_provider_heads_with_adapter_sync_inner(
                 }
                 Ok(None) => break,
                 Err(error) => {
+                    if bigname_storage::projection_staging::wait_for_projection_replay_admission_retry(
+                        &error,
+                        replay_admission_attempt,
+                    )
+                    .await
+                    {
+                        replay_admission_attempt += 1;
+                        continue;
+                    }
                     let Some(requirement) = live_coverage_requirement(&error) else {
                         warn!(
                             service = "indexer",
@@ -214,6 +226,17 @@ async fn poll_provider_heads_with_adapter_sync_inner(
                             );
                         }
                         Err(recovery_error) => {
+                            if bigname_storage::projection_staging::wait_for_projection_replay_admission_retry(
+                                &recovery_error,
+                                replay_admission_attempt,
+                            )
+                            .await
+                            {
+                                replay_admission_attempt += 1;
+                                coverage_recovery_attempt =
+                                    coverage_recovery_attempt.saturating_sub(1);
+                                continue;
+                            }
                             warn!(
                                 service = "indexer",
                                 command = "poll",

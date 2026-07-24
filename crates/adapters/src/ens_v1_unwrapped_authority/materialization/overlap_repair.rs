@@ -1,4 +1,5 @@
 use super::*;
+use bigname_storage::projection_staging::retry_projection_replay_admission;
 
 pub(crate) async fn close_weaker_overlapping_existing_surface_bindings(
     pool: &PgPool,
@@ -23,6 +24,35 @@ pub(crate) async fn close_weaker_overlapping_existing_surface_bindings(
         authority_ranks.push(i16::from(surface_binding_authority_rank(binding)));
     }
 
+    let rows = retry_projection_replay_admission(|| {
+        close_weaker_overlapping_existing_surface_bindings_once(
+            pool,
+            &surface_binding_ids,
+            &logical_name_ids,
+            &active_froms,
+            &authority_ranks,
+        )
+    })
+    .await?;
+
+    if !rows.is_empty() {
+        tracing::warn!(
+            adapter = DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
+            repaired_surface_binding_overlap_count = rows.len(),
+            "closed weaker overlapping surface bindings before authority replay"
+        );
+    }
+
+    Ok(rows.len())
+}
+
+async fn close_weaker_overlapping_existing_surface_bindings_once(
+    pool: &PgPool,
+    surface_binding_ids: &[Uuid],
+    logical_name_ids: &[String],
+    active_froms: &[OffsetDateTime],
+    authority_ranks: &[i16],
+) -> Result<Vec<(Uuid, String)>> {
     let mut transaction = pool
         .begin()
         .await
@@ -84,10 +114,10 @@ pub(crate) async fn close_weaker_overlapping_existing_surface_bindings(
             surface_bindings.logical_name_id
         "#,
     )
-    .bind(&surface_binding_ids)
-    .bind(&logical_name_ids)
-    .bind(&active_froms)
-    .bind(&authority_ranks)
+    .bind(surface_binding_ids)
+    .bind(logical_name_ids)
+    .bind(active_froms)
+    .bind(authority_ranks)
     .bind(DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY)
     .fetch_all(transaction.as_mut())
     .await
@@ -98,12 +128,7 @@ pub(crate) async fn close_weaker_overlapping_existing_surface_bindings(
             .commit()
             .await
             .context("failed to commit overlapping surface-binding closure transaction")?;
-        tracing::warn!(
-            adapter = DERIVATION_KIND_ENS_V1_UNWRAPPED_AUTHORITY,
-            repaired_surface_binding_overlap_count = rows.len(),
-            "closed weaker overlapping surface bindings before authority replay"
-        );
     }
 
-    Ok(rows.len())
+    Ok(rows)
 }

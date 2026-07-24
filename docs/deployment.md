@@ -174,13 +174,17 @@ terminates and replaces it. A current, validly stamped statement that finds
 replay admission holding the singleton receives the one retryable admission
 error instead of a fatal fence error.
 
-The invalidation queue is also an indexer-to-worker handoff. Its stamped DML
-reads the committed activation state and version floor without taking the
-singleton row lock, avoiding a lock-order cycle when ingestion already owns a
-staging input journal lock. An enqueue that commits before replay captures the
-journals participates in the replay drift check; an enqueue that commits after
-that capture remains durable post-replay apply work. Queue `TRUNCATE` and
-unstamped queue writers retain the non-waiting singleton-lock path.
+The invalidation queue is also an indexer-to-worker handoff. Its stamped DML at
+`READ COMMITTED` reads the committed activation state and version floor without
+taking the singleton row lock, avoiding a lock-order cycle when ingestion
+already owns a staging input journal lock. An enqueue that commits before
+replay captures the journals participates in the replay drift check; an enqueue
+that commits after that capture remains durable post-replay apply work. Roles,
+database defaults, and explicit transactions used by stamped queue producers
+must therefore retain PostgreSQL's `READ COMMITTED` isolation; the trigger
+fails a queue-writing statement at any isolation level with a longer-lived
+snapshot. Queue `TRUNCATE` and unstamped queue writers retain the non-waiting
+singleton-lock path.
 
 The worker also compares its compiled version with the durable minimum and
 every persisted attempt, checkpoint, and marker inside claim and replay

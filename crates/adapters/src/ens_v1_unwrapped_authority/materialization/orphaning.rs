@@ -1,4 +1,5 @@
 use super::*;
+use bigname_storage::projection_staging::retry_projection_replay_admission;
 
 pub(super) async fn orphan_stale_overlapping_surface_bindings(
     pool: &PgPool,
@@ -27,11 +28,19 @@ pub(super) async fn orphan_stale_overlapping_surface_bindings(
         block_numbers.push(candidate.block_number);
     }
 
-    let mut transaction = pool
-        .begin()
-        .await
-        .context("failed to open stale surface-binding orphaning transaction")?;
-    let rows = sqlx::query_as::<_, (Uuid, String)>(
+    let surface_binding_ids = surface_binding_ids.as_slice();
+    let resource_ids = resource_ids.as_slice();
+    let logical_name_ids = logical_name_ids.as_slice();
+    let authority_keys = authority_keys.as_slice();
+    let active_from_epochs = active_from_epochs.as_slice();
+    let block_hashes = block_hashes.as_slice();
+    let block_numbers = block_numbers.as_slice();
+    let rows = retry_projection_replay_admission(|| async move {
+        let mut transaction = pool
+            .begin()
+            .await
+            .context("failed to open stale surface-binding orphaning transaction")?;
+        let rows = sqlx::query_as::<_, (Uuid, String)>(
         r#"
         WITH candidate(
             surface_binding_id,
@@ -124,18 +133,28 @@ pub(super) async fn orphan_stale_overlapping_surface_bindings(
             surface_bindings.logical_name_id
         "#,
     )
-    .bind(&surface_binding_ids)
-    .bind(&resource_ids)
-    .bind(&logical_name_ids)
-    .bind(&authority_keys)
-    .bind(&active_from_epochs)
-    .bind(&block_hashes)
-    .bind(&block_numbers)
-    .fetch_all(transaction.as_mut())
-    .await
-    .context(
-        "failed to orphan stale overlapping surface bindings before restricted authority replay",
-    )?;
+        .bind(surface_binding_ids)
+        .bind(resource_ids)
+        .bind(logical_name_ids)
+        .bind(authority_keys)
+        .bind(active_from_epochs)
+        .bind(block_hashes)
+        .bind(block_numbers)
+        .fetch_all(transaction.as_mut())
+        .await
+        .context(
+            "failed to orphan stale overlapping surface bindings before restricted authority replay",
+        )?;
+
+        if !rows.is_empty() {
+            transaction
+                .commit()
+                .await
+                .context("failed to commit stale surface-binding orphaning transaction")?;
+        }
+        Ok(rows)
+    })
+    .await?;
 
     if rows.is_empty() {
         return Ok(0);
@@ -145,10 +164,6 @@ pub(super) async fn orphan_stale_overlapping_surface_bindings(
         .iter()
         .map(|(surface_binding_id, _)| *surface_binding_id)
         .collect::<HashSet<_>>();
-    transaction
-        .commit()
-        .await
-        .context("failed to commit stale surface-binding orphaning transaction")?;
     existing.retain(|binding| !orphaned_ids.contains(&binding.surface_binding_id));
 
     tracing::warn!(
@@ -185,11 +200,18 @@ pub(super) async fn orphan_weaker_same_start_surface_bindings(
         active_froms.push(candidate.active_from);
     }
 
-    let mut transaction = pool
-        .begin()
-        .await
-        .context("failed to open weaker same-start surface-binding orphaning transaction")?;
-    let rows = sqlx::query_as::<_, (Uuid, String)>(
+    let surface_binding_ids = surface_binding_ids.as_slice();
+    let logical_name_ids = logical_name_ids.as_slice();
+    let resource_ids = resource_ids.as_slice();
+    let authority_keys = authority_keys.as_slice();
+    let active_from_epochs = active_from_epochs.as_slice();
+    let active_froms = active_froms.as_slice();
+    let rows = retry_projection_replay_admission(|| async move {
+        let mut transaction = pool
+            .begin()
+            .await
+            .context("failed to open weaker same-start surface-binding orphaning transaction")?;
+        let rows = sqlx::query_as::<_, (Uuid, String)>(
         r#"
         WITH candidate(
             surface_binding_id,
@@ -235,17 +257,27 @@ pub(super) async fn orphan_weaker_same_start_surface_bindings(
             surface_bindings.logical_name_id
         "#,
     )
-    .bind(&surface_binding_ids)
-    .bind(&logical_name_ids)
-    .bind(&resource_ids)
-    .bind(&authority_keys)
-    .bind(&active_from_epochs)
-    .bind(&active_froms)
-    .fetch_all(transaction.as_mut())
-    .await
-    .context(
-        "failed to orphan weaker same-start surface bindings before restricted authority replay",
-    )?;
+        .bind(surface_binding_ids)
+        .bind(logical_name_ids)
+        .bind(resource_ids)
+        .bind(authority_keys)
+        .bind(active_from_epochs)
+        .bind(active_froms)
+        .fetch_all(transaction.as_mut())
+        .await
+        .context(
+            "failed to orphan weaker same-start surface bindings before restricted authority replay",
+        )?;
+
+        if !rows.is_empty() {
+            transaction
+                .commit()
+                .await
+                .context("failed to commit weaker same-start surface-binding orphaning transaction")?;
+        }
+        Ok(rows)
+    })
+    .await?;
 
     if rows.is_empty() {
         return Ok(0);
@@ -255,10 +287,6 @@ pub(super) async fn orphan_weaker_same_start_surface_bindings(
         .iter()
         .map(|(surface_binding_id, _)| *surface_binding_id)
         .collect::<HashSet<_>>();
-    transaction
-        .commit()
-        .await
-        .context("failed to commit weaker same-start surface-binding orphaning transaction")?;
     existing.retain(|binding| !orphaned_ids.contains(&binding.surface_binding_id));
 
     tracing::warn!(

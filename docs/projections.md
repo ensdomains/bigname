@@ -278,18 +278,20 @@ transaction already owns the singleton instead of creating a reverse lock-order
 deadlock. A current stamped statement that loses this non-waiting race receives
 a retryable admission error, not the fatal outdated-process error.
 
-Stamped `projection_invalidations` DML is the narrow exception: it checks the
-committed activation state and version floor without locking the singleton.
-Ingestion may already hold a staging input journal lock when it enqueues, so a
-singleton wait here would deadlock with replay holding the singleton while
-capturing that journal. An enqueue committed before journal capture is visible
-to the replay drift check; one committed afterward remains durable queue work,
-with a retained direct-invalidation revision, for post-replay apply. A stamped
-enqueue may therefore cross a concurrent floor raise using the previously
-committed floor, but it does not publish projection or replay state. Queue
-`TRUNCATE` and unstamped queue writers remain non-waiting. Dynamic `cprs_*`
-staging tables are covered by the checkpoint mutation committed in the same
-transaction.
+Stamped `projection_invalidations` DML at `READ COMMITTED` is the narrow
+exception: it checks the committed activation state and version floor without
+locking the singleton. Ingestion may already hold a staging input journal lock
+when it enqueues, so a singleton wait here would deadlock with replay holding
+the singleton while capturing that journal. An enqueue committed before
+journal capture is visible to the replay drift check; one committed afterward
+remains durable queue work, with a retained direct-invalidation revision, for
+post-replay apply. A stamped enqueue may therefore cross a concurrent floor
+raise using the previously committed floor, but it does not publish projection
+or replay state. The trigger rejects queue-writing transactions at isolation
+levels with a longer-lived snapshot so the next statement cannot keep seeing a
+stale floor. Queue `TRUNCATE` and unstamped queue writers remain non-waiting.
+Dynamic `cprs_*` staging tables are covered by the checkpoint mutation
+committed in the same transaction.
 
 The protected writer set is:
 
