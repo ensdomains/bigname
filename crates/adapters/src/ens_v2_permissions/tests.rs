@@ -14,7 +14,7 @@ use bigname_storage::{
     CanonicalityState, RawBlock, RawLog, default_database_url, load_normalized_events_by_namespace,
     upsert_raw_blocks, upsert_raw_logs,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::{
     PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},
@@ -27,7 +27,10 @@ use crate::evm_abi::keccak_signature_hex;
 
 use super::constants::*;
 use super::decode::build_permissions_observation;
-use super::hints::{fallback_resource_hint, resolver_resource_hint};
+use super::hints::{
+    fallback_resource_hint, observed_dns_encoded_name, resolver_resource_hint,
+    validated_persisted_selector_fields,
+};
 use super::normalized::{
     RoleVocabulary, permission_changed_event, permission_resource_id, role_bitmap_powers,
 };
@@ -139,6 +142,105 @@ fn decodes_named_text_resource_observation() -> Result<()> {
         _ => panic!("expected NamedTextResource observation"),
     }
     Ok(())
+}
+
+#[test]
+fn persisted_hint_matching_covers_each_named_resource_selector() {
+    let resource = topic_word(0x42);
+    let name = dns_name("Alice", "ETH");
+    let key_hash = topic_word(0xab);
+    let cases = [
+        (
+            PermissionsObservation::NamedResource {
+                resource: resource.clone(),
+                name: name.clone(),
+            },
+            "name",
+            None,
+            None,
+        ),
+        (
+            PermissionsObservation::NamedTextResource {
+                resource: resource.clone(),
+                name: name.clone(),
+                key_hash: key_hash.clone(),
+                key: "avatar".to_owned(),
+            },
+            "text",
+            Some("avatar"),
+            Some(key_hash.as_str()),
+        ),
+        (
+            PermissionsObservation::NamedAddrResource {
+                resource: resource.clone(),
+                name: name.clone(),
+                coin_type: "60".to_owned(),
+            },
+            "addr",
+            Some("60"),
+            None,
+        ),
+    ];
+
+    for (observation, selector_kind, selector_key, selector_hash) in cases {
+        assert_eq!(
+            observed_dns_encoded_name(
+                &observation,
+                &resource,
+                selector_kind,
+                selector_key,
+                selector_hash,
+            )
+            .as_deref(),
+            Some(name.as_slice())
+        );
+    }
+}
+
+#[test]
+fn persisted_selector_fields_require_exact_null_and_string_shapes() {
+    assert_eq!(
+        validated_persisted_selector_fields(
+            &json!({"selector_key": null, "selector_hash": null}),
+            "name",
+        ),
+        Some((None, None))
+    );
+    assert_eq!(
+        validated_persisted_selector_fields(
+            &json!({"selector_key": "avatar", "selector_hash": topic_word(0xab)}),
+            "text",
+        ),
+        Some((Some("avatar".to_owned()), Some(topic_word(0xab))))
+    );
+    assert_eq!(
+        validated_persisted_selector_fields(
+            &json!({"selector_key": "60", "selector_hash": null}),
+            "addr",
+        ),
+        Some((Some("60".to_owned()), None))
+    );
+
+    for malformed in [
+        json!({"selector_hash": null}),
+        json!({"selector_key": true, "selector_hash": null}),
+        json!({"selector_key": null}),
+        json!({"selector_key": null, "selector_hash": false}),
+    ] {
+        assert_eq!(
+            validated_persisted_selector_fields(&malformed, "name"),
+            None
+        );
+    }
+    for malformed in [
+        json!({"selector_key": "60"}),
+        json!({"selector_key": "60", "selector_hash": false}),
+    ] {
+        assert_eq!(
+            validated_persisted_selector_fields(&malformed, "addr"),
+            None
+        );
+    }
 }
 
 #[test]
@@ -611,6 +713,528 @@ async fn sync_ens_v2_permissions_consumes_registry_root_eac_roles_changed() -> R
     database.cleanup().await
 }
 
+#[tokio::test]
+async fn sync_ens_v2_permissions_reuses_persisted_resolver_hints_across_calls() -> Result<()> {
+    let _permit = crate::acquire_test_db_permit().await;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-sepolia";
+    let resolver_address = "0x0000000000000000000000000000000000000260";
+    let account = "0x1111111111111111111111111111111111111111";
+    let first_block = 11_163_600;
+    let block_hashes = (first_block..first_block + 14)
+        .map(permission_test_block_hash)
+        .collect::<Vec<_>>();
+    let unadmitted_block = first_block - 1;
+    let unadmitted_block_hash = permission_test_block_hash(unadmitted_block);
+    let resources = [
+        topic_word(0x101),
+        topic_word(0x102),
+        topic_word(0x103),
+        topic_word(0x104),
+        topic_word(0x105),
+        topic_word(0x106),
+        topic_word(0x107),
+    ];
+    let name = dns_name("Alice", "ETH");
+    let unadmitted_name = dns_name("aLiCe", "eTH");
+    let key_hash = topic_word(0xab);
+
+    let repository = load_repository(checked_in_manifest_root("manifests/sepolia"))?;
+    sync_repository(database.pool(), &repository).await?;
+    insert_test_discovered_resolver(
+        database.pool(),
+        chain,
+        resolver_address,
+        first_block,
+        &block_hashes[0],
+    )
+    .await?;
+
+    let blocks = block_hashes
+        .iter()
+        .enumerate()
+        .map(|(offset, block_hash)| {
+            permissions_test_raw_block(chain, block_hash, first_block + offset as i64)
+        })
+        .collect::<Vec<_>>();
+    upsert_raw_blocks(
+        database.pool(),
+        &[
+            vec![permissions_test_raw_block(
+                chain,
+                &unadmitted_block_hash,
+                unadmitted_block,
+            )],
+            blocks,
+        ]
+        .concat(),
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[
+            named_text_permission_raw_log(
+                chain,
+                &unadmitted_block_hash,
+                unadmitted_block,
+                resolver_address,
+                &resources[3],
+                &unadmitted_name,
+                &key_hash,
+                "avatar",
+            ),
+            named_text_permission_raw_log(
+                chain,
+                &block_hashes[0],
+                first_block,
+                resolver_address,
+                &resources[0],
+                &name,
+                &key_hash,
+                "avatar",
+            ),
+            eac_roles_changed_permission_raw_log(
+                chain,
+                &block_hashes[1],
+                first_block + 1,
+                resolver_address,
+                &resources[0],
+                account,
+            ),
+            named_text_permission_raw_log(
+                chain,
+                &block_hashes[2],
+                first_block + 2,
+                resolver_address,
+                &resources[1],
+                &name,
+                &key_hash,
+                "avatar",
+            ),
+            eac_roles_changed_permission_raw_log(
+                chain,
+                &block_hashes[3],
+                first_block + 3,
+                resolver_address,
+                &resources[1],
+                account,
+            ),
+            named_text_permission_raw_log(
+                chain,
+                &block_hashes[4],
+                first_block + 4,
+                resolver_address,
+                &resources[2],
+                &name,
+                &key_hash,
+                "avatar",
+            ),
+            eac_roles_changed_permission_raw_log(
+                chain,
+                &block_hashes[5],
+                first_block + 5,
+                resolver_address,
+                &resources[2],
+                account,
+            ),
+            named_text_permission_raw_log(
+                chain,
+                &block_hashes[6],
+                first_block + 6,
+                resolver_address,
+                &resources[3],
+                &name,
+                &key_hash,
+                "avatar",
+            ),
+            eac_roles_changed_permission_raw_log(
+                chain,
+                &block_hashes[7],
+                first_block + 7,
+                resolver_address,
+                &resources[3],
+                account,
+            ),
+            named_text_permission_raw_log(
+                chain,
+                &block_hashes[8],
+                first_block + 8,
+                resolver_address,
+                &resources[4],
+                &name,
+                &key_hash,
+                "avatar",
+            ),
+            eac_roles_changed_permission_raw_log(
+                chain,
+                &block_hashes[9],
+                first_block + 9,
+                resolver_address,
+                &resources[4],
+                account,
+            ),
+            named_text_permission_raw_log(
+                chain,
+                &block_hashes[10],
+                first_block + 10,
+                resolver_address,
+                &resources[5],
+                &name,
+                &key_hash,
+                "avatar",
+            ),
+            eac_roles_changed_permission_raw_log(
+                chain,
+                &block_hashes[11],
+                first_block + 11,
+                resolver_address,
+                &resources[5],
+                account,
+            ),
+            named_permission_raw_log(
+                chain,
+                &block_hashes[12],
+                first_block + 12,
+                resolver_address,
+                &resources[6],
+                &name,
+            ),
+            eac_roles_changed_permission_raw_log(
+                chain,
+                &block_hashes[13],
+                first_block + 13,
+                resolver_address,
+                &resources[6],
+                account,
+            ),
+        ],
+    )
+    .await?;
+
+    let preimages = crate::sync_block_derived_normalized_events(
+        database.pool(),
+        chain,
+        &block_hashes[..10],
+        None,
+    )
+    .await?;
+    assert_eq!(preimages.matched_log_count, resources.len() - 2);
+    assert_eq!(preimages.total_synced_count, resources.len() - 2);
+
+    let baseline = super::EnsV2PermissionsSyncSummary::sync_for_block_hashes(
+        database.pool(),
+        chain,
+        &block_hashes[..2],
+    )
+    .await?;
+    assert_eq!(baseline.matched_log_count, 2);
+    assert_eq!(baseline.total_synced_count, 1);
+    let in_memory_selector =
+        permission_selector_for_upstream_resource(database.pool(), &resources[0]).await?;
+
+    let persisted_named = super::EnsV2PermissionsSyncSummary::sync_for_block_hashes(
+        database.pool(),
+        chain,
+        std::slice::from_ref(&block_hashes[2]),
+    )
+    .await?;
+    assert_eq!(persisted_named.matched_log_count, 1);
+    assert_eq!(persisted_named.total_synced_count, 0);
+    let persisted_eac = super::EnsV2PermissionsSyncSummary::sync_for_block_hashes(
+        database.pool(),
+        chain,
+        std::slice::from_ref(&block_hashes[3]),
+    )
+    .await?;
+    assert_eq!(persisted_eac.matched_log_count, 1);
+    assert_eq!(persisted_eac.total_synced_count, 1);
+    assert_eq!(
+        permission_selector_for_upstream_resource(database.pool(), &resources[1]).await?,
+        in_memory_selector
+    );
+
+    let legacy_named = super::EnsV2PermissionsSyncSummary::sync_for_block_hashes(
+        database.pool(),
+        chain,
+        std::slice::from_ref(&block_hashes[4]),
+    )
+    .await?;
+    assert_eq!(legacy_named.matched_log_count, 1);
+    assert_eq!(legacy_named.total_synced_count, 0);
+    let legacy_update = sqlx::query(
+        r#"
+        UPDATE resources
+        SET provenance = provenance - 'dns_encoded_name'
+        WHERE provenance ->> 'adapter' = 'ens_v2_permissions'
+          AND provenance ->> 'upstream_resource' = $1
+        "#,
+    )
+    .bind(&resources[2])
+    .execute(database.pool())
+    .await?;
+    assert_eq!(legacy_update.rows_affected(), 1);
+
+    let legacy_eac = super::EnsV2PermissionsSyncSummary::sync_for_block_hashes(
+        database.pool(),
+        chain,
+        std::slice::from_ref(&block_hashes[5]),
+    )
+    .await?;
+    assert_eq!(legacy_eac.matched_log_count, 1);
+    assert_eq!(legacy_eac.total_synced_count, 1);
+    assert_eq!(
+        permission_selector_for_upstream_resource(database.pool(), &resources[2]).await?,
+        in_memory_selector
+    );
+
+    let compacted_named = super::EnsV2PermissionsSyncSummary::sync_for_block_hashes(
+        database.pool(),
+        chain,
+        std::slice::from_ref(&block_hashes[6]),
+    )
+    .await?;
+    assert_eq!(compacted_named.matched_log_count, 1);
+    assert_eq!(compacted_named.total_synced_count, 0);
+    let compacted_legacy_update = sqlx::query(
+        r#"
+        UPDATE resources
+        SET provenance = provenance - 'dns_encoded_name'
+        WHERE provenance ->> 'adapter' = 'ens_v2_permissions'
+          AND provenance ->> 'upstream_resource' = $1
+        "#,
+    )
+    .bind(&resources[3])
+    .execute(database.pool())
+    .await?;
+    assert_eq!(compacted_legacy_update.rows_affected(), 1);
+    let compacted_raw_delete = sqlx::query(
+        r#"
+        DELETE FROM raw_logs
+        WHERE chain_id = $1
+          AND block_hash = $2
+        "#,
+    )
+    .bind(chain)
+    .bind(&block_hashes[6])
+    .execute(database.pool())
+    .await?;
+    assert_eq!(compacted_raw_delete.rows_affected(), 1);
+
+    let compacted_eac = super::EnsV2PermissionsSyncSummary::sync_for_block_hashes(
+        database.pool(),
+        chain,
+        std::slice::from_ref(&block_hashes[7]),
+    )
+    .await?;
+    assert_eq!(compacted_eac.matched_log_count, 1);
+    assert_eq!(compacted_eac.total_synced_count, 1);
+    assert_eq!(
+        permission_selector_for_upstream_resource(database.pool(), &resources[3]).await?,
+        in_memory_selector
+    );
+
+    let missing_named = super::EnsV2PermissionsSyncSummary::sync_for_block_hashes(
+        database.pool(),
+        chain,
+        std::slice::from_ref(&block_hashes[8]),
+    )
+    .await?;
+    assert_eq!(missing_named.matched_log_count, 1);
+    assert_eq!(missing_named.total_synced_count, 0);
+    let missing_legacy_update = sqlx::query(
+        r#"
+        UPDATE resources
+        SET provenance = provenance - 'dns_encoded_name'
+        WHERE provenance ->> 'adapter' = 'ens_v2_permissions'
+          AND provenance ->> 'upstream_resource' = $1
+        "#,
+    )
+    .bind(&resources[4])
+    .execute(database.pool())
+    .await?;
+    assert_eq!(missing_legacy_update.rows_affected(), 1);
+    let missing_raw_delete = sqlx::query(
+        r#"
+        DELETE FROM raw_logs
+        WHERE chain_id = $1
+          AND block_hash = $2
+        "#,
+    )
+    .bind(chain)
+    .bind(&block_hashes[8])
+    .execute(database.pool())
+    .await?;
+    assert_eq!(missing_raw_delete.rows_affected(), 1);
+    sqlx::query(
+        r#"
+        DELETE FROM projection_normalized_event_changes
+        WHERE normalized_event_id IN (
+            SELECT normalized_event_id
+            FROM normalized_events
+            WHERE derivation_kind = 'raw_log_preimage_observation'
+              AND block_hash = $1
+        )
+        "#,
+    )
+    .bind(&block_hashes[8])
+    .execute(database.pool())
+    .await?;
+    let missing_preimage_delete = sqlx::query(
+        r#"
+        DELETE FROM normalized_events
+        WHERE derivation_kind = 'raw_log_preimage_observation'
+          AND block_hash = $1
+        "#,
+    )
+    .bind(&block_hashes[8])
+    .execute(database.pool())
+    .await?;
+    assert_eq!(missing_preimage_delete.rows_affected(), 1);
+
+    let missing_eac = super::EnsV2PermissionsSyncSummary::sync_for_block_hashes(
+        database.pool(),
+        chain,
+        std::slice::from_ref(&block_hashes[9]),
+    )
+    .await?;
+    assert_eq!(missing_eac.matched_log_count, 1);
+    assert_eq!(missing_eac.total_synced_count, 1);
+    assert_eq!(
+        permission_selector_for_upstream_resource(database.pool(), &resources[4]).await?,
+        json!({
+            "kind": "unknown",
+            "key": null,
+            "hash": null,
+            "normalized_name": null,
+            "dns_encoded_name": null,
+        })
+    );
+
+    let upgrade_named = super::EnsV2PermissionsSyncSummary::sync_for_block_hashes(
+        database.pool(),
+        chain,
+        std::slice::from_ref(&block_hashes[10]),
+    )
+    .await?;
+    assert_eq!(upgrade_named.matched_log_count, 1);
+    assert_eq!(upgrade_named.total_synced_count, 0);
+    let upgrade_legacy_update = sqlx::query(
+        r#"
+        UPDATE resources
+        SET provenance = provenance - 'dns_encoded_name'
+        WHERE provenance ->> 'adapter' = 'ens_v2_permissions'
+          AND provenance ->> 'upstream_resource' = $1
+        "#,
+    )
+    .bind(&resources[5])
+    .execute(database.pool())
+    .await?;
+    assert_eq!(upgrade_legacy_update.rows_affected(), 1);
+    let upgrade_eac = super::EnsV2PermissionsSyncSummary::sync_for_block_hashes(
+        database.pool(),
+        chain,
+        std::slice::from_ref(&block_hashes[11]),
+    )
+    .await?;
+    assert_eq!(upgrade_eac.matched_log_count, 1);
+    assert_eq!(upgrade_eac.total_synced_count, 1);
+    assert_eq!(
+        permission_selector_for_upstream_resource(database.pool(), &resources[5]).await?,
+        json!({
+            "kind": "unknown",
+            "key": null,
+            "hash": null,
+            "normalized_name": null,
+            "dns_encoded_name": null,
+        })
+    );
+
+    let upgrade_replay = super::EnsV2PermissionsSyncSummary::sync_for_block_hashes(
+        database.pool(),
+        chain,
+        &block_hashes[10..12],
+    )
+    .await?;
+    assert_eq!(upgrade_replay.matched_log_count, 2);
+    assert_eq!(upgrade_replay.total_synced_count, 1);
+    assert_eq!(
+        permission_selector_for_upstream_resource(database.pool(), &resources[5]).await?,
+        in_memory_selector
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM projection_normalized_event_changes change
+            JOIN normalized_events event
+              ON event.normalized_event_id = change.normalized_event_id
+            WHERE change.change_kind = 'content_update'
+              AND event.derivation_kind = 'ens_v2_permissions'
+              AND event.after_state ->> 'upstream_resource' = $1
+            "#,
+        )
+        .bind(&resources[5])
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "the unknown-to-named upgrade must be journaled for projection replay"
+    );
+
+    let malformed_named = super::EnsV2PermissionsSyncSummary::sync_for_block_hashes(
+        database.pool(),
+        chain,
+        std::slice::from_ref(&block_hashes[12]),
+    )
+    .await?;
+    assert_eq!(malformed_named.matched_log_count, 1);
+    assert_eq!(malformed_named.total_synced_count, 0);
+    let malformed_preimage = crate::sync_block_derived_normalized_events(
+        database.pool(),
+        chain,
+        std::slice::from_ref(&block_hashes[12]),
+        None,
+    )
+    .await?;
+    assert_eq!(malformed_preimage.matched_log_count, 1);
+    assert_eq!(malformed_preimage.total_synced_count, 1);
+    let malformed_update = sqlx::query(
+        r#"
+        UPDATE resources
+        SET provenance =
+            (provenance - 'dns_encoded_name')
+            || jsonb_build_object('selector_key', TRUE)
+        WHERE provenance ->> 'adapter' = 'ens_v2_permissions'
+          AND provenance ->> 'upstream_resource' = $1
+        "#,
+    )
+    .bind(&resources[6])
+    .execute(database.pool())
+    .await?;
+    assert_eq!(malformed_update.rows_affected(), 1);
+
+    let malformed_eac = super::EnsV2PermissionsSyncSummary::sync_for_block_hashes(
+        database.pool(),
+        chain,
+        std::slice::from_ref(&block_hashes[13]),
+    )
+    .await?;
+    assert_eq!(malformed_eac.matched_log_count, 1);
+    assert_eq!(malformed_eac.total_synced_count, 1);
+    assert_eq!(
+        permission_selector_for_upstream_resource(database.pool(), &resources[6]).await?,
+        json!({
+            "kind": "unknown",
+            "key": null,
+            "hash": null,
+            "normalized_name": null,
+            "dns_encoded_name": null,
+        }),
+        "malformed legacy selector provenance must fail closed"
+    );
+
+    database.cleanup().await
+}
+
 async fn assert_registry_and_root_eac_roles_changed_are_admitted(
     pool: &PgPool,
     chain: &str,
@@ -638,6 +1262,134 @@ async fn assert_registry_and_root_eac_roles_changed_are_admitted(
     Ok(())
 }
 
+async fn insert_test_discovered_resolver(
+    pool: &PgPool,
+    chain: &str,
+    address: &str,
+    active_from_block_number: i64,
+    active_from_block_hash: &str,
+) -> Result<Uuid> {
+    let source_manifest_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT manifest_id
+        FROM manifest_versions
+        WHERE chain = $1
+          AND source_family = $2
+          AND rollout_status = 'active'
+        "#,
+    )
+    .bind(chain)
+    .bind(SOURCE_FAMILY_ENS_V2_RESOLVER_L1)
+    .fetch_one(pool)
+    .await?;
+    let from_contract_instance_id = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT contract_instance_id
+        FROM contract_instances
+        WHERE chain_id = $1
+        ORDER BY contract_instance_id
+        LIMIT 1
+        "#,
+    )
+    .bind(chain)
+    .fetch_one(pool)
+    .await?;
+    let resolver_contract_instance_id = Uuid::from_u128(0x260);
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instances (
+            contract_instance_id,
+            chain_id,
+            contract_kind,
+            provenance
+        )
+        VALUES ($1, $2, 'resolver', '{}'::JSONB)
+        "#,
+    )
+    .bind(resolver_contract_instance_id)
+    .bind(chain)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instance_addresses (
+            contract_instance_id,
+            chain_id,
+            address,
+            active_from_block_number,
+            active_from_block_hash,
+            source_manifest_id,
+            provenance
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, '{}'::JSONB)
+        "#,
+    )
+    .bind(resolver_contract_instance_id)
+    .bind(chain)
+    .bind(normalize_address(address))
+    .bind(active_from_block_number)
+    .bind(active_from_block_hash)
+    .bind(source_manifest_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO discovery_edges (
+            chain_id,
+            edge_kind,
+            from_contract_instance_id,
+            to_contract_instance_id,
+            discovery_source,
+            source_manifest_id,
+            admission,
+            active_from_block_number,
+            active_from_block_hash,
+            provenance
+        )
+        VALUES (
+            $1,
+            'resolver',
+            $2,
+            $3,
+            'ens_v2_permissions:test-resolver',
+            $4,
+            'admitted',
+            $5,
+            $6,
+            jsonb_build_object('to_address', $7::TEXT)
+        )
+        "#,
+    )
+    .bind(chain)
+    .bind(from_contract_instance_id)
+    .bind(resolver_contract_instance_id)
+    .bind(source_manifest_id)
+    .bind(active_from_block_number)
+    .bind(active_from_block_hash)
+    .bind(normalize_address(address))
+    .execute(pool)
+    .await?;
+    Ok(resolver_contract_instance_id)
+}
+
+async fn permission_selector_for_upstream_resource(
+    pool: &PgPool,
+    upstream_resource: &str,
+) -> Result<Value> {
+    sqlx::query_scalar::<_, Value>(
+        r#"
+        SELECT after_state -> 'selector'
+        FROM normalized_events
+        WHERE event_kind = 'PermissionChanged'
+          AND after_state ->> 'upstream_resource' = $1
+        "#,
+    )
+    .bind(upstream_resource)
+    .fetch_one(pool)
+    .await
+    .context("failed to load ENSv2 permission selector")
+}
+
 fn checked_in_manifest_root(profile_root: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -656,6 +1408,93 @@ fn permissions_test_raw_block(chain: &str, block_hash: &str, block_number: i64) 
         transactions_root: None,
         receipts_root: None,
         state_root: None,
+        canonicality_state: CanonicalityState::Finalized,
+    }
+}
+
+fn permission_test_block_hash(block_number: i64) -> String {
+    format!("0x{block_number:064x}")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn named_text_permission_raw_log(
+    chain: &str,
+    block_hash: &str,
+    block_number: i64,
+    emitting_address: &str,
+    resource: &str,
+    name: &[u8],
+    key_hash: &str,
+    key: &str,
+) -> RawLog {
+    RawLog {
+        chain_id: chain.to_owned(),
+        block_hash: block_hash.to_owned(),
+        block_number,
+        transaction_hash: format!("0xnamedtext{block_number}"),
+        transaction_index: 0,
+        log_index: 0,
+        emitting_address: normalize_address(emitting_address),
+        topics: vec![
+            keccak_signature_hex(ABI_EVENT_NAMED_TEXT_RESOURCE_SIGNATURE),
+            resource.to_owned(),
+            key_hash.to_owned(),
+        ],
+        data: encode_two_dynamic(name, key.as_bytes()),
+        canonicality_state: CanonicalityState::Finalized,
+    }
+}
+
+fn named_permission_raw_log(
+    chain: &str,
+    block_hash: &str,
+    block_number: i64,
+    emitting_address: &str,
+    resource: &str,
+    name: &[u8],
+) -> RawLog {
+    RawLog {
+        chain_id: chain.to_owned(),
+        block_hash: block_hash.to_owned(),
+        block_number,
+        transaction_hash: format!("0xnamed{block_number}"),
+        transaction_index: 0,
+        log_index: 0,
+        emitting_address: normalize_address(emitting_address),
+        topics: vec![
+            keccak_signature_hex(ABI_EVENT_NAMED_RESOURCE_SIGNATURE),
+            resource.to_owned(),
+        ],
+        data: [hex_word(32), dynamic_tail(name)].concat(),
+        canonicality_state: CanonicalityState::Finalized,
+    }
+}
+
+fn eac_roles_changed_permission_raw_log(
+    chain: &str,
+    block_hash: &str,
+    block_number: i64,
+    emitting_address: &str,
+    resource: &str,
+    account: &str,
+) -> RawLog {
+    RawLog {
+        chain_id: chain.to_owned(),
+        block_hash: block_hash.to_owned(),
+        block_number,
+        transaction_hash: format!("0xeacroles{block_number}"),
+        transaction_index: 0,
+        log_index: 0,
+        emitting_address: normalize_address(emitting_address),
+        topics: vec![
+            keccak_signature_hex(ABI_EVENT_EAC_ROLES_CHANGED_SIGNATURE),
+            resource.to_owned(),
+            address_topic(account),
+        ],
+        data: [hex_word(0), bitmap_with_last_byte(0x11)]
+            .into_iter()
+            .flatten()
+            .collect(),
         canonicality_state: CanonicalityState::Finalized,
     }
 }
