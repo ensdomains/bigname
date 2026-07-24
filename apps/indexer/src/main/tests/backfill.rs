@@ -3082,6 +3082,8 @@ async fn source_family_backfill_persists_selector_identity_and_tx_sibling_facts(
         registrar_address,
     )
     .await?;
+    establish_backfill_ens_v2_retained_history_proof(database.pool(), "ethereum-mainnet", 42)
+        .await?;
 
     let range = BackfillBlockRange::new(42, 42)?;
     let source_plan = load_watched_source_selector_plan(
@@ -4332,6 +4334,8 @@ async fn source_scoped_backfill_does_not_normalize_preexisting_unselected_raw_lo
         unselected_address,
     )
     .await?;
+    establish_backfill_ens_v2_retained_history_proof(database.pool(), "ethereum-mainnet", 42)
+        .await?;
 
     let block_42 = provider_block(
         "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
@@ -6594,6 +6598,52 @@ fn backfill_job_config(
 fn backfill_lease_deadline() -> Result<OffsetDateTime> {
     OffsetDateTime::from_unix_timestamp(OffsetDateTime::now_utc().unix_timestamp() + 300)
         .context("backfill lease deadline must be valid")
+}
+
+async fn establish_backfill_ens_v2_retained_history_proof(
+    pool: &PgPool,
+    chain: &str,
+    through_block: i64,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO discovery_admission_epochs (chain_id, epoch)
+        VALUES ($1, 0)
+        ON CONFLICT (chain_id) DO NOTHING
+        "#,
+    )
+    .bind(chain)
+    .execute(pool)
+    .await?;
+    let discovery_epoch = bigname_manifests::load_discovery_admission_epoch(pool, chain).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO raw_log_staging_input_revisions (
+            chain_id,
+            revision,
+            retention_generation,
+            retained_history_complete,
+            incomplete_since,
+            proven_retention_generation,
+            proven_discovery_admission_epoch,
+            proven_through_block
+        )
+        VALUES ($1, 0, 0, true, NULL, 0, $2, $3)
+        ON CONFLICT (chain_id) DO UPDATE
+        SET retained_history_complete = true,
+            incomplete_since = NULL,
+            proven_retention_generation =
+                raw_log_staging_input_revisions.retention_generation,
+            proven_discovery_admission_epoch = EXCLUDED.proven_discovery_admission_epoch,
+            proven_through_block = EXCLUDED.proven_through_block
+        "#,
+    )
+    .bind(chain)
+    .bind(discovery_epoch)
+    .bind(through_block)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn create_backfill_job_tables(pool: &PgPool) -> Result<()> {

@@ -27,6 +27,8 @@ mod ens_v1_reverse_resolver_before_state;
 mod ens_v1_same_tx_registration_setup;
 #[path = "repair/ens_v1_wrapper_token_before_state.rs"]
 mod ens_v1_wrapper_token_before_state;
+#[path = "repair/ens_v2_registration_expiry.rs"]
+mod ens_v2_registration_expiry;
 #[path = "repair/primary_claim_source.rs"]
 mod primary_claim_source;
 
@@ -75,6 +77,10 @@ pub(super) use ens_v1_same_tx_registration_setup::{
 };
 pub(super) use ens_v1_wrapper_token_before_state::{
     ens_v1_wrapper_token_before_state_repair_allowed, repair_ens_v1_wrapper_token_before_states,
+};
+pub(super) use ens_v2_registration_expiry::{
+    ens_v2_registration_expiry_after_state_repair_allowed,
+    repair_ens_v2_registration_expiry_after_states,
 };
 pub(super) use primary_claim_source::{
     primary_claim_source_after_state_repair_allowed, repair_primary_claim_source_after_states,
@@ -140,6 +146,9 @@ pub(super) async fn repair_after_state_conflicts(
             existing_by_identity,
         )
         .await?;
+    let ens_v2_registration_expiry =
+        repair_ens_v2_registration_expiry_after_states(executor, events, existing_by_identity)
+            .await?;
 
     Ok(primary_claim_source.len()
         + resolver_observation_key.len()
@@ -151,7 +160,8 @@ pub(super) async fn repair_after_state_conflicts(
         + reverse_resolver_before_state.len()
         + registry_resolver_before_state.len()
         + renewal_before_state.len()
-        + registration_release_before_state.len())
+        + registration_release_before_state.len()
+        + ens_v2_registration_expiry.len())
 }
 
 pub(super) async fn repair_resource_id_conflicts(
@@ -244,6 +254,11 @@ pub(super) fn normalized_event_identity_repair_allowed(
             differing_fields,
         )
         || ens_v1_unwrapped_authority_registry_event_time_null_resource_id_repair_allowed(
+            existing,
+            incoming,
+            differing_fields,
+        )
+        || ens_v2_registration_expiry_after_state_repair_allowed(
             existing,
             incoming,
             differing_fields,

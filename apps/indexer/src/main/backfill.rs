@@ -267,6 +267,10 @@ pub(crate) enum BackfillAdapterSyncMode {
     #[default]
     Auto,
     Inline,
+    /// Run ordinary inline adapter work while an ENSv2 retained-history
+    /// recovery pass defers all dependency-ordered ENSv2 adapter derivation
+    /// until registry full-source reconciliation establishes stable outputs.
+    InlineWithoutEnsV2Adapters,
     RawOnly,
 }
 
@@ -286,6 +290,7 @@ impl BackfillAdapterSyncMode {
         match self {
             Self::Auto => "auto",
             Self::Inline => "inline",
+            Self::InlineWithoutEnsV2Adapters => "inline-without-ens-v2-adapters",
             Self::RawOnly => "raw-only",
         }
     }
@@ -293,15 +298,23 @@ impl BackfillAdapterSyncMode {
     pub(crate) fn hash_pinned_backfill_mode(self) -> Self {
         match self {
             Self::Auto => Self::Inline,
-            Self::Inline | Self::RawOnly => self,
+            Self::Inline | Self::InlineWithoutEnsV2Adapters | Self::RawOnly => self,
         }
     }
 
     pub(crate) fn startup_hash_pinned_backfill_mode(self) -> Self {
         match self {
             Self::Auto => Self::RawOnly,
-            Self::Inline | Self::RawOnly => self,
+            Self::Inline | Self::InlineWithoutEnsV2Adapters | Self::RawOnly => self,
         }
+    }
+
+    pub(crate) const fn runs_inline_adapters(self) -> bool {
+        matches!(self, Self::Inline | Self::InlineWithoutEnsV2Adapters)
+    }
+
+    pub(crate) const fn defers_ens_v2_adapters(self) -> bool {
+        matches!(self, Self::InlineWithoutEnsV2Adapters)
     }
 }
 

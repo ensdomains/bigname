@@ -126,12 +126,13 @@ async fn load_live_adapter_source_scope_rows(
                 raw.chain,
                 raw.address,
                 raw.block_number,
-                cia.contract_instance_id
+                cia.contract_instance_id,
+                cia.deactivated_at AS address_deactivated_at,
+                cia.active_to_block_number AS address_active_to_block_number
             FROM raw_log_targets raw
             JOIN contract_instance_addresses cia
               ON cia.chain_id = raw.chain
              AND cia.address = raw.address
-             AND cia.deactivated_at IS NULL
              AND (
                  cia.active_from_block_number IS NULL
                  OR cia.active_from_block_number <= raw.block_number
@@ -178,6 +179,10 @@ async fn load_live_adapter_source_scope_rows(
                 manifest_range.start_block IS NULL
                 OR manifest_range.start_block <= ti.block_number
             )
+              AND (
+                  ti.address_deactivated_at IS NULL
+                  OR ti.address_active_to_block_number IS NOT NULL
+              )
         ),
         direct_other_edge_sources AS (
             SELECT
@@ -251,7 +256,15 @@ async fn load_live_adapter_source_scope_rows(
                 WHERE de.chain_id = ti.chain
                   AND de.to_contract_instance_id = ti.contract_instance_id
                   AND de.source_manifest_id = candidate.edge_source_manifest_id
-                  AND de.deactivated_at IS NULL
+                  AND (
+                      de.deactivated_at IS NULL
+                      OR de.active_to_block_number IS NOT NULL
+                  )
+                  AND (
+                      ti.address_deactivated_at IS NULL
+                      OR ti.address_active_to_block_number IS NOT NULL
+                      OR de.active_to_block_number IS NOT NULL
+                  )
                   AND de.edge_kind <> 'migration'
                   AND (
                       de.active_from_block_number IS NULL
@@ -280,7 +293,15 @@ async fn load_live_adapter_source_scope_rows(
                 WHERE de.chain_id = ti.chain
                   AND de.to_contract_instance_id = ti.contract_instance_id
                   AND de.source_manifest_id = candidate.edge_source_manifest_id
-                  AND de.deactivated_at IS NULL
+                  AND (
+                      de.deactivated_at IS NULL
+                      OR de.active_to_block_number IS NOT NULL
+                  )
+                  AND (
+                      ti.address_deactivated_at IS NULL
+                      OR ti.address_active_to_block_number IS NOT NULL
+                      OR de.active_to_block_number IS NOT NULL
+                  )
                   AND de.edge_kind <> 'migration'
                   AND de.edge_kind <> 'resolver'
                   AND (
@@ -310,7 +331,15 @@ async fn load_live_adapter_source_scope_rows(
                 WHERE de.chain_id = ti.chain
                   AND de.to_contract_instance_id = ti.contract_instance_id
                   AND de.source_manifest_id = candidate.edge_source_manifest_id
-                  AND de.deactivated_at IS NULL
+                  AND (
+                      de.deactivated_at IS NULL
+                      OR de.active_to_block_number IS NOT NULL
+                  )
+                  AND (
+                      ti.address_deactivated_at IS NULL
+                      OR ti.address_active_to_block_number IS NOT NULL
+                      OR de.active_to_block_number IS NOT NULL
+                  )
                   AND de.edge_kind = 'resolver'
                   AND (
                       de.active_from_block_number IS NULL
@@ -389,70 +418,5 @@ fn collapse_live_adapter_source_scope(
 }
 
 #[cfg(test)]
-mod tests {
-    use anyhow::Result;
-    use bigname_test_support::{TestDatabase, TestDatabaseConfig};
-
-    use super::load_live_adapter_target_block_number;
-
-    #[tokio::test]
-    async fn live_adapter_target_ignores_orphaned_selected_blocks() -> Result<()> {
-        let database = TestDatabase::create(TestDatabaseConfig::new(
-            "indexer_live_adapter_canonical_target",
-        ))
-        .await?;
-        sqlx::raw_sql(
-            r#"
-            CREATE TYPE canonicality_state AS ENUM (
-                'observed', 'canonical', 'safe', 'finalized', 'orphaned'
-            );
-            CREATE TABLE chain_lineage (
-                chain_id TEXT NOT NULL,
-                block_hash TEXT NOT NULL,
-                block_number BIGINT NOT NULL,
-                canonicality_state canonicality_state NOT NULL,
-                PRIMARY KEY (chain_id, block_hash)
-            );
-            "#,
-        )
-        .execute(database.pool())
-        .await?;
-        sqlx::query(
-            r#"
-            INSERT INTO chain_lineage (
-                chain_id, block_hash, block_number, canonicality_state
-            )
-            VALUES
-                ('testnet', '0xcanonical', 10, 'canonical'),
-                ('testnet', '0xorphaned', 20, 'orphaned')
-            "#,
-        )
-        .execute(database.pool())
-        .await?;
-
-        assert_eq!(
-            load_live_adapter_target_block_number(
-                database.pool(),
-                "testnet",
-                &["0xcanonical".to_owned(), "0xorphaned".to_owned()],
-            )
-            .await?,
-            10
-        );
-        let error = load_live_adapter_target_block_number(
-            database.pool(),
-            "testnet",
-            &["0xorphaned".to_owned()],
-        )
-        .await
-        .expect_err("an orphan-only selection must not produce a live adapter target");
-        assert!(
-            error
-                .to_string()
-                .contains("live adapter block-hash selection is empty"),
-            "unexpected orphan-only target error: {error:#}"
-        );
-
-        database.cleanup().await
-    }
-}
+#[path = "scope/tests.rs"]
+mod tests;
