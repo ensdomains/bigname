@@ -150,9 +150,6 @@ pub(crate) async fn load_active_emitters(
         .into_iter()
         .filter(|contract| contract.chain == chain)
         .collect::<Vec<_>>();
-    if watched_contracts.is_empty() {
-        return Ok(Vec::new());
-    }
 
     let mut manifest_ids = HashSet::new();
     for (index, watched_contract) in watched_contracts.iter().enumerate() {
