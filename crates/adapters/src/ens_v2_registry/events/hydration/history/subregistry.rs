@@ -294,8 +294,11 @@ fn build_registry_suffix_history_query<'args>(
 
 /// Load discovery intervals from the stable canonical prefix plus the exact
 /// parent chain above a safe or finalized boundary. A bounded interval stays
-/// eligible after deactivation, but a sibling cannot supply either its start
-/// or its closing boundary to the selected branch.
+/// eligible after deactivation, but above the stable boundary a sibling
+/// cannot supply either its start or its closing boundary to the selected
+/// branch. Below the boundary, canonical rows are trusted by state under the
+/// reconciler invariant that no non-orphaned sibling survives at or below a
+/// safe or finalized height.
 pub(in crate::ens_v2_registry::events::hydration) async fn load_subregistry_target_rows(
     pool: &PgPool,
     requests: &[TargetRequest],
