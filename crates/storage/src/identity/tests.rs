@@ -4115,14 +4115,21 @@ async fn identity_count_resource_observed_to_orphaned_does_not_recompute() -> Re
 }
 
 #[tokio::test]
-async fn identity_feed_statement_triggers_recompute_name_current_resource_eligibility() -> Result<()>
-{
+async fn identity_sidecars_retry_canonicality_flip_across_replay_admission() -> Result<()> {
     let database = TestDatabase::new().await?;
     let address = "0x0000000000000000000000000000000000000fed";
     let logical_name_id = "ens:feed-trigger.eth";
     let relation_resource_id = Uuid::from_u128(0xf101);
     let name_current_resource_id = Uuid::from_u128(0xf102);
     let surface_binding_id = Uuid::from_u128(0xf103);
+    let name_current_resource = resource(
+        name_current_resource_id,
+        None,
+        "ens",
+        "feed_trigger_name_resource",
+        802,
+        CanonicalityState::Finalized,
+    );
 
     upsert_name_surfaces(
         database.pool(),
@@ -4147,14 +4154,7 @@ async fn identity_feed_statement_triggers_recompute_name_current_resource_eligib
                 801,
                 CanonicalityState::Finalized,
             ),
-            resource(
-                name_current_resource_id,
-                None,
-                "ens",
-                "feed_trigger_name_resource",
-                802,
-                CanonicalityState::Finalized,
-            ),
+            name_current_resource.clone(),
         ],
     )
     .await?;
@@ -4276,6 +4276,7 @@ async fn identity_feed_statement_triggers_recompute_name_current_resource_eligib
         identity_feed_count(database.pool(), address, "owned").await?,
         1
     );
+    assert_eq!(identity_count(database.pool(), address, "owned").await?, 1);
     let feed_recomputed_at = identity_feed_recomputed_at(database.pool(), address, "owned").await?;
 
     sleep(std::time::Duration::from_millis(10)).await;
@@ -4294,16 +4295,45 @@ async fn identity_feed_statement_triggers_recompute_name_current_resource_eligib
         feed_recomputed_at
     );
 
-    sqlx::query("UPDATE resources SET canonicality_state = 'orphaned' WHERE resource_id = $1")
-        .bind(name_current_resource_id)
-        .execute(database.pool())
+    let mut replay_admission = database.pool().begin().await?;
+    crate::projection_staging::lock_current_projection_replay_version_for_replay_write_in_transaction(
+        &mut replay_admission,
+    )
+    .await?;
+    let admission_error =
+        sqlx::query("UPDATE resources SET canonicality_state = 'orphaned' WHERE resource_id = $1")
+            .bind(name_current_resource_id)
+            .execute(database.pool())
+            .await
+            .expect_err("an unwrapped identity write must lose the sidecar NOWAIT admission race");
+    let admission_error = anyhow::Error::from(admission_error);
+    assert!(
+        crate::projection_staging::is_retryable_projection_replay_admission_error(&admission_error),
+        "the current-version identity collision must be retryable, got: {admission_error:#}"
+    );
+
+    let mut orphaned_resource = name_current_resource;
+    orphaned_resource.canonicality_state = CanonicalityState::Orphaned;
+    let upsert_pool = database.pool().clone();
+    let mut canonicality_flip = tokio::spawn(async move {
+        upsert_resources(&upsert_pool, std::slice::from_ref(&orphaned_resource)).await
+    });
+    sleep(std::time::Duration::from_millis(30)).await;
+    assert!(
+        !canonicality_flip.is_finished(),
+        "the identity transaction should be retrying while replay admission holds the fence"
+    );
+    replay_admission.commit().await?;
+    timeout(std::time::Duration::from_secs(5), &mut canonicality_flip)
         .await
-        .context("failed to orphan name_current resource")?;
+        .context("identity canonicality retry did not finish after replay admission committed")?
+        .context("identity canonicality retry task panicked")??;
 
     assert_eq!(
         identity_feed_count(database.pool(), address, "owned").await?,
         0
     );
+    assert_eq!(identity_count(database.pool(), address, "owned").await?, 0);
 
     database.cleanup().await
 }

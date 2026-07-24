@@ -1,4 +1,7 @@
-use crate::projection_staging::advance_current_projection_full_replay_input_revision_in_transaction;
+use crate::projection_staging::{
+    advance_current_projection_full_replay_input_revision_in_transaction,
+    lock_current_projection_replay_version_for_replay_write_in_transaction,
+};
 use anyhow::{Context, Result};
 
 use super::super::guards::ensure_canonical_raw_log_floor_from;
@@ -14,6 +17,11 @@ pub(super) async fn reset_replay_state(
     state: &RunState,
 ) -> Result<BaseNormalizedRederiveCounts> {
     ensure_canonical_raw_log_floor_from(transaction).await?;
+    // Admit the reset while every replay-version marker is still available to the max-version
+    // check, and establish the fence-before-protected-table lock order for the deletes below.
+    lock_current_projection_replay_version_for_replay_write_in_transaction(transaction)
+        .await
+        .context("failed to lock projection replay state before Base rederive reset")?;
     let current_projection_replay_status =
         delete_current_projection_replay_status(transaction).await?;
     let adapter_checkpoint_item_rows =

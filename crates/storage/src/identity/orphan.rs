@@ -15,6 +15,18 @@ pub async fn mark_surface_binding_range_orphaned(
         return Ok(0);
     }
 
+    crate::projection_staging::retry_projection_replay_admission(|| {
+        mark_surface_binding_range_orphaned_once(pool, chain_id, from_hash, stop_before_hash)
+    })
+    .await
+}
+
+async fn mark_surface_binding_range_orphaned_once(
+    pool: &PgPool,
+    chain_id: &str,
+    from_hash: &str,
+    stop_before_hash: Option<&str>,
+) -> Result<u64> {
     let mut transaction = pool
         .begin()
         .await
@@ -62,6 +74,18 @@ pub async fn mark_identity_rows_range_orphaned(
         return Ok(IdentityOrphanCounts::default());
     }
 
+    crate::projection_staging::retry_projection_replay_admission(|| {
+        mark_identity_rows_range_orphaned_once(pool, chain_id, from_hash, stop_before_hash)
+    })
+    .await
+}
+
+async fn mark_identity_rows_range_orphaned_once(
+    pool: &PgPool,
+    chain_id: &str,
+    from_hash: &str,
+    stop_before_hash: Option<&str>,
+) -> Result<IdentityOrphanCounts> {
     let mut transaction = pool
         .begin()
         .await
