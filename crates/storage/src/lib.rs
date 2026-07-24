@@ -448,6 +448,10 @@ fn connect_options(
 
     let mut options = PgConnectOptions::from_str(&database_url)
         .context("failed to parse PostgreSQL database URL")?;
+    options = options.options([(
+        "bigname.projection_replay_version",
+        CURRENT_PROJECTION_REPLAY_VERSION.to_string(),
+    )]);
     if let Some(application_name) = application_name {
         options = options.application_name(application_name);
     }

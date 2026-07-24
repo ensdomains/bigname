@@ -69,9 +69,13 @@ impl TestDatabase {
             .await
             .with_context(|| format!("failed to create test database {database_name}"))?;
 
+        let database_options = base_options.database(&database_name).options([(
+            "bigname.projection_replay_version",
+            bigname_storage::CURRENT_PROJECTION_REPLAY_VERSION.to_string(),
+        )]);
         let pool = PgPoolOptions::new()
             .max_connections(5)
-            .connect_with(base_options.database(&database_name))
+            .connect_with(database_options)
             .await
             .context("failed to connect worker address_names test pool")?;
 

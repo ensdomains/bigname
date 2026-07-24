@@ -44,8 +44,7 @@ pub(super) fn spawn(
             projection_apply_hydration_lock,
             required_subtask_activity,
         )
-        .await;
-        Ok(())
+        .await
     })
 }
 
@@ -57,7 +56,7 @@ async fn run(
     projection_apply_generation: Arc<AtomicU64>,
     projection_apply_hydration_lock: Arc<Mutex<()>>,
     required_subtask_activity: RequiredSubtaskActivity,
-) {
+) -> anyhow::Result<()> {
     let poll_interval = Duration::from_secs(poll_interval_secs.max(1));
     let mut bootstrap_completed = false;
     let mut last_trigger = primary_hydration::LegacyReverseHydrationTriggerState::default();
@@ -116,6 +115,11 @@ async fn run(
                     }
                 }
                 Err(error) => {
+                    if bigname_storage::projection_staging::is_outdated_projection_replay_version_error(
+                        &error,
+                    ) {
+                        return Err(error);
+                    }
                     warn!(
                         service = "worker",
                         projection = "primary_names_current",
@@ -146,6 +150,11 @@ async fn run(
                     progressed |= summary.upserted_row_count > 0 || summary.deleted_row_count > 0;
                 }
                 Err(error) => {
+                    if bigname_storage::projection_staging::is_outdated_projection_replay_version_error(
+                        &error,
+                    ) {
+                        return Err(error);
+                    }
                     warn!(
                         service = "worker",
                         projection = "primary_names_current",

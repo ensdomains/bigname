@@ -476,6 +476,14 @@ async fn load_text_hydration_rows(
 }
 
 async fn update_record_inventory_entries(pool: &PgPool, row: &HydrationRow) -> Result<()> {
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to open record_inventory_current hydration publish transaction")?;
+    bigname_storage::projection_staging::lock_current_projection_replay_version_for_projection_write_in_transaction(
+        &mut transaction,
+    )
+    .await?;
     sqlx::query(
         r#"
         UPDATE record_inventory_current
@@ -487,7 +495,7 @@ async fn update_record_inventory_entries(pool: &PgPool, row: &HydrationRow) -> R
     .bind(row.resource_id)
     .bind(&row.record_version_boundary_key)
     .bind(&row.entries)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .with_context(|| {
         format!(
@@ -495,6 +503,10 @@ async fn update_record_inventory_entries(pool: &PgPool, row: &HydrationRow) -> R
             row.resource_id, row.record_version_boundary_key
         )
     })?;
+    transaction
+        .commit()
+        .await
+        .context("failed to commit record_inventory_current hydration publish")?;
     Ok(())
 }
 

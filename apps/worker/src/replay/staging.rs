@@ -369,6 +369,10 @@ async fn lock_projection_checkpoint(
     transaction: &mut Transaction<'_, Postgres>,
     projection: &str,
 ) -> Result<()> {
+    bigname_storage::projection_staging::lock_current_projection_replay_version_for_replay_write_in_transaction(
+        transaction,
+    )
+    .await?;
     sqlx::query(
         "SELECT pg_advisory_xact_lock(hashtextextended('current_projection_staging:' || $1, 0))",
     )

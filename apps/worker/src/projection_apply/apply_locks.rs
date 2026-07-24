@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, time::Duration};
 
 use anyhow::{Context, Result, bail};
-use sqlx::{Connection, PgConnection, PgPool};
+use sqlx::{Connection, PgConnection, PgPool, Postgres, Transaction};
 use tokio::time::timeout;
 
 use super::apply::ClaimedInvalidation;
@@ -10,6 +10,7 @@ const APPLY_LOCK_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const APPLY_LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(super) struct InvalidationApplyLocks {
+    version_fence: Option<Transaction<'static, Postgres>>,
     conn: PgConnection,
     keys: Vec<String>,
 }
@@ -33,6 +34,14 @@ pub(super) async fn acquire_invalidation_apply_locks_with_timeout(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
+    let mut version_fence = pool
+        .begin()
+        .await
+        .context("failed to open projection invalidation apply version-fence transaction")?;
+    bigname_storage::projection_staging::lock_current_projection_replay_version_for_projection_write_in_transaction(
+        &mut version_fence,
+    )
+    .await?;
     let connect_options = pool.connect_options();
     let mut conn = timeout(
         APPLY_LOCK_CONNECT_TIMEOUT,
@@ -68,12 +77,24 @@ pub(super) async fn acquire_invalidation_apply_locks_with_timeout(
     }
     keys.reverse();
 
-    Ok(InvalidationApplyLocks { conn, keys })
+    Ok(InvalidationApplyLocks {
+        version_fence: Some(version_fence),
+        conn,
+        keys,
+    })
 }
 
 pub(super) async fn ensure_invalidation_apply_locks_alive(
     locks: &mut InvalidationApplyLocks,
 ) -> Result<()> {
+    let version_fence = locks
+        .version_fence
+        .as_mut()
+        .context("projection invalidation apply version fence was already released")?;
+    sqlx::query("SELECT 1")
+        .execute(&mut **version_fence)
+        .await
+        .context("projection invalidation apply version fence is not alive")?;
     ensure_invalidation_apply_locks_connection_alive(&mut locks.conn)
         .await
         .context("projection invalidation apply lock connection is not alive")
@@ -136,17 +157,35 @@ pub(super) async fn invalidation_apply_locks_backend_pid(
 pub(super) async fn release_invalidation_apply_locks(
     locks: &mut InvalidationApplyLocks,
 ) -> Result<()> {
+    let mut release_error = None;
     for key in &locks.keys {
-        sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1::text, 0::bigint))")
-            .bind(key)
-            .execute(&mut locks.conn)
-            .await
-            .with_context(|| {
-                format!("failed to release projection invalidation apply lock {key}")
-            })?;
+        if let Err(error) =
+            sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1::text, 0::bigint))")
+                .bind(key)
+                .execute(&mut locks.conn)
+                .await
+                .with_context(|| {
+                    format!("failed to release projection invalidation apply lock {key}")
+                })
+        {
+            release_error = Some(error);
+            break;
+        }
     }
 
-    Ok(())
+    let version_fence = locks
+        .version_fence
+        .take()
+        .context("projection invalidation apply version fence was already released")?;
+    let fence_release = version_fence
+        .commit()
+        .await
+        .context("failed to release projection invalidation apply version fence");
+    if let Some(error) = release_error {
+        fence_release?;
+        return Err(error);
+    }
+    fence_release
 }
 
 pub(super) fn invalidation_apply_lock_key(invalidation: &ClaimedInvalidation) -> String {

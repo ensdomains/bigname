@@ -132,8 +132,45 @@ starting any worker from the new image. Start one new worker, wait until every
 current projection family has a marker for the new replay version and
 `projection_invalidations` is empty, and only then start or undrain the API.
 The supported deployment has one active worker; do not overlap old and new
-workers during this handoff. Indexers may continue ingesting while workers are
-stopped; their durable changes will be consumed after replay handoff.
+workers during this handoff. An indexer from the same release may continue
+ingesting while workers are stopped and during replay; its durable changes will
+be consumed after replay handoff. Replace an indexer from before this change
+before admitting the new worker because its unstamped writes are rejected once
+enforcement activates.
+
+The database also enforces this version boundary with the
+[projection replay-version fence](glossary.md#projection-replay-version-fence).
+The singleton
+`current_projection_full_replay_input_revision` row stores the minimum
+projection replay version admitted to projection writes and whether enforcement
+has been activated. Every new process stamps its compiled replay version on
+each database connection. Applying the migration leaves enforcement inactive;
+the first replay transaction from the new release activates it and raises the
+minimum under an exclusive row lock. Database triggers on the invalidation queue
+and cursor, current projection tables and companion tables, and durable replay
+state take the shared side of that lock before every write. An older write that
+began first therefore commits before activation and is included in the new
+replay. After activation, a lower version or a connection with no stamp from a
+pre-fence binary receives a loud database error before it can claim, extend a
+claim lease, publish, complete queue work, or change replay state. Workers that
+implement this check treat the error as process-fatal and exit. A binary from
+before the check existed cannot be retrofitted: its protected writes remain
+blocked, but it may keep retrying and may continue updating its health heartbeat
+until the operator or supervisor terminates and replaces it. The invalidation
+queue is also an indexer-to-worker handoff, so DML from a stamped connection
+waits for in-progress replay admission and then performs the same version check.
+Its ordinary table lock is compatible with replay queue DML; this keeps
+matching-version indexer intake live without weakening the rejection of a
+lower-version or unstamped writer.
+
+The worker also compares its compiled version with the durable minimum and
+every persisted attempt, checkpoint, and marker inside claim and replay
+transactions. These cooperative checks provide a typed fatal error; the
+database triggers are the enforcement boundary that also catches a binary
+deployed before the check existed. This turns accidental mixed-version overlap
+into a database-enforced stop, but it does not remove the API drain: operators
+must still wait for current markers and an empty invalidation queue before
+serving reads.
 
 Replay version 9 is such an upgrade: it forces the full permission cutover that
 discovers canonical zero-event resources and seeds
@@ -153,9 +190,16 @@ and every version-9 marker, including `name_current`, is current. Replay version
 `permissions_current_resource_summary` and introduced the current-wrapper
 unsupported control summary; version 9 retains those behaviors and the version-7
 ENSv2 exact-name-profile evidence. The replay-version marker prevents a new
-worker from trusting old bootstrap completion; it does not fence an old worker
-from claiming a later invalidation. Container healthchecks report version skew
-but do not stop an old process, so they are not a substitute for this drain.
+worker from trusting old bootstrap completion. The version-8/version-9 handoff
+predated the database fence and is the motivating historical example of the
+former documentation-only protection. Once the fence migration is installed,
+the first replay from the new release rejects protected writes from any
+still-running pre-fence worker or rollback image because its database
+connections have no replay-version stamp. Future replay-version handoffs
+therefore have structural writer enforcement in addition to the documented
+rollout procedure. Container healthchecks still report version skew, but the
+database—not the healthcheck—prevents a stale writer from committing. The stop
+and drain steps remain required rollout and read-freshness gates.
 
 The version-9 full permission cutover writes publication version 2 and advances
 its monotonic `data_revision` atomically with holder rows and per-resource

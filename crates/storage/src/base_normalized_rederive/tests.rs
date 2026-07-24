@@ -256,6 +256,10 @@ fn resource_projection_count_sql_joins_from_scoped_resources() {
 async fn test_database() -> Result<TestDatabase> {
     TestDatabase::create_migrated(
         TestDatabaseConfig::new("bigname_storage_base_rederive_test")
+            .connection_option(
+                "bigname.projection_replay_version",
+                crate::CURRENT_PROJECTION_REPLAY_VERSION.to_string(),
+            )
             .admin_connect_context("failed to connect admin pool for Base rederive tests")
             .pool_connect_context("failed to connect Base rederive test pool"),
         &crate::MIGRATOR,

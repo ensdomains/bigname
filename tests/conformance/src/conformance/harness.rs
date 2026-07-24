@@ -22,7 +22,8 @@
             NameSurface, NormalizedEvent, PermissionScope, PermissionsCurrentRow,
             PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot, RawBlock,
             RecordInventoryCurrentRow, ResolverCurrentRow, Resource, SurfaceBinding,
-            SurfaceBindingKind, TokenLineage, default_database_url,
+            SurfaceBindingKind, TokenLineage, CURRENT_PROJECTION_REPLAY_VERSION,
+            default_database_url,
             invalidate_execution_outcomes_for_manifest_version,
             invalidate_execution_outcomes_for_manifest_version_and_request_key,
             invalidate_execution_outcomes_for_record_boundary,
@@ -351,7 +352,13 @@
                         format!("failed to create conformance database {database_name}")
                     })?;
 
-                let pool_options = base_options.clone().database(&database_name);
+                let pool_options = base_options
+                    .clone()
+                    .database(&database_name)
+                    .options([(
+                        "bigname.projection_replay_version",
+                        CURRENT_PROJECTION_REPLAY_VERSION.to_string(),
+                    )]);
                 let database_url = pool_options.to_url_lossy().to_string();
                 let pool = PgPoolOptions::new()
                     .max_connections(1)

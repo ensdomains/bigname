@@ -265,6 +265,10 @@ impl ProjectionStagingCheckpoint {
         progress: &StagingBatchProgress,
         input_fence: &StagingBatchInputFence,
     ) -> Result<()> {
+        bigname_storage::projection_staging::lock_current_projection_replay_version_for_replay_write_in_transaction(
+            transaction,
+        )
+        .await?;
         ensure_current_projection_full_replay_input_revision_in_transaction(
             transaction,
             self.full_replay_input_revision,
