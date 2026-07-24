@@ -4,7 +4,7 @@ use bigname_storage::sql_row;
 use sqlx::PgPool;
 
 use crate::ens_v2_common::{
-    ActiveEmitter, active_emitter_for_block, emitters_by_address, normalize_address,
+    ActiveEmitter, active_emitter_for_log, emitters_by_address, normalize_address,
     source_scope_bindings,
 };
 use crate::{
@@ -278,9 +278,14 @@ pub(super) async fn load_resolver_raw_logs(
             let emitting_address =
                 normalize_address(&sql_row::get::<String>(&row, "emitting_address")?);
             let block_number = sql_row::get(&row, "block_number")?;
-            let Some(emitter) = active_emitters_by_address
-                .get(&emitting_address)
-                .and_then(|emitters| active_emitter_for_block(emitters, block_number))
+            let transaction_index = sql_row::get(&row, "transaction_index")?;
+            let log_index = sql_row::get(&row, "log_index")?;
+            let Some(emitter) =
+                active_emitters_by_address
+                    .get(&emitting_address)
+                    .and_then(|emitters| {
+                        active_emitter_for_log(emitters, block_number, transaction_index, log_index)
+                    })
             else {
                 continue;
             };
@@ -290,8 +295,8 @@ pub(super) async fn load_resolver_raw_logs(
                 block_number,
                 event_position_timestamp: sql_row::get(&row, "event_position_timestamp")?,
                 transaction_hash: sql_row::get(&row, "transaction_hash")?,
-                transaction_index: sql_row::get(&row, "transaction_index")?,
-                log_index: sql_row::get(&row, "log_index")?,
+                transaction_index,
+                log_index,
                 emitting_address,
                 emitting_contract_instance_id: emitter.contract_instance_id,
                 topics: sql_row::get(&row, "topics")?,
