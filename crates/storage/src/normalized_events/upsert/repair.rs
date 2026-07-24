@@ -27,6 +27,8 @@ mod ens_v1_reverse_resolver_before_state;
 mod ens_v1_same_tx_registration_setup;
 #[path = "repair/ens_v1_wrapper_token_before_state.rs"]
 mod ens_v1_wrapper_token_before_state;
+#[path = "repair/ens_v2_permission_selector.rs"]
+mod ens_v2_permission_selector;
 #[path = "repair/ens_v2_registration_expiry.rs"]
 mod ens_v2_registration_expiry;
 #[path = "repair/primary_claim_source.rs"]
@@ -77,6 +79,9 @@ pub(super) use ens_v1_same_tx_registration_setup::{
 };
 pub(super) use ens_v1_wrapper_token_before_state::{
     ens_v1_wrapper_token_before_state_repair_allowed, repair_ens_v1_wrapper_token_before_states,
+};
+pub(super) use ens_v2_permission_selector::{
+    ens_v2_permission_selector_link_repair_allowed, repair_ens_v2_permission_selector_links,
 };
 pub(super) use ens_v2_registration_expiry::{
     ens_v2_registration_expiry_after_state_repair_allowed,
@@ -149,6 +154,8 @@ pub(super) async fn repair_after_state_conflicts(
     let ens_v2_registration_expiry =
         repair_ens_v2_registration_expiry_after_states(executor, events, existing_by_identity)
             .await?;
+    let ens_v2_permission_selector =
+        repair_ens_v2_permission_selector_links(executor, events, existing_by_identity).await?;
 
     Ok(primary_claim_source.len()
         + resolver_observation_key.len()
@@ -161,7 +168,8 @@ pub(super) async fn repair_after_state_conflicts(
         + registry_resolver_before_state.len()
         + renewal_before_state.len()
         + registration_release_before_state.len()
-        + ens_v2_registration_expiry.len())
+        + ens_v2_registration_expiry.len()
+        + ens_v2_permission_selector.len())
 }
 
 pub(super) async fn repair_resource_id_conflicts(
@@ -263,6 +271,7 @@ pub(super) fn normalized_event_identity_repair_allowed(
             incoming,
             differing_fields,
         )
+        || ens_v2_permission_selector_link_repair_allowed(existing, incoming, differing_fields)
         || ens_v1_unwrapped_authority_boundary_manifest_metadata_mismatch_allowed(
             existing,
             incoming,

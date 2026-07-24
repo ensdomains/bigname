@@ -1815,6 +1815,18 @@ async fn ens_v2_incremental_batches_match_full_replay_normalized_events() -> Res
         2,
         "terminal replay must retain bounded resolver and subregistry discovery history"
     );
+    // Repairs must not be allowed to converge a divergent incremental derivation silently.
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT \
+             FROM projection_normalized_event_changes \
+             WHERE change_kind = 'content_update'",
+        )
+        .fetch_one(incremental.pool())
+        .await?,
+        0,
+        "incremental equivalence must hold without normalized-event repair intervention"
+    );
 
     incremental.cleanup().await?;
     full_replay.cleanup().await
