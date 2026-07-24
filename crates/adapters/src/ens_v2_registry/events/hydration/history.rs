@@ -23,8 +23,10 @@ const TRANSFER_REQUEST_CHUNK_SIZE: usize = 8_000;
 const REGISTRY_AUTHORITY_REQUEST_BIND_COUNT: usize = 2;
 const REGISTRY_AUTHORITY_REQUEST_CHUNK_SIZE: usize = 30_000;
 
+mod ancestry;
 mod subregistry;
 
+use ancestry::{SelectedPathAnchor, ensure_selected_paths_reach_stable_boundaries};
 pub(super) use subregistry::load_subregistry_target_rows;
 use subregistry::{RegistryAuthorityKey, load_registry_suffixes};
 
@@ -129,6 +131,22 @@ async fn load_unique_linked_transfer_states(
         debug_assert!(
             transfer_query_bind_count(unique_requests.len()) < POSTGRES_BIND_PARAMETER_LIMIT
         );
+        let anchors = unique_requests
+            .iter()
+            .enumerate()
+            .map(|(request_index, (_, request))| SelectedPathAnchor {
+                request_index: i64::try_from(request_index).expect("request index must fit i64"),
+                chain_id: &request.chain_id,
+                block_number: request.block_number,
+                block_hash: &request.block_hash,
+            })
+            .collect::<Vec<_>>();
+        ensure_selected_paths_reach_stable_boundaries(
+            pool,
+            "transfer-predecessor hydration",
+            &anchors,
+        )
+        .await?;
         let mut query = build_transfer_predecessor_query(unique_requests, &predecessor_topics);
         let mut rows_by_request = HashMap::<usize, Vec<PgRow>>::new();
         for row in query
@@ -266,7 +284,10 @@ fn build_transfer_predecessor_query<'args>(
              AND parent.block_hash = child.parent_hash
              AND parent.block_number = child.block_number - 1
              AND parent.canonicality_state <> 'orphaned'::canonicality_state
-            WHERE child.canonicality_state = 'observed'::canonicality_state
+            WHERE child.canonicality_state NOT IN (
+                'safe'::canonicality_state,
+                'finalized'::canonicality_state
+            )
         )
         SELECT
             requested.request_index,
@@ -307,7 +328,10 @@ fn build_transfer_predecessor_query<'args>(
                       SELECT MAX(tail.block_number)
                       FROM selected_tail tail
                       WHERE tail.request_index = requested.request_index
-                        AND tail.canonicality_state <> 'observed'::canonicality_state
+                        AND tail.canonicality_state IN (
+                            'safe'::canonicality_state,
+                            'finalized'::canonicality_state
+                        )
                   ), -1)
               )
           )
