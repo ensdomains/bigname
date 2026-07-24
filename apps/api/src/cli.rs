@@ -104,8 +104,8 @@ impl ServeArgs {
             "BIGNAME_API_RPC_TIMEOUT_MS must be greater than zero"
         );
         ensure!(
-            self.rpc_connect_timeout_ms <= self.rpc_timeout_ms,
-            "BIGNAME_API_RPC_CONNECT_TIMEOUT_MS must not exceed BIGNAME_API_RPC_TIMEOUT_MS"
+            self.rpc_connect_timeout_ms < self.rpc_timeout_ms,
+            "BIGNAME_API_RPC_CONNECT_TIMEOUT_MS must be less than BIGNAME_API_RPC_TIMEOUT_MS"
         );
         ChainRpcUrls::from_entries(&self.chain_rpc_urls)?.with_http_timeouts(
             Duration::from_millis(self.rpc_connect_timeout_ms),

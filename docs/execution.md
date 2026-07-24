@@ -17,7 +17,7 @@ Every step is attributable in provenance. One request may cover multiple explici
 
 Before persisting a selector-local result as a supported, cache-eligible outcome, execution reloads from storage the manifest versions, the same declared topology snapshot the mixed route would serve, and any [resolver-profile](glossary.md) [admission](glossary.md) state required by the participating resolver-local fact families. The namespace support class is derived from those stored inputs, not from transient trace shape. If revalidation cannot re-establish a frozen supported class, audit material may persist but supported-outcome persistence fails closed.
 
-Unsupported record families surface explicit `status=unsupported`; they never silently degrade to declared cache values. Supported requests that cannot produce a trustworthy answer return `status=execution_failed` with a typed `failure_reason`; plain resolver reverts are `resolver_call_reverted`, malformed return data is `resolver_return_data_malformed`, and unclassified provider-side JSON-RPC response errors remain `resolver_call_failed`. Cache-eligible in-band failures are limited to completed JSON-RPC responses, malformed successful response payloads, expiration of the API's configured provider connect or total-response deadline, and expiration of the CCIP-Read gateway client's configured total-response deadline. A JSON-RPC response recognized as unable to serve the selected block and any non-timeout provider or gateway transport failure abort before trace or outcome persistence.
+Unsupported record families surface explicit `status=unsupported`; they never silently degrade to declared cache values. Supported requests that cannot produce a trustworthy answer return `status=execution_failed` with a typed `failure_reason`; plain resolver reverts are `resolver_call_reverted`, malformed return data is `resolver_return_data_malformed`, and unclassified provider-side JSON-RPC response errors remain `resolver_call_failed`. Cache-eligible in-band failures are limited to completed JSON-RPC responses, malformed successful response payloads, expiration of the API's configured provider response deadline, and expiration of the CCIP-Read gateway client's configured response deadline. A JSON-RPC response recognized as unable to serve the selected block, a provider or gateway connect-phase timeout, or any other provider or gateway transport failure aborts before trace or outcome persistence.
 
 ### Namespaces and entrypoints
 
@@ -64,13 +64,15 @@ Live-execution rules:
   back to declared cache. `v1` routes surface that as `409 stale`; `v2`
   product routes keep the successful envelope and report in-band
   `status=stale` with `failure_reason` on the affected verified record section.
-  Expiration of the provider connect or total-response deadline instead
+  Expiration of the provider response deadline after connection instead
   produces and persists the existing selector-local
   `execution_failed`/`resolver_call_failed` result, bounded by
-  `BIGNAME_API_RPC_CONNECT_TIMEOUT_MS` and `BIGNAME_API_RPC_TIMEOUT_MS`.
-  Non-timeout transport failures such as DNS resolution, TLS negotiation, or a
-  connection reset abort without persisting a trace or outcome, so a later
-  read retries the provider.
+  `BIGNAME_API_RPC_TIMEOUT_MS`. Expiration of the connect deadline, bounded by
+  `BIGNAME_API_RPC_CONNECT_TIMEOUT_MS`, and other transport failures such as
+  DNS resolution, TLS negotiation, or a connection reset abort without
+  persisting a trace or outcome, so a later read retries the provider. The RPC
+  connect deadline must be configured below the response deadline so it wins
+  while the client is still connecting.
 - unsupported selector families and unsupported verified [path classes](glossary.md) stay
   selector-local `status=unsupported`; on-demand execution does not widen the
   support boundary
@@ -81,10 +83,11 @@ The compact records routes `GET /v1/names/{namespace}/{name}/records` and
 selected stored snapshot as the profile routes. When either route needs
 on-demand ENS verified values, it executes against that snapshot and persists
 the trace and outcome. A JSON-RPC selected-block rejection returns `409 stale`
-in `v1` and in-band `status=stale` in `v2`; expiration of a configured API
-transport deadline is persisted as an in-band `execution_failed` result for the
-affected selector. Other transport failures abort before persistence. It never
-targets provider `latest` independently of the selected snapshot.
+in `v1` and in-band `status=stale` in `v2`; expiration of the configured API
+provider response deadline is persisted as an in-band `execution_failed` result
+for the affected selector. A connect-phase timeout or other transport failure
+aborts before persistence. It never targets provider `latest` independently of
+the selected snapshot.
 
 ### Namespace inference
 
@@ -109,7 +112,7 @@ A verification request runs:
 
 The route keeps claim state separate from the execution-derived verification result. Both `claimed_primary_name` and `verified_primary_name` use `ResultStatus`. `claimed_primary_name` is limited to `success`, `not_found`, `unsupported`, `invalid_name`, and `execution_failed`; the last status distinguishes a route-local reverse provider failure from an absent claim. `verified_primary_name` additionally uses `mismatch`. A normalizable claim that fails step 3 produces verified `invalid_name` with `failure_reason=claim_not_normalized`; no forward lookup runs.
 
-Completed JSON-RPC failures, malformed successful responses, and expiration of the API's configured provider connect or total-response deadline remain cache-eligible in-band `execution_failed` results. DNS, TLS, connection-reset, and other non-timeout transport failures abort the primary-name request with `409 stale` before trace or outcome persistence, so the next read retries.
+Completed JSON-RPC failures, malformed successful responses, and expiration of the API's configured provider response deadline remain cache-eligible in-band `execution_failed` results. A provider connect-phase timeout, DNS failure, TLS failure, connection reset, or other transport failure aborts the primary-name request with `409 stale` before trace or outcome persistence, so the next read retries. The CCIP-Read gateway leg follows the same rule: response timeouts remain cache-eligible, while connect-phase timeouts and other gateway transport failures abort before persistence.
 
 `mismatch` means the claim normalized, resolved for the requested `coin_type`, and produced a concrete target address that did not equal the requested one. A nonblank raw claim that cannot be normalized surfaces `invalid_name`; blank or whitespace-only is `not_found`. `raw_claim_name` is claim-local — it may be preserved to explain `claimed_primary_name.status=invalid_name` but does not migrate into `verified_primary_name`. When verification establishes a concrete normalized target, `verified_primary_name` may carry that name identity for `success` or `mismatch`; it is omitted otherwise.
 

@@ -1,10 +1,32 @@
-use std::time::Duration;
+use std::{
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use anyhow::Context;
 use bigname_storage::ENS_NAMESPACE;
 use sqlx::types::time::OffsetDateTime;
 
 use super::*;
+
+struct CallbackTimeoutDnsResolver {
+    rpc_address: SocketAddr,
+    attempts: Arc<AtomicU64>,
+}
+
+impl reqwest::dns::Resolve for CallbackTimeoutDnsResolver {
+    fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        if self.attempts.fetch_add(1, Ordering::SeqCst) > 0 {
+            return Box::pin(std::future::pending());
+        }
+        let address = self.rpc_address;
+        Box::pin(async move { Ok(Box::new(std::iter::once(address)) as reqwest::dns::Addrs) })
+    }
+}
 
 #[tokio::test]
 async fn rpc_transport_timeout_is_an_in_band_selector_failure() -> Result<()> {
@@ -104,6 +126,125 @@ async fn followable_offchain_lookup_with_gateway_success_still_returns_selector_
     assert!(summary.failure_payload.is_none());
     gateway.await??;
     rpc.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn ccip_callback_rpc_connect_timeout_aborts_the_selector_call() -> Result<()> {
+    let (gateway_url, gateway) = spawn_test_gateway().await?;
+    let universal_resolver = ENS_UNIVERSAL_RESOLVER_ADDRESS.parse()?;
+    let (rpc_url, rpc) = spawn_ccip_test_rpc_actions(vec![CcipTestRpcAction::Json(
+        ccip_initial_error_response(encoded_offchain_lookup_error_with(
+            universal_resolver,
+            format!("{gateway_url}/{{data}}"),
+        )),
+    )])
+    .await?;
+    let rpc_address = rpc_url
+        .strip_prefix("http://")
+        .context("mock RPC URL must be HTTP")?
+        .parse::<SocketAddr>()?;
+    let attempts = Arc::new(AtomicU64::new(0));
+    let connect_timeout = Duration::from_millis(25);
+    let response_timeout = Duration::from_secs(1);
+    let client = reqwest::Client::builder()
+        .connect_timeout(connect_timeout)
+        .timeout(response_timeout)
+        .no_proxy()
+        .dns_resolver(CallbackTimeoutDnsResolver {
+            rpc_address,
+            attempts: Arc::clone(&attempts),
+        })
+        .build()?;
+    let endpoint = "http://resolution-callback.connect-timeout.test";
+    let rpc_urls = crate::rpc::ChainRpcUrls::from_entries(&[format!(
+        "{ETHEREUM_MAINNET_CHAIN_ID}={endpoint}"
+    )])?
+    .with_test_http_client(client, connect_timeout, response_timeout)?;
+    let client = JsonRpcHttpClient::new_for_rpc_urls(endpoint, &rpc_urls)?;
+    let row = test_name_current_row();
+    let record = EnsResolutionRecord::new("avatar", "text", Some("avatar".to_owned()));
+
+    let result = execute_record_call(
+        &row,
+        &record,
+        b"\x05alice\x03eth\x00",
+        [0_u8; 32],
+        &ExecutionBlock {
+            chain_id: ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
+            block_number: 21_000_000,
+            block_hash: "0xabc123".to_owned(),
+        },
+        &client,
+        true,
+    )
+    .await;
+    let Err(_error) = result else {
+        panic!("a CCIP callback provider connect timeout must abort before persistence");
+    };
+
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    gateway.await??;
+    rpc.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn ccip_callback_rpc_response_timeout_is_an_in_band_selector_failure() -> Result<()> {
+    let (gateway_url, gateway) = spawn_test_gateway().await?;
+    let universal_resolver = ENS_UNIVERSAL_RESOLVER_ADDRESS.parse()?;
+    let (rpc_url, rpc) = spawn_ccip_test_rpc_actions(vec![
+        CcipTestRpcAction::Json(ccip_initial_error_response(
+            encoded_offchain_lookup_error_with(
+                universal_resolver,
+                format!("{gateway_url}/{{data}}"),
+            ),
+        )),
+        CcipTestRpcAction::Hang,
+    ])
+    .await?;
+    let client = JsonRpcHttpClient::new_with_timeouts(
+        &rpc_url,
+        Duration::from_millis(10),
+        Duration::from_millis(25),
+    )?;
+    let row = test_name_current_row();
+    let record = EnsResolutionRecord::new("avatar", "text", Some("avatar".to_owned()));
+
+    let selector_call = execute_record_call(
+        &row,
+        &record,
+        b"\x05alice\x03eth\x00",
+        [0_u8; 32],
+        &ExecutionBlock {
+            chain_id: ETHEREUM_MAINNET_CHAIN_ID.to_owned(),
+            block_number: 21_000_000,
+            block_hash: "0xabc123".to_owned(),
+        },
+        &client,
+        true,
+    )
+    .await?;
+    rpc.abort();
+    gateway.await??;
+
+    let verified_query = selector_call.verified_query(Uuid::from_u128(1));
+    assert_eq!(verified_query["status"], json!("execution_failed"));
+    assert_eq!(
+        verified_query["failure_reason"],
+        json!("resolver_call_failed")
+    );
+    let summary = selector_call
+        .ccip_summary
+        .context("durable callback timeout must retain CCIP evidence")?;
+    assert_eq!(summary.step_payloads.len(), 1);
+    assert_eq!(
+        summary
+            .failure_payload
+            .as_ref()
+            .map(|payload| &payload["configured_timeout"]),
+        Some(&json!(true))
+    );
     Ok(())
 }
 
@@ -378,24 +519,45 @@ async fn spawn_ccip_test_rpc(
     offchain_lookup: String,
     callback_result: String,
 ) -> Result<(String, tokio::task::JoinHandle<Result<()>>)> {
+    spawn_ccip_test_rpc_actions(vec![
+        CcipTestRpcAction::Json(ccip_initial_error_response(offchain_lookup)),
+        CcipTestRpcAction::Json(json!({ "jsonrpc": "2.0", "id": 1, "result": callback_result })),
+    ])
+    .await
+}
+
+enum CcipTestRpcAction {
+    Json(Value),
+    Hang,
+}
+
+fn ccip_initial_error_response(offchain_lookup: String) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": {
+            "code": 3,
+            "message": "execution reverted",
+            "data": offchain_lookup,
+        }
+    })
+}
+
+async fn spawn_ccip_test_rpc_actions(
+    actions: Vec<CcipTestRpcAction>,
+) -> Result<(String, tokio::task::JoinHandle<Result<()>>)> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("http://{}", listener.local_addr()?);
     let handle = tokio::spawn(async move {
-        for body in [
-            json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "error": {
-                    "code": 3,
-                    "message": "execution reverted",
-                    "data": offchain_lookup,
-                }
-            }),
-            json!({ "jsonrpc": "2.0", "id": 1, "result": callback_result }),
-        ] {
+        for action in actions {
             let (mut socket, _) = listener.accept().await?;
             read_test_http_request(&mut socket).await?;
-            write_test_http_response(&mut socket, body.to_string().as_bytes()).await?;
+            match action {
+                CcipTestRpcAction::Json(body) => {
+                    write_test_http_response(&mut socket, body.to_string().as_bytes()).await?;
+                }
+                CcipTestRpcAction::Hang => std::future::pending::<()>().await,
+            }
         }
         Ok(())
     });

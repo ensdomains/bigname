@@ -140,7 +140,7 @@ pub(super) async fn execute_record_call(
                         outcome.result
                     }
                     Ok(None) => result,
-                    Err(error) if error.is_gateway_transport_failure() => {
+                    Err(error) if error.is_transport_failure() => {
                         if !error.is_configured_timeout() {
                             return Err(error.into());
                         }

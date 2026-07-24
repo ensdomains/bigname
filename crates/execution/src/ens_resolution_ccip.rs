@@ -1,5 +1,7 @@
-use std::sync::LazyLock;
-use std::time::{Duration, Instant};
+use std::{
+    sync::LazyLock,
+    time::{Duration, Instant},
+};
 
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::{SolCall, SolError, SolValue, sol};
@@ -13,14 +15,26 @@ use crate::rpc::{JsonRpcCallError, JsonRpcCallResult, JsonRpcHttpClient};
 const LOCAL_BATCH_GATEWAY_URL: &str = "x-batch-gateway:true";
 const MAX_CCIP_REDIRECTS: usize = 4;
 const MAX_GATEWAY_URLS: usize = 4;
+#[cfg(not(test))]
+const GATEWAY_CONNECT_TIMEOUT: Duration = Duration::from_millis(1000);
+#[cfg(test)]
+const GATEWAY_CONNECT_TIMEOUT: Duration = Duration::from_millis(25);
 const GATEWAY_TIMEOUT: Duration = Duration::from_millis(1500);
 
-static GATEWAY_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .timeout(GATEWAY_TIMEOUT)
+static GATEWAY_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(build_gateway_http_client);
+
+fn build_gateway_http_client() -> reqwest::Client {
+    let builder = reqwest::Client::builder()
+        .connect_timeout(GATEWAY_CONNECT_TIMEOUT)
+        .timeout(GATEWAY_TIMEOUT);
+    #[cfg(test)]
+    let builder = builder
+        .no_proxy()
+        .dns_resolver(tests::TestGatewayDnsResolver::default());
+    builder
         .build()
         .expect("CCIP gateway HTTP client configuration must be valid")
-});
+}
 
 mod abi {
     use super::*;
@@ -141,10 +155,6 @@ pub(crate) async fn follow_ccip_read(
             "data": hex_string(&callback_calldata),
         });
         let callback_sender = lookup.sender.clone();
-        let callback_result = rpc
-            .call("eth_call", vec![call, block_selector.clone()])
-            .await
-            .context("failed to execute CCIP-Read callback eth_call")?;
         gateway_digests.extend(gateway_response.gateway_digests);
         step_payloads.push(json!({
             "sender": lookup.sender,
@@ -153,6 +163,31 @@ pub(crate) async fn follow_ccip_read(
             "response_bytes": gateway_response.body.len(),
             "latency_ms": elapsed_latency_ms(started),
         }));
+        let callback_result = match rpc
+            .call("eth_call", vec![call, block_selector.clone()])
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                let configured_timeout = rpc.is_configured_timeout(&error);
+                let failure_payload = json!({
+                    "sender": lookup.sender,
+                    "provider_callback": true,
+                    "transport_failure": true,
+                    "configured_timeout": configured_timeout,
+                    "latency_ms": elapsed_latency_ms(started),
+                });
+                return Err(CcipReadError::provider_callback_transport(
+                    error.context("failed to execute CCIP-Read callback eth_call"),
+                    configured_timeout,
+                    CcipReadSummary {
+                        gateway_digests,
+                        step_payloads,
+                        failure_payload: Some(failure_payload),
+                    },
+                ));
+            }
+        };
 
         match &callback_result.result {
             Err(error) if redirect_index + 1 < MAX_CCIP_REDIRECTS => {

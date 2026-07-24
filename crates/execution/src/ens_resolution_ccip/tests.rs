@@ -1,10 +1,51 @@
 use super::*;
+use std::{collections::HashMap, net::SocketAddr, sync::Mutex};
 
 #[derive(Debug, Eq, PartialEq)]
 struct GatewayRequest {
     method: String,
     path: String,
     body: Vec<u8>,
+}
+
+#[derive(Default)]
+pub(super) struct TestGatewayDnsResolver {
+    attempts: Mutex<HashMap<String, usize>>,
+}
+
+impl reqwest::dns::Resolve for TestGatewayDnsResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let hostname = name.as_str().to_owned();
+        if hostname.ends_with(".connect-timeout.test") {
+            let first_attempt = {
+                let mut attempts = self
+                    .attempts
+                    .lock()
+                    .expect("test gateway DNS attempt mutex must not be poisoned");
+                let attempt = attempts.entry(hostname).or_default();
+                let first_attempt = *attempt == 0;
+                *attempt += 1;
+                first_attempt
+            };
+            if first_attempt {
+                return Box::pin(std::future::pending());
+            }
+            let address = SocketAddr::from(([127, 0, 0, 1], 0));
+            return Box::pin(async move {
+                Ok(Box::new(std::iter::once(address)) as reqwest::dns::Addrs)
+            });
+        }
+
+        Box::pin(async move {
+            let addresses = tokio::net::lookup_host((hostname.as_str(), 0))
+                .await
+                .map_err(|error| {
+                    Box::new(error) as Box<dyn std::error::Error + Send + Sync + 'static>
+                })?
+                .collect::<Vec<_>>();
+            Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
 }
 
 #[test]
@@ -306,7 +347,7 @@ async fn earlier_gateway_connect_failure_is_not_hidden_by_later_client_error() -
 }
 
 #[tokio::test]
-async fn configured_gateway_timeout_is_transport_tagged_for_durable_handling() -> Result<()> {
+async fn gateway_response_timeout_is_transport_tagged_for_durable_handling() -> Result<()> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let gateway_url = format!("http://{}", listener.local_addr()?);
     let gateway = tokio::spawn(async move {
@@ -331,7 +372,7 @@ async fn configured_gateway_timeout_is_transport_tagged_for_durable_handling() -
         &format_address(sender),
     )
     .await
-    .expect_err("configured gateway deadline must surface as a tagged timeout");
+    .expect_err("gateway response deadline must surface as a tagged timeout");
     gateway.abort();
 
     assert!(error.is_gateway_transport_failure());
@@ -343,6 +384,22 @@ async fn configured_gateway_timeout_is_transport_tagged_for_durable_handling() -
             .and_then(|failure| failure.get("configured_timeout")),
         Some(&json!(true))
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn gateway_connect_deadline_precedes_response_deadline() -> Result<()> {
+    assert!(GATEWAY_CONNECT_TIMEOUT < GATEWAY_TIMEOUT);
+    let error = fetch_one_gateway(
+        &GATEWAY_HTTP_CLIENT,
+        "http://gateway-client.connect-timeout.test/{data}",
+        "0x1111111111111111111111111111111111111111",
+        "0x1234",
+    )
+    .await
+    .expect_err("a DNS/connect stall must expire the gateway connect deadline");
+
+    assert_eq!(gateway_transport_classification(&error), Some(false));
     Ok(())
 }
 
