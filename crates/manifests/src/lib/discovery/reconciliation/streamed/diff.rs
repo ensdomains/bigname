@@ -16,34 +16,13 @@ use super::super::existing::edge_from_row;
 use super::DiscoveryObservationPageSource;
 use super::staging::analyze_temp_table;
 
+#[path = "diff/probes.rs"]
+mod probes;
 #[path = "diff/retention.rs"]
 mod retention;
 
+use probes::{deactivation_source_page_sql, insert_candidate_page_sql};
 pub(super) use retention::collect_same_assignment_retained_edges;
-
-/// Exact stored-spec equality between an active `discovery_edges` row (`de`,
-/// with `cia` as its active to-address join) and a staged desired row
-/// (`desired`). This mirrors `ReconciledDiscoveryEdgeSpec` equality against
-/// the spec `load_active_reconciled_discovery_edges` reconstructs:
-/// `source_manifest_id` NULL loads as -1, `observation_key` and the event
-/// position come from provenance, and provenance compares as jsonb minus the
-/// `active_to_*` position keys — the loader round-trips stored provenance
-/// through jsonb, so jsonb equality is the loader's text equality.
-const STREAMED_EXACT_SPEC_MATCH_SQL: &str = r#"
-    desired.discovery_source = de.discovery_source
-    AND desired.observation_key = de.provenance ->> 'observation_key'
-    AND desired.chain_id = de.chain_id
-    AND desired.edge_kind = de.edge_kind
-    AND desired.from_contract_instance_id = de.from_contract_instance_id
-    AND desired.to_contract_instance_id = de.to_contract_instance_id
-    AND desired.source_manifest_id = COALESCE(de.source_manifest_id, -1)
-    AND desired.admission = de.admission
-    AND desired.active_from_block_number IS NOT DISTINCT FROM de.active_from_block_number
-    AND desired.active_from_block_hash IS NOT DISTINCT FROM de.active_from_block_hash
-    AND desired.provenance_json::JSONB = (
-        de.provenance - 'active_to_transaction_index' - 'active_to_log_index'
-    )
-"#;
 
 const STREAMED_ACTIVE_EDGE_FROM_SQL: &str = r#"
     FROM discovery_edges de
@@ -87,38 +66,6 @@ const STREAMED_EDGE_IS_ORPHANED_SQL: &str = r#"
     )
 "#;
 
-/// `assignment_starts_no_later(existing = de, desired)` in SQL: a missing
-/// existing start is "no later"; an existing start needs a desired start to
-/// compare; equal blocks fall back to the block-inclusive comparison unless
-/// both sides carry a full event position.
-const STREAMED_STARTS_NO_LATER_SQL: &str = r#"
-    (
-        de.active_from_block_number IS NULL
-        OR (
-            desired.active_from_block_number IS NOT NULL
-            AND (
-                de.active_from_block_number < desired.active_from_block_number
-                OR (
-                    de.active_from_block_number = desired.active_from_block_number
-                    AND (
-                        (de.provenance ->> 'transaction_index') IS NULL
-                        OR (de.provenance ->> 'log_index') IS NULL
-                        OR desired.active_from_transaction_index IS NULL
-                        OR desired.active_from_log_index IS NULL
-                        OR (
-                            (de.provenance ->> 'transaction_index')::BIGINT,
-                            (de.provenance ->> 'log_index')::BIGINT
-                        ) <= (
-                            desired.active_from_transaction_index,
-                            desired.active_from_log_index
-                        )
-                    )
-                )
-            )
-        )
-    )
-"#;
-
 const STREAMED_SUCCESSOR_IDENTITY_SQL: &str = r#"
     de.provenance ->> 'observation_key' = desired.observation_key
     AND de.chain_id = desired.chain_id
@@ -157,9 +104,11 @@ pub(super) async fn load_streamed_deactivation_source_page(
     after_edge_id: i64,
     limit: i64,
 ) -> Result<StreamedDeactivationSourcePage> {
-    let edge_ids = sqlx::query_scalar::<_, i64>(
+    let edge_page = sqlx::query_as::<_, (i64, String)>(
         r#"
-        SELECT de.discovery_edge_id
+        SELECT
+            de.discovery_edge_id,
+            de.provenance ->> 'observation_key' AS observation_key
         FROM discovery_edges de
         WHERE de.discovery_source = $1
           AND de.deactivated_at IS NULL
@@ -180,30 +129,20 @@ pub(super) async fn load_streamed_deactivation_source_page(
     .fetch_all(&mut *executor)
     .await
     .context("failed to page discovery-edge identities for streamed deactivation diff")?;
-    let Some(last_edge_id) = edge_ids.last().copied() else {
+    let Some(last_edge_id) = edge_page.last().map(|(edge_id, _)| *edge_id) else {
         return Ok(StreamedDeactivationSourcePage {
             last_edge_id: None,
             candidates: Vec::new(),
         });
     };
-    let rows = sqlx::query(&format!(
-        r#"
-        SELECT {STREAMED_EXISTING_EDGE_COLUMNS_QUALIFIED},
-               NOT EXISTS (
-                   SELECT 1
-                   FROM pg_temp.reconcile_desired_edges desired
-                   WHERE {STREAMED_EXACT_SPEC_MATCH_SQL}
-               ) AS deactivation_candidate
-        {STREAMED_ACTIVE_EDGE_FROM_SQL}
-          AND de.discovery_edge_id = ANY($2::BIGINT[])
-        ORDER BY de.discovery_edge_id
-        "#
-    ))
-    .bind(discovery_source)
-    .bind(&edge_ids)
-    .fetch_all(&mut *executor)
-    .await
-    .context("failed to load a streamed discovery-edge deactivation source page")?;
+    let (edge_ids, observation_keys): (Vec<_>, Vec<_>) = edge_page.into_iter().unzip();
+    let rows = sqlx::query(&deactivation_source_page_sql())
+        .bind(discovery_source)
+        .bind(&edge_ids)
+        .bind(&observation_keys)
+        .fetch_all(&mut *executor)
+        .await
+        .context("failed to load a streamed discovery-edge deactivation source page")?;
 
     let mut candidates = Vec::new();
     for row in rows {
@@ -343,49 +282,13 @@ pub(super) async fn materialize_streamed_insert_candidate_page(
     let Some(last_row_id) = desired_row_ids.last().copied() else {
         return Ok((None, 0, 0));
     };
-    let inserted = sqlx::query(&format!(
-        r#"
-        INSERT INTO pg_temp.reconcile_insert_candidates (desired_row_id)
-        SELECT desired.desired_row_id
-        FROM pg_temp.reconcile_desired_edges desired
-        WHERE desired.desired_row_id = ANY($2::BIGINT[])
-        AND NOT EXISTS (
-            SELECT 1
-            FROM discovery_edges de
-            JOIN contract_instance_addresses cia
-              ON cia.contract_instance_id = de.to_contract_instance_id
-             AND cia.deactivated_at IS NULL
-            WHERE de.discovery_source = $1
-              AND de.deactivated_at IS NULL
-              AND {STREAMED_EXACT_SPEC_MATCH_SQL}
-        )
-        AND NOT EXISTS (
-            SELECT 1
-            FROM discovery_edges de
-            JOIN contract_instance_addresses cia
-              ON cia.contract_instance_id = de.to_contract_instance_id
-             AND cia.deactivated_at IS NULL
-            WHERE de.discovery_source = $1
-              AND de.deactivated_at IS NULL
-              AND de.discovery_source = desired.discovery_source
-              AND de.provenance ->> 'observation_key' = desired.observation_key
-              AND de.chain_id = desired.chain_id
-              AND de.edge_kind = desired.edge_kind
-              AND de.from_contract_instance_id = desired.from_contract_instance_id
-              AND de.to_contract_instance_id = desired.to_contract_instance_id
-              AND COALESCE(de.source_manifest_id, -1) = desired.source_manifest_id
-              AND de.admission = desired.admission
-              AND NOT {STREAMED_EDGE_IS_ORPHANED_SQL}
-              AND {STREAMED_STARTS_NO_LATER_SQL}
-        )
-        "#
-    ))
-    .bind(discovery_source)
-    .bind(&desired_row_ids)
-    .execute(&mut *executor)
-    .await
-    .context("failed to materialize a streamed discovery-edge insert-candidate page")?
-    .rows_affected() as usize;
+    let inserted = sqlx::query(&insert_candidate_page_sql())
+        .bind(discovery_source)
+        .bind(&desired_row_ids)
+        .execute(&mut *executor)
+        .await
+        .context("failed to materialize a streamed discovery-edge insert-candidate page")?
+        .rows_affected() as usize;
 
     Ok((Some(last_row_id), desired_row_ids.len(), inserted))
 }

@@ -10,6 +10,8 @@ use super::super::super::types::{DiscoveryObservation, ExistingReconciledDiscove
 use super::{DiscoveryObservationPageSource, StreamedDiscoveryReconciliationOptions};
 use crate::normalize_address;
 
+const STAGED_OBSERVATION_INSERT_BATCH_SIZE: usize = 6_000;
+
 pub(super) async fn create_streamed_reconcile_temp_tables(
     executor: &mut PgConnection,
 ) -> Result<()> {
@@ -169,7 +171,10 @@ pub(super) async fn stage_streamed_observations(
         }
         // Chunk below the bind-parameter protocol limit regardless of the
         // source's page size.
-        for chunk in rows.chunks(options.mutation_batch_size.max(1)) {
+        let insert_batch_size = options
+            .mutation_batch_size
+            .clamp(1, STAGED_OBSERVATION_INSERT_BATCH_SIZE);
+        for chunk in rows.chunks(insert_batch_size) {
             let mut builder = QueryBuilder::<Postgres>::new(
                 r#"
                 INSERT INTO pg_temp.reconcile_observations (

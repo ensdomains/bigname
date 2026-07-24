@@ -1169,7 +1169,7 @@ avoids a later manual replay of already completed spans.
 The ENSv1/Basenames registry full-closure replay finalizes its discovery-edge
 reconciliation as a streamed temp-table set-diff instead of an in-memory
 reconcile, so memory stays bounded by pages rather than the staged observation
-count (#168). Two operational consequences:
+count (#168). Operational consequences:
 
 - **Two-level deactivation guard.** The finalize must be a near-no-op after a
   verified rederive. A coarse cap (`max(100_000, 10%)` of the source's active
@@ -1180,6 +1180,14 @@ count (#168). Two operational consequences:
   bounds with `BIGNAME_INDEXER_DISCOVERY_FULL_RECONCILE_MAX_DEACTIVATIONS`
   (the value is the permitted deactivation count). An aborted finalize rolls
   back cleanly and keeps the replay checkpoint resumable.
+- **Diff batching.** Server-side desired-edge mutation/diff statements process
+  `50,000` rows by default; override that positive row count with
+  `BIGNAME_INDEXER_DISCOVERY_FULL_RECONCILE_MUTATION_BATCH_SIZE`. Active
+  discovery-edge deactivation scans also page `50,000` rows by default and use
+  the independent
+  `BIGNAME_INDEXER_DISCOVERY_FULL_RECONCILE_DEACTIVATION_PAGE_SIZE` override.
+  Before either diff loop, the transaction refreshes `discovery_edges`
+  statistics and forces custom plans for its prepared statements.
 - **Connection minimum.** The checkpointed replay concurrently holds the
   raw-log staging guard, the streamed reconcile transaction, and a third
   pooled connection for staged assignment page reads. The replay entry point
