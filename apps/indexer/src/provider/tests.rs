@@ -324,9 +324,11 @@ async fn reth_db_provider_matches_rpc_and_stored_for_known_correct_code_hash_win
         "BIGNAME_INDEXER_TEST_RETH_CODE_HASH_DATABASE_URL must point at bigname storage",
     )?;
 
-    let pool = sqlx::PgPool::connect(&database_url)
-        .await
-        .context("failed to connect to bigname storage")?;
+    let pool = sqlx::PgPool::connect_with(bigname_storage::stamp_projection_replay_version(
+        database_url.parse()?,
+    ))
+    .await
+    .context("failed to connect to bigname storage")?;
     let (block_numbers, block_override) = parse_reth_compare_blocks_env(
         RETH_CODE_HASH_COMPARE_BLOCKS_ENV,
         DEFAULT_RETH_CODE_HASH_COMPARE_FROM_BLOCK..=DEFAULT_RETH_CODE_HASH_COMPARE_TO_BLOCK,
@@ -374,9 +376,11 @@ async fn reth_db_provider_latest_rows_match_consensus() -> Result<()> {
         "BIGNAME_INDEXER_TEST_RETH_CODE_HASH_DATABASE_URL must point at bigname storage",
     )?;
 
-    let pool = sqlx::PgPool::connect(&database_url)
-        .await
-        .context("failed to connect to bigname storage")?;
+    let pool = sqlx::PgPool::connect_with(bigname_storage::stamp_projection_replay_version(
+        database_url.parse()?,
+    ))
+    .await
+    .context("failed to connect to bigname storage")?;
     let stored = load_latest_stored_code_hash_rows_by_address(&pool, ETHEREUM_MAINNET_CHAIN)
         .await
         .context("failed to load latest stored code-hash rows")?;

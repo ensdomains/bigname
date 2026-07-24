@@ -415,8 +415,9 @@ mod tests {
             },
             hashes_by_number: BTreeMap::from([(40, canonical_40.block_hash)]),
         };
-        let pool = PgPool::connect_lazy("postgres://bigname:bigname@127.0.0.1:5432/bigname")
-            .expect("canonicality evidence test does not touch the lazy pool");
+        let pool = PgPool::connect_lazy_with(bigname_storage::stamp_projection_replay_version(
+            "postgres://bigname:bigname@127.0.0.1:5432/bigname".parse()?,
+        ));
 
         let states = evidence
             .states_for_blocks(
@@ -466,8 +467,9 @@ mod tests {
             },
             hashes_by_number: BTreeMap::from([(40, canonical_40.block_hash.clone())]),
         };
-        let pool = PgPool::connect_lazy("postgres://bigname:bigname@127.0.0.1:1/bigname")
-            .expect("test pool must stay lazy unless stored lineage is queried");
+        let pool = PgPool::connect_lazy_with(bigname_storage::stamp_projection_replay_version(
+            "postgres://bigname:bigname@127.0.0.1:1/bigname".parse()?,
+        ));
 
         let states = evidence
             .states_for_blocks(
@@ -521,8 +523,9 @@ mod tests {
             },
             hashes_by_number: BTreeMap::from([(40, canonical_40.block_hash)]),
         };
-        let pool = PgPool::connect_lazy("postgres://bigname:bigname@127.0.0.1:1/bigname")
-            .expect("test pool must stay lazy unless stored lineage is queried");
+        let pool = PgPool::connect_lazy_with(bigname_storage::stamp_projection_replay_version(
+            "postgres://bigname:bigname@127.0.0.1:1/bigname".parse()?,
+        ));
 
         let states = evidence
             .states_for_blocks(

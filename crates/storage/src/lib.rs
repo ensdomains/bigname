@@ -6,6 +6,7 @@ mod backfill_jobs;
 mod base_normalized_rederive;
 mod checkpoints;
 mod children;
+mod connection;
 mod coverage_recovery_failures;
 mod evm_primitives;
 mod execution;
@@ -106,6 +107,7 @@ pub use children::{
     stream_canonical_declared_child_sources, upsert_children_current_rows,
 };
 use clap::Args;
+pub use connection::{PROJECTION_REPLAY_VERSION_SETTING, stamp_projection_replay_version};
 pub use coverage_recovery_failures::fence::{
     bind_coverage_recovery_job_write_epoch,
     load_bound_coverage_recovery_job_with_unjournaled_attempt, load_coverage_recovery_epoch,
@@ -412,7 +414,7 @@ pub async fn connect_reserved_readiness_pool(
         .acquire_timeout(check_timeout)
         .idle_timeout(None)
         .max_lifetime(None)
-        .connect_with(options)
+        .connect_with(stamp_projection_replay_version(options))
         .await
         .context("failed to connect reserved PostgreSQL readiness pool")
 }
@@ -442,7 +444,7 @@ async fn connect_inner(
     let options = connect_options(config, application_name, statement_timeout)?;
     PgPoolOptions::new()
         .max_connections(config.max_connections)
-        .connect_with(options)
+        .connect_with(stamp_projection_replay_version(options))
         .await
         .context("failed to connect to PostgreSQL")
 }
@@ -458,12 +460,10 @@ fn connect_options(
         .or_else(|| std::env::var("DATABASE_URL").ok())
         .unwrap_or_else(|| default_database_url().to_owned());
 
-    let mut options = PgConnectOptions::from_str(&database_url)
-        .context("failed to parse PostgreSQL database URL")?;
-    options = options.options([(
-        "bigname.projection_replay_version",
-        CURRENT_PROJECTION_REPLAY_VERSION.to_string(),
-    )]);
+    let mut options = stamp_projection_replay_version(
+        PgConnectOptions::from_str(&database_url)
+            .context("failed to parse PostgreSQL database URL")?,
+    );
     if let Some(application_name) = application_name {
         options = options.application_name(application_name);
     }

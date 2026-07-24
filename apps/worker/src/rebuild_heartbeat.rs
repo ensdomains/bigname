@@ -235,8 +235,11 @@ mod tests {
 
     #[tokio::test]
     async fn heartbeat_write_failure_is_warn_and_continue() {
-        let pool = PgPool::connect_lazy("postgres://bigname:bigname@127.0.0.1:5432/bigname")
-            .expect("test pool URL must parse");
+        let pool = PgPool::connect_lazy_with(bigname_storage::stamp_projection_replay_version(
+            "postgres://bigname:bigname@127.0.0.1:5432/bigname"
+                .parse()
+                .expect("static test database URL must parse"),
+        ));
         pool.close().await;
         let mut heartbeat =
             LoopHeartbeat::new("worker-closed-pool".to_owned(), Duration::from_secs(5));
@@ -251,8 +254,11 @@ mod tests {
 
     #[tokio::test]
     async fn rebuild_phase_does_not_start_without_a_durable_phase_marker() {
-        let pool = PgPool::connect_lazy("postgres://bigname:bigname@127.0.0.1:5432/bigname")
-            .expect("test pool URL must parse");
+        let pool = PgPool::connect_lazy_with(bigname_storage::stamp_projection_replay_version(
+            "postgres://bigname:bigname@127.0.0.1:5432/bigname"
+                .parse()
+                .expect("static test database URL must parse"),
+        ));
         pool.close().await;
         let mut heartbeat =
             LoopHeartbeat::new("worker-closed-pool".to_owned(), Duration::from_secs(5));

@@ -119,9 +119,11 @@ pub(crate) async fn connect_read_only(config: &DatabaseConfig) -> Result<sqlx::P
         .clone()
         .or_else(|| std::env::var("DATABASE_URL").ok())
         .unwrap_or_else(|| bigname_storage::default_database_url().to_owned());
-    let options = PgConnectOptions::from_str(&database_url)
-        .context("failed to parse PostgreSQL URL for read-only inspect connection")?
-        .options([("default_transaction_read_only", "on")]);
+    let options = bigname_storage::stamp_projection_replay_version(
+        PgConnectOptions::from_str(&database_url)
+            .context("failed to parse PostgreSQL URL for read-only inspect connection")?
+            .options([("default_transaction_read_only", "on")]),
+    );
 
     PgPoolOptions::new()
         .max_connections(config.max_connections)

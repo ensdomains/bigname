@@ -333,6 +333,7 @@ impl TestDatabase {
             .unwrap_or_else(|_| default_database_url().to_owned());
         let base_options = PgConnectOptions::from_str(&database_url)
             .context("failed to parse database URL for indexer tests")?;
+        let base_options = bigname_storage::stamp_projection_replay_version(base_options);
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .context("system clock is before unix epoch")?
@@ -901,6 +902,23 @@ impl TestDatabase {
         .execute(&pool)
         .await
         .context("failed to create current-projection staging state for indexer tests")?;
+        // This fixture intentionally builds only the tables exercised by indexer tests, so it
+        // cannot run the [projection replay-version fence](../../../../../docs/glossary.md#projection-replay-version-fence)
+        // migration that installs triggers on all projection tables. Keep its shared fence state
+        // in sync with the migrated schema used by production.
+        sqlx::query(
+            r#"
+                ALTER TABLE current_projection_full_replay_input_revision
+                    ADD COLUMN projection_replay_version_floor INTEGER DEFAULT 1 NOT NULL,
+                    ADD COLUMN projection_replay_version_fence_active BOOLEAN DEFAULT false NOT NULL,
+                    ADD CONSTRAINT current_projection_replay_version_floor_check CHECK (
+                        projection_replay_version_floor > 0
+                    )
+                "#,
+        )
+        .execute(&pool)
+        .await
+        .context("failed to create current-projection replay fence state for indexer tests")?;
         sqlx::query(
             r#"
                 CREATE TABLE name_surface_normalization_repair_findings (
@@ -1245,6 +1263,7 @@ impl TestDatabase {
         let options = PgConnectOptions::from_str(&database_url)
             .context("failed to parse database URL for additional indexer test pool")?
             .database(&self.database_name);
+        let options = bigname_storage::stamp_projection_replay_version(options);
         PgPoolOptions::new()
             .max_connections(max_connections)
             .connect_with(options)

@@ -409,8 +409,11 @@ mod tests {
 
     #[tokio::test]
     async fn alias_changed_skips_invalid_source_name_without_pool_query() -> Result<()> {
-        let pool =
-            PgPoolOptions::new().connect_lazy("postgres://bigname:bigname@127.0.0.1:1/bigname")?;
+        let pool = PgPoolOptions::new().connect_lazy_with(
+            bigname_storage::stamp_projection_replay_version(
+                "postgres://bigname:bigname@127.0.0.1:1/bigname".parse()?,
+            ),
+        );
         let events = build_resolver_events(
             &pool,
             &raw_log(),
@@ -428,8 +431,11 @@ mod tests {
     #[tokio::test]
     async fn alias_changed_treats_invalid_target_name_as_unknown_without_pool_query() -> Result<()>
     {
-        let pool =
-            PgPoolOptions::new().connect_lazy("postgres://bigname:bigname@127.0.0.1:1/bigname")?;
+        let pool = PgPoolOptions::new().connect_lazy_with(
+            bigname_storage::stamp_projection_replay_version(
+                "postgres://bigname:bigname@127.0.0.1:1/bigname".parse()?,
+            ),
+        );
         let events = build_resolver_events(
             &pool,
             &raw_log(),

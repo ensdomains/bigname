@@ -124,6 +124,7 @@ impl TestDatabase {
         let connect_options: PgConnectOptions = database_url.parse().with_context(|| {
             "failed to parse database URL for ENSv1 subregistry adapter tests".to_owned()
         })?;
+        let connect_options = bigname_storage::stamp_projection_replay_version(connect_options);
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)
             .connect_with(connect_options.clone().database("postgres"))
