@@ -3,7 +3,10 @@ use std::{
     sync::{Mutex, atomic::AtomicUsize},
 };
 
-use crate::ops_catchup::{CapacityGuardConfig, OpsCatchupConfig, run_ops_finalized_catchup};
+use crate::ops_catchup::{
+    CapacityGuardConfig, OpsCatchupConfig, install_after_ens_v2_proof_publication_failure,
+    run_ops_finalized_catchup,
+};
 use bigname_storage::{
     BackfillLifecycleStatus, ResolverProfileReconciliationTarget,
     enqueue_resolver_profile_reconciliations, load_backfill_job, load_backfill_ranges,
@@ -355,18 +358,25 @@ async fn ops_catchup_retry_reloads_targets_admitted_during_prior_pass() -> Resul
 }
 
 #[tokio::test]
-async fn ops_catchup_rebuilds_ensv2_retained_history_proof_after_compaction() -> Result<()> {
+async fn ops_catchup_resumes_ensv2_finalization_after_proof_publication_restart() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_ops_catchup_backfill_job_tables(database.pool()).await?;
     let chain = "ethereum-sepolia";
     let root_manifest_id = 4_130;
     let registry_manifest_id = 4_131;
+    let registrar_manifest_id = 4_132;
+    let resolver_manifest_id = 4_133;
     let root_contract_instance_id = Uuid::from_u128(41_301);
     let registry_contract_instance_id = Uuid::from_u128(41_302);
     let child_contract_instance_id = Uuid::from_u128(41_303);
+    let registrar_contract_instance_id = Uuid::from_u128(41_304);
+    let resolver_contract_instance_id = Uuid::from_u128(41_305);
     let root_address = "0x0000000000000000000000000000000000001301";
     let registry_address = "0x0000000000000000000000000000000000001302";
     let child_address = "0x0000000000000000000000000000000000001303";
+    let registrar_address = "0x0000000000000000000000000000000000001304";
+    let resolver_address = "0x0000000000000000000000000000000000001305";
+    let permission_account = "0x0000000000000000000000000000000000000a11";
     insert_ops_ens_v2_registry_manifests(
         database.pool(),
         chain,
@@ -376,6 +386,28 @@ async fn ops_catchup_rebuilds_ensv2_retained_history_proof_after_compaction() ->
         registry_contract_instance_id,
         root_address,
         registry_address,
+    )
+    .await?;
+    insert_ops_watched_manifest_contract(
+        database.pool(),
+        resolver_manifest_id,
+        "ens",
+        chain,
+        "ens_v2_resolver_l1",
+        resolver_contract_instance_id,
+        resolver_address,
+        Some(1),
+    )
+    .await?;
+    insert_ops_watched_manifest_contract(
+        database.pool(),
+        registrar_manifest_id,
+        "ens",
+        chain,
+        "ens_v2_registrar_l1",
+        registrar_contract_instance_id,
+        registrar_address,
+        Some(1),
     )
     .await?;
     insert_contract_instance(
@@ -396,11 +428,8 @@ async fn ops_catchup_rebuilds_ensv2_retained_history_proof_after_compaction() ->
     sqlx::query(
         r#"
         UPDATE contract_instance_addresses
-        SET deactivated_at = now(),
-            active_from_block_number = 2,
-            active_from_block_hash = $3,
-            active_to_block_number = 4,
-            active_to_block_hash = $4
+        SET active_from_block_number = 2,
+            active_from_block_hash = $3
         WHERE chain_id = $1
           AND contract_instance_id = $2
         "#,
@@ -408,7 +437,6 @@ async fn ops_catchup_rebuilds_ensv2_retained_history_proof_after_compaction() ->
     .bind(chain)
     .bind(child_contract_instance_id)
     .bind(hex_string(&[2; 32]))
-    .bind(hex_string(&[4; 32]))
     .execute(database.pool())
     .await?;
     insert_active_discovery_edge_with_range(
@@ -419,24 +447,8 @@ async fn ops_catchup_rebuilds_ensv2_retained_history_proof_after_compaction() ->
         child_contract_instance_id,
         Some(registry_manifest_id),
         Some(2),
-        Some(4),
+        None,
     )
-    .await?;
-    sqlx::query(
-        r#"
-        UPDATE discovery_edges
-        SET deactivated_at = now(),
-            active_from_block_hash = $3,
-            active_to_block_hash = $4
-        WHERE chain_id = $1
-          AND to_contract_instance_id = $2
-        "#,
-    )
-    .bind(chain)
-    .bind(child_contract_instance_id)
-    .bind(hex_string(&[2; 32]))
-    .bind(hex_string(&[4; 32]))
-    .execute(database.pool())
     .await?;
     sqlx::query(
         r#"
@@ -466,17 +478,34 @@ async fn ops_catchup_rebuilds_ensv2_retained_history_proof_after_compaction() ->
     .execute(database.pool())
     .await?;
 
-    let blocks = provider_blocks(1, 4);
+    let blocks = provider_blocks(1, 5);
     let fixtures = vec![
         ProviderBlockFixture {
             block: blocks[0].clone(),
-            logs: vec![ops_ens_v2_label_registered_log_payload(
-                &blocks[0],
-                registry_address,
-                1,
-                "alice",
-                0,
-            )],
+            logs: vec![
+                ops_ens_v2_label_registered_log_payload(
+                    &blocks[0],
+                    registry_address,
+                    1,
+                    "alice",
+                    0,
+                ),
+                ops_ens_v2_token_resource_log_payload(&blocks[0], registry_address, 1, 101, 1),
+                ops_ens_v2_registrar_name_registered_log_payload(
+                    &blocks[0],
+                    registrar_address,
+                    1,
+                    "alice",
+                    2,
+                ),
+                ops_ens_v2_named_resource_log_payload(
+                    &blocks[0],
+                    resolver_address,
+                    501,
+                    b"\x05alice\x03eth\x00",
+                    3,
+                ),
+            ],
         },
         ProviderBlockFixture {
             block: blocks[1].clone(),
@@ -490,13 +519,16 @@ async fn ops_catchup_rebuilds_ensv2_retained_history_proof_after_compaction() ->
         },
         ProviderBlockFixture {
             block: blocks[2].clone(),
-            logs: vec![ops_ens_v2_label_registered_log_payload(
-                &blocks[2],
-                child_address,
-                2,
-                "bob",
-                0,
-            )],
+            logs: vec![
+                ops_ens_v2_label_registered_log_payload(&blocks[2], child_address, 2, "bob", 0),
+                ops_ens_v2_eac_roles_changed_log_payload(
+                    &blocks[2],
+                    resolver_address,
+                    501,
+                    permission_account,
+                    1,
+                ),
+            ],
         },
         ProviderBlockFixture {
             block: blocks[3].clone(),
@@ -508,20 +540,75 @@ async fn ops_catchup_rebuilds_ensv2_retained_history_proof_after_compaction() ->
                 0,
             )],
         },
+        ProviderBlockFixture {
+            block: blocks[4].clone(),
+            logs: Vec::new(),
+        },
     ];
     let requests = Arc::new(Mutex::new(Vec::new()));
     let (provider_url, server) =
-        ops_catchup_provider_with_fixtures(fixtures, vec![4], Arc::clone(&requests)).await?;
+        ops_catchup_provider_with_fixtures(fixtures, vec![5], Arc::clone(&requests)).await?;
     let registry = ProviderRegistry::from_chain_rpc_urls(&[format!("{chain}={provider_url}")])?;
 
+    let _failure = install_after_ens_v2_proof_publication_failure(database.pool(), chain).await?;
+    let first_error = run_ops_finalized_catchup(
+        database.pool(),
+        &[catchup_task(chain, registry_address)],
+        &registry,
+        ops_config(2),
+    )
+    .await
+    .expect_err("the test hook must stop recovery after proof publication");
+    assert!(
+        first_error
+            .to_string()
+            .contains("injected failure after ENSv2 retained-history proof publication"),
+        "unexpected injected recovery error: {first_error:#}"
+    );
+    assert!(
+        !crate::bootstrap_backfill::load_bootstrap_retention_snapshot(database.pool(), chain, 5,)
+            .await?
+            .requires_ens_v2_history_recovery,
+        "the injected failure must occur after retained-history proof publication"
+    );
+    assert!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM backfill_jobs
+            WHERE status <> 'completed'::backfill_lifecycle_status
+              AND idempotency_key LIKE '%:ens_v2_recovery_phase=finalization:%'
+            "#,
+        )
+        .fetch_one(database.pool())
+        .await?
+            > 0,
+        "the exact deferred finalization jobs must be durable before proof publication"
+    );
+
+    // A new invocation has no process-local recovery state. It must discover
+    // and finish the durable finalization jobs before reporting stability.
     let outcome = run_ops_finalized_catchup(
         database.pool(),
         &[catchup_task(chain, registry_address)],
         &registry,
-        ops_config(4),
+        ops_config(2),
     )
     .await?;
     assert!(outcome.drained_job_count >= 1);
+    let recovery_job_keys = sqlx::query_scalar::<_, String>(
+        "SELECT idempotency_key FROM backfill_jobs ORDER BY backfill_job_id",
+    )
+    .fetch_all(database.pool())
+    .await?;
+    for phase in ["history-collection", "finalization"] {
+        assert!(
+            recovery_job_keys
+                .iter()
+                .any(|key| key.contains(&format!(":ens_v2_recovery_phase={phase}"))),
+            "ENSv2 retained-history recovery must persist a distinct {phase} job: {recovery_job_keys:#?}"
+        );
+    }
 
     let discovery_epoch =
         bigname_manifests::load_discovery_admission_epoch(database.pool(), chain).await?;
@@ -540,27 +627,124 @@ async fn ops_catchup_rebuilds_ensv2_retained_history_proof_after_compaction() ->
         .bind(chain)
         .fetch_one(database.pool())
         .await?,
-        (true, Some(1), Some(discovery_epoch), Some(4)),
+        (true, Some(1), Some(discovery_epoch), Some(5)),
         "ops catch-up must finish the full-source ENSv2 reconciliation and bind the rebuilt proof to current authority"
     );
     assert!(
-        !crate::bootstrap_backfill::load_bootstrap_retention_snapshot(database.pool(), chain, 4,)
+        !crate::bootstrap_backfill::load_bootstrap_retention_snapshot(database.pool(), chain, 5,)
             .await?
             .requires_ens_v2_history_recovery,
         "completed ops recovery must not leave the chain fail-closed"
     );
+    let child_coverage = sqlx::query_as::<_, (i64, i64, i64)>(
+        r#"
+        SELECT DISTINCT
+            fact.covered_from_block,
+            fact.covered_to_block,
+            job.raw_log_retention_generation
+        FROM backfill_coverage_facts fact
+        JOIN backfill_jobs job USING (backfill_job_id)
+        WHERE fact.chain_id = $1
+          AND fact.source_family = 'ens_v2_registry_l1'
+          AND fact.scope = 'address'
+          AND fact.address = lower($2)
+        ORDER BY fact.covered_from_block, fact.covered_to_block
+        "#,
+    )
+    .bind(chain)
+    .bind(child_address)
+    .fetch_all(database.pool())
+    .await?;
     assert_eq!(
-        ops_address_coverage_generations(
-            database.pool(),
-            chain,
-            "ens_v2_registry_l1",
-            child_address,
-            2,
-            4,
-        )
-        .await?,
-        vec![1],
+        child_coverage,
+        vec![(2, 3, 1), (4, 4, 1), (4, 5, 1)],
         "the compacted generation must cover the closed child registry's full authoritative interval"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM backfill_jobs
+            WHERE status = 'failed'::backfill_lifecycle_status
+              AND failure_reason =
+                  'ENSv2 finalization source scope superseded by converged authority'
+              AND failure_metadata ->> 'replacement_backfill_job_id' IS NOT NULL
+            "#,
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "restart recovery must replace the pre-proof open child interval with the converged closed interval"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM normalized_events
+            WHERE event_kind = 'PreimageObserved'
+              AND lower(raw_fact_ref ->> 'emitting_address') = lower($1)
+            "#,
+        )
+        .bind(registry_address)
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "retained-history recovery must keep stateless inline adapters enabled while ENSv2 registry derivation is deferred"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM normalized_events
+            WHERE event_kind = 'RegistrationGranted'
+              AND lower(raw_fact_ref ->> 'emitting_address') = lower($1)
+            "#,
+        )
+        .bind(registry_address)
+        .fetch_one(database.pool())
+        .await?,
+        2,
+        "post-coverage full-source reconciliation must derive the deferred ENSv2 registry event"
+    );
+    let registrar_link = sqlx::query_as::<_, (Option<Uuid>, Option<String>)>(
+        r#"
+        SELECT resource_id, after_state ->> 'registry_resource_id'
+        FROM normalized_events
+        WHERE event_kind = 'RegistrarNameRegistered'
+          AND lower(raw_fact_ref ->> 'emitting_address') = lower($1)
+        "#,
+    )
+    .bind(registrar_address)
+    .fetch_one(database.pool())
+    .await?;
+    let linked_resource_id = registrar_link
+        .0
+        .expect("the post-proof registrar rerun must link to the registry resource");
+    assert_eq!(
+        registrar_link.1,
+        Some(linked_resource_id.to_string()),
+        "the deferred ENSv2 tail must rerun after registry full-source reconciliation"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (Option<String>, Option<String>)>(
+            r#"
+            SELECT
+                logical_name_id,
+                after_state #>> '{selector,normalized_name}'
+            FROM normalized_events
+            WHERE derivation_kind = 'ens_v2_permissions'
+              AND event_kind = 'PermissionChanged'
+              AND lower(raw_fact_ref ->> 'emitting_address') = lower($1)
+            "#,
+        )
+        .bind(resolver_address)
+        .fetch_one(database.pool())
+        .await?,
+        (
+            Some("ens:alice.eth".to_owned()),
+            Some("alice.eth".to_owned())
+        ),
+        "finalization must preserve a resolver resource-name hint across recovery chunk boundaries"
     );
 
     server.abort();
@@ -1034,6 +1218,135 @@ fn ops_ens_v2_label_registered_log_payload(
             "0x0000000000000000000000000000000000000a11",
             1_900_000_000,
         ),
+    })
+}
+
+fn ops_ens_v2_token_resource_log_payload(
+    block: &ProviderBlock,
+    address: &str,
+    token_id: u64,
+    resource: u64,
+    log_index: u64,
+) -> Value {
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": format!("0x{log_index:x}"),
+        "address": address,
+        "topics": [
+            keccak256_hex(b"TokenResource(uint256,uint256)"),
+            hex_string(&abi_word_u64(token_id)),
+            hex_string(&abi_word_u64(resource)),
+        ],
+        "data": "0x",
+    })
+}
+
+fn ops_ens_v2_registrar_name_registered_log_payload(
+    block: &ProviderBlock,
+    address: &str,
+    token_id: u64,
+    label: &str,
+    log_index: u64,
+) -> Value {
+    let label_bytes = label.as_bytes();
+    let mut data = Vec::new();
+    data.extend_from_slice(&abi_word_u64(9 * 32));
+    data.extend_from_slice(&abi_word_address(
+        "0x0000000000000000000000000000000000000a11",
+    ));
+    data.extend_from_slice(&abi_word_address(
+        "0x0000000000000000000000000000000000000000",
+    ));
+    data.extend_from_slice(&abi_word_address(
+        "0x0000000000000000000000000000000000000000",
+    ));
+    data.extend_from_slice(&abi_word_u64(31_536_000));
+    data.extend_from_slice(&abi_word_address(
+        "0x0000000000000000000000000000000000000000",
+    ));
+    data.extend_from_slice(&[0; 32]);
+    data.extend_from_slice(&abi_word_u64(1));
+    data.extend_from_slice(&abi_word_u64(0));
+    data.extend_from_slice(&abi_word_u64(
+        u64::try_from(label_bytes.len()).expect("registrar label length must fit in u64"),
+    ));
+    data.extend_from_slice(label_bytes);
+    data.resize((10 + label_bytes.len().div_ceil(32)) * 32, 0);
+
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": format!("0x{log_index:x}"),
+        "address": address,
+        "topics": [
+            keccak256_hex(
+                b"NameRegistered(uint256,string,address,address,address,uint64,address,bytes32,uint256,uint256)"
+            ),
+            hex_string(&abi_word_u64(token_id)),
+        ],
+        "data": hex_string(&data),
+    })
+}
+
+fn ops_ens_v2_named_resource_log_payload(
+    block: &ProviderBlock,
+    address: &str,
+    resource: u64,
+    dns_encoded_name: &[u8],
+    log_index: u64,
+) -> Value {
+    let mut data = Vec::new();
+    data.extend_from_slice(&abi_word_u64(32));
+    data.extend_from_slice(&abi_word_u64(
+        u64::try_from(dns_encoded_name.len()).expect("DNS name length must fit in u64"),
+    ));
+    data.extend_from_slice(dns_encoded_name);
+    data.resize((2 + dns_encoded_name.len().div_ceil(32)) * 32, 0);
+
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": format!("0x{log_index:x}"),
+        "address": address,
+        "topics": [
+            keccak256_hex(b"NamedResource(uint256,bytes)"),
+            hex_string(&abi_word_u64(resource)),
+        ],
+        "data": hex_string(&data),
+    })
+}
+
+fn ops_ens_v2_eac_roles_changed_log_payload(
+    block: &ProviderBlock,
+    address: &str,
+    resource: u64,
+    account: &str,
+    log_index: u64,
+) -> Value {
+    let mut data = Vec::new();
+    data.extend_from_slice(&abi_word_u64(0));
+    data.extend_from_slice(&abi_word_u64(0x11));
+
+    json!({
+        "blockHash": block.block_hash.clone(),
+        "blockNumber": format!("0x{:x}", block.block_number),
+        "transactionHash": transaction_hash_for_block(block),
+        "transactionIndex": "0x0",
+        "logIndex": format!("0x{log_index:x}"),
+        "address": address,
+        "topics": [
+            keccak256_hex(b"EACRolesChanged(uint256,address,uint256,uint256)"),
+            hex_string(&abi_word_u64(resource)),
+            hex_string(&abi_word_address(account)),
+        ],
+        "data": hex_string(&data),
     })
 }
 

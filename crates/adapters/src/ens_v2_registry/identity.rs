@@ -342,7 +342,7 @@ pub(super) fn build_resource_events(
                     state.first_ref.chain_id, state.registry_contract_instance_id, link.upstream_resource
                 ),
                 "registrant": state.owner,
-                "expiry": state.expiry,
+                "expiry": link.observed_expiry,
                 "labelhash": state.labelhash,
                 "token_id": link.observed_token_id,
                 "current_token_id": link.observed_token_id,

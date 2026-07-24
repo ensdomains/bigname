@@ -195,6 +195,7 @@ fn resource_provenance(raw_log: &PermissionsRawLogRow, hint: &ResolverResourceHi
         "selector_hash": hint.selector_hash,
         "logical_name_id": hint.logical_name_id,
         "normalized_name": hint.normalized_name,
+        "dns_encoded_name": hint.dns_encoded_name.as_ref().map(|bytes| format!("0x{}", hex_string(bytes))),
         "source_family": raw_log.source_family,
         "source_manifest_id": raw_log.source_manifest_id,
         "manifest_version": raw_log.manifest_version,
@@ -350,7 +351,7 @@ pub(super) fn permission_resource_id(
     }
 }
 
-fn is_registry_permission_source(source_family: &str) -> bool {
+pub(super) fn is_registry_permission_source(source_family: &str) -> bool {
     matches!(
         source_family,
         SOURCE_FAMILY_ENS_V2_ROOT_L1 | SOURCE_FAMILY_ENS_V2_REGISTRY_L1

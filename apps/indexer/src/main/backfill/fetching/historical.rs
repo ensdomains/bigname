@@ -22,8 +22,6 @@ use crate::{
         provider_block_to_raw_block_with_header_audit_mode,
         provider_code_observation_to_raw_code_hash, provider_raw_payload_cache_metadata_to_upserts,
         provider_receipt_to_raw_receipt, provider_transaction_to_raw_transaction,
-        sync_adapter_state_from_persisted_raw_payloads,
-        sync_adapter_state_from_scoped_persisted_raw_payloads,
     },
     source_scope::SourceScope,
 };
@@ -31,6 +29,7 @@ pub(crate) use log_payloads::fill_log_payloads_from_validation_provider;
 
 use super::{
     BackfillCanonicalityEvidence,
+    adapter_sync::sync_inline_adapters,
     log_ranges::{selected_addresses_for_materialized_block, uses_topic_first_source_family_scan},
     materialization::{
         fetch_full_payload_bundles_for_log_blocks, materialize_backfill_block_payloads,
@@ -452,18 +451,11 @@ async fn maybe_sync_adapters(
     adapter_sync_scope: &[(String, String, i64, i64)],
 ) -> Result<()> {
     let chain = source_plan.watched_chain_plan.chain.as_str();
-    if !logs.is_empty() && adapter_sync_mode == BackfillAdapterSyncMode::Inline {
-        if source_plan.selector_kind == WatchedSourceSelectorKind::WholeActiveWatchedChain {
-            sync_adapter_state_from_persisted_raw_payloads(pool, chain, block_hashes).await?;
-        } else {
-            sync_adapter_state_from_scoped_persisted_raw_payloads(
-                pool,
-                chain,
-                block_hashes,
-                adapter_sync_scope,
-            )
-            .await?;
-        }
+    if !logs.is_empty() && adapter_sync_mode.runs_inline_adapters() {
+        let source_scope = (source_plan.selector_kind
+            != WatchedSourceSelectorKind::WholeActiveWatchedChain)
+            .then_some(adapter_sync_scope);
+        sync_inline_adapters(pool, chain, block_hashes, source_scope, adapter_sync_mode).await?;
     } else if !logs.is_empty() {
         info!(
             service = "indexer",

@@ -179,6 +179,47 @@ fn basenames_repaired_primary_claim_source_event(event: &NormalizedEvent) -> Nor
     repaired
 }
 
+fn ens_v2_registration_grant_event(expiry: i64) -> NormalizedEvent {
+    let mut event = normalized_event(
+        "ens_v2_registry_resource_surface:41:0xregistration:0xtx:7:RegistrationGranted:registration-granted:0x65",
+        "RegistrationGranted",
+        CanonicalityState::Finalized,
+    );
+    event.logical_name_id = Some("ens:alice.eth".to_owned());
+    event.resource_id = Some(Uuid::from_u128(0x161_001));
+    event.source_family = "ens_v2_registry_l1".to_owned();
+    event.derivation_kind = "ens_v2_registry_resource_surface".to_owned();
+    event.chain_id = Some("ethereum-sepolia".to_owned());
+    event.block_number = Some(100);
+    event.block_hash = Some("0xregistration".to_owned());
+    event.transaction_hash = Some("0xtx".to_owned());
+    event.log_index = Some(7);
+    event.raw_fact_ref = json!({
+        "kind": "raw_log",
+        "chain_id": "ethereum-sepolia",
+        "block_number": 100,
+        "block_hash": "0xregistration",
+        "transaction_hash": "0xtx",
+        "transaction_index": 0,
+        "log_index": 7,
+        "emitting_address": "0x00000000000000000000000000000000000000aa",
+    });
+    event.before_state = json!({});
+    event.after_state = json!({
+        "authority_kind": "ens_v2_registry",
+        "authority_key": "ens-v2-registry:ethereum-sepolia:00000000-0000-0000-0000-000000001610:0x65",
+        "registrant": "0x0000000000000000000000000000000000000a11",
+        "expiry": expiry,
+        "labelhash": "0xcbf005454c11bc7e583aa4a100988b4a893acb2233dbb77afef8d9f931df3735",
+        "token_id": "0x01",
+        "current_token_id": "0x01",
+        "upstream_resource": "0x65",
+        "status": "registered",
+        "registry_contract_instance_id": "00000000-0000-0000-0000-000000001610",
+    });
+    event
+}
+
 fn ens_v1_reverse_name_observation_event(with_primary_claim_source: bool) -> NormalizedEvent {
     let mut event = normalized_event(
         "ens_v1_unwrapped_authority:RecordChanged:record-change:reverse-profile-transition",
@@ -2575,6 +2616,49 @@ async fn normalized_event_upsert_rejects_identity_mismatch() -> Result<()> {
             .to_string()
             .contains("normalized event identity mismatch for event manifest:1:source_manifest"),
         "unexpected error: {error:#}"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn normalized_event_upsert_repairs_ens_v2_registration_link_time_expiry() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let stale = ens_v2_registration_grant_event(2_000_000_000);
+    upsert_normalized_events(database.pool(), std::slice::from_ref(&stale)).await?;
+
+    let repaired = ens_v2_registration_grant_event(1_900_000_000);
+    assert_eq!(
+        upsert_normalized_events_count_only(database.pool(), std::slice::from_ref(&repaired))
+            .await?,
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT (after_state ->> 'expiry')::BIGINT \
+             FROM normalized_events WHERE event_identity = $1",
+        )
+        .bind(&repaired.event_identity)
+        .fetch_one(database.pool())
+        .await?,
+        1_900_000_000
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM projection_normalized_event_changes change
+            JOIN normalized_events event
+              ON event.normalized_event_id = change.normalized_event_id
+            WHERE event.event_identity = $1
+              AND change.change_kind = 'content_update'
+            "#,
+        )
+        .bind(&repaired.event_identity)
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "the bounded payload repair must invalidate downstream projections"
     );
 
     database.cleanup().await
