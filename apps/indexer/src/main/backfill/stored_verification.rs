@@ -31,7 +31,7 @@ pub(super) struct StoredVerificationPlan {
     pub(super) segments: Vec<VerifiedRangeSegment>,
     planned_raw_log_input_revision: Option<i64>,
     verification_range: Option<BackfillBlockRange>,
-    local_bucket_evidence: Option<Vec<StoredLogIdentityBucket>>,
+    local_bucket_evidence: Option<Vec<(StoredLogIdentityBucket, bool)>>,
 }
 
 impl StoredVerificationPlan {
@@ -127,10 +127,11 @@ impl StoredVerificationPlan {
             *slot = bucket;
         }
         let sources = local
-            .iter()
+            .into_iter()
             .zip(provider)
-            .map(|(local, provider)| {
-                if local.selected_log_count == provider.selected_log_count
+            .map(|((local, reusable), provider)| {
+                if reusable
+                    && local.selected_log_count == provider.selected_log_count
                     && local.digest_left == provider.digest_left
                     && local.digest_right == provider.digest_right
                 {
@@ -322,22 +323,18 @@ pub(super) async fn plan_stored_verification(
             bucket: i64::try_from(bucket).expect("bucket count was converted from i64"),
             ..Default::default()
         })
+        .map(|bucket| (bucket, true))
         .collect::<Vec<_>>();
     for row in rows {
         let bucket: i64 = row.try_get("bucket")?;
         let selected_log_count: i64 = row.try_get("selected_log_count")?;
         let invalid_count: i64 = row.try_get("invalid_count")?;
-        ensure!(
-            invalid_count == 0,
-            "stored verification found {invalid_count} selected non-orphan raw logs without canonical lineage in bucket {bucket} for {} {}",
-            selector.source_family,
-            selector.address
-        );
         let bucket =
             usize::try_from(bucket).context("stored verification bucket must not be negative")?;
-        let slot = bucket_evidence
+        let (slot, reusable) = bucket_evidence
             .get_mut(bucket)
             .context("stored verification returned an out-of-range bucket")?;
+        *reusable = invalid_count == 0;
         *slot = StoredLogIdentityBucket {
             bucket: i64::try_from(bucket).context("stored verification bucket overflowed")?,
             selected_log_count,

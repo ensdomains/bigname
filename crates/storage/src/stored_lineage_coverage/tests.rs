@@ -177,6 +177,87 @@ async fn publication_rejects_stale_revision_and_epoch() -> Result<()> {
 }
 
 #[tokio::test]
+async fn publication_rejects_raw_input_committed_after_repeatable_read_snapshot() -> Result<()> {
+    let database = test_database("storage_stored_coverage_post_snapshot_raw_input").await?;
+    let chain = "test-chain";
+    assert_eq!(
+        crate::ensure_and_load_raw_log_retention_generation(database.pool(), chain).await?,
+        0
+    );
+
+    let mut guard =
+        begin_stored_lineage_coverage_frontier_publication(database.pool(), chain, None, 0).await?;
+    stage(
+        &mut guard,
+        "0x0000000000000000000000000000000000000001",
+        1,
+        2,
+    )
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO raw_logs (
+            chain_id,
+            block_hash,
+            block_number,
+            transaction_hash,
+            transaction_index,
+            log_index,
+            emitting_address,
+            topics,
+            canonicality_state
+        )
+        VALUES (
+            $1,
+            '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            1,
+            '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+            0,
+            0,
+            '0x0000000000000000000000000000000000000001',
+            ARRAY['0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'],
+            'observed'::canonicality_state
+        )
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    assert_eq!(
+        crate::load_raw_log_staging_input_version(database.pool(), chain)
+            .await?
+            .revision,
+        1,
+        "the raw-log writer must commit after the publication snapshot"
+    );
+
+    match guard.publish(&publication(0, 1, 2)).await {
+        Ok(StoredLineageCoveragePublicationOutcome::Conflict) => {}
+        Ok(StoredLineageCoveragePublicationOutcome::Published { snapshot_revision }) => {
+            panic!(
+                "post-snapshot raw input must prevent publication, but revision {snapshot_revision} was published"
+            );
+        }
+        Err(error) => {
+            let error = format!("{error:#}");
+            assert!(
+                error.contains("raw-log input version")
+                    || error.contains("could not serialize access"),
+                "unexpected publication refusal: {error}"
+            );
+        }
+    }
+    assert_eq!(
+        load_stored_lineage_coverage_frontier_header(database.pool(), chain).await?,
+        None,
+        "a candidate validated before the raw-log commit must not become durable"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn repeatable_read_publication_maps_serialization_loss_to_cas_conflict() -> Result<()> {
     let database = test_database("storage_stored_coverage_serialization_conflict").await?;
     let chain = "test-chain";

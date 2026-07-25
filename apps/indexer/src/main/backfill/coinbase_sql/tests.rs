@@ -61,6 +61,32 @@ fn stored_identity_query_returns_bounded_bucket_count_and_digest_evidence() -> R
     Ok(())
 }
 
+#[test]
+fn stored_identity_query_excludes_logs_from_removed_transactions() -> Result<()> {
+    let sql = stored_log_identity_evidence_query(&StoredLogIdentityEvidenceRequest {
+        chain: "base-mainnet".to_owned(),
+        address: "0x1111111111111111111111111111111111111111".to_owned(),
+        topic0s: vec![
+            "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
+        ],
+        range: BackfillBlockRange::new(10, 20)?,
+        bucket_blocks: 131_072,
+    })?;
+
+    assert!(
+        sql.contains("WITH active_transactions AS"),
+        "aggregate evidence must use the same active-transaction changelog reduction as row fetches"
+    );
+    assert_eq!(
+        sql.matches("JOIN active_transactions t").count(),
+        2,
+        "both decoded and encoded aggregate arms must exclude logs from removed transactions"
+    );
+    assert!(sql.contains("FROM base.transactions"));
+    assert!(sql.contains("WHERE t.action_sum > 0"));
+    Ok(())
+}
+
 fn pack(
     addresses: Vec<String>,
     topic0s: Vec<String>,
