@@ -23,7 +23,10 @@ mod stored_verification;
 
 use anyhow::{Context, Result, bail};
 use bigname_manifests::WatchedSourceSelectorPlan;
-use bigname_storage::{ensure_and_load_raw_log_retention_generation, load_backfill_job};
+use bigname_storage::{
+    CoverageRecoveryReservationFence, ensure_and_load_raw_log_retention_generation,
+    load_backfill_job,
+};
 use clap::ValueEnum;
 use sqlx::types::time::OffsetDateTime;
 use tracing::warn;
@@ -329,6 +332,7 @@ pub(crate) struct BackfillJobRunConfig {
     /// Automatic raw-log recovery appends the generation while holding the
     /// retention-state lock; explicit operator keys remain unchanged.
     pub(crate) scope_idempotency_to_raw_log_retention_generation: bool,
+    pub(crate) coverage_recovery_reservation_fence: Option<CoverageRecoveryReservationFence>,
     pub(crate) range: BackfillBlockRange,
     pub(crate) lease_owner: String,
     pub(crate) lease_token: String,

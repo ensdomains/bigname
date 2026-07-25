@@ -26,11 +26,6 @@ loc = 677
 justification = "The remaining file owns the existing Coinbase SQL reservation lifecycle; window execution and coverage-recovery evidence were split into a dedicated submodule."
 
 [[files]]
-path = "apps/indexer/src/main/backfill/stored_verification.rs"
-loc = 643
-justification = "Stored-history recovery keeps its fenced local evidence, independent-source comparison, final digest, and mutation checks together; focused tests live in a separate module."
-
-[[files]]
 path = "apps/indexer/src/main/cli.rs"
 loc = 659
 justification = "The indexer run command now accepts the existing Coinbase SQL connection and window controls needed by automatic recovery; command parsing remains centralized here."
@@ -39,11 +34,6 @@ justification = "The indexer run command now accepts the existing Coinbase SQL c
 path = "apps/indexer/src/main/normalized_replay_catchup.rs"
 loc = 639
 justification = "The catch-up loop now carries provider-specific recovery configuration and a typed full-closure coverage failure while retaining its existing cursor and heartbeat lifecycle."
-
-[[files]]
-path = "apps/indexer/src/main/normalized_replay_catchup/coverage_recovery.rs"
-loc = 652
-justification = "The recovery module owns both existing exact ENSv2 recovery and the new bounded full-closure job construction, authority fences, and provider selection."
 
 [[files]]
 path = "crates/adapters/src/ens_v1_unwrapped_authority/loading/active_emitters.rs"

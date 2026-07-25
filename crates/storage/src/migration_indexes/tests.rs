@@ -246,6 +246,37 @@ async fn watched_address_lookup_indexes_cover_active_and_historical_rows() -> Re
 }
 
 #[tokio::test]
+async fn raw_log_range_revision_lookup_uses_block_range_index() -> Result<()> {
+    let database = test_database().await?;
+    let mut transaction = database.pool().begin().await?;
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *transaction)
+        .await?;
+
+    let plan = sqlx::query_scalar::<_, String>(
+        r#"
+        EXPLAIN (FORMAT TEXT)
+        SELECT COALESCE(MAX(revision), 0)::BIGINT
+        FROM raw_log_staging_block_revisions
+        WHERE chain_id = 'eip155:1'
+          AND block_number BETWEEN 0 AND 20000000
+        "#,
+    )
+    .fetch_all(&mut *transaction)
+    .await?
+    .join("\n");
+    eprintln!("raw-log range revision lookup plan:\n{plan}");
+    assert!(
+        plan.contains(RAW_LOG_STAGING_BLOCK_RANGE_REVISION_INDEX),
+        "range-bound revision lookup must use its chain/block index:\n{plan}"
+    );
+
+    transaction.rollback().await?;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn compat_trigger_tuple_invalidation_uses_request_lookup_index() -> Result<()> {
     let database = test_database().await?;
     let mut transaction = database.pool().begin().await?;

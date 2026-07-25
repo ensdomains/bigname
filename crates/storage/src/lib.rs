@@ -6,6 +6,7 @@ mod backfill_jobs;
 mod base_normalized_rederive;
 mod checkpoints;
 mod children;
+mod coverage_recovery_failures;
 mod evm_primitives;
 mod execution;
 mod history;
@@ -105,6 +106,17 @@ pub use children::{
     stream_canonical_declared_child_sources, upsert_children_current_rows,
 };
 use clap::Args;
+pub use coverage_recovery_failures::fence::{
+    bind_coverage_recovery_job_write_epoch,
+    load_bound_coverage_recovery_job_with_unjournaled_attempt, load_coverage_recovery_epoch,
+};
+pub use coverage_recovery_failures::{
+    CoverageRecoveryFailureKey, CoverageRecoveryFailureRecord, CoverageRecoveryFailureState,
+    CoverageRecoveryReservationFence, clear_coverage_recovery_failure,
+    load_coverage_recovery_failure, load_coverage_recovery_job_attempt_watermark,
+    rearm_terminal_coverage_recovery_failure, record_coverage_recovery_attempt_failure,
+    record_coverage_recovery_terminal_failure,
+};
 pub use evm_primitives::{ens_namehash_label_bytes, normalize_evm_address, normalize_evm_b256};
 pub use execution::{
     ExecutionBoundaryInvalidation, ExecutionCacheKey, ExecutionManifestInvalidation,

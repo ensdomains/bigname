@@ -472,7 +472,7 @@ For ENSv2, `resource_id` keys by `(chain_id, registry_contract_instance_id, upst
 | `chain_*` | intake | lineage and canonical block graph |
 | `raw_*` | intake; storage triggers own raw-log revision and retention-generation metadata | immutable hot replay facts, payload-cache metadata, compact per-chain/per-block-hash mutation revisions, and generation/epoch/through-bound retained-history proofs |
 | `backfill_*` | worker/backfill substrate through storage-owned lifecycle helpers | persisted backfill jobs, bounded range leases, resumable range checkpoints, and completion-scoped coverage facts |
-| `normalized_replay_*` | indexer/replay orchestration | operational replay cursors and adapter-private replay checkpoints |
+| `normalized_replay_*` | indexer/replay orchestration | operational replay cursors, adapter-private replay checkpoints, and per-window automatic coverage-recovery retry/terminal records |
 | `resolver_profile_input_changes` | storage triggers enqueue; indexer convergence acknowledges | coalesced generation-fenced work for effective resolver code-hash, manifest, or discovery admission changes |
 | `resolver_profile_authority_journal`, `resolver_profile_authority_journal_entries` | storage API persists; indexer manifest/discovery orchestration advances | revision/epoch compare-and-set header plus canonical-keyed authority entries whose forced resolver-profile work was durably queued |
 | `resolver_profile_reconciliation_runs`, `resolver_profile_reconciliation_targets`, `resolver_profile_reconciliation_state_items` | indexer resolver-profile replay orchestration; adapters persist private staging state | transient run metadata, exact resolver-emitter targets, and page-evicted private adapter state plus staged events for one absence-aware resolver-profile reconciliation; not replay cursors, checkpoints, projection input, or API state |
@@ -677,15 +677,18 @@ Resolver-profile admission state (PublicResolver-generation profiles for ENSv1, 
 
 At minimum:
 
-- `backfill_jobs` — one row per bounded backfill job with selected profile, chain, selector kind, resolved source identity, scan mode, declared range start and end, the atomically captured `raw_log_retention_generation`, idempotency key, lifecycle status, failure metadata, timestamps. Jobs using [stored-history verification](glossary.md) also carry a projected minimum and the actual provider-query count plus nullable verification revision, inclusive bounds, selected-log count, and digest.
+- `backfill_jobs` — one row per bounded backfill job with selected profile, chain, selector kind, resolved source identity, scan mode, declared range start and end, the atomically captured `raw_log_retention_generation`, idempotency key, lifecycle status, failure metadata, timestamps. Automatic full-closure jobs also carry a nullable mutable recovery-write-epoch binding and the job-attempt count captured when that binding was made. Those fields fence reuse and reservation without changing the immutable creation identity. Jobs using [stored-history verification](glossary.md) also carry a projected minimum and the actual provider-query count plus nullable verification revision, inclusive bounds, selected-log count, and digest.
 - `backfill_ranges` — child range records with declared range bounds, last-completed checkpoint, lease owner, lease token, lease expiry, attempt counters, lifecycle status, failure metadata, timestamps. A new range initializes its checkpoint to one block before the declared start so resume starts at `checkpoint_block_number + 1`.
+- `normalized_replay_coverage_recovery_failures` — one retry budget and schedule per deployment profile, chain, retention generation, source family, exact address, and exact missing interval. It records cumulative attempts across immutable job revisions, the retry deadline, last job id and observed job attempt count, and an operator-facing terminal cause.
+- `normalized_replay_coverage_recovery_job_attempts` — the highest attempt count already added to that retry budget for each immutable job revision. These per-job watermarks prevent a revisited revision from being counted twice after recovery has tried another revision; they are removed with their parent failure record on success or re-arm.
+- `normalized_replay_coverage_recovery_epochs` — the monotonic compare-and-set epoch for the same exact key. Unlike the current failure row, this tombstone survives successful recovery and operator re-arm; every failure writer must match the epoch captured before planning, while clear and re-arm advance it before removing failure state.
 - Monotonic helper-owned checkpoint fields that let a worker resume after crash without widening the original range or reclassifying already admitted facts.
 
 Stored-history planning retains the fenced raw-log revision that authorized its locally reusable segments. Final verification rejects a newer per-block revision inside any such segment. A checkpoint alone is not verification evidence: on resume, provider-classified segments are fetched again unless the job already has a generation-current final verification covering the exact range with no later in-range mutation.
 
 Operational finalized catch-up uses these same families. It may create many finite chunks, but each chunk preserves one immutable job shape and idempotency key. Capacity preflight (current Postgres size, writable free disk, configured object-cache budget) records explicit failure or paused state in existing lifecycle/failure metadata when capacity is insufficient.
 
-The normalized replay catch-up loop also performs the bounded stale-claim sweep. When both a `reserved` or `running` job and its active child range have not updated for one hour, storage acquires locks in the ordinary job-then-range order, marks both failed with `phase=stale_claim_sweep`, clears the child lease, and preserves its checkpoint. Existing reservation code can then reclaim that range; the sweep does not introduce a second claim lifecycle.
+The normalized replay catch-up loop also performs the bounded stale-claim sweep. When both a `reserved` or `running` job and its active child range have not updated for one hour, storage acquires locks in the ordinary job-then-range order, marks both failed with `phase=stale_claim_sweep`, clears the child lease, and preserves its checkpoint. Existing reservation code can then reclaim that range; the sweep does not introduce a second claim lifecycle. A separate generation sweep marks pending, reserved, or running automatic full-closure recovery jobs and unfinished child ranges failed with `cause=obsolete_retention_generation` when their captured generation is no longer current. That includes a never-leased pending job created immediately before a retention rotation.
 
 The selector identity fields on a job:
 
@@ -699,7 +702,7 @@ Very large source-family jobs and whole-active watched-chain jobs may persist co
 
 Idempotency validation has one compatibility bridge for jobs created before compact identity was introduced: a legacy full-payload identity and a `selected_targets_digest_v1` identity may match even when their `source_identity_hash` values differ, but only when every selector/provider field outside the selected-target representation and hash matches exactly and the compact count, digest, and sample recompute from the full `selected_targets` set. A different target set, topic plan, scan/provider field, range, chain, profile, scan mode, or idempotency key remains an immutable-job conflict.
 
-Automatic full-closure recovery derives its logical key from the exact identity that will be persisted after provider selection. A hash-pinned job records the manifest topic set used by its final verification; a Coinbase SQL job additionally records its provider, validation mode, and topic plan used for stored-history evidence and gap fetches. Those fields participate in `source_identity_hash`, so changing provider or topic/validation identity at the same raw-log revision creates a distinct generation-bound job rather than colliding with an immutable prior job. Execution carries that creation-time topic plan through the job instead of reloading a possibly newer manifest plan.
+Automatic full-closure recovery derives its logical key from the exact identity that will be persisted after provider selection, its exact interval, and the maximum committed raw-log block revision inside that interval when the job is created. It does not bind the chain-global input revision, so live-tail writes outside the violation window neither mint a replacement job nor reset an incomplete hash-pinned fetch. A hash-pinned job records the manifest topic set used by its final verification; a Coinbase SQL job additionally records its provider, validation mode, and topic plan used for stored-history evidence and gap fetches. Those fields participate in `source_identity_hash`, so changing provider or topic/validation identity at the same exact-window revision creates a distinct generation-bound job rather than colliding with an immutable prior job. The stable per-window failure record directs a retry to its last incomplete job. If a crash occurred before that record committed, recovery rediscovers the newest incomplete job with the same source identity, interval, and generation. Either path resumes that job even when its own writes advanced an in-range revision. A later in-range mutation that invalidates completed verification raises the interval maximum and produces a new revision-bound job. Execution carries the creation-time topic plan through the job instead of reloading a possibly newer manifest plan.
 
 When whole-chain or mixed-source backfill uses generic ENSv1 resolver topic scanning, the persisted identity records that scan in `generic_topic_scans` with `source_identity_payload_format=generic_resolver_event_topics_v1` and records the exact fetched topic set in `topic0s_by_source_family`. The address-scoped portion may be stored as `selected_targets_with_generic_topic_scans_v1` or, when compact, `selected_targets_digest_with_generic_topic_scans_v1`; in both forms `selected_targets`, `selected_target_count`, digest, and sample intentionally exclude the resolver-family targets covered by the generic topic scan while `source_identity_hash` covers the selected-target identity, generic scan declaration, and fetched topic set.
 
@@ -777,18 +780,38 @@ suffix without independent completeness evidence still fails closed.
 
 For Coinbase SQL recovery, retained raw logs may replace provider row fetches
 only after an independent aggregate query over the exact address, manifest
-topic set, and job window. Under the raw-log mutation fence, the indexer divides
-the window into 131,072-block buckets and computes the selected canonical
-raw-log count plus a 128-bit identity fingerprint from block hash, transaction
-hash, and log index. Coinbase SQL computes the same bounded evidence. A bucket
-is reusable only when count and fingerprint match and every selected local log
-has readable canonical lineage. This permits an empty bucket only when the
-independent query also reports it empty; local emptiness alone proves nothing.
-Adjacent mismatches are coalesced and fetched through the existing Coinbase SQL
-row path. After any gap fetch, the indexer repeats the aggregate comparison over
-the full job window and fails if a mismatch remains. Hash-pinned recovery
-instead fetches the exact requirement window and does not infer completeness
-from local rows.
+topic set, and job window. The indexer divides the window into 131,072-block
+buckets and computes the selected canonical raw-log count plus a 128-bit
+identity fingerprint from the multiset of `(block_hash, transaction_hash,
+log_index)` identities. Coinbase SQL computes the same bounded evidence.
+Equality proves identity-set equality only; it does not prove that every stored
+payload field is correct. A bucket is reusable only when count and fingerprint
+match and every selected local log has readable canonical lineage. This permits
+an empty bucket only when the independent query also reports it empty; local
+emptiness alone proves nothing. Adjacent mismatches are coalesced and fetched
+through the existing Coinbase SQL row path. After any gap fetch, the indexer
+repeats the aggregate comparison over the full job window and fails if a
+mismatch remains. Hash-pinned recovery instead fetches the exact requirement
+window and does not infer completeness from local rows.
+
+The local bucket and final payload-digest aggregations run outside the
+chain-scoped raw-log staging fence. Each scan is bracketed by short fenced
+revision reads; after the scan, the per-block mutation ledger must prove that
+no selected block changed before the evidence can be accepted, and the final
+revision check plus verification-record write remain inside the second fence.
+Canonical, safe, and finalized rows use
+`raw_logs_canonical_emitter_block_idx`; a separate observed-row invalidation
+branch uses `raw_logs_by_state_idx`. Registrar addresses currently hold about
+1.3–4.3 million rows each, so the emitter index bounds the heavy branch while
+moving the aggregation outside the fence prevents those rows from blocking
+all same-chain raw-log writers.
+
+Operations must not interpret a matched identity bucket as a content audit.
+Content-divergent stored rows in the stale-vintage class can match the identity
+count and fingerprint and are not detected on that skipped bucket. A
+mismatched bucket takes the refetch path, where an incompatible stored payload
+fails loudly, and final verification records a full local payload digest; those
+checks do not retroactively make a matched identity-only bucket a content proof.
 
 The fenced verification record on the parent job contains the exact verified
 bounds, selected-log count, deterministic local payload digest, and raw-log
@@ -799,13 +822,38 @@ later mutation inside the fact interval. The count and digest remain
 operator-visible audit evidence; the commit-ordered block revision ledger is
 the inexpensive digest-validity check on subsequent reads.
 
-Automatic full-closure recovery creates no more than four exact jobs per
-catch-up iteration. Its logical key includes the exact provider-specific source
-identity, interval, and violation-snapshot raw-log revision; generation-scoped
-job creation appends the captured retention generation. The required catch-up
-failure record names the jobs completed or attempted in that iteration so
-operators can distinguish bounded recovery progress from a replay loop that
-created no work. Coinbase SQL recovery persists a pre-fetch lower bound
+Automatic full-closure recovery allows no more than four provider attempts per
+catch-up iteration but continues inspecting later reported violations after an
+individual failure. Its logical key includes the exact provider-specific source
+identity, interval, per-window recovery write epoch, and maximum committed
+revision inside that interval at job creation; generation-scoped job creation
+appends the captured retention generation. Provider failures persist
+exponential backoff from 5 seconds to a
+300-second cap in the per-window failure record. Attempts accumulate across
+immutable job revisions and become terminal at 32 for that exact window and
+generation. A per-job watermark adds only newly observed attempts when a
+revision is revisited. Before reservation, exact-window binding serializes the
+natural key and leaves exactly one incomplete revision reservation-eligible;
+it refuses to supersede a revision with an active lease or an unjournaled
+attempt. Before resolving a possibly changed provider or topic identity, a poll
+journals any failed bound job whose persisted attempt count is ahead of that
+baseline, including a first crashed attempt for which no failure row exists,
+and defers the identity switch until the next eligible poll. Reservation then
+compares the current window epoch, planned cumulative failure count, bound
+job-attempt baseline, and maximum persisted job-attempt count while holding the
+same natural-key and job locks. Concurrent polls
+therefore cannot both claim the final allowed attempt, and a superseded plan
+defers without issuing a provider query or publishing a terminal failure.
+Terminal intervals continue to block
+replay closure but consume no
+further provider queries until operator remediation and exact re-arming through
+`bigname-indexer repair coverage-recovery-rearm`. A
+topic-less source family is recorded terminal with cause
+`source_family_without_active_event_topic0` during preparation. The required
+catch-up failure record names completed, attempted, failed, retry-delayed,
+terminal, and prepared-but-unattempted jobs in that iteration so operators can
+distinguish bounded recovery progress from a replay loop that created no work.
+Coinbase SQL recovery persists a pre-fetch lower bound
 containing one initial aggregate verification query, one row query per
 configured initial block window containing a true gap, and one final aggregate
 verification query when any gap exists. Actuals include retries plus

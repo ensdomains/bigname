@@ -21,14 +21,14 @@ mod stored_verification_execution;
 #[cfg(test)]
 #[path = "reservation_execution/tests.rs"]
 mod tests;
-
 use anyhow::{Context, Result, bail, ensure};
 use bigname_adapters::StartupAdapterProgress;
 use bigname_manifests::WatchedSourceSelectorPlan;
 use bigname_storage::{
     BackfillJobCreate, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange,
     BackfillRangeSpec, advance_backfill_range, create_backfill_job,
-    create_generation_scoped_backfill_job, load_backfill_job, reserve_backfill_range,
+    create_generation_scoped_backfill_job, load_backfill_job,
+    reserve_backfill_range_with_coverage_recovery_fence,
 };
 use serde_json::{Value, json};
 use tracing::info;
@@ -52,19 +52,18 @@ use super::{
         VerifiedRangeSource, completed_plan, provider_only_plan, stored_verification_is_current,
     },
 };
-use digest::keccak256_json_digest;
-use generic_topic_identity::{generic_topic_scan_source_identity_payload, selected_targets_sample};
-use identity::requested_watched_targets_value_with_progress;
-pub(crate) use identity::{
-    backfill_job_source_identity_payload, backfill_job_source_identity_payload_with_progress,
-};
-
 pub(crate) use coinbase_sql_execution::{
     effective_coinbase_sql_adapter_sync_mode,
     ensure_coinbase_sql_registry_range_start_is_replay_safe,
     run_precreated_verified_coinbase_sql_backfill_job,
     run_precreated_verified_coinbase_sql_backfill_job_with_progress,
     run_reserved_coinbase_sql_backfill_range, run_resumable_coinbase_sql_backfill_job,
+};
+use digest::keccak256_json_digest;
+use generic_topic_identity::{generic_topic_scan_source_identity_payload, selected_targets_sample};
+use identity::requested_watched_targets_value_with_progress;
+pub(crate) use identity::{
+    backfill_job_source_identity_payload, backfill_job_source_identity_payload_with_progress,
 };
 pub(super) use lease_heartbeat::{
     backfill_lease_duration_secs, refreshed_backfill_lease_expires_at,
@@ -260,9 +259,10 @@ async fn run_precreated_hash_pinned_backfill_job_inner_with_verification(
     );
 
     loop {
-        let Some(reserved_range) = reserve_backfill_range(
+        let Some(reserved_range) = reserve_backfill_range_with_coverage_recovery_fence(
             pool,
             record.job.backfill_job_id,
+            config.coverage_recovery_reservation_fence.as_ref(),
             &config.lease_owner,
             &config.lease_token,
             refreshed_backfill_lease_expires_at(lease_duration_secs)?,

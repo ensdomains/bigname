@@ -492,6 +492,7 @@ mod tests {
             deployment_profile: "test".to_owned(),
             idempotency_key: "test".to_owned(),
             scope_idempotency_to_raw_log_retention_generation: false,
+            coverage_recovery_reservation_fence: None,
             range: super::super::BackfillBlockRange {
                 from_block: 1,
                 to_block: 8_192,

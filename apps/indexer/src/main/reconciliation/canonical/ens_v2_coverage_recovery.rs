@@ -155,6 +155,7 @@ async fn recover_ens_v2_live_coverage_requirement_inner(
         deployment_profile: deployment_profile.to_owned(),
         idempotency_key,
         scope_idempotency_to_raw_log_retention_generation: true,
+        coverage_recovery_reservation_fence: None,
         range,
         lease_owner: format!(
             "{}:live-ens-v2-coverage-recovery",

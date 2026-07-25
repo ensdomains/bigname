@@ -6,9 +6,11 @@ use bigname_storage::{
     BackfillJob, BackfillStoredVerification, acquire_raw_log_staging_read_guard,
     backfill_job_stored_verification_is_current, record_backfill_job_stored_verification,
 };
-use sqlx::Row;
 
 use super::{BackfillBlockRange, BackfillTopicPlan};
+
+#[path = "stored_verification/scans.rs"]
+mod scans;
 
 /// Compare local and source identity evidence in large bounded buckets.
 pub(super) const STORED_VERIFICATION_BUCKET_BLOCKS: i64 = 131_072;
@@ -154,7 +156,7 @@ impl StoredVerificationPlan {
     }
 }
 
-struct ExactStoredSelector {
+pub(super) struct ExactStoredSelector {
     chain: String,
     source_family: String,
     address: String,
@@ -214,7 +216,8 @@ pub(super) fn stored_log_identity_evidence_request(
     })
 }
 
-/// Snapshot canonical raw-log identities under the chain mutation fence.
+/// Snapshot canonical raw-log identities, then prove under the short mutation
+/// fence that no in-range writer changed the snapshot while it was scanned.
 /// Independent source count and digest evidence must authorize bucket reuse.
 pub(super) async fn plan_stored_verification(
     pool: &sqlx::PgPool,
@@ -228,7 +231,7 @@ pub(super) async fn plan_stored_verification(
         return Ok(provider_only_plan(range));
     }
 
-    let mut guard = acquire_raw_log_staging_read_guard(pool, &selector.chain).await?;
+    let guard = acquire_raw_log_staging_read_guard(pool, &selector.chain).await?;
     ensure!(
         guard.version().retention_generation == job.raw_log_retention_generation,
         "backfill job {} captured raw-log retention generation {}, but stored verification observed {}",
@@ -236,79 +239,36 @@ pub(super) async fn plan_stored_verification(
         job.raw_log_retention_generation,
         guard.version().retention_generation
     );
-    let rows = sqlx::query(
-        r#"
-        WITH selected_raw AS (
-            SELECT
-                ((logs.block_number - $2) / $6)::BIGINT AS bucket,
-                (
-                    logs.canonicality_state IN (
-                        'canonical'::canonicality_state,
-                        'safe'::canonicality_state,
-                        'finalized'::canonicality_state
-                    )
-                    AND lineage.block_hash IS NOT NULL
-                ) AS usable,
-                md5(
-                    LOWER(logs.block_hash)
-                    || LOWER(logs.transaction_hash)
-                    || logs.log_index::TEXT
-                ) AS row_hash
-            FROM raw_logs logs
-            LEFT JOIN chain_lineage lineage
-              ON lineage.chain_id = logs.chain_id
-             AND lineage.block_hash = logs.block_hash
-             AND lineage.block_number = logs.block_number
-             AND lineage.canonicality_state IN (
-                 'canonical'::canonicality_state,
-                 'safe'::canonicality_state,
-                 'finalized'::canonicality_state
-             )
-            WHERE logs.chain_id = $1
-              AND logs.block_number BETWEEN $2 AND $3
-              AND LOWER(logs.emitting_address) = $4
-              AND LOWER(logs.topics[1]) = ANY($5::TEXT[])
-              AND logs.canonicality_state <> 'orphaned'::canonicality_state
+    let scan_started_version = guard.version();
+    guard.release().await?;
+
+    // Millions of rows can belong to one registrar address. The aggregate
+    // runs without the writer fence; a second short fence proves its snapshot
+    // stayed unchanged before the evidence is accepted.
+    let rows = scans::scan_local_identity_buckets(pool, &selector, range).await?;
+    let mut guard = acquire_raw_log_staging_read_guard(pool, &selector.chain).await?;
+    ensure!(
+        guard.version().retention_generation == scan_started_version.retention_generation,
+        "raw-log retention generation changed while stored verification planning scanned {}..={}",
+        range.from_block,
+        range.to_block
+    );
+    ensure!(
+        guard.version().revision >= scan_started_version.revision,
+        "raw-log input revision moved backwards while stored verification planning"
+    );
+    ensure!(
+        !scans::range_changed_since(
+            guard.connection_mut(),
+            &selector.chain,
+            scan_started_version.revision,
+            range,
         )
-        SELECT
-            bucket,
-            COUNT(*) FILTER (WHERE usable)::BIGINT AS selected_log_count,
-            COUNT(*) FILTER (WHERE NOT usable)::BIGINT AS invalid_count,
-            COALESCE(
-                bit_xor(
-                    ('x' || SUBSTRING(row_hash, 1, 16))::BIT(64)::BIGINT
-                ) FILTER (WHERE usable),
-                0
-            ) AS digest_left,
-            COALESCE(
-                bit_xor(
-                    ('x' || SUBSTRING(row_hash, 17, 16))::BIT(64)::BIGINT
-                ) FILTER (WHERE usable),
-                0
-            ) AS digest_right
-        FROM selected_raw
-        GROUP BY bucket
-        ORDER BY bucket
-        "#,
-    )
-    .bind(&selector.chain)
-    .bind(range.from_block)
-    .bind(range.to_block)
-    .bind(&selector.address)
-    .bind(&selector.topic0s)
-    .bind(STORED_VERIFICATION_BUCKET_BLOCKS)
-    .fetch_all(guard.connection_mut())
-    .await
-    .with_context(|| {
-        format!(
-            "failed to plan stored raw-log verification for {} {} on {} over {}..={}",
-            selector.source_family,
-            selector.address,
-            selector.chain,
-            range.from_block,
-            range.to_block
-        )
-    })?;
+        .await?,
+        "raw-log input changed inside stored verification range {}..={} while local identity evidence was scanned; replan",
+        range.from_block,
+        range.to_block
+    );
 
     let bucket_count = range
         .to_block
@@ -326,20 +286,17 @@ pub(super) async fn plan_stored_verification(
         .map(|bucket| (bucket, true))
         .collect::<Vec<_>>();
     for row in rows {
-        let bucket: i64 = row.try_get("bucket")?;
-        let selected_log_count: i64 = row.try_get("selected_log_count")?;
-        let invalid_count: i64 = row.try_get("invalid_count")?;
-        let bucket =
-            usize::try_from(bucket).context("stored verification bucket must not be negative")?;
+        let bucket = usize::try_from(row.bucket)
+            .context("stored verification bucket must not be negative")?;
         let (slot, reusable) = bucket_evidence
             .get_mut(bucket)
             .context("stored verification returned an out-of-range bucket")?;
-        *reusable = invalid_count == 0;
+        *reusable = row.invalid_count == 0;
         *slot = StoredLogIdentityBucket {
             bucket: i64::try_from(bucket).context("stored verification bucket overflowed")?,
-            selected_log_count,
-            digest_left: row.try_get::<i64, _>("digest_left")? as u64,
-            digest_right: row.try_get::<i64, _>("digest_right")? as u64,
+            selected_log_count: row.selected_log_count,
+            digest_left: row.digest_left as u64,
+            digest_right: row.digest_right as u64,
         };
     }
     let segments = coalesced_segments(
@@ -372,7 +329,8 @@ pub(super) async fn stored_verification_is_current(
     .await
 }
 
-/// Re-read the exact selector and persist its final fenced count and digest.
+/// Re-read the exact selector outside the writer fence, then atomically prove
+/// that the range stayed unchanged and persist its final count and digest.
 pub(super) async fn finalize_stored_verification(
     pool: &sqlx::PgPool,
     job: &BackfillJob,
@@ -386,13 +344,40 @@ pub(super) async fn finalize_stored_verification(
         !selector.topic0s.is_empty(),
         "stored verification cannot authorize a source family without current event topics"
     );
-    let mut guard = acquire_raw_log_staging_read_guard(pool, &selector.chain).await?;
+    let guard = acquire_raw_log_staging_read_guard(pool, &selector.chain).await?;
     ensure!(
         guard.version().retention_generation == job.raw_log_retention_generation,
         "backfill job {} captured raw-log retention generation {}, but final stored verification observed {}",
         job.backfill_job_id,
         job.raw_log_retention_generation,
         guard.version().retention_generation
+    );
+    let scan_started_version = guard.version();
+    guard.release().await?;
+
+    let row = scans::scan_final_payload_digest(pool, &selector, range).await?;
+    let mut guard = acquire_raw_log_staging_read_guard(pool, &selector.chain).await?;
+    ensure!(
+        guard.version().retention_generation == scan_started_version.retention_generation,
+        "raw-log retention generation changed while final stored verification scanned {}..={}",
+        range.from_block,
+        range.to_block
+    );
+    ensure!(
+        guard.version().revision >= scan_started_version.revision,
+        "raw-log input revision moved backwards during final stored verification"
+    );
+    ensure!(
+        !scans::range_changed_since(
+            guard.connection_mut(),
+            &selector.chain,
+            scan_started_version.revision,
+            range,
+        )
+        .await?,
+        "raw-log input changed inside final stored verification range {}..={} while its digest was scanned; retry",
+        range.from_block,
+        range.to_block
     );
     let stored_segments = plan
         .segments
@@ -415,129 +400,30 @@ pub(super) async fn finalize_stored_verification(
             .iter()
             .map(|segment| segment.range.to_block)
             .collect::<Vec<_>>();
-        let changed = sqlx::query_scalar::<_, bool>(
-            r#"
-            SELECT EXISTS (
-                SELECT 1
-                FROM raw_log_staging_block_revisions changed
-                JOIN UNNEST($3::BIGINT[], $4::BIGINT[])
-                    AS segment(from_block, to_block)
-                  ON changed.block_number BETWEEN
-                      segment.from_block AND segment.to_block
-                WHERE changed.chain_id = $1
-                  AND changed.revision > $2
-            )
-            "#,
+        let changed = scans::segments_changed_since(
+            guard.connection_mut(),
+            &selector.chain,
+            planned_revision,
+            &from_blocks,
+            &to_blocks,
         )
-        .bind(&selector.chain)
-        .bind(planned_revision)
-        .bind(&from_blocks)
-        .bind(&to_blocks)
-        .fetch_one(guard.connection_mut())
-        .await
-        .context("failed to fence stored verification segments against later raw-log changes")?;
+        .await?;
         ensure!(
             !changed,
             "raw-log input changed inside a locally verified stored segment after revision {planned_revision}; replan before writing coverage"
         );
     }
-    let row = sqlx::query(
-        r#"
-        WITH matching AS (
-            SELECT
-                (
-                    logs.canonicality_state IN (
-                        'canonical'::canonicality_state,
-                        'safe'::canonicality_state,
-                        'finalized'::canonicality_state
-                    )
-                    AND lineage.block_hash IS NOT NULL
-                ) AS usable,
-                md5(
-                    jsonb_build_array(
-                        LOWER(logs.block_hash),
-                        logs.block_number,
-                        LOWER(logs.transaction_hash),
-                        logs.transaction_index,
-                        logs.log_index,
-                        LOWER(logs.emitting_address),
-                        logs.topics,
-                        encode(logs.data, 'hex')
-                    )::TEXT
-                ) AS row_hash
-            FROM raw_logs logs
-            LEFT JOIN chain_lineage lineage
-              ON lineage.chain_id = logs.chain_id
-             AND lineage.block_hash = logs.block_hash
-             AND lineage.block_number = logs.block_number
-             AND lineage.canonicality_state IN (
-                 'canonical'::canonicality_state,
-                 'safe'::canonicality_state,
-                 'finalized'::canonicality_state
-             )
-            WHERE logs.chain_id = $1
-              AND logs.block_number BETWEEN $2 AND $3
-              AND LOWER(logs.emitting_address) = $4
-              AND LOWER(logs.topics[1]) = ANY($5::TEXT[])
-              AND logs.canonicality_state <> 'orphaned'::canonicality_state
-        )
-        SELECT
-            COUNT(*) FILTER (WHERE usable)::BIGINT AS selected_log_count,
-            COUNT(*) FILTER (WHERE NOT usable)::BIGINT AS invalid_count,
-            LPAD(
-                to_hex(
-                    COALESCE(
-                        bit_xor(
-                            ('x' || SUBSTRING(row_hash, 1, 16))::BIT(64)::BIGINT
-                        ) FILTER (WHERE usable),
-                        0
-                    )
-                ),
-                16,
-                '0'
-            ) || LPAD(
-                to_hex(
-                    COALESCE(
-                        bit_xor(
-                            ('x' || SUBSTRING(row_hash, 17, 16))::BIT(64)::BIGINT
-                        ) FILTER (WHERE usable),
-                        0
-                    )
-                ),
-                16,
-                '0'
-            ) AS selected_log_digest
-        FROM matching
-        "#,
-    )
-    .bind(&selector.chain)
-    .bind(range.from_block)
-    .bind(range.to_block)
-    .bind(&selector.address)
-    .bind(&selector.topic0s)
-    .fetch_one(guard.connection_mut())
-    .await
-    .with_context(|| {
-        format!(
-            "failed to finalize stored raw-log verification for {} {} on {} over {}..={}",
-            selector.source_family,
-            selector.address,
-            selector.chain,
-            range.from_block,
-            range.to_block
-        )
-    })?;
-    let invalid_count: i64 = row.try_get("invalid_count")?;
     ensure!(
-        invalid_count == 0,
-        "final stored verification found {invalid_count} selected non-orphan raw logs without canonical lineage"
+        row.invalid_count == 0,
+        "final stored verification found {} selected non-orphan raw logs without canonical lineage",
+        row.invalid_count
     );
     let verification = BackfillStoredVerification {
         raw_log_input_revision: guard.version().revision,
         verified_from_block: range.from_block,
         verified_to_block: range.to_block,
-        selected_log_count: row.try_get("selected_log_count")?,
-        selected_log_digest: row.try_get("selected_log_digest")?,
+        selected_log_count: row.selected_log_count,
+        selected_log_digest: row.selected_log_digest,
     };
     record_backfill_job_stored_verification(
         guard.connection_mut(),

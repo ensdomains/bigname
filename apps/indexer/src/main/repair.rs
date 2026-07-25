@@ -14,11 +14,14 @@ use crate::{
 
 #[path = "repair/backfill_coverage_facts.rs"]
 mod backfill_coverage_facts;
+#[path = "repair/coverage_recovery_rearm.rs"]
+pub(crate) mod coverage_recovery_rearm;
 #[path = "repair/name_surface_normalization.rs"]
 mod name_surface_normalization;
 #[path = "repair/raw_code_hashes.rs"]
 mod raw_code_hashes;
 
+pub(crate) use coverage_recovery_rearm::run as rearm_coverage_recovery;
 pub(crate) const DEFAULT_ENS_V1_TEXT_RECORD_REPAIR_CHUNK_BLOCKS: i64 = 5_000;
 pub(crate) const DEFAULT_ENS_V1_TEXT_RECORD_REPAIR_PAGE_SIZE: i64 = 10_000;
 

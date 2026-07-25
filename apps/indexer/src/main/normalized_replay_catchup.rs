@@ -20,8 +20,7 @@ use crate::{
     run::startup_heartbeat::{NormalizedReplayHeartbeat, RequiredSubtaskActivity},
 };
 use anyhow::{Result, bail, ensure};
-use sqlx::PgPool;
-use sqlx::types::time::OffsetDateTime;
+use sqlx::{PgPool, types::time::OffsetDateTime};
 use tokio::time::sleep;
 use tracing::{info, warn};
 
@@ -37,13 +36,14 @@ mod indexes;
 mod sources;
 #[cfg(test)]
 #[path = "normalized_replay_catchup/test_hook.rs"]
-mod test_hook;
+pub(crate) mod test_hook;
 
 #[cfg(test)]
 pub(crate) use test_hook::{
     install_after_coverage_recovery as install_after_coverage_recovery_test_hook,
     install_after_progress as install_after_progress_test_hook,
     install_after_rewind as install_after_rewind_test_hook,
+    install_before_coverage_attempt as install_before_coverage_attempt_test_hook,
     install_before_cursor_failure_record as install_before_cursor_failure_record_test_hook,
 };
 

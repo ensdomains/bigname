@@ -1248,7 +1248,7 @@ async fn normalized_replay_catchup_auto_enqueues_stale_topic_coverage_recovery()
                 source_identity
             FROM backfill_jobs
             WHERE idempotency_key LIKE
-                'indexer-full-closure-coverage-recovery:v1:%'
+                'indexer-full-closure-coverage-recovery:v2:%'
             "#,
         )
         .fetch_one(database.pool())
@@ -1276,6 +1276,12 @@ async fn normalized_replay_catchup_auto_enqueues_stale_topic_coverage_recovery()
     assert!(
         recovery_job.7.contains(persisted_identity_hash),
         "automatic recovery idempotency key must include the exact persisted source identity hash"
+    );
+    assert!(
+        recovery_job
+            .7
+            .contains("range_raw_log_input_revision=1"),
+        "automatic recovery idempotency key must bind the exact-window raw-log revision"
     );
     assert!(
         recovery_job
@@ -1333,6 +1339,853 @@ async fn normalized_replay_catchup_auto_enqueues_stale_topic_coverage_recovery()
 
     server.abort();
     database.cleanup().await
+}
+
+#[tokio::test]
+async fn full_closure_recovery_defers_when_a_competing_runner_wins_the_lease_race() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_normalized_replay_cursor_table(database.pool()).await?;
+    let chain = "ethereum-mainnet";
+    let wrapper_address = "0x0000000000000000000000000000000000000133";
+    let wrapper_contract_instance_id = Uuid::from_u128(0x396);
+    let block = provider_block(
+        "0x3333333333333333333333333333333333333333333333333333333333333333",
+        Some("0x3232323232323232323232323232323232323232323232323232323232323232"),
+        33,
+    );
+    insert_active_replay_watched_contract(
+        database.pool(),
+        396,
+        chain,
+        wrapper_contract_instance_id,
+        wrapper_address,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET active_from_block_number = $2
+        WHERE contract_instance_id = $1
+        "#,
+    )
+    .bind(wrapper_contract_instance_id)
+    .bind(block.block_number)
+    .execute(database.pool())
+    .await?;
+    insert_raw_name_wrapped_log(
+        database.pool(),
+        chain,
+        &block,
+        wrapper_address,
+        0,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE raw_log_staging_input_revisions
+        SET revision = 1,
+            retention_generation = 1,
+            retained_history_complete = false,
+            incomplete_since = clock_timestamp(),
+            proven_retention_generation = NULL,
+            proven_discovery_admission_epoch = NULL,
+            proven_through_block = NULL
+        WHERE chain_id = $1
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO raw_log_staging_block_revisions (
+            chain_id, block_hash, block_number, revision
+        )
+        VALUES ($1, $2, $3, 1)
+        ON CONFLICT (chain_id, block_hash) DO UPDATE
+        SET block_number = EXCLUDED.block_number,
+            revision = EXCLUDED.revision
+        "#,
+    )
+    .bind(chain)
+    .bind(&block.block_hash)
+    .bind(block.block_number)
+    .execute(database.pool())
+    .await?;
+    insert_stale_wrapper_coverage_facts(
+        database.pool(),
+        chain,
+        &[(wrapper_address, block.block_number, block.block_number)],
+    )
+    .await?;
+
+    let config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
+        "mainnet".to_owned(),
+        vec![chain.to_owned()],
+        1_000,
+        1_000,
+        1,
+    )?;
+    let mut log = rpc_log_payload(&block);
+    log["address"] = serde_json::Value::String(wrapper_address.to_owned());
+    let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
+        block: block.clone(),
+        logs: vec![log],
+    }])
+    .await?;
+    let hook = normalized_replay_catchup::install_before_coverage_attempt_test_hook(
+        database.pool(),
+        "mainnet",
+        chain,
+    )
+    .await;
+    let task_pool = database.pool().clone();
+    let task_config = config.clone();
+    let task_provider = provider.clone();
+    let mut catchup = tokio::spawn(async move {
+        normalized_replay_catchup::run_normalized_replay_catchup_iteration_with_provider_for_test(
+            &task_pool,
+            &task_config,
+            chain,
+            &task_provider,
+            HeaderAuditMode::Minimal,
+        )
+        .await
+    });
+    tokio::select! {
+        () = hook.wait_until_before_attempt() => {}
+        result = &mut catchup => {
+            panic!("coverage recovery returned before the lease-race barrier: {result:?}");
+        }
+    }
+
+    let job_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT backfill_job_id
+        FROM backfill_jobs
+        WHERE idempotency_key LIKE
+            'indexer-full-closure-coverage-recovery:v2:%'
+        "#,
+    )
+    .fetch_one(database.pool())
+    .await?;
+    let competing_token = "competing-coverage-recovery-lease";
+    bigname_storage::reserve_backfill_range(
+        database.pool(),
+        job_id,
+        "competing-indexer",
+        competing_token,
+        OffsetDateTime::now_utc() + std::time::Duration::from_secs(300),
+    )
+    .await?
+    .context("competing runner did not reserve the recovery range")?;
+    hook.resume();
+    catchup
+        .await
+        .context("coverage recovery lease-race task panicked")?
+        .expect_err("the deferred recovery batch must leave catch-up fail-closed");
+
+    let job = bigname_storage::load_backfill_job(database.pool(), job_id)
+        .await?
+        .context("missing contended recovery job")?;
+    assert_eq!(job.status, bigname_storage::BackfillLifecycleStatus::Reserved);
+    let ranges = bigname_storage::load_backfill_ranges(database.pool(), job_id).await?;
+    assert_eq!(ranges.len(), 1);
+    assert_eq!(ranges[0].status, bigname_storage::BackfillLifecycleStatus::Reserved);
+    assert_eq!(ranges[0].lease_token.as_deref(), Some(competing_token));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM normalized_replay_coverage_recovery_failures
+            WHERE emitting_address = $1
+            "#,
+        )
+        .bind(wrapper_address)
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "lease contention must not consume the provider-attempt budget"
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn full_closure_recovery_is_bounded_nonblocking_and_reuses_its_failed_job() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_normalized_replay_cursor_table(database.pool()).await?;
+    let chain = "ethereum-mainnet";
+    let recoverable_address = "0x0000000000000000000000000000000000000140";
+    let terminal_address = "0x0000000000000000000000000000000000000141";
+    let healthy_address = "0x0000000000000000000000000000000000000142";
+    let block_40 = provider_block(
+        "0x4040404040404040404040404040404040404040404040404040404040404040",
+        Some("0x3939393939393939393939393939393939393939393939393939393939393939"),
+        40,
+    );
+    let block_41 = provider_block(
+        "0x4141414141414141414141414141414141414141414141414141414141414141",
+        Some(&block_40.block_hash),
+        41,
+    );
+    let block_42 = provider_block(
+        "0x4242424242424242424242424242424242424242424242424242424242424242",
+        Some(&block_41.block_hash),
+        42,
+    );
+    let targets = [
+        (
+            440,
+            Uuid::from_u128(0x440),
+            recoverable_address,
+            &block_40,
+        ),
+        (
+            441,
+            Uuid::from_u128(0x441),
+            terminal_address,
+            &block_41,
+        ),
+        (442, Uuid::from_u128(0x442), healthy_address, &block_42),
+    ];
+    for (manifest_id, contract_instance_id, address, block) in targets {
+        if manifest_id == 440 {
+            insert_active_replay_watched_contract(
+                database.pool(),
+                manifest_id,
+                chain,
+                contract_instance_id,
+                address,
+            )
+            .await?;
+        } else {
+            let role = format!("name_wrapper_{manifest_id}");
+            insert_contract_instance(database.pool(), contract_instance_id, chain, "contract")
+                .await?;
+            insert_active_contract_instance_address(
+                database.pool(),
+                contract_instance_id,
+                chain,
+                address,
+                Some(440),
+            )
+            .await?;
+            insert_manifest_contract_instance(
+                database.pool(),
+                440,
+                &role,
+                contract_instance_id,
+                address,
+                "none",
+                None,
+                None,
+            )
+            .await?;
+        }
+        sqlx::query(
+            r#"
+            UPDATE contract_instance_addresses
+            SET active_from_block_number = $2
+            WHERE contract_instance_id = $1
+            "#,
+        )
+        .bind(contract_instance_id)
+        .bind(block.block_number)
+        .execute(database.pool())
+        .await?;
+        insert_raw_name_wrapped_log(
+            database.pool(),
+            chain,
+            block,
+            address,
+            0,
+            CanonicalityState::Canonical,
+        )
+        .await?;
+    }
+    sqlx::query(
+        r#"
+        UPDATE raw_log_staging_input_revisions
+        SET revision = 10,
+            retention_generation = 1,
+            retained_history_complete = false,
+            incomplete_since = clock_timestamp(),
+            proven_retention_generation = NULL,
+            proven_discovery_admission_epoch = NULL,
+            proven_through_block = NULL
+        WHERE chain_id = $1
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO raw_log_staging_block_revisions (
+            chain_id,
+            block_hash,
+            block_number,
+            revision
+        )
+        VALUES
+            ($1, $2, 40, 10),
+            ($1, $3, 41, 10),
+            ($1, $4, 42, 10)
+        ON CONFLICT (chain_id, block_hash) DO UPDATE
+        SET block_number = EXCLUDED.block_number,
+            revision = EXCLUDED.revision
+        "#,
+    )
+    .bind(chain)
+    .bind(&block_40.block_hash)
+    .bind(&block_41.block_hash)
+    .bind(&block_42.block_hash)
+    .execute(database.pool())
+    .await?;
+    insert_stale_wrapper_coverage_facts(
+        database.pool(),
+        chain,
+        &[
+            (recoverable_address, 40, 42),
+            (terminal_address, 41, 42),
+            (healthy_address, 42, 42),
+        ],
+    )
+    .await?;
+
+    let mut fixtures = Vec::new();
+    for (block, address) in [
+        (&block_40, recoverable_address),
+        (&block_41, terminal_address),
+        (&block_42, healthy_address),
+    ] {
+        let mut log = rpc_log_payload(block);
+        log["address"] = serde_json::Value::String(address.to_owned());
+        fixtures.push(ProviderBlockFixture {
+            block: block.clone(),
+            logs: vec![log],
+        });
+    }
+    let recoverable_cleared = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let terminal_cleared = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let log_query_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let hook_recoverable_cleared = std::sync::Arc::clone(&recoverable_cleared);
+    let hook_terminal_cleared = std::sync::Arc::clone(&terminal_cleared);
+    let hook_log_query_count = std::sync::Arc::clone(&log_query_count);
+    let log_hook = std::sync::Arc::new(
+        move |filter: &serde_json::Map<String, serde_json::Value>,
+              logs: serde_json::Value| {
+            hook_log_query_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let filter = serde_json::Value::Object(filter.clone())
+                .to_string()
+                .to_ascii_lowercase();
+            if (filter.contains(terminal_address)
+                && !hook_terminal_cleared.load(std::sync::atomic::Ordering::SeqCst))
+                || (filter.contains(recoverable_address)
+                    && !hook_recoverable_cleared.load(std::sync::atomic::Ordering::SeqCst))
+            {
+                serde_json::Value::String("persistent provider mismatch".to_owned())
+            } else {
+                logs
+            }
+        },
+    );
+    let (provider, server) =
+        bundle_provider_with_fixtures_and_log_hook(fixtures, log_hook).await?;
+    let config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
+        "mainnet".to_owned(),
+        vec![chain.to_owned()],
+        1_000,
+        1_000,
+        1,
+    )?;
+
+    let first_error = Box::pin(
+        normalized_replay_catchup::run_normalized_replay_catchup_iteration_with_provider_for_test(
+            database.pool(),
+            &config,
+            chain,
+            &provider,
+            HeaderAuditMode::Minimal,
+        ),
+    )
+    .await
+    .expect_err("the first recovery batch must record its mixed outcome");
+    assert!(
+        format!("{first_error:#}").contains("full-closure coverage recovery"),
+        "unexpected first recovery error: {first_error:#}"
+    );
+    let first_jobs = sqlx::query_as::<_, (i64, String, String, serde_json::Value)>(
+        r#"
+        SELECT backfill_job_id, status::TEXT, idempotency_key, source_identity
+        FROM backfill_jobs
+        WHERE idempotency_key LIKE
+            'indexer-full-closure-coverage-recovery:%'
+        ORDER BY backfill_job_id
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert!(
+        !first_jobs.is_empty(),
+        "first recovery error created no jobs: {first_error:#}"
+    );
+    let recoverable_job =
+        load_recovery_job_for_address(database.pool(), recoverable_address).await?;
+    let terminal_job = load_recovery_job_for_address(database.pool(), terminal_address).await?;
+    let healthy_job = load_recovery_job_for_address(database.pool(), healthy_address).await?;
+    assert_eq!(recoverable_job.1, "failed");
+    assert_eq!(terminal_job.1, "failed");
+    assert_eq!(
+        healthy_job.1, "completed",
+        "an earlier poisoned violation must not block a later healthy violation"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM backfill_coverage_facts WHERE backfill_job_id = $1",
+        )
+        .bind(healthy_job.0)
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+
+    let recoverable_failure =
+        load_recovery_failure_for_address(database.pool(), recoverable_address).await?;
+    assert_eq!(recoverable_failure.0, "retry_backoff");
+    assert_eq!(recoverable_failure.1, 1);
+    assert!(recoverable_failure.2.is_some());
+    sqlx::query(
+        r#"
+        DELETE FROM normalized_replay_coverage_recovery_failures
+        WHERE emitting_address = $1
+        "#,
+    )
+    .bind(recoverable_address)
+    .execute(database.pool())
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO raw_log_staging_block_revisions (
+            chain_id,
+            block_hash,
+            block_number,
+            revision
+        )
+        VALUES (
+            $1,
+            '0x9999999999999999999999999999999999999999999999999999999999999999',
+            99,
+            11
+        )
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE raw_log_staging_input_revisions
+        SET revision = 11
+        WHERE chain_id = $1
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+
+    let queries_before_crash_recovery =
+        log_query_count.load(std::sync::atomic::Ordering::SeqCst);
+    Box::pin(
+        normalized_replay_catchup::run_normalized_replay_catchup_iteration_with_provider_for_test(
+            database.pool(),
+            &config,
+            chain,
+            &provider,
+            HeaderAuditMode::Minimal,
+        ),
+    )
+    .await
+    .expect_err("a missing failure journal must be rebuilt from the persisted failed job");
+    assert_eq!(
+        load_recovery_job_for_address(database.pool(), recoverable_address)
+            .await?
+            .0,
+        recoverable_job.0,
+        "crash recovery must rediscover the same incomplete job"
+    );
+    assert_eq!(
+        log_query_count.load(std::sync::atomic::Ordering::SeqCst),
+        queries_before_crash_recovery,
+        "rebuilding the missing failure journal must not pay for another provider attempt"
+    );
+    let recovered_failure =
+        load_recovery_failure_for_address(database.pool(), recoverable_address).await?;
+    assert_eq!(recovered_failure.0, "retry_backoff");
+    assert_eq!(recovered_failure.1, 1);
+
+    sqlx::query(
+        r#"
+        UPDATE normalized_replay_coverage_recovery_failures
+        SET retry_not_before = now() - INTERVAL '1 second'
+        WHERE emitting_address = $1
+        "#,
+    )
+    .bind(recoverable_address)
+    .execute(database.pool())
+    .await?;
+    recoverable_cleared.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    Box::pin(
+        normalized_replay_catchup::run_normalized_replay_catchup_iteration_with_provider_for_test(
+            database.pool(),
+            &config,
+            chain,
+            &provider,
+            HeaderAuditMode::Minimal,
+        ),
+    )
+    .await
+    .expect_err("the remaining poisoned violation must keep catch-up closed");
+    let resumed_job = load_recovery_job_for_address(database.pool(), recoverable_address).await?;
+    assert_eq!(resumed_job.0, recoverable_job.0);
+    assert_eq!(resumed_job.1, "completed");
+    assert!(
+        resumed_job.2.contains("range_raw_log_input_revision=10"),
+        "out-of-range global revision 11 must not change the recovery key: {}",
+        resumed_job.2
+    );
+    assert!(
+        !resumed_job.2.contains("raw_log_input_revision=11"),
+        "the recovery key must not bind the chain-global revision"
+    );
+    assert!(
+        bigname_storage::load_coverage_recovery_failure(
+            database.pool(),
+            &bigname_storage::CoverageRecoveryFailureKey {
+                deployment_profile: "mainnet".to_owned(),
+                chain_id: chain.to_owned(),
+                raw_log_retention_generation: 1,
+                source_family: "ens_v1_wrapper_l1".to_owned(),
+                emitting_address: recoverable_address.to_owned(),
+                required_from_block: 40,
+                required_to_block: 42,
+            },
+        )
+        .await?
+        .is_none(),
+        "successful persisted-job retry must clear its failure record"
+    );
+
+    sqlx::query(
+        r#"
+        UPDATE backfill_ranges
+        SET status = 'failed'::backfill_lifecycle_status,
+            attempt_count = 31,
+            lease_token = NULL,
+            lease_owner = NULL,
+            lease_expires_at = NULL
+        WHERE backfill_job_id = $1
+        "#,
+    )
+    .bind(terminal_job.0)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE backfill_jobs
+        SET coverage_recovery_bound_attempt_count = 31
+        WHERE backfill_job_id = $1
+        "#,
+    )
+    .bind(terminal_job.0)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE normalized_replay_coverage_recovery_job_attempts
+        SET observed_attempt_count = 31
+        WHERE backfill_job_id = $1
+        "#,
+    )
+    .bind(terminal_job.0)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE normalized_replay_coverage_recovery_failures
+        SET state = 'retry_backoff',
+            attempt_count = 31,
+            last_job_attempt_count = 31,
+            retry_not_before = now() - INTERVAL '1 second'
+        WHERE emitting_address = $1
+        "#,
+    )
+    .bind(terminal_address)
+    .execute(database.pool())
+    .await?;
+    let terminal_hook =
+        normalized_replay_catchup::test_hook::install_after_terminal_failure_record(
+            database.pool(),
+            "mainnet",
+            chain,
+        )
+        .await;
+    let task_pool = database.pool().clone();
+    let task_config = config.clone();
+    let task_provider = provider.clone();
+    let mut terminal_attempt = tokio::spawn(async move {
+        Box::pin(
+            normalized_replay_catchup::run_normalized_replay_catchup_iteration_with_provider_for_test(
+                &task_pool,
+                &task_config,
+                chain,
+                &task_provider,
+                HeaderAuditMode::Minimal,
+            ),
+        )
+        .await
+    });
+    tokio::select! {
+        () = terminal_hook.wait() => {}
+        result = &mut terminal_attempt => {
+            panic!("terminal recovery returned before its persisted-record barrier: {result:?}");
+        }
+    }
+    let terminal_failure =
+        load_recovery_failure_for_address(database.pool(), terminal_address).await?;
+    assert_eq!(terminal_failure.0, "terminal");
+    assert_eq!(terminal_failure.1, 32);
+    assert!(terminal_failure.2.is_none());
+    assert!(
+        terminal_failure
+            .3
+            .contains("exhausted its 32-attempt budget")
+    );
+
+    let queries_at_terminal =
+        log_query_count.load(std::sync::atomic::Ordering::SeqCst);
+    Box::pin(
+        normalized_replay_catchup::run_normalized_replay_catchup_iteration_with_provider_for_test(
+            database.pool(),
+            &config,
+            chain,
+            &provider,
+            HeaderAuditMode::Minimal,
+        ),
+    )
+    .await
+    .expect_err("a terminal violation must continue to fail catch-up closed");
+    assert_eq!(
+        log_query_count.load(std::sync::atomic::Ordering::SeqCst),
+        queries_at_terminal,
+        "a terminal violation must stop consuming provider queries"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM backfill_jobs
+            WHERE idempotency_key LIKE
+                'indexer-full-closure-coverage-recovery:v2:%'
+            "#,
+        )
+        .fetch_one(database.pool())
+        .await?,
+        3,
+        "retries and terminal polling must not mint replacement jobs"
+    );
+
+    let terminal_key = bigname_storage::CoverageRecoveryFailureKey {
+        deployment_profile: "mainnet".to_owned(),
+        chain_id: chain.to_owned(),
+        raw_log_retention_generation: 1,
+        source_family: "ens_v1_wrapper_l1".to_owned(),
+        emitting_address: terminal_address.to_owned(),
+        required_from_block: 41,
+        required_to_block: 42,
+    };
+    assert!(
+        bigname_storage::rearm_terminal_coverage_recovery_failure(
+            database.pool(),
+            &terminal_key,
+        )
+        .await?,
+        "operator re-arm must match the exact terminal interval"
+    );
+    terminal_cleared.store(true, std::sync::atomic::Ordering::SeqCst);
+    terminal_hook.resume();
+    terminal_attempt
+        .await
+        .context("terminal coverage recovery task panicked")?
+        .expect_err("the final allowed provider attempt must fail closed");
+    assert!(
+        bigname_storage::load_coverage_recovery_failure(database.pool(), &terminal_key)
+            .await?
+            .is_none(),
+        "a completed operator re-arm must not be undone by a delayed terminal writer"
+    );
+    Box::pin(
+        normalized_replay_catchup::run_normalized_replay_catchup_iteration_with_provider_for_test(
+            database.pool(),
+            &config,
+            chain,
+            &provider,
+            HeaderAuditMode::Minimal,
+        ),
+    )
+    .await
+    .expect_err("the successful re-armed recovery batch still leaves this iteration fail-closed");
+    let rearmed_job = load_recovery_job_for_address(database.pool(), terminal_address).await?;
+    assert_eq!(rearmed_job.0, terminal_job.0);
+    assert_eq!(rearmed_job.1, "completed");
+    assert!(
+        log_query_count.load(std::sync::atomic::Ordering::SeqCst) > queries_at_terminal,
+        "the re-armed exhausted job must receive a new provider attempt"
+    );
+    assert!(bigname_storage::load_coverage_recovery_failure(database.pool(), &terminal_key)
+        .await?
+        .is_none(), "successful re-armed recovery must clear its terminal record");
+    assert_eq!(
+        bigname_storage::load_coverage_recovery_epoch(database.pool(), &terminal_key).await?,
+        2,
+        "operator re-arm and later successful recovery must each advance the stale-writer fence"
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+async fn insert_stale_wrapper_coverage_facts(
+    pool: &PgPool,
+    chain: &str,
+    targets: &[(&str, i64, i64)],
+) -> Result<()> {
+    let stale_topic = format!("0x{:064x}", 0xdd);
+    let job_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO backfill_jobs (
+            deployment_profile,
+            chain_id,
+            raw_log_retention_generation,
+            source_identity,
+            scan_mode,
+            range_start_block_number,
+            range_end_block_number,
+            idempotency_key,
+            status,
+            completed_at
+        )
+        VALUES (
+            'mainnet',
+            $1,
+            1,
+            jsonb_build_object(
+                'topic0s_by_source_family',
+                jsonb_build_object('ens_v1_wrapper_l1', jsonb_build_array($2::TEXT))
+            ),
+            'hash_pinned_block',
+            $3,
+            $4,
+            'stale-topic-coverage-before-bounded-recovery',
+            'completed'::backfill_lifecycle_status,
+            now()
+        )
+        RETURNING backfill_job_id
+        "#,
+    )
+    .bind(chain)
+    .bind(stale_topic)
+    .bind(
+        targets
+            .iter()
+            .map(|(_, from, _)| *from)
+            .min()
+            .context("stale coverage fixture needs a target")?,
+    )
+    .bind(
+        targets
+            .iter()
+            .map(|(_, _, to)| *to)
+            .max()
+            .context("stale coverage fixture needs a target")?,
+    )
+    .fetch_one(pool)
+    .await?;
+    for (address, from_block, to_block) in targets {
+        sqlx::query(
+            r#"
+            INSERT INTO backfill_coverage_facts (
+                backfill_job_id,
+                chain_id,
+                source_family,
+                scope,
+                address,
+                covered_from_block,
+                covered_to_block,
+                derivation
+            )
+            VALUES (
+                $1,
+                $2,
+                'ens_v1_wrapper_l1',
+                'address',
+                $3,
+                $4,
+                $5,
+                'job_completion'
+            )
+            "#,
+        )
+        .bind(job_id)
+        .bind(chain)
+        .bind(address)
+        .bind(from_block)
+        .bind(to_block)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn load_recovery_job_for_address(
+    pool: &PgPool,
+    address: &str,
+) -> Result<(i64, String, String)> {
+    sqlx::query_as(
+        r#"
+        SELECT backfill_job_id, status::TEXT, idempotency_key
+        FROM backfill_jobs
+        WHERE idempotency_key LIKE
+            'indexer-full-closure-coverage-recovery:v2:%'
+          AND source_identity::TEXT ILIKE ('%' || $1 || '%')
+        "#,
+    )
+    .bind(address)
+    .fetch_one(pool)
+    .await
+    .with_context(|| format!("missing automatic recovery job for {address}"))
+}
+
+async fn load_recovery_failure_for_address(
+    pool: &PgPool,
+    address: &str,
+) -> Result<(String, i64, Option<OffsetDateTime>, String)> {
+    sqlx::query_as(
+        r#"
+        SELECT state, attempt_count, retry_not_before, failure_reason
+        FROM normalized_replay_coverage_recovery_failures
+        WHERE emitting_address = $1
+        "#,
+    )
+    .bind(address)
+    .fetch_one(pool)
+    .await
+    .with_context(|| format!("missing automatic recovery failure for {address}"))
 }
 
 #[tokio::test]
