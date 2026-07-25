@@ -10,7 +10,7 @@ pub(crate) mod startup_heartbeat;
 mod subtask_supervision;
 
 use crate::{
-    backfill::BackfillAdapterSyncMode,
+    backfill::{BackfillAdapterSyncMode, CoinbaseSqlBackfillConfig, CoinbaseSqlSourceRegistry},
     bootstrap_backfill::run_startup_bootstrap_backfills_with_heartbeat,
     cli::RunArgs,
     normalized_replay_catchup::{NormalizedReplayCatchupConfig, run_normalized_replay_catchup},
@@ -137,6 +137,22 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
     startup_heartbeat.record(&pool, &startup_chain_ids).await?;
     log_intake_chain_tasks("startup", &intake_chain_tasks);
     let provider_registry = args.provider_registry()?;
+    let coinbase_sql_config = CoinbaseSqlBackfillConfig {
+        initial_window_blocks: args.coinbase_sql.initial_window_blocks,
+        max_window_blocks: args.coinbase_sql.max_window_blocks,
+        page_limit: args.coinbase_sql.page_limit,
+        sql_char_limit: args.coinbase_sql.query_char_limit,
+        query_timeout_secs: args.coinbase_sql.query_timeout_secs,
+        rate_limit_qps: args.coinbase_sql.rate_limit_qps,
+        validation_mode: args.coinbase_sql.validation_mode,
+    };
+    coinbase_sql_config.validate()?;
+    let coinbase_sql_registry = CoinbaseSqlSourceRegistry::from_entries(
+        &args.coinbase_sql.urls,
+        args.coinbase_sql.api_key_id_env.clone(),
+        args.coinbase_sql.api_key_secret_env.clone(),
+        coinbase_sql_config.clone(),
+    )?;
     validate_provider_registry_for_intake_tasks(&intake_chain_tasks, &provider_registry)?;
     log_provider_registry("startup", &intake_chain_tasks, &provider_registry);
     // Automatic normalized catch-up replays bounded chunks after raw bootstrap drains.
@@ -196,7 +212,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
     }
     let (subtasks, subtask_monitor) = subtask_supervision::channel("indexer");
     if run_mode.normalized_replay_catchup_enabled {
-        let catchup_config = NormalizedReplayCatchupConfig::new(
+        let mut catchup_config = NormalizedReplayCatchupConfig::new(
             deployment_profile.clone(),
             intake_chain_tasks
                 .iter()
@@ -205,8 +221,9 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
             args.normalized_replay_catchup_chunk_blocks,
             args.normalized_replay_catchup_max_logs_per_chunk,
             args.normalized_replay_catchup_poll_interval_secs,
-        )?
-        .with_defer_projection_indexes(args.normalized_replay_defer_projection_indexes);
+        )?;
+        catchup_config.defer_projection_indexes = args.normalized_replay_defer_projection_indexes;
+        catchup_config.coverage_recovery_hash_pinned_chunk_blocks = args.hash_pinned_chunk_blocks;
         let catchup_pool = pool.clone();
         let catchup_provider_registry = provider_registry.clone();
         let catchup_heartbeat = startup_heartbeat::NormalizedReplayHeartbeat::new(
@@ -220,6 +237,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
                 catchup_pool,
                 catchup_config,
                 catchup_provider_registry,
+                (coinbase_sql_registry, coinbase_sql_config),
                 header_audit_mode,
                 catchup_heartbeat,
                 normalized_replay_activity.clone(),

@@ -16,11 +16,13 @@ mod progress;
 mod scan_all;
 #[path = "reservation_execution/startup_progress.rs"]
 mod startup_progress;
+#[path = "reservation_execution/stored_verification_execution.rs"]
+mod stored_verification_execution;
 #[cfg(test)]
 #[path = "reservation_execution/tests.rs"]
 mod tests;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use bigname_adapters::StartupAdapterProgress;
 use bigname_manifests::WatchedSourceSelectorPlan;
 use bigname_storage::{
@@ -46,6 +48,9 @@ use super::{
     failure_recording::{ReservedRangeFailure, record_reserved_range_failure},
     fetching::{load_backfill_canonicality_evidence, run_hash_pinned_backfill_range},
     selection::{SelectedTargetIntervalIndex, SelectedTargetRangeCursor},
+    stored_verification::{
+        VerifiedRangeSource, completed_plan, provider_only_plan, stored_verification_is_current,
+    },
 };
 use digest::keccak256_json_digest;
 use generic_topic_identity::{generic_topic_scan_source_identity_payload, selected_targets_sample};
@@ -57,6 +62,8 @@ pub(crate) use identity::{
 pub(crate) use coinbase_sql_execution::{
     effective_coinbase_sql_adapter_sync_mode,
     ensure_coinbase_sql_registry_range_start_is_replay_safe,
+    run_precreated_verified_coinbase_sql_backfill_job,
+    run_precreated_verified_coinbase_sql_backfill_job_with_progress,
     run_reserved_coinbase_sql_backfill_range, run_resumable_coinbase_sql_backfill_job,
 };
 pub(super) use lease_heartbeat::{
@@ -71,6 +78,7 @@ use scan_all::{
     coinbase_sql_basenames_registry_scan_all_source_identity_payload,
     coinbase_sql_uses_basenames_registry_scan_all,
 };
+pub(super) use stored_verification_execution::finalize_reserved_stored_verification;
 
 const HASH_PINNED_BACKFILL_SCAN_MODE: &str = "hash_pinned_block";
 pub(crate) const COINBASE_SQL_BACKFILL_SCAN_MODE: &str = "coinbase_sql_hash_pinned_logs_v1";
@@ -83,7 +91,9 @@ pub(crate) use creation::{
     create_coinbase_sql_backfill_job, create_coinbase_sql_backfill_job_with_ranges,
     create_hash_pinned_backfill_job, create_hash_pinned_backfill_job_with_progress,
     create_hash_pinned_backfill_job_with_ranges,
-    create_hash_pinned_backfill_job_with_ranges_with_progress, hash_pinned_backfill_range_specs,
+    create_hash_pinned_backfill_job_with_ranges_with_progress,
+    create_verified_coinbase_sql_backfill_job, create_verified_hash_pinned_backfill_job,
+    hash_pinned_backfill_range_specs, verified_backfill_job_source_identity_payload,
 };
 pub(crate) async fn run_resumable_hash_pinned_backfill_job(
     pool: &sqlx::PgPool,
@@ -127,12 +137,80 @@ pub(crate) async fn run_precreated_hash_pinned_backfill_job(
     .await
 }
 
+pub(crate) async fn run_precreated_verified_hash_pinned_backfill_job_with_progress(
+    pool: &sqlx::PgPool,
+    source_plan: &WatchedSourceSelectorPlan,
+    provider: &(impl ChainProviderOps + ?Sized),
+    mut config: BackfillJobRunConfig,
+    topic_plan: BackfillTopicPlan,
+    record: BackfillJobRecord,
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<BackfillJobRunOutcome> {
+    config.adapter_sync_mode =
+        effective_hash_pinned_adapter_sync_mode(source_plan, config.adapter_sync_mode);
+    validate_hash_pinned_chunk_blocks(config.hash_pinned_chunk_blocks)?;
+    run_precreated_hash_pinned_backfill_job_inner_with_verification(
+        pool,
+        source_plan,
+        provider,
+        config,
+        record,
+        Some(topic_plan),
+        &mut Some(progress),
+    )
+    .await
+}
+
+pub(crate) async fn run_precreated_verified_hash_pinned_backfill_job(
+    pool: &sqlx::PgPool,
+    source_plan: &WatchedSourceSelectorPlan,
+    provider: &(impl ChainProviderOps + ?Sized),
+    mut config: BackfillJobRunConfig,
+    topic_plan: BackfillTopicPlan,
+    record: BackfillJobRecord,
+) -> Result<BackfillJobRunOutcome> {
+    config.adapter_sync_mode =
+        effective_hash_pinned_adapter_sync_mode(source_plan, config.adapter_sync_mode);
+    validate_hash_pinned_chunk_blocks(config.hash_pinned_chunk_blocks)?;
+    run_precreated_hash_pinned_backfill_job_inner_with_verification(
+        pool,
+        source_plan,
+        provider,
+        config,
+        record,
+        Some(topic_plan),
+        &mut None,
+    )
+    .await
+}
+
 async fn run_precreated_hash_pinned_backfill_job_inner(
+    pool: &sqlx::PgPool,
+    source_plan: &WatchedSourceSelectorPlan,
+    provider: &(impl ChainProviderOps + ?Sized),
+    config: BackfillJobRunConfig,
+    record: BackfillJobRecord,
+    progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<BackfillJobRunOutcome> {
+    run_precreated_hash_pinned_backfill_job_inner_with_verification(
+        pool,
+        source_plan,
+        provider,
+        config,
+        record,
+        None,
+        progress,
+    )
+    .await
+}
+
+async fn run_precreated_hash_pinned_backfill_job_inner_with_verification(
     pool: &sqlx::PgPool,
     source_plan: &WatchedSourceSelectorPlan,
     provider: &(impl ChainProviderOps + ?Sized),
     mut config: BackfillJobRunConfig,
     record: BackfillJobRecord,
+    verification_topic_plan: Option<BackfillTopicPlan>,
     progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<BackfillJobRunOutcome> {
     let watched_chain = &source_plan.watched_chain_plan;
@@ -141,6 +219,26 @@ async fn run_precreated_hash_pinned_backfill_job_inner(
         .clone_from(&record.job.idempotency_key);
     let mut outcome = BackfillJobRunOutcome::new(record.job.backfill_job_id, source_plan, &config);
     let lease_duration_secs = backfill_lease_duration_secs(config.lease_expires_at)?;
+    let verify_stored_ranges = verification_topic_plan.is_some();
+    if verify_stored_ranges {
+        ensure!(
+            record.ranges.len() == 1
+                && record.ranges[0].range_start_block_number == config.range.from_block
+                && record.ranges[0].range_end_block_number == config.range.to_block,
+            "stored-history coverage recovery requires one child range matching the exact job window"
+        );
+        ensure!(
+            record.job.source_identity
+                == verified_backfill_job_source_identity_payload(
+                    source_plan,
+                    verification_topic_plan
+                        .as_ref()
+                        .expect("verified execution has a topic plan"),
+                    None,
+                )?,
+            "stored-history hash-pinned job identity does not match its execution topic plan"
+        );
+    }
 
     info!(
         service = "indexer",
@@ -175,13 +273,15 @@ async fn run_precreated_hash_pinned_backfill_job_inner(
         };
 
         outcome.reserved_range_count += 1;
-        run_reserved_hash_pinned_backfill_range_inner(
+        run_reserved_hash_pinned_backfill_range_inner_with_verification(
             pool,
             source_plan,
             provider,
             &config,
             &reserved_range,
             &mut outcome,
+            verify_stored_ranges.then_some(&record.job),
+            verification_topic_plan.as_ref(),
             None,
             progress,
         )
@@ -256,121 +356,233 @@ async fn run_reserved_hash_pinned_backfill_range_inner(
     progress_sender: Option<&tokio::sync::mpsc::UnboundedSender<()>>,
     service_progress: &mut Option<&mut dyn StartupAdapterProgress>,
 ) -> Result<()> {
-    let mut active_range = reserved_range.clone();
-    let mut block_number = active_range
-        .checkpoint_block_number
-        .checked_add(1)
-        .context("backfill checkpoint overflowed while computing resume block")?;
-    let selected_target_index = SelectedTargetIntervalIndex::from_source_plan(source_plan);
-    let mut selected_target_range_cursor = SelectedTargetRangeCursor::from_source_plan(source_plan);
-    let canonicality_evidence = match run_with_backfill_lease_heartbeat(
+    run_reserved_hash_pinned_backfill_range_inner_with_verification(
         pool,
-        &active_range,
+        source_plan,
+        provider,
         config,
-        load_backfill_canonicality_evidence(pool, &source_plan.watched_chain_plan.chain, provider),
+        reserved_range,
+        aggregate,
+        None,
+        None,
+        progress_sender,
+        service_progress,
     )
     .await
-    {
-        Ok(evidence) => evidence,
-        Err(error) => {
-            return Err(record_reserved_range_failure(ReservedRangeFailure {
-                pool,
-                reserved_range: &active_range,
-                config,
-                failure_reason: "backfill canonicality evidence load failed",
-                block_number: Some(block_number),
-                attempted_range: None,
-                phase: "canonicality_evidence",
-                error,
-            })
-            .await);
-        }
-    };
-    while block_number <= active_range.range_end_block_number {
-        let chunk_end = block_number
-            .checked_add(config.hash_pinned_chunk_blocks - 1)
-            .unwrap_or(active_range.range_end_block_number)
-            .min(active_range.range_end_block_number);
-        let chunk_range = BackfillBlockRange::new(block_number, chunk_end)?;
-        let progress_ranges = startup_progress::heartbeat_progress_ranges(
-            chunk_range,
-            progress_sender.is_some() || service_progress.is_some(),
-        )?;
-        for progress_range in progress_ranges {
-            let selected_target_addresses = scan_all::chunk_addresses_for_plan(
-                source_plan,
-                &mut selected_target_range_cursor,
-                progress_range,
-            );
-            let outcome = run_with_backfill_lease_heartbeat(
-                pool,
-                &active_range,
-                config,
-                run_hash_pinned_backfill_range(
-                    pool,
-                    source_plan,
-                    &selected_target_index,
-                    &selected_target_addresses,
-                    provider,
-                    progress_range,
-                    canonicality_evidence.clone(),
-                    config.adapter_sync_mode,
-                    config.header_audit_mode,
-                ),
-            )
-            .await
-            .map_err(|error| ReservedRangeFailure {
-                pool,
-                reserved_range: &active_range,
-                config,
-                failure_reason: "hash-pinned backfill failed",
-                block_number: Some(progress_range.from_block),
-                attempted_range: Some(progress_range),
-                phase: "hash_pinned_intake",
-                error,
-            });
-            let outcome = match outcome {
-                Ok(outcome) => outcome,
-                Err(failure) => return Err(record_reserved_range_failure(failure).await),
+}
+
+#[expect(clippy::too_many_arguments)]
+async fn run_reserved_hash_pinned_backfill_range_inner_with_verification(
+    pool: &sqlx::PgPool,
+    source_plan: &WatchedSourceSelectorPlan,
+    provider: &(impl ChainProviderOps + ?Sized),
+    config: &BackfillJobRunConfig,
+    reserved_range: &BackfillRange,
+    aggregate: &mut BackfillJobRunOutcome,
+    verification_job: Option<&bigname_storage::BackfillJob>,
+    verification_topic_plan: Option<&BackfillTopicPlan>,
+    progress_sender: Option<&tokio::sync::mpsc::UnboundedSender<()>>,
+    service_progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<()> {
+    let mut active_range = reserved_range.clone();
+    let remaining_range =
+        if active_range.checkpoint_block_number < active_range.range_end_block_number {
+            Some(BackfillBlockRange::new(
+                active_range
+                    .checkpoint_block_number
+                    .checked_add(1)
+                    .context("backfill checkpoint overflowed while computing resume block")?,
+                active_range.range_end_block_number,
+            )?)
+        } else {
+            None
+        };
+    let selected_target_index = SelectedTargetIntervalIndex::from_source_plan(source_plan);
+    let mut selected_target_range_cursor = SelectedTargetRangeCursor::from_source_plan(source_plan);
+    let (verification_plan, topic_plan, reuse_current_verification) = match verification_job {
+        Some(job) => {
+            let topic_plan = verification_topic_plan
+                .context("verified hash-pinned execution has no creation-time topic plan")?;
+            let reuse_current_verification = remaining_range.is_none()
+                && stored_verification_is_current(pool, job, config.range).await?;
+            let plan = if reuse_current_verification {
+                completed_plan()
+            } else {
+                provider_only_plan(config.range)
             };
-            aggregate.add_range_outcome(&outcome);
+            (plan, Some(topic_plan), reuse_current_verification)
+        }
+        None => (
+            remaining_range
+                .map(provider_only_plan)
+                .unwrap_or_else(completed_plan),
+            None,
+            false,
+        ),
+    };
+    let segments = if verification_job.is_some() {
+        verification_plan.execution_segments(active_range.checkpoint_block_number)?
+    } else {
+        verification_plan.segments.clone()
+    };
+    let mut block_number = segments
+        .first()
+        .map(|segment| segment.range.from_block)
+        .unwrap_or(active_range.range_end_block_number);
+    let canonicality_evidence = if segments
+        .iter()
+        .any(|segment| segment.source == VerifiedRangeSource::Provider)
+    {
+        match run_with_backfill_lease_heartbeat(
+            pool,
+            &active_range,
+            config,
+            load_backfill_canonicality_evidence(
+                pool,
+                &source_plan.watched_chain_plan.chain,
+                provider,
+            ),
+        )
+        .await
+        {
+            Ok(evidence) => Some(evidence),
+            Err(error) => {
+                return Err(record_reserved_range_failure(ReservedRangeFailure {
+                    pool,
+                    reserved_range: &active_range,
+                    config,
+                    failure_reason: "backfill canonicality evidence load failed",
+                    block_number: Some(block_number),
+                    attempted_range: None,
+                    phase: "canonicality_evidence",
+                    error,
+                })
+                .await);
+            }
+        }
+    } else {
+        None
+    };
+    for segment in segments {
+        if segment.source == VerifiedRangeSource::Stored {
+            active_range = advance_backfill_range(
+                pool,
+                active_range.backfill_range_id,
+                &config.lease_token,
+                segment.range.to_block,
+            )
+            .await?;
             if let Some(progress_sender) = progress_sender {
                 let _ = progress_sender.send(());
             }
             if let Some(progress) = service_progress.as_deref_mut() {
                 progress.record(pool).await?;
             }
+            continue;
         }
 
-        active_range = match advance_backfill_range(
-            pool,
-            active_range.backfill_range_id,
-            &config.lease_token,
-            chunk_end,
-        )
-        .await
-        {
-            Ok(range) => range,
-            Err(error) => {
-                return Err(record_reserved_range_failure(ReservedRangeFailure {
+        block_number = segment.range.from_block;
+        while block_number <= segment.range.to_block {
+            let chunk_end = block_number
+                .checked_add(config.hash_pinned_chunk_blocks - 1)
+                .unwrap_or(segment.range.to_block)
+                .min(segment.range.to_block);
+            let chunk_range = BackfillBlockRange::new(block_number, chunk_end)?;
+            let progress_ranges = startup_progress::heartbeat_progress_ranges(
+                chunk_range,
+                progress_sender.is_some() || service_progress.is_some(),
+            )?;
+            for progress_range in progress_ranges {
+                let selected_target_addresses = scan_all::chunk_addresses_for_plan(
+                    source_plan,
+                    &mut selected_target_range_cursor,
+                    progress_range,
+                );
+                let outcome = run_with_backfill_lease_heartbeat(
+                    pool,
+                    &active_range,
+                    config,
+                    run_hash_pinned_backfill_range(
+                        pool,
+                        source_plan,
+                        &selected_target_index,
+                        &selected_target_addresses,
+                        provider,
+                        progress_range,
+                        canonicality_evidence
+                            .as_ref()
+                            .expect("provider segment has canonicality evidence")
+                            .clone(),
+                        config.adapter_sync_mode,
+                        config.header_audit_mode,
+                        verification_job.is_some(),
+                    ),
+                )
+                .await
+                .map_err(|error| ReservedRangeFailure {
                     pool,
                     reserved_range: &active_range,
                     config,
-                    failure_reason: "backfill checkpoint advance failed",
-                    block_number: Some(block_number),
-                    attempted_range: Some(chunk_range),
-                    phase: "checkpoint_advance",
+                    failure_reason: "hash-pinned backfill failed",
+                    block_number: Some(progress_range.from_block),
+                    attempted_range: Some(progress_range),
+                    phase: "hash_pinned_intake",
                     error,
-                })
-                .await);
+                });
+                let outcome = match outcome {
+                    Ok(outcome) => outcome,
+                    Err(failure) => return Err(record_reserved_range_failure(failure).await),
+                };
+                aggregate.add_range_outcome(&outcome);
+                if let Some(progress_sender) = progress_sender {
+                    let _ = progress_sender.send(());
+                }
+                if let Some(progress) = service_progress.as_deref_mut() {
+                    progress.record(pool).await?;
+                }
             }
-        };
-        if chunk_end == active_range.range_end_block_number {
-            break;
+            active_range = match advance_backfill_range(
+                pool,
+                active_range.backfill_range_id,
+                &config.lease_token,
+                chunk_end,
+            )
+            .await
+            {
+                Ok(range) => range,
+                Err(error) => {
+                    return Err(record_reserved_range_failure(ReservedRangeFailure {
+                        pool,
+                        reserved_range: &active_range,
+                        config,
+                        failure_reason: "backfill checkpoint advance failed",
+                        block_number: Some(block_number),
+                        attempted_range: Some(chunk_range),
+                        phase: "checkpoint_advance",
+                        error,
+                    })
+                    .await);
+                }
+            };
+            block_number = chunk_end
+                .checked_add(1)
+                .context("backfill block number overflowed while advancing range")?;
         }
-        block_number = chunk_end
-            .checked_add(1)
-            .context("backfill block number overflowed while advancing range")?;
+    }
+    if let (Some(job), Some(topic_plan)) = (verification_job, topic_plan)
+        && !reuse_current_verification
+    {
+        finalize_reserved_stored_verification(
+            pool,
+            &active_range,
+            config,
+            job,
+            source_plan,
+            topic_plan,
+            &verification_plan,
+            "stored verification finalization failed",
+        )
+        .await?;
     }
 
     complete_reserved_range_recording_plan_coverage(
@@ -379,6 +591,7 @@ async fn run_reserved_hash_pinned_backfill_range_inner(
         config,
         source_plan,
         watched_source_plan_uses_basenames_registry_scan_all(source_plan),
+        verification_job.is_some(),
         "backfill range completion failed",
         progress_sender,
         service_progress,

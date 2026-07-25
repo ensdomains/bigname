@@ -54,6 +54,7 @@ pub(super) async fn complete_reserved_range_recording_plan_coverage(
     config: &BackfillJobRunConfig,
     source_plan: &WatchedSourceSelectorPlan,
     uses_basenames_registry_scan_all: bool,
+    exact_address_log_filter: bool,
     failure_reason: &'static str,
     progress_sender: Option<&tokio::sync::mpsc::UnboundedSender<()>>,
     service_progress: &mut Option<&mut dyn StartupAdapterProgress>,
@@ -72,6 +73,7 @@ pub(super) async fn complete_reserved_range_recording_plan_coverage(
                 job_completion_coverage_fact_stream(
                     source_plan,
                     uses_basenames_registry_scan_all,
+                    exact_address_log_filter,
                     job.range_start_block_number,
                     job.range_end_block_number,
                 )
@@ -117,6 +119,7 @@ fn job_completion_coverage_facts<'a>(
     job_completion_coverage_fact_stream(
         source_plan,
         uses_basenames_registry_scan_all,
+        false,
         job_start_block,
         job_end_block,
     )
@@ -126,14 +129,28 @@ fn job_completion_coverage_facts<'a>(
     })
 }
 
+#[cfg(test)]
+fn exact_job_completion_coverage_facts<'a>(
+    source_plan: &'a WatchedSourceSelectorPlan,
+    job_start_block: i64,
+    job_end_block: i64,
+) -> impl Iterator<Item = BackfillCoverageFactWrite> + 'a {
+    job_completion_coverage_fact_stream(source_plan, false, true, job_start_block, job_end_block)
+        .filter_map(|item| match item {
+            BackfillCoverageFactStreamItem::Fact(fact) => Some(fact),
+            BackfillCoverageFactStreamItem::Progress => None,
+        })
+}
+
 fn job_completion_coverage_fact_stream(
     source_plan: &WatchedSourceSelectorPlan,
     uses_basenames_registry_scan_all: bool,
+    exact_address_log_filter: bool,
     job_start_block: i64,
     job_end_block: i64,
 ) -> JobCompletionCoverageFactStream<'_> {
     let mut family_scan_source_families = BTreeSet::new();
-    if watched_source_plan_uses_generic_resolver_scope(source_plan) {
+    if !exact_address_log_filter && watched_source_plan_uses_generic_resolver_scope(source_plan) {
         family_scan_source_families.insert(SOURCE_FAMILY_ENS_V1_RESOLVER_L1);
     }
     if uses_basenames_registry_scan_all {

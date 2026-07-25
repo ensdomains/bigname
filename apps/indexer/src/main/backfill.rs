@@ -18,6 +18,8 @@ mod selection;
 mod source;
 #[path = "backfill/source_selection.rs"]
 mod source_selection;
+#[path = "backfill/stored_verification.rs"]
+mod stored_verification;
 
 use anyhow::{Context, Result, bail};
 use bigname_manifests::WatchedSourceSelectorPlan;
@@ -27,6 +29,8 @@ use sqlx::types::time::OffsetDateTime;
 use tracing::warn;
 
 use crate::reconciliation::HeaderAuditMode;
+
+pub(crate) const STALE_BACKFILL_CLAIM_MAX_AGE_SECS: i64 = 3_600;
 
 pub(crate) use coinbase_sql::load_backfill_topic_plan;
 pub(crate) use coinbase_sql::{
@@ -47,13 +51,21 @@ pub(crate) use fetching::{materialize_historical_payload_range, run_hash_pinned_
 pub(crate) use reservation_execution::COMPACT_SOURCE_IDENTITY_SELECTED_TARGET_THRESHOLD;
 #[cfg(test)]
 pub(crate) use reservation_execution::coinbase_sql_backfill_job_source_identity_payload;
+#[cfg(test)]
+pub(crate) use reservation_execution::create_coinbase_sql_backfill_job;
 pub(crate) use reservation_execution::effective_hash_pinned_adapter_sync_mode;
 pub(crate) use reservation_execution::{
     DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS, backfill_job_source_identity_payload,
     backfill_job_source_identity_payload_with_progress, create_hash_pinned_backfill_job,
+    create_verified_coinbase_sql_backfill_job, create_verified_hash_pinned_backfill_job,
     effective_coinbase_sql_adapter_sync_mode, hash_pinned_backfill_range_specs,
-    run_precreated_hash_pinned_backfill_job, run_resumable_coinbase_sql_backfill_job,
-    run_resumable_hash_pinned_backfill_job, run_resumable_hash_pinned_backfill_job_with_progress,
+    run_precreated_hash_pinned_backfill_job, run_precreated_verified_coinbase_sql_backfill_job,
+    run_precreated_verified_coinbase_sql_backfill_job_with_progress,
+    run_precreated_verified_hash_pinned_backfill_job,
+    run_precreated_verified_hash_pinned_backfill_job_with_progress,
+    run_resumable_coinbase_sql_backfill_job, run_resumable_hash_pinned_backfill_job,
+    run_resumable_hash_pinned_backfill_job_with_progress,
+    verified_backfill_job_source_identity_payload,
 };
 #[cfg(test)]
 pub(crate) use selection::SelectedTargetIntervalIndex;
@@ -63,6 +75,11 @@ pub(crate) use source::{
 };
 pub(crate) use source_selection::{
     is_base_chain, selected_backfill_source, standalone_backfill_profile_convergence_enabled,
+};
+#[cfg(test)]
+pub(crate) use stored_verification::{
+    StoredLogIdentityBucket, StoredLogIdentityEvidence, StoredLogIdentityEvidenceRequest,
+    StoredLogIdentityEvidenceSource,
 };
 
 pub(crate) async fn load_existing_job_id(

@@ -37,9 +37,7 @@ use crate::runtime::DEFAULT_STARTUP_DISCOVERY_PAGE_LOGS;
 
 #[path = "cli/healthcheck.rs"]
 mod healthcheck_args;
-
 pub(crate) use healthcheck_args::HealthcheckArgs;
-
 fn parse_positive_usize(value: &str) -> Result<usize, String> {
     let value = value.parse::<usize>().map_err(|error| error.to_string())?;
     let maximum = usize::try_from(i64::MAX - 1).unwrap_or(usize::MAX);
@@ -49,7 +47,6 @@ fn parse_positive_usize(value: &str) -> Result<usize, String> {
         value => Ok(value),
     }
 }
-
 #[derive(Parser, Debug)]
 #[command(name = "bigname-indexer", about = "Chain indexing process for bigname")]
 pub(crate) struct Cli {
@@ -67,6 +64,70 @@ pub(crate) enum Command {
     Rewind(RewindArgs),
     Repair(RepairArgs),
     DropAndRederiveBaseNormalizedEvents(DropAndRederiveBaseNormalizedEventsArgs),
+}
+#[derive(Args, Debug)]
+pub(crate) struct CoinbaseSqlArgs {
+    #[arg(
+        long = "coinbase-sql-url",
+        env = "BIGNAME_INDEXER_COINBASE_SQL_URLS",
+        value_delimiter = ','
+    )]
+    pub(crate) urls: Vec<String>,
+    #[arg(
+        long = "coinbase-sql-api-key-id-env",
+        env = "BIGNAME_INDEXER_COINBASE_SQL_API_KEY_ID_ENV",
+        default_value = DEFAULT_COINBASE_SQL_API_KEY_ID_ENV
+    )]
+    pub(crate) api_key_id_env: String,
+    #[arg(
+        long = "coinbase-sql-api-key-secret-env",
+        env = "BIGNAME_INDEXER_COINBASE_SQL_API_KEY_SECRET_ENV",
+        default_value = DEFAULT_COINBASE_SQL_API_KEY_SECRET_ENV
+    )]
+    pub(crate) api_key_secret_env: String,
+    #[arg(
+        long = "coinbase-sql-initial-window-blocks",
+        env = "BIGNAME_INDEXER_COINBASE_SQL_INITIAL_WINDOW_BLOCKS",
+        default_value_t = DEFAULT_COINBASE_SQL_INITIAL_WINDOW_BLOCKS
+    )]
+    pub(crate) initial_window_blocks: i64,
+    #[arg(
+        long = "coinbase-sql-max-window-blocks",
+        env = "BIGNAME_INDEXER_COINBASE_SQL_MAX_WINDOW_BLOCKS",
+        default_value_t = DEFAULT_COINBASE_SQL_MAX_WINDOW_BLOCKS
+    )]
+    pub(crate) max_window_blocks: i64,
+    #[arg(
+        long = "coinbase-sql-page-limit",
+        env = "BIGNAME_INDEXER_COINBASE_SQL_PAGE_LIMIT",
+        default_value_t = DEFAULT_COINBASE_SQL_PAGE_LIMIT
+    )]
+    pub(crate) page_limit: usize,
+    #[arg(
+        long = "coinbase-sql-query-char-limit",
+        env = "BIGNAME_INDEXER_COINBASE_SQL_QUERY_CHAR_LIMIT",
+        default_value_t = DEFAULT_COINBASE_SQL_QUERY_CHAR_LIMIT
+    )]
+    pub(crate) query_char_limit: usize,
+    #[arg(
+        long = "coinbase-sql-query-timeout-secs",
+        env = "BIGNAME_INDEXER_COINBASE_SQL_QUERY_TIMEOUT_SECS",
+        default_value_t = DEFAULT_COINBASE_SQL_QUERY_TIMEOUT_SECS
+    )]
+    pub(crate) query_timeout_secs: u64,
+    #[arg(
+        long = "coinbase-sql-rate-limit-qps",
+        env = "BIGNAME_INDEXER_COINBASE_SQL_RATE_LIMIT_QPS",
+        default_value_t = DEFAULT_COINBASE_SQL_RATE_LIMIT_QPS
+    )]
+    pub(crate) rate_limit_qps: u32,
+    #[arg(
+        long = "coinbase-sql-validation-mode",
+        env = "BIGNAME_INDEXER_COINBASE_SQL_VALIDATION_MODE",
+        value_enum,
+        default_value = "full"
+    )]
+    pub(crate) validation_mode: CoinbaseSqlValidationMode,
 }
 
 #[derive(Args, Debug)]
@@ -105,6 +166,8 @@ pub(crate) struct RunArgs {
         value_delimiter = ','
     )]
     pub(crate) chain_rpc_code_fallback_urls: Vec<String>,
+    #[command(flatten)]
+    pub(crate) coinbase_sql: CoinbaseSqlArgs,
     #[arg(
         long = "event-silent-reverse-resolver-address",
         env = "BIGNAME_INDEXER_EVENT_SILENT_REVERSE_RESOLVER_ADDRESSES",

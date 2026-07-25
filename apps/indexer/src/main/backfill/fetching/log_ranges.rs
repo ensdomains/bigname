@@ -31,7 +31,18 @@ pub(super) async fn fetch_backfill_logs_by_safe_ranges(
     selected_target_addresses_for_chunk: &[String],
     resolved_blocks: &[ProviderResolvedBlock],
     range: BackfillBlockRange,
+    exact_address_log_filter: bool,
 ) -> Result<BTreeMap<i64, Vec<ProviderLog>>> {
+    if exact_address_log_filter {
+        return fetch_address_scoped_logs_by_safe_ranges(
+            provider,
+            source_plan,
+            resolved_blocks,
+            range,
+            None,
+        )
+        .await;
+    }
     if let Some(topic_scan) = source_family_topic_scan(source_plan) {
         let scanned_source_family = topic_scan.scanned_source_family;
         let mut logs_by_block = fetch_topic_first_logs_by_safe_ranges(

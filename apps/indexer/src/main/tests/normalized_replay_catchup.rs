@@ -195,14 +195,14 @@ async fn spawned_normalized_replay_beats_on_progress_and_exposes_a_later_wedge()
     .await?;
     install_stale_indexer_heartbeat(database.pool(), instance_id).await?;
 
-    let config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
+    let mut config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
         "mainnet".to_owned(),
         vec![chain.to_owned()],
         1_000,
         1_000,
         1,
-    )?
-    .with_defer_projection_indexes(false);
+    )?;
+    config.defer_projection_indexes = false;
     let hook = normalized_replay_catchup::install_after_progress_test_hook(
         database.pool(),
         "mainnet",
@@ -856,7 +856,6 @@ async fn normalized_replay_catchup_does_not_use_log_bound_as_stateful_boundary()
 async fn normalized_replay_catchup_validates_retention_before_stateless_phase() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_normalized_replay_cursor_table(database.pool()).await?;
-    create_ops_catchup_backfill_job_tables(database.pool()).await?;
     let deployment_profile = "retention-validation-test";
     let chain = "ethereum-mainnet";
     let wrapper_address = "0x0000000000000000000000000000000000000138";
@@ -1044,13 +1043,12 @@ async fn normalized_replay_catchup_retries_full_closure_after_stateless_phase_fa
 }
 
 #[tokio::test]
-async fn normalized_replay_catchup_accepts_current_generation_ensv1_full_history_coverage()
--> Result<()> {
+async fn normalized_replay_catchup_auto_enqueues_stale_topic_coverage_recovery() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_normalized_replay_cursor_table(database.pool()).await?;
-    create_ops_catchup_backfill_job_tables(database.pool()).await?;
     let chain = "ethereum-mainnet";
     let wrapper_address = "0x0000000000000000000000000000000000000132";
+    let wrapper_contract_instance_id = Uuid::from_u128(0x395);
     let suffix_block = provider_block(
         "0x3232323232323232323232323232323232323232323232323232323232323232",
         Some("0x3131313131313131313131313131313131313131313131313131313131313131"),
@@ -1061,9 +1059,20 @@ async fn normalized_replay_catchup_accepts_current_generation_ensv1_full_history
         database.pool(),
         395,
         chain,
-        Uuid::from_u128(0x395),
+        wrapper_contract_instance_id,
         wrapper_address,
     )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET active_from_block_number = $2
+        WHERE contract_instance_id = $1
+        "#,
+    )
+    .bind(wrapper_contract_instance_id)
+    .bind(suffix_block.block_number)
+    .execute(database.pool())
     .await?;
     insert_raw_name_wrapped_log(
         database.pool(),
@@ -1097,7 +1106,24 @@ async fn normalized_replay_catchup_accepts_current_generation_ensv1_full_history
     .bind(chain)
     .execute(database.pool())
     .await?;
-    let coverage_job_id = sqlx::query_scalar::<_, i64>(
+    sqlx::query(
+        r#"
+        INSERT INTO raw_log_staging_block_revisions (
+            chain_id,
+            block_hash,
+            block_number,
+            revision
+        )
+        VALUES ($1, $2, $3, 1)
+        "#,
+    )
+    .bind(chain)
+    .bind(&suffix_block.block_hash)
+    .bind(suffix_block.block_number)
+    .execute(database.pool())
+    .await?;
+    let stale_topic = format!("0x{:064x}", 0xdd);
+    let stale_job_id = sqlx::query_scalar::<_, i64>(
         r#"
         INSERT INTO backfill_jobs (
             deployment_profile,
@@ -1115,18 +1141,23 @@ async fn normalized_replay_catchup_accepts_current_generation_ensv1_full_history
             'mainnet',
             $1,
             1,
-            '{}'::jsonb,
+            jsonb_build_object(
+                'topic0s_by_source_family',
+                jsonb_build_object('ens_v1_wrapper_l1', jsonb_build_array($2::TEXT))
+            ),
             'hash_pinned_block',
-            0,
-            32,
-            'generation-one-wrapper-closure',
-            'completed',
+            $3,
+            $3,
+            'stale-topic-coverage-before-auto-recovery',
+            'completed'::backfill_lifecycle_status,
             now()
         )
         RETURNING backfill_job_id
         "#,
     )
     .bind(chain)
+    .bind(stale_topic)
+    .bind(suffix_block.block_number)
     .fetch_one(database.pool())
     .await?;
     sqlx::query(
@@ -1141,12 +1172,22 @@ async fn normalized_replay_catchup_accepts_current_generation_ensv1_full_history
             covered_to_block,
             derivation
         )
-        VALUES ($1, $2, 'ens_v1_wrapper_l1', 'address', lower($3), 0, 32, 'job_completion')
+        VALUES (
+            $1,
+            $2,
+            'ens_v1_wrapper_l1',
+            'address',
+            $3,
+            $4,
+            $4,
+            'job_completion'
+        )
         "#,
     )
-    .bind(coverage_job_id)
+    .bind(stale_job_id)
     .bind(chain)
     .bind(wrapper_address)
+    .bind(suffix_block.block_number)
     .execute(database.pool())
     .await?;
 
@@ -1157,10 +1198,106 @@ async fn normalized_replay_catchup_accepts_current_generation_ensv1_full_history
         1_000,
         1,
     )?;
+    let mut suffix_log = rpc_log_payload(&suffix_block);
+    suffix_log["address"] = serde_json::Value::String(wrapper_address.to_owned());
+    let (provider, server) = bundle_provider_with_fixtures(vec![ProviderBlockFixture {
+        block: suffix_block.clone(),
+        logs: vec![suffix_log],
+    }])
+    .await?;
+    let error =
+        normalized_replay_catchup::run_normalized_replay_catchup_iteration_with_provider_for_test(
+            database.pool(),
+            &config,
+            chain,
+            &provider,
+            HeaderAuditMode::Minimal,
+        )
+        .await
+        .expect_err("the bounded enqueue iteration must be journaled before replay retries");
+    assert!(
+        format!("{error:#}").contains(
+            "auto-enqueued and completed generation-bound full-closure coverage recovery job ids"
+        ),
+        "recovery failure record must name its job ids: {error:#}"
+    );
+    let recovery_job = sqlx::query_as::<
+        _,
+        (
+            i64,
+            String,
+            i64,
+            i64,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+            String,
+            serde_json::Value,
+        ),
+    >(
+            r#"
+            SELECT
+                backfill_job_id,
+                status::TEXT,
+                projected_minimum_provider_query_count,
+                actual_provider_query_count,
+                stored_verification_raw_log_input_revision,
+                stored_verification_log_count,
+                stored_verification_digest,
+                idempotency_key,
+                source_identity
+            FROM backfill_jobs
+            WHERE idempotency_key LIKE
+                'indexer-full-closure-coverage-recovery:v1:%'
+            "#,
+        )
+        .fetch_one(database.pool())
+        .await?;
+    assert_eq!(recovery_job.1, "completed");
+    assert_eq!(
+        (recovery_job.2, recovery_job.3),
+        (0, 0),
+        "Coinbase SQL query accounting does not apply to hash-pinned recovery"
+    );
+    assert_eq!(recovery_job.4, Some(1));
+    assert_eq!(recovery_job.5, Some(1));
+    assert!(
+        recovery_job
+            .6
+            .as_deref()
+            .is_some_and(|digest| digest.len() == 32),
+        "provider-verified recovery must persist its selected-log digest"
+    );
+    let persisted_identity_hash = recovery_job
+        .8
+        .get("source_identity_hash")
+        .and_then(serde_json::Value::as_str)
+        .context("automatic recovery job must persist its source identity hash")?;
+    assert!(
+        recovery_job.7.contains(persisted_identity_hash),
+        "automatic recovery idempotency key must include the exact persisted source identity hash"
+    );
+    assert!(
+        recovery_job
+            .8
+            .pointer("/topic0s_by_source_family/ens_v1_wrapper_l1")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|topics| !topics.is_empty()),
+        "recovery must persist the exact creation-time manifest topic set that it fetched"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM backfill_coverage_facts WHERE backfill_job_id = $1",
+        )
+        .bind(recovery_job.0)
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "provider-verified recovery completion must mint the exact generation-bound fact"
+    );
+
     let outcome = normalized_replay_catchup::run_normalized_replay_catchup_iteration(
-        database.pool(),
-        &config,
-        chain,
+        database.pool(), &config, chain,
     )
     .await?;
     assert_eq!(
@@ -1194,6 +1331,7 @@ async fn normalized_replay_catchup_accepts_current_generation_ensv1_full_history
         "authorized closure must publish normalized output"
     );
 
+    server.abort();
     database.cleanup().await
 }
 
@@ -1769,7 +1907,6 @@ async fn normalized_replay_catchup_recovers_multiple_new_ensv2_emitters_with_sco
 -> Result<()> {
     let database = TestDatabase::new().await?;
     create_normalized_replay_cursor_table(database.pool()).await?;
-    create_ops_catchup_backfill_job_tables(database.pool()).await?;
     let chain = "ethereum-sepolia";
     let root_manifest_id = 51_300;
     let registry_manifest_id = 51_301;
@@ -1991,14 +2128,14 @@ async fn normalized_replay_catchup_recovers_multiple_new_ensv2_emitters_with_sco
     .execute(database.pool())
     .await?;
 
-    let config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
+    let mut config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
         "sepolia".to_owned(),
         vec![chain.to_owned()],
         1_000,
         1_000,
         1,
-    )?
-    .with_defer_projection_indexes(false);
+    )?;
+    config.defer_projection_indexes = false;
     let stateless_pages =
         install_stateless_page_observer(database.pool(), "sepolia", chain).await?;
     let recovery_hook = normalized_replay_catchup::install_after_coverage_recovery_test_hook(
@@ -2408,7 +2545,6 @@ async fn normalized_replay_recovery_preserves_full_stateless_span_after_prefligh
 -> Result<()> {
     let database = TestDatabase::new().await?;
     create_normalized_replay_cursor_table(database.pool()).await?;
-    create_ops_catchup_backfill_job_tables(database.pool()).await?;
     let chain = "ethereum-sepolia";
     let root_manifest_id = 52_300;
     let registry_manifest_id = 52_301;
@@ -2615,14 +2751,14 @@ async fn normalized_replay_recovery_preserves_full_stateless_span_after_prefligh
         .execute(database.pool())
         .await?;
 
-    let config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
+    let mut config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
         "sepolia".to_owned(),
         vec![chain.to_owned()],
         1_000,
         1_000,
         1,
-    )?
-    .with_defer_projection_indexes(false);
+    )?;
+    config.defer_projection_indexes = false;
     let stateless_pages =
         install_stateless_page_observer(database.pool(), "sepolia", chain).await?;
     let error = normalized_replay_catchup::run_normalized_replay_catchup_iteration(
@@ -3615,7 +3751,6 @@ async fn run_normalized_replay_coverage_fence_test(
 ) -> Result<NormalizedReplayCoverageFenceOutcome> {
     let database = TestDatabase::new().await?;
     create_normalized_replay_cursor_table(database.pool()).await?;
-    create_ops_catchup_backfill_job_tables(database.pool()).await?;
     let chain = NORMALIZED_REPLAY_COVERAGE_FENCE_CHAIN;
     let root_manifest_id = 54_300;
     let registry_manifest_id = 54_301;
@@ -3826,14 +3961,14 @@ async fn run_normalized_replay_coverage_fence_test(
     .execute(database.pool())
     .await?;
 
-    let config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
+    let mut config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
         "sepolia".to_owned(),
         vec![chain.to_owned()],
         1_000,
         1_000,
         1,
-    )?
-    .with_defer_projection_indexes(false);
+    )?;
+    config.defer_projection_indexes = false;
     let recovery_hook = normalized_replay_catchup::install_after_coverage_recovery_test_hook(
         database.pool(),
         "sepolia",
@@ -4442,6 +4577,7 @@ async fn create_normalized_replay_cursor_table(pool: &PgPool) -> Result<()> {
     .await
     .context("failed to create normalized_replay_cursors table for indexer tests")?;
     create_normalized_replay_adapter_checkpoint_tables(pool).await?;
+    Box::pin(create_ops_catchup_backfill_job_tables(pool)).await?;
 
     Ok(())
 }

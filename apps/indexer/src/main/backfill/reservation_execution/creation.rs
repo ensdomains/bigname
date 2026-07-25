@@ -12,6 +12,26 @@ pub(crate) async fn create_hash_pinned_backfill_job(
     create_hash_pinned_backfill_job_with_ranges(pool, source_plan, config, ranges).await
 }
 
+pub(crate) async fn create_verified_hash_pinned_backfill_job(
+    pool: &sqlx::PgPool,
+    source_plan: &WatchedSourceSelectorPlan,
+    config: &BackfillJobRunConfig,
+    topic_plan: &BackfillTopicPlan,
+) -> Result<BackfillJobRecord> {
+    let ranges = vec![BackfillRangeSpec {
+        range_start_block_number: config.range.from_block,
+        range_end_block_number: config.range.to_block,
+    }];
+    create_hash_pinned_backfill_job_from_identity(
+        pool,
+        source_plan,
+        config,
+        ranges,
+        verified_hash_pinned_backfill_job_source_identity_payload(source_plan, topic_plan)?,
+    )
+    .await
+}
+
 pub(crate) async fn create_hash_pinned_backfill_job_with_progress(
     pool: &sqlx::PgPool,
     source_plan: &WatchedSourceSelectorPlan,
@@ -114,6 +134,32 @@ pub(crate) async fn create_coinbase_sql_backfill_job(
     .await
 }
 
+pub(crate) async fn create_verified_coinbase_sql_backfill_job(
+    pool: &sqlx::PgPool,
+    source_plan: &WatchedSourceSelectorPlan,
+    config: &BackfillJobRunConfig,
+    coinbase_config: &CoinbaseSqlBackfillConfig,
+    topic_plan: &BackfillTopicPlan,
+) -> Result<BackfillJobRecord> {
+    let ranges = vec![BackfillRangeSpec {
+        range_start_block_number: config.range.from_block,
+        range_end_block_number: config.range.to_block,
+    }];
+    let source_identity = verified_coinbase_sql_backfill_job_source_identity_payload(
+        source_plan,
+        coinbase_config,
+        topic_plan,
+    )?;
+    create_coinbase_sql_backfill_job_from_identity(
+        pool,
+        source_plan,
+        config,
+        ranges,
+        source_identity,
+    )
+    .await
+}
+
 pub(crate) async fn create_coinbase_sql_backfill_job_with_ranges(
     pool: &sqlx::PgPool,
     source_plan: &WatchedSourceSelectorPlan,
@@ -122,14 +168,54 @@ pub(crate) async fn create_coinbase_sql_backfill_job_with_ranges(
     topic_plan: &BackfillTopicPlan,
     ranges: Vec<BackfillRangeSpec>,
 ) -> Result<BackfillJobRecord> {
+    create_coinbase_sql_backfill_job_with_ranges_for_scope(
+        pool,
+        source_plan,
+        config,
+        coinbase_config,
+        topic_plan,
+        ranges,
+        false,
+    )
+    .await
+}
+
+async fn create_coinbase_sql_backfill_job_with_ranges_for_scope(
+    pool: &sqlx::PgPool,
+    source_plan: &WatchedSourceSelectorPlan,
+    config: &BackfillJobRunConfig,
+    coinbase_config: &CoinbaseSqlBackfillConfig,
+    topic_plan: &BackfillTopicPlan,
+    ranges: Vec<BackfillRangeSpec>,
+    exact_address_log_filter: bool,
+) -> Result<BackfillJobRecord> {
+    let source_identity = coinbase_sql_backfill_job_source_identity_payload_for_scope(
+        source_plan,
+        coinbase_config,
+        topic_plan,
+        exact_address_log_filter,
+    )?;
+    create_coinbase_sql_backfill_job_from_identity(
+        pool,
+        source_plan,
+        config,
+        ranges,
+        source_identity,
+    )
+    .await
+}
+
+async fn create_coinbase_sql_backfill_job_from_identity(
+    pool: &sqlx::PgPool,
+    source_plan: &WatchedSourceSelectorPlan,
+    config: &BackfillJobRunConfig,
+    ranges: Vec<BackfillRangeSpec>,
+    source_identity: Value,
+) -> Result<BackfillJobRecord> {
     let request = BackfillJobCreate {
         deployment_profile: config.deployment_profile.clone(),
         chain_id: source_plan.watched_chain_plan.chain.clone(),
-        source_identity: coinbase_sql_backfill_job_source_identity_payload(
-            source_plan,
-            coinbase_config,
-            topic_plan,
-        )?,
+        source_identity,
         scan_mode: COINBASE_SQL_BACKFILL_SCAN_MODE.to_owned(),
         range_start_block_number: config.range.from_block,
         range_end_block_number: config.range.to_block,
@@ -140,6 +226,69 @@ pub(crate) async fn create_coinbase_sql_backfill_job_with_ranges(
         create_generation_scoped_backfill_job(pool, &request).await
     } else {
         create_backfill_job(pool, &request).await
+    }
+}
+
+fn verified_hash_pinned_backfill_job_source_identity_payload(
+    source_plan: &WatchedSourceSelectorPlan,
+    topic_plan: &BackfillTopicPlan,
+) -> Result<Value> {
+    let mut payload = source_plan.source_identity_payload();
+    let topic_identity = topic_plan.source_identity_payload()?;
+    let topic0s_by_source_family = topic_identity
+        .get("topic0s_by_source_family")
+        .cloned()
+        .context("backfill topic identity is missing topic0s_by_source_family")?;
+    let object = payload
+        .as_object_mut()
+        .context("backfill source identity payload must be an object")?;
+    object.insert(
+        "stored_verification_topic_filtering".to_owned(),
+        Value::String("manifest_abi_topic0_union_v1".to_owned()),
+    );
+    object.insert("stored_verification_topic_plan".to_owned(), topic_identity);
+    object.insert(
+        "topic0s_by_source_family".to_owned(),
+        topic0s_by_source_family,
+    );
+    object.remove("source_identity_hash");
+    let source_identity_hash = keccak256_json_digest(&payload)
+        .context("failed to digest verified hash-pinned source identity")?;
+    payload
+        .as_object_mut()
+        .context("backfill source identity payload must be an object")?
+        .insert(
+            "source_identity_hash".to_owned(),
+            Value::String(source_identity_hash),
+        );
+    Ok(payload)
+}
+
+fn verified_coinbase_sql_backfill_job_source_identity_payload(
+    source_plan: &WatchedSourceSelectorPlan,
+    coinbase_config: &CoinbaseSqlBackfillConfig,
+    topic_plan: &BackfillTopicPlan,
+) -> Result<Value> {
+    coinbase_sql_backfill_job_source_identity_payload_for_scope(
+        source_plan,
+        coinbase_config,
+        topic_plan,
+        true,
+    )
+}
+
+pub(crate) fn verified_backfill_job_source_identity_payload(
+    source_plan: &WatchedSourceSelectorPlan,
+    topic_plan: &BackfillTopicPlan,
+    coinbase_config: Option<&CoinbaseSqlBackfillConfig>,
+) -> Result<Value> {
+    match coinbase_config {
+        Some(config) => verified_coinbase_sql_backfill_job_source_identity_payload(
+            source_plan,
+            config,
+            topic_plan,
+        ),
+        None => verified_hash_pinned_backfill_job_source_identity_payload(source_plan, topic_plan),
     }
 }
 
@@ -173,12 +322,29 @@ pub(crate) fn hash_pinned_backfill_range_specs(
     Ok(ranges)
 }
 
+#[cfg(test)]
 pub(crate) fn coinbase_sql_backfill_job_source_identity_payload(
     source_plan: &WatchedSourceSelectorPlan,
     coinbase_config: &CoinbaseSqlBackfillConfig,
     topic_plan: &BackfillTopicPlan,
 ) -> Result<Value> {
-    let mut payload = if coinbase_sql_uses_basenames_registry_scan_all(source_plan, topic_plan) {
+    coinbase_sql_backfill_job_source_identity_payload_for_scope(
+        source_plan,
+        coinbase_config,
+        topic_plan,
+        false,
+    )
+}
+
+fn coinbase_sql_backfill_job_source_identity_payload_for_scope(
+    source_plan: &WatchedSourceSelectorPlan,
+    coinbase_config: &CoinbaseSqlBackfillConfig,
+    topic_plan: &BackfillTopicPlan,
+    exact_address_log_filter: bool,
+) -> Result<Value> {
+    let mut payload = if exact_address_log_filter {
+        source_plan.source_identity_payload()
+    } else if coinbase_sql_uses_basenames_registry_scan_all(source_plan, topic_plan) {
         coinbase_sql_basenames_registry_scan_all_source_identity_payload(source_plan)?
     } else {
         if watched_source_plan_uses_basenames_registry_scan_all(source_plan) {

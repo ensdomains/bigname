@@ -14,12 +14,14 @@ use super::{
     push_deduped_log,
     query::{CoinbaseSqlFilterPack, build_or_split_filter_pack, build_query},
     rows::CoinbaseSqlLogRow,
+    stored_log_identity_bucket_from_value, stored_log_identity_evidence_query,
 };
 use crate::{
     backfill::{
         BackfillBlockRange, BackfillTopicPlan, COINBASE_SQL_RESULT_SET_CAP,
         CoinbaseSqlBackfillConfig, CoinbaseSqlFetchStats, CoinbaseSqlValidationMode,
         DEFAULT_COINBASE_SQL_QUERY_CHAR_LIMIT, HistoricalLogPayloadRequest,
+        StoredLogIdentityEvidenceRequest,
         reservation_execution::{
             backfill_job_source_identity_payload, coinbase_sql_backfill_job_source_identity_payload,
         },
@@ -27,6 +29,37 @@ use crate::{
     },
     provider::{ProviderLog, ProviderResolvedBlock},
 };
+
+#[test]
+fn stored_identity_query_returns_bounded_bucket_count_and_digest_evidence() -> Result<()> {
+    let sql = stored_log_identity_evidence_query(&StoredLogIdentityEvidenceRequest {
+        chain: "base-mainnet".to_owned(),
+        address: "0x1111111111111111111111111111111111111111".to_owned(),
+        topic0s: vec![
+            "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
+        ],
+        range: BackfillBlockRange::new(0, 46_954_147)?,
+        bucket_blocks: 131_072,
+    })?;
+
+    assert!(sql.contains("GROUP BY bucket"));
+    assert!(sql.contains("groupBitXor"));
+    assert!(sql.contains("MD5(concat(lower(block_hash), lower(transaction_hash)"));
+    assert!(sql.contains("lower(l.address) = '0x1111111111111111111111111111111111111111'"));
+    assert!(!sql.contains("LIMIT"));
+
+    let bucket = stored_log_identity_bucket_from_value(json!({
+        "bucket": "7",
+        "selected_log_count": "4341559",
+        "digest_left": "18446744073709551615",
+        "digest_right": 42
+    }))?;
+    assert_eq!(bucket.bucket, 7);
+    assert_eq!(bucket.selected_log_count, 4_341_559);
+    assert_eq!(bucket.digest_left, u64::MAX);
+    assert_eq!(bucket.digest_right, 42);
+    Ok(())
+}
 
 fn pack(
     addresses: Vec<String>,

@@ -677,11 +677,15 @@ Resolver-profile admission state (PublicResolver-generation profiles for ENSv1, 
 
 At minimum:
 
-- `backfill_jobs` — one row per bounded backfill job with selected profile, chain, selector kind, resolved source identity, scan mode, declared range start and end, the atomically captured `raw_log_retention_generation`, idempotency key, lifecycle status, failure metadata, timestamps.
+- `backfill_jobs` — one row per bounded backfill job with selected profile, chain, selector kind, resolved source identity, scan mode, declared range start and end, the atomically captured `raw_log_retention_generation`, idempotency key, lifecycle status, failure metadata, timestamps. Jobs using [stored-history verification](glossary.md) also carry a projected minimum and the actual provider-query count plus nullable verification revision, inclusive bounds, selected-log count, and digest.
 - `backfill_ranges` — child range records with declared range bounds, last-completed checkpoint, lease owner, lease token, lease expiry, attempt counters, lifecycle status, failure metadata, timestamps. A new range initializes its checkpoint to one block before the declared start so resume starts at `checkpoint_block_number + 1`.
 - Monotonic helper-owned checkpoint fields that let a worker resume after crash without widening the original range or reclassifying already admitted facts.
 
+Stored-history planning retains the fenced raw-log revision that authorized its locally reusable segments. Final verification rejects a newer per-block revision inside any such segment. A checkpoint alone is not verification evidence: on resume, provider-classified segments are fetched again unless the job already has a generation-current final verification covering the exact range with no later in-range mutation.
+
 Operational finalized catch-up uses these same families. It may create many finite chunks, but each chunk preserves one immutable job shape and idempotency key. Capacity preflight (current Postgres size, writable free disk, configured object-cache budget) records explicit failure or paused state in existing lifecycle/failure metadata when capacity is insufficient.
+
+The normalized replay catch-up loop also performs the bounded stale-claim sweep. When both a `reserved` or `running` job and its active child range have not updated for one hour, storage acquires locks in the ordinary job-then-range order, marks both failed with `phase=stale_claim_sweep`, clears the child lease, and preserves its checkpoint. Existing reservation code can then reclaim that range; the sweep does not introduce a second claim lifecycle.
 
 The selector identity fields on a job:
 
@@ -694,6 +698,8 @@ The selector identity fields on a job:
 Very large source-family jobs and whole-active watched-chain jobs may persist compact selector identity instead of a full `selected_targets` array. Whole-active selectors use this compact form when the resolved target set has more than 10,000 targets. Compact identity sets `source_identity_payload_format=selected_targets_digest_v1`, keeps the selector fields including `source_family` (null for whole-active selectors), and carries `selected_target_count`, `selected_targets_digest_algorithm=keccak256`, `selected_targets_digest`, a first/last `selected_targets_sample`, and `source_identity_hash`. The digest input remains the sorted canonical `selected_targets` tuple; the compact payload is therefore `source_family` plus the target-set digest, not a source-family-only identity.
 
 Idempotency validation has one compatibility bridge for jobs created before compact identity was introduced: a legacy full-payload identity and a `selected_targets_digest_v1` identity may match even when their `source_identity_hash` values differ, but only when every selector/provider field outside the selected-target representation and hash matches exactly and the compact count, digest, and sample recompute from the full `selected_targets` set. A different target set, topic plan, scan/provider field, range, chain, profile, scan mode, or idempotency key remains an immutable-job conflict.
+
+Automatic full-closure recovery derives its logical key from the exact identity that will be persisted after provider selection. A hash-pinned job records the manifest topic set used by its final verification; a Coinbase SQL job additionally records its provider, validation mode, and topic plan used for stored-history evidence and gap fetches. Those fields participate in `source_identity_hash`, so changing provider or topic/validation identity at the same raw-log revision creates a distinct generation-bound job rather than colliding with an immutable prior job. Execution carries that creation-time topic plan through the job instead of reloading a possibly newer manifest plan.
 
 When whole-chain or mixed-source backfill uses generic ENSv1 resolver topic scanning, the persisted identity records that scan in `generic_topic_scans` with `source_identity_payload_format=generic_resolver_event_topics_v1` and records the exact fetched topic set in `topic0s_by_source_family`. The address-scoped portion may be stored as `selected_targets_with_generic_topic_scans_v1` or, when compact, `selected_targets_digest_with_generic_topic_scans_v1`; in both forms `selected_targets`, `selected_target_count`, digest, and sample intentionally exclude the resolver-family targets covered by the generic topic scan while `source_identity_hash` covers the selected-target identity, generic scan declaration, and fetched topic set.
 
@@ -767,7 +773,46 @@ older-generation facts and stale topic-filtered evidence, and rechecks the
 raw-log input version and discovery-admission epoch while establishing the
 proof. A migrated generation-one database can therefore recover replay
 authority by completing generation-scoped historical backfill; a retained
-suffix without that coverage still fails closed.
+suffix without independent completeness evidence still fails closed.
+
+For Coinbase SQL recovery, retained raw logs may replace provider row fetches
+only after an independent aggregate query over the exact address, manifest
+topic set, and job window. Under the raw-log mutation fence, the indexer divides
+the window into 131,072-block buckets and computes the selected canonical
+raw-log count plus a 128-bit identity fingerprint from block hash, transaction
+hash, and log index. Coinbase SQL computes the same bounded evidence. A bucket
+is reusable only when count and fingerprint match and every selected local log
+has readable canonical lineage. This permits an empty bucket only when the
+independent query also reports it empty; local emptiness alone proves nothing.
+Adjacent mismatches are coalesced and fetched through the existing Coinbase SQL
+row path. After any gap fetch, the indexer repeats the aggregate comparison over
+the full job window and fails if a mismatch remains. Hash-pinned recovery
+instead fetches the exact requirement window and does not infer completeness
+from local rows.
+
+The fenced verification record on the parent job contains the exact verified
+bounds, selected-log count, deterministic local payload digest, and raw-log
+input revision. Coverage readers require the fact interval to be contained by
+those verified bounds, require the job's retention generation to remain
+current, and reject the fact when `raw_log_staging_block_revisions` records any
+later mutation inside the fact interval. The count and digest remain
+operator-visible audit evidence; the commit-ordered block revision ledger is
+the inexpensive digest-validity check on subsequent reads.
+
+Automatic full-closure recovery creates no more than four exact jobs per
+catch-up iteration. Its logical key includes the exact provider-specific source
+identity, interval, and violation-snapshot raw-log revision; generation-scoped
+job creation appends the captured retention generation. The required catch-up
+failure record names the jobs completed or attempted in that iteration so
+operators can distinguish bounded recovery progress from a replay loop that
+created no work. Coinbase SQL recovery persists a pre-fetch lower bound
+containing one initial aggregate verification query, one row query per
+configured initial block window containing a true gap, and one final aggregate
+verification query when any gap exists. Actuals include retries plus
+pagination and query-size filter-pack splits. Each returned query's attempts
+are recorded before subsequent validation and materialization so a later
+failure preserves the paid-work count. Provider row gaps retain the existing
+window, page, query-size, timeout, and rate limits.
 
 Stored-lineage promotion ([checkpoint promotion](glossary.md); "promotion"
 unqualified in this section always means the checkpoint sense, never capability
@@ -787,7 +832,9 @@ execution-cache outcome.
 `stored_lineage_coverage_frontiers` has one header row per chain. The header
 contains a monotonically increasing `snapshot_revision`, a
 `proof_format_version`, the `discovery_admission_epoch` used to build the
-snapshot, inclusive `verified_from_block` and `verified_through_block` bounds,
+snapshot, the raw-log input revision and retention generation under which its
+coverage facts were verified, inclusive `verified_from_block` and
+`verified_through_block` bounds,
 the canonical map of active event topic0 values by source family, the exact
 requirement-row count, a constant-state 128-bit integrity fingerprint over the
 normalized requirement rows, and `updated_at`. The count and fingerprint detect
@@ -803,6 +850,12 @@ topics, or an unsupported proof format is not coverage authority. This release
 hard-refuses every proof format other than `stored_lineage_coverage_v1`; it does
 not overwrite or downgrade an unrecognized row. `updated_at` is audit metadata,
 not a separate freshness signal.
+
+A saved frontier is reusable only while its retention generation is current
+and no later per-block raw-log revision touched its inclusive verified bounds.
+A generation rotation or in-range mutation forces the complete candidate to be
+verified again; revisions confined outside the saved bounds do not invalidate
+the proof.
 
 `stored_lineage_coverage_frontier_requirements` stores one normalized row for
 each `(chain_id, source_family, lowercased address)` in the header snapshot. Its

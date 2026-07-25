@@ -75,6 +75,372 @@ impl bigname_adapters::StartupAdapterProgress for CountingSourceIdentityProgress
     }
 }
 
+struct EmptyHistoricalSource {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    query_count: usize,
+}
+
+struct StoredOnlyHistoricalSource {
+    evidence: backfill::StoredLogIdentityEvidence,
+    evidence_calls: Arc<std::sync::atomic::AtomicUsize>,
+    payload_calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+struct OversizedHistoricalSource {
+    payload_calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[derive(Clone, Copy)]
+enum IncrementalQueryFailureStage {
+    Aggregate,
+    SecondRowPage,
+}
+
+struct IncrementallyRecordedFailureSource {
+    pool: PgPool,
+    backfill_job_id: i64,
+    stage: IncrementalQueryFailureStage,
+}
+
+struct FenceMutatingHistoricalSource {
+    pool: PgPool,
+    chain: String,
+    block_number: i64,
+    evidence_calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl backfill::HistoricalBackfillSourceOps for FenceMutatingHistoricalSource {
+    async fn fetch_selected_log_payloads(
+        &self,
+        request: backfill::HistoricalLogPayloadRequest<'_>,
+    ) -> Result<backfill::HistoricalLogPayload> {
+        Ok(backfill::HistoricalLogPayload {
+            validation_mode: request.validation_mode,
+            source_stats: backfill::CoinbaseSqlFetchStats {
+                query_count: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+    }
+}
+
+impl backfill::StoredLogIdentityEvidenceSource for FenceMutatingHistoricalSource {
+    fn fetch_stored_log_identity_evidence<'a>(
+        &'a self,
+        _request: backfill::StoredLogIdentityEvidenceRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<backfill::StoredLogIdentityEvidence>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let call = self
+                .evidence_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == 1 {
+                let current_revision = sqlx::query_scalar::<_, i64>(
+                    "SELECT revision FROM raw_log_staging_input_revisions WHERE chain_id = $1",
+                )
+                .bind(&self.chain)
+                .fetch_one(&self.pool)
+                .await?;
+                let changed_revision = current_revision + 1;
+                sqlx::query(
+                    "UPDATE raw_log_staging_input_revisions SET revision = $2 WHERE chain_id = $1",
+                )
+                .bind(&self.chain)
+                .bind(changed_revision)
+                .execute(&self.pool)
+                .await?;
+                sqlx::query(
+                    r#"
+                    INSERT INTO raw_log_staging_block_revisions (
+                        chain_id,
+                        block_hash,
+                        block_number,
+                        revision
+                    )
+                    VALUES ($1, '0xstored-verification-fence-change', $2, $3)
+                    "#,
+                )
+                .bind(&self.chain)
+                .bind(self.block_number)
+                .bind(changed_revision)
+                .execute(&self.pool)
+                .await?;
+                return Ok(backfill::StoredLogIdentityEvidence {
+                    buckets: Vec::new(),
+                    query_count: 1,
+                });
+            }
+            Ok(backfill::StoredLogIdentityEvidence {
+                buckets: vec![backfill::StoredLogIdentityBucket {
+                    bucket: 0,
+                    selected_log_count: 1,
+                    digest_left: 0,
+                    digest_right: 0,
+                }],
+                query_count: 1,
+            })
+        })
+    }
+}
+
+impl backfill::HistoricalBackfillSourceOps for IncrementallyRecordedFailureSource {
+    fn records_provider_query_attempts_incrementally(&self) -> bool {
+        true
+    }
+
+    async fn fetch_selected_log_payloads(
+        &self,
+        _request: backfill::HistoricalLogPayloadRequest<'_>,
+    ) -> Result<backfill::HistoricalLogPayload> {
+        bigname_storage::add_backfill_job_actual_provider_queries(
+            &self.pool,
+            self.backfill_job_id,
+            1,
+        )
+        .await?;
+        if matches!(self.stage, IncrementalQueryFailureStage::SecondRowPage) {
+            bigname_storage::add_backfill_job_actual_provider_queries(
+                &self.pool,
+                self.backfill_job_id,
+                1,
+            )
+            .await?;
+            anyhow::bail!("synthetic Coinbase SQL second row page failed validation");
+        }
+        anyhow::bail!("aggregate failure source must not fetch row payloads")
+    }
+}
+
+impl backfill::StoredLogIdentityEvidenceSource for IncrementallyRecordedFailureSource {
+    fn records_provider_query_attempts_incrementally(&self) -> bool {
+        true
+    }
+
+    fn fetch_stored_log_identity_evidence<'a>(
+        &'a self,
+        _request: backfill::StoredLogIdentityEvidenceRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<backfill::StoredLogIdentityEvidence>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            bigname_storage::add_backfill_job_actual_provider_queries(
+                &self.pool,
+                self.backfill_job_id,
+                1,
+            )
+            .await?;
+            if matches!(self.stage, IncrementalQueryFailureStage::Aggregate) {
+                anyhow::bail!("synthetic malformed Coinbase SQL aggregate response");
+            }
+            Ok(backfill::StoredLogIdentityEvidence {
+                buckets: vec![backfill::StoredLogIdentityBucket {
+                    bucket: 0,
+                    selected_log_count: 1,
+                    digest_left: 0,
+                    digest_right: 0,
+                }],
+                query_count: 0,
+            })
+        })
+    }
+}
+
+impl backfill::HistoricalBackfillSourceOps for OversizedHistoricalSource {
+    async fn fetch_selected_log_payloads(
+        &self,
+        request: backfill::HistoricalLogPayloadRequest<'_>,
+    ) -> Result<backfill::HistoricalLogPayload> {
+        self.payload_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let log = ProviderLog {
+            block_hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+            block_number: request.range.from_block,
+            transaction_hash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_owned(),
+            transaction_index: 0,
+            log_index: 0,
+            address: materialization_pipeline_selected_address().to_owned(),
+            topics: vec![name_wrapped_topic0()],
+            data: "0x".to_owned(),
+        };
+        Ok(backfill::HistoricalLogPayload {
+            logs_by_block: BTreeMap::from([(request.range.from_block, vec![log; 5_001])]),
+            validation_mode: request.validation_mode,
+            source_stats: backfill::CoinbaseSqlFetchStats {
+                query_count: 3,
+                retry_count: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+    }
+}
+
+impl backfill::StoredLogIdentityEvidenceSource for OversizedHistoricalSource {
+    fn fetch_stored_log_identity_evidence<'a>(
+        &'a self,
+        _request: backfill::StoredLogIdentityEvidenceRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<backfill::StoredLogIdentityEvidence>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            Ok(backfill::StoredLogIdentityEvidence {
+                buckets: vec![backfill::StoredLogIdentityBucket {
+                    bucket: 0,
+                    selected_log_count: 1,
+                    digest_left: 0,
+                    digest_right: 0,
+                }],
+                query_count: 1,
+            })
+        })
+    }
+}
+
+impl backfill::HistoricalBackfillSourceOps for StoredOnlyHistoricalSource {
+    async fn fetch_selected_log_payloads(
+        &self,
+        _request: backfill::HistoricalLogPayloadRequest<'_>,
+    ) -> Result<backfill::HistoricalLogPayload> {
+        self.payload_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        anyhow::bail!("stored-only verification must not fetch provider log rows")
+    }
+}
+
+impl backfill::StoredLogIdentityEvidenceSource for StoredOnlyHistoricalSource {
+    fn fetch_stored_log_identity_evidence<'a>(
+        &'a self,
+        _request: backfill::StoredLogIdentityEvidenceRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<backfill::StoredLogIdentityEvidence>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            self.evidence_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.evidence.clone())
+        })
+    }
+}
+
+impl backfill::HistoricalBackfillSourceOps for EmptyHistoricalSource {
+    async fn fetch_selected_log_payloads(
+        &self,
+        request: backfill::HistoricalLogPayloadRequest<'_>,
+    ) -> Result<backfill::HistoricalLogPayload> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(backfill::HistoricalLogPayload {
+            validation_mode: request.validation_mode,
+            source_stats: backfill::CoinbaseSqlFetchStats {
+                query_count: self.query_count,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+    }
+}
+
+impl backfill::StoredLogIdentityEvidenceSource for EmptyHistoricalSource {
+    fn fetch_stored_log_identity_evidence<'a>(
+        &'a self,
+        _request: backfill::StoredLogIdentityEvidenceRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<backfill::StoredLogIdentityEvidence>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let buckets = (self.calls.load(std::sync::atomic::Ordering::SeqCst) == 0)
+                .then_some(backfill::StoredLogIdentityBucket {
+                    bucket: 0,
+                    selected_log_count: 1,
+                    digest_left: 0,
+                    digest_right: 0,
+                })
+                .into_iter()
+                .collect();
+            Ok(backfill::StoredLogIdentityEvidence {
+                buckets,
+                query_count: 1,
+            })
+        })
+    }
+}
+
+#[test]
+fn coverage_recovery_identity_includes_coinbase_provider_and_topic_contract() -> Result<()> {
+    let source_plan = WatchedSourceSelectorPlan {
+        chain: "base-mainnet".to_owned(),
+        selector_kind: WatchedSourceSelectorKind::SourceFamily,
+        source_family: Some("basenames_base_registrar".to_owned()),
+        requested_watched_targets: Vec::new(),
+        selected_targets: Vec::new(),
+        watched_chain_plan: WatchedChainPlan {
+            chain: "base-mainnet".to_owned(),
+            addresses: Vec::new(),
+            manifest_root_entry_count: 0,
+            manifest_contract_entry_count: 0,
+            discovery_edge_entry_count: 0,
+        },
+    };
+    let topic_plan = backfill::BackfillTopicPlan::new(
+        BTreeMap::from([(
+            "basenames_base_registrar".to_owned(),
+            vec!["0x1111111111111111111111111111111111111111111111111111111111111111".to_owned()],
+        )]),
+        BTreeMap::new(),
+        BTreeSet::new(),
+    );
+    let coinbase_config = backfill::CoinbaseSqlBackfillConfig {
+        initial_window_blocks: 1_024,
+        max_window_blocks: 8_192,
+        page_limit: 10_000,
+        sql_char_limit: 10_000,
+        query_timeout_secs: 30,
+        rate_limit_qps: 5,
+        validation_mode: backfill::CoinbaseSqlValidationMode::Sample,
+    };
+    let identity = backfill::verified_backfill_job_source_identity_payload(
+        &source_plan,
+        &topic_plan,
+        Some(&coinbase_config),
+    )?;
+
+    assert_eq!(identity["backfill_provider"], "coinbase_cdp_sql");
+    assert_eq!(
+        identity["coinbase_sql_topic_plan"]["topic0s_by_source_family"]["basenames_base_registrar"]
+            [0],
+        "0x1111111111111111111111111111111111111111111111111111111111111111"
+    );
+    assert_ne!(
+        identity["source_identity_hash"],
+        source_plan.source_identity_payload()["source_identity_hash"],
+        "provider or topic drift must mint a distinct automatic-recovery key"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn pruned_primary_code_fallback_persists_like_primary_observation() -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -1654,6 +2020,7 @@ async fn hash_pinned_backfill_preserves_orphaned_lineage_when_reorg_lands_after_
         evidence,
         backfill::BackfillAdapterSyncMode::RawOnly,
         HeaderAuditMode::Minimal,
+        false,
     )
     .await?;
     assert_eq!(outcome.resolved_block_count, 1);
@@ -4834,6 +5201,782 @@ async fn historical_materialization_skips_code_observations_without_selected_log
     database.cleanup().await
 }
 
+#[tokio::test]
+async fn verified_coinbase_true_gap_records_projected_minimum_and_actual_queries() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let range = BackfillBlockRange::new(42, 42)?;
+    let manifest_id = 9_303;
+    let source_plan =
+        materialization_pipeline_source_plan(database.pool(), manifest_id, range).await?;
+    sqlx::query(
+        r#"
+        UPDATE manifest_versions
+        SET manifest_payload = $2
+        WHERE manifest_id = $1
+        "#,
+    )
+    .bind(manifest_id)
+    .bind(json!({
+        "abi": {
+            "events": [{
+                "name": "NameWrapped",
+                "fragment": "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry)",
+                "emitter_roles": ["name_wrapper"],
+                "normalized_events": ["WrapperNameWrapped", "PreimageObserved"]
+            }]
+        }
+    }))
+    .execute(database.pool())
+    .await?;
+    let topic_plan = backfill::load_backfill_topic_plan(database.pool(), &source_plan).await?;
+    let coinbase_config = backfill::CoinbaseSqlBackfillConfig {
+        initial_window_blocks: 1,
+        max_window_blocks: 1,
+        page_limit: 100,
+        sql_char_limit: 10_000,
+        query_timeout_secs: 30,
+        rate_limit_qps: 1,
+        validation_mode: backfill::CoinbaseSqlValidationMode::Sample,
+    };
+    let mut config = backfill_job_config(
+        range,
+        "verified-coinbase-query-accounting",
+        "verified-query-lease",
+    )?;
+    config.scope_idempotency_to_raw_log_retention_generation = true;
+    config.adapter_sync_mode = backfill::BackfillAdapterSyncMode::RawOnly;
+    let record = backfill::create_coinbase_sql_backfill_job(
+        database.pool(),
+        &source_plan,
+        &config,
+        &coinbase_config,
+        &topic_plan,
+    )
+    .await?;
+    let job_id = record.job.backfill_job_id;
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        materialization_pipeline_provider_fixtures(),
+        Arc::clone(&requests),
+    )
+    .await?;
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let historical_source = EmptyHistoricalSource {
+        calls: Arc::clone(&calls),
+        query_count: 3,
+    };
+
+    backfill::run_precreated_verified_coinbase_sql_backfill_job(
+        database.pool(),
+        &source_plan,
+        &provider,
+        &historical_source,
+        config.clone(),
+        coinbase_config.clone(),
+        topic_plan.clone(),
+        record,
+    )
+    .await?;
+
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64, Option<i64>, Option<String>)>(
+            r#"
+            SELECT
+                projected_minimum_provider_query_count,
+                actual_provider_query_count,
+                stored_verification_log_count,
+                stored_verification_digest
+            FROM backfill_jobs
+            WHERE backfill_job_id = $1
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(database.pool())
+        .await?,
+        (
+            3,
+            5,
+            Some(0),
+            Some("00000000000000000000000000000000".to_owned()),
+        )
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM backfill_coverage_facts WHERE backfill_job_id = $1",
+        )
+        .bind(job_id)
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+
+    let mut resume_config = config;
+    resume_config.idempotency_key = "verified-coinbase-completed-checkpoint-resume".to_owned();
+    resume_config.lease_token = "verified-completed-checkpoint-lease".to_owned();
+    resume_config.lease_expires_at = backfill_lease_deadline()?;
+    let resume_record = backfill::create_coinbase_sql_backfill_job(
+        database.pool(),
+        &source_plan,
+        &resume_config,
+        &coinbase_config,
+        &topic_plan,
+    )
+    .await?;
+    let resume_job_id = resume_record.job.backfill_job_id;
+    let reserved = bigname_storage::reserve_backfill_range(
+        database.pool(),
+        resume_job_id,
+        &resume_config.lease_owner,
+        &resume_config.lease_token,
+        resume_config.lease_expires_at,
+    )
+    .await?
+    .context("completed-checkpoint recovery range must be reservable")?;
+    bigname_storage::advance_backfill_range(
+        database.pool(),
+        reserved.backfill_range_id,
+        &resume_config.lease_token,
+        range.to_block,
+    )
+    .await?;
+    bigname_storage::fail_backfill_range(
+        database.pool(),
+        reserved.backfill_range_id,
+        &resume_config.lease_token,
+        "synthetic completion failure",
+        json!({"phase": "range_completion"}),
+    )
+    .await?;
+    let resume_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let resume_historical_source = EmptyHistoricalSource {
+        calls: Arc::clone(&resume_calls),
+        query_count: 1,
+    };
+    backfill::run_precreated_verified_coinbase_sql_backfill_job(
+        database.pool(),
+        &source_plan,
+        &provider,
+        &resume_historical_source,
+        resume_config,
+        coinbase_config,
+        topic_plan,
+        resume_record,
+    )
+    .await?;
+    assert_eq!(
+        resume_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a checkpoint without a durable stored verification must not bypass provider proof"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status::TEXT FROM backfill_jobs WHERE backfill_job_id = $1",
+        )
+        .bind(resume_job_id)
+        .fetch_one(database.pool())
+        .await?,
+        "completed"
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn verified_coinbase_records_paid_row_queries_before_later_validation_failure() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let range = BackfillBlockRange::new(42, 42)?;
+    let source_plan = materialization_pipeline_source_plan(database.pool(), 9_306, range).await?;
+    let topic_plan = backfill::load_backfill_topic_plan(database.pool(), &source_plan).await?;
+    let coinbase_config = backfill::CoinbaseSqlBackfillConfig {
+        initial_window_blocks: 1,
+        max_window_blocks: 1,
+        page_limit: 10_000,
+        sql_char_limit: 10_000,
+        query_timeout_secs: 30,
+        rate_limit_qps: 1,
+        validation_mode: backfill::CoinbaseSqlValidationMode::Sample,
+    };
+    let mut config = backfill_job_config(
+        range,
+        "verified-coinbase-validation-failure-accounting",
+        "validation-failure-lease",
+    )?;
+    config.scope_idempotency_to_raw_log_retention_generation = true;
+    config.adapter_sync_mode = backfill::BackfillAdapterSyncMode::RawOnly;
+    let record = backfill::create_verified_coinbase_sql_backfill_job(
+        database.pool(),
+        &source_plan,
+        &config,
+        &coinbase_config,
+        &topic_plan,
+    )
+    .await?;
+    let job_id = record.job.backfill_job_id;
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        materialization_pipeline_provider_fixtures(),
+        Arc::clone(&requests),
+    )
+    .await?;
+    let payload_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let historical_source = OversizedHistoricalSource {
+        payload_calls: Arc::clone(&payload_calls),
+    };
+
+    let error = backfill::run_precreated_verified_coinbase_sql_backfill_job(
+        database.pool(),
+        &source_plan,
+        &provider,
+        &historical_source,
+        config,
+        coinbase_config,
+        topic_plan,
+        record,
+    )
+    .await
+    .expect_err("oversized sampled payload must fail after the paid source query returns");
+    assert!(
+        format!("{error:#}").contains("refusing decoded SQL materialization"),
+        "unexpected failure: {error:#}"
+    );
+    assert_eq!(payload_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        sqlx::query_as::<_, (String, i64, i64)>(
+            r#"
+            SELECT
+                status::TEXT,
+                projected_minimum_provider_query_count,
+                actual_provider_query_count
+            FROM backfill_jobs
+            WHERE backfill_job_id = $1
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(database.pool())
+        .await?,
+        ("failed".to_owned(), 3, 6,),
+        "actual accounting must include the aggregate query plus every row-query attempt, including retries, even when validation fails"
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+async fn run_incrementally_recorded_query_failure(
+    stage: IncrementalQueryFailureStage,
+    manifest_id: i64,
+    idempotency_key: &str,
+) -> Result<(String, i64, String)> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let range = BackfillBlockRange::new(42, 42)?;
+    let source_plan =
+        materialization_pipeline_source_plan(database.pool(), manifest_id, range).await?;
+    let topic_plan = backfill::load_backfill_topic_plan(database.pool(), &source_plan).await?;
+    let coinbase_config = backfill::CoinbaseSqlBackfillConfig {
+        initial_window_blocks: 1,
+        max_window_blocks: 1,
+        page_limit: 100,
+        sql_char_limit: 10_000,
+        query_timeout_secs: 30,
+        rate_limit_qps: 1,
+        validation_mode: backfill::CoinbaseSqlValidationMode::Sample,
+    };
+    let mut config = backfill_job_config(range, idempotency_key, idempotency_key)?;
+    config.scope_idempotency_to_raw_log_retention_generation = true;
+    config.adapter_sync_mode = backfill::BackfillAdapterSyncMode::RawOnly;
+    let record = backfill::create_verified_coinbase_sql_backfill_job(
+        database.pool(),
+        &source_plan,
+        &config,
+        &coinbase_config,
+        &topic_plan,
+    )
+    .await?;
+    let job_id = record.job.backfill_job_id;
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        materialization_pipeline_provider_fixtures(),
+        requests,
+    )
+    .await?;
+    let source = IncrementallyRecordedFailureSource {
+        pool: database.pool().clone(),
+        backfill_job_id: job_id,
+        stage,
+    };
+
+    let error = backfill::run_precreated_verified_coinbase_sql_backfill_job(
+        database.pool(),
+        &source_plan,
+        &provider,
+        &source,
+        config,
+        coinbase_config,
+        topic_plan,
+        record,
+    )
+    .await
+    .expect_err("synthetic incremental Coinbase SQL source must fail");
+    let (status, actual_queries) = sqlx::query_as::<_, (String, i64)>(
+        r#"
+        SELECT status::TEXT, actual_provider_query_count
+        FROM backfill_jobs
+        WHERE backfill_job_id = $1
+        "#,
+    )
+    .bind(job_id)
+    .fetch_one(database.pool())
+    .await?;
+
+    server.abort();
+    database.cleanup().await?;
+    Ok((status, actual_queries, format!("{error:#}")))
+}
+
+#[tokio::test]
+async fn verified_coinbase_records_malformed_aggregate_attempt_before_failure() -> Result<()> {
+    let (status, actual_queries, error) = run_incrementally_recorded_query_failure(
+        IncrementalQueryFailureStage::Aggregate,
+        9_307,
+        "verified-coinbase-malformed-aggregate",
+    )
+    .await?;
+
+    assert_eq!(status, "failed");
+    assert_eq!(actual_queries, 1);
+    assert!(error.contains("malformed Coinbase SQL aggregate"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn verified_coinbase_records_prior_pages_when_later_page_fails() -> Result<()> {
+    let (status, actual_queries, error) = run_incrementally_recorded_query_failure(
+        IncrementalQueryFailureStage::SecondRowPage,
+        9_308,
+        "verified-coinbase-second-page-failure",
+    )
+    .await?;
+
+    assert_eq!(status, "failed");
+    assert_eq!(
+        actual_queries, 3,
+        "one aggregate and two returned row-page attempts must survive the later failure"
+    );
+    assert!(error.contains("second row page failed validation"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn verified_coinbase_finalization_fence_failure_marks_range_and_job_failed() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let range = BackfillBlockRange::new(42, 42)?;
+    let source_plan = materialization_pipeline_source_plan(database.pool(), 9_309, range).await?;
+    let topic_plan = backfill::load_backfill_topic_plan(database.pool(), &source_plan).await?;
+    let coinbase_config = backfill::CoinbaseSqlBackfillConfig {
+        initial_window_blocks: 1,
+        max_window_blocks: 1,
+        page_limit: 100,
+        sql_char_limit: 10_000,
+        query_timeout_secs: 30,
+        rate_limit_qps: 1,
+        validation_mode: backfill::CoinbaseSqlValidationMode::Sample,
+    };
+    let mut config = backfill_job_config(
+        range,
+        "verified-coinbase-finalization-fence",
+        "verified-coinbase-finalization-fence",
+    )?;
+    config.scope_idempotency_to_raw_log_retention_generation = true;
+    config.adapter_sync_mode = backfill::BackfillAdapterSyncMode::RawOnly;
+    let record = backfill::create_verified_coinbase_sql_backfill_job(
+        database.pool(),
+        &source_plan,
+        &config,
+        &coinbase_config,
+        &topic_plan,
+    )
+    .await?;
+    let job_id = record.job.backfill_job_id;
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        materialization_pipeline_provider_fixtures(),
+        requests,
+    )
+    .await?;
+    let evidence_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let source = FenceMutatingHistoricalSource {
+        pool: database.pool().clone(),
+        chain: source_plan.watched_chain_plan.chain.clone(),
+        block_number: range.from_block,
+        evidence_calls: Arc::clone(&evidence_calls),
+    };
+
+    let error = backfill::run_precreated_verified_coinbase_sql_backfill_job(
+        database.pool(),
+        &source_plan,
+        &provider,
+        &source,
+        config,
+        coinbase_config,
+        topic_plan,
+        record,
+    )
+    .await
+    .expect_err("an in-range mutation after re-verification must fail finalization");
+    assert!(
+        format!("{error:#}").contains("changed inside a locally verified stored segment"),
+        "unexpected finalization fence failure: {error:#}"
+    );
+    assert_eq!(evidence_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(
+        sqlx::query_as::<_, (String, String, String)>(
+            r#"
+            SELECT
+                job.status::TEXT,
+                range.status::TEXT,
+                range.failure_metadata ->> 'phase'
+            FROM backfill_jobs job
+            JOIN backfill_ranges range USING (backfill_job_id)
+            WHERE job.backfill_job_id = $1
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(database.pool())
+        .await?,
+        (
+            "failed".to_owned(),
+            "failed".to_owned(),
+            "stored_verification_finalize".to_owned(),
+        )
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn verified_coinbase_reuses_independently_matched_stored_range_without_row_fetch()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let range = BackfillBlockRange::new(42, 42)?;
+    let source_plan = materialization_pipeline_source_plan(database.pool(), 9_304, range).await?;
+    let topic_plan = backfill::load_backfill_topic_plan(database.pool(), &source_plan).await?;
+    let selected_target_index =
+        backfill::SelectedTargetIntervalIndex::from_source_plan(&source_plan);
+    let (block, _) = materialization_pipeline_blocks();
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        materialization_pipeline_provider_fixtures(),
+        Arc::clone(&requests),
+    )
+    .await?;
+    let canonicality_evidence = backfill::load_backfill_canonicality_evidence(
+        database.pool(),
+        "ethereum-mainnet",
+        &provider,
+    )
+    .await?;
+    backfill::materialize_historical_payload_range(
+        database.pool(),
+        &source_plan,
+        &selected_target_index,
+        &provider,
+        range,
+        canonicality_evidence,
+        &[ProviderResolvedBlock {
+            block_number: block.block_number,
+            block_hash: block.block_hash.clone(),
+        }],
+        vec![block.clone()],
+        backfill::HistoricalLogPayload {
+            logs_by_block: BTreeMap::from([(
+                block.block_number,
+                vec![provider_log_for_materialization_block(
+                    &block,
+                    materialization_pipeline_selected_address(),
+                    0,
+                )],
+            )]),
+            logs_need_validation_provider_payload: true,
+            validation_filters: vec![backfill::HistoricalLogValidationFilter {
+                from_block: range.from_block,
+                to_block: range.to_block,
+                addresses: vec![materialization_pipeline_selected_address().to_owned()],
+                topic0s: topic_plan
+                    .topic0s_for_source_family("ens_v1_wrapper_l1")
+                    .to_vec(),
+            }],
+            validation_mode: backfill::CoinbaseSqlValidationMode::Full,
+            ..Default::default()
+        },
+        backfill::BackfillAdapterSyncMode::RawOnly,
+        HeaderAuditMode::Minimal,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE raw_log_staging_input_revisions
+        SET revision = revision + 1,
+            retention_generation = 1,
+            retained_history_complete = false,
+            incomplete_since = clock_timestamp()
+        WHERE chain_id = 'ethereum-mainnet'
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    let local_evidence = sqlx::query_as::<_, (i64, i64, i64)>(
+        r#"
+        WITH matching AS (
+            SELECT md5(
+                LOWER(logs.block_hash)
+                || LOWER(logs.transaction_hash)
+                || logs.log_index::TEXT
+            ) AS row_hash
+            FROM raw_logs logs
+            JOIN chain_lineage lineage
+              ON lineage.chain_id = logs.chain_id
+             AND lineage.block_hash = logs.block_hash
+             AND lineage.block_number = logs.block_number
+             AND lineage.canonicality_state IN (
+                 'canonical'::canonicality_state,
+                 'safe'::canonicality_state,
+                 'finalized'::canonicality_state
+             )
+            WHERE logs.chain_id = 'ethereum-mainnet'
+              AND logs.block_number BETWEEN $1 AND $2
+              AND LOWER(logs.emitting_address) = $3
+              AND LOWER(logs.topics[1]) = ANY($4::TEXT[])
+              AND logs.canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+        )
+        SELECT
+            COUNT(*)::BIGINT,
+            COALESCE(
+                bit_xor(('x' || SUBSTRING(row_hash, 1, 16))::BIT(64)::BIGINT),
+                0
+            ),
+            COALESCE(
+                bit_xor(('x' || SUBSTRING(row_hash, 17, 16))::BIT(64)::BIGINT),
+                0
+            )
+        FROM matching
+        "#,
+    )
+    .bind(range.from_block)
+    .bind(range.to_block)
+    .bind(materialization_pipeline_selected_address())
+    .bind(
+        topic_plan
+            .topic0s_for_source_family("ens_v1_wrapper_l1")
+            .to_vec(),
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(local_evidence.0, 1);
+
+    requests
+        .lock()
+        .expect("request log must not be poisoned")
+        .clear();
+    let evidence_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let payload_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let historical_source = StoredOnlyHistoricalSource {
+        evidence: backfill::StoredLogIdentityEvidence {
+            buckets: vec![backfill::StoredLogIdentityBucket {
+                bucket: 0,
+                selected_log_count: local_evidence.0,
+                digest_left: local_evidence.1 as u64,
+                digest_right: local_evidence.2 as u64,
+            }],
+            query_count: 1,
+        },
+        evidence_calls: Arc::clone(&evidence_calls),
+        payload_calls: Arc::clone(&payload_calls),
+    };
+    let coinbase_config = backfill::CoinbaseSqlBackfillConfig {
+        initial_window_blocks: 1,
+        max_window_blocks: 1,
+        page_limit: 100,
+        sql_char_limit: 10_000,
+        query_timeout_secs: 30,
+        rate_limit_qps: 1,
+        validation_mode: backfill::CoinbaseSqlValidationMode::Sample,
+    };
+    let mut config =
+        backfill_job_config(range, "verified-coinbase-stored-only", "stored-only-lease")?;
+    config.scope_idempotency_to_raw_log_retention_generation = true;
+    config.adapter_sync_mode = backfill::BackfillAdapterSyncMode::RawOnly;
+    let record = backfill::create_verified_coinbase_sql_backfill_job(
+        database.pool(),
+        &source_plan,
+        &config,
+        &coinbase_config,
+        &topic_plan,
+    )
+    .await?;
+    let job_id = record.job.backfill_job_id;
+
+    backfill::run_precreated_verified_coinbase_sql_backfill_job(
+        database.pool(),
+        &source_plan,
+        &provider,
+        &historical_source,
+        config,
+        coinbase_config,
+        topic_plan,
+        record,
+    )
+    .await?;
+
+    assert_eq!(evidence_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        payload_calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "matched stored history must not execute a provider row fetch"
+    );
+    assert!(
+        requests
+            .lock()
+            .expect("request log must not be poisoned")
+            .is_empty(),
+        "matched stored history must not call the validation provider"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, i64, i64, Option<i64>)>(
+            r#"
+            SELECT
+                status::TEXT,
+                projected_minimum_provider_query_count,
+                actual_provider_query_count,
+                stored_verification_log_count
+            FROM backfill_jobs
+            WHERE backfill_job_id = $1
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(database.pool())
+        .await?,
+        ("completed".to_owned(), 1, 1, Some(1))
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM backfill_coverage_facts WHERE backfill_job_id = $1",
+        )
+        .bind(job_id)
+        .fetch_one(database.pool())
+        .await?,
+        1
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn verified_hash_recovery_keeps_creation_time_topic_plan_after_manifest_change() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let range = BackfillBlockRange::new(42, 42)?;
+    let manifest_id = 9_305;
+    let source_plan =
+        materialization_pipeline_source_plan(database.pool(), manifest_id, range).await?;
+    let creation_topic_plan =
+        backfill::load_backfill_topic_plan(database.pool(), &source_plan).await?;
+    let mut config = backfill_job_config(
+        range,
+        "verified-hash-topic-plan-race",
+        "topic-plan-race-lease",
+    )?;
+    config.scope_idempotency_to_raw_log_retention_generation = true;
+    config.adapter_sync_mode = backfill::BackfillAdapterSyncMode::RawOnly;
+    let record = backfill::create_verified_hash_pinned_backfill_job(
+        database.pool(),
+        &source_plan,
+        &config,
+        &creation_topic_plan,
+    )
+    .await?;
+    let job_id = record.job.backfill_job_id;
+
+    sqlx::query(
+        r#"
+        UPDATE manifest_versions
+        SET manifest_payload = $2
+        WHERE manifest_id = $1
+        "#,
+    )
+    .bind(manifest_id)
+    .bind(json!({
+        "abi": {
+            "events": [{
+                "name": "Transfer",
+                "fragment": "event Transfer(address indexed from, address indexed to, uint256 value)"
+            }]
+        }
+    }))
+    .execute(database.pool())
+    .await?;
+    let current_topic_plan =
+        backfill::load_backfill_topic_plan(database.pool(), &source_plan).await?;
+    assert_ne!(
+        creation_topic_plan, current_topic_plan,
+        "the regression requires a manifest topic change after job creation"
+    );
+
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        materialization_pipeline_provider_fixtures(),
+        Arc::clone(&requests),
+    )
+    .await?;
+    backfill::run_precreated_verified_hash_pinned_backfill_job(
+        database.pool(),
+        &source_plan,
+        &provider,
+        config,
+        creation_topic_plan,
+        record,
+    )
+    .await?;
+
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status::TEXT FROM backfill_jobs WHERE backfill_job_id = $1",
+        )
+        .bind(job_id)
+        .fetch_one(database.pool())
+        .await?,
+        "completed"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM backfill_coverage_facts WHERE backfill_job_id = $1",
+        )
+        .bind(job_id)
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "coverage must remain bound to the job's persisted creation-time topic identity"
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
 async fn run_hash_pinned_materialization_fact_set(
     adapter_sync_mode: backfill::BackfillAdapterSyncMode,
     idempotency_key: &str,
@@ -6624,6 +7767,13 @@ async fn create_backfill_job_tables(pool: &PgPool) -> Result<()> {
             range_start_block_number BIGINT NOT NULL CHECK (range_start_block_number >= 0),
             range_end_block_number BIGINT NOT NULL CHECK (range_end_block_number >= range_start_block_number),
             idempotency_key TEXT NOT NULL,
+            projected_minimum_provider_query_count BIGINT NOT NULL DEFAULT 0,
+            actual_provider_query_count BIGINT NOT NULL DEFAULT 0,
+            stored_verification_raw_log_input_revision BIGINT,
+            stored_verification_from_block BIGINT,
+            stored_verification_to_block BIGINT,
+            stored_verification_log_count BIGINT,
+            stored_verification_digest TEXT,
             status backfill_lifecycle_status NOT NULL DEFAULT 'pending',
             failure_reason TEXT,
             failure_metadata JSONB NOT NULL DEFAULT '{}'::JSONB,

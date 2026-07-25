@@ -2,15 +2,19 @@ pub use crate::backfill_jobs::{
     BackfillCoverageFactDerivation, BackfillCoverageFactScope, BackfillCoverageFactStreamItem,
     BackfillCoverageFactWrite, BackfillCoverageProgress, BackfillCoverageProgressFuture,
     BackfillJob, BackfillJobCreate, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange,
-    BackfillRangeSpec, BackfillTopicCoverageRequirement, BackfillTopicCoverageViolation,
-    MAX_BACKFILL_TOPIC_EVIDENCE_REQUIREMENTS, advance_backfill_range, complete_backfill_job,
-    complete_backfill_range, complete_backfill_range_recording_coverage,
+    BackfillRangeSpec, BackfillStoredVerification, BackfillTopicCoverageRequirement,
+    BackfillTopicCoverageViolation, MAX_BACKFILL_TOPIC_EVIDENCE_REQUIREMENTS,
+    add_backfill_job_actual_provider_queries, advance_backfill_range,
+    backfill_job_stored_verification_is_current, complete_backfill_job, complete_backfill_range,
+    complete_backfill_range_recording_coverage,
     complete_backfill_range_recording_coverage_with_progress, create_backfill_job,
     create_generation_scoped_backfill_job, ensure_and_load_raw_log_retention_generation,
     fail_backfill_job, fail_backfill_range, find_backfill_topic_coverage_violations,
     load_backfill_coverage_fact_counts, load_backfill_job, load_backfill_ranges,
     load_completed_backfill_jobs_intersecting_range, materialize_completed_backfill_topic_evidence,
-    reserve_backfill_range, write_backfill_coverage_facts,
+    record_backfill_job_projected_minimum_provider_queries,
+    record_backfill_job_stored_verification, reserve_backfill_range, sweep_stale_backfill_claims,
+    write_backfill_coverage_facts,
 };
 
 pub use crate::stored_lineage_coverage::{

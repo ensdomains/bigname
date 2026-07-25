@@ -8,6 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use bigname_storage::add_backfill_job_actual_provider_queries;
 use reqwest::StatusCode;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
@@ -25,6 +26,13 @@ pub(super) struct CoinbaseSqlClient {
     auth: CoinbaseSqlAuth,
     rate_limiter: CoinbaseSqlRateLimiter,
     query_timeout_secs: u64,
+    query_attempt_recorder: Option<CoinbaseSqlQueryAttemptRecorder>,
+}
+
+#[derive(Clone)]
+struct CoinbaseSqlQueryAttemptRecorder {
+    pool: sqlx::PgPool,
+    backfill_job_id: i64,
 }
 
 impl CoinbaseSqlClient {
@@ -46,26 +54,63 @@ impl CoinbaseSqlClient {
             auth,
             rate_limiter: CoinbaseSqlRateLimiter::new(config.rate_limit_qps),
             query_timeout_secs: config.query_timeout_secs,
+            query_attempt_recorder: None,
         })
     }
 
+    pub(super) fn with_query_attempt_recorder(
+        mut self,
+        pool: sqlx::PgPool,
+        backfill_job_id: i64,
+    ) -> Self {
+        self.query_attempt_recorder = Some(CoinbaseSqlQueryAttemptRecorder {
+            pool,
+            backfill_job_id,
+        });
+        self
+    }
+
+    pub(super) fn records_query_attempts_incrementally(&self) -> bool {
+        self.query_attempt_recorder.is_some()
+    }
+
     pub(super) async fn run_query(&self, sql: &str) -> Result<CoinbaseSqlQueryResponse> {
+        let response = self.run_raw_query(sql).await?;
+        let rows = response
+            .rows
+            .into_iter()
+            .map(CoinbaseSqlLogRow::from_value)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(CoinbaseSqlQueryResponse {
+            rows,
+            retry_count: response.retry_count,
+        })
+    }
+
+    pub(super) async fn run_raw_query(&self, sql: &str) -> Result<CoinbaseSqlRawQueryResponse> {
         let mut retry_count = 0usize;
         for attempt in 0..MAX_SQL_ATTEMPTS {
             self.rate_limiter.wait().await;
             let bearer_token = self.auth.bearer_token()?;
             let response = self.run_curl_query(sql, &bearer_token).await;
+            if let Some(recorder) = &self.query_attempt_recorder {
+                add_backfill_job_actual_provider_queries(
+                    &recorder.pool,
+                    recorder.backfill_job_id,
+                    1,
+                )
+                .await
+                .context("failed to record returned Coinbase SQL query attempt")?;
+            }
 
             match response {
                 Ok(response) if response.status.is_success() => {
                     let body = serde_json::from_str::<CoinbaseSqlRunResponse>(&response.body)
                         .context("failed to decode Coinbase SQL response")?;
-                    let rows = body
-                        .result
-                        .into_iter()
-                        .map(CoinbaseSqlLogRow::from_value)
-                        .collect::<Result<Vec<_>>>()?;
-                    return Ok(CoinbaseSqlQueryResponse { rows, retry_count });
+                    return Ok(CoinbaseSqlRawQueryResponse {
+                        rows: body.result,
+                        retry_count,
+                    });
                 }
                 Ok(response)
                     if should_retry_status(response.status) && attempt + 1 < MAX_SQL_ATTEMPTS =>
@@ -259,6 +304,11 @@ fn request_path_for_url(url: &reqwest::Url) -> String {
 
 pub(super) struct CoinbaseSqlQueryResponse {
     pub(super) rows: Vec<CoinbaseSqlLogRow>,
+    pub(super) retry_count: usize,
+}
+
+pub(super) struct CoinbaseSqlRawQueryResponse {
+    pub(super) rows: Vec<Value>,
     pub(super) retry_count: usize,
 }
 

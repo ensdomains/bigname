@@ -370,6 +370,217 @@ async fn generation_scoped_creation_rejects_a_manual_key_collision_from_an_older
 }
 
 #[tokio::test]
+async fn recovery_jobs_record_query_counts_and_fenced_stored_verification() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let mut request = backfill_job_create("coverage-recovery-accounting");
+    request.ranges.clear();
+    let created = create_generation_scoped_backfill_job(database.pool(), &request).await?;
+
+    record_backfill_job_projected_minimum_provider_queries(
+        database.pool(),
+        created.job.backfill_job_id,
+        7,
+    )
+    .await?;
+    record_backfill_job_projected_minimum_provider_queries(
+        database.pool(),
+        created.job.backfill_job_id,
+        3,
+    )
+    .await?;
+    add_backfill_job_actual_provider_queries(database.pool(), created.job.backfill_job_id, 2)
+        .await?;
+    add_backfill_job_actual_provider_queries(database.pool(), created.job.backfill_job_id, 4)
+        .await?;
+
+    let raw_log_input_revision = sqlx::query_scalar::<_, i64>(
+        "SELECT revision FROM raw_log_staging_input_revisions WHERE chain_id = $1",
+    )
+    .bind(&created.job.chain_id)
+    .fetch_one(database.pool())
+    .await?;
+    let verification = BackfillStoredVerification {
+        raw_log_input_revision,
+        verified_from_block: 100,
+        verified_to_block: 120,
+        selected_log_count: 42,
+        selected_log_digest: "0123456789abcdef0123456789abcdef".to_owned(),
+    };
+    let mut connection = database.pool().acquire().await?;
+    record_backfill_job_stored_verification(
+        &mut connection,
+        created.job.backfill_job_id,
+        created.job.raw_log_retention_generation,
+        &verification,
+    )
+    .await?;
+    drop(connection);
+
+    assert_eq!(
+        sqlx::query_as::<
+            _,
+            (
+                i64,
+                i64,
+                Option<i64>,
+                Option<i64>,
+                Option<i64>,
+                Option<i64>,
+                Option<String>
+            ),
+        >(
+            r#"
+            SELECT
+                projected_minimum_provider_query_count,
+                actual_provider_query_count,
+                stored_verification_raw_log_input_revision,
+                stored_verification_from_block,
+                stored_verification_to_block,
+                stored_verification_log_count,
+                stored_verification_digest
+            FROM backfill_jobs
+            WHERE backfill_job_id = $1
+            "#,
+        )
+        .bind(created.job.backfill_job_id)
+        .fetch_one(database.pool())
+        .await?,
+        (
+            7,
+            6,
+            Some(verification.raw_log_input_revision),
+            Some(verification.verified_from_block),
+            Some(verification.verified_to_block),
+            Some(verification.selected_log_count),
+            Some(verification.selected_log_digest),
+        )
+    );
+    assert!(
+        backfill_job_stored_verification_is_current(
+            database.pool(),
+            created.job.backfill_job_id,
+            &created.job.chain_id,
+            verification.verified_from_block,
+            verification.verified_to_block,
+        )
+        .await?
+    );
+    let changed_revision = sqlx::query_scalar::<_, i64>(
+        r#"
+        UPDATE raw_log_staging_input_revisions
+        SET revision = revision + 1
+        WHERE chain_id = $1
+        RETURNING revision
+        "#,
+    )
+    .bind(&created.job.chain_id)
+    .fetch_one(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO raw_log_staging_block_revisions (
+            chain_id,
+            block_hash,
+            block_number,
+            revision
+        )
+        VALUES ($1, '0xchanged-after-verification', $2, $3)
+        "#,
+    )
+    .bind(&created.job.chain_id)
+    .bind(verification.verified_from_block)
+    .bind(changed_revision)
+    .execute(database.pool())
+    .await?;
+    assert!(
+        !backfill_job_stored_verification_is_current(
+            database.pool(),
+            created.job.backfill_job_id,
+            &created.job.chain_id,
+            verification.verified_from_block,
+            verification.verified_to_block,
+        )
+        .await?
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn stale_claim_sweep_releases_old_heartbeats_but_preserves_fresh_claims() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let mut stale_request = backfill_job_create("stale-claim-recovery");
+    stale_request.ranges.clear();
+    let stale = create_backfill_job(database.pool(), &stale_request).await?;
+    let stale_range = reserve_backfill_range(
+        database.pool(),
+        stale.job.backfill_job_id,
+        "dead-worker",
+        "dead-lease",
+        OffsetDateTime::from_unix_timestamp(OffsetDateTime::now_utc().unix_timestamp() + 86_400)?,
+    )
+    .await?
+    .expect("stale fixture range must reserve");
+    sqlx::query(
+        r#"
+        UPDATE backfill_ranges
+        SET status = 'running', updated_at = now() - INTERVAL '2 hours'
+        WHERE backfill_range_id = $1
+        "#,
+    )
+    .bind(stale_range.backfill_range_id)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE backfill_jobs SET status = 'running', updated_at = now() - INTERVAL '2 hours' WHERE backfill_job_id = $1",
+    )
+    .bind(stale.job.backfill_job_id)
+    .execute(database.pool())
+    .await?;
+
+    let mut fresh_request = backfill_job_create("fresh-claim-preserved");
+    fresh_request.ranges.clear();
+    let fresh = create_backfill_job(database.pool(), &fresh_request).await?;
+    reserve_backfill_range(
+        database.pool(),
+        fresh.job.backfill_job_id,
+        "live-worker",
+        "live-lease",
+        lease_deadline(),
+    )
+    .await?
+    .expect("fresh fixture range must reserve");
+
+    let swept = sweep_stale_backfill_claims(
+        database.pool(),
+        &stale_request.chain_id,
+        OffsetDateTime::from_unix_timestamp(OffsetDateTime::now_utc().unix_timestamp() - 3_600)?,
+    )
+    .await?;
+    assert_eq!(swept, vec![stale.job.backfill_job_id]);
+    let reclaimed = reserve_backfill_range(
+        database.pool(),
+        stale.job.backfill_job_id,
+        "replacement-worker",
+        "replacement-lease",
+        lease_deadline(),
+    )
+    .await?
+    .expect("swept stale range must be ordinarily reclaimable");
+    assert_eq!(reclaimed.backfill_range_id, stale_range.backfill_range_id);
+    assert_eq!(reclaimed.attempt_count, 2);
+
+    let fresh_range = load_backfill_ranges(database.pool(), fresh.job.backfill_job_id)
+        .await?
+        .pop()
+        .expect("fresh range must exist");
+    assert_eq!(fresh_range.status, BackfillLifecycleStatus::Reserved);
+    assert_eq!(fresh_range.lease_token.as_deref(), Some("live-lease"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn raw_log_retention_migration_isolates_a_legacy_job_only_chain() -> Result<()> {
     const RETENTION_MIGRATION: i64 = 20260714120000;
     let database = TestDatabase::new_before_migration(Some(RETENTION_MIGRATION)).await?;

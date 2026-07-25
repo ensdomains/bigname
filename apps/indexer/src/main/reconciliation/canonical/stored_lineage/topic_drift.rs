@@ -51,19 +51,78 @@ pub(crate) async fn find_uncovered_generation_bound_coverage_with_current_topics
         Some(retention_generation),
     )
     .await?;
-    for page in required_tuples.chunks(MAX_BACKFILL_TOPIC_EVIDENCE_REQUIREMENTS) {
-        ensure_required_topic_sets_undrifted_in_transaction(transaction.as_mut(), chain, page)
-            .await?;
+    let uncovered_limit = usize::try_from(uncovered_limit)
+        .map_err(|_| "generation-bound uncovered limit must be positive".to_owned())?;
+    if uncovered_limit == 0 {
+        return Err("generation-bound uncovered limit must be positive".to_owned());
     }
-    let uncovered = find_uncovered_required_watched_tuples_for_retention_generation_in_transaction(
-        transaction.as_mut(),
-        chain,
-        &required_tuples,
-        retention_generation,
-        uncovered_limit,
-    )
-    .await
-    .map_err(|error| error.to_string())?;
+    let mut uncovered = Vec::new();
+    for page in required_tuples.chunks(MAX_BACKFILL_TOPIC_EVIDENCE_REQUIREMENTS) {
+        let remaining = uncovered_limit.saturating_sub(uncovered.len());
+        if remaining == 0 {
+            break;
+        }
+        let requirements = page
+            .iter()
+            .map(|tuple| BackfillTopicCoverageRequirement {
+                source_family: tuple.source_family.clone(),
+                address: tuple.address.clone(),
+                required_from_block: tuple.required_from_block,
+                required_to_block: tuple.required_to_block,
+            })
+            .collect::<Vec<_>>();
+        let violation_limit = i64::try_from(remaining.min(requirements.len()))
+            .map_err(|_| "topic violation limit exceeds signed 64-bit".to_owned())?;
+        let violations = find_backfill_topic_coverage_violations(
+            transaction.as_mut(),
+            chain,
+            &requirements,
+            violation_limit,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        uncovered.extend(
+            violations
+                .into_iter()
+                .map(|violation| UncoveredWatchedTuple {
+                    source_family: violation.source_family,
+                    address: violation.address,
+                    required_from_block: violation.required_from_block,
+                    required_to_block: violation.required_to_block,
+                }),
+        );
+    }
+    if uncovered.len() < uncovered_limit {
+        let remaining = i64::try_from(uncovered_limit - uncovered.len())
+            .map_err(|_| "uncovered limit exceeds signed 64-bit".to_owned())?;
+        uncovered.extend(
+            find_uncovered_required_watched_tuples_for_retention_generation_in_transaction(
+                transaction.as_mut(),
+                chain,
+                &required_tuples,
+                retention_generation,
+                remaining,
+            )
+            .await
+            .map_err(|error| error.to_string())?,
+        );
+    }
+    uncovered.sort_by(|left, right| {
+        (
+            &left.source_family,
+            &left.address,
+            left.required_from_block,
+            left.required_to_block,
+        )
+            .cmp(&(
+                &right.source_family,
+                &right.address,
+                right.required_from_block,
+                right.required_to_block,
+            ))
+    });
+    uncovered.dedup_by(|left, right| left == right);
+    uncovered.truncate(uncovered_limit);
     transaction
         .commit()
         .await
@@ -232,6 +291,101 @@ mod tests {
                 address: valid.address,
                 required_from_block: valid.required_from_block,
                 required_to_block: valid.required_to_block,
+            }]
+        );
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn generation_bound_proof_returns_stale_topic_coverage_as_uncovered() -> Result<()> {
+        let database = TestDatabase::create_migrated(
+            TestDatabaseConfig::new("topic_evidence_generation_bound_stale"),
+            &bigname_storage::MIGRATOR,
+            "failed to migrate stale generation-bound topic test",
+        )
+        .await?;
+        let chain = "test-chain";
+        let family = "test-family";
+        let address = "0x0000000000000000000000000000000000000001";
+        let old_topic = format!("0x{:064x}", 1);
+        let current_topic = format!("0x{:064x}", 2);
+        let job_id = sqlx::query_scalar::<_, i64>(
+            r#"
+            INSERT INTO backfill_jobs (
+                deployment_profile,
+                chain_id,
+                source_identity,
+                scan_mode,
+                range_start_block_number,
+                range_end_block_number,
+                idempotency_key,
+                status,
+                completed_at
+            )
+            VALUES (
+                'test', $1,
+                jsonb_build_object(
+                    'topic0s_by_source_family',
+                    jsonb_build_object($2, jsonb_build_array($3::TEXT))
+                ),
+                'test', 1, 10, 'stale-topic-generation-bound',
+                'completed'::backfill_lifecycle_status, now()
+            )
+            RETURNING backfill_job_id
+            "#,
+        )
+        .bind(chain)
+        .bind(family)
+        .bind(&old_topic)
+        .fetch_one(database.pool())
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO backfill_coverage_facts (
+                backfill_job_id,
+                chain_id,
+                source_family,
+                scope,
+                address,
+                covered_from_block,
+                covered_to_block,
+                derivation
+            )
+            VALUES ($1, $2, $3, 'address', $4, 1, 10, 'job_completion')
+            "#,
+        )
+        .bind(job_id)
+        .bind(chain)
+        .bind(family)
+        .bind(address)
+        .execute(database.pool())
+        .await?;
+        let requirement = RequiredWatchedTuple {
+            source_family: family.to_owned(),
+            address: address.to_owned(),
+            required_from_block: 1,
+            required_to_block: 10,
+        };
+        let current_topics = BTreeMap::from([(family.to_owned(), BTreeSet::from([current_topic]))]);
+
+        let uncovered = find_uncovered_generation_bound_coverage_with_current_topics(
+            database.pool(),
+            chain,
+            &current_topics,
+            std::slice::from_ref(&requirement),
+            0,
+            20,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+
+        assert_eq!(
+            uncovered,
+            vec![UncoveredWatchedTuple {
+                source_family: requirement.source_family,
+                address: requirement.address,
+                required_from_block: requirement.required_from_block,
+                required_to_block: requirement.required_to_block,
             }]
         );
         database.cleanup().await

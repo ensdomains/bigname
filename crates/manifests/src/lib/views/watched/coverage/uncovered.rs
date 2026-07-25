@@ -53,6 +53,34 @@ pub async fn find_uncovered_watched_tuples(
                     WHERE fact.chain_id = $1
                       AND fact_job.status = 'completed'::backfill_lifecycle_status
                       AND fact_job.chain_id = fact.chain_id
+                      AND (
+                          fact_job.stored_verification_raw_log_input_revision IS NULL
+                          OR (
+                              fact_job.stored_verification_from_block
+                                  <= fact.covered_from_block
+                              AND fact_job.stored_verification_to_block
+                                  >= fact.covered_to_block
+                              AND fact_job.raw_log_retention_generation = (
+                                  SELECT retained.retention_generation
+                                  FROM raw_log_staging_input_revisions retained
+                                  WHERE retained.chain_id = fact.chain_id
+                              )
+                              AND fact_job.stored_verification_raw_log_input_revision <= (
+                                  SELECT retained.revision
+                                  FROM raw_log_staging_input_revisions retained
+                                  WHERE retained.chain_id = fact.chain_id
+                              )
+                              AND NOT EXISTS (
+                                  SELECT 1
+                                  FROM raw_log_staging_block_revisions changed
+                                  WHERE changed.chain_id = fact.chain_id
+                                    AND changed.revision
+                                        > fact_job.stored_verification_raw_log_input_revision
+                                    AND changed.block_number BETWEEN
+                                        fact.covered_from_block AND fact.covered_to_block
+                              )
+                          )
+                      )
                       AND fact.covered_from_block >= fact_job.range_start_block_number
                       AND fact.covered_to_block <= fact_job.range_end_block_number
                       AND fact.source_family = watched.source_family
@@ -273,6 +301,29 @@ async fn find_uncovered_required_watched_tuples_with_retention_generation(
                       AND fact_job.status = 'completed'::backfill_lifecycle_status
                       AND fact_job.chain_id = fact.chain_id
                       AND ($6::BIGINT IS NULL OR fact_job.raw_log_retention_generation = $6)
+                      AND (
+                          fact_job.stored_verification_raw_log_input_revision IS NULL
+                          OR (
+                              fact_job.stored_verification_from_block
+                                  <= fact.covered_from_block
+                              AND fact_job.stored_verification_to_block
+                                  >= fact.covered_to_block
+                              AND fact_job.raw_log_retention_generation = (
+                                  SELECT retained.retention_generation
+                                  FROM raw_log_staging_input_revisions retained
+                                  WHERE retained.chain_id = fact.chain_id
+                              )
+                              AND NOT EXISTS (
+                                  SELECT 1
+                                  FROM raw_log_staging_block_revisions changed
+                                  WHERE changed.chain_id = fact.chain_id
+                                    AND changed.revision
+                                        > fact_job.stored_verification_raw_log_input_revision
+                                    AND changed.block_number BETWEEN
+                                        fact.covered_from_block AND fact.covered_to_block
+                              )
+                          )
+                      )
                       AND fact.covered_from_block >= fact_job.range_start_block_number
                       AND fact.covered_to_block <= fact_job.range_end_block_number
                       AND fact.source_family = watched.source_family
