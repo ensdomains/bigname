@@ -64,6 +64,17 @@ every address of the source family is covered by a topics-complete fetch.
 Checkpoint promotion composes these facts into gap-free proof instead of
 re-deriving coverage from job definitions.
 
+**Stored-history verification** — the fail-closed recovery check that can reuse
+retained raw logs without fetching the same log rows again. Under the raw-log
+mutation fence, each bucket's selected canonical raw-log count and 128-bit
+identity fingerprint must match evidence from an independent historical
+source over the exact address, topic set, and block window, and every selected
+local log must have readable canonical lineage. A local empty bucket is
+reusable only when the independent source also reports it empty. Mismatched
+buckets require provider row fetch and a full independent recheck. The job then
+records the exact bounds, input revision, selected-log count, and digest that
+back its generation-scoped coverage facts.
+
 **Canonicality** — whether a stored fact belongs to the chain branch currently
 accepted as real, and how final that acceptance is. States: `observed` (seen,
 unproven), `canonical`, `safe`, `finalized` (standard Ethereum finality tags),

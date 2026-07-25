@@ -16,8 +16,8 @@ use bigname_manifests::{
 use bigname_storage::{
     ChainLineageBlock, StoredLineageCoverageFrontierPublication, StoredLineageCoverageProgress,
     StoredLineageCoverageProgressFuture, StoredLineageCoveragePublicationOutcome,
-    begin_stored_lineage_coverage_frontier_publication,
-    load_stored_lineage_coverage_frontier_header,
+    begin_stored_lineage_coverage_frontier_publication, load_raw_log_staging_input_version,
+    load_stored_lineage_coverage_frontier_header, raw_log_staging_block_range_changed_since,
     stored_lineage_coverage_frontier_requirements_are_valid,
     stored_lineage_coverage_frontier_requirements_are_valid_with_progress,
 };
@@ -327,10 +327,13 @@ async fn ensure_verified_coverage_frontier_through(
     let mut cas_conflicts = 0;
 
     for _ in 0..MAX_PUBLICATIONS_PER_PROMOTION {
+        let raw_input_version = load_raw_log_staging_input_version(pool, chain)
+            .await
+            .map_err(|error| error.to_string())?;
         let header = load_stored_lineage_coverage_frontier_header(pool, chain)
             .await
             .map_err(|error| error.to_string())?;
-        let persisted_requirements_valid = match &header {
+        let persisted_snapshot_valid = match &header {
             Some(header)
                 if header.is_well_formed
                     && coverage_frontiers
@@ -353,6 +356,25 @@ async fn ensure_verified_coverage_frontier_through(
             .map_err(|error| error.to_string())?,
             None => true,
         };
+        let raw_input_valid = match &header {
+            Some(header) if header.is_well_formed => {
+                header.raw_log_retention_generation == raw_input_version.retention_generation
+                    && header.raw_log_input_revision <= raw_input_version.revision
+                    && (header.raw_log_input_revision == raw_input_version.revision
+                        || !raw_log_staging_block_range_changed_since(
+                            pool,
+                            chain,
+                            header.raw_log_input_revision,
+                            header.verified_from_block,
+                            header.verified_through_block,
+                        )
+                        .await
+                        .map_err(|error| error.to_string())?)
+            }
+            Some(_) => false,
+            None => true,
+        };
+        let persisted_requirements_valid = persisted_snapshot_valid && raw_input_valid;
         let earliest_known_watched_block = match progress.as_deref_mut() {
             Some(progress) => {
                 let mut bridge = AdapterManifestProgress(progress);
@@ -494,6 +516,8 @@ async fn ensure_verified_coverage_frontier_through(
 
         let publication = StoredLineageCoverageFrontierPublication {
             discovery_admission_epoch,
+            raw_log_input_revision: raw_input_version.revision,
+            raw_log_retention_generation: raw_input_version.retention_generation,
             verified_from_block: plan.verified_from_block,
             verified_through_block: plan.verified_through_block,
             topic0s_by_family: current_topics.clone(),

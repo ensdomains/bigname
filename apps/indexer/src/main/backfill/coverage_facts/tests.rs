@@ -110,6 +110,21 @@ fn generic_resolver_scan_yields_family_fact_and_excludes_resolver_targets() {
 }
 
 #[test]
+fn exact_resolver_recovery_never_mints_family_coverage() {
+    let address = "0x2222222222222222222222222222222222222222";
+    let source_plan = source_plan(
+        "ethereum-mainnet",
+        vec![target("ens_v1_resolver_l1", 2, address, 12, 18)],
+    );
+
+    let facts = exact_job_completion_coverage_facts(&source_plan, 12, 18).collect::<Vec<_>>();
+
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].scope, BackfillCoverageFactScope::Address);
+    assert_eq!(facts[0].address.as_deref(), Some(address));
+}
+
+#[test]
 fn family_scans_without_matching_targets_or_overlap_yield_no_family_fact() {
     let mut no_resolver_targets = source_plan(
         "ethereum-mainnet",

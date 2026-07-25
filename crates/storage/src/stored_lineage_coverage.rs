@@ -27,6 +27,8 @@ pub struct StoredLineageCoverageFrontierHeader {
     pub snapshot_revision: i64,
     pub proof_format_version: String,
     pub discovery_admission_epoch: i64,
+    pub raw_log_input_revision: i64,
+    pub raw_log_retention_generation: i64,
     pub verified_from_block: i64,
     pub verified_through_block: i64,
     pub topic0s_by_family: BTreeMap<String, Vec<String>>,
@@ -41,6 +43,8 @@ pub struct StoredLineageCoverageFrontierHeader {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredLineageCoverageFrontierPublication {
     pub discovery_admission_epoch: i64,
+    pub raw_log_input_revision: i64,
+    pub raw_log_retention_generation: i64,
     pub verified_from_block: i64,
     pub verified_through_block: i64,
     pub topic0s_by_family: BTreeMap<String, Vec<String>>,
@@ -116,6 +120,36 @@ impl StoredLineageCoveragePublicationGuard {
                 .await?
             }
         };
+        let observed_raw_input = sqlx::query_as::<_, (i64, i64)>(
+            r#"
+            SELECT revision, retention_generation
+            FROM raw_log_staging_input_revisions
+            WHERE chain_id = $1
+            "#,
+        )
+        .bind(&self.chain)
+        .fetch_optional(self.transaction.as_mut())
+        .await
+        .with_context(|| {
+            format!(
+                "failed to fence raw-log input version for stored-lineage coverage publication on {}",
+                self.chain
+            )
+        })?
+        .unwrap_or_default();
+        ensure!(
+            observed_raw_input
+                == (
+                    publication.raw_log_input_revision,
+                    publication.raw_log_retention_generation,
+                ),
+            "raw-log input version for chain {} changed while publishing stored-lineage coverage: expected revision {} generation {}, observed revision {} generation {}",
+            self.chain,
+            publication.raw_log_input_revision,
+            publication.raw_log_retention_generation,
+            observed_raw_input.0,
+            observed_raw_input.1,
+        );
 
         // Candidate derivation and immutable coverage-fact verification are
         // deliberately optimistic. Take the shared admission fence only for
@@ -156,11 +190,13 @@ impl StoredLineageCoveragePublicationGuard {
                     SET snapshot_revision = snapshot_revision + 1,
                         proof_format_version = $3,
                         discovery_admission_epoch = $4,
-                        verified_from_block = $5,
-                        verified_through_block = $6,
-                        topic0s_by_family = $7,
-                        requirement_row_count = $8,
-                        requirement_digest = $9,
+                        raw_log_input_revision = $5,
+                        raw_log_retention_generation = $6,
+                        verified_from_block = $7,
+                        verified_through_block = $8,
+                        topic0s_by_family = $9,
+                        requirement_row_count = $10,
+                        requirement_digest = $11,
                         updated_at = now()
                     WHERE chain_id = $1
                       AND snapshot_revision = $2
@@ -171,6 +207,8 @@ impl StoredLineageCoveragePublicationGuard {
                 .bind(expected_revision)
                 .bind(STORED_LINEAGE_COVERAGE_PROOF_FORMAT_VERSION)
                 .bind(publication.discovery_admission_epoch)
+                .bind(publication.raw_log_input_revision)
+                .bind(publication.raw_log_retention_generation)
                 .bind(publication.verified_from_block)
                 .bind(publication.verified_through_block)
                 .bind(&topics)
@@ -187,13 +225,15 @@ impl StoredLineageCoveragePublicationGuard {
                         snapshot_revision,
                         proof_format_version,
                         discovery_admission_epoch,
+                        raw_log_input_revision,
+                        raw_log_retention_generation,
                         verified_from_block,
                         verified_through_block,
                         topic0s_by_family,
                         requirement_row_count,
                         requirement_digest
                     )
-                    VALUES ($1, 1, $2, $3, $4, $5, $6, $7, $8)
+                    VALUES ($1, 1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                     ON CONFLICT (chain_id) DO NOTHING
                     RETURNING snapshot_revision
                     "#,
@@ -201,6 +241,8 @@ impl StoredLineageCoveragePublicationGuard {
                 .bind(&self.chain)
                 .bind(STORED_LINEAGE_COVERAGE_PROOF_FORMAT_VERSION)
                 .bind(publication.discovery_admission_epoch)
+                .bind(publication.raw_log_input_revision)
+                .bind(publication.raw_log_retention_generation)
                 .bind(publication.verified_from_block)
                 .bind(publication.verified_through_block)
                 .bind(&topics)
@@ -276,6 +318,8 @@ pub async fn load_stored_lineage_coverage_frontier_header(
             snapshot_revision,
             proof_format_version,
             discovery_admission_epoch,
+            raw_log_input_revision,
+            raw_log_retention_generation,
             verified_from_block,
             verified_through_block,
             topic0s_by_family,
@@ -466,12 +510,16 @@ fn header_from_row(row: sqlx::postgres::PgRow) -> Result<StoredLineageCoverageFr
         };
     let snapshot_revision = row.try_get("snapshot_revision")?;
     let discovery_admission_epoch = row.try_get("discovery_admission_epoch")?;
+    let raw_log_input_revision = row.try_get("raw_log_input_revision")?;
+    let raw_log_retention_generation = row.try_get("raw_log_retention_generation")?;
     let verified_from_block = row.try_get("verified_from_block")?;
     let verified_through_block = row.try_get("verified_through_block")?;
     let requirement_row_count = row.try_get("requirement_row_count")?;
     let requirement_digest: String = row.try_get("requirement_digest")?;
     let is_well_formed = snapshot_revision > 0
         && discovery_admission_epoch >= 0
+        && raw_log_input_revision >= 0
+        && raw_log_retention_generation >= 0
         && verified_from_block >= 0
         && verified_from_block <= verified_through_block
         && verified_through_block < i64::MAX
@@ -484,6 +532,8 @@ fn header_from_row(row: sqlx::postgres::PgRow) -> Result<StoredLineageCoverageFr
         snapshot_revision,
         proof_format_version: row.try_get("proof_format_version")?,
         discovery_admission_epoch,
+        raw_log_input_revision,
+        raw_log_retention_generation,
         verified_from_block,
         verified_through_block,
         topic0s_by_family,
@@ -498,6 +548,14 @@ fn validate_publication(publication: &StoredLineageCoverageFrontierPublication) 
     ensure!(
         publication.discovery_admission_epoch >= 0,
         "coverage publication discovery epoch must not be negative"
+    );
+    ensure!(
+        publication.raw_log_input_revision >= 0,
+        "coverage publication raw-log input revision must not be negative"
+    );
+    ensure!(
+        publication.raw_log_retention_generation >= 0,
+        "coverage publication raw-log retention generation must not be negative"
     );
     ensure!(
         publication.verified_from_block >= 0,

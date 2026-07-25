@@ -1,39 +1,55 @@
+#[path = "coinbase_sql/recovery.rs"]
+mod recovery;
+
 use super::{
-    backfill_lease_duration_secs, create_coinbase_sql_backfill_job,
+    backfill_lease_duration_secs, coinbase_sql_uses_basenames_registry_scan_all,
+    create_coinbase_sql_backfill_job, finalize_reserved_stored_verification,
     refreshed_backfill_lease_expires_at, run_with_backfill_lease_heartbeat,
 };
 use crate::backfill::{
-    BackfillBlockRange, BackfillJobRunConfig, BackfillJobRunOutcome, BackfillOutcome,
-    BackfillTopicPlan, CoinbaseSqlBackfillConfig, CoinbaseSqlValidationMode,
-    HistoricalBackfillSourceOps, HistoricalLogPayload, HistoricalLogPayloadRequest,
+    BackfillBlockRange, BackfillJobRunConfig, BackfillJobRunOutcome, BackfillTopicPlan,
+    CoinbaseSqlBackfillConfig, HistoricalBackfillSourceOps,
     coinbase_sql::load_backfill_topic_plan,
     coverage_facts::complete_reserved_range_recording_plan_coverage,
     failure_recording::{ReservedRangeFailure, record_reserved_range_failure},
-    fetching::{
-        BackfillCanonicalityEvidence, fill_log_payloads_from_validation_provider,
-        load_backfill_canonicality_evidence, materialize_historical_payload_range,
-    },
-    range_resolution::{resolve_backfill_block_numbers, resolve_backfill_range},
+    fetching::load_backfill_canonicality_evidence,
     selection::{SelectedTargetIntervalIndex, SelectedTargetRangeCursor},
+    stored_verification::{
+        StoredLogIdentityEvidenceSource, VerifiedRangeSource, completed_plan, provider_only_plan,
+        stored_verification_is_current,
+    },
 };
-use crate::provider::{ChainProviderOps, ProviderLog, ProviderResolvedBlock};
-use anyhow::{Context, Result, bail};
+use crate::provider::ChainProviderOps;
+use anyhow::{Context, Result, bail, ensure};
+use bigname_adapters::StartupAdapterProgress;
 use bigname_manifests::WatchedSourceSelectorPlan;
 use bigname_storage::{
-    BackfillLifecycleStatus, BackfillRange, advance_backfill_range, load_backfill_job,
+    BackfillJob, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange, advance_backfill_range,
+    load_backfill_job, record_backfill_job_projected_minimum_provider_queries,
     reserve_backfill_range,
 };
-use std::{collections::BTreeMap, time::Instant};
 use tracing::{info, warn};
-const MAX_COINBASE_SQL_SAMPLE_VALIDATION_BLOCKS: usize = 512;
-const MAX_COINBASE_SQL_SAMPLE_PROVIDER_PAYLOAD_LOGS: usize = 2_000;
-const MAX_COINBASE_SQL_SAMPLE_DECODED_PAYLOAD_LOGS: usize = 5_000;
-const MAX_COINBASE_SQL_BASENAMES_REGISTRY_SAMPLE_DECODED_PAYLOAD_LOGS: usize = 50_000;
-const MAX_COINBASE_SQL_BASENAMES_REGISTRAR_SAMPLE_DECODED_PAYLOAD_LOGS: usize = 15_000;
-const MAX_COINBASE_SQL_PRACTICAL_WINDOW_BLOCKS: i64 = 65_536;
 const BASENAMES_BASE_REGISTRY_SOURCE_FAMILY: &str = "basenames_base_registry";
 const BASENAMES_BASE_REGISTRAR_SOURCE_FAMILY: &str = "basenames_base_registrar";
-const BASENAMES_BASE_RESOLVER_SOURCE_FAMILY: &str = "basenames_base_resolver";
+#[cfg(test)]
+use crate::{
+    backfill::{CoinbaseSqlValidationMode, HistoricalLogPayload},
+    provider::{ProviderLog, ProviderResolvedBlock},
+};
+#[cfg(test)]
+use recovery::{
+    MAX_BASENAMES_REGISTRAR_SAMPLE_DECODED_PAYLOAD_LOGS as MAX_COINBASE_SQL_BASENAMES_REGISTRAR_SAMPLE_DECODED_PAYLOAD_LOGS,
+    MAX_BASENAMES_REGISTRY_SAMPLE_DECODED_PAYLOAD_LOGS as MAX_COINBASE_SQL_BASENAMES_REGISTRY_SAMPLE_DECODED_PAYLOAD_LOGS,
+    MAX_SAMPLE_DECODED_PAYLOAD_LOGS as MAX_COINBASE_SQL_SAMPLE_DECODED_PAYLOAD_LOGS,
+    MAX_SAMPLE_VALIDATION_BLOCKS as MAX_COINBASE_SQL_SAMPLE_VALIDATION_BLOCKS,
+    ensure_logs_match_resolved_blocks as ensure_coinbase_sql_logs_match_resolved_blocks,
+    ensure_sample_validation_size as ensure_coinbase_sql_sample_validation_size,
+    next_window_blocks as next_coinbase_sql_window_blocks,
+    sample_decoded_payload_log_limit as coinbase_sql_sample_decoded_payload_log_limit,
+    sample_validation_block_numbers as coinbase_sql_sample_validation_block_numbers,
+};
+#[cfg(test)]
+const MAX_COINBASE_SQL_PRACTICAL_WINDOW_BLOCKS: i64 = 65_536;
 pub(crate) async fn run_resumable_coinbase_sql_backfill_job(
     pool: &sqlx::PgPool,
     source_plan: &WatchedSourceSelectorPlan,
@@ -43,7 +59,6 @@ pub(crate) async fn run_resumable_coinbase_sql_backfill_job(
     coinbase_config: CoinbaseSqlBackfillConfig,
 ) -> Result<BackfillJobRunOutcome> {
     coinbase_config.validate()?;
-    let watched_chain = &source_plan.watched_chain_plan;
     let topic_plan = load_backfill_topic_plan(pool, source_plan).await?;
     config.adapter_sync_mode = effective_coinbase_sql_adapter_sync_mode(
         source_plan,
@@ -58,8 +73,130 @@ pub(crate) async fn run_resumable_coinbase_sql_backfill_job(
     let record =
         create_coinbase_sql_backfill_job(pool, source_plan, &config, &coinbase_config, &topic_plan)
             .await?;
+    run_precreated_coinbase_sql_backfill_job_inner(
+        pool,
+        source_plan,
+        validation_provider,
+        historical_source,
+        None,
+        config,
+        coinbase_config,
+        topic_plan,
+        record,
+        false,
+        &mut None,
+    )
+    .await
+}
+
+#[expect(clippy::too_many_arguments)]
+pub(crate) async fn run_precreated_verified_coinbase_sql_backfill_job_with_progress(
+    pool: &sqlx::PgPool,
+    source_plan: &WatchedSourceSelectorPlan,
+    validation_provider: &(impl ChainProviderOps + ?Sized),
+    historical_source: &(impl HistoricalBackfillSourceOps + StoredLogIdentityEvidenceSource),
+    mut config: BackfillJobRunConfig,
+    coinbase_config: CoinbaseSqlBackfillConfig,
+    topic_plan: BackfillTopicPlan,
+    record: BackfillJobRecord,
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<BackfillJobRunOutcome> {
+    coinbase_config.validate()?;
+    config.adapter_sync_mode = effective_coinbase_sql_adapter_sync_mode(
+        source_plan,
+        &topic_plan,
+        config.adapter_sync_mode,
+    );
+    ensure_coinbase_sql_registry_range_start_is_replay_safe(
+        source_plan,
+        &topic_plan,
+        config.range,
+    )?;
+    run_precreated_coinbase_sql_backfill_job_inner(
+        pool,
+        source_plan,
+        validation_provider,
+        historical_source,
+        Some(historical_source),
+        config,
+        coinbase_config,
+        topic_plan,
+        record,
+        true,
+        &mut Some(progress),
+    )
+    .await
+}
+
+#[expect(clippy::too_many_arguments)]
+pub(crate) async fn run_precreated_verified_coinbase_sql_backfill_job(
+    pool: &sqlx::PgPool,
+    source_plan: &WatchedSourceSelectorPlan,
+    validation_provider: &(impl ChainProviderOps + ?Sized),
+    historical_source: &(impl HistoricalBackfillSourceOps + StoredLogIdentityEvidenceSource),
+    mut config: BackfillJobRunConfig,
+    coinbase_config: CoinbaseSqlBackfillConfig,
+    topic_plan: BackfillTopicPlan,
+    record: BackfillJobRecord,
+) -> Result<BackfillJobRunOutcome> {
+    coinbase_config.validate()?;
+    config.adapter_sync_mode = effective_coinbase_sql_adapter_sync_mode(
+        source_plan,
+        &topic_plan,
+        config.adapter_sync_mode,
+    );
+    ensure_coinbase_sql_registry_range_start_is_replay_safe(
+        source_plan,
+        &topic_plan,
+        config.range,
+    )?;
+    run_precreated_coinbase_sql_backfill_job_inner(
+        pool,
+        source_plan,
+        validation_provider,
+        historical_source,
+        Some(historical_source),
+        config,
+        coinbase_config,
+        topic_plan,
+        record,
+        true,
+        &mut None,
+    )
+    .await
+}
+
+#[expect(clippy::too_many_arguments)]
+async fn run_precreated_coinbase_sql_backfill_job_inner(
+    pool: &sqlx::PgPool,
+    source_plan: &WatchedSourceSelectorPlan,
+    validation_provider: &(impl ChainProviderOps + ?Sized),
+    historical_source: &(impl HistoricalBackfillSourceOps + ?Sized),
+    stored_evidence_source: Option<&dyn StoredLogIdentityEvidenceSource>,
+    mut config: BackfillJobRunConfig,
+    coinbase_config: CoinbaseSqlBackfillConfig,
+    topic_plan: BackfillTopicPlan,
+    record: BackfillJobRecord,
+    verify_stored_ranges: bool,
+    service_progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<BackfillJobRunOutcome> {
+    let watched_chain = &source_plan.watched_chain_plan;
+    config
+        .idempotency_key
+        .clone_from(&record.job.idempotency_key);
     let mut outcome = BackfillJobRunOutcome::new(record.job.backfill_job_id, source_plan, &config);
     let lease_duration_secs = backfill_lease_duration_secs(config.lease_expires_at)?;
+    if verify_stored_ranges {
+        ensure!(
+            record.job.source_identity
+                == super::verified_backfill_job_source_identity_payload(
+                    source_plan,
+                    &topic_plan,
+                    Some(&coinbase_config),
+                )?,
+            "stored-history Coinbase SQL job identity does not match its execution topic/provider plan"
+        );
+    }
     info!(
         service = "indexer",
         command = "backfill",
@@ -97,16 +234,19 @@ pub(crate) async fn run_resumable_coinbase_sql_backfill_job(
         };
 
         outcome.reserved_range_count += 1;
-        run_reserved_coinbase_sql_backfill_range(
+        run_reserved_coinbase_sql_backfill_range_inner(
             pool,
             source_plan,
             validation_provider,
             historical_source,
+            stored_evidence_source,
             &config,
             &coinbase_config,
             &topic_plan,
             &reserved_range,
             &mut outcome,
+            verify_stored_ranges.then_some(&record.job),
+            service_progress,
         )
         .await?;
         outcome.completed_range_count += 1;
@@ -157,360 +297,307 @@ pub(crate) async fn run_reserved_coinbase_sql_backfill_range(
     reserved_range: &BackfillRange,
     aggregate: &mut BackfillJobRunOutcome,
 ) -> Result<()> {
-    let mut active_range = reserved_range.clone();
-    let mut block_number = active_range
-        .checkpoint_block_number
-        .checked_add(1)
-        .context("backfill checkpoint overflowed while computing Coinbase SQL resume block")?;
-    let mut window_blocks = coinbase_config.initial_window_blocks;
-    let selected_target_index = SelectedTargetIntervalIndex::from_source_plan(source_plan);
-    let mut selected_target_range_cursor = SelectedTargetRangeCursor::from_source_plan(source_plan);
-    let canonicality_evidence = match run_with_backfill_lease_heartbeat(
+    run_reserved_coinbase_sql_backfill_range_inner(
         pool,
-        &active_range,
+        source_plan,
+        validation_provider,
+        historical_source,
+        None,
         config,
-        load_backfill_canonicality_evidence(
-            pool,
-            &source_plan.watched_chain_plan.chain,
-            validation_provider,
-        ),
+        coinbase_config,
+        topic_plan,
+        reserved_range,
+        aggregate,
+        None,
+        &mut None,
     )
     .await
-    {
-        Ok(evidence) => evidence,
-        Err(error) => {
-            return Err(record_reserved_range_failure(ReservedRangeFailure {
-                pool,
-                reserved_range: &active_range,
-                config,
-                failure_reason: "Coinbase SQL validation canonicality evidence load failed",
-                block_number: Some(block_number),
-                attempted_range: None,
-                phase: "canonicality_evidence",
-                error,
-            })
-            .await);
+}
+
+#[expect(clippy::too_many_arguments)]
+async fn run_reserved_coinbase_sql_backfill_range_inner(
+    pool: &sqlx::PgPool,
+    source_plan: &WatchedSourceSelectorPlan,
+    validation_provider: &(impl ChainProviderOps + ?Sized),
+    historical_source: &(impl HistoricalBackfillSourceOps + ?Sized),
+    stored_evidence_source: Option<&dyn StoredLogIdentityEvidenceSource>,
+    config: &BackfillJobRunConfig,
+    coinbase_config: &CoinbaseSqlBackfillConfig,
+    topic_plan: &BackfillTopicPlan,
+    reserved_range: &BackfillRange,
+    aggregate: &mut BackfillJobRunOutcome,
+    verification_job: Option<&BackfillJob>,
+    service_progress: &mut Option<&mut dyn StartupAdapterProgress>,
+) -> Result<()> {
+    let mut active_range = reserved_range.clone();
+    let remaining_range =
+        if active_range.checkpoint_block_number < active_range.range_end_block_number {
+            Some(BackfillBlockRange::new(
+                active_range
+                    .checkpoint_block_number
+                    .checked_add(1)
+                    .context(
+                        "backfill checkpoint overflowed while computing Coinbase SQL resume block",
+                    )?,
+                active_range.range_end_block_number,
+            )?)
+        } else {
+            None
+        };
+    let selected_target_index = SelectedTargetIntervalIndex::from_source_plan(source_plan);
+    let mut selected_target_range_cursor = SelectedTargetRangeCursor::from_source_plan(source_plan);
+    let reuse_current_verification = match verification_job {
+        Some(job) if remaining_range.is_none() => {
+            stored_verification_is_current(pool, job, config.range).await?
         }
+        _ => false,
     };
-    while block_number <= active_range.range_end_block_number {
-        let window_end = block_number
-            .checked_add(window_blocks - 1)
-            .unwrap_or(active_range.range_end_block_number)
-            .min(active_range.range_end_block_number);
-        let window_range = BackfillBlockRange::new(block_number, window_end)?;
-        let selected_target_addresses_for_chunk = selected_target_range_cursor
-            .active_addresses_for_monotonic_range(window_range.from_block, window_range.to_block);
-        let window_outcome = match run_with_backfill_lease_heartbeat(
+    let mut initial_verification_query_minimum = 0_i64;
+    let mut verification_plan = match verification_job {
+        Some(_) if reuse_current_verification => completed_plan(),
+        Some(job) => {
+            let evidence_source = stored_evidence_source
+                .context("verified Coinbase SQL execution has no stored-evidence source")?;
+            let plan = recovery::prepare(
+                pool,
+                &active_range,
+                config,
+                job,
+                source_plan,
+                topic_plan,
+                evidence_source,
+            )
+            .await?;
+            initial_verification_query_minimum = 1;
+            plan
+        }
+        None => remaining_range
+            .map(provider_only_plan)
+            .unwrap_or_else(completed_plan),
+    };
+    let has_provider_gaps = verification_plan
+        .segments
+        .iter()
+        .any(|segment| segment.source == VerifiedRangeSource::Provider);
+    let segments = if verification_job.is_some() {
+        verification_plan.execution_segments(active_range.checkpoint_block_number)?
+    } else {
+        verification_plan.segments.clone()
+    };
+    let mut block_number = segments
+        .first()
+        .map(|segment| segment.range.from_block)
+        .unwrap_or(active_range.range_end_block_number);
+    record_backfill_job_projected_minimum_provider_queries(
+        pool,
+        active_range.backfill_job_id,
+        verification_plan
+            .minimum_provider_queries(coinbase_config.initial_window_blocks)?
+            .checked_add(initial_verification_query_minimum)
+            .and_then(|count| {
+                count.checked_add(i64::from(verification_job.is_some() && has_provider_gaps))
+            })
+            .context("Coinbase SQL projected query count overflowed")?,
+    )
+    .await?;
+    let canonicality_evidence = if segments
+        .iter()
+        .any(|segment| segment.source == VerifiedRangeSource::Provider)
+    {
+        match run_with_backfill_lease_heartbeat(
             pool,
             &active_range,
             config,
-            run_coinbase_sql_backfill_window(
+            load_backfill_canonicality_evidence(
                 pool,
-                source_plan,
-                &selected_target_index,
-                &selected_target_addresses_for_chunk,
+                &source_plan.watched_chain_plan.chain,
                 validation_provider,
-                historical_source,
-                topic_plan,
-                window_range,
-                canonicality_evidence.clone(),
-                config,
-                coinbase_config,
             ),
         )
         .await
         {
-            Ok(outcome) => {
-                window_blocks = next_coinbase_sql_window_blocks(
-                    window_blocks,
-                    coinbase_config,
-                    outcome.raw_log_count,
-                );
-                outcome
-            }
-            Err(error) => {
-                if window_blocks > 1 {
-                    let next_window_blocks = (window_blocks / 2).max(1);
-                    warn!(
-                        service = "indexer",
-                        command = "backfill",
-                        chain = %source_plan.watched_chain_plan.chain,
-                        block_number,
-                        attempted_from_block = window_range.from_block,
-                        attempted_to_block = window_range.to_block,
-                        previous_window_blocks = window_blocks,
-                        next_window_blocks,
-                        error = %format!("{error:#}"),
-                        "Coinbase SQL backfill window failed; retrying with a smaller window before failing the range"
-                    );
-                    window_blocks = next_window_blocks;
-                    continue;
-                }
-                return Err(record_reserved_range_failure(ReservedRangeFailure {
-                    pool,
-                    reserved_range: &active_range,
-                    config,
-                    failure_reason: "Coinbase SQL backfill failed",
-                    block_number: Some(block_number),
-                    attempted_range: Some(window_range),
-                    phase: "coinbase_sql_intake",
-                    error,
-                })
-                .await);
-            }
-        };
-        aggregate.add_range_outcome(&window_outcome);
-        active_range = match advance_backfill_range(
-            pool,
-            active_range.backfill_range_id,
-            &config.lease_token,
-            window_end,
-        )
-        .await
-        {
-            Ok(range) => range,
+            Ok(evidence) => Some(evidence),
             Err(error) => {
                 return Err(record_reserved_range_failure(ReservedRangeFailure {
                     pool,
                     reserved_range: &active_range,
                     config,
-                    failure_reason: "Coinbase SQL backfill checkpoint advance failed",
+                    failure_reason: "Coinbase SQL validation canonicality evidence load failed",
                     block_number: Some(block_number),
-                    attempted_range: Some(window_range),
-                    phase: "checkpoint_advance",
+                    attempted_range: None,
+                    phase: "canonicality_evidence",
                     error,
                 })
                 .await);
             }
-        };
-        if window_end == active_range.range_end_block_number {
-            break;
         }
-        block_number = window_end
-            .checked_add(1)
-            .context("Coinbase SQL backfill block number overflowed while advancing range")?;
+    } else {
+        None
+    };
+    for segment in segments {
+        if segment.source == VerifiedRangeSource::Stored {
+            active_range = advance_backfill_range(
+                pool,
+                active_range.backfill_range_id,
+                &config.lease_token,
+                segment.range.to_block,
+            )
+            .await?;
+            if let Some(progress) = service_progress.as_deref_mut() {
+                progress.record(pool).await?;
+            }
+            continue;
+        }
+
+        let mut window_blocks = coinbase_config.initial_window_blocks;
+        block_number = segment.range.from_block;
+        while block_number <= segment.range.to_block {
+            let window_end = block_number
+                .checked_add(window_blocks - 1)
+                .unwrap_or(segment.range.to_block)
+                .min(segment.range.to_block);
+            let window_range = BackfillBlockRange::new(block_number, window_end)?;
+            let selected_target_addresses_for_chunk = selected_target_range_cursor
+                .active_addresses_for_monotonic_range(
+                    window_range.from_block,
+                    window_range.to_block,
+                );
+            let window_outcome = match run_with_backfill_lease_heartbeat(
+                pool,
+                &active_range,
+                config,
+                recovery::run_window(
+                    pool,
+                    source_plan,
+                    &selected_target_index,
+                    &selected_target_addresses_for_chunk,
+                    validation_provider,
+                    historical_source,
+                    topic_plan,
+                    active_range.backfill_job_id,
+                    window_range,
+                    canonicality_evidence
+                        .as_ref()
+                        .expect("provider segment has canonicality evidence")
+                        .clone(),
+                    config,
+                    coinbase_config,
+                ),
+            )
+            .await
+            {
+                Ok(outcome) => {
+                    window_blocks = recovery::next_window_blocks(
+                        window_blocks,
+                        coinbase_config,
+                        outcome.raw_log_count,
+                    );
+                    outcome
+                }
+                Err(error) => {
+                    if window_blocks > 1 {
+                        let next_window_blocks = (window_blocks / 2).max(1);
+                        warn!(
+                            service = "indexer",
+                            command = "backfill",
+                            chain = %source_plan.watched_chain_plan.chain,
+                            block_number,
+                            attempted_from_block = window_range.from_block,
+                            attempted_to_block = window_range.to_block,
+                            previous_window_blocks = window_blocks,
+                            next_window_blocks,
+                            error = %format!("{error:#}"),
+                            "Coinbase SQL backfill window failed; retrying with a smaller window before failing the range"
+                        );
+                        window_blocks = next_window_blocks;
+                        continue;
+                    }
+                    return Err(record_reserved_range_failure(ReservedRangeFailure {
+                        pool,
+                        reserved_range: &active_range,
+                        config,
+                        failure_reason: "Coinbase SQL backfill failed",
+                        block_number: Some(block_number),
+                        attempted_range: Some(window_range),
+                        phase: "coinbase_sql_intake",
+                        error,
+                    })
+                    .await);
+                }
+            };
+            aggregate.add_range_outcome(&window_outcome);
+            active_range = match advance_backfill_range(
+                pool,
+                active_range.backfill_range_id,
+                &config.lease_token,
+                window_end,
+            )
+            .await
+            {
+                Ok(range) => range,
+                Err(error) => {
+                    return Err(record_reserved_range_failure(ReservedRangeFailure {
+                        pool,
+                        reserved_range: &active_range,
+                        config,
+                        failure_reason: "Coinbase SQL backfill checkpoint advance failed",
+                        block_number: Some(block_number),
+                        attempted_range: Some(window_range),
+                        phase: "checkpoint_advance",
+                        error,
+                    })
+                    .await);
+                }
+            };
+            if let Some(progress) = service_progress.as_deref_mut() {
+                progress.record(pool).await?;
+            }
+            block_number = window_end
+                .checked_add(1)
+                .context("Coinbase SQL backfill block number overflowed while advancing range")?;
+        }
+    }
+    if let Some(job) = verification_job
+        && !reuse_current_verification
+    {
+        if has_provider_gaps {
+            let evidence_source = stored_evidence_source
+                .context("verified Coinbase SQL execution has no stored-evidence source")?;
+            verification_plan = recovery::reverify_after_fetch(
+                pool,
+                &active_range,
+                config,
+                job,
+                source_plan,
+                topic_plan,
+                evidence_source,
+            )
+            .await?;
+        }
+        finalize_reserved_stored_verification(
+            pool,
+            &active_range,
+            config,
+            job,
+            source_plan,
+            topic_plan,
+            &verification_plan,
+            "Coinbase SQL stored verification finalization failed",
+        )
+        .await?;
     }
     complete_reserved_range_recording_plan_coverage(
         pool,
         &active_range,
         config,
         source_plan,
-        super::coinbase_sql_uses_basenames_registry_scan_all(source_plan, topic_plan),
+        coinbase_sql_uses_basenames_registry_scan_all(source_plan, topic_plan),
+        verification_job.is_some(),
         "Coinbase SQL backfill range completion failed",
         None,
-        &mut None,
+        service_progress,
     )
     .await
-}
-fn next_coinbase_sql_window_blocks(
-    current_window_blocks: i64,
-    coinbase_config: &CoinbaseSqlBackfillConfig,
-    raw_log_count: usize,
-) -> i64 {
-    if raw_log_count >= (coinbase_config.effective_page_limit() / 2).max(1) {
-        (current_window_blocks / 2).max(1)
-    } else if raw_log_count < coinbase_config.effective_page_limit() {
-        current_window_blocks
-            .saturating_mul(2)
-            .min(coinbase_config.max_window_blocks)
-            .clamp(1, MAX_COINBASE_SQL_PRACTICAL_WINDOW_BLOCKS)
-    } else {
-        current_window_blocks
-    }
-}
-
-#[expect(clippy::too_many_arguments)]
-async fn run_coinbase_sql_backfill_window(
-    pool: &sqlx::PgPool,
-    source_plan: &WatchedSourceSelectorPlan,
-    selected_target_index: &SelectedTargetIntervalIndex,
-    selected_target_addresses_for_chunk: &[String],
-    validation_provider: &(impl ChainProviderOps + ?Sized),
-    historical_source: &(impl HistoricalBackfillSourceOps + ?Sized),
-    topic_plan: &BackfillTopicPlan,
-    range: BackfillBlockRange,
-    canonicality_evidence: BackfillCanonicalityEvidence,
-    config: &BackfillJobRunConfig,
-    coinbase_config: &CoinbaseSqlBackfillConfig,
-) -> Result<BackfillOutcome> {
-    let window_started = Instant::now();
-    info!(
-        service = "indexer",
-        command = "backfill",
-        chain = %source_plan.watched_chain_plan.chain,
-        from_block = range.from_block,
-        to_block = range.to_block,
-        coinbase_sql_validation_mode = coinbase_config.validation_mode.as_str(),
-        "Coinbase SQL backfill window started"
-    );
-    let (resolved_blocks, block_headers, historical_payload) = match coinbase_config.validation_mode
-    {
-        CoinbaseSqlValidationMode::Full => {
-            let resolved_blocks = resolve_backfill_range(validation_provider, range).await?;
-            let block_headers =
-                fetch_coinbase_sql_window_headers(validation_provider, &resolved_blocks, range)
-                    .await?;
-            let historical_payload = historical_source
-                .fetch_selected_log_payloads(HistoricalLogPayloadRequest {
-                    chain: &source_plan.watched_chain_plan.chain,
-                    source_plan,
-                    selected_target_index,
-                    resolved_blocks: &resolved_blocks,
-                    selected_target_addresses_for_chunk,
-                    topic_plan,
-                    range,
-                    validation_mode: coinbase_config.validation_mode,
-                })
-                .await?;
-            log_coinbase_sql_payload_fetch(
-                source_plan,
-                range,
-                coinbase_config.validation_mode,
-                &historical_payload,
-            );
-            (resolved_blocks, block_headers, historical_payload)
-        }
-        CoinbaseSqlValidationMode::Sample => {
-            let planning_blocks = coinbase_sql_planning_blocks(range);
-            let mut historical_payload = historical_source
-                .fetch_selected_log_payloads(HistoricalLogPayloadRequest {
-                    chain: &source_plan.watched_chain_plan.chain,
-                    source_plan,
-                    selected_target_index,
-                    resolved_blocks: &planning_blocks,
-                    selected_target_addresses_for_chunk,
-                    topic_plan,
-                    range,
-                    validation_mode: coinbase_config.validation_mode,
-                })
-                .await?;
-            log_coinbase_sql_payload_fetch(
-                source_plan,
-                range,
-                coinbase_config.validation_mode,
-                &historical_payload,
-            );
-            let sample_block_numbers = coinbase_sql_sample_validation_block_numbers(
-                range,
-                &historical_payload.logs_by_block,
-            );
-            let logs_need_validation_provider_payload =
-                historical_payload.logs_need_validation_provider_payload;
-            let decoded_payload_log_limit = coinbase_sql_sample_decoded_payload_log_limit(
-                source_plan,
-                &historical_payload,
-                logs_need_validation_provider_payload,
-            );
-            ensure_coinbase_sql_sample_validation_size(
-                range,
-                historical_payload_log_count(&historical_payload),
-                sample_block_numbers.len(),
-                logs_need_validation_provider_payload,
-                decoded_payload_log_limit,
-            )?;
-            info!(
-                service = "indexer",
-                command = "backfill",
-                chain = %source_plan.watched_chain_plan.chain,
-                from_block = range.from_block,
-                to_block = range.to_block,
-                sample_block_count = sample_block_numbers.len(),
-                "Coinbase SQL sample validation range resolution started"
-            );
-            let resolved_blocks =
-                resolve_backfill_block_numbers(validation_provider, &sample_block_numbers, range)
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to resolve validation-provider returned log blocks for sampled Coinbase SQL range {}..={}",
-                        range.from_block, range.to_block
-                    )
-                })?;
-            ensure_coinbase_sql_logs_match_resolved_blocks(
-                &historical_payload.logs_by_block,
-                &resolved_blocks,
-            )?;
-            if logs_need_validation_provider_payload {
-                info!(
-                    service = "indexer",
-                    command = "backfill",
-                    chain = %source_plan.watched_chain_plan.chain,
-                    from_block = range.from_block,
-                    to_block = range.to_block,
-                    resolved_block_count = resolved_blocks.len(),
-                    "Coinbase SQL sample validation log payload fill started"
-                );
-                let payload_fill_started = Instant::now();
-                historical_payload.logs_by_block = fill_log_payloads_from_validation_provider(
-                    validation_provider,
-                    &resolved_blocks,
-                    historical_payload.logs_by_block,
-                    &historical_payload.validation_filters,
-                    coinbase_config.validation_mode,
-                )
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to fill validation-provider log payloads for sampled Coinbase SQL range {}..={}",
-                        range.from_block, range.to_block
-                    )
-                })?;
-                historical_payload.logs_need_validation_provider_payload = false;
-                info!(
-                    service = "indexer",
-                    command = "backfill",
-                    chain = %source_plan.watched_chain_plan.chain,
-                    from_block = range.from_block,
-                    to_block = range.to_block,
-                    filled_log_count = historical_payload_log_count(&historical_payload),
-                    elapsed_ms = payload_fill_started.elapsed().as_millis(),
-                    "Coinbase SQL sample validation log payloads filled"
-                );
-            } else {
-                info!(
-                    service = "indexer",
-                    command = "backfill",
-                    chain = %source_plan.watched_chain_plan.chain,
-                    from_block = range.from_block,
-                    to_block = range.to_block,
-                    raw_log_count = historical_payload_log_count(&historical_payload),
-                    "Coinbase SQL sample validation log payload fill skipped; decoded SQL parameters supplied log data"
-                );
-            }
-            let block_headers =
-                fetch_coinbase_sql_window_headers(validation_provider, &resolved_blocks, range)
-                    .await?;
-            (resolved_blocks, block_headers, historical_payload)
-        }
-    };
-    let outcome = materialize_historical_payload_range(
-        pool,
-        source_plan,
-        selected_target_index,
-        validation_provider,
-        range,
-        canonicality_evidence,
-        &resolved_blocks,
-        block_headers,
-        historical_payload,
-        config.adapter_sync_mode,
-        config.header_audit_mode,
-    )
-    .await?;
-    info!(
-        service = "indexer",
-        command = "backfill",
-        chain = %source_plan.watched_chain_plan.chain,
-        from_block = range.from_block,
-        to_block = range.to_block,
-        resolved_block_count = outcome.resolved_block_count,
-        raw_log_count = outcome.raw_log_count,
-        raw_transaction_count = outcome.raw_transaction_count,
-        raw_receipt_count = outcome.raw_receipt_count,
-        elapsed_ms = window_started.elapsed().as_millis(),
-        "Coinbase SQL backfill window materialized"
-    );
-    Ok(outcome)
 }
 
 pub(crate) fn effective_coinbase_sql_adapter_sync_mode(
@@ -541,134 +628,8 @@ fn basenames_authority_source_family_requires_closure(source_family: &str) -> bo
         source_family,
         BASENAMES_BASE_REGISTRAR_SOURCE_FAMILY
             | BASENAMES_BASE_REGISTRY_SOURCE_FAMILY
-            | BASENAMES_BASE_RESOLVER_SOURCE_FAMILY
+            | "basenames_base_resolver"
     )
-}
-
-fn log_coinbase_sql_payload_fetch(
-    source_plan: &WatchedSourceSelectorPlan,
-    range: BackfillBlockRange,
-    validation_mode: CoinbaseSqlValidationMode,
-    payload: &HistoricalLogPayload,
-) {
-    info!(
-        service = "indexer",
-        command = "backfill",
-        chain = %source_plan.watched_chain_plan.chain,
-        from_block = range.from_block,
-        to_block = range.to_block,
-        coinbase_sql_validation_mode = validation_mode.as_str(),
-        coinbase_sql_query_count = payload.source_stats.query_count,
-        coinbase_sql_page_count = payload.source_stats.page_count,
-        coinbase_sql_row_count = payload.source_stats.row_count,
-        coinbase_sql_retry_count = payload.source_stats.retry_count,
-        coinbase_sql_union_duplicate_count = payload.source_stats.union_duplicate_count,
-        coinbase_sql_log_block_count = payload.logs_by_block.len(),
-        raw_log_count = historical_payload_log_count(payload),
-        validation_filter_count = payload.validation_filters.len(),
-        "Coinbase SQL payload fetched"
-    );
-}
-
-fn ensure_coinbase_sql_sample_validation_size(
-    range: BackfillBlockRange,
-    log_count: usize,
-    block_count: usize,
-    requires_validation_provider_payload: bool,
-    decoded_payload_log_limit: usize,
-) -> Result<()> {
-    if block_count > MAX_COINBASE_SQL_SAMPLE_VALIDATION_BLOCKS {
-        bail!(
-            "Coinbase SQL sample window {}..={} returned logs across {} blocks; refusing sample materialization above {} blocks so the range can retry smaller",
-            range.from_block,
-            range.to_block,
-            block_count,
-            MAX_COINBASE_SQL_SAMPLE_VALIDATION_BLOCKS
-        );
-    }
-    let max_log_count = if requires_validation_provider_payload {
-        MAX_COINBASE_SQL_SAMPLE_PROVIDER_PAYLOAD_LOGS
-    } else {
-        decoded_payload_log_limit
-    };
-    if log_count > max_log_count {
-        bail!(
-            "Coinbase SQL sample window {}..={} returned {} logs; refusing {} above {} logs so the range can retry smaller",
-            range.from_block,
-            range.to_block,
-            log_count,
-            sample_validation_log_label(requires_validation_provider_payload),
-            max_log_count
-        );
-    }
-
-    Ok(())
-}
-
-fn sample_validation_log_label(requires_validation_provider_payload: bool) -> &'static str {
-    match requires_validation_provider_payload {
-        true => "provider log-payload validation",
-        false => "decoded SQL materialization",
-    }
-}
-
-fn coinbase_sql_sample_decoded_payload_log_limit(
-    source_plan: &WatchedSourceSelectorPlan,
-    payload: &HistoricalLogPayload,
-    requires_validation_provider_payload: bool,
-) -> usize {
-    if is_basenames_registry_scan_all_decoded_payload(
-        source_plan,
-        payload,
-        requires_validation_provider_payload,
-    ) {
-        MAX_COINBASE_SQL_BASENAMES_REGISTRY_SAMPLE_DECODED_PAYLOAD_LOGS
-    } else if is_basenames_registrar_address_filtered_decoded_payload(
-        source_plan,
-        payload,
-        requires_validation_provider_payload,
-    ) {
-        MAX_COINBASE_SQL_BASENAMES_REGISTRAR_SAMPLE_DECODED_PAYLOAD_LOGS
-    } else {
-        MAX_COINBASE_SQL_SAMPLE_DECODED_PAYLOAD_LOGS
-    }
-}
-
-fn is_basenames_registry_scan_all_decoded_payload(
-    source_plan: &WatchedSourceSelectorPlan,
-    payload: &HistoricalLogPayload,
-    requires_validation_provider_payload: bool,
-) -> bool {
-    !requires_validation_provider_payload
-        && !source_plan.selected_targets.is_empty()
-        && source_plan
-            .selected_targets
-            .iter()
-            .all(|target| target.source_family == BASENAMES_BASE_REGISTRY_SOURCE_FAMILY)
-        && !payload.validation_filters.is_empty()
-        && payload
-            .validation_filters
-            .iter()
-            .all(|filter| filter.addresses.is_empty())
-}
-
-fn is_basenames_registrar_address_filtered_decoded_payload(
-    source_plan: &WatchedSourceSelectorPlan,
-    payload: &HistoricalLogPayload,
-    requires_validation_provider_payload: bool,
-) -> bool {
-    !requires_validation_provider_payload
-        && !payload.logs_filtered_by_selected_target_index
-        && !source_plan.selected_targets.is_empty()
-        && source_plan
-            .selected_targets
-            .iter()
-            .all(|target| target.source_family == BASENAMES_BASE_REGISTRAR_SOURCE_FAMILY)
-        && !payload.validation_filters.is_empty()
-        && payload
-            .validation_filters
-            .iter()
-            .all(|filter| !filter.addresses.is_empty())
 }
 
 pub(crate) fn ensure_coinbase_sql_registry_range_start_is_replay_safe(
@@ -702,80 +663,6 @@ pub(crate) fn ensure_coinbase_sql_registry_range_start_is_replay_safe(
             range.from_block,
             earliest_effective_from_block
         );
-    }
-
-    Ok(())
-}
-
-fn historical_payload_log_count(payload: &HistoricalLogPayload) -> usize {
-    payload.logs_by_block.values().map(Vec::len).sum()
-}
-
-fn coinbase_sql_planning_blocks(range: BackfillBlockRange) -> Vec<ProviderResolvedBlock> {
-    (range.from_block..=range.to_block)
-        .map(|block_number| ProviderResolvedBlock {
-            block_number,
-            block_hash: String::new(),
-        })
-        .collect()
-}
-
-fn coinbase_sql_sample_validation_block_numbers(
-    range: BackfillBlockRange,
-    logs_by_block: &BTreeMap<i64, Vec<ProviderLog>>,
-) -> Vec<i64> {
-    logs_by_block
-        .keys()
-        .copied()
-        .filter(|block_number| *block_number >= range.from_block && *block_number <= range.to_block)
-        .collect()
-}
-
-async fn fetch_coinbase_sql_window_headers(
-    validation_provider: &(impl ChainProviderOps + ?Sized),
-    resolved_blocks: &[ProviderResolvedBlock],
-    range: BackfillBlockRange,
-) -> Result<Vec<crate::provider::ProviderBlock>> {
-    validation_provider
-        .fetch_block_headers_by_hashes(resolved_blocks)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to fetch validation provider headers for Coinbase SQL range {}..={}",
-                range.from_block, range.to_block
-            )
-        })
-}
-
-fn ensure_coinbase_sql_logs_match_resolved_blocks(
-    logs_by_block: &BTreeMap<i64, Vec<ProviderLog>>,
-    resolved_blocks: &[ProviderResolvedBlock],
-) -> Result<()> {
-    let resolved_by_number = resolved_blocks
-        .iter()
-        .map(|block| (block.block_number, block.block_hash.clone()))
-        .collect::<BTreeMap<_, _>>();
-    for (block_number, logs) in logs_by_block {
-        let expected_hash = resolved_by_number.get(block_number).with_context(|| {
-            format!("Coinbase SQL returned block {block_number} that was not resolved by validation provider")
-        })?;
-        for log in logs {
-            if log.block_number != *block_number {
-                bail!(
-                    "Coinbase SQL grouped log block {} under block {}",
-                    log.block_number,
-                    block_number
-                );
-            }
-            if !log.block_hash.eq_ignore_ascii_case(expected_hash) {
-                bail!(
-                    "Coinbase SQL returned block {} hash {}, validation provider resolved {}",
-                    block_number,
-                    log.block_hash,
-                    expected_hash
-                );
-            }
-        }
     }
 
     Ok(())

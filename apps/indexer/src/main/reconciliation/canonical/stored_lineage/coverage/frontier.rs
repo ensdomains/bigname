@@ -129,6 +129,8 @@ mod tests {
             snapshot_revision: 4,
             proof_format_version: STORED_LINEAGE_COVERAGE_PROOF_FORMAT_VERSION.to_owned(),
             discovery_admission_epoch: 2,
+            raw_log_input_revision: 3,
+            raw_log_retention_generation: 1,
             verified_from_block: from,
             verified_through_block: through,
             topic0s_by_family: BTreeMap::from([(

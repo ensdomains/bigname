@@ -41,6 +41,8 @@ async fn database(name: &str) -> Result<TestDatabase> {
 fn publication() -> StoredLineageCoverageFrontierPublication {
     StoredLineageCoverageFrontierPublication {
         discovery_admission_epoch: 0,
+        raw_log_input_revision: 0,
+        raw_log_retention_generation: 0,
         verified_from_block: 10,
         verified_through_block: 40,
         topic0s_by_family: BTreeMap::from([(FAMILY.to_owned(), vec![format!("0x{:064x}", 1)])]),

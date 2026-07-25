@@ -71,6 +71,7 @@ pub(crate) async fn run_hash_pinned_backfill_range(
     canonicality_evidence: BackfillCanonicalityEvidence,
     adapter_sync_mode: BackfillAdapterSyncMode,
     header_audit_mode: HeaderAuditMode,
+    exact_address_log_filter: bool,
 ) -> Result<BackfillOutcome> {
     let watched_chain = &source_plan.watched_chain_plan;
     let total_started = Instant::now();
@@ -92,6 +93,7 @@ pub(crate) async fn run_hash_pinned_backfill_range(
             selected_target_addresses_for_chunk,
             &resolved_blocks,
             range,
+            exact_address_log_filter,
         )
         .await?
     } else {

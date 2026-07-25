@@ -4,7 +4,9 @@ use anyhow::{Context, Result, bail};
 use bigname_storage::{BackfillRange, advance_backfill_range};
 use sqlx::types::time::OffsetDateTime;
 
-use crate::backfill::BackfillJobRunConfig;
+use crate::backfill::{BackfillJobRunConfig, STALE_BACKFILL_CLAIM_MAX_AGE_SECS};
+
+const MAX_BACKFILL_LEASE_HEARTBEAT_INTERVAL_SECS: i64 = STALE_BACKFILL_CLAIM_MAX_AGE_SECS / 4;
 
 pub(crate) async fn run_with_backfill_lease_heartbeat<T, F>(
     pool: &sqlx::PgPool,
@@ -16,7 +18,7 @@ where
     F: Future<Output = Result<T>>,
 {
     let lease_duration_secs = active_range_lease_duration_secs(active_range)?;
-    let heartbeat_interval = Duration::from_secs((lease_duration_secs / 2).max(1) as u64);
+    let heartbeat_interval = backfill_lease_heartbeat_interval(lease_duration_secs);
     refresh_backfill_range_lease(pool, active_range, config, "before range work").await?;
 
     tokio::pin!(future);
@@ -33,6 +35,12 @@ where
             }
         }
     }
+}
+
+fn backfill_lease_heartbeat_interval(lease_duration_secs: i64) -> Duration {
+    Duration::from_secs(
+        (lease_duration_secs / 2).clamp(1, MAX_BACKFILL_LEASE_HEARTBEAT_INTERVAL_SECS) as u64,
+    )
 }
 
 async fn refresh_backfill_range_lease(
@@ -89,4 +97,28 @@ pub(crate) fn refreshed_backfill_lease_expires_at(duration_secs: i64) -> Result<
         .context("backfill lease expiry timestamp overflowed while refreshing range lease")?;
     OffsetDateTime::from_unix_timestamp(deadline)
         .context("refreshed backfill lease expiry timestamp is out of range")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_lease_heartbeats_before_stale_claim_sweep() {
+        let interval = backfill_lease_heartbeat_interval(4 * 60 * 60);
+
+        assert_eq!(
+            interval,
+            Duration::from_secs(MAX_BACKFILL_LEASE_HEARTBEAT_INTERVAL_SECS as u64)
+        );
+        assert!(interval.as_secs() < STALE_BACKFILL_CLAIM_MAX_AGE_SECS as u64);
+    }
+
+    #[test]
+    fn short_lease_heartbeats_at_half_lease() {
+        assert_eq!(
+            backfill_lease_heartbeat_interval(300),
+            Duration::from_secs(150)
+        );
+    }
 }

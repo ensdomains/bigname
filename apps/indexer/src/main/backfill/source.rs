@@ -15,6 +15,10 @@ use super::{
 use bigname_manifests::WatchedSourceSelectorPlan;
 
 pub(crate) trait HistoricalBackfillSourceOps {
+    fn records_provider_query_attempts_incrementally(&self) -> bool {
+        false
+    }
+
     fn fetch_selected_log_payloads(
         &self,
         request: HistoricalLogPayloadRequest<'_>,

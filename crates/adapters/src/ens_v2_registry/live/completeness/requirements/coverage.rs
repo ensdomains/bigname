@@ -243,6 +243,34 @@ async fn find_uncovered_generation_bound_requirement(
                       AND job.chain_id = fact.chain_id
                       AND job.status = 'completed'::backfill_lifecycle_status
                       AND job.raw_log_retention_generation = $6
+                      AND (
+                          job.stored_verification_raw_log_input_revision IS NULL
+                          OR (
+                              job.stored_verification_from_block
+                                  <= fact.covered_from_block
+                              AND job.stored_verification_to_block
+                                  >= fact.covered_to_block
+                              AND job.raw_log_retention_generation = (
+                                  SELECT retained.retention_generation
+                                  FROM raw_log_staging_input_revisions retained
+                                  WHERE retained.chain_id = fact.chain_id
+                              )
+                              AND job.stored_verification_raw_log_input_revision <= (
+                                  SELECT retained.revision
+                                  FROM raw_log_staging_input_revisions retained
+                                  WHERE retained.chain_id = fact.chain_id
+                              )
+                              AND NOT EXISTS (
+                                  SELECT 1
+                                  FROM raw_log_staging_block_revisions changed
+                                  WHERE changed.chain_id = fact.chain_id
+                                    AND changed.revision
+                                        > job.stored_verification_raw_log_input_revision
+                                    AND changed.block_number BETWEEN
+                                        fact.covered_from_block AND fact.covered_to_block
+                              )
+                          )
+                      )
                       AND fact.covered_from_block >= job.range_start_block_number
                       AND fact.covered_to_block <= job.range_end_block_number
                       AND fact.source_family = watched.source_family
@@ -289,6 +317,9 @@ async fn find_uncovered_generation_bound_requirement(
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Result;
+    use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+
     use super::*;
 
     #[test]
@@ -315,5 +346,136 @@ mod tests {
                 required_to_block: 20,
             })
         );
+    }
+
+    #[tokio::test]
+    async fn stored_verified_coverage_is_invalidated_by_later_range_mutation() -> Result<()> {
+        let database = TestDatabase::create_migrated(
+            TestDatabaseConfig::new("ens_v2_stored_verified_coverage_invalidation"),
+            &bigname_storage::MIGRATOR,
+            "failed to migrate ENSv2 stored verification invalidation test",
+        )
+        .await?;
+        let chain = "test-chain";
+        let source_family = "ens_v2_registry_l1";
+        let address = "0x0000000000000000000000000000000000000001";
+        sqlx::query(
+            r#"
+            INSERT INTO raw_log_staging_input_revisions (
+                chain_id,
+                revision,
+                retention_generation,
+                retained_history_complete,
+                incomplete_since
+            )
+            VALUES ($1, 5, 1, false, now())
+            "#,
+        )
+        .bind(chain)
+        .execute(database.pool())
+        .await?;
+        let job_id = sqlx::query_scalar::<_, i64>(
+            r#"
+            INSERT INTO backfill_jobs (
+                deployment_profile,
+                chain_id,
+                raw_log_retention_generation,
+                source_identity,
+                scan_mode,
+                range_start_block_number,
+                range_end_block_number,
+                idempotency_key,
+                status,
+                completed_at,
+                stored_verification_raw_log_input_revision,
+                stored_verification_from_block,
+                stored_verification_to_block,
+                stored_verification_log_count,
+                stored_verification_digest
+            )
+            VALUES (
+                'test', $1, 1, '{}'::JSONB, 'hash_pinned_block',
+                100, 120, 'ens-v2-stored-verification-current',
+                'completed'::backfill_lifecycle_status, now(),
+                5, 100, 120, 0, '00000000000000000000000000000000'
+            )
+            RETURNING backfill_job_id
+            "#,
+        )
+        .bind(chain)
+        .fetch_one(database.pool())
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO backfill_coverage_facts (
+                backfill_job_id,
+                chain_id,
+                source_family,
+                scope,
+                address,
+                covered_from_block,
+                covered_to_block,
+                derivation
+            )
+            VALUES ($1, $2, $3, 'address', $4, 100, 120, 'job_completion')
+            "#,
+        )
+        .bind(job_id)
+        .bind(chain)
+        .bind(source_family)
+        .bind(address)
+        .execute(database.pool())
+        .await?;
+        let requirement = RequiredWatchedTuple {
+            source_family: source_family.to_owned(),
+            address: address.to_owned(),
+            required_from_block: 100,
+            required_to_block: 120,
+        };
+        let mut connection = database.pool().acquire().await?;
+        assert!(
+            find_uncovered_generation_bound_requirement(
+                connection.as_mut(),
+                chain,
+                std::slice::from_ref(&requirement),
+                1,
+            )
+            .await?
+            .is_none()
+        );
+        drop(connection);
+
+        sqlx::query(
+            r#"
+            INSERT INTO raw_log_staging_block_revisions (
+                chain_id,
+                block_hash,
+                block_number,
+                revision
+            )
+            VALUES ($1, '0xchanged', 110, 6)
+            "#,
+        )
+        .bind(chain)
+        .execute(database.pool())
+        .await?;
+        sqlx::query("UPDATE raw_log_staging_input_revisions SET revision = 6 WHERE chain_id = $1")
+            .bind(chain)
+            .execute(database.pool())
+            .await?;
+        let mut connection = database.pool().acquire().await?;
+
+        assert_eq!(
+            find_uncovered_generation_bound_requirement(
+                connection.as_mut(),
+                chain,
+                std::slice::from_ref(&requirement),
+                1,
+            )
+            .await?,
+            Some(requirement)
+        );
+        drop(connection);
+        database.cleanup().await
     }
 }

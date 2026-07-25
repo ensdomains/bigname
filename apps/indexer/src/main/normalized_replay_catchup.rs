@@ -3,15 +3,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Result, bail, ensure};
-use sqlx::PgPool;
-use sqlx::types::time::OffsetDateTime;
-use tokio::time::sleep;
-use tracing::{info, warn};
-
 #[cfg(test)]
 use crate::provider::ChainProvider;
 use crate::{
+    backfill::{
+        CoinbaseSqlBackfillConfig, CoinbaseSqlSourceRegistry,
+        DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
+    },
     provider::{ChainProviderOps, ProviderRegistry},
     reconciliation::{
         HeaderAuditMode, RawFactNormalizedEventReplayRequest,
@@ -21,6 +19,11 @@ use crate::{
     },
     run::startup_heartbeat::{NormalizedReplayHeartbeat, RequiredSubtaskActivity},
 };
+use anyhow::{Result, bail, ensure};
+use sqlx::PgPool;
+use sqlx::types::time::OffsetDateTime;
+use tokio::time::sleep;
+use tracing::{info, warn};
 
 #[path = "normalized_replay_catchup/coverage_recovery.rs"]
 mod coverage_recovery;
@@ -64,8 +67,46 @@ pub(crate) const DEFAULT_NORMALIZED_REPLAY_CATCHUP_CHUNK_BLOCKS: i64 = 262_144;
 pub(crate) const DEFAULT_NORMALIZED_REPLAY_CATCHUP_MAX_LOGS_PER_CHUNK: usize = 100_000;
 pub(crate) const DEFAULT_NORMALIZED_REPLAY_CATCHUP_POLL_INTERVAL_SECS: u64 = 5;
 pub(crate) const DEFAULT_NORMALIZED_REPLAY_DEFER_PROJECTION_INDEXES: bool = true;
-
 pub(crate) const CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS: &str = "raw_fact_normalized_events";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FullClosureCoverageViolations {
+    pub(crate) chain: String,
+    pub(crate) retention_generation: i64,
+    pub(crate) violations: Vec<bigname_manifests::UncoveredWatchedTuple>,
+    pub(crate) further_violations_elided: bool,
+}
+
+impl std::fmt::Display for FullClosureCoverageViolations {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let listed = self
+            .violations
+            .iter()
+            .map(|tuple| {
+                format!(
+                    "(source_family {}, address {}, blocks {}..={})",
+                    tuple.source_family,
+                    tuple.address,
+                    tuple.required_from_block,
+                    tuple.required_to_block
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let suffix = if self.further_violations_elided {
+            " (further violations elided)"
+        } else {
+            ""
+        };
+        write!(
+            formatter,
+            "normalized-event replay cannot establish full closure from incomplete raw-log retention generation {} on chain {}: current-generation backfill coverage is missing or stale for {listed}{suffix}; run generation-bound historical backfill/refetch",
+            self.retention_generation, self.chain
+        )
+    }
+}
+
+impl std::error::Error for FullClosureCoverageViolations {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct NormalizedReplayCatchupConfig {
@@ -75,6 +116,7 @@ pub(crate) struct NormalizedReplayCatchupConfig {
     pub(crate) max_raw_logs_per_chunk: usize,
     pub(crate) poll_interval_secs: u64,
     pub(crate) defer_projection_indexes: bool,
+    pub(crate) coverage_recovery_hash_pinned_chunk_blocks: i64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -221,12 +263,8 @@ impl NormalizedReplayCatchupConfig {
             max_raw_logs_per_chunk,
             poll_interval_secs,
             defer_projection_indexes: DEFAULT_NORMALIZED_REPLAY_DEFER_PROJECTION_INDEXES,
+            coverage_recovery_hash_pinned_chunk_blocks: DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
         })
-    }
-
-    pub(crate) fn with_defer_projection_indexes(mut self, defer_projection_indexes: bool) -> Self {
-        self.defer_projection_indexes = defer_projection_indexes;
-        self
     }
 }
 
@@ -234,6 +272,7 @@ pub(crate) async fn run_normalized_replay_catchup(
     pool: PgPool,
     config: NormalizedReplayCatchupConfig,
     provider_registry: ProviderRegistry,
+    coinbase_sql_recovery: (CoinbaseSqlSourceRegistry, CoinbaseSqlBackfillConfig),
     header_audit_mode: HeaderAuditMode,
     heartbeat: NormalizedReplayHeartbeat,
     activity: RequiredSubtaskActivity,
@@ -260,6 +299,7 @@ pub(crate) async fn run_normalized_replay_catchup(
                 &config,
                 chain,
                 provider_registry.provider_for(chain),
+                Some((&coinbase_sql_recovery.0, &coinbase_sql_recovery.1)),
                 header_audit_mode,
                 &mut progress,
                 &activity,
@@ -309,6 +349,7 @@ pub(crate) async fn run_normalized_replay_catchup_iteration(
         config,
         chain,
         provider,
+        None,
         HeaderAuditMode::Minimal,
         &mut None,
     )
@@ -328,6 +369,7 @@ pub(crate) async fn run_normalized_replay_catchup_iteration_with_provider_for_te
         config,
         chain,
         Some(provider),
+        None,
         header_audit_mode,
         &mut None,
     )
@@ -348,6 +390,7 @@ pub(crate) async fn run_required_normalized_replay_catchup_iteration_for_test(
         config,
         chain,
         provider,
+        None,
         HeaderAuditMode::Minimal,
         progress,
         activity,
@@ -355,11 +398,13 @@ pub(crate) async fn run_required_normalized_replay_catchup_iteration_for_test(
     .await
 }
 
+#[expect(clippy::too_many_arguments)]
 async fn run_required_normalized_replay_catchup_iteration(
     pool: &PgPool,
     config: &NormalizedReplayCatchupConfig,
     chain: &str,
     provider: Option<&(impl ChainProviderOps + ?Sized)>,
+    coinbase_sql_recovery: Option<(&CoinbaseSqlSourceRegistry, &CoinbaseSqlBackfillConfig)>,
     header_audit_mode: HeaderAuditMode,
     progress: &mut NormalizedReplayHeartbeat,
     activity: &RequiredSubtaskActivity,
@@ -370,6 +415,7 @@ async fn run_required_normalized_replay_catchup_iteration(
         config,
         chain,
         provider,
+        coinbase_sql_recovery,
         header_audit_mode,
         &mut Some(progress),
     )
@@ -385,9 +431,11 @@ async fn run_normalized_replay_catchup_iteration_with_provider(
     config: &NormalizedReplayCatchupConfig,
     chain: &str,
     provider: Option<&(impl ChainProviderOps + ?Sized)>,
+    coinbase_sql_recovery: Option<(&CoinbaseSqlSourceRegistry, &CoinbaseSqlBackfillConfig)>,
     header_audit_mode: HeaderAuditMode,
     progress: &mut Option<&mut NormalizedReplayHeartbeat>,
 ) -> Result<CatchupIterationStatus> {
+    coverage_recovery::sweep_stale_backfill_claims_for_replay(pool, chain).await?;
     let pending_base_rederive_replay_target =
         bigname_storage::pending_base_normalized_rederive_replay_target(
             pool,
@@ -499,7 +547,7 @@ async fn run_normalized_replay_catchup_iteration_with_provider(
     };
     let started = Instant::now();
     let (outcome, raw_log_input_version) = if closure_or_dependency_replay {
-        replay_full_closure_with_coverage_recovery(
+        Box::pin(replay_full_closure_with_coverage_recovery(
             pool,
             &config.deployment_profile,
             chain,
@@ -507,10 +555,12 @@ async fn run_normalized_replay_catchup_iteration_with_provider(
             to_block,
             config.max_raw_logs_per_chunk,
             provider,
+            coinbase_sql_recovery,
+            config.coverage_recovery_hash_pinned_chunk_blocks,
             header_audit_mode,
             rewind_inspection_input_version,
             progress,
-        )
+        ))
         .await?
     } else {
         let request = RawFactNormalizedEventReplayRequest {

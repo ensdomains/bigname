@@ -97,6 +97,32 @@ pub async fn materialize_completed_backfill_topic_evidence(
               AND job.chain_id = fact.chain_id
               AND job.status = 'completed'::backfill_lifecycle_status
               AND ($5::BIGINT IS NULL OR job.raw_log_retention_generation = $5)
+              AND (
+                  job.stored_verification_raw_log_input_revision IS NULL
+                  OR (
+                      job.stored_verification_from_block <= fact.covered_from_block
+                      AND job.stored_verification_to_block >= fact.covered_to_block
+                      AND job.raw_log_retention_generation = (
+                          SELECT retained.retention_generation
+                          FROM raw_log_staging_input_revisions retained
+                          WHERE retained.chain_id = fact.chain_id
+                      )
+                      AND job.stored_verification_raw_log_input_revision <= (
+                          SELECT retained.revision
+                          FROM raw_log_staging_input_revisions retained
+                          WHERE retained.chain_id = fact.chain_id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM raw_log_staging_block_revisions changed
+                          WHERE changed.chain_id = fact.chain_id
+                            AND changed.revision
+                                > job.stored_verification_raw_log_input_revision
+                            AND changed.block_number BETWEEN
+                                fact.covered_from_block AND fact.covered_to_block
+                      )
+                  )
+              )
               AND fact.covered_from_block >= job.range_start_block_number
               AND fact.covered_to_block <= job.range_end_block_number
               AND fact.covered_from_block <= $3

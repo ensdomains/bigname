@@ -15,6 +15,8 @@ async fn test_database(name: &str) -> Result<TestDatabase> {
 fn publication(epoch: i64, from: i64, through: i64) -> StoredLineageCoverageFrontierPublication {
     StoredLineageCoverageFrontierPublication {
         discovery_admission_epoch: epoch,
+        raw_log_input_revision: 0,
+        raw_log_retention_generation: 0,
         verified_from_block: from,
         verified_through_block: through,
         topic0s_by_family: BTreeMap::from([(

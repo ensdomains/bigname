@@ -1,12 +1,31 @@
-use anyhow::Result;
+use anyhow::{Context, Result, ensure};
+use bigname_manifests::{
+    UncoveredWatchedTuple, WatchedSourceSelector, WatchedTargetIdentity,
+    load_discovery_admission_epoch, load_historical_watched_contracts_for_target,
+    resolve_watched_source_selector,
+};
 use bigname_storage::RawLogStagingInputVersion;
+use serde_json::Value;
+use sqlx::types::time::OffsetDateTime;
+use std::time::Duration;
 use tracing::info;
 
 use super::{
-    CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS, NormalizedReplayHeartbeat,
-    replay_full_closure_or_dependency_normalized_events,
+    CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS, FullClosureCoverageViolations,
+    NormalizedReplayHeartbeat, replay_full_closure_or_dependency_normalized_events,
 };
 use crate::{
+    backfill::{
+        BackfillAdapterSyncMode, BackfillBlockRange, BackfillJobRunConfig,
+        CoinbaseSqlBackfillConfig, CoinbaseSqlSourceRegistry, STALE_BACKFILL_CLAIM_MAX_AGE_SECS,
+        create_verified_coinbase_sql_backfill_job, create_verified_hash_pinned_backfill_job,
+        load_backfill_topic_plan, run_precreated_verified_coinbase_sql_backfill_job,
+        run_precreated_verified_coinbase_sql_backfill_job_with_progress,
+        run_precreated_verified_hash_pinned_backfill_job,
+        run_precreated_verified_hash_pinned_backfill_job_with_progress,
+        verified_backfill_job_source_identity_payload,
+    },
+    backfill_lease_expires_at, default_backfill_lease_owner, generated_backfill_lease_token,
     provider::ChainProviderOps,
     reconciliation::{
         EnsV2LiveCoverageRecoveryStatus, HeaderAuditMode, RawFactNormalizedEventReplayOutcome,
@@ -16,6 +35,335 @@ use crate::{
 };
 
 const MAX_COVERAGE_RECOVERY_ATTEMPTS: usize = 32;
+const MAX_FULL_CLOSURE_COVERAGE_JOBS_PER_ITERATION: usize = 4;
+const FULL_CLOSURE_COVERAGE_RECOVERY_LEASE_DURATION_SECS: u64 = 300;
+pub(super) async fn sweep_stale_backfill_claims_for_replay(
+    pool: &sqlx::PgPool,
+    chain: &str,
+) -> Result<()> {
+    let stale_job_ids = bigname_storage::sweep_stale_backfill_claims(
+        pool,
+        chain,
+        OffsetDateTime::now_utc() - Duration::from_secs(STALE_BACKFILL_CLAIM_MAX_AGE_SECS as u64),
+    )
+    .await?;
+    if !stale_job_ids.is_empty() {
+        info!(
+            service = "indexer",
+            command = "run",
+            replay_cursor_kind = CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS,
+            chain,
+            backfill_job_ids = ?stale_job_ids,
+            stale_after_secs = STALE_BACKFILL_CLAIM_MAX_AGE_SECS,
+            "released stale backfill claims for ordinary lease re-claim"
+        );
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FullClosureRecoveryAuthority {
+    retention_generation: i64,
+    raw_log_input_revision: i64,
+    discovery_admission_epoch: i64,
+}
+
+async fn load_full_closure_recovery_authority(
+    pool: &sqlx::PgPool,
+    chain: &str,
+) -> Result<FullClosureRecoveryAuthority> {
+    let input_version = bigname_storage::load_raw_log_staging_input_version(pool, chain).await?;
+    Ok(FullClosureRecoveryAuthority {
+        retention_generation: input_version.retention_generation,
+        raw_log_input_revision: input_version.revision,
+        discovery_admission_epoch: load_discovery_admission_epoch(pool, chain).await?,
+    })
+}
+
+async fn resolve_exact_coverage_recovery_source_plan(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    source_family: &str,
+    address: &str,
+    range: BackfillBlockRange,
+) -> Result<bigname_manifests::WatchedSourceSelectorPlan> {
+    let historical_contracts =
+        load_historical_watched_contracts_for_target(pool, chain, source_family, address)
+            .await?
+            .into_iter()
+            .filter(|contract| {
+                contract
+                    .active_from_block_number
+                    .is_none_or(|from| from <= range.to_block)
+                    && contract
+                        .active_to_block_number
+                        .is_none_or(|to| to >= range.from_block)
+            })
+            .collect::<Vec<_>>();
+    ensure!(
+        !historical_contracts.is_empty(),
+        "coverage recovery cannot resolve watched target {source_family} {address} on {chain} over {}..={}",
+        range.from_block,
+        range.to_block
+    );
+    let selected_targets = historical_contracts
+        .iter()
+        .map(|contract| WatchedTargetIdentity {
+            contract_instance_id: contract.contract_instance_id,
+        })
+        .collect::<Vec<_>>();
+    let source_plan = resolve_watched_source_selector(
+        &historical_contracts,
+        chain,
+        WatchedSourceSelector::WatchedTargetSet(selected_targets),
+        range.from_block,
+        range.to_block,
+    )?;
+    ensure!(
+        source_plan.selected_targets.iter().all(|target| {
+            target.source_family == source_family
+                && target.address.eq_ignore_ascii_case(address)
+                && target.effective_from_block >= range.from_block
+                && target.effective_to_block <= range.to_block
+        }),
+        "coverage recovery selected authority outside exact target {source_family} {address} over {}..={}",
+        range.from_block,
+        range.to_block
+    );
+    Ok(source_plan)
+}
+
+#[expect(clippy::too_many_arguments)]
+async fn recover_full_closure_coverage_batch(
+    pool: &sqlx::PgPool,
+    deployment_profile: &str,
+    provider: &(impl ChainProviderOps + ?Sized),
+    coinbase_sql_recovery: Option<(&CoinbaseSqlSourceRegistry, &CoinbaseSqlBackfillConfig)>,
+    hash_pinned_chunk_blocks: i64,
+    header_audit_mode: HeaderAuditMode,
+    requirement: &FullClosureCoverageViolations,
+    progress: &mut Option<&mut NormalizedReplayHeartbeat>,
+) -> Result<Vec<i64>> {
+    ensure!(
+        !requirement.violations.is_empty(),
+        "full-closure coverage recovery received an empty violation set"
+    );
+    let initial_authority = load_full_closure_recovery_authority(pool, &requirement.chain).await?;
+    ensure!(
+        initial_authority.retention_generation == requirement.retention_generation,
+        "full-closure coverage recovery authority changed before job creation on {}: expected retention generation {}, observed {}",
+        requirement.chain,
+        requirement.retention_generation,
+        initial_authority.retention_generation
+    );
+
+    let mut job_ids = Vec::new();
+    for violation in requirement
+        .violations
+        .iter()
+        .take(MAX_FULL_CLOSURE_COVERAGE_JOBS_PER_ITERATION)
+    {
+        let job_id = recover_one_full_closure_violation(
+            pool,
+            deployment_profile,
+            provider,
+            coinbase_sql_recovery,
+            hash_pinned_chunk_blocks,
+            header_audit_mode,
+            requirement,
+            violation,
+            initial_authority.raw_log_input_revision,
+            progress,
+        )
+        .await
+        .with_context(|| {
+            format!("full-closure coverage recovery failed after enqueueing job ids {job_ids:?}")
+        })?;
+        job_ids.push(job_id);
+    }
+
+    let final_authority = load_full_closure_recovery_authority(pool, &requirement.chain).await?;
+    ensure!(
+        final_authority.retention_generation == initial_authority.retention_generation
+            && final_authority.discovery_admission_epoch
+                == initial_authority.discovery_admission_epoch,
+        "full-closure retention generation or discovery authority changed while recovery jobs {job_ids:?} ran on {}; replan from current authority",
+        requirement.chain
+    );
+    Ok(job_ids)
+}
+
+#[expect(clippy::too_many_arguments)]
+async fn recover_one_full_closure_violation(
+    pool: &sqlx::PgPool,
+    deployment_profile: &str,
+    provider: &(impl ChainProviderOps + ?Sized),
+    coinbase_sql_recovery: Option<(&CoinbaseSqlSourceRegistry, &CoinbaseSqlBackfillConfig)>,
+    hash_pinned_chunk_blocks: i64,
+    header_audit_mode: HeaderAuditMode,
+    requirement: &FullClosureCoverageViolations,
+    violation: &UncoveredWatchedTuple,
+    recovery_raw_log_input_revision: i64,
+    progress: &mut Option<&mut NormalizedReplayHeartbeat>,
+) -> Result<i64> {
+    let range =
+        BackfillBlockRange::new(violation.required_from_block, violation.required_to_block)?;
+    let source_plan = resolve_exact_coverage_recovery_source_plan(
+        pool,
+        &requirement.chain,
+        &violation.source_family,
+        &violation.address,
+        range,
+    )
+    .await?;
+    let topic_plan = load_backfill_topic_plan(pool, &source_plan).await?;
+    let coinbase_config = coinbase_sql_recovery.and_then(|(registry, config)| {
+        registry
+            .has_source_for(&requirement.chain)
+            .then_some(config)
+    });
+    let uses_coinbase_sql = coinbase_config.is_some();
+    let source_identity =
+        verified_backfill_job_source_identity_payload(&source_plan, &topic_plan, coinbase_config)?;
+    let source_identity_hash = source_identity
+        .get("source_identity_hash")
+        .and_then(Value::as_str)
+        .context("full-closure recovery source identity is missing its hash")?;
+    let config = BackfillJobRunConfig {
+        deployment_profile: deployment_profile.to_owned(),
+        idempotency_key: format!(
+            "indexer-full-closure-coverage-recovery:v1:deployment_profile={deployment_profile}:chain={}:source_identity_hash={source_identity_hash}:from={}:to={}:raw_log_input_revision={recovery_raw_log_input_revision}",
+            requirement.chain, range.from_block, range.to_block,
+        ),
+        scope_idempotency_to_raw_log_retention_generation: true,
+        range,
+        lease_owner: format!(
+            "{}:full-closure-coverage-recovery",
+            default_backfill_lease_owner()
+        ),
+        lease_token: generated_backfill_lease_token()?,
+        lease_expires_at: backfill_lease_expires_at(
+            FULL_CLOSURE_COVERAGE_RECOVERY_LEASE_DURATION_SECS,
+        )?,
+        hash_pinned_chunk_blocks,
+        adapter_sync_mode: BackfillAdapterSyncMode::RawOnly,
+        header_audit_mode,
+    };
+
+    let job_id = if uses_coinbase_sql {
+        let (registry, coinbase_config) =
+            coinbase_sql_recovery.expect("Coinbase SQL registry was checked");
+        let coinbase_config = coinbase_config.clone();
+        let record = create_verified_coinbase_sql_backfill_job(
+            pool,
+            &source_plan,
+            &config,
+            &coinbase_config,
+            &topic_plan,
+        )
+        .await?;
+        ensure!(
+            record.job.raw_log_retention_generation == requirement.retention_generation,
+            "full-closure recovery job {} captured retention generation {}, expected {}",
+            record.job.backfill_job_id,
+            record.job.raw_log_retention_generation,
+            requirement.retention_generation
+        );
+        let job_id = record.job.backfill_job_id;
+        let historical_source = registry
+            .source_for(&requirement.chain)?
+            .context("configured Coinbase SQL recovery source disappeared")?
+            .with_query_attempt_recorder(pool.clone(), job_id);
+        let execution_result = match progress.as_deref_mut() {
+            Some(heartbeat) => {
+                run_precreated_verified_coinbase_sql_backfill_job_with_progress(
+                    pool,
+                    &source_plan,
+                    provider,
+                    &historical_source,
+                    config,
+                    coinbase_config,
+                    topic_plan,
+                    record,
+                    heartbeat,
+                )
+                .await
+            }
+            None => {
+                run_precreated_verified_coinbase_sql_backfill_job(
+                    pool,
+                    &source_plan,
+                    provider,
+                    &historical_source,
+                    config,
+                    coinbase_config,
+                    topic_plan,
+                    record,
+                )
+                .await
+            }
+        };
+        execution_result.with_context(|| {
+            format!(
+                "enqueued full-closure Coinbase SQL coverage recovery job id {job_id} failed for {} {} over {}..={}",
+                violation.source_family,
+                violation.address,
+                range.from_block,
+                range.to_block
+            )
+        })?;
+        job_id
+    } else {
+        let record =
+            create_verified_hash_pinned_backfill_job(pool, &source_plan, &config, &topic_plan)
+                .await?;
+        ensure!(
+            record.job.raw_log_retention_generation == requirement.retention_generation,
+            "full-closure recovery job {} captured retention generation {}, expected {}",
+            record.job.backfill_job_id,
+            record.job.raw_log_retention_generation,
+            requirement.retention_generation
+        );
+        let job_id = record.job.backfill_job_id;
+        let execution_result = match progress.as_deref_mut() {
+            Some(heartbeat) => {
+                run_precreated_verified_hash_pinned_backfill_job_with_progress(
+                    pool,
+                    &source_plan,
+                    provider,
+                    config,
+                    topic_plan,
+                    record,
+                    heartbeat,
+                )
+                .await
+            }
+            None => {
+                run_precreated_verified_hash_pinned_backfill_job(
+                    pool,
+                    &source_plan,
+                    provider,
+                    config,
+                    topic_plan,
+                    record,
+                )
+                .await
+            }
+        };
+        execution_result.with_context(|| {
+            format!(
+                "enqueued full-closure hash-pinned coverage recovery job id {job_id} failed for {} {} over {}..={}",
+                violation.source_family,
+                violation.address,
+                range.from_block,
+                range.to_block
+            )
+        })?;
+        job_id
+    };
+
+    Ok(job_id)
+}
 
 pub(crate) async fn recover_ens_v2_live_coverage_requirement_for_replay(
     pool: &sqlx::PgPool,
@@ -59,6 +407,8 @@ pub(super) async fn replay_full_closure_with_coverage_recovery(
     to_block: i64,
     max_raw_logs_per_page: usize,
     provider: Option<&(impl ChainProviderOps + ?Sized)>,
+    coinbase_sql_recovery: Option<(&CoinbaseSqlSourceRegistry, &CoinbaseSqlBackfillConfig)>,
+    hash_pinned_chunk_blocks: i64,
     header_audit_mode: HeaderAuditMode,
     mut raw_log_input_version: RawLogStagingInputVersion,
     progress: &mut Option<&mut NormalizedReplayHeartbeat>,
@@ -85,6 +435,44 @@ pub(super) async fn replay_full_closure_with_coverage_recovery(
             Err(error) => error,
         };
         let stateless_replay_completed = automatic_stateless_replay_completed(&replay_error);
+        if let Some(requirement) = replay_error
+            .downcast_ref::<FullClosureCoverageViolations>()
+            .cloned()
+        {
+            let Some(provider) = provider else {
+                return Err(replay_error.context(format!(
+                    "normalized replay cannot recover full-closure coverage violations on {chain}: no provider is configured"
+                )));
+            };
+            let job_ids = match Box::pin(recover_full_closure_coverage_batch(
+                pool,
+                deployment_profile,
+                provider,
+                coinbase_sql_recovery,
+                hash_pinned_chunk_blocks,
+                header_audit_mode,
+                &requirement,
+                progress,
+            ))
+            .await
+            {
+                Ok(job_ids) => job_ids,
+                Err(recovery_error) => {
+                    return Err(replay_error.context(format!(
+                        "automatic full-closure coverage recovery failed: {recovery_error:#}"
+                    )));
+                }
+            };
+            let remaining_reported = requirement.violations.len().saturating_sub(job_ids.len());
+            return Err(replay_error.context(format!(
+                "auto-enqueued and completed generation-bound full-closure coverage recovery job ids {job_ids:?}; processed at most {MAX_FULL_CLOSURE_COVERAGE_JOBS_PER_ITERATION} violations this iteration, {remaining_reported} reported violations remain{}; the next bounded catch-up iteration will reload coverage authority",
+                if requirement.further_violations_elided {
+                    " and further violations were elided"
+                } else {
+                    ""
+                }
+            )));
+        }
         let Some(requirement) = bigname_adapters::ens_v2_missing_coverage(&replay_error).cloned()
         else {
             return Err(replay_error);

@@ -12,6 +12,7 @@ use sqlx::Row;
 use crate::ens_v1_resolver::{
     GENERIC_SOURCE_SCOPE_ADDRESS, SOURCE_FAMILY_ENS_V1_RESOLVER_L1, generic_resolver_record_topic0s,
 };
+use crate::normalized_replay_catchup::FullClosureCoverageViolations;
 use crate::reconciliation::canonical::stored_lineage::find_uncovered_generation_bound_coverage_with_current_topics;
 
 use super::{
@@ -191,11 +192,13 @@ pub(super) async fn ensure_full_closure_retention_authority(
                 }
                 .into());
             }
-            let listed = render_uncovered_tuples(&proof.uncovered);
-            let suffix = elided_gap_suffix(&proof.uncovered);
-            anyhow::bail!(
-                "normalized-event replay cannot establish full closure from incomplete raw-log retention generation {retention_generation} on chain {chain}: current-generation backfill coverage is missing or stale for {listed}{suffix}; run generation-bound historical backfill/refetch"
-            );
+            return Err(anyhow::Error::new(FullClosureCoverageViolations {
+                chain: chain.to_owned(),
+                retention_generation,
+                further_violations_elided: proof.uncovered.len() as i64
+                    >= MAX_REPORTED_LEGACY_CLOSURE_COVERAGE_GAPS,
+                violations: proof.uncovered,
+            }));
         }
     }
     Ok(())
@@ -317,30 +320,6 @@ async fn load_generation_bound_coverage_proof(
         requirement_count: requirements.len(),
         uncovered,
     })
-}
-
-fn render_uncovered_tuples(uncovered: &[UncoveredWatchedTuple]) -> String {
-    uncovered
-        .iter()
-        .map(|tuple| {
-            format!(
-                "(source_family {}, address {}, blocks {}..={})",
-                tuple.source_family,
-                tuple.address,
-                tuple.required_from_block,
-                tuple.required_to_block
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn elided_gap_suffix(uncovered: &[UncoveredWatchedTuple]) -> &'static str {
-    if uncovered.len() as i64 >= MAX_REPORTED_LEGACY_CLOSURE_COVERAGE_GAPS {
-        " (further violations elided)"
-    } else {
-        ""
-    }
 }
 
 pub(super) async fn earliest_required_raw_fact_block(

@@ -1597,6 +1597,16 @@ async fn create_complete_raw_log_staging_input_fixture(
 
 #[allow(dead_code)]
 async fn create_ops_catchup_backfill_job_tables(pool: &PgPool) -> Result<()> {
+    if sqlx::query_scalar::<_, bool>(
+        "SELECT to_regclass('public.backfill_jobs') IS NOT NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .context("failed to inspect the backfill test schema")?
+    {
+        return Ok(());
+    }
+
     sqlx::query(
         r#"
         CREATE TYPE backfill_lifecycle_status AS ENUM (
@@ -1626,6 +1636,13 @@ async fn create_ops_catchup_backfill_job_tables(pool: &PgPool) -> Result<()> {
             range_start_block_number BIGINT NOT NULL CHECK (range_start_block_number >= 0),
             range_end_block_number BIGINT NOT NULL CHECK (range_end_block_number >= range_start_block_number),
             idempotency_key TEXT NOT NULL,
+            projected_minimum_provider_query_count BIGINT NOT NULL DEFAULT 0,
+            actual_provider_query_count BIGINT NOT NULL DEFAULT 0,
+            stored_verification_raw_log_input_revision BIGINT,
+            stored_verification_from_block BIGINT,
+            stored_verification_to_block BIGINT,
+            stored_verification_log_count BIGINT,
+            stored_verification_digest TEXT,
             status backfill_lifecycle_status NOT NULL DEFAULT 'pending',
             failure_reason TEXT,
             failure_metadata JSONB NOT NULL DEFAULT '{}'::JSONB,
@@ -1701,6 +1718,16 @@ async fn create_stored_lineage_coverage_frontier_tables(pool: &PgPool) -> Result
     .execute(pool)
     .await
     .context("failed to apply the stored-lineage coverage frontier migration for indexer tests")?;
+    sqlx::query(
+        r#"
+        ALTER TABLE stored_lineage_coverage_frontiers
+            ADD COLUMN raw_log_input_revision BIGINT NOT NULL DEFAULT 0,
+            ADD COLUMN raw_log_retention_generation BIGINT NOT NULL DEFAULT 0
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to add raw-input authority to the indexer test coverage frontier")?;
     Ok(())
 }
 

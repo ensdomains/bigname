@@ -5115,6 +5115,75 @@ async fn reconcile_fetched_heads_reuses_persisted_coverage_after_restart() -> Re
     Ok(())
 }
 
+#[tokio::test]
+async fn reconcile_fetched_heads_revalidates_frontier_after_in_range_raw_mutation() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let chain = "base-mainnet";
+    let first_process = ChainCoverageFrontiers::default();
+    let (task, heads, provider, server) =
+        promote_one_covered_slice(&database, chain, &first_process).await?;
+    let frontier =
+        bigname_storage::load_stored_lineage_coverage_frontier_header(database.pool(), chain)
+            .await?
+            .expect("the first promotion must publish durable coverage");
+    drop(first_process);
+    sqlx::query("DELETE FROM backfill_coverage_facts WHERE chain_id = $1")
+        .bind(chain)
+        .execute(database.pool())
+        .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO raw_log_staging_input_revisions (
+            chain_id,
+            revision,
+            retention_generation
+        )
+        VALUES ($1, 1, 0)
+        ON CONFLICT (chain_id) DO UPDATE SET revision = 1
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO raw_log_staging_block_revisions (
+            chain_id,
+            block_hash,
+            block_number,
+            revision
+        )
+        VALUES ($1, '0xfrontier-changed', $2, 1)
+        "#,
+    )
+    .bind(chain)
+    .bind(frontier.verified_from_block)
+    .execute(database.pool())
+    .await?;
+
+    let error = reconcile_fetched_heads_with_adapter_sync(
+        database.pool(),
+        &task,
+        &provider,
+        &heads,
+        false,
+        HeaderAuditMode::Minimal,
+        &[],
+        &ChainCoverageFrontiers::default(),
+    )
+    .await
+    .expect_err("an in-range raw mutation must invalidate durable frontier reuse");
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.contains("do not form gap-free coverage"),
+        "invalidated frontier must re-run the coverage proof: {rendered}"
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
 /// A saved proof whose lower bound is above the requested stored path is not
 /// eligible. The indexer must reprove the full current candidate before CAS
 /// replacement, leaving the narrowed revision unchanged when facts are absent.
