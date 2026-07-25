@@ -86,6 +86,13 @@ struct StoredOnlyHistoricalSource {
     payload_calls: Arc<std::sync::atomic::AtomicUsize>,
 }
 
+struct RepairingHistoricalSource {
+    evidence: backfill::StoredLogIdentityEvidence,
+    log: ProviderLog,
+    evidence_calls: Arc<std::sync::atomic::AtomicUsize>,
+    payload_calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
 struct OversizedHistoricalSource {
     payload_calls: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -320,6 +327,45 @@ impl backfill::HistoricalBackfillSourceOps for StoredOnlyHistoricalSource {
         self.payload_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         anyhow::bail!("stored-only verification must not fetch provider log rows")
+    }
+}
+
+impl backfill::HistoricalBackfillSourceOps for RepairingHistoricalSource {
+    async fn fetch_selected_log_payloads(
+        &self,
+        request: backfill::HistoricalLogPayloadRequest<'_>,
+    ) -> Result<backfill::HistoricalLogPayload> {
+        self.payload_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(backfill::HistoricalLogPayload {
+            logs_by_block: BTreeMap::from([(self.log.block_number, vec![self.log.clone()])]),
+            validation_mode: request.validation_mode,
+            source_stats: backfill::CoinbaseSqlFetchStats {
+                query_count: 1,
+                row_count: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+    }
+}
+
+impl backfill::StoredLogIdentityEvidenceSource for RepairingHistoricalSource {
+    fn fetch_stored_log_identity_evidence<'a>(
+        &'a self,
+        _request: backfill::StoredLogIdentityEvidenceRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<backfill::StoredLogIdentityEvidence>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            self.evidence_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.evidence.clone())
+        })
     }
 }
 
@@ -5655,6 +5701,327 @@ async fn verified_coinbase_finalization_fence_failure_marks_range_and_job_failed
             "failed".to_owned(),
             "stored_verification_finalize".to_owned(),
         )
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn verified_coinbase_fetches_and_repairs_unknown_local_lineage_bucket() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let range = BackfillBlockRange::new(42, 42)?;
+    let source_plan = materialization_pipeline_source_plan(database.pool(), 9_310, range).await?;
+    let topic_plan = backfill::load_backfill_topic_plan(database.pool(), &source_plan).await?;
+    let selected_target_index =
+        backfill::SelectedTargetIntervalIndex::from_source_plan(&source_plan);
+    let (block, _) = materialization_pipeline_blocks();
+    let selected_log = provider_log_for_materialization_block(
+        &block,
+        materialization_pipeline_selected_address(),
+        0,
+    );
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        materialization_pipeline_provider_fixtures(),
+        requests,
+    )
+    .await?;
+    let canonicality_evidence = backfill::load_backfill_canonicality_evidence(
+        database.pool(),
+        "ethereum-mainnet",
+        &provider,
+    )
+    .await?;
+    backfill::materialize_historical_payload_range(
+        database.pool(),
+        &source_plan,
+        &selected_target_index,
+        &provider,
+        range,
+        canonicality_evidence,
+        &[ProviderResolvedBlock {
+            block_number: block.block_number,
+            block_hash: block.block_hash.clone(),
+        }],
+        vec![block.clone()],
+        backfill::HistoricalLogPayload {
+            logs_by_block: BTreeMap::from([(block.block_number, vec![selected_log.clone()])]),
+            validation_mode: backfill::CoinbaseSqlValidationMode::Sample,
+            ..Default::default()
+        },
+        backfill::BackfillAdapterSyncMode::RawOnly,
+        HeaderAuditMode::Minimal,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE raw_logs
+        SET canonicality_state = 'observed'::canonicality_state
+        WHERE chain_id = 'ethereum-mainnet'
+          AND block_hash = $1
+          AND transaction_hash = $2
+          AND log_index = $3
+        "#,
+    )
+    .bind(&selected_log.block_hash)
+    .bind(&selected_log.transaction_hash)
+    .bind(selected_log.log_index)
+    .execute(database.pool())
+    .await?;
+
+    let provider_evidence = sqlx::query_as::<_, (i64, i64, i64)>(
+        r#"
+        WITH matching AS (
+            SELECT md5(
+                LOWER(block_hash)
+                || LOWER(transaction_hash)
+                || log_index::TEXT
+            ) AS row_hash
+            FROM raw_logs
+            WHERE chain_id = 'ethereum-mainnet'
+              AND block_number BETWEEN $1 AND $2
+              AND LOWER(emitting_address) = $3
+              AND LOWER(topics[1]) = ANY($4::TEXT[])
+        )
+        SELECT
+            COUNT(*)::BIGINT,
+            COALESCE(
+                bit_xor(('x' || SUBSTRING(row_hash, 1, 16))::BIT(64)::BIGINT),
+                0
+            ),
+            COALESCE(
+                bit_xor(('x' || SUBSTRING(row_hash, 17, 16))::BIT(64)::BIGINT),
+                0
+            )
+        FROM matching
+        "#,
+    )
+    .bind(range.from_block)
+    .bind(range.to_block)
+    .bind(materialization_pipeline_selected_address())
+    .bind(
+        topic_plan
+            .topic0s_for_source_family("ens_v1_wrapper_l1")
+            .to_vec(),
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(provider_evidence.0, 1);
+
+    let evidence_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let payload_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let historical_source = RepairingHistoricalSource {
+        evidence: backfill::StoredLogIdentityEvidence {
+            buckets: vec![backfill::StoredLogIdentityBucket {
+                bucket: 0,
+                selected_log_count: provider_evidence.0,
+                digest_left: provider_evidence.1 as u64,
+                digest_right: provider_evidence.2 as u64,
+            }],
+            query_count: 1,
+        },
+        log: selected_log,
+        evidence_calls: Arc::clone(&evidence_calls),
+        payload_calls: Arc::clone(&payload_calls),
+    };
+    let coinbase_config = backfill::CoinbaseSqlBackfillConfig {
+        initial_window_blocks: 1,
+        max_window_blocks: 1,
+        page_limit: 100,
+        sql_char_limit: 10_000,
+        query_timeout_secs: 30,
+        rate_limit_qps: 1,
+        validation_mode: backfill::CoinbaseSqlValidationMode::Sample,
+    };
+    let mut config = backfill_job_config(
+        range,
+        "verified-coinbase-unknown-local-lineage",
+        "unknown-local-lineage-lease",
+    )?;
+    config.scope_idempotency_to_raw_log_retention_generation = true;
+    config.adapter_sync_mode = backfill::BackfillAdapterSyncMode::RawOnly;
+    let record = backfill::create_verified_coinbase_sql_backfill_job(
+        database.pool(),
+        &source_plan,
+        &config,
+        &coinbase_config,
+        &topic_plan,
+    )
+    .await?;
+    let job_id = record.job.backfill_job_id;
+
+    backfill::run_precreated_verified_coinbase_sql_backfill_job(
+        database.pool(),
+        &source_plan,
+        &provider,
+        &historical_source,
+        config,
+        coinbase_config,
+        topic_plan,
+        record,
+    )
+    .await?;
+
+    assert_eq!(
+        evidence_calls.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the repaired bucket must pass the mandatory post-fetch comparison"
+    );
+    assert_eq!(
+        payload_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "unusable local lineage must be classified into exactly one provider fetch"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, String)>(
+            r#"
+            SELECT
+                job.status::TEXT,
+                logs.canonicality_state::TEXT
+            FROM backfill_jobs job
+            CROSS JOIN raw_logs logs
+            WHERE job.backfill_job_id = $1
+              AND logs.chain_id = 'ethereum-mainnet'
+              AND logs.block_number = 42
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(database.pool())
+        .await?,
+        ("completed".to_owned(), "canonical".to_owned())
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM backfill_coverage_facts WHERE backfill_job_id = $1",
+        )
+        .bind(job_id)
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "the repaired generation-bound job must record reusable coverage"
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn verified_coinbase_removed_transaction_changelog_converges_in_one_evidence_round()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let range = BackfillBlockRange::new(42, 42)?;
+    let source_plan = materialization_pipeline_source_plan(database.pool(), 9_311, range).await?;
+    let topic_plan = backfill::load_backfill_topic_plan(database.pool(), &source_plan).await?;
+    let transaction_actions = [1_i64, -1];
+    let log_actions = [1_i64];
+    let transaction_action_sum = transaction_actions.into_iter().sum::<i64>();
+    let log_action_sum = log_actions.into_iter().sum::<i64>();
+    assert_eq!(transaction_action_sum, 0);
+    assert!(log_action_sum > 0);
+    let provider_buckets = (transaction_action_sum > 0 && log_action_sum > 0)
+        .then_some(backfill::StoredLogIdentityBucket {
+            bucket: 0,
+            selected_log_count: 1,
+            digest_left: 7,
+            digest_right: 11,
+        })
+        .into_iter()
+        .collect();
+    let evidence_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let payload_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let historical_source = StoredOnlyHistoricalSource {
+        evidence: backfill::StoredLogIdentityEvidence {
+            buckets: provider_buckets,
+            query_count: 1,
+        },
+        evidence_calls: Arc::clone(&evidence_calls),
+        payload_calls: Arc::clone(&payload_calls),
+    };
+    let coinbase_config = backfill::CoinbaseSqlBackfillConfig {
+        initial_window_blocks: 1,
+        max_window_blocks: 1,
+        page_limit: 100,
+        sql_char_limit: 10_000,
+        query_timeout_secs: 30,
+        rate_limit_qps: 1,
+        validation_mode: backfill::CoinbaseSqlValidationMode::Sample,
+    };
+    let mut config = backfill_job_config(
+        range,
+        "verified-coinbase-removed-transaction",
+        "removed-transaction-lease",
+    )?;
+    config.scope_idempotency_to_raw_log_retention_generation = true;
+    config.adapter_sync_mode = backfill::BackfillAdapterSyncMode::RawOnly;
+    let record = backfill::create_verified_coinbase_sql_backfill_job(
+        database.pool(),
+        &source_plan,
+        &config,
+        &coinbase_config,
+        &topic_plan,
+    )
+    .await?;
+    let job_id = record.job.backfill_job_id;
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        materialization_pipeline_provider_fixtures(),
+        Arc::clone(&requests),
+    )
+    .await?;
+
+    backfill::run_precreated_verified_coinbase_sql_backfill_job(
+        database.pool(),
+        &source_plan,
+        &provider,
+        &historical_source,
+        config,
+        coinbase_config,
+        topic_plan,
+        record,
+    )
+    .await?;
+
+    assert_eq!(
+        evidence_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the removed transaction must disappear from aggregate evidence on the first comparison"
+    );
+    assert_eq!(
+        payload_calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a removed transaction must not create an impossible provider row-fetch gap"
+    );
+    assert!(
+        requests
+            .lock()
+            .expect("request log must not be poisoned")
+            .is_empty(),
+        "an empty active changelog bucket must not call the validation provider"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, Option<i64>)>(
+            r#"
+            SELECT status::TEXT, stored_verification_log_count
+            FROM backfill_jobs
+            WHERE backfill_job_id = $1
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(database.pool())
+        .await?,
+        ("completed".to_owned(), Some(0))
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM backfill_coverage_facts WHERE backfill_job_id = $1",
+        )
+        .bind(job_id)
+        .fetch_one(database.pool())
+        .await?,
+        1
     );
 
     server.abort();

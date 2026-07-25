@@ -308,25 +308,17 @@ fn stored_log_identity_evidence_query(
     if request.topic0s.is_empty() {
         bail!("Coinbase SQL stored verification requires at least one topic0");
     }
-    let network = match request.chain.as_str() {
-        "base-mainnet" | "base" => "base",
-        "base-sepolia" => "base_sepolia",
-        chain => bail!("Coinbase SQL backfill currently supports Base chains only, got {chain}"),
-    };
-    let address = sql_string_literal(&request.address);
-    let topics = request
-        .topic0s
-        .iter()
-        .map(|topic| sql_string_literal(topic))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let action = "CASE WHEN toString(l.action) IN ('1', 'added') THEN 1 \
-        WHEN toString(l.action) IN ('-1', 'removed') THEN -1 ELSE 0 END";
+    let network = query::coinbase_sql_network(&request.chain)?;
+    let address = query::sql_string_literals(std::slice::from_ref(&request.address));
+    let topics = query::sql_string_literals(&request.topic0s);
+    let action = query::active_action_expression("l.action");
     let from_block = request.range.from_block;
     let to_block = request.range.to_block;
     let bucket_blocks = request.bucket_blocks;
+    let active_transactions_cte = query::active_transactions_cte(network, from_block, to_block);
     Ok(format!(
-        r#"WITH selected_rows AS (
+        r#"WITH {active_transactions_cte},
+selected_rows AS (
   SELECT
     l.block_number,
     l.block_hash,
@@ -335,6 +327,8 @@ fn stored_log_identity_evidence_query(
     l.address,
     {action} AS action_delta
   FROM {network}.events l
+  JOIN active_transactions t
+    ON {active_transaction_log_join}
   WHERE l.block_number BETWEEN {from_block} AND {to_block}
     AND lower(l.address) = {address}
     AND lower(l.topics[1]) IN ({topics})
@@ -347,6 +341,8 @@ fn stored_log_identity_evidence_query(
     l.address,
     {action} AS action_delta
   FROM {network}.encoded_logs l
+  JOIN active_transactions t
+    ON {active_transaction_log_join}
   WHERE l.block_number BETWEEN {from_block} AND {to_block}
     AND lower(l.address) = {address}
     AND lower(l.topics[1]) IN ({topics})
@@ -377,12 +373,9 @@ SELECT
   )))) AS digest_right
 FROM active_rows
 GROUP BY bucket
-ORDER BY bucket"#
+ORDER BY bucket"#,
+        active_transaction_log_join = query::ACTIVE_TRANSACTION_LOG_JOIN,
     ))
-}
-
-fn sql_string_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn stored_log_identity_bucket_from_value(value: Value) -> Result<StoredLogIdentityBucket> {

@@ -14,6 +14,39 @@ pub(super) struct CoinbaseSqlFilterPack {
     pub(super) source_families: Vec<String>,
 }
 
+pub(super) const ACTIVE_TRANSACTION_LOG_JOIN: &str = "t.block_number = l.block_number
+   AND t.block_hash = l.block_hash
+   AND t.transaction_hash = l.transaction_hash";
+
+pub(super) fn active_transactions_cte(network: &str, from_block: i64, to_block: i64) -> String {
+    let tx_action_expr = active_action_expression("action");
+    format!(
+        r#"active_transactions AS (
+  SELECT
+    t.block_number AS block_number,
+    t.block_hash AS block_hash,
+    t.transaction_hash AS transaction_hash,
+    t.transaction_index AS transaction_index
+  FROM (
+    SELECT
+      block_number,
+      block_hash,
+      transaction_hash,
+      transaction_index,
+      sum({tx_action_expr}) AS action_sum
+    FROM {network}.transactions
+    WHERE block_number BETWEEN {from_block} AND {to_block}
+    GROUP BY
+      block_number,
+      block_hash,
+      transaction_hash,
+      transaction_index
+  ) t
+  WHERE t.action_sum > 0
+)"#
+    )
+}
+
 pub(super) fn build_query(
     pack: &CoinbaseSqlFilterPack,
     cursor: Option<CoinbaseSqlLogCursor>,
@@ -72,7 +105,7 @@ pub(super) fn build_query(
         ));
     }
     let log_action_expr = active_action_expression("l.action");
-    let tx_action_expr = active_action_expression("action");
+    let active_transactions_cte = active_transactions_cte(network, pack.from_block, pack.to_block);
 
     // The union of the decoded and encoded arms is wrapped in a subquery
     // before ORDER BY/LIMIT: ClickHouse binds a trailing ORDER BY/LIMIT after
@@ -87,29 +120,7 @@ pub(super) fn build_query(
     // A decoded-first tie-breaker column would remove that cost but deviates
     // from the live-proven query shape; adopt only with fresh live proof.
     Ok(format!(
-        r#"WITH active_transactions AS (
-  SELECT
-    t.block_number AS block_number,
-    t.block_hash AS block_hash,
-    t.transaction_hash AS transaction_hash,
-    t.transaction_index AS transaction_index
-  FROM (
-    SELECT
-      block_number,
-      block_hash,
-      transaction_hash,
-      transaction_index,
-      sum({tx_action_expr}) AS action_sum
-    FROM {network}.transactions
-    WHERE block_number BETWEEN {from_block} AND {to_block}
-    GROUP BY
-      block_number,
-      block_hash,
-      transaction_hash,
-      transaction_index
-  ) t
-  WHERE t.action_sum > 0
-),
+        r#"WITH {active_transactions_cte},
 decoded_log_rows AS (
   SELECT
     l.block_number AS block_number,
@@ -124,9 +135,7 @@ decoded_log_rows AS (
     {log_action_expr} AS action
   FROM {network}.events l
   JOIN active_transactions t
-    ON t.block_number = l.block_number
-   AND t.block_hash = l.block_hash
-   AND t.transaction_hash = l.transaction_hash
+    ON {active_transaction_log_join}
   WHERE {event_log_predicates}
 ),
 decoded_log_sums AS (
@@ -179,9 +188,7 @@ encoded_log_rows AS (
     {log_action_expr} AS action
   FROM {network}.encoded_logs l
   JOIN active_transactions t
-    ON t.block_number = l.block_number
-   AND t.block_hash = l.block_hash
-   AND t.transaction_hash = l.transaction_hash
+    ON {active_transaction_log_join}
   WHERE {encoded_log_predicates}
 ),
 encoded_log_sums AS (
@@ -259,9 +266,7 @@ FROM (
 ) u
 ORDER BY block_number, transaction_index, log_index
 LIMIT {limit}"#,
-        from_block = pack.from_block,
-        to_block = pack.to_block,
-        tx_action_expr = tx_action_expr,
+        active_transaction_log_join = ACTIVE_TRANSACTION_LOG_JOIN,
         log_action_expr = log_action_expr,
         event_log_predicates = event_log_predicates.join("\n    AND "),
         encoded_log_predicates = encoded_log_predicates.join("\n    AND "),
@@ -304,7 +309,7 @@ pub(super) fn build_or_split_filter_pack(
     bail!("single Coinbase SQL address/event-signature query exceeds SQL character budget")
 }
 
-fn coinbase_sql_network(chain: &str) -> Result<&'static str> {
+pub(super) fn coinbase_sql_network(chain: &str) -> Result<&'static str> {
     match chain {
         "base-mainnet" | "base" => Ok("base"),
         "base-sepolia" => Ok("base_sepolia"),
@@ -312,7 +317,7 @@ fn coinbase_sql_network(chain: &str) -> Result<&'static str> {
     }
 }
 
-fn active_action_expression(column: &str) -> String {
+pub(super) fn active_action_expression(column: &str) -> String {
     format!(
         "CASE WHEN toString({column}) IN ('1', 'added') THEN 1 WHEN toString({column}) IN ('-1', 'removed') THEN -1 ELSE 0 END"
     )
@@ -322,7 +327,7 @@ fn topic0_predicate(topic0s: &[String]) -> String {
     format!("l.topics[1] IN ({})", sql_string_literals(topic0s))
 }
 
-fn sql_string_literals(values: &[String]) -> String {
+pub(super) fn sql_string_literals(values: &[String]) -> String {
     values
         .iter()
         .map(|value| format!("'{}'", value.replace('\'', "''")))

@@ -27,7 +27,7 @@ justification = "The remaining file owns the existing Coinbase SQL reservation l
 
 [[files]]
 path = "apps/indexer/src/main/backfill/stored_verification.rs"
-loc = 646
+loc = 643
 justification = "Stored-history recovery keeps its fenced local evidence, independent-source comparison, final digest, and mutation checks together; focused tests live in a separate module."
 
 [[files]]

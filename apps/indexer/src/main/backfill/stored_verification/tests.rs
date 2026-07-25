@@ -30,7 +30,7 @@ fn bucket_segments_keep_stored_and_provider_spans_exact() -> Result<()> {
         }],
         planned_raw_log_input_revision: Some(1),
         verification_range: Some(range),
-        local_bucket_evidence: Some(local),
+        local_bucket_evidence: Some(local.into_iter().map(|bucket| (bucket, true)).collect()),
     };
     let plan = plan.verify_provider_evidence(StoredLogIdentityEvidence {
         query_count: 1,
@@ -93,10 +93,37 @@ fn partial_local_history_requires_provider_fetch() -> Result<()> {
         }],
         planned_raw_log_input_revision: Some(1),
         verification_range: Some(range),
-        local_bucket_evidence: Some(vec![partial_local_history]),
+        local_bucket_evidence: Some(vec![(partial_local_history, true)]),
     }
     .verify_provider_evidence(StoredLogIdentityEvidence {
         buckets: vec![provider_history],
+        query_count: 1,
+    })?;
+
+    assert_eq!(plan.segments[0].source, VerifiedRangeSource::Provider);
+    Ok(())
+}
+
+#[test]
+fn unusable_local_lineage_requires_provider_fetch_even_when_aggregate_matches() -> Result<()> {
+    let range = BackfillBlockRange::new(0, 32)?;
+    let matching = StoredLogIdentityBucket {
+        bucket: 0,
+        selected_log_count: 1,
+        digest_left: 7,
+        digest_right: 11,
+    };
+    let plan = StoredVerificationPlan {
+        segments: vec![VerifiedRangeSegment {
+            range,
+            source: VerifiedRangeSource::StoredCandidate,
+        }],
+        planned_raw_log_input_revision: Some(1),
+        verification_range: Some(range),
+        local_bucket_evidence: Some(vec![(matching, false)]),
+    }
+    .verify_provider_evidence(StoredLogIdentityEvidence {
+        buckets: vec![matching],
         query_count: 1,
     })?;
 

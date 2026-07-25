@@ -6,6 +6,8 @@ use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, types::time::Offset
 
 #[path = "stored_lineage_coverage/integrity.rs"]
 mod integrity;
+#[path = "stored_lineage_coverage/publication_fence.rs"]
+mod publication_fence;
 
 /// Candidate-table name shared with the manifest authority query helpers.
 /// The table is transaction-local and never contains durable authority.
@@ -57,8 +59,9 @@ pub enum StoredLineageCoveragePublicationOutcome {
 }
 
 /// Owns the optimistic transaction and its server-side candidate. Publication
-/// consumes the guard, briefly locks and rechecks the discovery epoch, then
-/// atomically replaces the durable requirement snapshot.
+/// consumes the guard, briefly locks and rechecks the raw-log input version
+/// and discovery epoch, then atomically replaces the durable requirement
+/// snapshot.
 pub struct StoredLineageCoveragePublicationGuard {
     transaction: Transaction<'static, Postgres>,
     chain: String,
@@ -120,36 +123,23 @@ impl StoredLineageCoveragePublicationGuard {
                 .await?
             }
         };
-        let observed_raw_input = sqlx::query_as::<_, (i64, i64)>(
-            r#"
-            SELECT revision, retention_generation
-            FROM raw_log_staging_input_revisions
-            WHERE chain_id = $1
-            "#,
-        )
-        .bind(&self.chain)
-        .fetch_optional(self.transaction.as_mut())
-        .await
-        .with_context(|| {
-            format!(
-                "failed to fence raw-log input version for stored-lineage coverage publication on {}",
-                self.chain
-            )
-        })?
-        .unwrap_or_default();
-        ensure!(
-            observed_raw_input
-                == (
-                    publication.raw_log_input_revision,
-                    publication.raw_log_retention_generation,
-                ),
-            "raw-log input version for chain {} changed while publishing stored-lineage coverage: expected revision {} generation {}, observed revision {} generation {}",
-            self.chain,
+        if publication_fence::fence_raw_input(
+            self.transaction.as_mut(),
+            &self.chain,
             publication.raw_log_input_revision,
             publication.raw_log_retention_generation,
-            observed_raw_input.0,
-            observed_raw_input.1,
-        );
+        )
+        .await?
+            == publication_fence::RawInputFence::Drifted
+        {
+            self.transaction.rollback().await.with_context(|| {
+                format!(
+                    "failed to roll back raw-input-conflicted stored-lineage coverage publication for {}",
+                    self.chain
+                )
+            })?;
+            return Ok(StoredLineageCoveragePublicationOutcome::Conflict);
+        }
 
         // Candidate derivation and immutable coverage-fact verification are
         // deliberately optimistic. Take the shared admission fence only for
@@ -296,7 +286,7 @@ impl StoredLineageCoveragePublicationGuard {
     }
 }
 
-fn is_serialization_failure(error: &sqlx::Error) -> bool {
+pub(super) fn is_serialization_failure(error: &sqlx::Error) -> bool {
     matches!(
         error,
         sqlx::Error::Database(database) if database.code().as_deref() == Some("40001")
@@ -469,6 +459,13 @@ pub async fn begin_stored_lineage_coverage_frontier_publication(
         "expected discovery admission epoch must not be negative"
     );
 
+    crate::ensure_and_load_raw_log_retention_generation(pool, chain)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to ensure raw-log input fence row before stored-lineage coverage publication for {chain}"
+            )
+        })?;
     let mut transaction = pool
         .begin()
         .await
