@@ -8091,6 +8091,7 @@ fn backfill_job_config(
         deployment_profile: "mainnet".to_owned(),
         idempotency_key: idempotency_key.to_owned(),
         scope_idempotency_to_raw_log_retention_generation: false,
+        coverage_recovery_reservation_fence: None,
         range,
         lease_owner: "indexer-backfill-test".to_owned(),
         lease_token: lease_token.to_owned(),

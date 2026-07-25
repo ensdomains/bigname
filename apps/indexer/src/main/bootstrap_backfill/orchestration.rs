@@ -447,6 +447,7 @@ pub(super) async fn run_startup_bootstrap_backfills_inner(
                     deployment_profile: deployment_profile.clone(),
                     idempotency_key,
                     scope_idempotency_to_raw_log_retention_generation: true,
+                    coverage_recovery_reservation_fence: None,
                     range: segment_range,
                     lease_owner: lease_owner.clone(),
                     lease_token: generated_backfill_lease_token()?,

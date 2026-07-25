@@ -2,6 +2,27 @@ use anyhow::{Result, bail};
 use serde_json::Value;
 use sqlx::types::time::OffsetDateTime;
 
+#[derive(Debug)]
+pub struct CoverageRecoveryReservationConflict {
+    message: String,
+}
+
+impl CoverageRecoveryReservationConflict {
+    pub(super) fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for CoverageRecoveryReservationConflict {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CoverageRecoveryReservationConflict {}
+
 /// Persisted lifecycle state for backfill jobs and range checkpoints.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackfillLifecycleStatus {

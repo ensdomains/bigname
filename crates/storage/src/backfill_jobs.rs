@@ -16,8 +16,9 @@ use sqlx::{PgConnection, PgPool, Row};
 
 const STALE_CLAIM_REASON: &str = "stale backfill claim";
 
-/// Durable count/digest evidence captured while the chain's raw-log mutation
-/// fence is held. The caller owns validation of the selected log set.
+/// Durable count/digest evidence recorded under the chain's raw-log mutation
+/// fence after the caller has fenced its selected-log scan against in-range
+/// changes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BackfillStoredVerification {
     pub raw_log_input_revision: i64,
@@ -351,6 +352,107 @@ pub async fn sweep_stale_backfill_claims(
     Ok(job_ids)
 }
 
+/// Fail unfinished generation-scoped jobs from an older raw-log retention
+/// generation. This closes the create/rotation gap where a job can remain
+/// pending forever without ever acquiring a lease.
+pub async fn fail_obsolete_generation_backfill_jobs(
+    pool: &PgPool,
+    chain_id: &str,
+    idempotency_key_prefix: &str,
+) -> Result<Vec<i64>> {
+    ensure!(
+        !chain_id.trim().is_empty(),
+        "obsolete backfill job sweep chain must not be empty"
+    );
+    ensure!(
+        !idempotency_key_prefix.trim().is_empty(),
+        "obsolete backfill job sweep idempotency prefix must not be empty"
+    );
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to open obsolete backfill job sweep transaction")?;
+    let rows = sqlx::query(
+        r#"
+        WITH current_generation AS MATERIALIZED (
+            SELECT retention_generation
+            FROM raw_log_staging_input_revisions
+            WHERE chain_id = $1
+        ),
+        obsolete_jobs AS MATERIALIZED (
+            SELECT job.backfill_job_id
+            FROM backfill_jobs job
+            CROSS JOIN current_generation current
+            WHERE job.chain_id = $1
+              AND LEFT(job.idempotency_key, LENGTH($2)) = $2
+              AND job.raw_log_retention_generation <> current.retention_generation
+              AND job.status IN (
+                  'pending'::backfill_lifecycle_status,
+                  'reserved'::backfill_lifecycle_status,
+                  'running'::backfill_lifecycle_status
+              )
+            ORDER BY job.backfill_job_id
+            FOR UPDATE OF job
+        ),
+        obsolete_ranges AS MATERIALIZED (
+            SELECT range.backfill_range_id
+            FROM backfill_ranges range
+            JOIN obsolete_jobs job USING (backfill_job_id)
+            WHERE range.status <> 'completed'::backfill_lifecycle_status
+            ORDER BY range.backfill_range_id
+            FOR UPDATE OF range
+        ),
+        failed_ranges AS (
+            UPDATE backfill_ranges range
+            SET status = 'failed'::backfill_lifecycle_status,
+                lease_token = NULL,
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                failure_reason =
+                    'backfill job retention generation became obsolete before completion',
+                failure_metadata = jsonb_build_object(
+                    'phase', 'obsolete_generation_sweep',
+                    'current_retention_generation',
+                    (SELECT retention_generation FROM current_generation)
+                ),
+                updated_at = now()
+            FROM obsolete_ranges obsolete
+            WHERE range.backfill_range_id = obsolete.backfill_range_id
+        )
+        UPDATE backfill_jobs job
+        SET status = 'failed'::backfill_lifecycle_status,
+            failure_reason =
+                'backfill job retention generation became obsolete before completion',
+            failure_metadata = jsonb_build_object(
+                'phase', 'obsolete_generation_sweep',
+                'state', 'terminal',
+                'cause', 'obsolete_retention_generation',
+                'current_retention_generation',
+                (SELECT retention_generation FROM current_generation)
+            ),
+            completed_at = NULL,
+            updated_at = now()
+        FROM obsolete_jobs obsolete
+        WHERE job.backfill_job_id = obsolete.backfill_job_id
+        RETURNING job.backfill_job_id
+        "#,
+    )
+    .bind(chain_id)
+    .bind(idempotency_key_prefix)
+    .fetch_all(&mut *transaction)
+    .await
+    .with_context(|| format!("failed to sweep obsolete generation jobs for {chain_id}"))?;
+    let job_ids = rows
+        .into_iter()
+        .map(|row| row.try_get("backfill_job_id").map_err(Into::into))
+        .collect::<Result<Vec<i64>>>()?;
+    transaction
+        .commit()
+        .await
+        .context("failed to commit obsolete backfill job sweep")?;
+    Ok(job_ids)
+}
+
 pub use complete::{
     complete_backfill_job, complete_backfill_range, complete_backfill_range_recording_coverage,
     complete_backfill_range_recording_coverage_with_progress,
@@ -365,7 +467,10 @@ pub use create::{
     ensure_and_load_raw_log_retention_generation,
 };
 pub use fail::{fail_backfill_job, fail_backfill_range};
-pub use lease::{advance_backfill_range, reserve_backfill_range};
+pub use lease::{
+    advance_backfill_range, reserve_backfill_range,
+    reserve_backfill_range_with_coverage_recovery_fence,
+};
 pub use read::{
     load_backfill_job, load_backfill_ranges, load_completed_backfill_jobs_intersecting_range,
 };
@@ -376,7 +481,7 @@ pub use topic_evidence::{
 };
 pub use types::{
     BackfillJob, BackfillJobCreate, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange,
-    BackfillRangeSpec,
+    BackfillRangeSpec, CoverageRecoveryReservationConflict,
 };
 
 #[cfg(test)]

@@ -10,6 +10,8 @@ pub(super) const EXECUTION_CACHE_OUTCOMES_REQUEST_LOOKUP_INDEX: &str =
     "execution_cache_outcomes_request_lookup_idx";
 pub(super) const DISCOVERY_EDGES_DEACTIVATED_IDENTITY_INDEX: &str =
     "discovery_edges_deactivated_identity_idx";
+pub(super) const RAW_LOG_STAGING_BLOCK_RANGE_REVISION_INDEX: &str =
+    "raw_log_staging_block_revisions_block_range_idx";
 const PRIMARY_NAME_ROUTE_OUTCOME_RETENTION_INDEX: &str =
     "execution_cache_outcomes_route_primary_checkpoint_idx";
 const PRIMARY_NAME_ROUTE_TRACE_RETENTION_INDEX: &str =
@@ -59,6 +61,14 @@ pub(super) const REQUIRED_RUNTIME_INDEXES: &[RequiredIndexDescriptor] = &[
             CREATE INDEX CONCURRENTLY IF NOT EXISTS discovery_edges_deactivated_identity_idx
             ON public.discovery_edges (chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id, discovery_source)
             WHERE deactivated_at IS NOT NULL
+        "#,
+    },
+    RequiredIndexDescriptor {
+        name: RAW_LOG_STAGING_BLOCK_RANGE_REVISION_INDEX,
+        table: "public.raw_log_staging_block_revisions",
+        create_concurrently_sql: r#"
+            CREATE INDEX CONCURRENTLY IF NOT EXISTS raw_log_staging_block_revisions_block_range_idx
+            ON public.raw_log_staging_block_revisions (chain_id, block_number, revision DESC)
         "#,
     },
     RequiredIndexDescriptor {

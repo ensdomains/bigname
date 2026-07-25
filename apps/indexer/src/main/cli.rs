@@ -1,7 +1,5 @@
-use std::path::PathBuf;
-
-use bigname_storage::DatabaseConfig;
 use clap::{Args, Parser, Subcommand};
+use {bigname_storage::DatabaseConfig, std::path::PathBuf};
 
 use crate::backfill::{
     BackfillSourceKind, CoinbaseSqlValidationMode, DEFAULT_COINBASE_SQL_API_KEY_ID_ENV,
@@ -24,6 +22,7 @@ use crate::ops_catchup::{
     DEFAULT_OPS_CATCHUP_CHUNK_BLOCKS, DEFAULT_OPS_CATCHUP_FOLLOW_POLL_INTERVAL_SECS,
     DEFAULT_OPS_CATCHUP_LEASE_DURATION_SECS,
 };
+use crate::repair::coverage_recovery_rearm::RepairCoverageRecoveryRearmArgs;
 use crate::repair::{
     DEFAULT_ENS_V1_TEXT_RECORD_REPAIR_CHUNK_BLOCKS, DEFAULT_ENS_V1_TEXT_RECORD_REPAIR_PAGE_SIZE,
     DEFAULT_NAME_SURFACE_NORMALIZATION_REPAIR_PAGE_SIZE,
@@ -520,6 +519,7 @@ pub(crate) enum ReplayCommand {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum RepairCommand {
+    CoverageRecoveryRearm(RepairCoverageRecoveryRearmArgs),
     DeriveBackfillCoverageFacts(RepairDeriveBackfillCoverageFactsArgs),
     EnsV1TextRecords(RepairEnsV1TextRecordsArgs),
     NameSurfaceNormalization(RepairNameSurfaceNormalizationArgs),

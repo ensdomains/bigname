@@ -1604,6 +1604,7 @@ async fn create_ops_catchup_backfill_job_tables(pool: &PgPool) -> Result<()> {
     .await
     .context("failed to inspect the backfill test schema")?
     {
+        create_coverage_recovery_failures_table(pool).await?;
         return Ok(());
     }
 
@@ -1705,9 +1706,28 @@ async fn create_ops_catchup_backfill_job_tables(pool: &PgPool) -> Result<()> {
     .await
     .context("failed to create active lease token index for ops catch-up tests")?;
 
+    create_coverage_recovery_failures_table(pool).await?;
     create_backfill_coverage_facts_table(pool).await?;
     create_stored_lineage_coverage_frontier_tables(pool).await?;
 
+    Ok(())
+}
+
+async fn create_coverage_recovery_failures_table(pool: &PgPool) -> Result<()> {
+    if sqlx::query_scalar::<_, bool>(
+        "SELECT to_regclass('public.normalized_replay_coverage_recovery_failures') IS NOT NULL",
+    )
+    .fetch_one(pool)
+    .await?
+    {
+        return Ok(());
+    }
+    sqlx::raw_sql(include_str!(
+        "../../../../../migrations/20260725121000_normalized_replay_coverage_recovery_failures.sql"
+    ))
+    .execute(pool)
+    .await
+    .context("failed to create coverage recovery failure records for indexer tests")?;
     Ok(())
 }
 
@@ -2523,6 +2543,9 @@ struct ProviderBlockFixture {
     logs: Vec<Value>,
 }
 
+type ProviderLogHook =
+    dyn Fn(&serde_json::Map<String, Value>, Value) -> Value + Send + Sync;
+
 async fn bundle_provider(
     blocks: Vec<ProviderBlock>,
 ) -> Result<(provider::JsonRpcProvider, JoinHandle<()>)> {
@@ -2540,6 +2563,13 @@ async fn bundle_provider(
 
 async fn bundle_provider_with_fixtures(
     fixtures: Vec<ProviderBlockFixture>,
+) -> Result<(provider::JsonRpcProvider, JoinHandle<()>)> {
+    bundle_provider_with_fixtures_and_log_hook(fixtures, Arc::new(|_, logs| logs)).await
+}
+
+async fn bundle_provider_with_fixtures_and_log_hook(
+    fixtures: Vec<ProviderBlockFixture>,
+    log_hook: Arc<ProviderLogHook>,
 ) -> Result<(provider::JsonRpcProvider, JoinHandle<()>)> {
     let blocks = Arc::new(
         fixtures
@@ -2604,7 +2634,10 @@ async fn bundle_provider_with_fixtures(
                     .first()
                     .and_then(Value::as_object)
                     .expect("log request must include a filter object");
-                support_logs_for_filter(filter, &blocks, &hashes_by_number)
+                log_hook(
+                    filter,
+                    support_logs_for_filter(filter, &blocks, &hashes_by_number),
+                )
             }
             "eth_getBlockReceipts" => {
                 let block_hash = params

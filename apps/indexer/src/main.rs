@@ -48,7 +48,6 @@ mod source_scope;
 #[cfg(test)]
 #[path = "main/tests.rs"]
 mod tests;
-
 #[cfg(test)]
 use std::path::PathBuf;
 
@@ -76,7 +75,6 @@ use bigname_storage::{
 };
 #[allow(unused_imports)]
 use bootstrap_backfill::*;
-use clap::Parser;
 use cli::{
     BackfillArgs, Cli, Command, HealthcheckArgs, OpsCatchupArgs, RepairArgs, RepairCommand,
     ReplayArgs, ReplayCommand, ReplayNormalizedEventsArgs, RewindArgs,
@@ -102,7 +100,7 @@ use replay::{backfill_source_selector, replay_normalized_events_selection};
 use resolver_profile_convergence::drain_resolver_profile_input_changes;
 #[allow(unused_imports)]
 use runtime::*;
-use tracing::info;
+use {clap::Parser, tracing::info};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -242,6 +240,7 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
         deployment_profile,
         idempotency_key: args.idempotency_key,
         scope_idempotency_to_raw_log_retention_generation: false,
+        coverage_recovery_reservation_fence: None,
         range,
         lease_owner,
         lease_token,
@@ -379,6 +378,7 @@ async fn run_rewind(args: RewindArgs) -> Result<rewind::RewindOutcome> {
 
 async fn run_repair(args: RepairArgs) -> Result<()> {
     match args.command {
+        RepairCommand::CoverageRecoveryRearm(args) => repair::rearm_coverage_recovery(args).await,
         RepairCommand::DeriveBackfillCoverageFacts(args) => {
             let (pool, _rederive_guard) =
                 bigname_storage::connect_with_base_normalized_rederive_writer_guard(

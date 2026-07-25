@@ -324,6 +324,7 @@ async fn run_ops_finalized_catchup_chunk(
         deployment_profile: config.deployment_profile.clone(),
         idempotency_key,
         scope_idempotency_to_raw_log_retention_generation: true,
+        coverage_recovery_reservation_fence: None,
         range: chunk.range,
         lease_owner: format!("{}:ops-finalized-catchup", default_backfill_lease_owner()),
         lease_token: generated_backfill_lease_token()?,

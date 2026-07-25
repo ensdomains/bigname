@@ -1,6 +1,5 @@
 #[path = "coinbase_sql/recovery.rs"]
 mod recovery;
-
 use super::{
     backfill_lease_duration_secs, coinbase_sql_uses_basenames_registry_scan_all,
     create_coinbase_sql_backfill_job, finalize_reserved_stored_verification,
@@ -26,7 +25,7 @@ use bigname_manifests::WatchedSourceSelectorPlan;
 use bigname_storage::{
     BackfillJob, BackfillJobRecord, BackfillLifecycleStatus, BackfillRange, advance_backfill_range,
     load_backfill_job, record_backfill_job_projected_minimum_provider_queries,
-    reserve_backfill_range,
+    reserve_backfill_range_with_coverage_recovery_fence,
 };
 use tracing::{info, warn};
 const BASENAMES_BASE_REGISTRY_SOURCE_FAMILY: &str = "basenames_base_registry";
@@ -221,9 +220,10 @@ async fn run_precreated_coinbase_sql_backfill_job_inner(
     );
 
     loop {
-        let Some(reserved_range) = reserve_backfill_range(
+        let Some(reserved_range) = reserve_backfill_range_with_coverage_recovery_fence(
             pool,
             record.job.backfill_job_id,
+            config.coverage_recovery_reservation_fence.as_ref(),
             &config.lease_owner,
             &config.lease_token,
             refreshed_backfill_lease_expires_at(lease_duration_secs)?,

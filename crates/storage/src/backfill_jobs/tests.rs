@@ -159,6 +159,26 @@ fn backfill_job_create(idempotency_key: &str) -> BackfillJobCreate {
     }
 }
 
+async fn set_backfill_job_attempt_count(
+    pool: &PgPool,
+    backfill_job_id: i64,
+    attempt_count: i64,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE backfill_ranges
+        SET attempt_count = $2,
+            updated_at = now()
+        WHERE backfill_job_id = $1
+        "#,
+    )
+    .bind(backfill_job_id)
+    .bind(attempt_count)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 async fn mark_backfill_job_completed_for_coverage_fact_test(
     pool: &PgPool,
     backfill_job_id: i64,
@@ -182,6 +202,20 @@ async fn mark_backfill_job_completed_for_coverage_fact_test(
 fn lease_deadline() -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(OffsetDateTime::now_utc().unix_timestamp() + 300)
         .expect("lease deadline must be valid")
+}
+
+fn coverage_recovery_reservation_fence(
+    key: &crate::CoverageRecoveryFailureKey,
+    expected_write_epoch: i64,
+    expected_failure_attempt_count: i64,
+    expected_job_attempt_count: i64,
+) -> crate::CoverageRecoveryReservationFence {
+    crate::CoverageRecoveryReservationFence {
+        key: key.clone(),
+        expected_write_epoch,
+        expected_failure_attempt_count,
+        expected_job_attempt_count,
+    }
 }
 
 #[tokio::test]
@@ -367,6 +401,811 @@ async fn generation_scoped_creation_rejects_a_manual_key_collision_from_an_older
     );
 
     database.cleanup().await
+}
+
+#[tokio::test]
+async fn obsolete_generation_sweep_closes_pending_recovery_jobs() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "eth-mainnet";
+    ensure_and_load_raw_log_retention_generation(database.pool(), chain).await?;
+
+    let recovery = create_generation_scoped_backfill_job(
+        database.pool(),
+        &backfill_job_create("indexer-full-closure-coverage-recovery:v2:pending"),
+    )
+    .await?;
+    let unrelated = create_generation_scoped_backfill_job(
+        database.pool(),
+        &backfill_job_create("operator-managed-pending"),
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE raw_log_staging_input_revisions
+        SET retention_generation = retention_generation + 1
+        WHERE chain_id = $1
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+
+    let swept = fail_obsolete_generation_backfill_jobs(
+        database.pool(),
+        chain,
+        "indexer-full-closure-coverage-recovery:",
+    )
+    .await?;
+    assert_eq!(swept, vec![recovery.job.backfill_job_id]);
+
+    let recovery_job = load_backfill_job(database.pool(), recovery.job.backfill_job_id)
+        .await?
+        .context("missing swept recovery job")?;
+    assert_eq!(recovery_job.status, BackfillLifecycleStatus::Failed);
+    assert_eq!(
+        recovery_job.failure_metadata["cause"],
+        "obsolete_retention_generation"
+    );
+    assert!(
+        load_backfill_ranges(database.pool(), recovery.job.backfill_job_id)
+            .await?
+            .iter()
+            .all(|range| range.status == BackfillLifecycleStatus::Failed)
+    );
+    assert_eq!(
+        load_backfill_job(database.pool(), unrelated.job.backfill_job_id)
+            .await?
+            .context("missing unrelated pending job")?
+            .status,
+        BackfillLifecycleStatus::Pending
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn coverage_recovery_attempt_budget_survives_job_revisions() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let first_job = create_generation_scoped_backfill_job(
+        database.pool(),
+        &backfill_job_create("coverage-attempt-budget:revision=1"),
+    )
+    .await?;
+    set_backfill_job_attempt_count(database.pool(), first_job.job.backfill_job_id, 1).await?;
+    let key = crate::CoverageRecoveryFailureKey {
+        deployment_profile: "mainnet".to_owned(),
+        chain_id: "eth-mainnet".to_owned(),
+        raw_log_retention_generation: 0,
+        source_family: "ens_v1_registry_l1".to_owned(),
+        emitting_address: "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned(),
+        required_from_block: 100,
+        required_to_block: 120,
+    };
+    let first = crate::record_coverage_recovery_attempt_failure(
+        database.pool(),
+        &key,
+        0,
+        first_job.job.backfill_job_id,
+        1,
+        5,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(300),
+        "provider mismatch",
+        "coverage recovery attempt budget exhausted",
+        json!({"cause": "provider_mismatch"}),
+    )
+    .await?;
+    assert_eq!(first.attempt_count, 1);
+    assert_eq!(
+        first.state,
+        crate::CoverageRecoveryFailureState::RetryBackoff
+    );
+    assert_eq!(first.failure_metadata["retry_after_seconds"], 5);
+
+    let repeated = crate::record_coverage_recovery_attempt_failure(
+        database.pool(),
+        &key,
+        0,
+        first_job.job.backfill_job_id,
+        1,
+        5,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(300),
+        "duplicate observation",
+        "coverage recovery attempt budget exhausted",
+        json!({}),
+    )
+    .await?;
+    assert_eq!(repeated, first);
+
+    let next_job = create_generation_scoped_backfill_job(
+        database.pool(),
+        &backfill_job_create("coverage-attempt-budget:revision=2"),
+    )
+    .await?;
+    set_backfill_job_attempt_count(database.pool(), next_job.job.backfill_job_id, 4).await?;
+    let terminal = crate::record_coverage_recovery_attempt_failure(
+        database.pool(),
+        &key,
+        0,
+        next_job.job.backfill_job_id,
+        4,
+        5,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(300),
+        "persistent provider mismatch",
+        "coverage recovery attempt budget exhausted",
+        json!({"cause": "provider_mismatch"}),
+    )
+    .await?;
+    assert_eq!(terminal.attempt_count, 5);
+    assert_eq!(
+        terminal.state,
+        crate::CoverageRecoveryFailureState::Terminal
+    );
+    assert!(terminal.retry_not_before.is_none());
+    assert_eq!(
+        terminal.failure_reason,
+        "coverage recovery attempt budget exhausted"
+    );
+    assert_eq!(
+        terminal.failure_metadata["cause"],
+        "attempt_budget_exhausted"
+    );
+
+    assert_eq!(
+        crate::load_coverage_recovery_failure(database.pool(), &key)
+            .await?
+            .context("missing persisted failure budget")?,
+        terminal
+    );
+    sqlx::query(
+        r#"
+        UPDATE backfill_jobs
+        SET status = 'failed'::backfill_lifecycle_status,
+            failure_reason = 'coverage recovery attempt budget exhausted',
+            failure_metadata = '{"state":"terminal"}'::jsonb,
+            completed_at = NULL,
+            updated_at = now()
+        WHERE backfill_job_id = $1
+        "#,
+    )
+    .bind(next_job.job.backfill_job_id)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE backfill_ranges
+        SET status = 'failed'::backfill_lifecycle_status,
+            attempt_count = 5,
+            failure_reason = 'coverage recovery attempt budget exhausted',
+            failure_metadata = '{"state":"terminal"}'::jsonb,
+            completed_at = NULL,
+            updated_at = now()
+        WHERE backfill_job_id = $1
+        "#,
+    )
+    .bind(next_job.job.backfill_job_id)
+    .execute(database.pool())
+    .await?;
+    assert!(
+        crate::rearm_terminal_coverage_recovery_failure(database.pool(), &key).await?,
+        "the exact terminal interval must be operator re-armable"
+    );
+    assert!(
+        load_backfill_ranges(database.pool(), next_job.job.backfill_job_id)
+            .await?
+            .iter()
+            .all(|range| range.attempt_count == 0),
+        "re-arm must reset the exhausted persisted job so its next reservation is attempt one"
+    );
+    assert_eq!(
+        crate::load_coverage_recovery_epoch(database.pool(), &key).await?,
+        1,
+        "operator re-arm must leave a durable epoch tombstone"
+    );
+    let rearmed_range = reserve_backfill_range(
+        database.pool(),
+        next_job.job.backfill_job_id,
+        "rearmed-worker",
+        "rearmed-lease",
+        OffsetDateTime::now_utc() + std::time::Duration::from_secs(300),
+    )
+    .await?
+    .context("re-armed range was not reservable")?;
+    assert_eq!(rearmed_range.attempt_count, 1);
+    let stale_terminal = crate::record_coverage_recovery_attempt_failure(
+        database.pool(),
+        &key,
+        0,
+        next_job.job.backfill_job_id,
+        5,
+        5,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(300),
+        "stale provider mismatch observation",
+        "coverage recovery attempt budget exhausted",
+        json!({"cause": "provider_mismatch"}),
+    )
+    .await;
+    assert!(
+        stale_terminal.is_err(),
+        "an observation cached before re-arm must not recreate terminal state after attempts reset"
+    );
+    let stale_preparation = crate::record_coverage_recovery_terminal_failure(
+        database.pool(),
+        &key,
+        0,
+        Some(next_job.job.backfill_job_id),
+        0,
+        "stale topic-less preparation",
+        json!({"cause": "source_family_without_active_event_topic0"}),
+    )
+    .await;
+    assert!(
+        stale_preparation.is_err(),
+        "terminal preparation planned before re-arm must fail its epoch compare-and-set"
+    );
+    let preserved = load_backfill_ranges(database.pool(), next_job.job.backfill_job_id).await?;
+    assert_eq!(preserved[0].lease_token.as_deref(), Some("rearmed-lease"));
+    assert_eq!(preserved[0].status, BackfillLifecycleStatus::Reserved);
+    assert!(
+        !crate::rearm_terminal_coverage_recovery_failure(database.pool(), &key).await?,
+        "re-arming an already cleared interval must report no match"
+    );
+    assert!(
+        crate::load_coverage_recovery_failure(database.pool(), &key)
+            .await?
+            .is_none()
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn coverage_recovery_attempt_watermarks_survive_job_revisit() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let job_a = create_generation_scoped_backfill_job(
+        database.pool(),
+        &backfill_job_create("coverage-attempt-revisit:plan-a"),
+    )
+    .await?;
+    let job_b = create_generation_scoped_backfill_job(
+        database.pool(),
+        &backfill_job_create("coverage-attempt-revisit:plan-b"),
+    )
+    .await?;
+    set_backfill_job_attempt_count(database.pool(), job_a.job.backfill_job_id, 10).await?;
+    set_backfill_job_attempt_count(database.pool(), job_b.job.backfill_job_id, 1).await?;
+    let key = crate::CoverageRecoveryFailureKey {
+        deployment_profile: "mainnet".to_owned(),
+        chain_id: "eth-mainnet".to_owned(),
+        raw_log_retention_generation: 0,
+        source_family: "ens_v1_registry_l1".to_owned(),
+        emitting_address: "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned(),
+        required_from_block: 100,
+        required_to_block: 120,
+    };
+    let record = |job_id, attempt_count, reason| {
+        crate::record_coverage_recovery_attempt_failure(
+            database.pool(),
+            &key,
+            0,
+            job_id,
+            attempt_count,
+            32,
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(300),
+            reason,
+            "coverage recovery attempt budget exhausted",
+            json!({"cause": "provider_mismatch"}),
+        )
+    };
+    assert_eq!(
+        record(job_a.job.backfill_job_id, 10, "plan A failures")
+            .await?
+            .attempt_count,
+        10
+    );
+    assert_eq!(
+        record(job_b.job.backfill_job_id, 1, "plan B failure")
+            .await?
+            .attempt_count,
+        11
+    );
+    let revisited = record(
+        job_a.job.backfill_job_id,
+        10,
+        "revisited plan A observation",
+    )
+    .await?;
+    assert_eq!(
+        revisited.attempt_count, 11,
+        "returning to an older immutable job must not count its ten attempts twice"
+    );
+    assert_eq!(
+        revisited.last_backfill_job_id,
+        Some(job_a.job.backfill_job_id),
+        "the no-delta revisit must move the crash-recovery pointer to the current plan"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn coverage_recovery_rearm_resets_older_exact_window_job_revisions() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let key = crate::CoverageRecoveryFailureKey {
+        deployment_profile: "mainnet".to_owned(),
+        chain_id: "eth-mainnet".to_owned(),
+        raw_log_retention_generation: 0,
+        source_family: "ens_v1_registry_l1".to_owned(),
+        emitting_address: "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned(),
+        required_from_block: 100,
+        required_to_block: 120,
+    };
+    let mut plan_a = backfill_job_create(
+        "indexer-full-closure-coverage-recovery:v2:rearm-plan-a:coverage_recovery_write_epoch=0:plan",
+    );
+    plan_a.source_identity = json!({
+        "selector_kind": "watched_target_set",
+        "selected_targets": [{
+            "source_family": key.source_family,
+            "address": key.emitting_address,
+            "effective_from_block": key.required_from_block,
+            "effective_to_block": key.required_to_block,
+        }],
+        "topic0s_by_source_family": {
+            "ens_v1_registry_l1": ["0xplan-a"]
+        },
+    });
+    let first_job = create_generation_scoped_backfill_job(database.pool(), &plan_a).await?;
+    crate::bind_coverage_recovery_job_write_epoch(
+        database.pool(),
+        &key,
+        0,
+        first_job.job.backfill_job_id,
+    )
+    .await?;
+    set_backfill_job_attempt_count(database.pool(), first_job.job.backfill_job_id, 31).await?;
+    let retry = crate::record_coverage_recovery_attempt_failure(
+        database.pool(),
+        &key,
+        0,
+        first_job.job.backfill_job_id,
+        31,
+        32,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(300),
+        "provider mismatch on plan A",
+        "coverage recovery attempt budget exhausted",
+        json!({"cause": "provider_mismatch"}),
+    )
+    .await?;
+    assert_eq!(retry.attempt_count, 31);
+
+    let mut plan_b = backfill_job_create(
+        "indexer-full-closure-coverage-recovery:v2:rearm-plan-b:coverage_recovery_write_epoch=0:plan",
+    );
+    plan_b.source_identity = json!({
+        "selector_kind": "watched_target_set",
+        "selected_targets": [{
+            "source_family": key.source_family,
+            "address": key.emitting_address,
+            "effective_from_block": key.required_from_block,
+            "effective_to_block": key.required_to_block,
+        }],
+        "topic0s_by_source_family": {
+            "ens_v1_registry_l1": []
+        },
+    });
+    let terminal_job = create_generation_scoped_backfill_job(database.pool(), &plan_b).await?;
+    crate::bind_coverage_recovery_job_write_epoch(
+        database.pool(),
+        &key,
+        0,
+        terminal_job.job.backfill_job_id,
+    )
+    .await?;
+    crate::record_coverage_recovery_terminal_failure(
+        database.pool(),
+        &key,
+        0,
+        Some(terminal_job.job.backfill_job_id),
+        0,
+        "topic authority temporarily has no active event topic0 values",
+        json!({"cause": "source_family_without_active_event_topic0"}),
+    )
+    .await?;
+
+    assert!(
+        crate::rearm_terminal_coverage_recovery_failure(database.pool(), &key).await?,
+        "the repaired exact window must be re-armed"
+    );
+    for job_id in [
+        first_job.job.backfill_job_id,
+        terminal_job.job.backfill_job_id,
+    ] {
+        assert!(
+            load_backfill_ranges(database.pool(), job_id)
+                .await?
+                .iter()
+                .all(|range| range.attempt_count == 0),
+            "re-arm must discard pre-epoch attempts from every incomplete exact-window job revision; job {job_id} retained attempts"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<i64>>(
+                "SELECT coverage_recovery_write_epoch FROM backfill_jobs WHERE backfill_job_id = $1",
+            )
+            .bind(job_id)
+            .fetch_one(database.pool())
+            .await?,
+            Some(1),
+            "re-arm must bind every reusable exact-window job revision to the new epoch"
+        );
+    }
+    let stale_fence = coverage_recovery_reservation_fence(&key, 0, 0, 0);
+    let stale_reservation = reserve_backfill_range_with_coverage_recovery_fence(
+        database.pool(),
+        first_job.job.backfill_job_id,
+        Some(&stale_fence),
+        "stale-plan-worker",
+        "stale-plan-lease",
+        lease_deadline(),
+    )
+    .await;
+    assert!(
+        stale_reservation.is_err(),
+        "a runner holding the pre-rearm job key must not consume a post-rearm attempt"
+    );
+    assert!(
+        load_backfill_ranges(database.pool(), first_job.job.backfill_job_id)
+            .await?
+            .iter()
+            .all(|range| range.attempt_count == 0),
+        "the stale reservation guard must reject before incrementing an attempt"
+    );
+    crate::bind_coverage_recovery_job_write_epoch(
+        database.pool(),
+        &key,
+        1,
+        first_job.job.backfill_job_id,
+    )
+    .await?;
+    let current_fence = coverage_recovery_reservation_fence(&key, 1, 0, 0);
+    crate::bind_coverage_recovery_job_write_epoch(
+        database.pool(),
+        &key,
+        1,
+        terminal_job.job.backfill_job_id,
+    )
+    .await?;
+    let superseded_reservation = reserve_backfill_range_with_coverage_recovery_fence(
+        database.pool(),
+        first_job.job.backfill_job_id,
+        Some(&current_fence),
+        "superseded-plan-worker",
+        "superseded-plan-lease",
+        lease_deadline(),
+    )
+    .await
+    .expect_err("a newly bound plan must make the prior job ineligible");
+    assert!(
+        superseded_reservation
+            .downcast_ref::<CoverageRecoveryReservationConflict>()
+            .is_some(),
+        "superseded-plan reservation must return the typed deferred conflict: {superseded_reservation:#}"
+    );
+    crate::bind_coverage_recovery_job_write_epoch(
+        database.pool(),
+        &key,
+        1,
+        first_job.job.backfill_job_id,
+    )
+    .await?;
+    let current_reservation = reserve_backfill_range_with_coverage_recovery_fence(
+        database.pool(),
+        first_job.job.backfill_job_id,
+        Some(&current_fence),
+        "current-plan-worker",
+        "current-plan-lease",
+        lease_deadline(),
+    )
+    .await?
+    .context("the rebound job must remain reservable in the new epoch")?;
+    let stale_binding = crate::bind_coverage_recovery_job_write_epoch(
+        database.pool(),
+        &key,
+        0,
+        first_job.job.backfill_job_id,
+    )
+    .await;
+    assert!(
+        stale_binding.is_err(),
+        "a stale planner must not rebind or fail a job after operator re-arm"
+    );
+    let preserved = load_backfill_ranges(database.pool(), first_job.job.backfill_job_id).await?;
+    let preserved_current = preserved
+        .iter()
+        .find(|range| range.backfill_range_id == current_reservation.backfill_range_id)
+        .context("current epoch reservation disappeared")?;
+    assert_eq!(
+        preserved_current.lease_token.as_deref(),
+        Some("current-plan-lease"),
+        "stale epoch handling must not erase a new epoch runner's live lease"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn coverage_recovery_reservation_fences_the_cached_final_attempt() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let key = crate::CoverageRecoveryFailureKey {
+        deployment_profile: "mainnet".to_owned(),
+        chain_id: "eth-mainnet".to_owned(),
+        raw_log_retention_generation: 0,
+        source_family: "ens_v1_registry_l1".to_owned(),
+        emitting_address: "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned(),
+        required_from_block: 100,
+        required_to_block: 120,
+    };
+    let mut request = backfill_job_create(
+        "indexer-full-closure-coverage-recovery:v2:final-attempt:coverage_recovery_write_epoch=0:plan",
+    );
+    request.ranges = Vec::new();
+    request.source_identity = json!({
+        "selector_kind": "watched_target_set",
+        "selected_targets": [{
+            "source_family": key.source_family,
+            "address": key.emitting_address,
+            "effective_from_block": key.required_from_block,
+            "effective_to_block": key.required_to_block,
+        }],
+    });
+    let job = create_generation_scoped_backfill_job(database.pool(), &request).await?;
+    crate::bind_coverage_recovery_job_write_epoch(
+        database.pool(),
+        &key,
+        0,
+        job.job.backfill_job_id,
+    )
+    .await?;
+    set_backfill_job_attempt_count(database.pool(), job.job.backfill_job_id, 31).await?;
+    let recorded = crate::record_coverage_recovery_attempt_failure(
+        database.pool(),
+        &key,
+        0,
+        job.job.backfill_job_id,
+        31,
+        32,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(300),
+        "provider mismatch before final attempt",
+        "coverage recovery attempt budget exhausted",
+        json!({"cause": "provider_mismatch"}),
+    )
+    .await?;
+    assert_eq!(recorded.attempt_count, 31);
+    let final_attempt_fence = coverage_recovery_reservation_fence(&key, 0, 31, 31);
+
+    let final_attempt = reserve_backfill_range_with_coverage_recovery_fence(
+        database.pool(),
+        job.job.backfill_job_id,
+        Some(&final_attempt_fence),
+        "final-attempt-worker",
+        "final-attempt-lease",
+        lease_deadline(),
+    )
+    .await?
+    .context("attempt 32 must be reservable")?;
+    assert_eq!(final_attempt.attempt_count, 32);
+    let duplicate_final_attempt = reserve_backfill_range_with_coverage_recovery_fence(
+        database.pool(),
+        job.job.backfill_job_id,
+        Some(&final_attempt_fence),
+        "final-attempt-worker",
+        "final-attempt-lease",
+        lease_deadline(),
+    )
+    .await?
+    .context("the same active final-attempt lease must remain idempotent")?;
+    assert_eq!(
+        duplicate_final_attempt.backfill_range_id,
+        final_attempt.backfill_range_id
+    );
+    fail_backfill_range(
+        database.pool(),
+        final_attempt.backfill_range_id,
+        "final-attempt-lease",
+        "persistent provider mismatch",
+        json!({"attempt": 32}),
+    )
+    .await?;
+
+    let stale_final_attempt = reserve_backfill_range_with_coverage_recovery_fence(
+        database.pool(),
+        job.job.backfill_job_id,
+        Some(&final_attempt_fence),
+        "stale-final-attempt-worker",
+        "stale-final-attempt-lease",
+        lease_deadline(),
+    )
+    .await;
+    assert!(
+        stale_final_attempt.is_err(),
+        "a second poll that cached attempt 31 must not reserve provider attempt 33"
+    );
+    assert_eq!(
+        load_backfill_ranges(database.pool(), job.job.backfill_job_id).await?[0].attempt_count,
+        32,
+        "the stale final-attempt reservation must reject before incrementing"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn concurrent_first_coverage_failures_preserve_both_attempts() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let first_job = create_generation_scoped_backfill_job(
+        database.pool(),
+        &backfill_job_create("coverage-attempt-concurrency:first"),
+    )
+    .await?;
+    let second_job = create_generation_scoped_backfill_job(
+        database.pool(),
+        &backfill_job_create("coverage-attempt-concurrency:second"),
+    )
+    .await?;
+    set_backfill_job_attempt_count(database.pool(), first_job.job.backfill_job_id, 1).await?;
+    set_backfill_job_attempt_count(database.pool(), second_job.job.backfill_job_id, 1).await?;
+    let key = crate::CoverageRecoveryFailureKey {
+        deployment_profile: "mainnet".to_owned(),
+        chain_id: "eth-mainnet".to_owned(),
+        raw_log_retention_generation: 0,
+        source_family: "ens_v1_registry_l1".to_owned(),
+        emitting_address: "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned(),
+        required_from_block: 100,
+        required_to_block: 120,
+    };
+
+    // Hold INSERT's ROW EXCLUSIVE table lock out while allowing both callers
+    // to observe the initially absent key. Releasing this lock makes their
+    // ON CONFLICT paths race deterministically.
+    let mut blocker = database.pool().begin().await?;
+    sqlx::query("LOCK TABLE normalized_replay_coverage_recovery_failures IN SHARE MODE")
+        .execute(&mut *blocker)
+        .await?;
+    let first_pool = database.dedicated_single_connection_pool().await?;
+    let second_pool = database.dedicated_single_connection_pool().await?;
+    let first_key = key.clone();
+    let second_key = key.clone();
+    let first = tokio::spawn(async move {
+        crate::record_coverage_recovery_attempt_failure(
+            &first_pool,
+            &first_key,
+            0,
+            first_job.job.backfill_job_id,
+            1,
+            32,
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(300),
+            "first concurrent provider failure",
+            "coverage recovery attempt budget exhausted",
+            json!({"cause": "provider_mismatch"}),
+        )
+        .await
+    });
+    let second = tokio::spawn(async move {
+        crate::record_coverage_recovery_attempt_failure(
+            &second_pool,
+            &second_key,
+            0,
+            second_job.job.backfill_job_id,
+            1,
+            32,
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(300),
+            "second concurrent provider failure",
+            "coverage recovery attempt budget exhausted",
+            json!({"cause": "provider_mismatch"}),
+        )
+        .await
+    });
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let blocked_writers = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND (
+                  query LIKE '%INSERT INTO normalized_replay_coverage_recovery_failures%'
+                  OR query LIKE '%pg_advisory_xact_lock(hashtextextended%'
+              )
+              AND wait_event_type = 'Lock'
+            "#,
+        )
+        .fetch_one(database.pool())
+        .await?;
+        if blocked_writers == 2 {
+            break;
+        }
+        anyhow::ensure!(
+            tokio::time::Instant::now() < deadline,
+            "concurrent failure writers did not both reach the blocked insert"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    blocker.commit().await?;
+    first.await.context("first failure task panicked")??;
+    second.await.context("second failure task panicked")??;
+
+    let recorded = crate::load_coverage_recovery_failure(database.pool(), &key)
+        .await?
+        .context("concurrent failure attempts were not recorded")?;
+    assert_eq!(
+        recorded.attempt_count, 2,
+        "the stable per-window budget must count both distinct job attempts"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn terminal_failure_writes_share_the_rearm_key_lock() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let writer_pool = database.dedicated_single_connection_pool().await?;
+    let key = crate::CoverageRecoveryFailureKey {
+        deployment_profile: "mainnet".to_owned(),
+        chain_id: "eth-mainnet".to_owned(),
+        raw_log_retention_generation: 0,
+        source_family: "ens_v1_registry_l1".to_owned(),
+        emitting_address: "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e".to_owned(),
+        required_from_block: 100,
+        required_to_block: 120,
+    };
+    let lock_identity = serde_json::to_string(&(
+        &key.deployment_profile,
+        &key.chain_id,
+        key.raw_log_retention_generation,
+        &key.source_family,
+        &key.emitting_address,
+        key.required_from_block,
+        key.required_to_block,
+    ))?;
+    let mut blocker = database.pool().begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(lock_identity)
+        .execute(&mut *blocker)
+        .await?;
+
+    let writer_key = key.clone();
+    let writer = tokio::spawn(async move {
+        crate::record_coverage_recovery_terminal_failure(
+            &writer_pool,
+            &writer_key,
+            0,
+            None,
+            0,
+            "terminal preparation failure",
+            json!({"cause": "test"}),
+        )
+        .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    let serialized = !writer.is_finished();
+    blocker.rollback().await?;
+    writer.await.context("terminal failure writer panicked")??;
+
+    database.cleanup().await?;
+    anyhow::ensure!(
+        serialized,
+        "terminal failure writer bypassed the natural-key lock used by operator re-arm"
+    );
+    Ok(())
 }
 
 #[tokio::test]

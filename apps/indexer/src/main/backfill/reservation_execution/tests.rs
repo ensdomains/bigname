@@ -43,6 +43,7 @@ async fn coinbase_sql_job_honors_retention_generation_idempotency_scope() -> Res
         deployment_profile: "mainnet".to_owned(),
         idempotency_key: "coinbase-generation-scoped".to_owned(),
         scope_idempotency_to_raw_log_retention_generation: true,
+        coverage_recovery_reservation_fence: None,
         range: BackfillBlockRange::new(10, 20)?,
         lease_owner: "test".to_owned(),
         lease_token: "test-token".to_owned(),

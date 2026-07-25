@@ -64,6 +64,33 @@ fn replay_normalized_events_cli_exposes_stateless_only_authority() {
 }
 
 #[test]
+fn coverage_recovery_terminal_failure_has_an_operator_rearm_command() {
+    let cli = Cli::try_parse_from([
+        "bigname-indexer",
+        "repair",
+        "coverage-recovery-rearm",
+        "--deployment-profile",
+        "mainnet",
+        "--chain",
+        "ethereum-mainnet",
+        "--raw-log-retention-generation",
+        "1",
+        "--source-family",
+        "ens_v1_wrapper_l1",
+        "--address",
+        "0x0000000000000000000000000000000000000133",
+        "--from-block",
+        "33",
+        "--to-block",
+        "33",
+    ]);
+    assert!(
+        cli.is_ok(),
+        "repair CLI must expose an exact generation/window coverage-recovery re-arm: {cli:?}"
+    );
+}
+
+#[test]
 fn run_cli_parses_startup_discovery_page_logs() {
     let command = <Cli as clap::CommandFactory>::command();
     let run_command = command

@@ -1,6 +1,11 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use sqlx::types::time::OffsetDateTime;
 use sqlx::{PgPool, Row};
+
+use crate::coverage_recovery_failures::{
+    CoverageRecoveryFailureState, CoverageRecoveryReservationFence, fence, load_failure_for_update,
+    lock_failure_key, validate_key,
+};
 
 use super::{
     complete::{set_backfill_job_completed, warn_backfill_job_completed_without_coverage_facts},
@@ -10,7 +15,7 @@ use super::{
         load_backfill_range_for_update, load_backfill_range_job_id,
     },
     sql::backfill_range_returning_sql,
-    types::{BackfillLifecycleStatus, BackfillRange},
+    types::{BackfillLifecycleStatus, BackfillRange, CoverageRecoveryReservationConflict},
     validate::{ensure_lease_is_active, ensure_lease_matches, validate_lease, validate_non_empty},
 };
 
@@ -23,12 +28,65 @@ pub async fn reserve_backfill_range(
     lease_token: &str,
     lease_expires_at: OffsetDateTime,
 ) -> Result<Option<BackfillRange>> {
+    reserve_backfill_range_inner(
+        pool,
+        backfill_job_id,
+        None,
+        lease_owner,
+        lease_token,
+        lease_expires_at,
+    )
+    .await
+}
+
+/// Reserve only while the job remains bound to the coverage-recovery write
+/// epoch observed by the caller. Re-arm changes that binding under the job
+/// lock, so a poll planned before re-arm cannot consume a new-epoch attempt.
+pub async fn reserve_backfill_range_with_coverage_recovery_fence(
+    pool: &PgPool,
+    backfill_job_id: i64,
+    expected_recovery_fence: Option<&CoverageRecoveryReservationFence>,
+    lease_owner: &str,
+    lease_token: &str,
+    lease_expires_at: OffsetDateTime,
+) -> Result<Option<BackfillRange>> {
+    if let Some(fence) = expected_recovery_fence {
+        validate_key(&fence.key)?;
+        ensure!(
+            fence.expected_write_epoch >= 0
+                && fence.expected_failure_attempt_count >= 0
+                && fence.expected_job_attempt_count >= 0,
+            "coverage recovery expected write epoch and attempt counts must not be negative"
+        );
+    }
+    reserve_backfill_range_inner(
+        pool,
+        backfill_job_id,
+        expected_recovery_fence,
+        lease_owner,
+        lease_token,
+        lease_expires_at,
+    )
+    .await
+}
+
+async fn reserve_backfill_range_inner(
+    pool: &PgPool,
+    backfill_job_id: i64,
+    expected_coverage_recovery_fence: Option<&CoverageRecoveryReservationFence>,
+    lease_owner: &str,
+    lease_token: &str,
+    lease_expires_at: OffsetDateTime,
+) -> Result<Option<BackfillRange>> {
     validate_lease(lease_owner, lease_token, lease_expires_at)?;
 
     let mut transaction = pool
         .begin()
         .await
         .context("failed to open transaction for backfill range reservation")?;
+    if let Some(recovery_fence) = expected_coverage_recovery_fence {
+        lock_failure_key(&mut transaction, &recovery_fence.key).await?;
+    }
 
     let job = load_backfill_job_for_update(&mut *transaction, backfill_job_id)
         .await?
@@ -54,6 +112,74 @@ pub async fn reserve_backfill_range(
             .await
             .context("failed to commit duplicate backfill range reservation")?;
         return Ok(Some(existing));
+    }
+
+    if let Some(recovery_fence) = expected_coverage_recovery_fence {
+        let current_epoch =
+            fence::load_epoch_in_transaction(&mut transaction, &recovery_fence.key).await?;
+        if current_epoch != recovery_fence.expected_write_epoch {
+            return Err(CoverageRecoveryReservationConflict::new(format!(
+                "coverage recovery write epoch changed from planned {} to {current_epoch}",
+                recovery_fence.expected_write_epoch
+            ))
+            .into());
+        }
+        let failure = load_failure_for_update(&mut transaction, &recovery_fence.key).await?;
+        if failure
+            .as_ref()
+            .is_some_and(|record| record.state == CoverageRecoveryFailureState::Terminal)
+        {
+            return Err(CoverageRecoveryReservationConflict::new(
+                "coverage recovery interval became terminal after planning",
+            )
+            .into());
+        }
+        let current_failure_attempt_count =
+            failure.as_ref().map_or(0, |record| record.attempt_count);
+        if current_failure_attempt_count != recovery_fence.expected_failure_attempt_count {
+            return Err(CoverageRecoveryReservationConflict::new(format!(
+                "coverage recovery failure attempt count changed from planned {} to {current_failure_attempt_count}",
+                recovery_fence.expected_failure_attempt_count
+            ))
+            .into());
+        }
+        let (bound_epoch, bound_attempt_count) = sqlx::query_as::<_, (Option<i64>, Option<i64>)>(
+            "SELECT coverage_recovery_write_epoch, coverage_recovery_bound_attempt_count FROM backfill_jobs WHERE backfill_job_id = $1",
+        )
+        .bind(backfill_job_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .context("failed to validate coverage recovery job epoch before reservation")?;
+        if bound_epoch != Some(recovery_fence.expected_write_epoch) {
+            return Err(CoverageRecoveryReservationConflict::new(format!(
+                "backfill job {backfill_job_id} coverage recovery write epoch changed after planning"
+            ))
+            .into());
+        }
+        if bound_attempt_count != Some(recovery_fence.expected_job_attempt_count) {
+            return Err(CoverageRecoveryReservationConflict::new(format!(
+                "backfill job {backfill_job_id} journaled attempt baseline changed after planning"
+            ))
+            .into());
+        }
+        let current_attempt_count = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COALESCE(MAX(attempt_count), 0)::BIGINT
+            FROM backfill_ranges
+            WHERE backfill_job_id = $1
+            "#,
+        )
+        .bind(backfill_job_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .context("failed to validate coverage recovery attempt count before reservation")?;
+        if current_attempt_count != recovery_fence.expected_job_attempt_count {
+            return Err(CoverageRecoveryReservationConflict::new(format!(
+                "backfill job {backfill_job_id} attempt count changed from planned {} to {current_attempt_count}",
+                recovery_fence.expected_job_attempt_count
+            ))
+            .into());
+        }
     }
 
     let candidate = sqlx::query(

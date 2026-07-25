@@ -93,6 +93,49 @@ no-transaction `CREATE INDEX CONCURRENTLY` migrations, as is the tuple-
 invalidation lookup index, so their builds do not hold execution-table writes
 behind a transactional `SHARE` lock.
 
+The raw-log block-range revision index used by automatic coverage recovery and
+stored-verification fences is also a no-transaction `CREATE INDEX
+CONCURRENTLY` migration. The current migration wrapper submits a concurrent
+index migration as one guarded operation; it does not add a per-migration
+`lock_timeout` and retry loop. During a live rollout, inspect and clear
+long-running transactions and queued `ACCESS EXCLUSIVE` DDL before running
+`migrate`: an exclusive request already waiting behind a long transaction can
+also queue the concurrent build behind it. If that occurs, resolve the blocker
+and rerun the migration command rather than leaving the rollout waiting
+indefinitely; startup's required-index check continues to fail closed until
+the index is valid and ready.
+
+When automatic full-closure recovery reaches its terminal attempt budget,
+first repair the provider, manifest topic plan, or retained raw-log condition
+named by the failure record. Then re-arm only that reviewed generation and
+interval:
+
+```sh
+BIGNAME_DATABASE_URL=postgres://... bigname-indexer repair coverage-recovery-rearm \
+  --deployment-profile mainnet \
+  --chain ethereum-mainnet \
+  --raw-log-retention-generation 7 \
+  --source-family ens_v1_wrapper_l1 \
+  --address 0x... \
+  --from-block 123 \
+  --to-block 456
+```
+
+The command advances that interval's durable write epoch, deletes its exact
+terminal retry record, and resets the unfinished ranges of every incomplete
+job revision for the exact source, address, generation, and interval to attempt
+zero without rewinding their checkpoints. It rebinds those jobs to the new
+epoch with attempt baselines of zero under their job-row locks and refuses a
+missing or nonterminal match. The next poll binds its chosen revision under the
+exact-window lock, leaving exactly that revision reservation-eligible. A runner
+planned before the command must still match the current window epoch, failure
+count, job binding, and attempt baseline while holding the window and job locks,
+so it cannot consume a newly re-armed attempt. The epoch also makes old terminal
+writes fail their compare-and-set instead of recreating stale state afterward.
+The command does not widen the interval, reset another generation, or itself
+issue provider queries. The next normalized replay catch-up poll reloads
+current authority before attempting the interval again.
+
 The two compatibility triggers are temporary rolling-upgrade support. Once the
 fleet is fully upgraded and no writer from before the #233 primary-name
 hardening release can run, including from a rollback image,
