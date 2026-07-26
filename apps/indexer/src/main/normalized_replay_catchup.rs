@@ -20,15 +20,17 @@ use crate::{
     run::startup_heartbeat::{NormalizedReplayHeartbeat, RequiredSubtaskActivity},
 };
 use anyhow::{Result, bail, ensure};
-use bigname_storage::projection_staging::wait_for_projection_replay_admission_retry as wait_for_admission_retry;
 use sqlx::{PgPool, types::time::OffsetDateTime};
 use tokio::time::sleep;
 use tracing::{info, warn};
 
+#[path = "normalized_replay_catchup/admission.rs"]
+mod admission;
 #[path = "normalized_replay_catchup/coverage_recovery.rs"]
 mod coverage_recovery;
 #[path = "normalized_replay_catchup/cursors.rs"]
 mod cursors;
+
 #[path = "normalized_replay_catchup/execution.rs"]
 mod execution;
 #[path = "normalized_replay_catchup/indexes.rs"]
@@ -51,10 +53,7 @@ pub(crate) use test_hook::{
 #[cfg(test)]
 pub(crate) use coverage_recovery::recover_ens_v2_live_coverage_requirement_for_replay;
 use coverage_recovery::replay_full_closure_with_coverage_recovery;
-use cursors::{
-    advance_cursor, ensure_cursor, record_cursor_failure,
-    rewind_cursor_for_newly_observed_older_logs,
-};
+use cursors::{advance_cursor, ensure_cursor, rewind_cursor_for_newly_observed_older_logs};
 use execution::{
     record_normalized_replay_progress, replay_full_closure_or_dependency_normalized_events,
 };
@@ -295,7 +294,7 @@ pub(crate) async fn run_normalized_replay_catchup(
         let mut progressed = false;
         for chain in &config.chains {
             let mut progress = heartbeat.clone();
-            match run_required_normalized_replay_catchup_iteration(
+            match admission::run_required_normalized_replay_catchup_iteration(
                 &pool,
                 &config,
                 chain,
@@ -386,7 +385,7 @@ pub(crate) async fn run_required_normalized_replay_catchup_iteration_for_test(
     activity: &RequiredSubtaskActivity,
 ) -> Result<CatchupIterationStatus> {
     let provider: Option<&ChainProvider> = None;
-    run_required_normalized_replay_catchup_iteration(
+    admission::run_required_normalized_replay_catchup_iteration(
         pool,
         config,
         chain,
@@ -399,45 +398,7 @@ pub(crate) async fn run_required_normalized_replay_catchup_iteration_for_test(
     .await
 }
 
-#[expect(clippy::too_many_arguments)]
-async fn run_required_normalized_replay_catchup_iteration(
-    pool: &PgPool,
-    config: &NormalizedReplayCatchupConfig,
-    chain: &str,
-    provider: Option<&(impl ChainProviderOps + ?Sized)>,
-    coinbase_sql_recovery: Option<(&CoinbaseSqlSourceRegistry, &CoinbaseSqlBackfillConfig)>,
-    header_audit_mode: HeaderAuditMode,
-    progress: &mut NormalizedReplayHeartbeat,
-    activity: &RequiredSubtaskActivity,
-) -> Result<CatchupIterationStatus> {
-    let _activity = activity.begin().await;
-    let mut replay_admission_attempt = 1_usize;
-    let result = loop {
-        let result = run_normalized_replay_catchup_iteration_with_provider(
-            pool,
-            config,
-            chain,
-            provider,
-            coinbase_sql_recovery,
-            header_audit_mode,
-            &mut Some(&mut *progress),
-        )
-        .await;
-        let Err(error) = &result else {
-            break result;
-        };
-        if !wait_for_admission_retry(error, replay_admission_attempt).await {
-            break result;
-        }
-        replay_admission_attempt += 1;
-    };
-    if let Err(error) = &result {
-        record_cursor_failure(pool, &config.deployment_profile, chain, error).await?;
-    }
-    result
-}
-
-async fn run_normalized_replay_catchup_iteration_with_provider(
+pub(super) async fn run_normalized_replay_catchup_iteration_with_provider(
     pool: &PgPool,
     config: &NormalizedReplayCatchupConfig,
     chain: &str,
