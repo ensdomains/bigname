@@ -110,6 +110,7 @@ async fn contended_wait_logs_the_holder_within_the_configured_interval() -> Resu
         .as_ref()
         .clone()
         .application_name(waiter_application_name);
+    let waiter_options = bigname_storage::stamp_projection_replay_version(waiter_options);
     let pool = PgPoolOptions::new()
         .max_connections(1)
         .connect_lazy_with(waiter_options);
@@ -607,6 +608,7 @@ async fn holder_connection(pool: &PgPool, application_name: &str) -> Result<PgCo
         .as_ref()
         .clone()
         .application_name(application_name);
+    let options = bigname_storage::stamp_projection_replay_version(options);
     PgConnection::connect_with(&options)
         .await
         .context("failed to connect the test lock holder")
