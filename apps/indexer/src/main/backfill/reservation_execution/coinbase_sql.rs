@@ -164,7 +164,6 @@ pub(crate) async fn run_precreated_verified_coinbase_sql_backfill_job(
     )
     .await
 }
-
 #[expect(clippy::too_many_arguments)]
 async fn run_precreated_coinbase_sql_backfill_job_inner(
     pool: &sqlx::PgPool,
@@ -353,6 +352,7 @@ async fn run_reserved_coinbase_sql_backfill_range_inner(
         _ => false,
     };
     let mut initial_verification_query_minimum = 0_i64;
+    let evidence_query_minimum = coinbase_config.evidence_query_count(config.range)?;
     let mut verification_plan = match verification_job {
         Some(_) if reuse_current_verification => completed_plan(),
         Some(job) => {
@@ -366,9 +366,10 @@ async fn run_reserved_coinbase_sql_backfill_range_inner(
                 source_plan,
                 topic_plan,
                 evidence_source,
+                coinbase_config,
             )
             .await?;
-            initial_verification_query_minimum = 1;
+            initial_verification_query_minimum = evidence_query_minimum;
             plan
         }
         None => remaining_range
@@ -388,15 +389,15 @@ async fn run_reserved_coinbase_sql_backfill_range_inner(
         .first()
         .map(|segment| segment.range.from_block)
         .unwrap_or(active_range.range_end_block_number);
+    let final_verification_query_minimum = initial_verification_query_minimum
+        * i64::from(verification_job.is_some() && has_provider_gaps);
     record_backfill_job_projected_minimum_provider_queries(
         pool,
         active_range.backfill_job_id,
         verification_plan
             .minimum_provider_queries(coinbase_config.initial_window_blocks)?
             .checked_add(initial_verification_query_minimum)
-            .and_then(|count| {
-                count.checked_add(i64::from(verification_job.is_some() && has_provider_gaps))
-            })
+            .and_then(|count| count.checked_add(final_verification_query_minimum))
             .context("Coinbase SQL projected query count overflowed")?,
     )
     .await?;
@@ -599,7 +600,6 @@ async fn run_reserved_coinbase_sql_backfill_range_inner(
     )
     .await
 }
-
 pub(crate) fn effective_coinbase_sql_adapter_sync_mode(
     source_plan: &WatchedSourceSelectorPlan,
     topic_plan: &BackfillTopicPlan,

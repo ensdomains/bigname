@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    fmt, fs,
     io::Write,
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
@@ -126,9 +126,12 @@ impl CoinbaseSqlClient {
                     sleep_waf_challenge_backoff(attempt).await;
                 }
                 Ok(response) => {
-                    let status = response.status;
-                    let body = truncate_error_body(&response.body);
-                    bail!("Coinbase SQL request failed with status {status}: {body}");
+                    return Err(CoinbaseSqlHttpError {
+                        status: response.status,
+                        body: response.body,
+                        attempt_count: attempt + 1,
+                    }
+                    .into());
                 }
                 Err(error) if attempt + 1 < MAX_SQL_ATTEMPTS => {
                     retry_count += 1;
@@ -312,6 +315,49 @@ pub(super) struct CoinbaseSqlRawQueryResponse {
     pub(super) retry_count: usize,
 }
 
+#[derive(Debug)]
+pub(super) struct CoinbaseSqlHttpError {
+    pub(super) status: StatusCode,
+    pub(super) body: String,
+    pub(super) attempt_count: usize,
+}
+
+impl CoinbaseSqlHttpError {
+    fn is_query_memory_limit(&self) -> bool {
+        if self.status != StatusCode::BAD_REQUEST {
+            return false;
+        }
+        serde_json::from_str::<Value>(&self.body)
+            .ok()
+            .and_then(|body| {
+                body.get("errorMessage")
+                    .and_then(Value::as_str)
+                    .map(str::to_ascii_lowercase)
+            })
+            .is_some_and(|message| message.contains("query memory limit exceeded"))
+    }
+}
+
+impl fmt::Display for CoinbaseSqlHttpError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Coinbase SQL request failed with status {}: {}",
+            self.status,
+            truncate_error_body(&self.body)
+        )
+    }
+}
+
+impl std::error::Error for CoinbaseSqlHttpError {}
+
+pub(super) fn query_memory_limit_attempt_count(error: &anyhow::Error) -> Option<usize> {
+    error
+        .downcast_ref::<CoinbaseSqlHttpError>()
+        .filter(|error| error.is_query_memory_limit())
+        .map(|error| error.attempt_count)
+}
+
 struct CoinbaseSqlHttpResponse {
     status: StatusCode,
     body: String,
@@ -369,10 +415,10 @@ fn truncate_error_body(body: &str) -> String {
 mod tests {
     use super::*;
     use crate::backfill::{
-        CoinbaseSqlValidationMode, DEFAULT_COINBASE_SQL_INITIAL_WINDOW_BLOCKS,
-        DEFAULT_COINBASE_SQL_MAX_WINDOW_BLOCKS, DEFAULT_COINBASE_SQL_PAGE_LIMIT,
-        DEFAULT_COINBASE_SQL_QUERY_CHAR_LIMIT, DEFAULT_COINBASE_SQL_QUERY_TIMEOUT_SECS,
-        DEFAULT_COINBASE_SQL_RATE_LIMIT_QPS,
+        CoinbaseSqlValidationMode, DEFAULT_COINBASE_SQL_EVIDENCE_WINDOW_BLOCKS,
+        DEFAULT_COINBASE_SQL_INITIAL_WINDOW_BLOCKS, DEFAULT_COINBASE_SQL_MAX_WINDOW_BLOCKS,
+        DEFAULT_COINBASE_SQL_PAGE_LIMIT, DEFAULT_COINBASE_SQL_QUERY_CHAR_LIMIT,
+        DEFAULT_COINBASE_SQL_QUERY_TIMEOUT_SECS, DEFAULT_COINBASE_SQL_RATE_LIMIT_QPS,
     };
 
     #[test]
@@ -537,6 +583,7 @@ mod tests {
         CoinbaseSqlBackfillConfig {
             initial_window_blocks: DEFAULT_COINBASE_SQL_INITIAL_WINDOW_BLOCKS,
             max_window_blocks: DEFAULT_COINBASE_SQL_MAX_WINDOW_BLOCKS,
+            evidence_window_blocks: DEFAULT_COINBASE_SQL_EVIDENCE_WINDOW_BLOCKS,
             page_limit: DEFAULT_COINBASE_SQL_PAGE_LIMIT,
             sql_char_limit: DEFAULT_COINBASE_SQL_QUERY_CHAR_LIMIT,
             query_timeout_secs: DEFAULT_COINBASE_SQL_QUERY_TIMEOUT_SECS,

@@ -140,6 +140,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
     let coinbase_sql_config = CoinbaseSqlBackfillConfig {
         initial_window_blocks: args.coinbase_sql.initial_window_blocks,
         max_window_blocks: args.coinbase_sql.max_window_blocks,
+        evidence_window_blocks: args.coinbase_sql.evidence_window_blocks,
         page_limit: args.coinbase_sql.page_limit,
         sql_char_limit: args.coinbase_sql.query_char_limit,
         query_timeout_secs: args.coinbase_sql.query_timeout_secs,

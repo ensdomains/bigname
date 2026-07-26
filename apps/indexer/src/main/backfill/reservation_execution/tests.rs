@@ -55,6 +55,7 @@ async fn coinbase_sql_job_honors_retention_generation_idempotency_scope() -> Res
     let coinbase_config = CoinbaseSqlBackfillConfig {
         initial_window_blocks: 1_000,
         max_window_blocks: 1_000,
+        evidence_window_blocks: 4_000_000,
         page_limit: 1_000,
         sql_char_limit: 10_000,
         query_timeout_secs: 30,

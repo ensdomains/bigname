@@ -129,20 +129,21 @@ mod tests {
             chain_reth_db_sources: Vec::new(),
             chain_rpc_code_fallback_urls: Vec::new(),
             backfill_source: crate::backfill::BackfillSourceKind::HashPinned,
-            coinbase_sql_urls: Vec::new(),
-            coinbase_sql_api_key_id_env: crate::backfill::DEFAULT_COINBASE_SQL_API_KEY_ID_ENV
-                .to_owned(),
-            coinbase_sql_api_key_secret_env:
-                crate::backfill::DEFAULT_COINBASE_SQL_API_KEY_SECRET_ENV.to_owned(),
-            coinbase_sql_initial_window_blocks:
-                crate::backfill::DEFAULT_COINBASE_SQL_INITIAL_WINDOW_BLOCKS,
-            coinbase_sql_max_window_blocks: crate::backfill::DEFAULT_COINBASE_SQL_MAX_WINDOW_BLOCKS,
-            coinbase_sql_page_limit: crate::backfill::DEFAULT_COINBASE_SQL_PAGE_LIMIT,
-            coinbase_sql_query_char_limit: crate::backfill::DEFAULT_COINBASE_SQL_QUERY_CHAR_LIMIT,
-            coinbase_sql_query_timeout_secs:
-                crate::backfill::DEFAULT_COINBASE_SQL_QUERY_TIMEOUT_SECS,
-            coinbase_sql_rate_limit_qps: crate::backfill::DEFAULT_COINBASE_SQL_RATE_LIMIT_QPS,
-            coinbase_sql_validation_mode: crate::backfill::CoinbaseSqlValidationMode::Full,
+            coinbase_sql: crate::cli::CoinbaseSqlArgs {
+                urls: Vec::new(),
+                api_key_id_env: crate::backfill::DEFAULT_COINBASE_SQL_API_KEY_ID_ENV.to_owned(),
+                api_key_secret_env: crate::backfill::DEFAULT_COINBASE_SQL_API_KEY_SECRET_ENV
+                    .to_owned(),
+                initial_window_blocks: crate::backfill::DEFAULT_COINBASE_SQL_INITIAL_WINDOW_BLOCKS,
+                max_window_blocks: crate::backfill::DEFAULT_COINBASE_SQL_MAX_WINDOW_BLOCKS,
+                evidence_window_blocks:
+                    crate::backfill::DEFAULT_COINBASE_SQL_EVIDENCE_WINDOW_BLOCKS,
+                page_limit: crate::backfill::DEFAULT_COINBASE_SQL_PAGE_LIMIT,
+                query_char_limit: crate::backfill::DEFAULT_COINBASE_SQL_QUERY_CHAR_LIMIT,
+                query_timeout_secs: crate::backfill::DEFAULT_COINBASE_SQL_QUERY_TIMEOUT_SECS,
+                rate_limit_qps: crate::backfill::DEFAULT_COINBASE_SQL_RATE_LIMIT_QPS,
+                validation_mode: crate::backfill::CoinbaseSqlValidationMode::Full,
+            },
             coinbase_sql_workers: 1,
             coinbase_sql_range_blocks: 0,
             chain: "ethereum-mainnet".to_owned(),

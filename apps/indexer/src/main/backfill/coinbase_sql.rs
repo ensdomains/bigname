@@ -1,12 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
-use serde_json::Value;
 
 #[path = "coinbase_sql/auth.rs"]
 mod auth;
 #[path = "coinbase_sql/client.rs"]
 mod client;
+#[path = "coinbase_sql/evidence.rs"]
+mod evidence;
 #[path = "coinbase_sql/pagination.rs"]
 mod pagination;
 #[path = "coinbase_sql/planner.rs"]
@@ -24,11 +25,13 @@ use super::{
     CoinbaseSqlBackfillConfig, CoinbaseSqlValidationMode, HistoricalBackfillSourceOps,
     HistoricalLogPayload, HistoricalLogPayloadRequest, HistoricalLogValidationFilter,
     stored_verification::{
-        StoredLogIdentityBucket, StoredLogIdentityEvidence, StoredLogIdentityEvidenceRequest,
+        StoredLogIdentityEvidence, StoredLogIdentityEvidenceRequest,
         StoredLogIdentityEvidenceSource,
     },
 };
 
+#[cfg(test)]
+use evidence::{stored_log_identity_bucket_from_value, stored_log_identity_evidence_query};
 pub(crate) use planner::load_backfill_topic_plan;
 #[cfg(test)]
 #[path = "coinbase_sql/tests.rs"]
@@ -281,136 +284,13 @@ impl StoredLogIdentityEvidenceSource for CoinbaseSqlBackfillSource {
                     request.chain
                 );
             }
-            let sql = stored_log_identity_evidence_query(&request)?;
-            let response = self.client.run_raw_query(&sql).await?;
-            let buckets = response
-                .rows
-                .into_iter()
-                .map(stored_log_identity_bucket_from_value)
-                .collect::<Result<Vec<_>>>()?;
-            Ok(StoredLogIdentityEvidence {
-                buckets,
-                query_count: 1 + response.retry_count,
-            })
+            evidence::fetch_stored_log_identity_evidence(
+                &self.client,
+                &request,
+                self.config.evidence_window_blocks,
+            )
+            .await
         })
-    }
-}
-
-fn stored_log_identity_evidence_query(
-    request: &StoredLogIdentityEvidenceRequest,
-) -> Result<String> {
-    if request.range.from_block > request.range.to_block {
-        bail!("Coinbase SQL stored verification range is inverted");
-    }
-    if request.bucket_blocks <= 0 {
-        bail!("Coinbase SQL stored verification bucket size must be positive");
-    }
-    if request.topic0s.is_empty() {
-        bail!("Coinbase SQL stored verification requires at least one topic0");
-    }
-    let network = query::coinbase_sql_network(&request.chain)?;
-    let address = query::sql_string_literals(std::slice::from_ref(&request.address));
-    let topics = query::sql_string_literals(&request.topic0s);
-    let action = query::active_action_expression("l.action");
-    let from_block = request.range.from_block;
-    let to_block = request.range.to_block;
-    let bucket_blocks = request.bucket_blocks;
-    let active_transactions_cte = query::active_transactions_cte(network, from_block, to_block);
-    Ok(format!(
-        r#"WITH {active_transactions_cte},
-selected_rows AS (
-  SELECT
-    l.block_number,
-    l.block_hash,
-    l.transaction_hash,
-    l.log_index,
-    l.address,
-    {action} AS action_delta
-  FROM {network}.events l
-  JOIN active_transactions t
-    ON {active_transaction_log_join}
-  WHERE l.block_number BETWEEN {from_block} AND {to_block}
-    AND lower(l.address) = {address}
-    AND lower(l.topics[1]) IN ({topics})
-  UNION ALL
-  SELECT
-    l.block_number,
-    l.block_hash,
-    l.transaction_hash,
-    l.log_index,
-    l.address,
-    {action} AS action_delta
-  FROM {network}.encoded_logs l
-  JOIN active_transactions t
-    ON {active_transaction_log_join}
-  WHERE l.block_number BETWEEN {from_block} AND {to_block}
-    AND lower(l.address) = {address}
-    AND lower(l.topics[1]) IN ({topics})
-),
-active_rows AS (
-  SELECT
-    block_number,
-    block_hash,
-    transaction_hash,
-    log_index,
-    address
-  FROM selected_rows
-  GROUP BY block_number, block_hash, transaction_hash, log_index, address
-  HAVING sum(action_delta) > 0
-)
-SELECT
-  intDiv(toInt64(block_number) - {from_block}, {bucket_blocks}) AS bucket,
-  count(*) AS selected_log_count,
-  groupBitXor(reinterpretAsUInt64(reverse(substring(
-    MD5(concat(lower(block_hash), lower(transaction_hash), toString(log_index))),
-    1,
-    8
-  )))) AS digest_left,
-  groupBitXor(reinterpretAsUInt64(reverse(substring(
-    MD5(concat(lower(block_hash), lower(transaction_hash), toString(log_index))),
-    9,
-    8
-  )))) AS digest_right
-FROM active_rows
-GROUP BY bucket
-ORDER BY bucket"#,
-        active_transaction_log_join = query::ACTIVE_TRANSACTION_LOG_JOIN,
-    ))
-}
-
-fn stored_log_identity_bucket_from_value(value: Value) -> Result<StoredLogIdentityBucket> {
-    let object = value
-        .as_object()
-        .context("Coinbase SQL stored verification row must be an object")?;
-    Ok(StoredLogIdentityBucket {
-        bucket: json_i64(object.get("bucket"), "bucket")?,
-        selected_log_count: json_i64(object.get("selected_log_count"), "selected_log_count")?,
-        digest_left: json_u64(object.get("digest_left"), "digest_left")?,
-        digest_right: json_u64(object.get("digest_right"), "digest_right")?,
-    })
-}
-
-fn json_i64(value: Option<&Value>, field: &str) -> Result<i64> {
-    match value.context(format!("Coinbase SQL result is missing {field}"))? {
-        Value::Number(value) => value
-            .as_i64()
-            .context(format!("Coinbase SQL field {field} exceeds i64")),
-        Value::String(value) => value
-            .parse::<i64>()
-            .with_context(|| format!("failed to parse Coinbase SQL field {field} value {value}")),
-        value => bail!("Coinbase SQL field {field} must be integer-like, got {value}"),
-    }
-}
-
-fn json_u64(value: Option<&Value>, field: &str) -> Result<u64> {
-    match value.context(format!("Coinbase SQL result is missing {field}"))? {
-        Value::Number(value) => value
-            .as_u64()
-            .context(format!("Coinbase SQL field {field} exceeds u64")),
-        Value::String(value) => value
-            .parse::<u64>()
-            .with_context(|| format!("failed to parse Coinbase SQL field {field} value {value}")),
-        value => bail!("Coinbase SQL field {field} must be unsigned integer-like, got {value}"),
     }
 }
 

@@ -123,7 +123,6 @@ async fn main() -> Result<()> {
 async fn run_healthcheck(args: HealthcheckArgs) -> Result<()> {
     healthcheck::healthcheck(args).await
 }
-
 async fn run_backfill(args: BackfillArgs) -> Result<()> {
     let range = BackfillBlockRange::new(args.from_block, args.to_block)?;
     let manifest_repository = load_manifest_repository(&args.manifests_root)?;
@@ -154,19 +153,20 @@ async fn run_backfill(args: BackfillArgs) -> Result<()> {
     log_watched_chain_plan("backfill", &manifest_runtime_state.watched_chain_plan);
     let provider_registry = args.provider_registry()?;
     let coinbase_sql_config = CoinbaseSqlBackfillConfig {
-        initial_window_blocks: args.coinbase_sql_initial_window_blocks,
-        max_window_blocks: args.coinbase_sql_max_window_blocks,
-        page_limit: args.coinbase_sql_page_limit,
-        sql_char_limit: args.coinbase_sql_query_char_limit,
-        query_timeout_secs: args.coinbase_sql_query_timeout_secs,
-        rate_limit_qps: args.coinbase_sql_rate_limit_qps,
-        validation_mode: args.coinbase_sql_validation_mode,
+        initial_window_blocks: args.coinbase_sql.initial_window_blocks,
+        max_window_blocks: args.coinbase_sql.max_window_blocks,
+        evidence_window_blocks: args.coinbase_sql.evidence_window_blocks,
+        page_limit: args.coinbase_sql.page_limit,
+        sql_char_limit: args.coinbase_sql.query_char_limit,
+        query_timeout_secs: args.coinbase_sql.query_timeout_secs,
+        rate_limit_qps: args.coinbase_sql.rate_limit_qps,
+        validation_mode: args.coinbase_sql.validation_mode,
     };
     coinbase_sql_config.validate()?;
     let coinbase_sql_registry = CoinbaseSqlSourceRegistry::from_entries(
-        &args.coinbase_sql_urls,
-        args.coinbase_sql_api_key_id_env.clone(),
-        args.coinbase_sql_api_key_secret_env.clone(),
+        &args.coinbase_sql.urls,
+        args.coinbase_sql.api_key_id_env.clone(),
+        args.coinbase_sql.api_key_secret_env.clone(),
         coinbase_sql_config.clone(),
     )?;
     provider_registry.ensure_configured_chains_admitted(

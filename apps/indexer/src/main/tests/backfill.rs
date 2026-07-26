@@ -408,7 +408,7 @@ impl backfill::HistoricalBackfillSourceOps for EmptyHistoricalSource {
 impl backfill::StoredLogIdentityEvidenceSource for EmptyHistoricalSource {
     fn fetch_stored_log_identity_evidence<'a>(
         &'a self,
-        _request: backfill::StoredLogIdentityEvidenceRequest,
+        request: backfill::StoredLogIdentityEvidenceRequest,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<Output = Result<backfill::StoredLogIdentityEvidence>>
@@ -426,9 +426,11 @@ impl backfill::StoredLogIdentityEvidenceSource for EmptyHistoricalSource {
                 })
                 .into_iter()
                 .collect();
+            let query_count =
+                usize::try_from(request.range.to_block - request.range.from_block + 1)?;
             Ok(backfill::StoredLogIdentityEvidence {
                 buckets,
-                query_count: 1,
+                query_count,
             })
         })
     }
@@ -461,6 +463,7 @@ fn coverage_recovery_identity_includes_coinbase_provider_and_topic_contract() ->
     let coinbase_config = backfill::CoinbaseSqlBackfillConfig {
         initial_window_blocks: 1_024,
         max_window_blocks: 8_192,
+        evidence_window_blocks: 4_000_000,
         page_limit: 10_000,
         sql_char_limit: 10_000,
         query_timeout_secs: 30,
@@ -999,6 +1002,7 @@ async fn whole_active_compact_source_identity_reuses_legacy_full_backfill_job() 
     let config = backfill::CoinbaseSqlBackfillConfig {
         initial_window_blocks: 8_192,
         max_window_blocks: 16_384,
+        evidence_window_blocks: 4_000_000,
         page_limit: 50_000,
         sql_char_limit: 10_000,
         query_timeout_secs: 30,
@@ -1340,6 +1344,7 @@ fn basenames_registry_coinbase_sql_scan_all_identity_ignores_discovery_expansion
     let config = backfill::CoinbaseSqlBackfillConfig {
         initial_window_blocks: 8_192,
         max_window_blocks: 16_384,
+        evidence_window_blocks: 4_000_000,
         page_limit: 50_000,
         sql_char_limit: 10_000,
         query_timeout_secs: 30,
@@ -5251,7 +5256,7 @@ async fn historical_materialization_skips_code_observations_without_selected_log
 async fn verified_coinbase_true_gap_records_projected_minimum_and_actual_queries() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_backfill_job_tables(database.pool()).await?;
-    let range = BackfillBlockRange::new(42, 42)?;
+    let range = BackfillBlockRange::new(42, 43)?;
     let manifest_id = 9_303;
     let source_plan =
         materialization_pipeline_source_plan(database.pool(), manifest_id, range).await?;
@@ -5279,6 +5284,7 @@ async fn verified_coinbase_true_gap_records_projected_minimum_and_actual_queries
     let coinbase_config = backfill::CoinbaseSqlBackfillConfig {
         initial_window_blocks: 1,
         max_window_blocks: 1,
+        evidence_window_blocks: 1,
         page_limit: 100,
         sql_char_limit: 10_000,
         query_timeout_secs: 30,
@@ -5325,7 +5331,7 @@ async fn verified_coinbase_true_gap_records_projected_minimum_and_actual_queries
     )
     .await?;
 
-    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     assert_eq!(
         sqlx::query_as::<_, (i64, i64, Option<i64>, Option<String>)>(
             r#"
@@ -5342,8 +5348,8 @@ async fn verified_coinbase_true_gap_records_projected_minimum_and_actual_queries
         .fetch_one(database.pool())
         .await?,
         (
-            3,
-            5,
+            6,
+            10,
             Some(0),
             Some("00000000000000000000000000000000".to_owned()),
         )
@@ -5413,7 +5419,7 @@ async fn verified_coinbase_true_gap_records_projected_minimum_and_actual_queries
     .await?;
     assert_eq!(
         resume_calls.load(std::sync::atomic::Ordering::SeqCst),
-        1,
+        2,
         "a checkpoint without a durable stored verification must not bypass provider proof"
     );
     assert_eq!(
@@ -5441,6 +5447,7 @@ async fn verified_coinbase_records_paid_row_queries_before_later_validation_fail
     let coinbase_config = backfill::CoinbaseSqlBackfillConfig {
         initial_window_blocks: 1,
         max_window_blocks: 1,
+        evidence_window_blocks: 4_000_000,
         page_limit: 10_000,
         sql_char_limit: 10_000,
         query_timeout_secs: 30,
@@ -5527,6 +5534,7 @@ async fn run_incrementally_recorded_query_failure(
     let coinbase_config = backfill::CoinbaseSqlBackfillConfig {
         initial_window_blocks: 1,
         max_window_blocks: 1,
+        evidence_window_blocks: 4_000_000,
         page_limit: 100,
         sql_char_limit: 10_000,
         query_timeout_secs: 30,
@@ -5628,6 +5636,7 @@ async fn verified_coinbase_finalization_fence_failure_marks_range_and_job_failed
     let coinbase_config = backfill::CoinbaseSqlBackfillConfig {
         initial_window_blocks: 1,
         max_window_blocks: 1,
+        evidence_window_blocks: 4_000_000,
         page_limit: 100,
         sql_char_limit: 10_000,
         query_timeout_secs: 30,
@@ -5829,6 +5838,7 @@ async fn verified_coinbase_fetches_and_repairs_unknown_local_lineage_bucket() ->
     let coinbase_config = backfill::CoinbaseSqlBackfillConfig {
         initial_window_blocks: 1,
         max_window_blocks: 1,
+        evidence_window_blocks: 4_000_000,
         page_limit: 100,
         sql_char_limit: 10_000,
         query_timeout_secs: 30,
@@ -5943,6 +5953,7 @@ async fn verified_coinbase_removed_transaction_changelog_converges_in_one_eviden
     let coinbase_config = backfill::CoinbaseSqlBackfillConfig {
         initial_window_blocks: 1,
         max_window_blocks: 1,
+        evidence_window_blocks: 4_000_000,
         page_limit: 100,
         sql_char_limit: 10_000,
         query_timeout_secs: 30,
@@ -6176,6 +6187,7 @@ async fn verified_coinbase_reuses_independently_matched_stored_range_without_row
     let coinbase_config = backfill::CoinbaseSqlBackfillConfig {
         initial_window_blocks: 1,
         max_window_blocks: 1,
+        evidence_window_blocks: 4_000_000,
         page_limit: 100,
         sql_char_limit: 10_000,
         query_timeout_secs: 30,
