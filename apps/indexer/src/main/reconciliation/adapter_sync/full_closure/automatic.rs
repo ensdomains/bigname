@@ -23,7 +23,8 @@ use crate::reconciliation::{
 };
 
 use super::{
-    FullClosureCheckpointCompletion, sync_full_closure_with_checkpoint_completion_and_prelude,
+    FullClosureCheckpointCompletion, FullClosureReplayLockWaitHeartbeat,
+    sync_full_closure_with_checkpoint_completion_and_prelude,
 };
 
 #[cfg(test)]
@@ -65,6 +66,7 @@ pub(crate) async fn sync_automatic_two_phase_full_closure_normalized_events(
     stateless_ranges: &[(i64, i64)],
     adapters: &[NormalizedEventReplayAdapter],
     max_raw_logs_per_page: usize,
+    lock_wait_heartbeat: &mut Option<&mut dyn FullClosureReplayLockWaitHeartbeat>,
     stateless_progress: &mut dyn StartupAdapterProgress,
     closure_progress: &mut dyn StartupAdapterProgress,
 ) -> Result<AutomaticTwoPhaseFullClosureSyncResult> {
@@ -91,6 +93,7 @@ pub(crate) async fn sync_automatic_two_phase_full_closure_normalized_events(
         adapters,
         max_raw_logs_per_page,
         FullClosureCheckpointCompletion::Retain,
+        lock_wait_heartbeat,
         &mut Some(closure_progress),
         move || async move {
             let stateless = replay_stateless_normalized_events_for_ranges(

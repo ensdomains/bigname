@@ -4,7 +4,8 @@ use tracing::info;
 
 use super::{CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS, NormalizedReplayHeartbeat};
 use crate::reconciliation::{
-    RawFactNormalizedEventReplayOutcome, active_closure_or_dependency_replay_adapters,
+    FullClosureReplayLockWaitHeartbeat, RawFactNormalizedEventReplayOutcome,
+    active_closure_or_dependency_replay_adapters,
     sync_automatic_two_phase_full_closure_normalized_events, unsupported_closure_replay_adapters,
 };
 
@@ -41,6 +42,11 @@ pub(super) async fn replay_full_closure_or_dependency_normalized_events(
         "two-phase full closure normalized-event replay session started"
     );
 
+    let mut lock_wait_heartbeat_handle = progress.as_deref().cloned();
+    let mut lock_wait_heartbeat: Option<&mut dyn FullClosureReplayLockWaitHeartbeat> =
+        lock_wait_heartbeat_handle
+            .as_mut()
+            .map(|heartbeat| heartbeat as &mut dyn FullClosureReplayLockWaitHeartbeat);
     let mut stateless_progress = progress.as_deref().cloned();
     let mut closure_progress = progress.as_deref().cloned();
     let mut noop_stateless_progress = NoopNormalizedReplayProgress;
@@ -55,6 +61,7 @@ pub(super) async fn replay_full_closure_or_dependency_normalized_events(
         stateless_ranges,
         &adapters,
         max_raw_logs_per_page,
+        &mut lock_wait_heartbeat,
         stateless_progress
             .as_mut()
             .map_or(&mut noop_stateless_progress, |progress| progress),

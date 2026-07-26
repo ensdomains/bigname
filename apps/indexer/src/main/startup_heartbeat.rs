@@ -1,4 +1,4 @@
-use std::{future::Future, sync::Arc};
+use std::{collections::BTreeSet, future::Future, sync::Arc};
 
 use anyhow::Result;
 use sqlx::PgPool;
@@ -7,7 +7,10 @@ use tokio::{
     time::{Duration, Instant},
 };
 
+use crate::reconciliation::FullClosureReplayLockWaitHeartbeat;
+
 const MAX_PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+const FULL_CLOSURE_REPLAY_LOCK_WAIT_PHASE: &str = "full_closure_replay_lock.wait";
 
 #[derive(Clone, Default)]
 pub(crate) struct RequiredSubtaskActivity {
@@ -48,6 +51,7 @@ pub(crate) struct StartupHeartbeat {
     instance_id: String,
     interval: Duration,
     last_recorded_at: Instant,
+    full_closure_replay_lock_waits: BTreeSet<(String, String)>,
     #[cfg(test)]
     adapter_progress_count: usize,
 }
@@ -132,12 +136,73 @@ impl bigname_adapters::StartupAdapterProgress for NormalizedReplayHeartbeat {
     }
 }
 
+impl FullClosureReplayLockWaitHeartbeat for StartupAdapterHeartbeat<'_> {
+    fn begin_wait<'a>(
+        &'a mut self,
+        pool: &'a PgPool,
+        deployment_profile: &'a str,
+        chain: &'a str,
+    ) -> bigname_adapters::StartupAdapterProgressFuture<'a> {
+        Box::pin(self.heartbeat.begin_full_closure_replay_lock_wait(
+            pool,
+            deployment_profile,
+            chain,
+        ))
+    }
+
+    fn finish_wait<'a>(
+        &'a mut self,
+        pool: &'a PgPool,
+        deployment_profile: &'a str,
+        chain: &'a str,
+    ) -> bigname_adapters::StartupAdapterProgressFuture<'a> {
+        Box::pin(self.heartbeat.finish_full_closure_replay_lock_wait(
+            pool,
+            deployment_profile,
+            chain,
+        ))
+    }
+}
+
+impl FullClosureReplayLockWaitHeartbeat for NormalizedReplayHeartbeat {
+    fn begin_wait<'a>(
+        &'a mut self,
+        pool: &'a PgPool,
+        deployment_profile: &'a str,
+        chain: &'a str,
+    ) -> bigname_adapters::StartupAdapterProgressFuture<'a> {
+        Box::pin(async move {
+            self.heartbeat
+                .lock()
+                .await
+                .begin_full_closure_replay_lock_wait(pool, deployment_profile, chain)
+                .await
+        })
+    }
+
+    fn finish_wait<'a>(
+        &'a mut self,
+        pool: &'a PgPool,
+        deployment_profile: &'a str,
+        chain: &'a str,
+    ) -> bigname_adapters::StartupAdapterProgressFuture<'a> {
+        Box::pin(async move {
+            self.heartbeat
+                .lock()
+                .await
+                .finish_full_closure_replay_lock_wait(pool, deployment_profile, chain)
+                .await
+        })
+    }
+}
+
 impl StartupHeartbeat {
     pub(crate) fn new(instance_id: String, interval: Duration) -> Self {
         Self {
             instance_id,
             interval: interval.min(MAX_PROGRESS_HEARTBEAT_INTERVAL),
             last_recorded_at: Instant::now(),
+            full_closure_replay_lock_waits: BTreeSet::new(),
             #[cfg(test)]
             adapter_progress_count: 0,
         }
@@ -168,6 +233,54 @@ impl StartupHeartbeat {
         )
         .await?;
         self.last_recorded_at = Instant::now();
+        Ok(())
+    }
+
+    async fn begin_full_closure_replay_lock_wait(
+        &mut self,
+        pool: &PgPool,
+        deployment_profile: &str,
+        chain: &str,
+    ) -> Result<()> {
+        let wait_identity = (deployment_profile.to_owned(), chain.to_owned());
+        if self.full_closure_replay_lock_waits.contains(&wait_identity) {
+            return Ok(());
+        }
+        if self.full_closure_replay_lock_waits.is_empty() {
+            bigname_storage::begin_service_loop_phase(
+                pool,
+                bigname_storage::INDEXER_SERVICE_NAME,
+                &self.instance_id,
+                FULL_CLOSURE_REPLAY_LOCK_WAIT_PHASE,
+            )
+            .await?;
+            self.last_recorded_at = Instant::now();
+        }
+        self.full_closure_replay_lock_waits.insert(wait_identity);
+        Ok(())
+    }
+
+    async fn finish_full_closure_replay_lock_wait(
+        &mut self,
+        pool: &PgPool,
+        deployment_profile: &str,
+        chain: &str,
+    ) -> Result<()> {
+        let wait_identity = (deployment_profile.to_owned(), chain.to_owned());
+        if !self.full_closure_replay_lock_waits.contains(&wait_identity) {
+            return Ok(());
+        }
+        if self.full_closure_replay_lock_waits.len() == 1 {
+            bigname_storage::finish_service_loop_phase(
+                pool,
+                bigname_storage::INDEXER_SERVICE_NAME,
+                &self.instance_id,
+                FULL_CLOSURE_REPLAY_LOCK_WAIT_PHASE,
+            )
+            .await?;
+            self.last_recorded_at = Instant::now();
+        }
+        self.full_closure_replay_lock_waits.remove(&wait_identity);
         Ok(())
     }
 }

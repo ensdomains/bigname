@@ -503,6 +503,68 @@ async fn healthz_prefers_a_healthy_worker_phase_over_a_newer_stale_replica() -> 
     database.cleanup().await
 }
 
+#[tokio::test]
+async fn healthz_ranks_indexer_phases_with_the_indexer_threshold() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    register_ready_health_loops(&database).await?;
+    bigname_storage::register_service_loop(
+        &database.pool,
+        bigname_storage::INDEXER_SERVICE_NAME,
+        "newer-stale-indexer",
+    )
+    .await?;
+    bigname_storage::begin_service_loop_phase(
+        &database.pool,
+        bigname_storage::INDEXER_SERVICE_NAME,
+        "api-health-indexer",
+        "full_closure_replay_lock.wait",
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE service_loop_heartbeats
+        SET started_at = clock_timestamp() - INTERVAL '3 minutes',
+            heartbeat_at = clock_timestamp() - INTERVAL '2 minutes'
+        WHERE service_name = 'indexer'
+          AND instance_id = 'api-health-indexer'
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE service_loop_heartbeats
+        SET started_at = clock_timestamp() - INTERVAL '2 minutes',
+            heartbeat_at = clock_timestamp() - INTERVAL '1 minute'
+        WHERE service_name = 'indexer'
+          AND instance_id = 'newer-stale-indexer'
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["status"], json!("degraded"));
+    assert_eq!(payload["loops"]["indexer"]["status"], json!("stale"));
+    assert_eq!(payload["loops"]["indexer"]["phase"], Value::Null);
+    assert!(
+        payload["loops"]["indexer"]["heartbeat_age_seconds"]
+            .as_i64()
+            .is_some_and(|age| (60..120).contains(&age))
+    );
+
+    database.cleanup().await
+}
+
 include!("tests/exact_name.rs");
 
 include!("tests/resolution.rs");

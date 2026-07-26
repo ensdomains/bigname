@@ -55,14 +55,18 @@ The indexer and worker healthcheck commands verify that applied database
 migrations exactly match the migration set compiled into the running binary
 and that the checked process instance's main-loop heartbeat is recent. They
 fail closed for missing, failed, checksum-mismatched, or newer unknown
-migrations, for a loop that never registered, and for a loop whose heartbeat
-exceeds the service-specific maximum age. The default maximum is 20 seconds;
+migrations, for a loop that never registered, and for a loop whose process or
+active named-phase heartbeat exceeds the service-specific maximum age. The
+default maximum is 20 seconds;
 set `BIGNAME_INDEXER_HEARTBEAT_MAX_AGE_SECS` and
 `BIGNAME_WORKER_HEARTBEAT_MAX_AGE_SECS` in proportion to custom poll
 intervals. Worker rebuild operations with no safe inner batch boundary use a
 named phase row and the independently tunable
 `BIGNAME_WORKER_REBUILD_PHASE_MAX_AGE_SECS` (default 43,200); set the matching
 API interpretation with `BIGNAME_API_WORKER_REBUILD_PHASE_MAX_AGE_SECS`.
+Indexer [full-closure replay](glossary.md) lock waits use a named phase with the
+ordinary indexer maximum; lock polling and finite-deadline retries do not
+refresh it.
 `docker-compose.server.yml` maps stable per-service instance IDs from
 `BIGNAME_INDEXER_HEARTBEAT_INSTANCE_ID` and
 `BIGNAME_WORKER_HEARTBEAT_INSTANCE_ID`, defaulting to `indexer` and `worker`.
