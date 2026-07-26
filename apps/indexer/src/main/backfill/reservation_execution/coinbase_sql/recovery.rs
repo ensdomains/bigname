@@ -236,6 +236,7 @@ pub(super) async fn run_window(
     Ok(outcome)
 }
 
+#[expect(clippy::too_many_arguments)]
 pub(super) async fn prepare(
     pool: &sqlx::PgPool,
     active_range: &BackfillRange,
@@ -244,6 +245,7 @@ pub(super) async fn prepare(
     source_plan: &WatchedSourceSelectorPlan,
     topic_plan: &BackfillTopicPlan,
     evidence_source: &dyn StoredLogIdentityEvidenceSource,
+    coinbase_config: &CoinbaseSqlBackfillConfig,
 ) -> Result<StoredVerificationPlan> {
     let result: Result<StoredVerificationPlan> = async {
         let plan = run_with_backfill_lease_heartbeat(
@@ -256,7 +258,7 @@ pub(super) async fn prepare(
         record_backfill_job_projected_minimum_provider_queries(
             pool,
             active_range.backfill_job_id,
-            1,
+            coinbase_config.evidence_query_count(config.range)?,
         )
         .await?;
         let evidence = fetch(

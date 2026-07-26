@@ -223,6 +223,7 @@ impl CoinbaseSqlValidationMode {
 
 pub(crate) const DEFAULT_COINBASE_SQL_INITIAL_WINDOW_BLOCKS: i64 = 1_024;
 pub(crate) const DEFAULT_COINBASE_SQL_MAX_WINDOW_BLOCKS: i64 = 8_192;
+pub(crate) const DEFAULT_COINBASE_SQL_EVIDENCE_WINDOW_BLOCKS: i64 = 4_000_000;
 pub(crate) const COINBASE_SQL_RESULT_SET_CAP: usize = 10_000;
 pub(crate) const DEFAULT_COINBASE_SQL_PAGE_LIMIT: usize = COINBASE_SQL_RESULT_SET_CAP;
 pub(crate) const DEFAULT_COINBASE_SQL_QUERY_CHAR_LIMIT: usize = 10_000;
@@ -233,6 +234,7 @@ pub(crate) const DEFAULT_COINBASE_SQL_RATE_LIMIT_QPS: u32 = 5;
 pub(crate) struct CoinbaseSqlBackfillConfig {
     pub(crate) initial_window_blocks: i64,
     pub(crate) max_window_blocks: i64,
+    pub(crate) evidence_window_blocks: i64,
     pub(crate) page_limit: usize,
     pub(crate) sql_char_limit: usize,
     pub(crate) query_timeout_secs: u64,
@@ -261,6 +263,12 @@ impl CoinbaseSqlBackfillConfig {
                 self.max_window_blocks
             );
         }
+        if self.evidence_window_blocks <= 0 {
+            bail!(
+                "Coinbase SQL evidence window blocks must be positive, got {}",
+                self.evidence_window_blocks
+            );
+        }
         if self.page_limit == 0 {
             bail!("Coinbase SQL page limit must be positive");
         }
@@ -279,6 +287,17 @@ impl CoinbaseSqlBackfillConfig {
 
     pub(crate) fn effective_page_limit(&self) -> usize {
         self.page_limit.min(COINBASE_SQL_RESULT_SET_CAP)
+    }
+
+    pub(crate) fn evidence_query_count(&self, range: BackfillBlockRange) -> Result<i64> {
+        if self.evidence_window_blocks <= 0 {
+            bail!("Coinbase SQL evidence window blocks must be positive");
+        }
+        let distance = range
+            .to_block
+            .checked_sub(range.from_block)
+            .context("Coinbase SQL evidence range length overflowed")?;
+        Ok(distance / self.evidence_window_blocks + 1)
     }
 }
 

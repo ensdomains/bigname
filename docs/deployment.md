@@ -938,6 +938,7 @@ promotion, and checkpoint promotion. Operators must still configure
 the same Base chain so the validation provider owns block hashes, headers,
 canonicality evidence, selected-log-emitter code observations, and
 transaction/receipt fills. The Coinbase SQL runner respects
+`BIGNAME_INDEXER_COINBASE_SQL_EVIDENCE_WINDOW_BLOCKS`,
 `BIGNAME_INDEXER_COINBASE_SQL_PAGE_LIMIT`,
 `BIGNAME_INDEXER_COINBASE_SQL_QUERY_CHAR_LIMIT`,
 `BIGNAME_INDEXER_COINBASE_SQL_QUERY_TIMEOUT_SECS`, and
@@ -949,7 +950,12 @@ uses bigname's conservative 10,000-row effective cap because Coinbase's
 currently publish different row/query-length ceilings. If the configured page
 limit is above the effective result cap, pagination and window tuning use the
 cap. The QPS default is a conservative per-process guardrail and remains
-operator-configurable if product limits change. The default validation mode is
+operator-configurable if product limits change. [Stored-history
+verification](glossary.md) evidence aggregation defaults to disjoint
+4,000,000-block sub-windows. A structured
+memory-limit `400 Bad Request` halves the affected sub-window up to four times;
+every failed and replacement query remains visible in job query accounting.
+The default validation mode is
 `full`, so the validation provider fetches the same address/topic log span and
 fails the range if Coinbase SQL omitted or added a selected log identity.
 Coinbase SQL reads decoded event rows and undecoded encoded-log rows; undecoded

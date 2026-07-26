@@ -32,7 +32,7 @@ use crate::{
 
 #[test]
 fn stored_identity_query_returns_bounded_bucket_count_and_digest_evidence() -> Result<()> {
-    let sql = stored_log_identity_evidence_query(&StoredLogIdentityEvidenceRequest {
+    let request = StoredLogIdentityEvidenceRequest {
         chain: "base-mainnet".to_owned(),
         address: "0x1111111111111111111111111111111111111111".to_owned(),
         topic0s: vec![
@@ -40,7 +40,8 @@ fn stored_identity_query_returns_bounded_bucket_count_and_digest_evidence() -> R
         ],
         range: BackfillBlockRange::new(0, 46_954_147)?,
         bucket_blocks: 131_072,
-    })?;
+    };
+    let sql = stored_log_identity_evidence_query(&request, request.range)?;
 
     assert!(sql.contains("GROUP BY bucket"));
     assert!(sql.contains("groupBitXor"));
@@ -63,7 +64,7 @@ fn stored_identity_query_returns_bounded_bucket_count_and_digest_evidence() -> R
 
 #[test]
 fn stored_identity_query_excludes_logs_from_removed_transactions() -> Result<()> {
-    let sql = stored_log_identity_evidence_query(&StoredLogIdentityEvidenceRequest {
+    let request = StoredLogIdentityEvidenceRequest {
         chain: "base-mainnet".to_owned(),
         address: "0x1111111111111111111111111111111111111111".to_owned(),
         topic0s: vec![
@@ -71,7 +72,8 @@ fn stored_identity_query_excludes_logs_from_removed_transactions() -> Result<()>
         ],
         range: BackfillBlockRange::new(10, 20)?,
         bucket_blocks: 131_072,
-    })?;
+    };
+    let sql = stored_log_identity_evidence_query(&request, request.range)?;
 
     assert!(
         sql.contains("WITH active_transactions AS"),
@@ -84,6 +86,25 @@ fn stored_identity_query_excludes_logs_from_removed_transactions() -> Result<()>
     );
     assert!(sql.contains("FROM base.transactions"));
     assert!(sql.contains("WHERE t.action_sum > 0"));
+    Ok(())
+}
+
+#[test]
+fn stored_identity_sub_window_keeps_the_whole_range_bucket_origin() -> Result<()> {
+    let request = StoredLogIdentityEvidenceRequest {
+        chain: "base-mainnet".to_owned(),
+        address: "0x1111111111111111111111111111111111111111".to_owned(),
+        topic0s: vec![
+            "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
+        ],
+        range: BackfillBlockRange::new(10, 30)?,
+        bucket_blocks: 8,
+    };
+
+    let sql = stored_log_identity_evidence_query(&request, BackfillBlockRange::new(15, 20)?)?;
+
+    assert!(sql.contains("l.block_number BETWEEN 15 AND 20"));
+    assert!(sql.contains("intDiv(toInt64(block_number) - 10, 8) AS bucket"));
     Ok(())
 }
 
@@ -134,6 +155,7 @@ fn coinbase_sql_test_config(
     CoinbaseSqlBackfillConfig {
         initial_window_blocks: 8_192,
         max_window_blocks: 8_192,
+        evidence_window_blocks: 4_000_000,
         page_limit: 50_000,
         sql_char_limit: 10_000,
         query_timeout_secs: 30,

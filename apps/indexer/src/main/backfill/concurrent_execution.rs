@@ -308,6 +308,7 @@ pub(crate) async fn run_resumable_coinbase_sql_backfill_job_concurrently<
         idempotency_key = %config.idempotency_key,
         coinbase_sql_initial_window_blocks = coinbase_config.initial_window_blocks,
         coinbase_sql_max_window_blocks = coinbase_config.max_window_blocks,
+        coinbase_sql_evidence_window_blocks = coinbase_config.evidence_window_blocks,
         coinbase_sql_page_limit = coinbase_config.page_limit,
         coinbase_sql_effective_page_limit = coinbase_config.effective_page_limit(),
         coinbase_sql_query_char_limit = coinbase_config.sql_char_limit,

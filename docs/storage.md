@@ -779,11 +779,14 @@ authority by completing generation-scoped historical backfill; a retained
 suffix without independent completeness evidence still fails closed.
 
 For Coinbase SQL recovery, retained raw logs may replace provider row fetches
-only after an independent aggregate query over the exact address, manifest
+only after independent aggregate queries over the exact address, manifest
 topic set, and job window. The indexer divides the window into 131,072-block
 buckets and computes the selected canonical raw-log count plus a 128-bit
 identity fingerprint from the multiset of `(block_hash, transaction_hash,
-log_index)` identities. Coinbase SQL computes the same bounded evidence.
+log_index)` identities. Coinbase SQL computes the same bounded evidence through
+disjoint block sub-ranges whose bucket numbering remains anchored to the job
+start. Counts add and fingerprint halves XOR when a bucket crosses a sub-range,
+so the composed evidence equals one whole-window aggregate.
 Equality proves identity-set equality only; it does not prove that every stored
 payload field is correct. A bucket is reusable only when count and fingerprint
 match and every selected local log has readable canonical lineage. This permits
@@ -853,14 +856,15 @@ topic-less source family is recorded terminal with cause
 catch-up failure record names completed, attempted, failed, retry-delayed,
 terminal, and prepared-but-unattempted jobs in that iteration so operators can
 distinguish bounded recovery progress from a replay loop that created no work.
-Coinbase SQL recovery persists a pre-fetch lower bound
-containing one initial aggregate verification query, one row query per
-configured initial block window containing a true gap, and one final aggregate
-verification query when any gap exists. Actuals include retries plus
-pagination and query-size filter-pack splits. Each returned query's attempts
-are recorded before subsequent validation and materialization so a later
-failure preserves the paid-work count. Provider row gaps retain the existing
-window, page, query-size, timeout, and rate limits.
+Coinbase SQL recovery persists a pre-fetch lower bound containing one initial
+aggregate query per configured evidence sub-window, one row query per
+configured initial block window containing a true gap, and the same aggregate
+sub-window count for final verification when any gap exists. Actuals include
+memory-limit halving attempts, retries, pagination, and query-size filter-pack
+splits. Each returned query's attempts are recorded before subsequent
+validation and materialization so a later failure preserves the paid-work
+count. Provider row gaps retain the existing window, page, query-size, timeout,
+and rate limits.
 
 Stored-lineage promotion ([checkpoint promotion](glossary.md); "promotion"
 unqualified in this section always means the checkpoint sense, never capability

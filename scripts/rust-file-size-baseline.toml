@@ -27,8 +27,8 @@ justification = "The remaining file owns the existing Coinbase SQL reservation l
 
 [[files]]
 path = "apps/indexer/src/main/cli.rs"
-loc = 659
-justification = "The indexer run command now accepts the existing Coinbase SQL connection and window controls needed by automatic recovery; command parsing remains centralized here."
+loc = 607
+justification = "Indexer runtime and manual backfill share the Coinbase SQL connection and window controls; command parsing remains centralized here."
 
 [[files]]
 path = "apps/indexer/src/main/normalized_replay_catchup.rs"

@@ -68,6 +68,7 @@ fn coinbase_sql_config_with_max(max_window_blocks: i64) -> CoinbaseSqlBackfillCo
     CoinbaseSqlBackfillConfig {
         initial_window_blocks: 8_192,
         max_window_blocks,
+        evidence_window_blocks: 4_000_000,
         page_limit: 50_000,
         sql_char_limit: 10_000,
         query_timeout_secs: 30,
@@ -148,6 +149,18 @@ fn sparse_coinbase_sql_window_growth_stays_below_practical_query_memory_ceiling(
         next_coinbase_sql_window_blocks(65_536, &config, 500),
         MAX_COINBASE_SQL_PRACTICAL_WINDOW_BLOCKS
     );
+}
+
+#[test]
+fn evidence_query_projection_counts_each_static_sub_window() -> Result<()> {
+    let mut config = coinbase_sql_config_with_max(8_192);
+    config.evidence_window_blocks = 4_000_000;
+
+    assert_eq!(
+        config.evidence_query_count(BackfillBlockRange::new(0, 46_954_147)?)?,
+        12
+    );
+    Ok(())
 }
 
 #[test]
