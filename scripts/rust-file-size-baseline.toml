@@ -23,17 +23,17 @@ justification = "Phase 7 allowlist for an oversized production file; future chan
 [[files]]
 path = "apps/indexer/src/main/backfill/reservation_execution/coinbase_sql.rs"
 loc = 677
-justification = "The remaining file owns the existing Coinbase SQL reservation lifecycle; window execution and coverage-recovery evidence were split into a dedicated submodule."
+justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]
 path = "apps/indexer/src/main/cli.rs"
 loc = 607
-justification = "Indexer runtime and manual backfill share the Coinbase SQL connection and window controls; command parsing remains centralized here."
+justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]
 path = "apps/indexer/src/main/normalized_replay_catchup.rs"
-loc = 639
-justification = "The catch-up loop now carries provider-specific recovery configuration and a typed full-closure coverage failure while retaining its existing cursor and heartbeat lifecycle."
+loc = 611
+justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]
 path = "crates/adapters/src/ens_v1_unwrapped_authority/loading/active_emitters.rs"
