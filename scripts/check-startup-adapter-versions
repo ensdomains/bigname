@@ -56,6 +56,8 @@ PRODUCER_PATHS: dict[str, tuple[str, ...]] = {
     "BLOCK_DERIVED_NORMALIZED_EVENTS_STARTUP_VERSION": (
         "crates/adapters/src/block_derived_normalized_events.rs",
         "crates/adapters/src/block_derived_normalized_events/",
+        "apps/indexer/src/main/reconciliation/replay/classification/contracts.rs",
+        "apps/indexer/src/main/reconciliation/adapter_sync/stateless.rs",
     ),
 }
 
