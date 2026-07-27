@@ -1,10 +1,10 @@
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use tokio::sync::Mutex;
 
-#[derive(Clone)]
+#[derive(Debug)]
 pub(super) struct CoinbaseSqlRateLimiter {
-    inner: Arc<Mutex<RateLimitState>>,
+    inner: Mutex<RateLimitState>,
     minimum_interval: Duration,
 }
 
@@ -12,7 +12,7 @@ impl CoinbaseSqlRateLimiter {
     pub(super) fn new(qps: u32) -> Self {
         let interval_millis = 1_000_u64 / u64::from(qps.max(1));
         Self {
-            inner: Arc::new(Mutex::new(RateLimitState::default())),
+            inner: Mutex::new(RateLimitState::default()),
             minimum_interval: Duration::from_millis(interval_millis.max(1)),
         }
     }
@@ -29,7 +29,7 @@ impl CoinbaseSqlRateLimiter {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct RateLimitState {
     next_allowed_at: Option<tokio::time::Instant>,
 }

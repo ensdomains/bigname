@@ -1,6 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    process::Command,
+    sync::Arc,
+};
 
 use anyhow::Result;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bigname_manifests::{
     WatchedBackfillTarget, WatchedChainPlan, WatchedSourceSelectorKind, WatchedSourceSelectorPlan,
 };
@@ -8,7 +13,7 @@ use serde_json::json;
 use sqlx::types::Uuid;
 
 use super::{
-    coinbase_sql_logs_need_validation_provider_payload,
+    CoinbaseSqlSourceRegistry, coinbase_sql_logs_need_validation_provider_payload,
     pagination::{CoinbaseSqlLogCursor, append_page_rows, ensure_full_page_advanced_cursor},
     planner::build_filter_packs,
     push_deduped_log,
@@ -162,6 +167,52 @@ fn coinbase_sql_test_config(
         rate_limit_qps: 5,
         validation_mode,
     }
+}
+
+#[test]
+fn clients_from_one_registry_share_rate_limiter_across_chains() -> Result<()> {
+    const CHILD_MARKER: &str = "BIGNAME_TEST_COINBASE_SQL_SHARED_LIMITER_CHILD";
+    const KEY_ID_ENV: &str = "BIGNAME_TEST_COINBASE_SQL_SHARED_LIMITER_KEY_ID";
+    const KEY_SECRET_ENV: &str = "BIGNAME_TEST_COINBASE_SQL_SHARED_LIMITER_KEY_SECRET";
+
+    if std::env::var_os(CHILD_MARKER).is_none() {
+        // Supply credentials at process creation instead of mutating the
+        // multi-threaded test process environment.
+        let output = Command::new(std::env::current_exe()?)
+            .arg("clients_from_one_registry_share_rate_limiter_across_chains")
+            .arg("--nocapture")
+            .env(CHILD_MARKER, "1")
+            .env(KEY_ID_ENV, "test-key")
+            .env(KEY_SECRET_ENV, STANDARD.encode([7_u8; 64]))
+            .output()?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "shared limiter child test failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+        return Ok(());
+    }
+
+    let registry = CoinbaseSqlSourceRegistry::from_entries(
+        &["ethereum=default".to_owned(), "base=default".to_owned()],
+        KEY_ID_ENV.to_owned(),
+        KEY_SECRET_ENV.to_owned(),
+        coinbase_sql_test_config(CoinbaseSqlValidationMode::Full),
+    )?;
+    let ethereum = registry
+        .source_for("ethereum")?
+        .expect("ethereum source should be configured");
+    let base = registry
+        .source_for("base")?
+        .expect("base source should be configured");
+
+    assert!(Arc::ptr_eq(
+        &ethereum.client.rate_limiter,
+        &base.client.rate_limiter,
+    ));
+    Ok(())
 }
 
 #[test]

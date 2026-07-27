@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result, bail};
 
@@ -48,6 +51,7 @@ pub(crate) struct CoinbaseSqlSourceRegistry {
     api_key_id_env: String,
     api_key_secret_env: String,
     config: CoinbaseSqlBackfillConfig,
+    rate_limiter: Arc<rate_limit::CoinbaseSqlRateLimiter>,
 }
 
 impl CoinbaseSqlSourceRegistry {
@@ -73,6 +77,9 @@ impl CoinbaseSqlSourceRegistry {
             urls_by_chain,
             api_key_id_env,
             api_key_secret_env,
+            rate_limiter: Arc::new(rate_limit::CoinbaseSqlRateLimiter::new(
+                config.rate_limit_qps,
+            )),
             config,
         })
     }
@@ -92,6 +99,7 @@ impl CoinbaseSqlSourceRegistry {
             self.api_key_id_env.clone(),
             self.api_key_secret_env.clone(),
             self.config.clone(),
+            Arc::clone(&self.rate_limiter),
         )
         .map(Some)
     }
@@ -128,6 +136,7 @@ impl CoinbaseSqlBackfillSource {
         api_key_id_env: String,
         api_key_secret_env: String,
         config: CoinbaseSqlBackfillConfig,
+        rate_limiter: Arc<rate_limit::CoinbaseSqlRateLimiter>,
     ) -> Result<Self> {
         config.validate()?;
         let url = if url == "default" {
@@ -135,8 +144,13 @@ impl CoinbaseSqlBackfillSource {
         } else {
             url
         };
-        let client =
-            client::CoinbaseSqlClient::new(&url, &api_key_id_env, &api_key_secret_env, &config)?;
+        let client = client::CoinbaseSqlClient::new(
+            &url,
+            &api_key_id_env,
+            &api_key_secret_env,
+            &config,
+            rate_limiter,
+        )?;
         Ok(Self {
             chain,
             config,
