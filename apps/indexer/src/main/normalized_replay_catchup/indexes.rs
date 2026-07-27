@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use bigname_storage::{
     DEFERRED_NORMALIZED_EVENT_INDEXES, NormalizedReplayIndexDdlGuard,
@@ -5,6 +7,7 @@ use bigname_storage::{
     count_unready_normalized_event_indexes,
 };
 use sqlx::{PgConnection, PgPool};
+use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use tracing::info;
 
 use crate::reconciliation::guard_release::prioritize_operation_error;
@@ -21,14 +24,31 @@ const CURRENT_PROJECTION_TABLES: &[&str] = &[
     "resolver_current",
 ];
 
+#[derive(Clone, Default)]
+pub(crate) struct ProjectionIndexCoordination {
+    mode: Arc<RwLock<()>>,
+}
+
+impl ProjectionIndexCoordination {
+    async fn restored_session(&self) -> OwnedRwLockReadGuard<()> {
+        Arc::clone(&self.mode).read_owned().await
+    }
+
+    async fn deferral(&self) -> OwnedRwLockWriteGuard<()> {
+        Arc::clone(&self.mode).write_owned().await
+    }
+}
+
 pub(super) async fn prepare_deferred_projection_indexes_for_fresh_replay(
     pool: &PgPool,
     cursor: &NormalizedReplayCursor,
+    coordination: &ProjectionIndexCoordination,
 ) -> Result<()> {
     if cursor.next_block_number > cursor.target_block_number {
         return Ok(());
     }
 
+    let _deferral = coordination.deferral().await;
     let mut ddl_guard = acquire_normalized_replay_index_ddl_guard(pool).await?;
     let preparation = async {
         let already_deferred = ddl_guard
@@ -75,12 +95,14 @@ pub(super) async fn ensure_projection_indexes_after_catchup(
     pool: &PgPool,
     deployment_profile: &str,
     chains: &[String],
+    coordination: &ProjectionIndexCoordination,
 ) -> Result<()> {
     if chains.is_empty()
         || !all_configured_cursors_complete(pool, deployment_profile, chains).await?
     {
         return Ok(());
     }
+    let _restored_session = coordination.restored_session().await;
     if !projection_indexes_need_restore(pool).await? {
         return Ok(());
     }
@@ -111,9 +133,11 @@ pub(super) async fn restore_deferred_projection_indexes(
     pool: &PgPool,
     deployment_profile: &str,
     chains: &[String],
-) -> Result<()> {
+    coordination: &ProjectionIndexCoordination,
+) -> Result<OwnedRwLockReadGuard<()>> {
+    let restored_session = coordination.restored_session().await;
     if !projection_indexes_need_restore(pool).await? {
-        return Ok(());
+        return Ok(restored_session);
     }
 
     info!(
@@ -135,7 +159,7 @@ pub(super) async fn restore_deferred_projection_indexes(
         chain_count = chains.len(),
         "deferred normalized replay projection indexes are ready"
     );
-    Ok(())
+    Ok(restored_session)
 }
 
 async fn ensure_deferred_projection_indexes_ready(
@@ -226,7 +250,10 @@ async fn current_projection_tables_empty(connection: &mut PgConnection) -> Resul
 // These focused index-readiness tests stay beside the helper they exercise.
 #[expect(clippy::items_after_test_module)]
 mod tests {
+    use std::time::Duration;
+
     use sqlx::types::time::OffsetDateTime;
+    use tokio::time::timeout;
 
     use super::*;
 
@@ -262,6 +289,57 @@ mod tests {
             false,
             true
         ));
+    }
+
+    #[tokio::test]
+    async fn restored_index_session_blocks_deferral_until_the_session_finishes() {
+        let coordination = ProjectionIndexCoordination::default();
+        let restored_session = coordination.restored_session().await;
+        let waiting_coordination = coordination.clone();
+        let deferral = tokio::spawn(async move { waiting_coordination.deferral().await });
+
+        assert!(
+            timeout(Duration::from_millis(50), async {
+                while !deferral.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_err(),
+            "projection-index deferral must wait for a closure replay session"
+        );
+
+        drop(restored_session);
+        timeout(Duration::from_secs(1), deferral)
+            .await
+            .expect("projection-index deferral stayed blocked after closure replay finished")
+            .expect("projection-index deferral task panicked");
+    }
+
+    #[tokio::test]
+    async fn restored_index_session_waits_for_in_progress_deferral_without_deadlock() {
+        let coordination = ProjectionIndexCoordination::default();
+        let deferral = coordination.deferral().await;
+        let waiting_coordination = coordination.clone();
+        let restored_session =
+            tokio::spawn(async move { waiting_coordination.restored_session().await });
+
+        assert!(
+            timeout(Duration::from_millis(50), async {
+                while !restored_session.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_err(),
+            "closure replay must wait while projection-index deferral is in progress"
+        );
+
+        drop(deferral);
+        timeout(Duration::from_secs(1), restored_session)
+            .await
+            .expect("closure replay stayed blocked after projection-index deferral finished")
+            .expect("restored-index session task panicked");
     }
 }
 

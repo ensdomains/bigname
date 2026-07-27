@@ -60,25 +60,36 @@ active named-phase heartbeat exceeds the service-specific maximum age. The
 default maximum is 20 seconds;
 set `BIGNAME_INDEXER_HEARTBEAT_MAX_AGE_SECS` and
 `BIGNAME_WORKER_HEARTBEAT_MAX_AGE_SECS` in proportion to custom poll
-intervals. Once the indexer has live-chain rows, its container check requires
-every row to be within
-`max(BIGNAME_INDEXER_HEARTBEAT_MAX_AGE_SECS, 1800)` seconds instead of applying
-the 20-second process limit. Each replay lane refreshes only its own chain row.
-The 1,800-second floor exceeds the supported maximum no-progress SQL or
-coverage-verification unit; raise the indexer setting when a deployment permits
-a longer unit, and raise `BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS` to
-the same bound for API aggregate health. Worker rebuild operations with no safe
+intervals. Once the indexer has an expected live-chain set, its container check
+requires every expected row to exist and be within
+`BIGNAME_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS` instead of applying the process
+limit. That independent chain threshold defaults to 5,400 seconds (90 minutes).
+It must exceed the longest legitimate atomic statement in a lane iteration:
+live deployment evidence includes [full-closure](glossary.md#closure)
+coverage-violation scans of
+about 37 minutes, with duration growing as the watch plan grows, so the default
+provides roughly 2x margin. Set
+`BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS` to the same value for API
+aggregate health and raise both together when a larger watch plan admits a
+longer atomic unit. Do not raise either process threshold to size lane
+liveness. Each replay lane refreshes only its own chain row after every
+successful iteration, including an idle poll. Worker rebuild operations with no safe
 inner batch boundary use a named phase row and the independently tunable
 `BIGNAME_WORKER_REBUILD_PHASE_MAX_AGE_SECS` (default 43,200); set the matching
 API interpretation with `BIGNAME_API_WORKER_REBUILD_PHASE_MAX_AGE_SECS`.
-Indexer [full-closure replay](glossary.md) lock waits use a named phase with the
+Indexer [full-closure replay](glossary.md#closure) lock waits use a named phase with the
 ordinary indexer maximum; lock polling and finite-deadline retries do not
 refresh it.
 `docker-compose.server.yml` maps stable per-service instance IDs from
 `BIGNAME_INDEXER_HEARTBEAT_INSTANCE_ID` and
 `BIGNAME_WORKER_HEARTBEAT_INSTANCE_ID`, defaulting to `indexer` and `worker`.
-This lets a recreated single-writer service retire unfinished non-process
-heartbeat rows from the prior container during registration.
+An indexer replacement inherits the prior process row's expected chain set,
+preserves a concurrently running peer instance's lane rows, and remains
+unhealthy until it records every inherited lane. Reusing the stable instance
+ID clears that instance's prior-lifetime scopes; registration also prunes
+orphan scopes after their process row is removed. A full parent heartbeat
+replaces the expected set and removes decommissioned chain rows. Worker
+registration retains its single-writer cleanup behavior.
 During rolling upgrades, running `migrate` before recreating old
 service containers can therefore mark those old indexer/worker containers
 unhealthy until they are replaced with the matching image; treat that as
@@ -89,9 +100,9 @@ process and its `SELECT 1` database probe. Its aggregate `status` and `loops`
 object still require recent indexer and worker evidence, using
 `BIGNAME_API_HEARTBEAT_MAX_AGE_SECS` (default 20), so a planned indexer restart
 or long worker phase stays visible without making the API container or public
-edge unhealthy. Indexer chain rows use the greater of that setting and
-`BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS` (default 1,800), and any stale
-chain row degrades the aggregate status. The status routes use the API chain RPC mapping for an
+edge unhealthy. Indexer chain rows use the independent
+`BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS` (default 5,400), and any
+missing or stale expected chain row degrades the aggregate status. The status routes use the API chain RPC mapping for an
 asynchronous cached network-head probe. Tune its provider timeout, refresh
 interval, cache TTL, and ingestion block/time limits with the
 `BIGNAME_API_STATUS_PROVIDER_*` and `BIGNAME_API_STATUS_MAX_*` variables in
@@ -1209,7 +1220,11 @@ time on logging instead of ingest.
 Automatic catch-up runs one independently supervised lane per configured
 chain. A lane that is idle or has recorded an iteration failure sleeps on its
 own poll timer; progress on another chain neither delays that timer nor waits
-behind it. Size the indexer primary pool to
+behind it. A closure/dependency lane holds a shared restored-index permit for
+its whole replay session. Fresh stateless deferral takes the exclusive permit
+before the existing DDL guard and releases it after the index-mode transition;
+this makes a drop wait for closure scans and makes closure wait for an
+in-progress drop without reversing the lock order. Size the indexer primary pool to
 `max(4, 1 + 3 * catch-up chain count)`: one connection is retained by the
 process-wide writer guard, and each concurrent lane can retain a bounded work
 guard while using a nested work connection and a progress or backfill-lease

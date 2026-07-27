@@ -132,6 +132,7 @@ pub(crate) async fn install_stale_indexer_heartbeat(
             scope_id TEXT NOT NULL,
             started_at TIMESTAMPTZ NOT NULL,
             heartbeat_at TIMESTAMPTZ NOT NULL,
+            expected_chain_ids TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
             PRIMARY KEY (service_name, instance_id, scope_kind, scope_id)
         )
         "#,

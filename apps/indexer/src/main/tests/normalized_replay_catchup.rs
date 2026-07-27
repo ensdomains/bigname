@@ -193,6 +193,13 @@ async fn outdated_indexer_exits_on_fatal_replay_fence_when_failure_journaling_fa
     )
     .await?;
     install_stale_indexer_heartbeat(database.pool(), instance_id).await?;
+    bigname_storage::record_service_loop_heartbeat(
+        database.pool(),
+        bigname_storage::INDEXER_SERVICE_NAME,
+        instance_id,
+        &[chain.to_owned()],
+    )
+    .await?;
 
     let mut config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
         "mainnet".to_owned(),
@@ -241,6 +248,7 @@ async fn outdated_indexer_exits_on_fatal_replay_fence_when_failure_journaling_fa
             None,
             Some((coinbase_registry, coinbase_config)),
             HeaderAuditMode::Minimal,
+            normalized_replay_catchup::ProjectionIndexCoordination::default(),
             heartbeat,
             activity,
         ),
@@ -329,6 +337,13 @@ async fn spawned_normalized_replay_beats_on_progress_and_exposes_a_later_wedge()
     )
     .await?;
     install_stale_indexer_heartbeat(database.pool(), instance_id).await?;
+    bigname_storage::record_service_loop_heartbeat(
+        database.pool(),
+        bigname_storage::INDEXER_SERVICE_NAME,
+        instance_id,
+        &[chain.to_owned()],
+    )
+    .await?;
 
     let mut config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
         "mainnet".to_owned(),
@@ -492,6 +507,13 @@ async fn normalized_replay_coverage_recovery_preserves_per_page_heartbeats() -> 
     let (provider, server) = bundle_provider_with_fixtures(fixtures).await?;
     let instance_id = "normalized-replay-coverage-progress-test";
     install_stale_indexer_heartbeat(database.pool(), instance_id).await?;
+    bigname_storage::record_service_loop_heartbeat(
+        database.pool(),
+        bigname_storage::INDEXER_SERVICE_NAME,
+        instance_id,
+        &[chain.to_owned()],
+    )
+    .await?;
     let mut heartbeat = crate::run::startup_heartbeat::NormalizedReplayHeartbeat::new(
         instance_id.to_owned(),
         tokio::time::Duration::ZERO,
@@ -563,6 +585,25 @@ async fn normalized_replay_failure_journal_keeps_child_heartbeat_ownership() -> 
     )
     .await?;
     install_stale_indexer_heartbeat(database.pool(), instance_id).await?;
+    bigname_storage::record_service_loop_heartbeat(
+        database.pool(),
+        bigname_storage::INDEXER_SERVICE_NAME,
+        instance_id,
+        &[chain.to_owned()],
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE service_loop_heartbeats
+        SET started_at = clock_timestamp() - INTERVAL '2 minutes',
+            heartbeat_at = clock_timestamp() - INTERVAL '1 minute'
+        WHERE service_name = 'indexer'
+          AND instance_id = $1
+        "#,
+    )
+    .bind(instance_id)
+    .execute(database.pool())
+    .await?;
     sqlx::query("DROP TABLE raw_logs CASCADE")
         .execute(database.pool())
         .await?;
@@ -1477,8 +1518,7 @@ async fn normalized_replay_catchup_auto_enqueues_stale_topic_coverage_recovery()
 }
 
 #[tokio::test]
-async fn parallel_chain_lanes_advance_while_another_chain_is_wedged_on_coverage_recovery()
--> Result<()> {
+async fn idle_chain_lane_keeps_beating_while_a_peer_is_wedged_on_coverage_recovery() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_normalized_replay_cursor_table(database.pool()).await?;
     let deployment_profile = "mainnet";
@@ -1646,6 +1686,8 @@ async fn parallel_chain_lanes_advance_while_another_chain_is_wedged_on_coverage_
     );
     let coverage_heartbeat = heartbeat.for_chain(coverage_chain)?;
     let advancing_heartbeat = heartbeat.for_chain(advancing_chain)?;
+    let projection_index_coordination =
+        normalized_replay_catchup::ProjectionIndexCoordination::default();
     let activity = crate::run::startup_heartbeat::RequiredSubtaskActivity::default();
 
     let coverage_lane = tokio::spawn(
@@ -1656,6 +1698,7 @@ async fn parallel_chain_lanes_advance_while_another_chain_is_wedged_on_coverage_
             Some(provider::ChainProvider::JsonRpc(coverage_provider)),
             None,
             HeaderAuditMode::Minimal,
+            projection_index_coordination.clone(),
             coverage_heartbeat,
             activity.clone(),
         ),
@@ -1673,8 +1716,8 @@ async fn parallel_chain_lanes_advance_while_another_chain_is_wedged_on_coverage_
     sqlx::query(
         r#"
         UPDATE service_loop_heartbeats
-        SET started_at = clock_timestamp() - INTERVAL '40 minutes',
-            heartbeat_at = clock_timestamp() - INTERVAL '31 minutes'
+        SET started_at = clock_timestamp() - INTERVAL '3 hours',
+            heartbeat_at = clock_timestamp() - INTERVAL '2 hours'
         WHERE service_name = 'indexer'
           AND instance_id = $1
           AND scope_kind = 'chain'
@@ -1719,6 +1762,7 @@ async fn parallel_chain_lanes_advance_while_another_chain_is_wedged_on_coverage_
             None,
             None,
             HeaderAuditMode::Minimal,
+            projection_index_coordination,
             advancing_heartbeat,
             activity,
         ),
@@ -1750,6 +1794,55 @@ async fn parallel_chain_lanes_advance_while_another_chain_is_wedged_on_coverage_
     })
     .await
     .context("advancing chain did not complete two chunks while coverage recovery was wedged")??;
+    let aged_idle_heartbeat = sqlx::query_scalar::<_, sqlx::types::time::OffsetDateTime>(
+        r#"
+        UPDATE service_loop_heartbeats
+        SET started_at = clock_timestamp() - INTERVAL '3 hours',
+            heartbeat_at = clock_timestamp() - INTERVAL '2 hours'
+        WHERE service_name = 'indexer'
+          AND instance_id = $1
+          AND scope_kind = 'chain'
+          AND scope_id = $2
+        RETURNING heartbeat_at
+        "#,
+    )
+    .bind(instance_id)
+    .bind(advancing_chain)
+    .fetch_one(database.pool())
+    .await?;
+    tokio::time::timeout(tokio::time::Duration::from_secs(3), async {
+        loop {
+            let heartbeat_at =
+                sqlx::query_scalar::<_, sqlx::types::time::OffsetDateTime>(
+                    r#"
+                    SELECT heartbeat_at
+                    FROM service_loop_heartbeats
+                    WHERE service_name = 'indexer'
+                      AND instance_id = $1
+                      AND scope_kind = 'chain'
+                      AND scope_id = $2
+                    "#,
+                )
+                .bind(instance_id)
+                .bind(advancing_chain)
+                .fetch_one(database.pool())
+                .await?;
+            if heartbeat_at > aged_idle_heartbeat {
+                return Ok::<_, anyhow::Error>(());
+            }
+            anyhow::ensure!(
+                !advancing_lane.is_finished(),
+                "caught-up chain lane exited before its next idle iteration"
+            );
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("caught-up chain lane did not refresh its row after a successful idle iteration")??;
+    assert!(
+        !coverage_lane.is_finished(),
+        "idle-lane evidence must be recorded while the peer still holds long work"
+    );
     assert_eq!(
         sqlx::query_scalar::<_, sqlx::types::time::OffsetDateTime>(
             r#"

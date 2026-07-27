@@ -327,10 +327,12 @@ pub use service_heartbeats::{
     INDEXER_SERVICE_NAME, ServiceLoopChainHeartbeat, ServiceLoopHeartbeat,
     ServiceLoopPhaseHeartbeat, WORKER_SERVICE_NAME, begin_service_loop_phase,
     deregister_service_loop, ensure_service_loop_heartbeat_recent,
-    ensure_service_loop_heartbeat_recent_with_phase, finish_service_loop_phase,
+    ensure_service_loop_heartbeat_recent_with_phase,
+    ensure_service_loop_heartbeat_recent_with_phase_and_chain, finish_service_loop_phase,
     load_preferred_service_loop_heartbeats,
     load_preferred_service_loop_heartbeats_with_indexer_chain_max_age, load_service_loop_heartbeat,
-    record_service_loop_heartbeat, register_service_loop, resolve_service_instance_id,
+    record_service_loop_chain_heartbeat, record_service_loop_heartbeat, register_service_loop,
+    resolve_service_instance_id,
 };
 pub use snapshot_selection::{
     ChainPosition, ChainPositions, SelectedSnapshot, SnapshotAt, SnapshotConsistency,

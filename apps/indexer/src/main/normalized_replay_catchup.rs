@@ -1,26 +1,24 @@
-use std::{
-    collections::BTreeSet,
-    time::{Duration, Instant},
-};
+use std::{collections::BTreeSet, time::Instant};
 
 use crate::{
     backfill::{
         CoinbaseSqlBackfillConfig, CoinbaseSqlSourceRegistry,
         DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
     },
-    provider::{ChainProvider, ChainProviderOps},
+    provider::ChainProviderOps,
     reconciliation::{
         HeaderAuditMode, RawFactNormalizedEventReplayRequest,
         RawFactNormalizedEventReplaySelection, chain_has_closure_or_dependency_replay_adapter,
         replay_raw_fact_normalized_events, replay_raw_fact_normalized_events_with_progress,
         select_log_bounded_replay_to_block,
     },
-    run::startup_heartbeat::{NormalizedReplayHeartbeat, RequiredSubtaskActivity},
+    run::startup_heartbeat::NormalizedReplayHeartbeat,
 };
+#[cfg(test)]
+use crate::{provider::ChainProvider, run::startup_heartbeat::RequiredSubtaskActivity};
 use anyhow::{Result, bail, ensure};
 use sqlx::{PgPool, types::time::OffsetDateTime};
-use tokio::time::sleep;
-use tracing::{info, warn};
+use tracing::info;
 
 #[path = "normalized_replay_catchup/admission.rs"]
 mod admission;
@@ -32,6 +30,8 @@ mod cursors;
 mod execution;
 #[path = "normalized_replay_catchup/indexes.rs"]
 mod indexes;
+#[path = "normalized_replay_catchup/lane.rs"]
+mod lane;
 #[path = "normalized_replay_catchup/sources.rs"]
 mod sources;
 #[cfg(test)]
@@ -54,10 +54,12 @@ use cursors::{advance_cursor, ensure_cursor, rewind_cursor_for_newly_observed_ol
 use execution::{
     record_normalized_replay_progress, replay_full_closure_or_dependency_normalized_events,
 };
+pub(crate) use indexes::ProjectionIndexCoordination;
 use indexes::{
     ensure_projection_indexes_after_catchup, prepare_deferred_projection_indexes_for_fresh_replay,
     restore_deferred_projection_indexes,
 };
+pub(crate) use lane::run_normalized_replay_catchup_chain;
 use sources::load_canonical_raw_log_bounds;
 
 pub(crate) const DEFAULT_NORMALIZED_REPLAY_CATCHUP_CHUNK_BLOCKS: i64 = 262_144;
@@ -265,68 +267,6 @@ impl NormalizedReplayCatchupConfig {
     }
 }
 
-#[expect(clippy::too_many_arguments)]
-pub(crate) async fn run_normalized_replay_catchup_chain(
-    pool: PgPool,
-    config: NormalizedReplayCatchupConfig,
-    chain: String,
-    provider: Option<ChainProvider>,
-    coinbase_sql_recovery: Option<(CoinbaseSqlSourceRegistry, CoinbaseSqlBackfillConfig)>,
-    header_audit_mode: HeaderAuditMode,
-    heartbeat: NormalizedReplayHeartbeat,
-    activity: RequiredSubtaskActivity,
-) -> Result<()> {
-    info!(
-        service = "indexer",
-        command = "run",
-        replay_cursor_kind = CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS,
-        deployment_profile = %config.deployment_profile,
-        chain,
-        chunk_blocks = config.chunk_blocks,
-        max_raw_logs_per_chunk = config.max_raw_logs_per_chunk,
-        poll_interval_secs = config.poll_interval_secs,
-        defer_projection_indexes = config.defer_projection_indexes,
-        "automatic normalized-event replay catch-up chain lane started"
-    );
-
-    loop {
-        let mut progress = heartbeat.clone();
-        let status = admission::run_required_normalized_replay_catchup_iteration(
-            &pool,
-            &config,
-            &chain,
-            provider.as_ref(),
-            coinbase_sql_recovery
-                .as_ref()
-                .map(|(registry, config)| (registry, config)),
-            header_audit_mode,
-            &mut progress,
-            &activity,
-        )
-        .await;
-        let progressed = match status {
-            Ok(CatchupIterationStatus::Progressed) => true,
-            Ok(CatchupIterationStatus::Idle) => false,
-            Err(error) if admission::is_fatal_replay_fence(&error) => return Err(error),
-            Err(error) => {
-                warn!(
-                    service = "indexer",
-                    command = "run",
-                    replay_cursor_kind = CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS,
-                    chain,
-                    error = ?error,
-                    "automatic normalized-event replay catch-up iteration failed"
-                );
-                false
-            }
-        };
-
-        if !progressed {
-            sleep(Duration::from_secs(config.poll_interval_secs)).await;
-        }
-    }
-}
-
 pub(crate) async fn normalized_replay_cursors_complete(
     pool: &PgPool,
     deployment_profile: &str,
@@ -342,6 +282,7 @@ pub(crate) async fn run_normalized_replay_catchup_iteration(
     chain: &str,
 ) -> Result<CatchupIterationStatus> {
     let provider: Option<&ChainProvider> = None;
+    let projection_index_coordination = ProjectionIndexCoordination::default();
     run_normalized_replay_catchup_iteration_with_provider(
         pool,
         config,
@@ -349,6 +290,7 @@ pub(crate) async fn run_normalized_replay_catchup_iteration(
         provider,
         None,
         HeaderAuditMode::Minimal,
+        &projection_index_coordination,
         &mut None,
     )
     .await
@@ -362,6 +304,7 @@ pub(crate) async fn run_normalized_replay_catchup_iteration_with_provider_for_te
     provider: &(impl ChainProviderOps + ?Sized),
     header_audit_mode: HeaderAuditMode,
 ) -> Result<CatchupIterationStatus> {
+    let projection_index_coordination = ProjectionIndexCoordination::default();
     run_normalized_replay_catchup_iteration_with_provider(
         pool,
         config,
@@ -369,6 +312,7 @@ pub(crate) async fn run_normalized_replay_catchup_iteration_with_provider_for_te
         Some(provider),
         None,
         header_audit_mode,
+        &projection_index_coordination,
         &mut None,
     )
     .await
@@ -383,6 +327,7 @@ pub(crate) async fn run_required_normalized_replay_catchup_iteration_for_test(
     activity: &RequiredSubtaskActivity,
 ) -> Result<CatchupIterationStatus> {
     let provider: Option<&ChainProvider> = None;
+    let projection_index_coordination = ProjectionIndexCoordination::default();
     admission::run_required_normalized_replay_catchup_iteration(
         pool,
         config,
@@ -390,12 +335,14 @@ pub(crate) async fn run_required_normalized_replay_catchup_iteration_for_test(
         provider,
         None,
         HeaderAuditMode::Minimal,
+        &projection_index_coordination,
         progress,
         activity,
     )
     .await
 }
 
+#[expect(clippy::too_many_arguments)]
 pub(super) async fn run_normalized_replay_catchup_iteration_with_provider(
     pool: &PgPool,
     config: &NormalizedReplayCatchupConfig,
@@ -403,6 +350,7 @@ pub(super) async fn run_normalized_replay_catchup_iteration_with_provider(
     provider: Option<&(impl ChainProviderOps + ?Sized)>,
     coinbase_sql_recovery: Option<(&CoinbaseSqlSourceRegistry, &CoinbaseSqlBackfillConfig)>,
     header_audit_mode: HeaderAuditMode,
+    projection_index_coordination: &ProjectionIndexCoordination,
     progress: &mut Option<&mut NormalizedReplayHeartbeat>,
 ) -> Result<CatchupIterationStatus> {
     coverage_recovery::sweep_stale_backfill_claims_for_replay(pool, chain).await?;
@@ -423,6 +371,7 @@ pub(super) async fn run_normalized_replay_catchup_iteration_with_provider(
                 pool,
                 &config.deployment_profile,
                 &config.chains,
+                projection_index_coordination,
             )
             .await?;
         }
@@ -483,20 +432,34 @@ pub(super) async fn run_normalized_replay_catchup_iteration_with_provider(
                 pool,
                 &config.deployment_profile,
                 &config.chains,
+                projection_index_coordination,
             )
             .await?;
         }
         return Ok(CatchupIterationStatus::Idle);
     }
 
-    if config.defer_projection_indexes {
-        if closure_or_dependency_replay {
-            restore_deferred_projection_indexes(pool, &config.deployment_profile, &config.chains)
-                .await?;
-        } else {
-            prepare_deferred_projection_indexes_for_fresh_replay(pool, &cursor).await?;
-        }
-    }
+    let _restored_projection_index_session = if !config.defer_projection_indexes {
+        None
+    } else if closure_or_dependency_replay {
+        Some(
+            restore_deferred_projection_indexes(
+                pool,
+                &config.deployment_profile,
+                &config.chains,
+                projection_index_coordination,
+            )
+            .await?,
+        )
+    } else {
+        prepare_deferred_projection_indexes_for_fresh_replay(
+            pool,
+            &cursor,
+            projection_index_coordination,
+        )
+        .await?;
+        None
+    };
     let (from_block, to_block) = if closure_or_dependency_replay {
         (cursor.range_start_block_number, cursor.target_block_number)
     } else {
@@ -580,9 +543,14 @@ pub(super) async fn run_normalized_replay_catchup_iteration_with_provider(
         .await?;
         record_normalized_replay_progress(pool, progress).await?;
     }
-    if config.defer_projection_indexes {
-        ensure_projection_indexes_after_catchup(pool, &config.deployment_profile, &config.chains)
-            .await?;
+    if config.defer_projection_indexes && !closure_or_dependency_replay {
+        ensure_projection_indexes_after_catchup(
+            pool,
+            &config.deployment_profile,
+            &config.chains,
+            projection_index_coordination,
+        )
+        .await?;
     }
 
     info!(

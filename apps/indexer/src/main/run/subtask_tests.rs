@@ -26,6 +26,7 @@ fn healthcheck_args(database: &TestDatabase, instance_id: &str) -> Result<Health
         manifests_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../manifests/mainnet"),
         heartbeat_instance_id: Some(instance_id.to_owned()),
         heartbeat_max_age_secs: 1,
+        chain_heartbeat_max_age_secs: bigname_storage::DEFAULT_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS,
     })
 }
 
@@ -169,8 +170,8 @@ async fn normalized_replay_lane_death_fails_process() -> Result<()> {
     sqlx::query(
         r#"
         UPDATE service_loop_heartbeats
-        SET started_at = clock_timestamp() - INTERVAL '32 minutes',
-            heartbeat_at = clock_timestamp() - INTERVAL '31 minutes'
+        SET started_at = clock_timestamp() - INTERVAL '3 hours',
+            heartbeat_at = clock_timestamp() - INTERVAL '2 hours'
         WHERE service_name = 'indexer'
           AND instance_id = $1
         "#,
@@ -202,6 +203,13 @@ async fn normalized_replay_catchup_wedge_is_not_masked_by_parent_heartbeat() -> 
         database.pool(),
         bigname_storage::INDEXER_SERVICE_NAME,
         instance_id,
+    )
+    .await?;
+    bigname_storage::record_service_loop_heartbeat(
+        database.pool(),
+        bigname_storage::INDEXER_SERVICE_NAME,
+        instance_id,
+        &["ethereum-mainnet".to_owned()],
     )
     .await?;
     sqlx::query(
@@ -304,6 +312,13 @@ async fn normalized_replay_progress_does_not_mask_a_parent_wedge() -> Result<()>
         database.pool(),
         bigname_storage::INDEXER_SERVICE_NAME,
         instance_id,
+    )
+    .await?;
+    bigname_storage::record_service_loop_heartbeat(
+        database.pool(),
+        bigname_storage::INDEXER_SERVICE_NAME,
+        instance_id,
+        &["ethereum-mainnet".to_owned()],
     )
     .await?;
     sqlx::query(

@@ -21,6 +21,7 @@ type ServiceLoopHeartbeatRow = (
     Option<OffsetDateTime>,
     Option<OffsetDateTime>,
     Option<i64>,
+    Option<String>,
 );
 
 pub async fn load_service_loop_heartbeat(
@@ -62,8 +63,23 @@ pub async fn load_service_loop_heartbeat(
                     )))::BIGINT,
                     0
                 )
-            END AS oldest_chain_age_seconds
+            END AS oldest_chain_age_seconds,
+            missing_chain.scope_id AS missing_expected_chain_id
         FROM service_loop_heartbeats AS process
+        LEFT JOIN LATERAL (
+            SELECT CASE
+                WHEN CARDINALITY(process.expected_chain_ids) > 0
+                    THEN process.expected_chain_ids
+                ELSE ARRAY(
+                    SELECT chain.scope_id
+                    FROM service_loop_heartbeats AS chain
+                    WHERE chain.service_name = process.service_name
+                      AND chain.instance_id = process.instance_id
+                      AND chain.scope_kind = 'chain'
+                    ORDER BY chain.scope_id
+                )
+            END AS chain_ids
+        ) AS expected_chains ON TRUE
         LEFT JOIN LATERAL (
             SELECT scope_id, started_at, heartbeat_at
             FROM service_loop_heartbeats
@@ -74,11 +90,26 @@ pub async fn load_service_loop_heartbeat(
             LIMIT 1
         ) AS phase ON TRUE
         LEFT JOIN LATERAL (
+            SELECT expected_chain_id AS scope_id
+            FROM UNNEST(expected_chains.chain_ids) AS expected(expected_chain_id)
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM service_loop_heartbeats AS chain
+                WHERE chain.service_name = process.service_name
+                  AND chain.instance_id = process.instance_id
+                  AND chain.scope_kind = 'chain'
+                  AND chain.scope_id = expected.expected_chain_id
+            )
+            ORDER BY expected_chain_id
+            LIMIT 1
+        ) AS missing_chain ON TRUE
+        LEFT JOIN LATERAL (
             SELECT scope_id, started_at, heartbeat_at
             FROM service_loop_heartbeats
             WHERE service_name = process.service_name
               AND instance_id = process.instance_id
               AND scope_kind = 'chain'
+              AND scope_id = ANY(expected_chains.chain_ids)
             ORDER BY heartbeat_at, scope_id
             LIMIT 1
         ) AS oldest_chain ON TRUE
@@ -107,12 +138,13 @@ pub async fn ensure_service_loop_heartbeat_recent(
     instance_id: &str,
     max_age_seconds: i64,
 ) -> Result<ServiceLoopHeartbeat> {
-    ensure_service_loop_heartbeat_recent_with_phase(
+    ensure_service_loop_heartbeat_recent_with_phase_and_chain(
         pool,
         service_name,
         instance_id,
         max_age_seconds,
         max_age_seconds,
+        DEFAULT_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS,
     )
     .await
 }
@@ -124,11 +156,33 @@ pub async fn ensure_service_loop_heartbeat_recent_with_phase(
     max_age_seconds: i64,
     phase_max_age_seconds: i64,
 ) -> Result<ServiceLoopHeartbeat> {
+    ensure_service_loop_heartbeat_recent_with_phase_and_chain(
+        pool,
+        service_name,
+        instance_id,
+        max_age_seconds,
+        phase_max_age_seconds,
+        DEFAULT_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS,
+    )
+    .await
+}
+
+pub async fn ensure_service_loop_heartbeat_recent_with_phase_and_chain(
+    pool: &PgPool,
+    service_name: &str,
+    instance_id: &str,
+    max_age_seconds: i64,
+    phase_max_age_seconds: i64,
+    indexer_chain_max_age_seconds: i64,
+) -> Result<ServiceLoopHeartbeat> {
     if max_age_seconds <= 0 {
         bail!("heartbeat maximum age must be greater than zero seconds");
     }
     if phase_max_age_seconds <= 0 {
         bail!("heartbeat phase maximum age must be greater than zero seconds");
+    }
+    if indexer_chain_max_age_seconds <= 0 {
+        bail!("indexer chain heartbeat maximum age must be greater than zero seconds");
     }
 
     let heartbeat = load_service_loop_heartbeat(pool, service_name, instance_id)
@@ -138,16 +192,19 @@ pub async fn ensure_service_loop_heartbeat_recent_with_phase(
                 "{service_name} loop heartbeat was not found for instance {instance_id}; the process loop never started"
             )
         })?;
-    if let Some(oldest_chain) = heartbeat.oldest_chain.as_ref() {
-        let chain_max_age_seconds =
-            max_age_seconds.max(DEFAULT_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS);
-        if oldest_chain.age_seconds > chain_max_age_seconds {
-            bail!(
-                "{service_name} loop heartbeat for chain {} on instance {instance_id} is stale ({} seconds old; maximum {chain_max_age_seconds}); the chain lane stopped or wedged",
-                oldest_chain.chain_id,
-                oldest_chain.age_seconds
-            );
-        }
+    if let Some(missing_chain_id) = heartbeat.missing_expected_chain_id.as_ref() {
+        bail!(
+            "{service_name} loop heartbeat for expected chain {missing_chain_id} on instance {instance_id} was not found; the chain lane has not recorded liveness"
+        );
+    }
+    if let Some(oldest_chain) = heartbeat.oldest_chain.as_ref()
+        && oldest_chain.age_seconds > indexer_chain_max_age_seconds
+    {
+        bail!(
+            "{service_name} loop heartbeat for chain {} on instance {instance_id} is stale ({} seconds old; maximum {indexer_chain_max_age_seconds}); the chain lane stopped or wedged",
+            oldest_chain.chain_id,
+            oldest_chain.age_seconds
+        );
     }
     if let Some(phase) = heartbeat.active_phase.as_ref() {
         if phase.age_seconds > phase_max_age_seconds {
@@ -238,8 +295,24 @@ pub async fn load_preferred_service_loop_heartbeats_with_indexer_chain_max_age(
                     )))::BIGINT,
                     0
                 )
-            END AS oldest_chain_age_seconds
+            END AS oldest_chain_age_seconds,
+            missing_chain.scope_id AS missing_expected_chain_id,
+            CARDINALITY(expected_chains.chain_ids) AS expected_chain_count
             FROM service_loop_heartbeats AS process
+            LEFT JOIN LATERAL (
+                SELECT CASE
+                    WHEN CARDINALITY(process.expected_chain_ids) > 0
+                        THEN process.expected_chain_ids
+                    ELSE ARRAY(
+                        SELECT chain.scope_id
+                        FROM service_loop_heartbeats AS chain
+                        WHERE chain.service_name = process.service_name
+                          AND chain.instance_id = process.instance_id
+                          AND chain.scope_kind = 'chain'
+                        ORDER BY chain.scope_id
+                    )
+                END AS chain_ids
+            ) AS expected_chains ON TRUE
             LEFT JOIN LATERAL (
                 SELECT scope_id, started_at, heartbeat_at
                 FROM service_loop_heartbeats
@@ -250,11 +323,26 @@ pub async fn load_preferred_service_loop_heartbeats_with_indexer_chain_max_age(
                 LIMIT 1
             ) AS phase ON TRUE
             LEFT JOIN LATERAL (
+                SELECT expected_chain_id AS scope_id
+                FROM UNNEST(expected_chains.chain_ids) AS expected(expected_chain_id)
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM service_loop_heartbeats AS chain
+                    WHERE chain.service_name = process.service_name
+                      AND chain.instance_id = process.instance_id
+                      AND chain.scope_kind = 'chain'
+                      AND chain.scope_id = expected.expected_chain_id
+                )
+                ORDER BY expected_chain_id
+                LIMIT 1
+            ) AS missing_chain ON TRUE
+            LEFT JOIN LATERAL (
                 SELECT scope_id, started_at, heartbeat_at
                 FROM service_loop_heartbeats
                 WHERE service_name = process.service_name
                   AND instance_id = process.instance_id
                   AND scope_kind = 'chain'
+                  AND scope_id = ANY(expected_chains.chain_ids)
                 ORDER BY heartbeat_at, scope_id
                 LIMIT 1
             ) AS oldest_chain ON TRUE
@@ -270,8 +358,10 @@ pub async fn load_preferred_service_loop_heartbeats_with_indexer_chain_max_age(
                     ORDER BY
                         CASE
                             WHEN service_name = 'indexer'
-                                 AND oldest_chain_heartbeat_at IS NOT NULL
-                                THEN oldest_chain_age_seconds <= GREATEST($4, $6)
+                                 AND expected_chain_count > 0
+                                THEN missing_expected_chain_id IS NULL
+                                     AND oldest_chain_heartbeat_at IS NOT NULL
+                                     AND oldest_chain_age_seconds <= $6
                                      AND (
                                          phase_heartbeat_at IS NULL
                                          OR phase_age_seconds <= $4
@@ -301,7 +391,8 @@ pub async fn load_preferred_service_loop_heartbeats_with_indexer_chain_max_age(
             oldest_chain_id,
             oldest_chain_started_at,
             oldest_chain_heartbeat_at,
-            oldest_chain_age_seconds
+            oldest_chain_age_seconds,
+            missing_expected_chain_id
         FROM ranked_heartbeats
         WHERE preference = 1
         ORDER BY service_name
@@ -353,5 +444,6 @@ fn heartbeat_from_row(row: ServiceLoopHeartbeatRow) -> ServiceLoopHeartbeat {
         age_seconds: row.4,
         active_phase,
         oldest_chain,
+        missing_expected_chain_id: row.13,
     }
 }

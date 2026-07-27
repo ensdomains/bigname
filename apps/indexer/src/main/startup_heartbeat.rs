@@ -123,7 +123,12 @@ impl bigname_adapters::StartupAdapterProgress for NormalizedReplayHeartbeat {
             if last_recorded_at.elapsed() < self.interval {
                 return Ok(());
             }
-            heartbeat.record(pool, &self.chain_ids).await?;
+            let [chain_id] = self.chain_ids.as_slice() else {
+                anyhow::bail!(
+                    "normalized replay heartbeat must be scoped to exactly one chain before recording progress"
+                );
+            };
+            heartbeat.record_chain(pool, chain_id).await?;
             *last_recorded_at = Instant::now();
             Ok(())
         })
@@ -226,6 +231,13 @@ impl StartupHeartbeat {
             chain_ids,
         )
         .await?;
+        self.last_recorded_at = Instant::now();
+        Ok(())
+    }
+
+    async fn record_chain(&mut self, pool: &PgPool, chain_id: &str) -> Result<()> {
+        bigname_storage::record_service_loop_chain_heartbeat(pool, &self.instance_id, chain_id)
+            .await?;
         self.last_recorded_at = Instant::now();
         Ok(())
     }
