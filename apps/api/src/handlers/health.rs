@@ -45,7 +45,10 @@ pub(super) async fn health(
                 check: "select_1",
                 error: None,
             };
-            match bigname_storage::load_preferred_service_loop_heartbeats(
+            let indexer_chain_max_age_secs = state
+                .heartbeat_max_age_secs
+                .max(state.indexer_chain_heartbeat_max_age_secs);
+            match bigname_storage::load_preferred_service_loop_heartbeats_with_indexer_chain_max_age(
                 &health_pool.0,
                 &[
                     bigname_storage::INDEXER_SERVICE_NAME,
@@ -53,6 +56,7 @@ pub(super) async fn health(
                 ],
                 state.heartbeat_max_age_secs,
                 state.worker_rebuild_phase_max_age_secs,
+                indexer_chain_max_age_secs,
             )
             .await
             {
@@ -63,6 +67,7 @@ pub(super) async fn health(
                         }),
                         state.heartbeat_max_age_secs,
                         state.heartbeat_max_age_secs,
+                        Some(indexer_chain_max_age_secs),
                     );
                     let worker = loop_health_response(
                         heartbeats.iter().find(|heartbeat| {
@@ -70,6 +75,7 @@ pub(super) async fn health(
                         }),
                         state.heartbeat_max_age_secs,
                         state.worker_rebuild_phase_max_age_secs,
+                        None,
                     );
                     let loops_ready = indexer.status == "running" && worker.status == "running";
                     (database, HealthLoopsResponse { indexer, worker }, loops_ready)
@@ -135,6 +141,7 @@ fn loop_health_response(
     heartbeat: Option<&bigname_storage::ServiceLoopHeartbeat>,
     max_age_seconds: i64,
     phase_max_age_seconds: i64,
+    chain_max_age_seconds: Option<i64>,
 ) -> HealthLoopResponse {
     let Some(heartbeat) = heartbeat else {
         return HealthLoopResponse {
@@ -146,6 +153,19 @@ fn loop_health_response(
             max_age_seconds,
         };
     };
+    if let (Some(chain), Some(chain_max_age_seconds)) =
+        (heartbeat.oldest_chain.as_ref(), chain_max_age_seconds)
+        && chain.age_seconds > chain_max_age_seconds
+    {
+        return HealthLoopResponse {
+            status: "stale",
+            phase: None,
+            started_at: Some(format_timestamp(chain.started_at)),
+            heartbeat_at: Some(format_timestamp(chain.heartbeat_at)),
+            heartbeat_age_seconds: Some(chain.age_seconds),
+            max_age_seconds: chain_max_age_seconds,
+        };
+    }
     if let Some(phase) = heartbeat.active_phase.as_ref() {
         return HealthLoopResponse {
             status: if phase.age_seconds <= phase_max_age_seconds {
@@ -158,6 +178,18 @@ fn loop_health_response(
             heartbeat_at: Some(format_timestamp(phase.heartbeat_at)),
             heartbeat_age_seconds: Some(phase.age_seconds),
             max_age_seconds: phase_max_age_seconds,
+        };
+    }
+    if let (Some(chain), Some(chain_max_age_seconds)) =
+        (heartbeat.oldest_chain.as_ref(), chain_max_age_seconds)
+    {
+        return HealthLoopResponse {
+            status: "running",
+            phase: None,
+            started_at: Some(format_timestamp(chain.started_at)),
+            heartbeat_at: Some(format_timestamp(chain.heartbeat_at)),
+            heartbeat_age_seconds: Some(chain.age_seconds),
+            max_age_seconds: chain_max_age_seconds,
         };
     }
     HealthLoopResponse {

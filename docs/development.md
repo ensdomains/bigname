@@ -174,10 +174,13 @@ indexer/worker main-loop liveness:
   `api_status=ready` and aggregate `status=degraded`. This keeps API container
   and public-edge readiness local to the serving process and database while
   retaining the indexer/worker failure in the payload. A missing row is
-  `not_started`; a row older than
-  `BIGNAME_API_HEARTBEAT_MAX_AGE_SECS` is `stale`. The default maximum age is
-  20 seconds, four times the default five-second indexer and worker loop
-  intervals.
+  `not_started`; a process row older than
+  `BIGNAME_API_HEARTBEAT_MAX_AGE_SECS` is `stale`. The default process maximum
+  is 20 seconds, four times the default five-second indexer and worker loop
+  intervals. Once indexer chain rows exist, every row must instead be within
+  `max(BIGNAME_API_HEARTBEAT_MAX_AGE_SECS,
+  BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS)`. The chain setting
+  defaults to 1,800 seconds.
 
 Database reachability is checked with `SELECT 1` through the configured
 PostgreSQL pool. `api_status` is API-local readiness: because the handler is
@@ -187,18 +190,26 @@ service loops and may therefore be `degraded` in an HTTP 200 response.
 The API prefers the retained service instance with a currently healthy normal
 heartbeat or named phase, using the newest stale evidence only when none is
 healthy. Indexer phases use the ordinary indexer heartbeat maximum; worker
-rebuild phases use their separate long-operation maximum. A deployment runs
-one active writer for each service; process
+rebuild phases use their separate long-operation maximum. Indexer instance
+ranking also treats any chain row beyond the API chain maximum as stale. A
+deployment runs one active writer for each service; process
 rows retained across a restart make that selection robust during the handoff
 without authorizing concurrent workers. The indexer and worker `healthcheck`
 subcommands instead validate their own `BIGNAME_HEARTBEAT_INSTANCE_ID`,
 including any active named phase. Local binaries fall
 back to `HOSTNAME`; the server compose file pins stable `indexer` and `worker`
 identities so a recreated container refreshes the same process row. The checks
-fail when the row is absent or older than the service-specific
-`BIGNAME_INDEXER_HEARTBEAT_MAX_AGE_SECS` or
-`BIGNAME_WORKER_HEARTBEAT_MAX_AGE_SECS` limit. This distinguishes a loop that
-never registered from one that registered and then stopped advancing. Worker
+fail when the row is absent or older than the service-specific limit. Once
+indexer live-chain rows exist, the indexer check instead requires every chain
+row to be no older than
+`max(BIGNAME_INDEXER_HEARTBEAT_MAX_AGE_SECS, 1800)` seconds; a replay lane
+refreshes only its own chain row. The 1,800-second floor covers the supported
+maximum no-progress SQL or verification unit, and deployments admitting a
+longer unit must raise `BIGNAME_INDEXER_HEARTBEAT_MAX_AGE_SECS` and the API's
+`BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS`.
+`BIGNAME_WORKER_HEARTBEAT_MAX_AGE_SECS` remains the worker process limit. This
+distinguishes a loop that never registered from one that registered and then
+stopped advancing. Worker
 bootstrap replay and projection apply refresh the process row only at actual
 progress boundaries; the indexer registers before startup bootstrap and
 refreshes after completed hash-pinned progress units of at most 32 blocks

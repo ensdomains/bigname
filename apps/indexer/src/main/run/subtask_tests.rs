@@ -169,11 +169,10 @@ async fn normalized_replay_lane_death_fails_process() -> Result<()> {
     sqlx::query(
         r#"
         UPDATE service_loop_heartbeats
-        SET started_at = clock_timestamp() - INTERVAL '3 seconds',
-            heartbeat_at = clock_timestamp() - INTERVAL '2 seconds'
+        SET started_at = clock_timestamp() - INTERVAL '32 minutes',
+            heartbeat_at = clock_timestamp() - INTERVAL '31 minutes'
         WHERE service_name = 'indexer'
           AND instance_id = $1
-          AND scope_kind = 'process'
         "#,
     )
     .bind(instance_id)
@@ -181,7 +180,7 @@ async fn normalized_replay_lane_death_fails_process() -> Result<()> {
     .await?;
     let health_error = healthcheck::healthcheck(healthcheck_args(&database, instance_id)?)
         .await
-        .expect_err("stopped indexer heartbeat must become unhealthy");
+        .expect_err("stopped indexer chain heartbeat must become unhealthy");
     assert!(
         health_error.to_string().contains("stopped or wedged"),
         "unexpected indexer health error: {health_error:#}"

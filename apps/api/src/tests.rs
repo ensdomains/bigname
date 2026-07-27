@@ -275,6 +275,69 @@ async fn healthz_distinguishes_not_started_and_stale_service_loops() -> Result<(
 }
 
 #[tokio::test]
+async fn healthz_reports_a_stale_indexer_chain_while_its_peer_advances() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    register_ready_health_loops(&database).await?;
+    let wedged_chain = "ethereum-mainnet";
+    let peer_chain = "base-mainnet";
+    bigname_storage::record_service_loop_heartbeat(
+        &database.pool,
+        bigname_storage::INDEXER_SERVICE_NAME,
+        "api-health-indexer",
+        &[wedged_chain.to_owned(), peer_chain.to_owned()],
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE service_loop_heartbeats
+        SET started_at = clock_timestamp() - INTERVAL '40 minutes',
+            heartbeat_at = clock_timestamp() - INTERVAL '31 minutes'
+        WHERE service_name = 'indexer'
+          AND instance_id = 'api-health-indexer'
+          AND scope_kind = 'chain'
+          AND scope_id = $1
+        "#,
+    )
+    .bind(wedged_chain)
+    .execute(&database.pool)
+    .await?;
+    bigname_storage::record_service_loop_heartbeat(
+        &database.pool,
+        bigname_storage::INDEXER_SERVICE_NAME,
+        "api-health-indexer",
+        &[peer_chain.to_owned()],
+    )
+    .await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["status"], json!("degraded"));
+    assert_eq!(payload["api_status"], json!("ready"));
+    assert_eq!(payload["loops"]["indexer"]["status"], json!("stale"));
+    assert_eq!(payload["loops"]["indexer"]["phase"], Value::Null);
+    assert_eq!(
+        payload["loops"]["indexer"]["max_age_seconds"],
+        json!(bigname_storage::DEFAULT_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS)
+    );
+    assert!(
+        payload["loops"]["indexer"]["heartbeat_age_seconds"]
+            .as_i64()
+            .is_some_and(|age| age >= 31 * 60)
+    );
+    assert_eq!(payload["loops"]["worker"]["status"], json!("running"));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn api_pool_applies_statement_timeout_to_every_connection() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let pool = bigname_storage::connect_with_application_name_and_statement_timeout(

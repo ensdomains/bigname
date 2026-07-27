@@ -529,15 +529,21 @@ non-startup backfills. The worker
 advances the process row after bounded
 [projection](glossary.md) rebuild batches and projection-apply units. This
 keeps long, actively progressing work live without using a detached timer that
-could mask a stuck operation. A missing
-process-scoped row therefore means that instance's loop never registered or
-gracefully deregistered, while a present row older than the configured maximum
-age means the loop stopped or wedged after starting. For each service, the API
+could mask a stuck operation. A missing process-scoped row therefore means that
+instance's loop never registered or gracefully deregistered. Before the
+indexer's live-chain rows exist, a process row older than the configured
+maximum means the loop stopped or wedged after starting. Once those chain rows
+exist, the indexer container healthcheck uses the per-chain contract described
+below. For each service, the API
 prefers an instance whose normal heartbeat or active phase is within that
 service's configured age, then falls back to the newest stale evidence when
-none is healthy. Indexer phases use the ordinary indexer maximum; worker
-rebuild phases use their separate long-operation maximum. One live instance
-can therefore satisfy shared readiness
+none is healthy. An indexer candidate with chain rows is healthy only when
+every row is within
+`max(BIGNAME_API_HEARTBEAT_MAX_AGE_SECS,
+BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS)`; the latter defaults to 1,800
+seconds. Indexer phases use the ordinary API indexer maximum; worker rebuild
+phases use their separate long-operation maximum. One live instance can
+therefore satisfy shared readiness
 without being hidden by a newer retained instance that stopped. Each
 container's `healthcheck` subcommand reads its own instance row, so another
 instance cannot hide a stopped process. These rows are mutable operational signals. They are
@@ -550,14 +556,30 @@ gate. For the indexer, the parent poll takes exclusive ownership against the
 complete set of active normalized-event replay chain lanes, while chain lanes
 may hold child ownership concurrently. A parent work unit or required child
 iteration acquires ownership before it starts and releases ownership before an
-idle poll sleep. Only the parent or active child-lane set can advance the row,
-and each can do so only after its own bounded work commits. A wedged child
-therefore cannot be hidden by an otherwise healthy parent, and a progressing
-child cannot hide a wedged parent. Concurrent peer lanes can advance the shared
-process row. Profile-and-chain full-closure lock waits are tracked as separate
-in-process memberships that share one aggregate phase row; its oldest timestamp
-remains until the final unresolved wait acquires ownership. No timer generates
-beats on either operation's behalf.
+idle poll sleep. Parent progress stamps the process row and the complete current
+chain set. Each child-lane progress write stamps the process row and only that
+lane's chain row. Concurrent peer lanes can therefore keep the shared process
+row fresh, but cannot refresh a wedged lane's row. The indexer container
+healthcheck fails when any current chain row exceeds
+`max(BIGNAME_INDEXER_HEARTBEAT_MAX_AGE_SECS, 1800)` seconds; when chain rows
+exist, their all-chains check replaces the process-row age check. The API
+aggregate health evaluation applies the corresponding API threshold above. A
+parent wedge ages every chain row because the parent owns the exclusive
+boundary and new lane iterations cannot start.
+
+Catch-up heartbeats are progress-driven, not timer-driven. The 1,800-second
+chain-row floor is the supported maximum for one legitimate no-progress unit
+and leaves margin for SQL statements that run for more than eight minutes and
+for long coverage-verification segments. A deployment that admits a longer
+single statement or verification segment must raise
+`BIGNAME_INDEXER_HEARTBEAT_MAX_AGE_SECS` above that bound and raise
+`BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS` to keep API aggregate health
+aligned. A lane wedge becomes unhealthy only after this bound; until then it is
+intentionally indistinguishable from a slow atomic unit. Full-closure lock
+waits for each deployment profile and chain are tracked as separate in-process
+memberships that share one aggregate phase row; its oldest timestamp remains
+until the final unresolved wait acquires ownership. No timer generates beats
+on either operation's behalf.
 
 Full worker rebuild heartbeat routes are explicit:
 
@@ -634,9 +656,9 @@ and must be allowed to make the heartbeat stale.
 | indexer resolver-profile convergence | compare and advance the authority journal | newly-covered (#229) | Completed authority-entry, seed-family expansion, staged-diff, mutation, and forced-target pages. |
 | indexer resolver-profile convergence | drain input changes and materialize reconciliation targets | newly-covered (#229) | Each 1,000-input page and each completed target/family page. A progress-enabled drain rejects pools below four connections, reserving capacity for the runtime writer guard, reconciliation guard, bounded authority/event reads, and heartbeat writes. |
 | indexer resolver-profile convergence | replay resolver targets, stage/publish events, and enqueue invalidations | newly-covered (#229) | Completed target/log/state pages, 1,000-row staged-event and invalidation pages, family publication, and acknowledged input pages. |
-| indexer spawned task | wait for full-closure replay ownership | newly-covered (#156) | The first unresolved nonblocking lock attempt starts the aggregate `full_closure_replay_lock.wait` phase; 50-millisecond poll ticks never beat. Profile-and-chain waits remain separate in-process memberships, so another chain cannot clear or refresh the oldest timestamp; the final unresolved acquisition finishes the phase. |
-| indexer spawned task | automatic normalized-event replay catch-up | newly-covered (#229) | One required task per chain independently runs chunks, coverage recovery, failure journaling, and idle/error poll sleeps. Completed stateless replay pages, adapter-internal pages, full-closure adapter boundaries, replay chunks, durable cursor publications, and checkpoint cleanup advance the shared process row. Chain lanes may own work concurrently; parent work takes exclusive activity ownership and therefore cannot mask a lane's wedge. Profile-and-chain full-closure waits share the aggregate phase without interfering with each other's membership, and every lane's exit or panic fails supervision (#242). |
-| indexer spawned task | normalized-replay projection-index preparation and restoration DDL statements | n-a | Each PostgreSQL catalog check and `CREATE INDEX` or `DROP INDEX` statement is atomic at the application boundary, with no safe successful progress callback inside the statement. The replay iteration retains heartbeat ownership, so a slow or stuck statement intentionally ages the process row instead of receiving a synthetic beat. |
+| indexer spawned task | wait for full-closure replay ownership | newly-covered (#156) | The first unresolved nonblocking lock attempt starts the aggregate `full_closure_replay_lock.wait` phase; 50-millisecond poll ticks never beat. Waits remain separate for each deployment profile and chain, so another chain cannot clear or refresh the oldest timestamp; the final unresolved acquisition finishes the phase. |
+| indexer spawned task | automatic normalized-event replay catch-up | newly-covered (#229) | One required task per chain independently runs chunks, coverage recovery, failure journaling, and idle/error poll sleeps. Completed stateless replay pages, adapter-internal pages, full-closure adapter boundaries, replay chunks, durable cursor publications, and checkpoint cleanup advance the shared process row plus only that lane's chain row. Chain lanes may own work concurrently; a healthy peer cannot refresh another lane's row, and parent work takes exclusive activity ownership. Full-closure waits for each deployment profile and chain share the aggregate phase without interfering with each other's membership, and every lane's exit or panic fails supervision (#242). |
+| indexer spawned task | normalized-replay projection-index preparation and restoration DDL statements | n-a | Each PostgreSQL catalog check and `CREATE INDEX` or `DROP INDEX` statement is atomic at the application boundary, with no safe successful progress callback inside the statement. The replay iteration retains heartbeat ownership, so a slow or stuck statement intentionally ages its chain row instead of receiving a synthetic beat; a peer may still advance the shared process row and its own chain row. |
 | indexer one-shot modes | manual backfill, replay, rewind, repair, and operational catch-up commands | n-a | These commands do not run inside the registered `indexer run` service loop, so service-loop heartbeat coverage does not describe their completion. Backfill range leases retain their separate ownership heartbeat. |
 
 A named phase is a distinct `scope_kind='phase'` row for a service instance.
