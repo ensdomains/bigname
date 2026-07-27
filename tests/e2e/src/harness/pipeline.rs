@@ -245,9 +245,9 @@ fn pipeline_command(repo_root: &Path, executable: &Path) -> Command {
     command.current_dir(repo_root);
     // E2e corpora are tiny, but every spawned binary defaults to a
     // 10-connection pool; under suite parallelism that exhausts the shared
-    // test postgres (max_connections 100) and surfaces as pool-acquire
-    // timeouts in unrelated tests.
-    command.env("BIGNAME_DATABASE_MAX_CONNECTIONS", "4");
+    // test postgres and surfaces as pool-acquire timeouts in unrelated tests.
+    // Seven is the minimum for the two-chain normalized-replay fixture.
+    command.env("BIGNAME_DATABASE_MAX_CONNECTIONS", "7");
     command
 }
 
@@ -1617,7 +1617,7 @@ mod tests {
                 .get_envs()
                 .find(|(name, _)| *name == OsStr::new("BIGNAME_DATABASE_MAX_CONNECTIONS"))
                 .and_then(|(_, value)| value),
-            Some(OsStr::new("4"))
+            Some(OsStr::new("7"))
         );
     }
 

@@ -11,12 +11,12 @@ type SubtaskFuture = Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>;
 type JoinedSubtask = Pin<Box<dyn Future<Output = SubtaskExit> + Send + 'static>>;
 
 struct SubtaskRegistration {
-    name: &'static str,
+    name: String,
     future: SubtaskFuture,
 }
 
 struct SubtaskExit {
-    name: &'static str,
+    name: String,
     result: std::result::Result<Result<()>, JoinError>,
 }
 
@@ -44,13 +44,14 @@ pub(super) struct SubtaskSpawner {
 }
 
 impl SubtaskSpawner {
-    pub(super) fn spawn<Subtask>(&self, name: &'static str, subtask: Subtask) -> Result<()>
+    pub(super) fn spawn<Subtask>(&self, name: impl Into<String>, subtask: Subtask) -> Result<()>
     where
         Subtask: Future<Output = Result<()>> + Send + 'static,
     {
+        let name = name.into();
         self.registrations
             .send(SubtaskRegistration {
-                name,
+                name: name.clone(),
                 future: Box::pin(subtask),
             })
             .map_err(|_| anyhow!("subtask supervisor stopped before {name} could start"))
@@ -103,7 +104,7 @@ impl SubtaskMonitor {
                 }
                 exit = running.next(), if !running.is_empty() => {
                     let exit = exit.expect("a non-empty subtask set must yield an exit");
-                    let name = exit.name;
+                    let name = exit.name.clone();
                     let error = exit.into_error();
                     tracing::error!(
                         service = self.service,

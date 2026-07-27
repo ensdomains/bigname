@@ -31,10 +31,13 @@ fn healthcheck_args(database: &TestDatabase, instance_id: &str) -> Result<Health
 
 #[test]
 fn indexer_run_rejects_a_pool_without_a_progress_heartbeat_connection() {
-    let error = ensure_indexer_run_pool_capacity(&DatabaseConfig {
-        database_url: None,
-        max_connections: 2,
-    })
+    let error = ensure_indexer_run_pool_capacity(
+        &DatabaseConfig {
+            database_url: None,
+            max_connections: 2,
+        },
+        0,
+    )
     .expect_err("the runtime guard, nested work guards, and progress heartbeat need four slots");
     assert!(
         error
@@ -43,10 +46,13 @@ fn indexer_run_rejects_a_pool_without_a_progress_heartbeat_connection() {
         "unexpected pool-capacity error: {error:#}"
     );
 
-    let error = ensure_indexer_run_pool_capacity(&DatabaseConfig {
-        database_url: None,
-        max_connections: 3,
-    })
+    let error = ensure_indexer_run_pool_capacity(
+        &DatabaseConfig {
+            database_url: None,
+            max_connections: 3,
+        },
+        0,
+    )
     .expect_err("three slots still starve a heartbeat behind two nested work guards");
     assert!(
         error
@@ -55,11 +61,49 @@ fn indexer_run_rejects_a_pool_without_a_progress_heartbeat_connection() {
         "unexpected pool-capacity error: {error:#}"
     );
 
-    ensure_indexer_run_pool_capacity(&DatabaseConfig {
-        database_url: None,
-        max_connections: 4,
-    })
+    ensure_indexer_run_pool_capacity(
+        &DatabaseConfig {
+            database_url: None,
+            max_connections: 4,
+        },
+        0,
+    )
     .expect("four connections cover the runtime guard, nested work guards, and heartbeat");
+}
+
+#[test]
+fn indexer_run_sizes_the_pool_for_parallel_normalized_replay_lanes() {
+    let error = ensure_indexer_run_pool_capacity(
+        &DatabaseConfig {
+            database_url: None,
+            max_connections: 6,
+        },
+        2,
+    )
+    .expect_err("two catch-up lanes require the runtime guard plus six lane connections");
+    assert!(
+        error
+            .to_string()
+            .contains("at least 7 database connections"),
+        "unexpected two-lane pool-capacity error: {error:#}"
+    );
+
+    ensure_indexer_run_pool_capacity(
+        &DatabaseConfig {
+            database_url: None,
+            max_connections: 7,
+        },
+        2,
+    )
+    .expect("seven connections cover the runtime guard and two catch-up lanes");
+    ensure_indexer_run_pool_capacity(
+        &DatabaseConfig {
+            database_url: None,
+            max_connections: 10,
+        },
+        3,
+    )
+    .expect("the documented ten-connection default covers three catch-up lanes");
 }
 
 async fn record_parent_heartbeat(pool: PgPool, instance_id: String) -> Result<()> {
@@ -82,7 +126,7 @@ async fn panic_when_released(release: Arc<Notify>) -> Result<()> {
 }
 
 #[tokio::test]
-async fn normalized_replay_catchup_panic_stops_indexer_liveness() -> Result<()> {
+async fn normalized_replay_lane_death_fails_process() -> Result<()> {
     let database = TestDatabase::create_migrated(
         TestDatabaseConfig::new("bigname_indexer_catchup_supervision_test"),
         &bigname_storage::MIGRATOR,
@@ -99,7 +143,8 @@ async fn normalized_replay_catchup_panic_stops_indexer_liveness() -> Result<()> 
 
     let (subtasks, monitor) = subtask_supervision::channel("indexer");
     let release = Arc::new(Notify::new());
-    spawn_normalized_replay_catchup(&subtasks, panic_when_released(Arc::clone(&release)))?;
+    let chain = "base-mainnet";
+    spawn_normalized_replay_catchup(&subtasks, chain, panic_when_released(Arc::clone(&release)))?;
     let parent = tokio::spawn(monitor.run(record_parent_heartbeat(
         database.pool().clone(),
         instance_id.to_owned(),
@@ -116,7 +161,7 @@ async fn normalized_replay_catchup_panic_stops_indexer_liveness() -> Result<()> 
     assert!(
         error
             .to_string()
-            .contains(NORMALIZED_REPLAY_CATCHUP_SUBTASK)
+            .contains(&format!("{NORMALIZED_REPLAY_CATCHUP_SUBTASK}:{chain}"))
             && error.to_string().contains("panicked"),
         "unexpected supervision error: {error:#}"
     );

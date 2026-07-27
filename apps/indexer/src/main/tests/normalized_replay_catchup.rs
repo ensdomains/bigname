@@ -201,7 +201,6 @@ async fn outdated_indexer_exits_normalized_replay_catchup_on_fatal_replay_fence(
         1,
     )?;
     config.defer_projection_indexes = false;
-    let provider_registry = ProviderRegistry::from_chain_rpc_urls(&[])?;
     let coinbase_config = backfill::CoinbaseSqlBackfillConfig {
         initial_window_blocks: 1,
         max_window_blocks: 1,
@@ -229,11 +228,12 @@ async fn outdated_indexer_exits_normalized_replay_catchup_on_fatal_replay_fence(
 
     let result = tokio::time::timeout(
         tokio::time::Duration::from_secs(10),
-        normalized_replay_catchup::run_normalized_replay_catchup(
+        normalized_replay_catchup::run_normalized_replay_catchup_chain(
             database.pool().clone(),
             config,
-            provider_registry,
-            (coinbase_registry, coinbase_config),
+            chain.to_owned(),
+            None,
+            Some((coinbase_registry, coinbase_config)),
             HeaderAuditMode::Minimal,
             heartbeat,
             activity,
@@ -1446,6 +1446,254 @@ async fn normalized_replay_catchup_auto_enqueues_stale_topic_coverage_recovery()
         "authorized closure must publish normalized output"
     );
 
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn parallel_chain_lanes_advance_while_another_chain_is_wedged_on_coverage_recovery()
+-> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_normalized_replay_cursor_table(database.pool()).await?;
+    let deployment_profile = "mainnet";
+    let coverage_chain = "ethereum-mainnet";
+    let advancing_chain = "base-mainnet";
+    let wrapper_address = "0x0000000000000000000000000000000000000259";
+    let wrapper_contract_instance_id = Uuid::from_u128(0x259);
+    let coverage_block = provider_block(
+        "0x3333333333333333333333333333333333333333333333333333333333333333",
+        Some("0x3232323232323232323232323232323232323232323232323232323232323232"),
+        33,
+    );
+    insert_active_replay_watched_contract(
+        database.pool(),
+        25_900,
+        coverage_chain,
+        wrapper_contract_instance_id,
+        wrapper_address,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE contract_instance_addresses
+        SET active_from_block_number = $2
+        WHERE contract_instance_id = $1
+        "#,
+    )
+    .bind(wrapper_contract_instance_id)
+    .bind(coverage_block.block_number)
+    .execute(database.pool())
+    .await?;
+    insert_raw_name_wrapped_log(
+        database.pool(),
+        coverage_chain,
+        &coverage_block,
+        wrapper_address,
+        0,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE raw_log_staging_input_revisions
+        SET revision = 1,
+            retention_generation = 1,
+            retained_history_complete = false,
+            incomplete_since = clock_timestamp(),
+            proven_retention_generation = NULL,
+            proven_discovery_admission_epoch = NULL,
+            proven_through_block = NULL
+        WHERE chain_id = $1
+        "#,
+    )
+    .bind(coverage_chain)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO raw_log_staging_block_revisions (
+            chain_id, block_hash, block_number, revision
+        )
+        VALUES ($1, $2, $3, 1)
+        ON CONFLICT (chain_id, block_hash) DO UPDATE
+        SET block_number = EXCLUDED.block_number,
+            revision = EXCLUDED.revision
+        "#,
+    )
+    .bind(coverage_chain)
+    .bind(&coverage_block.block_hash)
+    .bind(coverage_block.block_number)
+    .execute(database.pool())
+    .await?;
+    insert_stale_wrapper_coverage_facts(
+        database.pool(),
+        coverage_chain,
+        &[(
+            wrapper_address,
+            coverage_block.block_number,
+            coverage_block.block_number,
+        )],
+    )
+    .await?;
+
+    let reverse_address = "0x00000000000000000000000000000000000000af";
+    let reverse_contract_instance_id = Uuid::from_u128(0x25a);
+    let advancing_blocks = [
+        provider_block(
+            "0x4040404040404040404040404040404040404040404040404040404040404040",
+            None,
+            40,
+        ),
+        provider_block(
+            "0x4141414141414141414141414141414141414141414141414141414141414141",
+            Some("0x4040404040404040404040404040404040404040404040404040404040404040"),
+            41,
+        ),
+    ];
+    insert_active_replay_watched_contract_with_source_family(
+        database.pool(),
+        25_901,
+        advancing_chain,
+        "ens_v1_reverse_l1",
+        reverse_contract_instance_id,
+        reverse_address,
+        "reverse_registrar",
+    )
+    .await?;
+    for (block, claimed_address) in advancing_blocks.iter().zip([
+        "0x1111111111111111111111111111111111111111",
+        "0x2222222222222222222222222222222222222222",
+    ]) {
+        insert_chain_lineage_for_block(
+            database.pool(),
+            advancing_chain,
+            block,
+            CanonicalityState::Canonical,
+        )
+        .await?;
+        insert_raw_reverse_claimed_log(
+            database.pool(),
+            advancing_chain,
+            block,
+            reverse_address,
+            claimed_address,
+            CanonicalityState::Canonical,
+        )
+        .await?;
+    }
+
+    let mut config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
+        deployment_profile.to_owned(),
+        vec![coverage_chain.to_owned(), advancing_chain.to_owned()],
+        1,
+        1_000,
+        1,
+    )?;
+    config.defer_projection_indexes = false;
+    let mut coverage_log = rpc_log_payload(&coverage_block);
+    coverage_log["address"] = serde_json::Value::String(wrapper_address.to_owned());
+    let (coverage_provider, server) =
+        bundle_provider_with_fixtures(vec![ProviderBlockFixture {
+            block: coverage_block,
+            logs: vec![coverage_log],
+        }])
+        .await?;
+    let hook = normalized_replay_catchup::install_before_coverage_attempt_test_hook(
+        database.pool(),
+        deployment_profile,
+        coverage_chain,
+    )
+    .await;
+    let instance_id = "parallel-normalized-replay-lanes-test";
+    install_stale_indexer_heartbeat(database.pool(), instance_id).await?;
+    let heartbeat = crate::run::startup_heartbeat::NormalizedReplayHeartbeat::new(
+        instance_id.to_owned(),
+        tokio::time::Duration::ZERO,
+        config.chains.clone(),
+    );
+    let activity = crate::run::startup_heartbeat::RequiredSubtaskActivity::default();
+
+    let coverage_lane = tokio::spawn(
+        normalized_replay_catchup::run_normalized_replay_catchup_chain(
+            database.pool().clone(),
+            config.clone(),
+            coverage_chain.to_owned(),
+            Some(provider::ChainProvider::JsonRpc(coverage_provider)),
+            None,
+            HeaderAuditMode::Minimal,
+            heartbeat.clone(),
+            activity.clone(),
+        ),
+    );
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(5),
+        hook.wait_until_before_attempt(),
+    )
+    .await
+    .context("coverage-recovery lane did not reach its injected wedge")?;
+    assert!(
+        !coverage_lane.is_finished(),
+        "coverage-recovery lane must remain wedged while the other chain advances"
+    );
+
+    let parent_activity = activity.clone();
+    let waiting_parent = tokio::spawn(async move {
+        let _required_subtask_exclusion = parent_activity.exclude_required_subtask().await;
+        std::future::pending::<()>().await;
+    });
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    assert!(
+        !waiting_parent.is_finished(),
+        "the parent poll must wait behind the wedged coverage-recovery lane"
+    );
+
+    let advancing_lane = tokio::spawn(
+        normalized_replay_catchup::run_normalized_replay_catchup_chain(
+            database.pool().clone(),
+            config,
+            advancing_chain.to_owned(),
+            None,
+            None,
+            HeaderAuditMode::Minimal,
+            heartbeat,
+            activity,
+        ),
+    );
+    tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+        loop {
+            let next_block = sqlx::query_scalar::<_, i64>(
+                r#"
+                SELECT next_block_number
+                FROM normalized_replay_cursors
+                WHERE deployment_profile = $1
+                  AND chain_id = $2
+                  AND cursor_kind = 'raw_fact_normalized_events'
+                "#,
+            )
+            .bind(deployment_profile)
+            .bind(advancing_chain)
+            .fetch_optional(database.pool())
+            .await?;
+            if next_block.is_some_and(|next_block| next_block > 41) {
+                return Ok::<_, anyhow::Error>(());
+            }
+            anyhow::ensure!(
+                !advancing_lane.is_finished(),
+                "advancing chain lane exited before completing two chunks"
+            );
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("advancing chain did not complete two chunks while coverage recovery was wedged")??;
+
+    waiting_parent.abort();
+    hook.resume();
+    coverage_lane.abort();
+    advancing_lane.abort();
+    let _ = waiting_parent.await;
+    let _ = coverage_lane.await;
+    let _ = advancing_lane.await;
     server.abort();
     database.cleanup().await
 }

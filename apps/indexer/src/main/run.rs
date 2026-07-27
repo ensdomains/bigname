@@ -1,6 +1,6 @@
 use std::future::Future;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use tokio::time::Duration;
 use tracing::info;
 
@@ -13,7 +13,9 @@ use crate::{
     backfill::{BackfillAdapterSyncMode, CoinbaseSqlBackfillConfig, CoinbaseSqlSourceRegistry},
     bootstrap_backfill::run_startup_bootstrap_backfills_with_heartbeat,
     cli::RunArgs,
-    normalized_replay_catchup::{NormalizedReplayCatchupConfig, run_normalized_replay_catchup},
+    normalized_replay_catchup::{
+        NormalizedReplayCatchupConfig, run_normalized_replay_catchup_chain,
+    },
     provider::{ChainProviderKind, ProviderRegistry},
     provider_configuration::ProviderSourceArgs,
     reconciliation::HeaderAuditMode,
@@ -38,20 +40,37 @@ use startup_heartbeat::{RequiredSubtaskActivity, StartupHeartbeat};
 
 const NORMALIZED_REPLAY_CATCHUP_SUBTASK: &str = "normalized_replay_catchup";
 const MIN_INDEXER_RUN_POOL_CONNECTIONS: u32 = 4;
+const NORMALIZED_REPLAY_CATCHUP_POOL_CONNECTIONS_PER_LANE: u32 = 3;
+const INDEXER_RUNTIME_WRITER_GUARD_POOL_CONNECTIONS: u32 = 1;
 
-fn ensure_indexer_run_pool_capacity(database: &bigname_storage::DatabaseConfig) -> Result<()> {
+fn ensure_indexer_run_pool_capacity(
+    database: &bigname_storage::DatabaseConfig,
+    normalized_replay_lane_count: usize,
+) -> Result<()> {
+    let normalized_replay_lane_count = u32::try_from(normalized_replay_lane_count)
+        .context("normalized replay catch-up lane count exceeds u32")?;
+    let normalized_replay_connections = normalized_replay_lane_count
+        .checked_mul(NORMALIZED_REPLAY_CATCHUP_POOL_CONNECTIONS_PER_LANE)
+        .and_then(|connections| {
+            connections.checked_add(INDEXER_RUNTIME_WRITER_GUARD_POOL_CONNECTIONS)
+        })
+        .context("normalized replay catch-up connection requirement overflowed")?;
+    let required_connections = MIN_INDEXER_RUN_POOL_CONNECTIONS.max(normalized_replay_connections);
     ensure!(
-        database.max_connections >= MIN_INDEXER_RUN_POOL_CONNECTIONS,
-        "indexer run progress heartbeats require at least {MIN_INDEXER_RUN_POOL_CONNECTIONS} \
-         database connections (runtime writer guard, nested work guards, heartbeat writer); \
+        database.max_connections >= required_connections,
+        "indexer run with {normalized_replay_lane_count} normalized replay catch-up lane(s) \
+         requires at least {required_connections} database connections (one permanent runtime \
+         writer guard and up to {NORMALIZED_REPLAY_CATCHUP_POOL_CONNECTIONS_PER_LANE} pooled \
+         work, nested-guard, and heartbeat/lease-refresh connections per concurrent lane; \
+         the baseline minimum is {MIN_INDEXER_RUN_POOL_CONNECTIONS}); \
          set BIGNAME_DATABASE_MAX_CONNECTIONS or --database-max-connections to \
-         {MIN_INDEXER_RUN_POOL_CONNECTIONS} or higher"
+         {required_connections} or higher"
     );
     Ok(())
 }
 
 pub(crate) async fn run(args: RunArgs) -> Result<()> {
-    ensure_indexer_run_pool_capacity(&args.database)?;
+    ensure_indexer_run_pool_capacity(&args.database, 0)?;
     let heartbeat_instance_id =
         bigname_storage::resolve_service_instance_id(args.heartbeat_instance_id.as_deref())?;
     let manifest_repository = load_manifest_repository(&args.manifests_root)?;
@@ -225,25 +244,30 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         )?;
         catchup_config.defer_projection_indexes = args.normalized_replay_defer_projection_indexes;
         catchup_config.coverage_recovery_hash_pinned_chunk_blocks = args.hash_pinned_chunk_blocks;
-        let catchup_pool = pool.clone();
-        let catchup_provider_registry = provider_registry.clone();
+        ensure_indexer_run_pool_capacity(&args.database, catchup_config.chains.len())?;
         let catchup_heartbeat = startup_heartbeat::NormalizedReplayHeartbeat::new(
             heartbeat_instance_id.clone(),
             Duration::from_secs(args.poll_interval_secs.max(1)),
             live_chain_ids.clone(),
         );
-        spawn_normalized_replay_catchup(
-            &subtasks,
-            run_normalized_replay_catchup(
-                catchup_pool,
-                catchup_config,
-                catchup_provider_registry,
-                (coinbase_sql_registry, coinbase_sql_config),
-                header_audit_mode,
-                catchup_heartbeat,
-                normalized_replay_activity.clone(),
-            ),
-        )?;
+        for chain in catchup_config.chains.clone() {
+            let provider = provider_registry.provider_for(&chain).cloned();
+            let lane_chain = chain.clone();
+            spawn_normalized_replay_catchup(
+                &subtasks,
+                &chain,
+                run_normalized_replay_catchup_chain(
+                    pool.clone(),
+                    catchup_config.clone(),
+                    lane_chain,
+                    provider,
+                    Some((coinbase_sql_registry.clone(), coinbase_sql_config.clone())),
+                    header_audit_mode,
+                    catchup_heartbeat.clone(),
+                    normalized_replay_activity.clone(),
+                ),
+            )?;
+        }
     }
 
     let watched_chain_plan_state =
@@ -379,12 +403,16 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
 
 fn spawn_normalized_replay_catchup<Subtask>(
     subtasks: &subtask_supervision::SubtaskSpawner,
+    chain: &str,
     subtask: Subtask,
 ) -> Result<()>
 where
     Subtask: Future<Output = Result<()>> + Send + 'static,
 {
-    subtasks.spawn(NORMALIZED_REPLAY_CATCHUP_SUBTASK, subtask)
+    subtasks.spawn(
+        format!("{NORMALIZED_REPLAY_CATCHUP_SUBTASK}:{chain}"),
+        subtask,
+    )
 }
 
 async fn sync_post_bootstrap_adapter_state_with_heartbeat(

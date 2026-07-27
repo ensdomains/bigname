@@ -1,51 +1,21 @@
-use std::{collections::BTreeSet, future::Future, sync::Arc};
+use std::{collections::BTreeSet, sync::Arc};
 
 use anyhow::Result;
 use sqlx::PgPool;
 use tokio::{
-    sync::{Mutex, OwnedMutexGuard},
+    sync::Mutex,
     time::{Duration, Instant},
 };
 
 use crate::reconciliation::FullClosureReplayLockWaitHeartbeat;
 
+#[path = "startup_heartbeat/activity.rs"]
+mod activity;
+
+pub(crate) use activity::RequiredSubtaskActivity;
+
 const MAX_PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const FULL_CLOSURE_REPLAY_LOCK_WAIT_PHASE: &str = "full_closure_replay_lock.wait";
-
-#[derive(Clone, Default)]
-pub(crate) struct RequiredSubtaskActivity {
-    exclusion: Arc<Mutex<()>>,
-}
-
-pub(crate) struct RequiredSubtaskActivityGuard {
-    _exclusion: OwnedMutexGuard<()>,
-}
-
-impl RequiredSubtaskActivity {
-    pub(crate) async fn begin(&self) -> RequiredSubtaskActivityGuard {
-        RequiredSubtaskActivityGuard {
-            _exclusion: Arc::clone(&self.exclusion).lock_owned().await,
-        }
-    }
-
-    pub(crate) async fn exclude_required_subtask(&self) -> OwnedMutexGuard<()> {
-        Arc::clone(&self.exclusion).lock_owned().await
-    }
-
-    pub(crate) async fn exclude_required_subtask_or_shutdown<F>(
-        &self,
-        shutdown: F,
-    ) -> Option<OwnedMutexGuard<()>>
-    where
-        F: Future,
-    {
-        tokio::select! {
-            biased;
-            _ = shutdown => None,
-            exclusion = self.exclude_required_subtask() => Some(exclusion),
-        }
-    }
-}
 
 pub(crate) struct StartupHeartbeat {
     instance_id: String,
