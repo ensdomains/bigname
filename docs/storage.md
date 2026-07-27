@@ -1272,13 +1272,45 @@ The post-bootstrap startup adapter sync uses the separate
 `startup_adapter_sync` checkpoint scope. It latches the greatest canonical
 stored block or raw-log block for the chain and uses the existing ENSv1
 adapter-private checkpoint formats without sharing rows with full-closure
-replay. Each startup checkpoint payload also records the chain's discovery
-admission epoch, which versions the manifest-declared and discovered watched
-surface; a retained checkpoint resets instead of resuming when that authority
-has changed. ENSv1 subregistry discovery stages only one raw-log page's changed
-assignments at a time, finalizes through the streamed full-source discovery
-reconcile, and emits normalized events from checkpoint pages. The streamed
-reconcile therefore applies its existing
+replay. A completed family result is reusable across process starts only when
+its raw-log [input revision](glossary.md), raw-log retention
+[generation](glossary.md), discovery-[admission epoch](glossary.md),
+adapter-declared derivation version, applied migration count, and highest
+applied migration version all exactly match the current database and binary.
+The discovery-admission epoch covers manifest-declared and discovered watched
+addresses that can change adapter inputs without changing raw logs. Migration
+state is deliberately conservative: any newly applied migration invalidates
+all completed startup family results because identity or discovery table
+shape and migration backfills may affect derivation. A code-only release whose
+declared adapter versions are unchanged does not invalidate these rows.
+The stored schema key is the successful migration-row count plus the highest
+applied version. This is sufficient only after the normal migrator has accepted
+the repository's immutable, ordered migration ledger; a missing ledger, an
+empty ledger, any failed row, or migrator checksum/version rejection prevents
+startup reuse rather than weakening that assumption.
+
+Missing rows, a status other than `completed`, absent key fields, an unknown
+raw-log revision row, revision or generation drift, discovery-admission drift,
+an adapter-version mismatch, or migration-state skew all run the complete
+family sync. The indexer checks the raw-log version under the chain's
+semantic-mutation fence before accepting a completed result and again before
+publishing a replacement completion row; input drift during a scan is never
+recorded as reusable completion. Partial ENSv1 rows keep their existing
+within-phase resume behavior, but partial state is not cross-boot completion
+authority for skipping a family. ENSv2 registry reconciliation is the expected
+self-invalidating case: admitting a registry or resolver advances the
+discovery-admission epoch. The indexer repeats that complete family scan
+against the new key until a pass leaves the key stable, with the same
+1,024-pass safety ceiling used by the other ENSv2 discovery expansion loops.
+It never publishes an intermediate pass as reusable completion.
+
+ENSv1 subregistry discovery stages only one raw-log page's changed assignments
+at a time, finalizes through the streamed full-source discovery reconcile, and
+emits normalized events from checkpoint pages. Its completed checkpoint and
+staged assignments remain durable under the same reuse key, so an unchanged
+restart reuses the completed streamed-walk outcome instead of rebuilding its
+temporary walk and diff state. The streamed reconcile therefore applies its
+existing
 `BIGNAME_INDEXER_DISCOVERY_FULL_RECONCILE_MAX_DEACTIVATIONS` guard to startup
 as well. ENSv1 unwrapped-authority startup sync likewise uses checkpointed
 raw-log pages, but keeps each page's normalized events in adapter-private
@@ -1287,9 +1319,29 @@ materialized. It then publishes and deletes those staged events in pages of
 20,000, so a continuously running projection worker cannot consume an event
 before its identity rows exist. A failed startup retains its rows for the next
 boot, including a stream-complete checkpoint whose target is extended by a
-later boot. The indexer deletes completed startup-scoped checkpoint rows only
-after every requested startup family and the resolver-profile authority journal
-update have completed successfully.
+later boot. Successful startup retains completed startup-scoped rows and their
+adapter-private items for exact-key reuse. Adapters that do not need private
+staged items use the same checkpoint table for a completion row only.
+
+Every startup adapter family declares a positive integer derivation version in
+`crates/adapters/src/startup_versions.rs`. Adapter authors must increment the
+affected `*_DECLARATION` value whenever decoding, derivation, discovery,
+identity materialization, or normalized-event semantics change. The persisted
+semantic version is a collision-free integer composition of that declaration
+and any declared producer versions. ENSv1 unwrapped authority consumes reverse
+claim events, so its checkpoint version includes the ENSv1 reverse-claim
+declaration. ENSv2 registrar consumes registry normalized events, and ENSv2
+resolver consumes registry name surfaces and bindings, so their checkpoint
+versions include the ENSv2 registry declaration. A producer bump therefore
+invalidates each known downstream family without requiring separate downstream
+declaration bumps. Unrelated families keep their existing versions.
+
+The static repository check maps each family-owned production path to its
+declaration and rejects a changed adapter path whose declaration did not
+increase. The check is intentionally conservative for mapped files, but it
+cannot infer semantic effects from every shared helper or external crate
+change; reviewers remain responsible for adding dependency edges and bumping
+every affected family when previously unmapped shared behavior changes.
 
 For `ens_v1_unwrapped_authority`, the durable checkpoint payload is the adapter's private closure snapshot: dirty name histories, reverse-claim histories, learned name metadata, pending namehash observations, migrated-registry markers, flushed normalized-event counters, and the block-boundary watermark. To keep full-closure replay bounded, that replay lane may flush already-emitted normalized events through the adapter-owned `normalized_events` upsert boundary at checkpoint boundaries, then persist the checkpoint with those event buffers cleared. Those full-closure rows are not projection readiness, public API readiness, identity-row finalization, or a cursor boundary; projection workers still wait for the global `raw_fact_normalized_events` cursor and identity finalization. Startup uses the private event staging and post-materialization paged publication described above instead; this distinction leaves the replay-catch-up lane unchanged.
 

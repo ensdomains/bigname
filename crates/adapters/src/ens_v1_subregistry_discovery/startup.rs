@@ -6,6 +6,7 @@ use super::{
     checkpoint::SubregistryReplayCheckpoint, loader::RegistryRawLogPosition,
     replay::sync_ens_v1_subregistry_discovery_with_checkpoint_context,
 };
+use crate::ENS_V1_SUBREGISTRY_DISCOVERY_STARTUP_VERSION;
 
 const STARTUP_PROGRESS_LOG_EVERY_PAGES: usize = 25;
 
@@ -15,7 +16,13 @@ pub async fn sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_l
     checkpoint: &StartupAdapterCheckpointContext,
     max_raw_logs_per_page: usize,
 ) -> Result<EnsV1SubregistryDiscoverySyncSummary> {
-    let checkpoint = checkpoint.adapter_context(pool, chain).await?;
+    let checkpoint = checkpoint
+        .adapter_context(
+            pool,
+            chain,
+            ENS_V1_SUBREGISTRY_DISCOVERY_STARTUP_VERSION.semantic_version,
+        )
+        .await?;
     sync_ens_v1_subregistry_discovery_with_checkpoint_context(
         pool,
         chain,
@@ -34,7 +41,13 @@ pub async fn sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_l
     max_raw_logs_per_page: usize,
     progress: &mut dyn StartupAdapterProgress,
 ) -> Result<EnsV1SubregistryDiscoverySyncSummary> {
-    let checkpoint = checkpoint.adapter_context(pool, chain).await?;
+    let checkpoint = checkpoint
+        .adapter_context(
+            pool,
+            chain,
+            ENS_V1_SUBREGISTRY_DISCOVERY_STARTUP_VERSION.semantic_version,
+        )
+        .await?;
     sync_ens_v1_subregistry_discovery_with_checkpoint_context(
         pool,
         chain,

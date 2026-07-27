@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use anyhow::{Context, Result, ensure};
 use bigname_storage::{
     RawLogStagingInputVersion, load_raw_log_staging_input_version,
-    raw_log_staging_block_range_changed_since,
+    raw_log_staging_block_range_changed_since, try_load_raw_log_staging_input_version,
 };
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
@@ -46,6 +46,9 @@ pub(super) struct SubregistryReplayCheckpoint {
     staged_item_count: usize,
     state_payload: Value,
     raw_log_input_version: RawLogStagingInputVersion,
+    adapter_semantic_version: Option<i64>,
+    schema_migration_count: Option<i64>,
+    schema_migration_max_version: Option<i64>,
 }
 
 impl SubregistryReplayCheckpoint {
@@ -54,14 +57,21 @@ impl SubregistryReplayCheckpoint {
         chain: &str,
         context: &AdapterCheckpointContext,
     ) -> Result<Self> {
-        let raw_log_input_version = load_raw_log_staging_input_version(pool, chain).await?;
+        let known_raw_log_input_version =
+            try_load_raw_log_staging_input_version(pool, chain).await?;
+        let raw_log_input_version = known_raw_log_input_version.unwrap_or_default();
         let existing = load_checkpoint_row(pool, chain, context).await?;
         let reset_existing = match existing.as_ref() {
             Some(checkpoint) => {
                 checkpoint.context.range_start_block_number != context.range_start_block_number
                     || context.startup_authority_changed(&checkpoint.state_payload)
+                    || context.startup_version_changed(
+                        checkpoint.adapter_semantic_version,
+                        checkpoint.schema_migration_count,
+                        checkpoint.schema_migration_max_version,
+                    )
                     || checkpoint
-                        .raw_log_input_requires_reset(pool, raw_log_input_version)
+                        .raw_log_input_requires_reset(pool, known_raw_log_input_version)
                         .await?
             }
             None => false,
@@ -84,9 +94,12 @@ impl SubregistryReplayCheckpoint {
                     replay_target_block_number,
                     state_payload,
                     raw_log_retention_generation,
-                    raw_log_input_revision
+                    raw_log_input_revision,
+                    adapter_semantic_version,
+                    schema_migration_count,
+                    schema_migration_max_version
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                 "#,
             )
             .bind(&context.deployment_profile)
@@ -99,6 +112,9 @@ impl SubregistryReplayCheckpoint {
             .bind(state_payload)
             .bind(raw_log_input_version.retention_generation)
             .bind(raw_log_input_version.revision)
+            .bind(context.startup_adapter_semantic_version())
+            .bind(context.startup_schema_migration_count())
+            .bind(context.startup_schema_migration_max_version())
             .execute(pool)
             .await
             .with_context(|| {
@@ -123,6 +139,9 @@ impl SubregistryReplayCheckpoint {
                     END,
                     raw_log_retention_generation = $7,
                     raw_log_input_revision = $8,
+                    adapter_semantic_version = $9,
+                    schema_migration_count = $10,
+                    schema_migration_max_version = $11,
                     updated_at = now()
                 WHERE deployment_profile = $1
                   AND chain_id = $2
@@ -139,6 +158,9 @@ impl SubregistryReplayCheckpoint {
             .bind(context.target_block_number)
             .bind(raw_log_input_version.retention_generation)
             .bind(raw_log_input_version.revision)
+            .bind(context.startup_adapter_semantic_version())
+            .bind(context.startup_schema_migration_count())
+            .bind(context.startup_schema_migration_max_version())
             .execute(pool)
             .await
             .with_context(|| {
@@ -157,8 +179,12 @@ impl SubregistryReplayCheckpoint {
     async fn raw_log_input_requires_reset(
         &self,
         pool: &PgPool,
-        current: RawLogStagingInputVersion,
+        current: Option<RawLogStagingInputVersion>,
     ) -> Result<bool> {
+        if self.context.is_startup() {
+            return Ok(current != Some(self.raw_log_input_version));
+        }
+        let current = current.unwrap_or_default();
         if self.raw_log_input_version.retention_generation != current.retention_generation
             || self.raw_log_input_version.revision > current.revision
         {
@@ -439,6 +465,9 @@ impl SubregistryReplayCheckpoint {
                 matched_log_count = $7,
                 raw_log_retention_generation = $8,
                 raw_log_input_revision = $9,
+                adapter_semantic_version = $10,
+                schema_migration_count = $11,
+                schema_migration_max_version = $12,
                 updated_at = now(),
                 last_failure_reason = NULL
             WHERE deployment_profile = $1
@@ -457,6 +486,9 @@ impl SubregistryReplayCheckpoint {
         .bind(i64::try_from(matched_log_count).context("matched log count overflowed i64")?)
         .bind(self.raw_log_input_version.retention_generation)
         .bind(self.raw_log_input_version.revision)
+        .bind(self.context.startup_adapter_semantic_version())
+        .bind(self.context.startup_schema_migration_count())
+        .bind(self.context.startup_schema_migration_max_version())
         .execute(pool)
         .await
         .context("failed to mark subregistry replay checkpoint stream complete")?;
@@ -485,6 +517,9 @@ impl SubregistryReplayCheckpoint {
                 state_payload = $8,
                 raw_log_retention_generation = $9,
                 raw_log_input_revision = $10,
+                adapter_semantic_version = $11,
+                schema_migration_count = $12,
+                schema_migration_max_version = $13,
                 completed_at = now(),
                 updated_at = now(),
                 last_failure_reason = NULL
@@ -505,6 +540,9 @@ impl SubregistryReplayCheckpoint {
         .bind(&state_payload)
         .bind(self.raw_log_input_version.retention_generation)
         .bind(self.raw_log_input_version.revision)
+        .bind(self.context.startup_adapter_semantic_version())
+        .bind(self.context.startup_schema_migration_count())
+        .bind(self.context.startup_schema_migration_max_version())
         .execute(pool)
         .await
         .context("failed to mark subregistry replay checkpoint completed")?;

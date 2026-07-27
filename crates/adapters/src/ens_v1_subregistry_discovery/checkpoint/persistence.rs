@@ -27,7 +27,10 @@ pub(super) async fn load_checkpoint_row(
             status,
             state_payload,
             raw_log_retention_generation,
-            raw_log_input_revision
+            raw_log_input_revision,
+            adapter_semantic_version,
+            schema_migration_count,
+            schema_migration_max_version
         FROM normalized_replay_adapter_checkpoints
         WHERE deployment_profile = $1
           AND chain_id = $2
@@ -90,6 +93,8 @@ fn checkpoint_from_row(
             range_start_block_number,
             target_block_number,
             startup_discovery_admission_epoch: context.startup_discovery_admission_epoch,
+            startup_adapter_semantic_version: context.startup_adapter_semantic_version,
+            startup_schema_migration_state: context.startup_schema_migration_state,
         },
         chain: chain.to_owned(),
         status: row.try_get("status")?,
@@ -105,6 +110,9 @@ fn checkpoint_from_row(
             retention_generation: row.try_get("raw_log_retention_generation")?,
             revision: row.try_get("raw_log_input_revision")?,
         },
+        adapter_semantic_version: row.try_get("adapter_semantic_version")?,
+        schema_migration_count: row.try_get("schema_migration_count")?,
+        schema_migration_max_version: row.try_get("schema_migration_max_version")?,
     })
 }
 
@@ -135,6 +143,9 @@ pub(super) async fn update_checkpoint_progress(
             state_payload = $15,
             raw_log_retention_generation = $16,
             raw_log_input_revision = $17,
+            adapter_semantic_version = $18,
+            schema_migration_count = $19,
+            schema_migration_max_version = $20,
             updated_at = now(),
             last_failure_reason = NULL
         WHERE deployment_profile = $1
@@ -161,6 +172,9 @@ pub(super) async fn update_checkpoint_progress(
     .bind(state_payload)
     .bind(checkpoint.raw_log_input_version.retention_generation)
     .bind(checkpoint.raw_log_input_version.revision)
+    .bind(checkpoint.context.startup_adapter_semantic_version())
+    .bind(checkpoint.context.startup_schema_migration_count())
+    .bind(checkpoint.context.startup_schema_migration_max_version())
     .execute(transaction.as_mut())
     .await
     .context("failed to update replay adapter checkpoint progress")?;

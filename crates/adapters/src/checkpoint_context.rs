@@ -93,16 +93,21 @@ impl StartupAdapterCheckpointContext {
         &self,
         pool: &PgPool,
         chain: &str,
+        adapter_semantic_version: i64,
     ) -> Result<AdapterCheckpointContext> {
         let discovery_admission_epoch =
-            bigname_manifests::load_discovery_admission_epoch(pool, chain).await?;
+            bigname_manifests::try_load_discovery_admission_epoch(pool, chain).await?;
+        let schema_migration_state =
+            bigname_storage::load_startup_adapter_schema_state(pool).await?;
         Ok(AdapterCheckpointContext {
             deployment_profile: self.deployment_profile.clone(),
             cursor_kind: STARTUP_CHECKPOINT_CURSOR_KIND.to_owned(),
             checkpoint_scope: STARTUP_CHECKPOINT_SCOPE,
             range_start_block_number: self.range_start_block_number,
             target_block_number: self.target_block_number,
-            startup_discovery_admission_epoch: Some(discovery_admission_epoch),
+            startup_discovery_admission_epoch: discovery_admission_epoch,
+            startup_adapter_semantic_version: Some(adapter_semantic_version),
+            startup_schema_migration_state: schema_migration_state,
         })
     }
 }
@@ -115,6 +120,8 @@ pub(crate) struct AdapterCheckpointContext {
     pub(crate) range_start_block_number: i64,
     pub(crate) target_block_number: i64,
     pub(crate) startup_discovery_admission_epoch: Option<i64>,
+    pub(crate) startup_adapter_semantic_version: Option<i64>,
+    pub(crate) startup_schema_migration_state: Option<(i64, i64)>,
 }
 
 impl AdapterCheckpointContext {
@@ -126,6 +133,8 @@ impl AdapterCheckpointContext {
             range_start_block_number: context.range_start_block_number,
             target_block_number: context.target_block_number,
             startup_discovery_admission_epoch: None,
+            startup_adapter_semantic_version: None,
+            startup_schema_migration_state: None,
         }
     }
 
@@ -134,13 +143,51 @@ impl AdapterCheckpointContext {
     }
 
     pub(crate) fn startup_authority_changed(&self, state_payload: &Value) -> bool {
-        self.startup_discovery_admission_epoch
-            .is_some_and(|expected_epoch| {
-                state_payload
-                    .get(STARTUP_DISCOVERY_ADMISSION_EPOCH_FIELD)
-                    .and_then(Value::as_i64)
-                    != Some(expected_epoch)
-            })
+        if !self.is_startup() {
+            return false;
+        }
+        let Some(expected_epoch) = self.startup_discovery_admission_epoch else {
+            return true;
+        };
+        state_payload
+            .get(STARTUP_DISCOVERY_ADMISSION_EPOCH_FIELD)
+            .and_then(Value::as_i64)
+            != Some(expected_epoch)
+    }
+
+    pub(crate) fn startup_version_changed(
+        &self,
+        adapter_semantic_version: Option<i64>,
+        schema_migration_count: Option<i64>,
+        schema_migration_max_version: Option<i64>,
+    ) -> bool {
+        if !self.is_startup() {
+            return false;
+        }
+        let Some(expected_adapter_version) = self.startup_adapter_semantic_version else {
+            return true;
+        };
+        let Some((expected_migration_count, expected_max_migration)) =
+            self.startup_schema_migration_state
+        else {
+            return true;
+        };
+        adapter_semantic_version != Some(expected_adapter_version)
+            || schema_migration_count != Some(expected_migration_count)
+            || schema_migration_max_version != Some(expected_max_migration)
+    }
+
+    pub(crate) fn startup_adapter_semantic_version(&self) -> Option<i64> {
+        self.startup_adapter_semantic_version
+    }
+
+    pub(crate) fn startup_schema_migration_count(&self) -> Option<i64> {
+        self.startup_schema_migration_state.map(|(count, _)| count)
+    }
+
+    pub(crate) fn startup_schema_migration_max_version(&self) -> Option<i64> {
+        self.startup_schema_migration_state
+            .map(|(_, max_version)| max_version)
     }
 
     pub(crate) fn bind_startup_authority(&self, mut state_payload: Value) -> Result<Value> {
@@ -164,7 +211,7 @@ impl AdapterCheckpointContext {
     ) -> Result<()> {
         if self.is_startup() {
             self.startup_discovery_admission_epoch =
-                Some(bigname_manifests::load_discovery_admission_epoch(pool, chain).await?);
+                bigname_manifests::try_load_discovery_admission_epoch(pool, chain).await?;
         }
         Ok(())
     }
@@ -204,6 +251,8 @@ pub async fn clear_startup_adapter_checkpoints(
 
 #[cfg(test)]
 mod tests {
+    use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+
     use super::*;
 
     #[test]
@@ -214,5 +263,32 @@ mod tests {
         assert_eq!(startup.range_start_block_number(), 0);
         assert_eq!(startup.target_block_number(), 42);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_discovery_epoch_stays_unknown_for_private_startup_checkpoints() -> Result<()> {
+        let database = TestDatabase::create_migrated(
+            TestDatabaseConfig::new("missing_startup_discovery_epoch"),
+            &bigname_storage::MIGRATOR,
+            "failed to migrate missing startup discovery-epoch test database",
+        )
+        .await?;
+        let startup = StartupAdapterCheckpointContext::new("mainnet", 42)?;
+        let context = startup
+            .adapter_context(database.pool(), "missing-epoch-chain", 1)
+            .await?;
+
+        assert_eq!(
+            context.startup_discovery_admission_epoch, None,
+            "a missing authority row must not become a reusable synthetic epoch"
+        );
+        assert!(
+            context.startup_authority_changed(
+                &serde_json::json!({ STARTUP_DISCOVERY_ADMISSION_EPOCH_FIELD: 0 })
+            ),
+            "unknown authority must reset staged startup state even when it stored epoch zero"
+        );
+
+        database.cleanup().await
     }
 }

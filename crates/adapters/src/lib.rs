@@ -20,6 +20,7 @@ mod manifest_normalized_events;
 mod normalized_event_support;
 mod registry_migration_cache;
 mod startup_progress;
+mod startup_versions;
 
 pub use block_derived_normalized_events::{
     BlockDerivedNormalizedEventKindSyncSummary, BlockDerivedNormalizedEventSyncSummary,
@@ -87,6 +88,12 @@ pub use ens_v2_resolver::{
 pub use manifest_normalized_events::{
     ManifestNormalizedEventKindSyncSummary, ManifestNormalizedEventSyncSummary,
     sync_manifest_normalized_events, sync_manifest_normalized_events_with_progress,
+};
+pub use startup_versions::{
+    ENS_V1_REVERSE_CLAIM_STARTUP_VERSION, ENS_V1_SUBREGISTRY_DISCOVERY_STARTUP_VERSION,
+    ENS_V1_UNWRAPPED_AUTHORITY_STARTUP_VERSION, ENS_V2_PERMISSIONS_STARTUP_VERSION,
+    ENS_V2_REGISTRAR_STARTUP_VERSION, ENS_V2_REGISTRY_RESOURCE_SURFACE_STARTUP_VERSION,
+    ENS_V2_RESOLVER_STARTUP_VERSION, StartupAdapterVersion,
 };
 
 pub async fn clear_replay_adapter_checkpoints(

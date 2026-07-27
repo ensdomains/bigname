@@ -66,6 +66,16 @@ jobs:
       - name: Migration version guard
         run: ./scripts/check-migration-versions
 
+      - name: Startup adapter semantic version guard
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ -n "$BASE_REF" ]; then
+            ./scripts/check-startup-adapter-versions --base-ref "refs/remotes/origin/${BASE_REF}"
+          else
+            ./scripts/check-startup-adapter-versions --base-ref HEAD^
+          fi
+
       - name: Install native build dependencies
         run: |
           sudo apt-get update

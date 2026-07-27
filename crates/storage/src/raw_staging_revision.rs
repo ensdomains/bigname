@@ -334,6 +334,20 @@ pub async fn load_raw_log_staging_input_version(
     pool: &PgPool,
     chain: &str,
 ) -> Result<RawLogStagingInputVersion> {
+    Ok(try_load_raw_log_staging_input_version(pool, chain)
+        .await?
+        .unwrap_or_default())
+}
+
+/// Loads a raw-log corpus version only when its durable revision row exists.
+///
+/// Callers that use the version as cross-boot reuse authority must use this
+/// strict form: a missing row is unknown input, not a known generation-zero
+/// empty corpus.
+pub async fn try_load_raw_log_staging_input_version(
+    pool: &PgPool,
+    chain: &str,
+) -> Result<Option<RawLogStagingInputVersion>> {
     ensure!(
         !chain.trim().is_empty(),
         "raw-log staging chain must not be empty"
@@ -349,7 +363,13 @@ pub async fn load_raw_log_staging_input_version(
     .fetch_optional(pool)
     .await
     .with_context(|| format!("failed to load raw-log staging input version for {chain}"))?;
-    raw_log_staging_input_version_from_row(row)
+    row.map(|row| {
+        Ok(RawLogStagingInputVersion {
+            retention_generation: row.try_get("retention_generation")?,
+            revision: row.try_get("revision")?,
+        })
+    })
+    .transpose()
 }
 
 /// Reports whether a committed semantic raw-log mutation after `revision`

@@ -1,4 +1,200 @@
 #[tokio::test]
+async fn startup_registry_checkpoint_tolerates_its_own_admission_epoch_advance() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "startup-registry-self-advance";
+    sqlx::query(
+        "INSERT INTO raw_log_staging_input_revisions (
+             chain_id, revision, retention_generation, retained_history_complete, incomplete_since
+         ) VALUES ($1, 1, 0, FALSE, now())",
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    sqlx::query("INSERT INTO discovery_admission_epochs (chain_id, epoch) VALUES ($1, 0)")
+        .bind(chain)
+        .execute(database.pool())
+        .await?;
+
+    let attempt = crate::runtime::adapter_sync::checkpoint::prepare_startup_family_sync(
+        database.pool(),
+        Some("test"),
+        chain,
+        bigname_adapters::ENS_V2_REGISTRY_RESOURCE_SURFACE_STARTUP_VERSION,
+    )
+    .await?
+    .expect("a missing checkpoint must run the registry startup sync");
+    sqlx::query("UPDATE discovery_admission_epochs SET epoch = epoch + 1 WHERE chain_id = $1")
+        .bind(chain)
+        .execute(database.pool())
+        .await?;
+
+    assert_eq!(
+        attempt
+            .complete_or_retry(
+                database.pool(),
+                chain,
+                bigname_adapters::ENS_V2_REGISTRY_RESOURCE_SURFACE_STARTUP_VERSION,
+            )
+            .await?,
+        crate::runtime::adapter_sync::checkpoint::StartupFamilySyncCompletion::Retry,
+        "a registry pass that admits a discovery edge must request another pass"
+    );
+    let retry = crate::runtime::adapter_sync::checkpoint::prepare_startup_family_sync(
+        database.pool(),
+        Some("test"),
+        chain,
+        bigname_adapters::ENS_V2_REGISTRY_RESOURCE_SURFACE_STARTUP_VERSION,
+    )
+    .await?
+    .expect("the advanced admission epoch must force another registry pass");
+    assert_eq!(
+        retry
+            .complete_or_retry(
+                database.pool(),
+                chain,
+                bigname_adapters::ENS_V2_REGISTRY_RESOURCE_SURFACE_STARTUP_VERSION,
+            )
+            .await?,
+        crate::runtime::adapter_sync::checkpoint::StartupFamilySyncCompletion::Stable,
+    );
+    assert!(
+        crate::runtime::adapter_sync::checkpoint::prepare_startup_family_sync(
+            database.pool(),
+            Some("test"),
+            chain,
+            bigname_adapters::ENS_V2_REGISTRY_RESOURCE_SURFACE_STARTUP_VERSION,
+        )
+        .await?
+        .is_none(),
+        "the converged pass must publish the exact current key"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn focused_startup_registry_sync_checkpoints_after_admitting_an_edge() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_ops_catchup_backfill_job_tables(database.pool()).await?;
+    let chain = "ethereum-mainnet";
+    let registry_address = "0x00000000000000000000000000000000000000aa";
+    let child_address = "0x00000000000000000000000000000000000000bb";
+    let manifests = TestManifestDir::new()?;
+    manifests.write_manifest(&manifest_contents(registry_address, "supported"))?;
+    let repository = load_manifest_repository(&manifests.path)?;
+    let state = build_manifest_runtime_state_with_watch_scope(
+        database.pool(),
+        &repository,
+        RuntimeWatchScope::ManifestDeclaredOnly,
+    )
+    .await?;
+    let block = provider_block(
+        "0xdadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadada",
+        None,
+        1,
+    );
+    insert_chain_lineage_for_block(database.pool(), chain, &block, CanonicalityState::Finalized)
+        .await?;
+    insert_raw_resolver_log(
+        database.pool(),
+        chain,
+        &block,
+        registry_address,
+        vec![
+            ens_v2_label_registered_topic0(),
+            hex_string(&abi_word_u64(1)),
+            keccak256_hex(b"alice"),
+            hex_string(&abi_word_address(
+                "0x0000000000000000000000000000000000000dad",
+            )),
+        ],
+        decode_hex_string(&encode_ens_v2_label_registered_log_data(
+            "alice",
+            "0x0000000000000000000000000000000000000a11",
+            1_900_000_000,
+        )),
+        0,
+        CanonicalityState::Finalized,
+    )
+    .await?;
+    insert_raw_resolver_log(
+        database.pool(),
+        chain,
+        &block,
+        registry_address,
+        vec![
+            keccak256_hex(b"SubregistryUpdated(uint256,address,address)"),
+            hex_string(&abi_word_u64(1)),
+            hex_string(&abi_word_address(child_address)),
+            hex_string(&abi_word_address(
+                "0x0000000000000000000000000000000000000dad",
+            )),
+        ],
+        Vec::new(),
+        1,
+        CanonicalityState::Finalized,
+    )
+    .await?;
+    insert_completed_backfill_range_coverage_for_source_family(
+        database.pool(),
+        chain,
+        0,
+        1,
+        "ens_v2_registry_l1",
+        &[registry_address, child_address],
+    )
+    .await?;
+    let initial_epoch =
+        bigname_manifests::load_discovery_admission_epoch(database.pool(), chain).await?;
+    sqlx::query(
+        "UPDATE raw_log_staging_input_revisions
+         SET retained_history_complete = TRUE,
+             incomplete_since = NULL,
+             proven_retention_generation = retention_generation,
+             proven_discovery_admission_epoch = $2,
+             proven_through_block = 1
+         WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .bind(initial_epoch)
+    .execute(database.pool())
+    .await?;
+
+    sync_discovery_adapter_owned_raw_log_state(
+        database.pool(),
+        "test",
+        &state.watched_chain_plan,
+        DEFAULT_STARTUP_DISCOVERY_PAGE_LOGS,
+    )
+    .await?;
+
+    let settled_epoch =
+        bigname_manifests::load_discovery_admission_epoch(database.pool(), chain).await?;
+    assert!(
+        settled_epoch > initial_epoch,
+        "the first registry pass must admit the child edge"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT (state_payload ->> 'startup_discovery_admission_epoch')::BIGINT
+             FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = 'test'
+               AND chain_id = $1
+               AND adapter = 'ens_v2_registry_resource_surface'
+               AND checkpoint_scope = 'startup_adapter_sync'
+               AND status = 'completed'",
+        )
+        .bind(chain)
+        .fetch_one(database.pool())
+        .await?,
+        settled_epoch,
+        "the bounded second pass must checkpoint the stable post-admission key"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn scoped_ens_v2_registry_sync_emits_registry_permission_events() -> Result<()> {
     let database = TestDatabase::new().await?;
     let chain = "ethereum-mainnet";
@@ -1733,8 +1929,47 @@ async fn sync_adapter_owned_raw_log_state_backfills_wrapper_authority_from_store
         )
         .fetch_one(database.pool())
         .await?,
-        0,
-        "the broad startup pass must clean both completed ENSv1 checkpoint families"
+        7,
+        "the broad startup pass must retain one completed row for every family"
+    );
+    sqlx::query(
+        r#"
+        CREATE FUNCTION reject_unchanged_full_startup_checkpoint_mutation()
+        RETURNS TRIGGER AS $function$
+        BEGIN
+            RAISE EXCEPTION 'unchanged full startup checkpoint was mutated';
+        END;
+        $function$ LANGUAGE plpgsql
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        "CREATE TRIGGER reject_unchanged_full_startup_checkpoint_mutation
+         BEFORE INSERT OR UPDATE OR DELETE ON normalized_replay_adapter_checkpoints
+         FOR EACH ROW EXECUTE FUNCTION reject_unchanged_full_startup_checkpoint_mutation()",
+    )
+    .execute(database.pool())
+    .await?;
+    sync_adapter_owned_raw_log_state_with_heartbeat(
+        database.pool(),
+        "test",
+        &watched_plan,
+        DEFAULT_STARTUP_DISCOVERY_PAGE_LOGS,
+        &mut heartbeat,
+        &heartbeat_chain_ids,
+    )
+    .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = 'test'
+               AND checkpoint_scope = 'startup_adapter_sync'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        7,
+        "the unchanged second boot must retain the seven verified rows"
     );
 
     assert_eq!(

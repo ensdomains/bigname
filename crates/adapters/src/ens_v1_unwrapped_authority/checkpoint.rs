@@ -5,7 +5,7 @@ use crate::checkpoint_context::{
 use anyhow::{Context, Result, ensure};
 use bigname_storage::{
     RawLogStagingInputVersion, load_raw_log_staging_input_version,
-    raw_log_staging_block_range_changed_since,
+    raw_log_staging_block_range_changed_since, try_load_raw_log_staging_input_version,
 };
 use futures_util::TryStreamExt;
 use serde_json::{Value, json};
@@ -92,6 +92,9 @@ pub(super) struct UnwrappedAuthorityReplayCheckpoint {
     flushed_events: UnwrappedAuthorityReplayFlushedEvents,
     state_payload: Value,
     raw_log_input_version: RawLogStagingInputVersion,
+    adapter_semantic_version: Option<i64>,
+    schema_migration_count: Option<i64>,
+    schema_migration_max_version: Option<i64>,
 }
 
 impl UnwrappedAuthorityReplayCheckpoint {
@@ -100,15 +103,22 @@ impl UnwrappedAuthorityReplayCheckpoint {
         chain: &str,
         context: &AdapterCheckpointContext,
     ) -> Result<Self> {
-        let raw_log_input_version = load_raw_log_staging_input_version(pool, chain).await?;
+        let known_raw_log_input_version =
+            try_load_raw_log_staging_input_version(pool, chain).await?;
+        let raw_log_input_version = known_raw_log_input_version.unwrap_or_default();
         let existing = load_checkpoint_row(pool, chain, context).await?;
         let reset_existing = match existing.as_ref() {
             Some(checkpoint) => {
                 checkpoint.context.range_start_block_number != context.range_start_block_number
                     || !checkpoint.snapshot_version_is_current()
                     || context.startup_authority_changed(&checkpoint.state_payload)
+                    || context.startup_version_changed(
+                        checkpoint.adapter_semantic_version,
+                        checkpoint.schema_migration_count,
+                        checkpoint.schema_migration_max_version,
+                    )
                     || checkpoint
-                        .raw_log_input_requires_reset(pool, raw_log_input_version)
+                        .raw_log_input_requires_reset(pool, known_raw_log_input_version)
                         .await?
             }
             None => false,
@@ -132,9 +142,12 @@ impl UnwrappedAuthorityReplayCheckpoint {
                     replay_target_block_number,
                     state_payload,
                     raw_log_retention_generation,
-                    raw_log_input_revision
+                    raw_log_input_revision,
+                    adapter_semantic_version,
+                    schema_migration_count,
+                    schema_migration_max_version
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                 "#,
             )
             .bind(&context.deployment_profile)
@@ -147,6 +160,9 @@ impl UnwrappedAuthorityReplayCheckpoint {
             .bind(state_payload)
             .bind(raw_log_input_version.retention_generation)
             .bind(raw_log_input_version.revision)
+            .bind(context.startup_adapter_semantic_version())
+            .bind(context.startup_schema_migration_count())
+            .bind(context.startup_schema_migration_max_version())
             .execute(pool)
             .await
             .with_context(|| {
@@ -171,6 +187,9 @@ impl UnwrappedAuthorityReplayCheckpoint {
                     END,
                     raw_log_retention_generation = $7,
                     raw_log_input_revision = $8,
+                    adapter_semantic_version = $9,
+                    schema_migration_count = $10,
+                    schema_migration_max_version = $11,
                     updated_at = now()
                 WHERE deployment_profile = $1
                   AND chain_id = $2
@@ -187,6 +206,9 @@ impl UnwrappedAuthorityReplayCheckpoint {
             .bind(context.target_block_number)
             .bind(raw_log_input_version.retention_generation)
             .bind(raw_log_input_version.revision)
+            .bind(context.startup_adapter_semantic_version())
+            .bind(context.startup_schema_migration_count())
+            .bind(context.startup_schema_migration_max_version())
             .execute(pool)
             .await
             .with_context(|| {
@@ -205,8 +227,12 @@ impl UnwrappedAuthorityReplayCheckpoint {
     async fn raw_log_input_requires_reset(
         &self,
         pool: &PgPool,
-        current: RawLogStagingInputVersion,
+        current: Option<RawLogStagingInputVersion>,
     ) -> Result<bool> {
+        if self.context.is_startup() {
+            return Ok(current != Some(self.raw_log_input_version));
+        }
+        let current = current.unwrap_or_default();
         if self.raw_log_input_version.retention_generation != current.retention_generation
             || self.raw_log_input_version.revision > current.revision
         {
@@ -471,100 +497,6 @@ impl UnwrappedAuthorityReplayCheckpoint {
         self.matched_log_count = matched_log_count;
         self.flushed_events = flushed_events.clone();
         self.status = "running".to_owned();
-        self.state_payload = state_payload;
-        Ok(())
-    }
-
-    pub(super) async fn mark_stream_complete(
-        &mut self,
-        pool: &PgPool,
-        scanned_log_count: usize,
-        matched_log_count: usize,
-    ) -> Result<()> {
-        sqlx::query(
-            r#"
-            UPDATE normalized_replay_adapter_checkpoints
-            SET
-                status = 'stream_complete',
-                scanned_log_count = $6,
-                matched_log_count = $7,
-                raw_log_retention_generation = $8,
-                raw_log_input_revision = $9,
-                updated_at = now(),
-                last_failure_reason = NULL
-            WHERE deployment_profile = $1
-              AND chain_id = $2
-              AND cursor_kind = $3
-              AND adapter = $4
-              AND checkpoint_scope = $5
-            "#,
-        )
-        .bind(&self.context.deployment_profile)
-        .bind(&self.chain)
-        .bind(&self.context.cursor_kind)
-        .bind(ADAPTER)
-        .bind(self.context.checkpoint_scope)
-        .bind(i64::try_from(scanned_log_count).context("scanned log count overflowed i64")?)
-        .bind(i64::try_from(matched_log_count).context("matched log count overflowed i64")?)
-        .bind(self.raw_log_input_version.retention_generation)
-        .bind(self.raw_log_input_version.revision)
-        .execute(pool)
-        .await
-        .context("failed to mark unwrapped-authority replay checkpoint stream complete")?;
-
-        self.status = "stream_complete".to_owned();
-        self.scanned_log_count = scanned_log_count;
-        self.matched_log_count = matched_log_count;
-        Ok(())
-    }
-
-    pub(super) async fn mark_completed(
-        &mut self,
-        pool: &PgPool,
-        summary: &EnsV1UnwrappedAuthoritySyncSummary,
-    ) -> Result<()> {
-        let state_payload = self.context.bind_startup_authority(json!({
-            "version": SNAPSHOT_VERSION,
-            "summary": summary_payload(summary),
-        }))?;
-        sqlx::query(
-            r#"
-            UPDATE normalized_replay_adapter_checkpoints
-            SET
-                status = 'completed',
-                scanned_log_count = $6,
-                matched_log_count = $7,
-                state_payload = $8,
-                raw_log_retention_generation = $9,
-                raw_log_input_revision = $10,
-                completed_at = now(),
-                updated_at = now(),
-                last_failure_reason = NULL
-            WHERE deployment_profile = $1
-              AND chain_id = $2
-              AND cursor_kind = $3
-              AND adapter = $4
-              AND checkpoint_scope = $5
-            "#,
-        )
-        .bind(&self.context.deployment_profile)
-        .bind(&self.chain)
-        .bind(&self.context.cursor_kind)
-        .bind(ADAPTER)
-        .bind(self.context.checkpoint_scope)
-        .bind(i64::try_from(summary.scanned_log_count).context("scanned log count overflowed i64")?)
-        .bind(i64::try_from(summary.matched_log_count).context("matched log count overflowed i64")?)
-        .bind(&state_payload)
-        .bind(self.raw_log_input_version.retention_generation)
-        .bind(self.raw_log_input_version.revision)
-        .execute(pool)
-        .await
-        .context("failed to mark unwrapped-authority replay checkpoint completed")?;
-
-        self.status = "completed".to_owned();
-        self.scanned_log_count = summary.scanned_log_count;
-        self.matched_log_count = summary.matched_log_count;
-        self.flushed_events = UnwrappedAuthorityReplayFlushedEvents::default();
         self.state_payload = state_payload;
         Ok(())
     }
