@@ -14,8 +14,9 @@ use sqlx::{
 use super::*;
 use crate::{
     CanonicalityState, RawBlock, RawCallSnapshot, RawCodeHash, RawPayloadCacheMetadataUpsert,
-    default_database_url, upsert_raw_blocks, upsert_raw_call_snapshots, upsert_raw_code_hashes,
-    upsert_raw_payload_cache_metadata,
+    default_database_url, load_raw_log_staging_input_version,
+    raw_log_staging_block_range_changed_since, upsert_raw_blocks, upsert_raw_call_snapshots,
+    upsert_raw_code_hashes, upsert_raw_payload_cache_metadata,
 };
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -257,7 +258,7 @@ async fn upserts_raw_transactions_receipts_and_logs() -> Result<()> {
 }
 
 #[tokio::test]
-async fn raw_log_block_number_updates_keep_the_new_number_in_block_revision() -> Result<()> {
+async fn raw_log_block_number_updates_retain_each_revision_number() -> Result<()> {
     let database = TestDatabase::new().await?;
     let log = raw_log(CanonicalityState::Canonical);
     upsert_raw_logs(database.pool(), std::slice::from_ref(&log)).await?;
@@ -267,6 +268,8 @@ async fn raw_log_block_number_updates_keep_the_new_number_in_block_revision() ->
         SELECT block_number, revision
         FROM raw_log_staging_block_revisions
         WHERE chain_id = $1 AND block_hash = $2
+        ORDER BY revision DESC
+        LIMIT 1
         "#,
     )
     .bind(&log.chain_id)
@@ -291,6 +294,8 @@ async fn raw_log_block_number_updates_keep_the_new_number_in_block_revision() ->
             SELECT block_number, revision
             FROM raw_log_staging_block_revisions
             WHERE chain_id = $1 AND block_hash = $2
+            ORDER BY revision DESC
+            LIMIT 1
             "#,
         )
         .bind(&log.chain_id)
@@ -300,14 +305,48 @@ async fn raw_log_block_number_updates_keep_the_new_number_in_block_revision() ->
         assert_eq!(revised, (block_number, expected_revision));
     }
     assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM raw_log_staging_block_revisions WHERE chain_id = $1 AND block_hash = $2",
+        sqlx::query_as::<_, (i64, i64)>(
+            r#"
+            SELECT block_number, revision
+            FROM raw_log_staging_block_revisions
+            WHERE chain_id = $1 AND block_hash = $2
+            ORDER BY revision
+            "#,
         )
         .bind(&log.chain_id)
         .bind(&log.block_hash)
-        .fetch_one(database.pool())
+        .fetch_all(database.pool())
         .await?,
-        1
+        vec![(101, 1), (100, 2), (102, 3)]
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn repeated_tail_block_mutations_retain_gap_free_range_evidence() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let mut log = raw_log(CanonicalityState::Observed);
+    upsert_raw_logs(database.pool(), std::slice::from_ref(&log)).await?;
+    let recorded_revision = load_raw_log_staging_input_version(database.pool(), &log.chain_id)
+        .await?
+        .revision;
+
+    log.canonicality_state = CanonicalityState::Canonical;
+    upsert_raw_logs(database.pool(), std::slice::from_ref(&log)).await?;
+    log.canonicality_state = CanonicalityState::Safe;
+    upsert_raw_logs(database.pool(), std::slice::from_ref(&log)).await?;
+
+    assert!(
+        !raw_log_staging_block_range_changed_since(
+            database.pool(),
+            &log.chain_id,
+            recorded_revision,
+            0,
+            100,
+        )
+        .await?,
+        "two evidenced mutations of the same block above the range must preserve range reuse"
     );
 
     database.cleanup().await

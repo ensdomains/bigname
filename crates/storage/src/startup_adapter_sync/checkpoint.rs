@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use sqlx::PgConnection;
 
+use crate::raw_staging_revision::raw_log_staging_block_range_changed_since_from_connection;
+
 use super::{
     STARTUP_ADAPTER_CHECKPOINT_SCOPE, STARTUP_ADAPTER_CURSOR_KIND,
     STARTUP_CANONICAL_LINEAGE_HEAD_FIELD, STARTUP_DISCOVERY_ADMISSION_EPOCH_FIELD,
@@ -17,9 +19,9 @@ pub(super) async fn completed_checkpoint_matches(
     adapter: &str,
     key: &StartupAdapterSyncKey,
 ) -> Result<bool> {
-    let state_payload = sqlx::query_scalar::<_, Value>(
+    let checkpoint = sqlx::query_as::<_, (Value, i64)>(
         r#"
-        SELECT state_payload
+        SELECT state_payload, raw_log_input_revision
         FROM normalized_replay_adapter_checkpoints
         WHERE deployment_profile = $1
           AND chain_id = $2
@@ -29,12 +31,11 @@ pub(super) async fn completed_checkpoint_matches(
           AND status = 'completed'
           AND completed_at IS NOT NULL
           AND raw_log_retention_generation = $6
-          AND raw_log_input_revision = $7
-          AND adapter_semantic_version = $8
-          AND schema_migration_count = $9
-          AND schema_migration_max_version = $10
-          AND state_payload -> $11 = to_jsonb($12::BIGINT)
-          AND state_payload ? $13
+          AND adapter_semantic_version = $7
+          AND schema_migration_count = $8
+          AND schema_migration_max_version = $9
+          AND state_payload -> $10 = to_jsonb($11::BIGINT)
+          AND state_payload ? $12
         "#,
     )
     .bind(deployment_profile)
@@ -43,7 +44,6 @@ pub(super) async fn completed_checkpoint_matches(
     .bind(adapter)
     .bind(STARTUP_ADAPTER_CHECKPOINT_SCOPE)
     .bind(key.raw_log_input_version.retention_generation)
-    .bind(key.raw_log_input_version.revision)
     .bind(key.adapter_semantic_version)
     .bind(key.schema_migration_count)
     .bind(key.schema_migration_max_version)
@@ -58,7 +58,7 @@ pub(super) async fn completed_checkpoint_matches(
              {deployment_profile}/{chain}/{adapter}"
         )
     })?;
-    let Some(state_payload) = state_payload else {
+    let Some((state_payload, recorded_raw_log_revision)) = checkpoint else {
         return Ok(false);
     };
     let Some(recorded_revision) = state_payload
@@ -84,6 +84,18 @@ pub(super) async fn completed_checkpoint_matches(
     ) else {
         return Ok(false);
     };
+    let scanned_through_block = scanned_extent.as_ref().map_or(0, |head| head.block_number);
+    if raw_log_staging_block_range_changed_since_from_connection(
+        connection,
+        chain,
+        recorded_raw_log_revision,
+        0,
+        scanned_through_block,
+    )
+    .await?
+    {
+        return Ok(false);
+    }
     completed_lineage_extent_is_reusable(
         connection,
         chain,

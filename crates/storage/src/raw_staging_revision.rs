@@ -3,6 +3,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, Result, ensure};
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
 
+mod range;
+
+pub(crate) use range::raw_log_staging_block_range_changed_since_from_connection;
+pub use range::{
+    earliest_raw_log_staging_block_changed_since, raw_log_staging_block_range_changed_since,
+};
+
 /// Commit-ordered version of one chain's retained raw-log staging corpus.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RawLogStagingInputVersion {
@@ -296,24 +303,52 @@ async fn classify_newer_revisions_after(
         return Ok(RawLogStagingBoundaryStatus::Accepted(observed));
     }
 
-    let earliest_changed_block = sqlx::query_scalar::<_, Option<i64>>(
+    let evidence_floor = sqlx::query_scalar::<_, i64>(
         r#"
-        SELECT MIN(block_number)
-        FROM raw_log_staging_block_revisions
+        SELECT block_revision_evidence_floor
+        FROM raw_log_staging_input_revisions
         WHERE chain_id = $1
-          AND revision > $2
         "#,
     )
     .bind(chain)
-    .bind(expected.revision)
-    .fetch_one(connection)
+    .fetch_one(&mut *connection)
     .await
-    .with_context(|| {
-        format!(
-            "failed to inspect fenced raw-log staging changes for {chain} after revision {}",
-            expected.revision
+    .with_context(|| format!("failed to load raw-log block-revision evidence floor for {chain}"))?;
+    if expected.revision < evidence_floor {
+        return Ok(RawLogStagingBoundaryStatus::ChangedAtOrBefore {
+            observed,
+            earliest_block: 0,
+        });
+    }
+
+    let (earliest_changed_block, evidenced_revision_count) =
+        sqlx::query_as::<_, (Option<i64>, i64)>(
+            r#"
+        SELECT MIN(block_number), COUNT(DISTINCT revision)
+        FROM raw_log_staging_block_revisions
+        WHERE chain_id = $1
+          AND revision > $2
+          AND revision <= $3
+        "#,
         )
-    })?;
+        .bind(chain)
+        .bind(expected.revision)
+        .bind(observed.revision)
+        .fetch_one(connection)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to inspect fenced raw-log staging changes for {chain} after revision {}",
+                expected.revision
+            )
+        })?;
+    let expected_revision_count = observed.revision - expected.revision;
+    ensure!(
+        evidenced_revision_count == expected_revision_count,
+        "raw-log staging revision advanced for {chain} from {} to {} without per-block revision evidence for every intervening revision: expected {expected_revision_count}, found {evidenced_revision_count}",
+        expected.revision,
+        observed.revision
+    );
     let earliest_changed_block = earliest_changed_block.with_context(|| {
         format!(
             "raw-log staging revision advanced for {chain} from {} to {} without per-block revision evidence",
@@ -370,117 +405,6 @@ pub async fn try_load_raw_log_staging_input_version(
         })
     })
     .transpose()
-}
-
-/// Reports whether a committed semantic raw-log mutation after `revision`
-/// touched any block in the inclusive range. Unknown input or an advanced
-/// revision without per-block evidence returns `true` so callers using this as
-/// boundary-reuse authority fail closed.
-pub async fn raw_log_staging_block_range_changed_since(
-    pool: &PgPool,
-    chain: &str,
-    revision: i64,
-    from_block: i64,
-    through_block: i64,
-) -> Result<bool> {
-    ensure!(
-        !chain.trim().is_empty(),
-        "raw-log staging chain must not be empty"
-    );
-    ensure!(
-        revision >= 0,
-        "raw-log staging revision must not be negative"
-    );
-    ensure!(
-        from_block >= 0,
-        "raw-log staging range start must not be negative"
-    );
-    ensure!(
-        through_block >= from_block,
-        "raw-log staging range end must not precede its start"
-    );
-    sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT CASE
-            WHEN current_revision IS NULL OR current_revision < $2 THEN TRUE
-            WHEN current_revision = $2 THEN FALSE
-            WHEN (
-                SELECT MAX(revision)
-                FROM raw_log_staging_block_revisions
-                WHERE chain_id = $1
-                  AND revision > $2
-                  AND revision <= current_revision
-            ) IS DISTINCT FROM current_revision THEN TRUE
-            ELSE EXISTS (
-                SELECT 1
-                FROM raw_log_staging_block_revisions
-                WHERE chain_id = $1
-                  AND revision > $2
-                  AND revision <= current_revision
-                  AND block_number BETWEEN $3 AND $4
-            )
-        END
-        FROM (
-            SELECT (
-                SELECT revision
-                FROM raw_log_staging_input_revisions
-                WHERE chain_id = $1
-            ) AS current_revision
-        ) AS current
-        "#,
-    )
-    .bind(chain)
-    .bind(revision)
-    .bind(from_block)
-    .bind(through_block)
-    .fetch_one(pool)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to inspect raw-log staging changes for {chain} after revision {revision} in {from_block}..={through_block}"
-        )
-    })
-}
-
-/// Returns the earliest block at or below `through_block` touched by a
-/// semantic raw-log mutation after `revision`.
-pub async fn earliest_raw_log_staging_block_changed_since(
-    pool: &PgPool,
-    chain: &str,
-    revision: i64,
-    through_block: i64,
-) -> Result<Option<i64>> {
-    ensure!(
-        !chain.trim().is_empty(),
-        "raw-log staging chain must not be empty"
-    );
-    ensure!(
-        revision >= 0,
-        "raw-log staging revision must not be negative"
-    );
-    ensure!(
-        through_block >= 0,
-        "raw-log staging changed-block boundary must not be negative"
-    );
-    sqlx::query_scalar::<_, Option<i64>>(
-        r#"
-        SELECT MIN(block_number)
-        FROM raw_log_staging_block_revisions
-        WHERE chain_id = $1
-          AND revision > $2
-          AND block_number <= $3
-        "#,
-    )
-    .bind(chain)
-    .bind(revision)
-    .bind(through_block)
-    .fetch_one(pool)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to load earliest raw-log staging change for {chain} after revision {revision} through block {through_block}"
-        )
-    })
 }
 
 async fn load_raw_log_staging_input_version_in_transaction(

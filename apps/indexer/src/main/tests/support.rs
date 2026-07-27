@@ -1324,6 +1324,7 @@ async fn create_raw_log_staging_input_revisions_table(pool: &PgPool) -> Result<(
             chain_id TEXT PRIMARY KEY,
             revision BIGINT NOT NULL DEFAULT 0,
             retention_generation BIGINT NOT NULL DEFAULT 0,
+            block_revision_evidence_floor BIGINT NOT NULL DEFAULT 0,
             retained_history_complete BOOLEAN NOT NULL DEFAULT false,
             incomplete_since TIMESTAMPTZ,
             proven_retention_generation BIGINT,
@@ -1343,7 +1344,7 @@ async fn create_raw_log_staging_input_revisions_table(pool: &PgPool) -> Result<(
             block_hash TEXT NOT NULL,
             block_number BIGINT NOT NULL,
             revision BIGINT NOT NULL,
-            PRIMARY KEY (chain_id, block_hash)
+            PRIMARY KEY (chain_id, revision, block_hash)
         )
         "#,
     )

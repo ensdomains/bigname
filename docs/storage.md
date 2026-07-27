@@ -398,7 +398,15 @@ Live polling may retain selected `raw_transactions` and `raw_receipts` for succe
 
 `bigname-worker raw-facts compact-log-staging` is the manual compaction boundary for minimal mode. It refuses to compact unless the `raw_fact_normalized_events` replay cursor is caught up and failure-free, and only operates on raw-log staging families. Log-audit deployments do not run it for retained ranges.
 
-Raw-log inserts and semantic updates advance a commit-ordered per-chain [input revision](glossary.md) and record the revision that last touched each old or new block hash. Semantic updates are changes to `raw_log_id`, chain, block, transaction, log position, emitting address, topics, payload bytes, or canonicality. An `observed_at`-only refresh is metadata and does not advance either revision. This is compact synchronization metadata, not a raw fact or an adapter snapshot. Stateful live adapters may use it to prove that all raw-log mutations since a cached block anchor leave the cached ancestor path unchanged; sequence-allocated `raw_log_id` values are not a commit-order proof.
+Raw-log inserts and semantic updates advance a commit-ordered per-chain [input revision](glossary.md) and append per-revision evidence for every old or new block hash they touch. Multiple block hashes can share one revision, while repeated mutations of the same hash retain separate revision witnesses. Semantic updates are changes to `raw_log_id`, chain, block, transaction, log position, emitting address, topics, payload bytes, or canonicality. An `observed_at`-only refresh is metadata and does not advance either revision. This is synchronization metadata, not a raw fact or an adapter snapshot. Stateful live adapters may use it to prove that all raw-log mutations since a cached block anchor leave the cached ancestor path unchanged; sequence-allocated `raw_log_id` values are not a commit-order proof.
+
+The append-only evidence-key migration records each existing chain's current
+revision as its [block-revision evidence
+floor](glossary.md#block-revision-evidence-floor). The legacy latest-per-block
+key could already have discarded witnesses, so a checkpoint below that floor
+cannot use the retained rows as a complete sequence and must restart. A
+checkpoint recorded at the floor needs only the gap-free witnesses written
+after the cutover; new chains start at floor zero.
 
 [Retained-history](glossary.md) authority is a separate proof tuple: raw-log retention [generation](glossary.md), discovery-[admission epoch](glossary.md), and inclusive proven-through block. A fresh chain starts incomplete; inserting its first raw log does not claim that earlier selected history is complete. Deleting or truncating raw-log staging increments the retention generation, clears the proof, and invalidates every process-local cache built under the previous generation. Updating a raw log's identity or payload has the same destructive effect for both the old and new chain identities because the retained corpus no longer proves what was fetched; a canonicality-only update retains the generation and proof, while an `observed_at`-only update changes neither revision nor proof. Per-block input-revision metadata cannot carry a cache across a generation change.
 
@@ -474,7 +482,7 @@ For ENSv2, `resource_id` keys by `(chain_id, registry_contract_instance_id, upst
 | Family | Write owner | Purpose |
 | --- | --- | --- |
 | `chain_*` | intake owns lineage and the canonical block graph; storage triggers own `chain_lineage_mutation_revisions` | lineage and canonical block graph plus commit-ordered per-chain revision metadata for startup reuse fences |
-| `raw_*` | intake; storage triggers own raw-log revision and retention-generation metadata | immutable hot replay facts, payload-cache metadata, compact per-chain/per-block-hash mutation revisions, and generation/epoch/through-bound retained-history proofs |
+| `raw_*` | intake; storage triggers own raw-log revision and retention-generation metadata | immutable hot replay facts, payload-cache metadata, append-only per-chain/revision/block-hash mutation evidence, and generation/epoch/through-bound retained-history proofs |
 | `backfill_*` | worker/backfill substrate through storage-owned lifecycle helpers | persisted backfill jobs, bounded range leases, resumable range checkpoints, and completion-scoped coverage facts |
 | `normalized_replay_*` | indexer/replay orchestration | operational replay cursors, adapter-private replay checkpoints, and per-window automatic coverage-recovery retry/terminal records |
 | `resolver_profile_input_changes` | storage triggers enqueue; indexer convergence acknowledges | coalesced generation-fenced work for effective resolver code-hash, manifest, or discovery admission changes |
@@ -1231,6 +1239,12 @@ was ever destroyed — the retention [generation](glossary.md):
 
 Durable ENSv1 adapter checkpoints record the raw-log retention generation and commit-ordered input revision from which their private state was derived. Each checkpointed ENSv1 adapter invocation holds the chain-scoped raw-log semantic-mutation fence and an `ACCESS SHARE` lock through final publication. On resume, a retention-generation change or a later raw-log mutation touching an already consumed block resets the adapter-private checkpoint to its replay start; a revision change confined after the consumed boundary may advance the stored version and continue. The global automatic replay cursor records the same input version. At rewind inspection it latches the current version, then rewinds to the earliest already-consumed block changed by a newer committed revision, or to the range start when the retention generation changed. Cursor publication treats the completed iteration boundary (the latched target for a full-closure pass) as inclusive: it may advance the stored input version when per-block revision metadata proves that every newer mutation is strictly above that boundary and the retention generation is unchanged. Those later raw facts remain explicit subsequent-page or backlog work and do not widen or starve the completed pass. A newer mutation at or below the boundary, a missing per-block revision witness, or a retention-generation change still fails publication and is rewound on the next iteration. Publication performs that boundary check while holding the chain-scoped mutation fence and writes the cursor plus newest accepted input version through the same fenced transaction, so a concurrent commit cannot be silently acknowledged. Raw-log commit revisions, rather than `observed_at` timestamps or sequence allocation order, are the durable rewind authority.
 
+A raw-log checkpoint below the block-revision evidence floor also rewinds to
+its range start. This is the populated-database upgrade path for legacy
+latest-per-block evidence: it invalidates the unprovable prefix without
+changing retained raw facts or turning the known legacy gap into a permanent
+handoff error.
+
 The raw-staging boundary classifier distinguishes an accepted newer input version from retention-generation drift and a witnessed mutation at or before an inclusive boundary. Missing per-block evidence, revision rollback, and storage failures remain integrity errors rather than ordinary stale-readiness results. The multi-chain form holds one transaction, takes chain advisory locks in sorted order, and holds one `ACCESS SHARE` lock on `raw_logs`, so final handoff validation observes one raw-input snapshot without consuming one connection per chain.
 
 The `post_replay_live_adapter_backlog` cursor stores the raw-log retention generation and commit revision accepted for every consumed block through `next_block_number - 1`, including empty advancement. A legacy/default-version cursor or a cursor whose accepted version predates the replay prefix resets to `replay_target + 1` at the replay cursor's accepted version and reprocesses instead of waiting forever. A later same-generation mutation touching the consumed post-target range rewinds to its earliest affected block; replay-prefix drift returns ownership to full replay, while a mutation strictly after the consumed range becomes later backlog work. Adapter execution occurs outside the raw-log fence, but page publication reacquires the fence and either publishes the cursor at the observed version, rewinds and retries, or defers to replay. Final ownership uses the sorted multi-chain guard to validate replay prefixes, backlog cursors, and current canonical raw maxima, grants only a one-poll adapter permit while that guard is held, and repeats the proof on every poll. Raw-only writers queued behind the final guard commit on the far side of that permit and are therefore detected by the next cycle.
@@ -1275,11 +1289,24 @@ extent (or block zero for an empty lineage corpus), and every family scan is
 bounded through that extent. It uses the existing ENSv1 adapter-private
 checkpoint formats without sharing rows with full-closure replay. A completed
 family result records both that consumed lineage extent and the lineage
-revision and head accepted when completion was published. Its raw-log [input
-revision](glossary.md), raw-log retention [generation](glossary.md),
-discovery-[admission epoch](glossary.md), adapter-declared derivation version,
-applied migration count, and highest applied migration version must exactly
-match the current database and binary.
+revision and head accepted when completion was published. Its raw-log retention
+[generation](glossary.md), discovery-[admission epoch](glossary.md),
+adapter-declared derivation version, applied migration count, and highest
+applied migration version must exactly match the current database and binary.
+Its raw-log [input revision](glossary.md) and lineage revision may advance only
+under the extent-qualified proofs below.
+
+Raw-log semantic-mutation triggers write one or more per-block evidence rows
+for every advanced raw-log input revision. A later completion or boot may
+accept a newer revision only when the retention generation is unchanged, the
+number of distinct evidenced revisions after the recorded revision equals the
+revision delta, and every affected block is strictly above the recorded scan
+extent. Multiple affected blocks in one revision count as one evidenced
+revision. The ledger key includes the revision and block hash, so repeated
+mutations of the same block retain every intervening witness. A mutation at or
+below the extent, a missing intermediate or latest revision witness, revision
+rollback, retention-generation change, or recorded revision below the
+block-revision evidence floor invalidates the completion.
 
 Statement triggers advance the lineage mutation revision once for each affected
 chain on a `chain_lineage` insert, update, or delete, and write one evidence row
@@ -1291,10 +1318,11 @@ when no newer revision exists, it must exactly match the head accepted with the
 recorded revision. A mutation at or below the extent, a missing evidence row, a
 revision gap, a lower or ambiguous current head, or malformed checkpoint
 evidence invalidates the completion. This lets an old and new indexer overlap:
-live tail growth above a bounded pass does not force that pass to retry, and a
-quiet chain can reuse a completed prefix after its head advances. A header-anchor
-backfill below the stored head or a same-height branch switch still invalidates,
-even when neither change mutates a retained raw log.
+evidenced raw-log and lineage tail growth above a bounded pass does not force
+that pass to retry, and a quiet chain can reuse a completed prefix after its
+head advances. A header-anchor backfill below the stored head or a same-height
+branch switch still invalidates, even when neither change mutates a retained
+raw log.
 
 The discovery-admission epoch covers manifest-declared and discovered watched
 addresses that can change adapter inputs without changing raw logs. Migration
@@ -1313,33 +1341,35 @@ finishes its checkpoint-table DDL and ledger write before startup can enter
 verification; startup never holds a ledger lock while waiting behind that DDL.
 
 Missing rows, a status other than `completed`, absent key fields, an unknown
-raw-log revision row, raw-log revision or generation drift, an unproved
+raw-log revision row, retention-generation drift, an unproved raw-log or
 lineage-prefix change, discovery-admission drift, an adapter-version mismatch,
 or migration-state skew all run the complete family sync. The indexer checks
 the key under the raw-log, lineage, admission, and migration fences before
 accepting a completed result and again before publishing a replacement
-completion row. Only fully evidenced lineage mutations strictly above the
-latched extent are non-invalidating; other input drift during a scan is never
-recorded as reusable completion. If a pass reports changed inputs, its existing
-family checkpoint row is deleted unconditionally inside the fenced completion
-transaction before the bounded retry; a completion that was already present is
-not treated as proof that this pass left its derived rows intact. If prepare
-cannot capture a complete key, the family still runs, but the fenced completion
-step deletes the exact deployment-profile, chain, cursor, adapter, and startup
-scope row. This also removes a completion that an ENSv1 private checkpoint
-writer may have stamped after prepare, so no row produced under uncaptured
-inputs can become reusable when the missing key component later appears.
+completion row. Only gap-free, fully evidenced raw-log and lineage mutations
+strictly above the latched extent are non-invalidating; other input drift
+during a scan is never recorded as reusable completion. If a pass reports
+changed inputs, its existing family checkpoint row is deleted unconditionally
+inside the fenced completion transaction before the bounded retry; a
+completion that was already present is not treated as proof that this pass left
+its derived rows intact. If prepare cannot capture a complete key, the family
+still runs, but the fenced completion step deletes the exact
+deployment-profile, chain, cursor, adapter, and startup scope row. This also
+removes a completion that an ENSv1 private checkpoint writer may have stamped
+after prepare, so no row produced under uncaptured inputs can become reusable
+when the missing key component later appears.
 
 A partial ENSv1 `running` or `stream_complete` row keeps its durable boundary
 only when the lineage mutation revision is unchanged, the retention generation
-is unchanged, and the per-block revision ledger proves every newer raw-log
-mutation is strictly above the consumed boundary. Lineage drift, a raw-log
-mutation at or below that boundary, missing proof, authority drift, or version
-drift resets it to block zero. Partial state never skips the family. If more
-than one canonical, safe, or finalized lineage row exists at the highest stored
-height, startup logs a warning, treats the key as unknown, runs the full sync,
-and retains no reusable completion instead of failing the boot. ENSv2 registry
-reconciliation is the expected self-invalidating case:
+is unchanged, and the per-block revision ledger proves every intervening
+raw-log revision and places every mutation strictly above the consumed
+boundary. Lineage drift, a raw-log mutation at or below that boundary, missing
+or gapped proof, authority drift, or version drift resets it to block zero.
+Partial state never skips the family. If more than one canonical, safe, or
+finalized lineage row exists at the highest stored height, startup logs a
+warning, treats the key as unknown, runs the full sync, and retains no reusable
+completion instead of failing the boot. ENSv2 registry reconciliation is the
+expected self-invalidating case:
 admitting a registry or resolver advances the discovery-admission epoch. The
 indexer repeats that complete family scan against the new key until a pass
 leaves the key stable, with the same 1,024-pass safety ceiling used by the other
@@ -1415,10 +1445,14 @@ declared producer paths to producer components. It rejects a mapped production
 change whose declaration did not increase. The manifest watched-contract
 loader path (`crates/manifests/src/lib/views/watched.rs` and its module
 directory) maps to every family because it supplies every family emitter set.
-CI fetches and validates its own
-comparison commit; pull requests compare with the target branch and ordinary
-pushes compare with the event's full pre-push commit. A branch-creation event
-has no range base and retains the documented one-parent fallback. The check
+The startup runtime orchestration path
+(`apps/indexer/src/main/runtime/adapter_sync.rs` and its module directory) also
+maps to every family because it selects bounded entrypoints and extents and
+orders producer replay before dependent consumers. CI fetches and validates
+its own comparison commit; pull requests compare with the target branch and
+ordinary pushes compare with the event's full pre-push commit. A
+branch-creation event has no range base and retains the documented one-parent
+fallback. The check
 cannot infer semantic effects from every external crate change, so reviewers
 remain responsible for adding dependency edges when previously unmapped shared
 behavior changes.
