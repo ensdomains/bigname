@@ -253,6 +253,102 @@ async fn ethereum_only_provider_leaves_active_base_watch_state_idle() -> Result<
 }
 
 #[tokio::test]
+async fn outdated_indexer_exits_canonical_poll_on_fatal_replay_fence() -> Result<()> {
+    let database = bigname_test_support::TestDatabase::create_migrated(
+        bigname_test_support::TestDatabaseConfig::new(
+            "bigname_indexer_canonical_poll_replay_fence_test",
+        ),
+        &bigname_storage::MIGRATOR,
+        "failed to migrate canonical-poll replay-fence test database",
+    )
+    .await?;
+    let chain = "ethereum-mainnet";
+    let wrapper_address = "0x0000000000000000000000000000000000000001";
+    insert_active_replay_watched_contract(
+        database.pool(),
+        490,
+        chain,
+        Uuid::from_u128(0x490),
+        wrapper_address,
+    )
+    .await?;
+    let watched_plan = load_watched_chain_plan(database.pool()).await?;
+    let mut tasks = sync_intake_chain_tasks(database.pool(), &watched_plan).await?;
+    let canonical_head = provider_block(
+        "0x4949494949494949494949494949494949494949494949494949494949494949",
+        Some("0x4848484848484848484848484848484848484848484848484848484848484848"),
+        49,
+    );
+    let rpc_head = canonical_head.clone();
+    let rpc_log = rpc_log_payload(&canonical_head);
+    let (rpc_url, server) = spawn_json_rpc_server(std::sync::Arc::new(move |body| {
+        let method = body
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let params = body
+            .get("params")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let first_param = params
+            .first()
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+
+        let result = match method {
+            "eth_getBlockByNumber" if first_param == "latest" => {
+                json!({ "hash": rpc_head.block_hash.clone() })
+            }
+            "eth_getBlockByNumber" if first_param == "safe" || first_param == "finalized" => {
+                Value::Null
+            }
+            "eth_getBlockByHash" if first_param == rpc_head.block_hash => {
+                rpc_block_bundle_payload(&rpc_head)
+            }
+            "eth_getLogs" => Value::Array(vec![rpc_log.clone()]),
+            "eth_getBlockReceipts" if first_param == rpc_head.block_hash => {
+                Value::Array(vec![rpc_receipt_payload(&rpc_head)])
+            }
+            "eth_getTransactionByHash" => rpc_transaction_payload(&rpc_head),
+            "eth_getTransactionReceipt" => rpc_receipt_payload(&rpc_head),
+            "eth_getCode" => Value::String("0x6001600155".to_owned()),
+            _ => panic!("unexpected replay-fence RPC request: {body}"),
+        };
+
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": result,
+        })
+    }))
+    .await?;
+    let provider_registry =
+        ProviderRegistry::from_chain_rpc_urls(&[format!("{chain}={rpc_url}")])?;
+    let newer_replay_version =
+        raise_projection_replay_version_floor_above_process(database.pool()).await?;
+
+    let error = poll_provider_heads(database.pool(), &mut tasks, &provider_registry)
+        .await
+        .expect_err("an outdated indexer canonical poll must exit on a fatal replay fence");
+    assert!(
+        bigname_storage::projection_staging::is_fatal_projection_replay_version_fence_error(
+            &error
+        ),
+        "canonical poll must propagate the process-fatal replay fence, got: {error:#}"
+    );
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.contains(&newer_replay_version.to_string()),
+        "canonical poll refusal must name the newer replay version, got: {error:#}"
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn refresh_watched_chain_plan_detects_storage_changes() -> Result<()> {
     let database = TestDatabase::new().await?;
     let root_contract_instance_id = Uuid::from_u128(41);

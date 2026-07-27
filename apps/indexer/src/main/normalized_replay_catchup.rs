@@ -30,7 +30,6 @@ mod admission;
 mod coverage_recovery;
 #[path = "normalized_replay_catchup/cursors.rs"]
 mod cursors;
-
 #[path = "normalized_replay_catchup/execution.rs"]
 mod execution;
 #[path = "normalized_replay_catchup/indexes.rs"]
@@ -310,6 +309,7 @@ pub(crate) async fn run_normalized_replay_catchup(
                     progressed = true;
                 }
                 Ok(CatchupIterationStatus::Idle) => {}
+                Err(error) if admission::is_fatal_replay_fence(&error) => return Err(error),
                 Err(error) => {
                     warn!(
                         service = "indexer",

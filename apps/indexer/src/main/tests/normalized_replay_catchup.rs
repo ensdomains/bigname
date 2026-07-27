@@ -149,6 +149,115 @@ async fn normalized_replay_catchup_rewinds_for_later_older_raw_backfill() -> Res
 }
 
 #[tokio::test]
+async fn outdated_indexer_exits_normalized_replay_catchup_on_fatal_replay_fence() -> Result<()> {
+    let database = bigname_test_support::TestDatabase::create_migrated(
+        bigname_test_support::TestDatabaseConfig::new(
+            "bigname_indexer_normalized_replay_fence_test",
+        )
+        .pool_max_connections(5),
+        &bigname_storage::MIGRATOR,
+        "failed to migrate normalized-replay fence test database",
+    )
+    .await?;
+    let chain = "ethereum-mainnet";
+    let instance_id = "normalized-replay-fence-test";
+    let wrapper_address = "0x0000000000000000000000000000000000000491";
+    let block = provider_block(
+        "0x9191919191919191919191919191919191919191919191919191919191919191",
+        Some("0x9090909090909090909090909090909090909090909090909090909090909090"),
+        91,
+    );
+    insert_active_replay_watched_contract(
+        database.pool(),
+        491,
+        chain,
+        Uuid::from_u128(0x491),
+        wrapper_address,
+    )
+    .await?;
+    insert_chain_lineage_for_block(
+        database.pool(),
+        chain,
+        &block,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_name_wrapped_log(
+        database.pool(),
+        chain,
+        &block,
+        wrapper_address,
+        0,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    install_stale_indexer_heartbeat(database.pool(), instance_id).await?;
+
+    let mut config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
+        "mainnet".to_owned(),
+        vec![chain.to_owned()],
+        1_000,
+        1_000,
+        1,
+    )?;
+    config.defer_projection_indexes = false;
+    let provider_registry = ProviderRegistry::from_chain_rpc_urls(&[])?;
+    let coinbase_config = backfill::CoinbaseSqlBackfillConfig {
+        initial_window_blocks: 1,
+        max_window_blocks: 1,
+        evidence_window_blocks: 1,
+        page_limit: 1,
+        sql_char_limit: 1_000,
+        query_timeout_secs: 1,
+        rate_limit_qps: 1,
+        validation_mode: backfill::CoinbaseSqlValidationMode::Full,
+    };
+    let coinbase_registry = backfill::CoinbaseSqlSourceRegistry::from_entries(
+        &[],
+        "UNUSED_COINBASE_KEY_ID".to_owned(),
+        "UNUSED_COINBASE_KEY_SECRET".to_owned(),
+        coinbase_config.clone(),
+    )?;
+    let heartbeat = crate::run::startup_heartbeat::NormalizedReplayHeartbeat::new(
+        instance_id.to_owned(),
+        tokio::time::Duration::ZERO,
+        vec![chain.to_owned()],
+    );
+    let activity = crate::run::startup_heartbeat::RequiredSubtaskActivity::default();
+    let newer_replay_version =
+        raise_projection_replay_version_floor_above_process(database.pool()).await?;
+
+    let result = tokio::time::timeout(
+        tokio::time::Duration::from_secs(10),
+        normalized_replay_catchup::run_normalized_replay_catchup(
+            database.pool().clone(),
+            config,
+            provider_registry,
+            (coinbase_registry, coinbase_config),
+            HeaderAuditMode::Minimal,
+            heartbeat,
+            activity,
+        ),
+    )
+    .await
+    .context("an outdated normalized-replay subtask stayed healthy instead of exiting")?;
+    let error = result.expect_err("an outdated normalized-replay subtask must fail");
+    assert!(
+        bigname_storage::projection_staging::is_fatal_projection_replay_version_fence_error(
+            &error
+        ),
+        "normalized replay must propagate the process-fatal replay fence, got: {error:#}"
+    );
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.contains(&newer_replay_version.to_string()),
+        "normalized-replay refusal must name the newer replay version, got: {error:#}"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn spawned_normalized_replay_beats_on_progress_and_exposes_a_later_wedge() -> Result<()> {
     let database = bigname_test_support::TestDatabase::create_migrated(
         bigname_test_support::TestDatabaseConfig::new(

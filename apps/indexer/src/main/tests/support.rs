@@ -1290,6 +1290,30 @@ impl TestDatabase {
     }
 }
 
+async fn raise_projection_replay_version_floor_above_process(pool: &PgPool) -> Result<i32> {
+    let newer_replay_version = bigname_storage::CURRENT_PROJECTION_REPLAY_VERSION + 1;
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SELECT set_config($1, $2, true)")
+        .bind(bigname_storage::PROJECTION_REPLAY_VERSION_SETTING)
+        .bind(newer_replay_version.to_string())
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        r#"
+        UPDATE current_projection_full_replay_input_revision
+        SET
+            projection_replay_version_floor = $1,
+            projection_replay_version_fence_active = true
+        WHERE singleton
+        "#,
+    )
+    .bind(newer_replay_version)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(newer_replay_version)
+}
+
 #[allow(dead_code)]
 async fn create_raw_log_staging_input_revisions_table(pool: &PgPool) -> Result<()> {
     sqlx::query(
