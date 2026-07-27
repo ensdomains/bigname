@@ -210,6 +210,13 @@ usage)
 backfill range or projection invalidation (standard distributed-systems
 usage). Context disambiguates; both senses are intentional.
 
+**Lineage mutation revision** — a per-chain counter advanced once per affected
+chain by statement triggers for every insert, update, or delete of stored block
+lineage. Startup adapter checkpoints record this revision so a lineage change
+invalidates completed reuse and partial resume even when it occurs below the
+stored head and changes no retained raw log. Missing or ambiguous revision
+evidence fails closed.
+
 **Normalized event** — the append-only, adapter-produced record of one semantic
 protocol transition, carrying identity, provenance, chain position, and
 before/after state. The event stream, not raw logs, is what projections

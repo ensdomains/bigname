@@ -219,10 +219,12 @@ Backfill enters as bounded persisted jobs with resumable range checkpoints and u
 At process startup, each full-corpus adapter family may reuse its last completed
 result instead of scanning retained raw logs again. Reuse requires an exact
 match on the chain's raw-log [input revision](glossary.md), raw-log retention
-[generation](glossary.md), highest canonical lineage block number and hash,
-discovery-[admission epoch](glossary.md), the adapter's declared derivation
-version, and the applied database migration state. Missing, incomplete,
-unknown, or mismatched checkpoint state always runs the full family sync.
+[generation](glossary.md), trigger-maintained per-chain [lineage mutation
+revision](glossary.md#lineage-mutation-revision), highest canonical lineage
+block number and hash, discovery-[admission epoch](glossary.md), the adapter's
+declared derivation version, and the applied database migration state. Missing,
+incomplete, unknown, or mismatched checkpoint state always runs the full family
+sync.
 Completed ENSv1 subregistry state also retains the staged observation set and
 completed streamed reconciliation outcome, so an unchanged restart does not
 repeat that full walk. These rows are operational startup evidence only: they

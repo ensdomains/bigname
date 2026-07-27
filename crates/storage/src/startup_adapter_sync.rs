@@ -1,24 +1,26 @@
 use anyhow::{Context, Result, ensure};
-use serde::Serialize;
 use serde_json::{Value, json};
 use sqlx::{Acquire, PgConnection, PgPool, Postgres, Row, migrate::Migrate, pool::PoolConnection};
 
 use crate::RawLogStagingInputVersion;
 
+mod lineage;
+
+pub use lineage::{
+    StartupAdapterLineageState, StartupCanonicalLineageHead, load_startup_adapter_lineage_state,
+};
+use lineage::{load_startup_adapter_lineage_state_from_connection, lock_canonical_lineage};
+
 pub const STARTUP_ADAPTER_CURSOR_KIND: &str = "startup_adapter_owned_raw_log_state";
 pub const STARTUP_ADAPTER_CHECKPOINT_SCOPE: &str = "startup_adapter_sync";
 pub const STARTUP_DISCOVERY_ADMISSION_EPOCH_FIELD: &str = "startup_discovery_admission_epoch";
 pub const STARTUP_CANONICAL_LINEAGE_HEAD_FIELD: &str = "startup_canonical_lineage_head";
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct StartupCanonicalLineageHead {
-    pub block_number: i64,
-    pub block_hash: String,
-}
+pub const STARTUP_LINEAGE_MUTATION_REVISION_FIELD: &str = "startup_lineage_mutation_revision";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StartupAdapterSyncKey {
     pub raw_log_input_version: RawLogStagingInputVersion,
+    pub lineage_mutation_revision: i64,
     pub canonical_lineage_head: Option<StartupCanonicalLineageHead>,
     pub discovery_admission_epoch: i64,
     pub adapter_semantic_version: i64,
@@ -106,14 +108,23 @@ pub async fn complete_startup_adapter_sync(
             load_startup_adapter_sync_key(transaction.as_mut(), chain, adapter_semantic_version)
                 .await?;
         if current_key.as_ref() != Some(&started_key) {
+            invalidate_startup_adapter_checkpoint(
+                transaction.as_mut(),
+                deployment_profile,
+                chain,
+                adapter,
+            )
+            .await?;
+            let completion = if current_key.is_some() {
+                StartupAdapterSyncCompletion::InputChanged
+            } else {
+                StartupAdapterSyncCompletion::KeyUnknown
+            };
             transaction
                 .commit()
                 .await
                 .context("failed to finish changed startup adapter input check")?;
-            return Ok(match current_key {
-                Some(_) => StartupAdapterSyncCompletion::InputChanged,
-                None => StartupAdapterSyncCompletion::KeyUnknown,
-            });
+            return Ok(completion);
         }
 
         publish_completed_checkpoint(
@@ -155,23 +166,6 @@ pub async fn load_startup_adapter_schema_state(pool: &PgPool) -> Result<Option<(
     prioritize_lock_release(operation_result, release_result)
 }
 
-pub async fn load_startup_adapter_canonical_lineage_head(
-    pool: &PgPool,
-    chain: &str,
-) -> Result<Option<StartupCanonicalLineageHead>> {
-    let mut transaction = pool
-        .begin()
-        .await
-        .context("failed to start startup canonical-lineage head transaction")?;
-    lock_canonical_lineage(transaction.as_mut(), chain).await?;
-    let head = load_canonical_lineage_head(transaction.as_mut(), chain).await?;
-    transaction
-        .commit()
-        .await
-        .context("failed to finish startup canonical-lineage head transaction")?;
-    Ok(head)
-}
-
 async fn load_startup_adapter_sync_key(
     connection: &mut PgConnection,
     chain: &str,
@@ -191,7 +185,11 @@ async fn load_startup_adapter_sync_key(
     let Some(raw_log_input) = raw_log_input else {
         return Ok(None);
     };
-    let canonical_lineage_head = load_canonical_lineage_head(connection, chain).await?;
+    let Some(lineage_state) =
+        load_startup_adapter_lineage_state_from_connection(connection, chain).await?
+    else {
+        return Ok(None);
+    };
 
     let discovery_admission_epoch = sqlx::query_scalar::<_, i64>(
         r#"
@@ -221,7 +219,8 @@ async fn load_startup_adapter_sync_key(
             retention_generation: raw_log_input.try_get("retention_generation")?,
             revision: raw_log_input.try_get("revision")?,
         },
-        canonical_lineage_head,
+        lineage_mutation_revision: lineage_state.mutation_revision,
+        canonical_lineage_head: lineage_state.canonical_lineage_head,
         discovery_admission_epoch,
         adapter_semantic_version,
         schema_migration_count,
@@ -289,7 +288,8 @@ async fn completed_checkpoint_matches(
               AND schema_migration_count = $9
               AND schema_migration_max_version = $10
               AND state_payload -> $11 = to_jsonb($12::BIGINT)
-              AND state_payload -> $13 = $14::JSONB
+              AND state_payload -> $13 = to_jsonb($14::BIGINT)
+              AND state_payload -> $15 = $16::JSONB
         )
         "#,
     )
@@ -305,6 +305,8 @@ async fn completed_checkpoint_matches(
     .bind(key.schema_migration_max_version)
     .bind(STARTUP_DISCOVERY_ADMISSION_EPOCH_FIELD)
     .bind(key.discovery_admission_epoch)
+    .bind(STARTUP_LINEAGE_MUTATION_REVISION_FIELD)
+    .bind(key.lineage_mutation_revision)
     .bind(STARTUP_CANONICAL_LINEAGE_HEAD_FIELD)
     .bind(canonical_lineage_head_payload(
         key.canonical_lineage_head.as_ref(),
@@ -328,6 +330,7 @@ async fn publish_completed_checkpoint(
 ) -> Result<()> {
     let state_payload = json!({
         (STARTUP_DISCOVERY_ADMISSION_EPOCH_FIELD): key.discovery_admission_epoch,
+        (STARTUP_LINEAGE_MUTATION_REVISION_FIELD): key.lineage_mutation_revision,
         (STARTUP_CANONICAL_LINEAGE_HEAD_FIELD):
             canonical_lineage_head_payload(key.canonical_lineage_head.as_ref()),
     });
@@ -393,6 +396,38 @@ async fn publish_completed_checkpoint(
     .with_context(|| {
         format!(
             "failed to publish completed startup adapter checkpoint for \
+             {deployment_profile}/{chain}/{adapter}"
+        )
+    })?;
+    Ok(())
+}
+
+async fn invalidate_startup_adapter_checkpoint(
+    connection: &mut PgConnection,
+    deployment_profile: &str,
+    chain: &str,
+    adapter: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        DELETE FROM normalized_replay_adapter_checkpoints
+        WHERE deployment_profile = $1
+          AND chain_id = $2
+          AND cursor_kind = $3
+          AND adapter = $4
+          AND checkpoint_scope = $5
+        "#,
+    )
+    .bind(deployment_profile)
+    .bind(chain)
+    .bind(STARTUP_ADAPTER_CURSOR_KIND)
+    .bind(adapter)
+    .bind(STARTUP_ADAPTER_CHECKPOINT_SCOPE)
+    .execute(connection)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to invalidate changed startup adapter checkpoint for \
              {deployment_profile}/{chain}/{adapter}"
         )
     })?;
@@ -467,91 +502,6 @@ async fn begin_startup_adapter_fence<'a>(
         .with_context(|| format!("failed to fence startup raw-log truncation for {chain}"))?;
     lock_canonical_lineage(transaction.as_mut(), chain).await?;
     Ok(transaction)
-}
-
-async fn lock_canonical_lineage(connection: &mut PgConnection, chain: &str) -> Result<()> {
-    // This short SHARE lock blocks lineage INSERT/UPDATE/DELETE while the head
-    // identity is read. Prepare and completion take the same lock, so movement
-    // during the full scan is observed as an optimistic-key mismatch.
-    sqlx::query("LOCK TABLE chain_lineage IN SHARE MODE")
-        .execute(connection)
-        .await
-        .with_context(|| format!("failed to fence canonical lineage for {chain}"))?;
-    Ok(())
-}
-
-async fn load_canonical_lineage_head(
-    connection: &mut PgConnection,
-    chain: &str,
-) -> Result<Option<StartupCanonicalLineageHead>> {
-    let row = sqlx::query(
-        r#"
-        WITH canonical_state_heads AS MATERIALIZED (
-            (
-                SELECT block_number
-                FROM chain_lineage
-                WHERE chain_id = $1
-                  AND canonicality_state = 'canonical'::canonicality_state
-                ORDER BY block_number DESC
-                LIMIT 1
-            )
-            UNION ALL
-            (
-                SELECT block_number
-                FROM chain_lineage
-                WHERE chain_id = $1
-                  AND canonicality_state = 'safe'::canonicality_state
-                ORDER BY block_number DESC
-                LIMIT 1
-            )
-            UNION ALL
-            (
-                SELECT block_number
-                FROM chain_lineage
-                WHERE chain_id = $1
-                  AND canonicality_state = 'finalized'::canonicality_state
-                ORDER BY block_number DESC
-                LIMIT 1
-            )
-        )
-        SELECT block_number, block_hash, same_height_count
-        FROM (
-            SELECT
-                block_number,
-                block_hash,
-                COUNT(*) OVER () AS same_height_count
-            FROM chain_lineage
-            WHERE chain_id = $1
-              AND block_number = (
-                  SELECT MAX(block_number)
-                  FROM canonical_state_heads
-              )
-              AND canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
-        ) AS canonical_lineage
-        ORDER BY block_hash
-        LIMIT 1
-        "#,
-    )
-    .bind(chain)
-    .fetch_optional(connection)
-    .await
-    .with_context(|| format!("failed to load canonical lineage head for {chain}"))?;
-    row.map(|row| {
-        let same_height_count: i64 = row.try_get("same_height_count")?;
-        ensure!(
-            same_height_count == 1,
-            "canonical lineage for {chain} has {same_height_count} heads at its highest block"
-        );
-        Ok(StartupCanonicalLineageHead {
-            block_number: row.try_get("block_number")?,
-            block_hash: row.try_get("block_hash")?,
-        })
-    })
-    .transpose()
 }
 
 fn canonical_lineage_head_payload(head: Option<&StartupCanonicalLineageHead>) -> Value {

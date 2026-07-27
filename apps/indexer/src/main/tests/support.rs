@@ -1244,6 +1244,7 @@ impl TestDatabase {
 
         ensure_normalized_replay_adapter_checkpoint_tables(&pool).await?;
         create_raw_log_staging_input_revisions_table(&pool).await?;
+        create_chain_lineage_mutation_revision_fixture(&pool).await?;
         ensure_resolver_profile_convergence_tables(&pool).await?;
 
         Ok(Self {
@@ -1388,6 +1389,102 @@ async fn create_raw_log_staging_input_revisions_table(pool: &PgPool) -> Result<(
     .await
     .context("failed to create raw-log retention authority trigger for indexer tests")?;
 
+    Ok(())
+}
+
+async fn create_chain_lineage_mutation_revision_fixture(pool: &PgPool) -> Result<()> {
+    sqlx::raw_sql(
+        r#"
+        CREATE TABLE chain_lineage_mutation_revisions (
+            chain_id TEXT PRIMARY KEY,
+            revision BIGINT NOT NULL CHECK (revision >= 0)
+        );
+
+        CREATE FUNCTION bump_chain_lineage_mutation_revision_after_insert()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+            affected_chain TEXT;
+        BEGIN
+            FOR affected_chain IN
+                SELECT DISTINCT chain_id FROM inserted_rows ORDER BY chain_id
+            LOOP
+                INSERT INTO chain_lineage_mutation_revisions (chain_id, revision)
+                VALUES (affected_chain, 1)
+                ON CONFLICT (chain_id) DO UPDATE
+                SET revision = chain_lineage_mutation_revisions.revision + 1;
+            END LOOP;
+            RETURN NULL;
+        END;
+        $$;
+
+        CREATE FUNCTION bump_chain_lineage_mutation_revision_after_update()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+            affected_chain TEXT;
+        BEGIN
+            FOR affected_chain IN
+                SELECT chain_id
+                FROM (
+                    SELECT chain_id FROM deleted_rows
+                    UNION
+                    SELECT chain_id FROM inserted_rows
+                ) AS affected_chains
+                ORDER BY chain_id
+            LOOP
+                INSERT INTO chain_lineage_mutation_revisions (chain_id, revision)
+                VALUES (affected_chain, 1)
+                ON CONFLICT (chain_id) DO UPDATE
+                SET revision = chain_lineage_mutation_revisions.revision + 1;
+            END LOOP;
+            RETURN NULL;
+        END;
+        $$;
+
+        CREATE FUNCTION bump_chain_lineage_mutation_revision_after_delete()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+            affected_chain TEXT;
+        BEGIN
+            FOR affected_chain IN
+                SELECT DISTINCT chain_id FROM deleted_rows ORDER BY chain_id
+            LOOP
+                INSERT INTO chain_lineage_mutation_revisions (chain_id, revision)
+                VALUES (affected_chain, 1)
+                ON CONFLICT (chain_id) DO UPDATE
+                SET revision = chain_lineage_mutation_revisions.revision + 1;
+            END LOOP;
+            RETURN NULL;
+        END;
+        $$;
+
+        CREATE TRIGGER chain_lineage_mutation_revision_insert
+        AFTER INSERT ON chain_lineage
+        REFERENCING NEW TABLE AS inserted_rows
+        FOR EACH STATEMENT
+        EXECUTE FUNCTION bump_chain_lineage_mutation_revision_after_insert();
+
+        CREATE TRIGGER chain_lineage_mutation_revision_update
+        AFTER UPDATE ON chain_lineage
+        REFERENCING OLD TABLE AS deleted_rows NEW TABLE AS inserted_rows
+        FOR EACH STATEMENT
+        EXECUTE FUNCTION bump_chain_lineage_mutation_revision_after_update();
+
+        CREATE TRIGGER chain_lineage_mutation_revision_delete
+        AFTER DELETE ON chain_lineage
+        REFERENCING OLD TABLE AS deleted_rows
+        FOR EACH STATEMENT
+        EXECUTE FUNCTION bump_chain_lineage_mutation_revision_after_delete();
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to create lineage mutation revision fixture for indexer tests")?;
     Ok(())
 }
 

@@ -21,6 +21,8 @@ mod cleanup;
 mod items;
 mod payload;
 mod persistence;
+#[cfg(test)]
+mod tests;
 
 pub use cleanup::clear_replay_adapter_checkpoints;
 pub(super) use cleanup::delete_checkpoint;
@@ -65,8 +67,7 @@ impl SubregistryReplayCheckpoint {
             Some(checkpoint) => {
                 checkpoint.context.range_start_block_number != context.range_start_block_number
                     || context.startup_authority_changed(&checkpoint.state_payload)
-                    || (checkpoint.status == "completed"
-                        && context.startup_lineage_changed(&checkpoint.state_payload))
+                    || context.startup_lineage_changed(&checkpoint.state_payload)
                     || context.startup_version_changed(
                         checkpoint.adapter_semantic_version,
                         checkpoint.schema_migration_count,

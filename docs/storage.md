@@ -473,7 +473,7 @@ For ENSv2, `resource_id` keys by `(chain_id, registry_contract_instance_id, upst
 
 | Family | Write owner | Purpose |
 | --- | --- | --- |
-| `chain_*` | intake | lineage and canonical block graph |
+| `chain_*` | intake owns lineage and the canonical block graph; storage triggers own `chain_lineage_mutation_revisions` | lineage and canonical block graph plus commit-ordered per-chain revision metadata for startup reuse fences |
 | `raw_*` | intake; storage triggers own raw-log revision and retention-generation metadata | immutable hot replay facts, payload-cache metadata, compact per-chain/per-block-hash mutation revisions, and generation/epoch/through-bound retained-history proofs |
 | `backfill_*` | worker/backfill substrate through storage-owned lifecycle helpers | persisted backfill jobs, bounded range leases, resumable range checkpoints, and completion-scoped coverage facts |
 | `normalized_replay_*` | indexer/replay orchestration | operational replay cursors, adapter-private replay checkpoints, and per-window automatic coverage-recovery retry/terminal records |
@@ -1274,12 +1274,16 @@ stored block or raw-log block for the chain and uses the existing ENSv1
 adapter-private checkpoint formats without sharing rows with full-closure
 replay. A completed family result is reusable across process starts only when
 its raw-log [input revision](glossary.md), raw-log retention
-[generation](glossary.md), highest canonical lineage block number and hash,
-discovery-[admission epoch](glossary.md), adapter-declared derivation version,
-applied migration count, and highest applied migration version all exactly
-match the current database and binary. The lineage component changes when an
-empty block advances the canonical head or a same-height branch switch replaces
-it, even though neither movement needs to mutate a retained raw log.
+[generation](glossary.md), trigger-maintained per-chain [lineage mutation
+revision](glossary.md#lineage-mutation-revision), highest canonical lineage
+block number and hash, discovery-[admission epoch](glossary.md),
+adapter-declared derivation version, applied migration count, and highest
+applied migration version all exactly match the current database and binary.
+Statement triggers advance the lineage mutation revision once for each affected
+chain on a `chain_lineage` insert, update, or delete. It therefore changes when
+a header-anchor backfill inserts a block below the stored head, as well as when
+an empty block advances the head or a same-height branch switch replaces it,
+even though none of those changes needs to mutate a retained raw log.
 The discovery-admission epoch covers manifest-declared and discovered watched
 addresses that can change adapter inputs without changing raw logs. Migration
 state is deliberately conservative: any newly applied migration invalidates
@@ -1302,13 +1306,21 @@ discovery-admission drift, an adapter-version mismatch, or migration-state skew
 all run the complete family sync. The indexer checks the key under the raw-log,
 lineage, admission, and migration fences before accepting a completed result
 and again before publishing a replacement completion row; input drift during a
-scan is never recorded as reusable completion. A partial ENSv1 `running` or
-`stream_complete` row keeps its durable boundary when the retention generation
-is unchanged and the per-block revision ledger proves every newer raw-log
-mutation is strictly above the consumed boundary. A mutation at or below that
-boundary, missing proof, authority drift, or version drift resets it to block
-zero. Completed-row reuse remains exact-key only; partial state never skips the
-family. ENSv2 registry reconciliation is the expected self-invalidating case:
+scan is never recorded as reusable completion. If a pass reports changed
+inputs, its existing family checkpoint row is deleted unconditionally inside
+the fenced completion transaction before the bounded retry; a completion that
+was already present is not treated as proof that this pass left its derived
+rows intact. A partial ENSv1 `running` or `stream_complete` row keeps its durable
+boundary only when the lineage mutation revision is unchanged, the retention generation
+is unchanged, and the per-block revision ledger proves every newer raw-log
+mutation is strictly above the consumed boundary. Lineage drift, a raw-log
+mutation at or below that boundary, missing proof, authority drift, or version
+drift resets it to block zero. Completed-row reuse remains exact-key only;
+partial state never skips the family. If more than one canonical, safe, or
+finalized lineage row exists at the highest stored height, startup logs a
+warning, treats the key as unknown, runs the full sync, and publishes no
+reusable completion instead of failing the boot. ENSv2 registry reconciliation
+is the expected self-invalidating case:
 admitting a registry or resolver advances the discovery-admission epoch. The
 indexer repeats that complete family scan against the new key until a pass
 leaves the key stable, with the same 1,024-pass safety ceiling used by the other
@@ -1341,12 +1353,13 @@ checkpoint items until its name surfaces, resources, and bindings have been
 materialized. It then publishes and deletes those staged events in pages of
 20,000, so a continuously running projection worker cannot consume an event
 before its identity rows exist. A failed startup retains its partial rows for
-the next boot. When a later raw-log revision changes only blocks strictly above
-the retained `running` or `stream_complete` boundary, the later boot resumes
-from that boundary; a changed consumed block resets the walk. Successful
-startup retains completed startup-scoped rows and their adapter-private items
-for exact-key reuse. Adapters that do not need private staged items use the same
-checkpoint table for a completion row only.
+the next boot. When lineage is unchanged and a later raw-log revision changes
+only blocks strictly above the retained `running` or `stream_complete`
+boundary, the later boot resumes from that boundary; lineage drift or a changed
+consumed block resets the walk. Successful startup retains completed
+startup-scoped rows and their adapter-private items for exact-key reuse.
+Adapters that do not need private staged items use the same checkpoint table
+for a completion row only.
 
 Every startup adapter family declares a positive integer derivation version in
 `crates/adapters/src/startup_versions.rs`. Adapter authors must increment the
