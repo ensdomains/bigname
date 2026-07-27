@@ -27,8 +27,13 @@ justification = "Phase 7 allowlist for an oversized production file; future chan
 
 [[files]]
 path = "apps/indexer/src/main/cli.rs"
-loc = 607
+loc = 604
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
+
+[[files]]
+path = "apps/indexer/src/main/run.rs"
+loc = 617
+justification = "Indexer runtime wiring: per-chain lane spawning, pool-capacity admission, and startup configuration warnings; split candidates are the lane spawn block and startup validation."
 
 [[files]]
 path = "crates/adapters/src/ens_v1_unwrapped_authority/loading/active_emitters.rs"

@@ -133,8 +133,11 @@ the index is valid and ready.
 positive provider-attempt cap for one normalized replay catch-up iteration and
 defaults to `4`. Each iteration re-scans coverage, so higher values amortize
 that scan when many recovery windows are pending; the tradeoff is a larger
-provider-query budget per iteration. This setting does not change the durable
-32-attempt budget for one exact window and generation.
+provider-query budget per iteration. The per-iteration violation report contains
+at most 20 coverage gaps and recovery visits only those reported gaps, so the
+effective attempt cap is `min(configured value, 20)`; values above 20 do not
+increase provider attempts in one iteration. This setting does not change the
+durable 32-attempt budget for one exact window and generation.
 
 When automatic full-closure recovery reaches its terminal attempt budget,
 first repair the provider, manifest topic plan, or retained raw-log condition

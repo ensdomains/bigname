@@ -45,7 +45,7 @@ fn retention_closure_authority_kind(source_families: &[&str]) -> RetentionClosur
     }
 }
 
-const MAX_REPORTED_LEGACY_CLOSURE_COVERAGE_GAPS: i64 = 20;
+pub(crate) const MAX_REPORTED_LEGACY_CLOSURE_COVERAGE_GAPS: i64 = 20;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LegacyRegistryNewlyRequiredCoverage {
