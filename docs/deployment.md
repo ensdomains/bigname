@@ -129,6 +129,13 @@ and rerun the migration command rather than leaving the rollout waiting
 indefinitely; startup's required-index check continues to fail closed until
 the index is valid and ready.
 
+`BIGNAME_INDEXER_COVERAGE_RECOVERY_MAX_ATTEMPTS_PER_ITERATION` sets the
+positive provider-attempt cap for one normalized replay catch-up iteration and
+defaults to `4`. Each iteration re-scans coverage, so higher values amortize
+that scan when many recovery windows are pending; the tradeoff is a larger
+provider-query budget per iteration. This setting does not change the durable
+32-attempt budget for one exact window and generation.
+
 When automatic full-closure recovery reaches its terminal attempt budget,
 first repair the provider, manifest topic plan, or retained raw-log condition
 named by the failure record. Then re-arm only that reviewed generation and

@@ -66,8 +66,8 @@ pub(crate) const DEFAULT_NORMALIZED_REPLAY_CATCHUP_CHUNK_BLOCKS: i64 = 262_144;
 pub(crate) const DEFAULT_NORMALIZED_REPLAY_CATCHUP_MAX_LOGS_PER_CHUNK: usize = 100_000;
 pub(crate) const DEFAULT_NORMALIZED_REPLAY_CATCHUP_POLL_INTERVAL_SECS: u64 = 5;
 pub(crate) const DEFAULT_NORMALIZED_REPLAY_DEFER_PROJECTION_INDEXES: bool = true;
+pub(crate) const DEFAULT_COVERAGE_RECOVERY_MAX_ATTEMPTS_PER_ITERATION: usize = 4;
 pub(crate) const CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS: &str = "raw_fact_normalized_events";
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FullClosureCoverageViolations {
     pub(crate) chain: String,
@@ -75,7 +75,6 @@ pub(crate) struct FullClosureCoverageViolations {
     pub(crate) violations: Vec<bigname_manifests::UncoveredWatchedTuple>,
     pub(crate) further_violations_elided: bool,
 }
-
 impl std::fmt::Display for FullClosureCoverageViolations {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let listed = self
@@ -106,7 +105,6 @@ impl std::fmt::Display for FullClosureCoverageViolations {
 }
 
 impl std::error::Error for FullClosureCoverageViolations {}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct NormalizedReplayCatchupConfig {
     pub(crate) deployment_profile: String,
@@ -116,14 +114,13 @@ pub(crate) struct NormalizedReplayCatchupConfig {
     pub(crate) poll_interval_secs: u64,
     pub(crate) defer_projection_indexes: bool,
     pub(crate) coverage_recovery_hash_pinned_chunk_blocks: i64,
+    pub(crate) coverage_recovery_max_attempts_per_iteration: usize,
 }
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CatchupIterationStatus {
     Progressed,
     Idle,
 }
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RawLogBounds {
     start_block: i64,
@@ -263,6 +260,8 @@ impl NormalizedReplayCatchupConfig {
             poll_interval_secs,
             defer_projection_indexes: DEFAULT_NORMALIZED_REPLAY_DEFER_PROJECTION_INDEXES,
             coverage_recovery_hash_pinned_chunk_blocks: DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
+            coverage_recovery_max_attempts_per_iteration:
+                DEFAULT_COVERAGE_RECOVERY_MAX_ATTEMPTS_PER_ITERATION,
         })
     }
 }
@@ -490,6 +489,7 @@ pub(super) async fn run_normalized_replay_catchup_iteration_with_provider(
             provider,
             coinbase_sql_recovery,
             config.coverage_recovery_hash_pinned_chunk_blocks,
+            config.coverage_recovery_max_attempts_per_iteration,
             header_audit_mode,
             rewind_inspection_input_version,
             progress,

@@ -13,12 +13,7 @@ use crate::bootstrap_backfill::{
     DEFAULT_BOOTSTRAP_BACKFILL_RANGE_BLOCKS, DEFAULT_BOOTSTRAP_BACKFILL_WORKERS,
 };
 use crate::drop_rederive::DropAndRederiveBaseNormalizedEventsArgs;
-use crate::normalized_replay_catchup::{
-    DEFAULT_NORMALIZED_REPLAY_CATCHUP_CHUNK_BLOCKS,
-    DEFAULT_NORMALIZED_REPLAY_CATCHUP_MAX_LOGS_PER_CHUNK,
-    DEFAULT_NORMALIZED_REPLAY_CATCHUP_POLL_INTERVAL_SECS,
-    DEFAULT_NORMALIZED_REPLAY_DEFER_PROJECTION_INDEXES,
-};
+use crate::normalized_replay_catchup as catchup;
 use crate::ops_catchup::{
     DEFAULT_OPS_CATCHUP_CHUNK_BLOCKS, DEFAULT_OPS_CATCHUP_FOLLOW_POLL_INTERVAL_SECS,
     DEFAULT_OPS_CATCHUP_LEASE_DURATION_SECS,
@@ -53,7 +48,6 @@ pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) command: Command,
 }
-
 #[derive(Subcommand, Debug)]
 pub(crate) enum Command {
     Run(RunArgs),
@@ -222,25 +216,32 @@ pub(crate) struct RunArgs {
     #[arg(
         long = "normalized-replay-catchup-chunk-blocks",
         env = "BIGNAME_INDEXER_NORMALIZED_REPLAY_CATCHUP_CHUNK_BLOCKS",
-        default_value_t = DEFAULT_NORMALIZED_REPLAY_CATCHUP_CHUNK_BLOCKS
+        default_value_t = catchup::DEFAULT_NORMALIZED_REPLAY_CATCHUP_CHUNK_BLOCKS
     )]
     pub(crate) normalized_replay_catchup_chunk_blocks: i64,
     #[arg(
         long = "normalized-replay-catchup-max-logs-per-chunk",
         env = "BIGNAME_INDEXER_NORMALIZED_REPLAY_CATCHUP_MAX_LOGS_PER_CHUNK",
-        default_value_t = DEFAULT_NORMALIZED_REPLAY_CATCHUP_MAX_LOGS_PER_CHUNK
+        default_value_t = catchup::DEFAULT_NORMALIZED_REPLAY_CATCHUP_MAX_LOGS_PER_CHUNK
     )]
     pub(crate) normalized_replay_catchup_max_logs_per_chunk: usize,
     #[arg(
         long = "normalized-replay-catchup-poll-interval-secs",
         env = "BIGNAME_INDEXER_NORMALIZED_REPLAY_CATCHUP_POLL_INTERVAL_SECS",
-        default_value_t = DEFAULT_NORMALIZED_REPLAY_CATCHUP_POLL_INTERVAL_SECS
+        default_value_t = catchup::DEFAULT_NORMALIZED_REPLAY_CATCHUP_POLL_INTERVAL_SECS
     )]
     pub(crate) normalized_replay_catchup_poll_interval_secs: u64,
     #[arg(
+        long = "coverage-recovery-max-attempts-per-iteration",
+        env = "BIGNAME_INDEXER_COVERAGE_RECOVERY_MAX_ATTEMPTS_PER_ITERATION",
+        default_value_t = catchup::DEFAULT_COVERAGE_RECOVERY_MAX_ATTEMPTS_PER_ITERATION,
+        value_parser = parse_positive_usize
+    )]
+    pub(crate) coverage_recovery_max_attempts_per_iteration: usize,
+    #[arg(
         long = "normalized-replay-defer-projection-indexes",
         env = "BIGNAME_INDEXER_NORMALIZED_REPLAY_DEFER_PROJECTION_INDEXES",
-        default_value_t = DEFAULT_NORMALIZED_REPLAY_DEFER_PROJECTION_INDEXES
+        default_value_t = catchup::DEFAULT_NORMALIZED_REPLAY_DEFER_PROJECTION_INDEXES
     )]
     pub(crate) normalized_replay_defer_projection_indexes: bool,
     #[arg(
@@ -250,7 +251,6 @@ pub(crate) struct RunArgs {
     )]
     pub(crate) retain_header_audit_fields: bool,
 }
-
 #[derive(Args, Debug)]
 pub(crate) struct BackfillArgs {
     #[command(flatten)]
