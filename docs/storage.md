@@ -875,12 +875,14 @@ later mutation inside the fact interval. The count and digest remain
 operator-visible audit evidence; the commit-ordered block revision ledger is
 the inexpensive digest-validity check on subsequent reads.
 
-Automatic full-closure recovery allows no more than four provider attempts per
-catch-up iteration but continues inspecting later reported violations after an
-individual failure. Its logical key includes the exact provider-specific source
-identity, interval, per-window recovery write epoch, and maximum committed
-revision inside that interval at job creation; generation-scoped job creation
-appends the captured retention generation. Provider failures persist
+Automatic full-closure recovery allows no more provider attempts per catch-up
+iteration than the positive
+`BIGNAME_INDEXER_COVERAGE_RECOVERY_MAX_ATTEMPTS_PER_ITERATION` cap, which
+defaults to `4`, but continues inspecting later reported violations after an
+individual failure. Its logical key includes the exact provider-specific
+source identity, interval, per-window recovery write epoch, and maximum
+committed revision inside that interval at job creation; generation-scoped job
+creation appends the captured retention generation. Provider failures persist
 exponential backoff from 5 seconds to a
 300-second cap in the per-window failure record. Attempts accumulate across
 immutable job revisions and become terminal at 32 for that exact window and

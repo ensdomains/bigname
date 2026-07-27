@@ -243,6 +243,8 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         )?;
         catchup_config.defer_projection_indexes = args.normalized_replay_defer_projection_indexes;
         catchup_config.coverage_recovery_hash_pinned_chunk_blocks = args.hash_pinned_chunk_blocks;
+        catchup_config.coverage_recovery_max_attempts_per_iteration =
+            args.coverage_recovery_max_attempts_per_iteration;
         ensure_indexer_run_pool_capacity(&args.database, catchup_config.chains.len())?;
         let catchup_heartbeat = startup_heartbeat::NormalizedReplayHeartbeat::new(
             heartbeat_instance_id.clone(),
@@ -361,6 +363,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         normalized_replay_catchup_chunk_blocks = args.normalized_replay_catchup_chunk_blocks,
         normalized_replay_catchup_max_logs_per_chunk = args.normalized_replay_catchup_max_logs_per_chunk,
         normalized_replay_catchup_poll_interval_secs = args.normalized_replay_catchup_poll_interval_secs,
+        coverage_recovery_max_attempts_per_iteration = args.coverage_recovery_max_attempts_per_iteration,
         normalized_replay_defer_projection_indexes = args.normalized_replay_defer_projection_indexes,
         adapter_sync_on_manifest_refresh = run_mode.broad_runtime_refresh_enabled,
         manifest_observation_refresh_enabled = run_mode.broad_runtime_refresh_enabled,

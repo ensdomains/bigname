@@ -23,16 +23,22 @@ use crate::{
 };
 
 const ALL_FULL_CLOSURE_JOB_KEY_PREFIX: &str = "indexer-full-closure-coverage-recovery:";
-const MAX_PROVIDER_ATTEMPTS_PER_ITERATION: usize = 4;
 
-#[derive(Default)]
 struct ProviderAttemptBudget {
     attempted: usize,
+    maximum: usize,
 }
 
 impl ProviderAttemptBudget {
+    fn new(maximum: usize) -> Self {
+        Self {
+            attempted: 0,
+            maximum,
+        }
+    }
+
     fn allows_attempt(&self) -> bool {
-        self.attempted < MAX_PROVIDER_ATTEMPTS_PER_ITERATION
+        self.attempted < self.maximum
     }
 
     fn record(&mut self, attempted: bool) {
@@ -123,6 +129,7 @@ pub(super) async fn recover_full_closure_coverage_batch(
     provider: &(impl ChainProviderOps + ?Sized),
     coinbase_sql_recovery: Option<(&CoinbaseSqlSourceRegistry, &CoinbaseSqlBackfillConfig)>,
     hash_pinned_chunk_blocks: i64,
+    max_provider_attempts_per_iteration: usize,
     header_audit_mode: HeaderAuditMode,
     requirement: &FullClosureCoverageViolations,
     progress: &mut Option<&mut NormalizedReplayHeartbeat>,
@@ -130,6 +137,10 @@ pub(super) async fn recover_full_closure_coverage_batch(
     ensure!(
         !requirement.violations.is_empty(),
         "full-closure coverage recovery received an empty violation set"
+    );
+    ensure!(
+        max_provider_attempts_per_iteration > 0,
+        "full-closure coverage recovery provider-attempt cap must be positive"
     );
     let initial_authority = load_authority(pool, &requirement.chain).await?;
     ensure!(
@@ -141,7 +152,8 @@ pub(super) async fn recover_full_closure_coverage_batch(
     );
 
     let mut batch = FullClosureRecoveryBatchOutcome::default();
-    let mut provider_attempt_budget = ProviderAttemptBudget::default();
+    let mut provider_attempt_budget =
+        ProviderAttemptBudget::new(max_provider_attempts_per_iteration);
     for violation in &requirement.violations {
         let observed_authority = load_authority(pool, &requirement.chain).await?;
         ensure!(
@@ -265,12 +277,13 @@ fn failure_key(
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_PROVIDER_ATTEMPTS_PER_ITERATION, ProviderAttemptBudget};
+    use super::ProviderAttemptBudget;
 
     #[test]
     fn provider_attempt_budget_counts_attempts_without_a_recovery_outcome() {
-        let mut budget = ProviderAttemptBudget::default();
-        for _ in 0..MAX_PROVIDER_ATTEMPTS_PER_ITERATION {
+        let non_default_iteration_cap = 7;
+        let mut budget = ProviderAttemptBudget::new(non_default_iteration_cap);
+        for _ in 0..non_default_iteration_cap {
             assert!(budget.allows_attempt());
             budget.record(true);
         }

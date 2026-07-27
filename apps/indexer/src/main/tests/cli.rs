@@ -164,3 +164,62 @@ fn run_cli_parses_startup_discovery_page_logs() {
         "run CLI must reject a page-log limit whose SQL lookahead overflows"
     );
 }
+
+#[test]
+fn run_cli_parses_coverage_recovery_max_attempts_per_iteration() {
+    let command = <Cli as clap::CommandFactory>::command();
+    let run_command = command
+        .get_subcommands()
+        .find(|command| command.get_name() == "run")
+        .expect("CLI must expose the run command");
+    let attempt_cap_arg = run_command
+        .get_arguments()
+        .find(|arg| arg.get_id() == "coverage_recovery_max_attempts_per_iteration")
+        .expect("run CLI must expose the coverage-recovery iteration attempt cap");
+    assert_eq!(
+        attempt_cap_arg.get_env(),
+        Some(std::ffi::OsStr::new(
+            "BIGNAME_INDEXER_COVERAGE_RECOVERY_MAX_ATTEMPTS_PER_ITERATION"
+        ))
+    );
+    assert_eq!(
+        attempt_cap_arg.get_default_values(),
+        &[std::ffi::OsStr::new("4")]
+    );
+
+    let Cli {
+        command: Command::Run(defaults),
+    } = Cli::try_parse_from(["bigname-indexer", "run"])
+        .expect("run CLI must default the coverage-recovery iteration attempt cap")
+    else {
+        panic!("run command must parse as Command::Run");
+    };
+    assert_eq!(defaults.coverage_recovery_max_attempts_per_iteration, 4);
+
+    let Cli {
+        command: Command::Run(custom),
+    } = Cli::try_parse_from([
+        "bigname-indexer",
+        "run",
+        "--coverage-recovery-max-attempts-per-iteration",
+        "9",
+    ])
+    .expect("run CLI must accept a custom coverage-recovery iteration attempt cap")
+    else {
+        panic!("run command must parse as Command::Run");
+    };
+    assert_eq!(custom.coverage_recovery_max_attempts_per_iteration, 9);
+
+    for invalid in ["0", "not-a-number"] {
+        let result = Cli::try_parse_from([
+            "bigname-indexer",
+            "run",
+            "--coverage-recovery-max-attempts-per-iteration",
+            invalid,
+        ]);
+        assert!(
+            result.is_err(),
+            "run CLI must reject invalid coverage-recovery iteration attempt cap {invalid:?}"
+        );
+    }
+}

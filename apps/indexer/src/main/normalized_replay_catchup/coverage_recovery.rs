@@ -67,6 +67,7 @@ pub(super) async fn replay_full_closure_with_coverage_recovery(
     provider: Option<&(impl ChainProviderOps + ?Sized)>,
     coinbase_sql_recovery: Option<(&CoinbaseSqlSourceRegistry, &CoinbaseSqlBackfillConfig)>,
     hash_pinned_chunk_blocks: i64,
+    max_provider_attempts_per_iteration: usize,
     header_audit_mode: HeaderAuditMode,
     mut raw_log_input_version: RawLogStagingInputVersion,
     progress: &mut Option<&mut NormalizedReplayHeartbeat>,
@@ -108,6 +109,7 @@ pub(super) async fn replay_full_closure_with_coverage_recovery(
                 provider,
                 coinbase_sql_recovery,
                 hash_pinned_chunk_blocks,
+                max_provider_attempts_per_iteration,
                 header_audit_mode,
                 &requirement,
                 progress,
@@ -126,7 +128,7 @@ pub(super) async fn replay_full_closure_with_coverage_recovery(
                 .len()
                 .saturating_sub(batch.completed_count());
             return Err(replay_error.context(format!(
-                "auto-enqueued and completed generation-bound full-closure coverage recovery job ids are recorded in batch outcome: {}; at most four provider attempts ran while deferred or terminal violations did not block later reported violations; {remaining_reported} reported violations remain{}; the next bounded catch-up iteration will reload coverage authority",
+                "auto-enqueued and completed generation-bound full-closure coverage recovery job ids are recorded in batch outcome: {}; at most {max_provider_attempts_per_iteration} provider attempts ran while deferred or terminal violations did not block later reported violations; {remaining_reported} reported violations remain{}; the next bounded catch-up iteration will reload coverage authority",
                 batch.failure_record_summary(),
                 if requirement.further_violations_elided {
                     " and further violations were elided"
