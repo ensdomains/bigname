@@ -357,8 +357,27 @@ async fn ops_catchup_retry_reloads_targets_admitted_during_prior_pass() -> Resul
     database.cleanup().await
 }
 
-#[tokio::test]
-async fn ops_catchup_resumes_ensv2_finalization_after_proof_publication_restart() -> Result<()> {
+#[test]
+fn ops_catchup_resumes_ensv2_finalization_after_proof_publication_restart() -> Result<()> {
+    std::thread::Builder::new()
+        .name("ensv2-finalization-restart".to_owned())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("failed to build restart-test runtime")?
+                .block_on(
+                    ops_catchup_resumes_ensv2_finalization_after_proof_publication_restart_inner(),
+                )
+        })
+        .context("failed to spawn restart-test thread")?
+        .join()
+        .map_err(|_| anyhow::anyhow!("restart-test thread panicked"))?
+}
+
+async fn ops_catchup_resumes_ensv2_finalization_after_proof_publication_restart_inner() -> Result<()>
+{
     let database = TestDatabase::new().await?;
     create_ops_catchup_backfill_job_tables(database.pool()).await?;
     let chain = "ethereum-sepolia";
@@ -698,12 +717,12 @@ async fn ops_catchup_resumes_ensv2_finalization_after_proof_publication_restart(
     let registry = ProviderRegistry::from_chain_rpc_urls(&[format!("{chain}={provider_url}")])?;
 
     let _failure = install_after_ens_v2_proof_publication_failure(database.pool(), chain).await?;
-    let first_error = run_ops_finalized_catchup(
+    let first_error = Box::pin(run_ops_finalized_catchup(
         database.pool(),
         &[catchup_task(chain, registry_address)],
         &registry,
         ops_config(2),
-    )
+    ))
     .await
     .expect_err("the test hook must stop recovery after proof publication");
     assert!(
@@ -757,12 +776,12 @@ async fn ops_catchup_resumes_ensv2_finalization_after_proof_publication_restart(
 
     // A new invocation has no process-local recovery state. It must discover
     // and finish the durable finalization jobs before reporting stability.
-    let outcome = run_ops_finalized_catchup(
+    let outcome = Box::pin(run_ops_finalized_catchup(
         database.pool(),
         &[catchup_task(chain, registry_address)],
         &registry,
         ops_config(2),
-    )
+    ))
     .await?;
     assert!(outcome.drained_job_count >= 1);
     let recovery_job_keys = sqlx::query_scalar::<_, String>(

@@ -1510,12 +1510,44 @@ async fn ensure_normalized_replay_adapter_checkpoint_tables(pool: &PgPool) -> Re
         r#"
         ALTER TABLE normalized_replay_adapter_checkpoints
             ADD COLUMN IF NOT EXISTS raw_log_retention_generation BIGINT NOT NULL DEFAULT 0,
-            ADD COLUMN IF NOT EXISTS raw_log_input_revision BIGINT NOT NULL DEFAULT 0
+            ADD COLUMN IF NOT EXISTS raw_log_input_revision BIGINT NOT NULL DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS adapter_semantic_version BIGINT,
+            ADD COLUMN IF NOT EXISTS schema_migration_count BIGINT,
+            ADD COLUMN IF NOT EXISTS schema_migration_max_version BIGINT
         "#,
     )
     .execute(pool)
     .await
     .context("failed to add raw-log versions to replay adapter checkpoints")?;
+    // This hand-built fixture does not run SQLx migrations, but startup
+    // checkpoint reuse intentionally fails closed without a migration ledger.
+    // Give it a stable synthetic applied-schema state so boot-reuse behavior
+    // can be exercised without duplicating the full production schema.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS _sqlx_migrations (
+            version BIGINT PRIMARY KEY,
+            description TEXT NOT NULL,
+            installed_on TIMESTAMPTZ NOT NULL DEFAULT now(),
+            success BOOLEAN NOT NULL,
+            checksum BYTEA NOT NULL,
+            execution_time BIGINT NOT NULL
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("failed to create startup migration-state test fixture")?;
+    sqlx::query(
+        "INSERT INTO _sqlx_migrations (
+             version, description, success, checksum, execution_time
+         )
+         VALUES (20260727120100, 'startup adapter test schema', TRUE, ''::BYTEA, 0)
+         ON CONFLICT (version) DO NOTHING",
+    )
+    .execute(pool)
+    .await
+    .context("failed to seed startup migration-state test fixture")?;
     Ok(())
 }
 

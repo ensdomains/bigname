@@ -1324,9 +1324,49 @@ async fn focused_discovery_sync_before_widen_admits_bootstrap_edges_into_the_liv
         )
         .fetch_one(database.pool())
         .await?,
-        0,
-        "a successful startup discovery pass must clear its checkpoint rows"
+        2,
+        "both discovery families must retain completed cross-boot checkpoints"
     );
+    let staged_item_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoint_items
+             WHERE deployment_profile = 'test'
+               AND checkpoint_scope = 'startup_adapter_sync'",
+        )
+        .fetch_one(database.pool())
+        .await?;
+    assert!(
+        staged_item_count > 0,
+        "the completed streamed walk must retain its staged assignment evidence"
+    );
+
+    // A second boot with the same input key must verify the completed rows
+    // without entering either adapter. Any adapter entry would mutate its
+    // checkpoint while loading/completing and trip this guard.
+    sqlx::query(
+        r#"
+        CREATE FUNCTION reject_reused_startup_checkpoint_mutation() RETURNS TRIGGER AS $function$
+        BEGIN
+            RAISE EXCEPTION 'unchanged startup checkpoint was mutated';
+        END;
+        $function$ LANGUAGE plpgsql
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        "CREATE TRIGGER reject_reused_startup_checkpoint_mutation
+         BEFORE INSERT OR UPDATE OR DELETE ON normalized_replay_adapter_checkpoints
+         FOR EACH ROW EXECUTE FUNCTION reject_reused_startup_checkpoint_mutation()",
+    )
+    .execute(database.pool())
+    .await?;
+    sync_discovery_adapter_owned_raw_log_state(
+        database.pool(),
+        "test",
+        &bootstrap_state.watched_chain_plan,
+        DEFAULT_STARTUP_DISCOVERY_PAGE_LOGS,
+    )
+    .await?;
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*)::BIGINT FROM normalized_replay_adapter_checkpoint_items
@@ -1335,8 +1375,8 @@ async fn focused_discovery_sync_before_widen_admits_bootstrap_edges_into_the_liv
         )
         .fetch_one(database.pool())
         .await?,
-        0,
-        "startup checkpoint item cleanup must cascade with the parent row"
+        staged_item_count,
+        "the unchanged boot must reuse the completed walk without rebuilding staged items"
     );
     let widened_state =
         widen_runtime_state_to_live_watch_scope(database.pool(), &bootstrap_state).await?;

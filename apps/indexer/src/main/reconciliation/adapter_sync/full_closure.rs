@@ -314,21 +314,25 @@ async fn sync_full_closure_normalized_events_without_lock(
         let adapter_started = Instant::now();
         let summary = match progress.as_deref_mut() {
             Some(progress) => {
-                bigname_adapters::sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit_and_progress(
-                    pool,
-                    chain,
-                    &checkpoint_context,
-                    max_raw_logs_per_page,
-                    progress,
+                Box::pin(
+                    bigname_adapters::sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit_and_progress(
+                        pool,
+                        chain,
+                        &checkpoint_context,
+                        max_raw_logs_per_page,
+                        progress,
+                    ),
                 )
                 .await?
             }
             None => {
-                bigname_adapters::sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit(
-                    pool,
-                    chain,
-                    &checkpoint_context,
-                    max_raw_logs_per_page,
+                Box::pin(
+                    bigname_adapters::sync_ens_v1_subregistry_discovery_with_replay_checkpoint_and_log_limit(
+                        pool,
+                        chain,
+                        &checkpoint_context,
+                        max_raw_logs_per_page,
+                    ),
                 )
                 .await?
             }
@@ -364,21 +368,25 @@ async fn sync_full_closure_normalized_events_without_lock(
         let adapter_started = Instant::now();
         let summary = match progress.as_deref_mut() {
             Some(progress) => {
-                bigname_adapters::sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limit_and_progress(
-                    pool,
-                    chain,
-                    &checkpoint_context,
-                    max_raw_logs_per_page,
-                    progress,
+                Box::pin(
+                    bigname_adapters::sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limit_and_progress(
+                        pool,
+                        chain,
+                        &checkpoint_context,
+                        max_raw_logs_per_page,
+                        progress,
+                    ),
                 )
                 .await?
             }
             None => {
-                bigname_adapters::sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limit(
-                    pool,
-                    chain,
-                    &checkpoint_context,
-                    max_raw_logs_per_page,
+                Box::pin(
+                    bigname_adapters::sync_ens_v1_unwrapped_authority_with_replay_checkpoint_and_log_limit(
+                        pool,
+                        chain,
+                        &checkpoint_context,
+                        max_raw_logs_per_page,
+                    ),
                 )
                 .await?
             }

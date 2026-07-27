@@ -17,7 +17,10 @@ pub use admission::DiscoveryAdmissionState;
 pub(crate) use admission_epoch::{
     bump_discovery_admission_epochs, fence_discovery_admission_epoch_writes,
 };
-pub use admission_epoch::{load_discovery_admission_epoch, load_discovery_admission_epochs};
+pub use admission_epoch::{
+    load_discovery_admission_epoch, load_discovery_admission_epochs,
+    try_load_discovery_admission_epoch,
+};
 pub use loading::{load_discovery_admission_state, load_discovery_admission_state_with_progress};
 pub use persistence::persist_discovery_observation;
 pub use provenance::discovery_observation_evm_event_position;

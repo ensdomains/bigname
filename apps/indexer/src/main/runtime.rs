@@ -1,5 +1,5 @@
 #[path = "runtime/adapter_sync.rs"]
-mod adapter_sync;
+pub(crate) mod adapter_sync;
 #[path = "runtime/intake.rs"]
 mod intake;
 #[path = "runtime/logging.rs"]

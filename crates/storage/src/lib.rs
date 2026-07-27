@@ -36,6 +36,7 @@ mod resolver_profile_input_changes;
 mod service_heartbeats;
 mod snapshot_selection;
 pub mod sql_row;
+mod startup_adapter_sync;
 mod stored_lineage_coverage;
 mod time;
 mod versions;
@@ -274,6 +275,7 @@ pub use raw_staging_revision::{
     RawLogStagingReadSetGuard, acquire_raw_log_staging_read_guard,
     acquire_raw_log_staging_read_set_guard, earliest_raw_log_staging_block_changed_since,
     load_raw_log_staging_input_version, raw_log_staging_block_range_changed_since,
+    try_load_raw_log_staging_input_version,
 };
 pub use record_inventory::{
     RecordInventoryCurrentRow, clear_record_inventory_current,
@@ -315,6 +317,8 @@ pub use resolver_profile_authority_journal::{
     resolver_profile_authority_entry_key,
 };
 #[rustfmt::skip]
+pub use startup_adapter_sync::{StartupAdapterSyncCompletion, StartupAdapterSyncDecision, StartupAdapterSyncKey, complete_startup_adapter_sync, load_startup_adapter_schema_state, prepare_startup_adapter_sync};
+#[rustfmt::skip]
 pub use resolver_profile_authority_journal::{ResolverProfileAuthorityJournalProgress, ResolverProfileAuthorityJournalProgressFuture};
 pub use resolver_profile_input_changes::{
     ResolverProfileInputChange, ResolverProfileReconciliationTarget,
@@ -342,7 +346,6 @@ pub use snapshot_selection::{
     resolve_exact_name_snapshot_selection,
 };
 pub use versions::{CURRENT_PROJECTION_REPLAY_VERSION, latest_migration_version};
-
 /// Checked-in database migrations.
 pub const MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 

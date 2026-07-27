@@ -1,4 +1,5 @@
 use super::*;
+use crate::ENS_V1_UNWRAPPED_AUTHORITY_STARTUP_VERSION;
 use crate::checkpoint_context::{
     AdapterCheckpointContext, ReplayAdapterCheckpointContext, StartupAdapterCheckpointContext,
     StartupAdapterProgress,
@@ -62,7 +63,13 @@ pub async fn sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_lim
     checkpoint: &StartupAdapterCheckpointContext,
     max_raw_logs_per_page: usize,
 ) -> Result<EnsV1UnwrappedAuthoritySyncSummary> {
-    let checkpoint = checkpoint.adapter_context(pool, chain).await?;
+    let checkpoint = checkpoint
+        .adapter_context(
+            pool,
+            chain,
+            ENS_V1_UNWRAPPED_AUTHORITY_STARTUP_VERSION.semantic_version,
+        )
+        .await?;
     sync_ens_v1_unwrapped_authority_with_checkpoint_context(
         pool,
         chain,
@@ -80,7 +87,13 @@ pub async fn sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_lim
     max_raw_logs_per_page: usize,
     progress: &mut dyn StartupAdapterProgress,
 ) -> Result<EnsV1UnwrappedAuthoritySyncSummary> {
-    let checkpoint = checkpoint.adapter_context(pool, chain).await?;
+    let checkpoint = checkpoint
+        .adapter_context(
+            pool,
+            chain,
+            ENS_V1_UNWRAPPED_AUTHORITY_STARTUP_VERSION.semantic_version,
+        )
+        .await?;
     sync_ens_v1_unwrapped_authority_with_checkpoint_context(
         pool,
         chain,

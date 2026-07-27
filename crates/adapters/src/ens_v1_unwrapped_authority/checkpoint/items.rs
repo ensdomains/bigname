@@ -411,6 +411,9 @@ pub(super) async fn update_checkpoint_progress(
             state_payload = $12,
             raw_log_retention_generation = $13,
             raw_log_input_revision = $14,
+            adapter_semantic_version = $15,
+            schema_migration_count = $16,
+            schema_migration_max_version = $17,
             updated_at = now(),
             last_failure_reason = NULL
         WHERE deployment_profile = $1
@@ -434,6 +437,9 @@ pub(super) async fn update_checkpoint_progress(
     .bind(state_payload)
     .bind(checkpoint.raw_log_input_version.retention_generation)
     .bind(checkpoint.raw_log_input_version.revision)
+    .bind(checkpoint.context.startup_adapter_semantic_version())
+    .bind(checkpoint.context.startup_schema_migration_count())
+    .bind(checkpoint.context.startup_schema_migration_max_version())
     .execute(transaction.as_mut())
     .await
     .context("failed to update unwrapped-authority replay checkpoint progress")?;

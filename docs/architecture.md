@@ -216,6 +216,21 @@ Postgres is the hot indexed and replay-focused store. Lineage anchors, selected 
 
 Backfill enters as bounded persisted jobs with resumable range checkpoints and uses the same stages as live intake. Backfill checkpoint state is operational worker state — it does not promote canonical, safe, or finalized chain checkpoints.
 
+At process startup, each full-corpus adapter family may reuse its last completed
+result instead of scanning retained raw logs again. Reuse requires an exact
+match on the chain's raw-log [input revision](glossary.md), raw-log retention
+[generation](glossary.md), discovery-[admission epoch](glossary.md), the
+adapter's declared derivation version, and the applied database migration
+state. Missing, incomplete, unknown, or mismatched checkpoint state always
+runs the full family sync. Completed ENSv1 subregistry state also retains the
+staged observation set and completed streamed reconciliation outcome, so an
+unchanged restart does not repeat that full walk. These rows are operational
+startup evidence only: they do not change manifest or discovery authority,
+canonicality, normalized-event ownership, projection readiness, or chain
+checkpoints. ENSv2 registry discovery may itself advance the admission epoch;
+startup repeats that family against the new exact key until a pass leaves the
+key stable, and publishes no reusable completion for an intermediate pass.
+
 Reconciliation, fetch, notification, and historical-backfill detail live in [`chain-intake.md`](chain-intake.md).
 
 ## Immutable facts and rebuildable state
