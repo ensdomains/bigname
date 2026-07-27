@@ -1359,6 +1359,50 @@ async fn startup_subregistry_resumes_across_page_limit_change() -> Result<()> {
         1
     );
 
+    sqlx::query(
+        r#"
+        WITH advanced AS (
+            UPDATE raw_log_staging_input_revisions
+            SET revision = revision + 1
+            WHERE chain_id = $1
+            RETURNING revision
+        )
+        INSERT INTO raw_log_staging_block_revisions (
+            chain_id,
+            block_hash,
+            block_number,
+            revision
+        )
+        SELECT $1, '0xstartup-tail-43', 43, revision
+        FROM advanced
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    sqlx::raw_sql(
+        r#"
+        CREATE FUNCTION reject_running_subregistry_startup_reset()
+        RETURNS TRIGGER
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            IF OLD.adapter = 'ens_v1_subregistry_discovery'
+               AND OLD.checkpoint_scope = 'startup_adapter_sync'
+               AND OLD.status = 'running' THEN
+                RAISE EXCEPTION 'running startup checkpoint was reset';
+            END IF;
+            RETURN OLD;
+        END;
+        $$;
+        CREATE TRIGGER reject_running_subregistry_startup_reset
+        BEFORE DELETE ON normalized_replay_adapter_checkpoints
+        FOR EACH ROW EXECUTE FUNCTION reject_running_subregistry_startup_reset();
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
     let resumed = sync_ens_v1_subregistry_discovery_with_startup_checkpoint_and_log_limit(
         database.pool(),
         chain,
@@ -1488,22 +1532,51 @@ async fn startup_checkpointed_subregistry_extends_after_interrupted_finalize() -
         "stream_complete"
     );
 
+    sqlx::raw_sql(
+        r#"
+        CREATE FUNCTION reject_stream_complete_subregistry_startup_reset()
+        RETURNS TRIGGER
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            IF OLD.adapter = 'ens_v1_subregistry_discovery'
+               AND OLD.checkpoint_scope = 'startup_adapter_sync'
+               AND OLD.status = 'stream_complete' THEN
+                RAISE EXCEPTION 'stream-complete startup checkpoint was reset';
+            END IF;
+            RETURN OLD;
+        END;
+        $$;
+        CREATE TRIGGER reject_stream_complete_subregistry_startup_reset
+        BEFORE DELETE ON normalized_replay_adapter_checkpoints
+        FOR EACH ROW EXECUTE FUNCTION reject_stream_complete_subregistry_startup_reset();
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
     sqlx::query("DELETE FROM startup_finalize_failure")
         .execute(database.pool())
         .await?;
-    insert_raw_new_owner_log_with_key(
-        database.pool(),
-        RawNewOwnerLog {
-            chain_id: chain,
-            block_hash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            block_number: 43,
-            emitting_address: registry_address,
-            owner: "0x00000000000000000000000000000000000000DD",
-            parent_node: ZERO_NODE,
-            label: "com",
-            canonicality_state: CanonicalityState::Canonical,
-        },
+    sqlx::query(
+        r#"
+        WITH advanced AS (
+            UPDATE raw_log_staging_input_revisions
+            SET revision = revision + 1
+            WHERE chain_id = $1
+            RETURNING revision
+        )
+        INSERT INTO raw_log_staging_block_revisions (
+            chain_id,
+            block_hash,
+            block_number,
+            revision
+        )
+        SELECT $1, '0xstartup-finalize-tail-43', 43, revision
+        FROM advanced
+        "#,
     )
+    .bind(chain)
+    .execute(database.pool())
     .await?;
 
     let extended_checkpoint = StartupAdapterCheckpointContext::new("test-finalize-resume", 43)?;
@@ -1514,9 +1587,9 @@ async fn startup_checkpointed_subregistry_extends_after_interrupted_finalize() -
         1,
     )
     .await?;
-    assert_eq!(resumed.scanned_log_count, 2);
-    assert_eq!(resumed.matched_log_count, 2);
-    assert_eq!(resumed.active_edge_count, 2);
+    assert_eq!(resumed.scanned_log_count, 1);
+    assert_eq!(resumed.matched_log_count, 1);
+    assert_eq!(resumed.active_edge_count, 1);
     assert_eq!(
         query_scalar::<_, i64>(
             "SELECT COUNT(*)::BIGINT FROM normalized_events
@@ -1524,7 +1597,7 @@ async fn startup_checkpointed_subregistry_extends_after_interrupted_finalize() -
         )
         .fetch_one(database.pool())
         .await?,
-        2
+        1
     );
 
     database.cleanup().await

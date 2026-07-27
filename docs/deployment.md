@@ -915,9 +915,10 @@ the configured chunk as their execution unit. The startup adapter pass then
 advances that same heartbeat after checkpoint stream pages and bounded
 discovery, identity, binding, and normalized-event finalization batches, so a
 large materialization stays live without a free-running timer masking a stuck
-operation. Live manifest and discovery refresh adapter passes use the same
-checkpoint-page callbacks and family-boundary beats. Raw-only sparse backfill
-also caps each materialized push with
+operation. Live manifest and discovery refresh passes do not write boot
+checkpoints; they use adapter progress callbacks where available, periodic
+in-flight beats around uncheckpointed ENSv1 whole-corpus work, and
+family-boundary beats. Raw-only sparse backfill also caps each materialized push with
 `BIGNAME_INDEXER_HASH_PINNED_BACKFILL_MAX_LOGS_PER_PUSH` so dense log spans are
 split before transaction and receipt fetch/persist work. The older
 `BIGNAME_INDEXER_HASH_PINNED_BACKFILL_MAX_LOGS_PER_RANGE` name is still accepted

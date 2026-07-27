@@ -1,10 +1,20 @@
-use anyhow::{Result, bail};
+use std::{future::Future, time::Duration};
+
+use anyhow::Result;
 use bigname_adapters::StartupAdapterVersion;
 use bigname_storage::{
     StartupAdapterSyncCompletion, StartupAdapterSyncDecision, StartupAdapterSyncKey,
-    complete_startup_adapter_sync, prepare_startup_adapter_sync,
+    acquire_raw_log_staging_read_guard, complete_startup_adapter_sync,
+    prepare_startup_adapter_sync,
 };
 use tracing::{info, warn};
+
+use crate::run::startup_heartbeat::StartupHeartbeat;
+
+#[cfg(not(test))]
+const LIVE_ADAPTER_HEARTBEAT_TICK: Duration = Duration::from_secs(1);
+#[cfg(test)]
+const LIVE_ADAPTER_HEARTBEAT_TICK: Duration = Duration::from_millis(10);
 
 pub(crate) struct StartupFamilySyncAttempt {
     deployment_profile: Option<String>,
@@ -18,23 +28,6 @@ pub(crate) enum StartupFamilySyncCompletion {
 }
 
 impl StartupFamilySyncAttempt {
-    pub(crate) async fn complete(
-        self,
-        pool: &sqlx::PgPool,
-        chain: &str,
-        adapter: StartupAdapterVersion,
-    ) -> Result<()> {
-        if self.complete_or_retry(pool, chain, adapter).await? == StartupFamilySyncCompletion::Retry
-        {
-            bail!(
-                "startup adapter input changed while syncing {adapter_name} for {chain}; \
-                 refusing to publish completion so the next startup performs a full re-scan",
-                adapter_name = adapter.adapter,
-            );
-        }
-        Ok(())
-    }
-
     pub(crate) async fn complete_or_retry(
         self,
         pool: &sqlx::PgPool,
@@ -156,5 +149,49 @@ pub(crate) async fn prepare_startup_family_sync(
                 started_key,
             }))
         }
+    }
+}
+
+pub(crate) async fn await_live_adapter_sync_with_heartbeat<T, F>(
+    pool: &sqlx::PgPool,
+    heartbeat: &mut StartupHeartbeat,
+    heartbeat_chain_ids: &[String],
+    sync: F,
+) -> Result<T>
+where
+    F: Future<Output = Result<T>>,
+{
+    tokio::pin!(sync);
+    let first_tick = tokio::time::Instant::now() + LIVE_ADAPTER_HEARTBEAT_TICK;
+    let mut interval = tokio::time::interval_at(first_tick, LIVE_ADAPTER_HEARTBEAT_TICK);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            result = &mut sync => return result,
+            _ = interval.tick() => heartbeat.record_if_due(pool, heartbeat_chain_ids).await?,
+        }
+    }
+}
+
+pub(crate) async fn await_live_full_source_adapter_with_heartbeat<T, F>(
+    pool: &sqlx::PgPool,
+    chain: &str,
+    heartbeat: &mut StartupHeartbeat,
+    heartbeat_chain_ids: &[String],
+    sync: F,
+) -> Result<T>
+where
+    F: Future<Output = Result<T>>,
+{
+    // Full-source discovery treats missing observations as removals. Keep the
+    // same-chain raw corpus stable until reconciliation has published, so live
+    // intake cannot commit a new source fact between the scan and source lock.
+    let guard = acquire_raw_log_staging_read_guard(pool, chain).await?;
+    let sync_result =
+        await_live_adapter_sync_with_heartbeat(pool, heartbeat, heartbeat_chain_ids, sync).await;
+    let release_result = guard.release().await;
+    match (sync_result, release_result) {
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        (Ok(value), Ok(())) => Ok(value),
     }
 }

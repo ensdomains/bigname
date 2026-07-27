@@ -4934,6 +4934,14 @@ async fn startup_authority_resumes_across_page_limit_change() -> Result<()> {
     .execute(database.pool())
     .await?;
 
+    sqlx::query(
+        "INSERT INTO discovery_admission_epochs (chain_id, epoch)
+         VALUES ($1, 0)
+         ON CONFLICT (chain_id) DO NOTHING",
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
     let checkpoint = crate::StartupAdapterCheckpointContext::new("test-limit-resume", 44)?;
     let error = sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit(
         database.pool(),
@@ -4959,6 +4967,50 @@ async fn startup_authority_resumes_across_page_limit_change() -> Result<()> {
         ("running".to_owned(), Some(42), 1, 1),
         "the first page's whole-block boundary must survive interruption"
     );
+
+    sqlx::query(
+        r#"
+        WITH advanced AS (
+            UPDATE raw_log_staging_input_revisions
+            SET revision = revision + 1
+            WHERE chain_id = $1
+            RETURNING revision
+        )
+        INSERT INTO raw_log_staging_block_revisions (
+            chain_id,
+            block_hash,
+            block_number,
+            revision
+        )
+        SELECT $1, '0xstartup-authority-tail-43', 43, revision
+        FROM advanced
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    sqlx::raw_sql(
+        r#"
+        CREATE FUNCTION reject_running_authority_startup_reset()
+        RETURNS TRIGGER
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            IF OLD.adapter = 'ens_v1_unwrapped_authority'
+               AND OLD.checkpoint_scope = 'startup_adapter_sync'
+               AND OLD.status = 'running' THEN
+                RAISE EXCEPTION 'running startup authority checkpoint was reset';
+            END IF;
+            RETURN OLD;
+        END;
+        $$;
+        CREATE TRIGGER reject_running_authority_startup_reset
+        BEFORE DELETE ON normalized_replay_adapter_checkpoints
+        FOR EACH ROW EXECUTE FUNCTION reject_running_authority_startup_reset();
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
 
     let resumed = sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit(
         database.pool(),
@@ -5174,6 +5226,14 @@ async fn startup_authority_extends_after_interrupted_finalize() -> Result<()> {
     .execute(database.pool())
     .await?;
 
+    sqlx::query(
+        "INSERT INTO discovery_admission_epochs (chain_id, epoch)
+         VALUES ($1, 0)
+         ON CONFLICT (chain_id) DO NOTHING",
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
     let first_checkpoint = crate::StartupAdapterCheckpointContext::new("test-extend", 42)?;
     let error = sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit(
         database.pool(),
@@ -5195,6 +5255,28 @@ async fn startup_authority_extends_after_interrupted_finalize() -> Result<()> {
         "stream_complete"
     );
 
+    sqlx::raw_sql(
+        r#"
+        CREATE FUNCTION reject_stream_complete_authority_startup_reset()
+        RETURNS TRIGGER
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            IF OLD.adapter = 'ens_v1_unwrapped_authority'
+               AND OLD.checkpoint_scope = 'startup_adapter_sync'
+               AND OLD.status = 'stream_complete' THEN
+                RAISE EXCEPTION 'stream-complete startup authority checkpoint was reset';
+            END IF;
+            RETURN OLD;
+        END;
+        $$;
+        CREATE TRIGGER reject_stream_complete_authority_startup_reset
+        BEFORE DELETE ON normalized_replay_adapter_checkpoints
+        FOR EACH ROW EXECUTE FUNCTION reject_stream_complete_authority_startup_reset();
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
     sqlx::query("DELETE FROM startup_authority_finalize_failure")
         .execute(database.pool())
         .await?;

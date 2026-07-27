@@ -373,7 +373,9 @@ pub async fn try_load_raw_log_staging_input_version(
 }
 
 /// Reports whether a committed semantic raw-log mutation after `revision`
-/// touched any block in the inclusive range.
+/// touched any block in the inclusive range. Unknown input or an advanced
+/// revision without per-block evidence returns `true` so callers using this as
+/// boundary-reuse authority fail closed.
 pub async fn raw_log_staging_block_range_changed_since(
     pool: &PgPool,
     chain: &str,
@@ -399,13 +401,32 @@ pub async fn raw_log_staging_block_range_changed_since(
     );
     sqlx::query_scalar::<_, bool>(
         r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM raw_log_staging_block_revisions
-            WHERE chain_id = $1
-              AND revision > $2
-              AND block_number BETWEEN $3 AND $4
-        )
+        SELECT CASE
+            WHEN current_revision IS NULL OR current_revision < $2 THEN TRUE
+            WHEN current_revision = $2 THEN FALSE
+            WHEN (
+                SELECT MAX(revision)
+                FROM raw_log_staging_block_revisions
+                WHERE chain_id = $1
+                  AND revision > $2
+                  AND revision <= current_revision
+            ) IS DISTINCT FROM current_revision THEN TRUE
+            ELSE EXISTS (
+                SELECT 1
+                FROM raw_log_staging_block_revisions
+                WHERE chain_id = $1
+                  AND revision > $2
+                  AND revision <= current_revision
+                  AND block_number BETWEEN $3 AND $4
+            )
+        END
+        FROM (
+            SELECT (
+                SELECT revision
+                FROM raw_log_staging_input_revisions
+                WHERE chain_id = $1
+            ) AS current_revision
+        ) AS current
         "#,
     )
     .bind(chain)

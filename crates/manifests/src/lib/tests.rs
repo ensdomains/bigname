@@ -8223,6 +8223,43 @@ async fn byte_identical_manifest_sync_preserves_discovery_admission_epoch() -> R
 }
 
 #[tokio::test]
+async fn byte_identical_manifest_sync_seeds_a_missing_admission_epoch() -> Result<()> {
+    let test_dir = TestDir::new()?;
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    test_dir.write_manifest(
+        "ens",
+        "ens_v2_registry_l1",
+        "v1",
+        &manifest_contents(
+            "active",
+            "0x0000000000000000000000000000000000000001",
+            "0x00000000000000000000000000000000000000AA",
+            Some("0x00000000000000000000000000000000000000DD"),
+        ),
+    )?;
+    let repository = load_repository(&test_dir.path)?;
+    sync_repository(database.pool(), &repository).await?;
+    sqlx::query("DELETE FROM discovery_admission_epochs WHERE chain_id = $1")
+        .bind(chain)
+        .execute(database.pool())
+        .await?;
+    assert_eq!(
+        try_load_discovery_admission_epoch(database.pool(), chain).await?,
+        None
+    );
+
+    sync_repository(database.pool(), &repository).await?;
+    assert_eq!(
+        try_load_discovery_admission_epoch(database.pool(), chain).await?,
+        Some(0),
+        "manifest sync must seed strict startup authority even when no watched rows mutate"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn manifest_sync_bumps_epoch_for_authority_mutations_and_repairs() -> Result<()> {
     let test_dir = TestDir::new()?;
     let database = TestDatabase::new().await?;

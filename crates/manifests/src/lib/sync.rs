@@ -83,6 +83,10 @@ async fn sync_repository_inner(
                 .map(|manifest| manifest.storage_key.chain.clone()),
         )
         .collect::<BTreeSet<_>>();
+    // The writer fence also seeds epoch zero. Do this for every incoming or
+    // previously stored chain even when the repository is byte-identical, so
+    // startup reuse never treats a watched chain with no discovery mutations
+    // as having unknown admission authority.
     fence_discovery_admission_epoch_writes(transaction.as_mut(), &admission_fence_chains).await?;
 
     let mut retained_keys = HashSet::new();

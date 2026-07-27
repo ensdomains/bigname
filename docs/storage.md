@@ -1274,9 +1274,12 @@ stored block or raw-log block for the chain and uses the existing ENSv1
 adapter-private checkpoint formats without sharing rows with full-closure
 replay. A completed family result is reusable across process starts only when
 its raw-log [input revision](glossary.md), raw-log retention
-[generation](glossary.md), discovery-[admission epoch](glossary.md),
-adapter-declared derivation version, applied migration count, and highest
-applied migration version all exactly match the current database and binary.
+[generation](glossary.md), highest canonical lineage block number and hash,
+discovery-[admission epoch](glossary.md), adapter-declared derivation version,
+applied migration count, and highest applied migration version all exactly
+match the current database and binary. The lineage component changes when an
+empty block advances the canonical head or a same-height branch switch replaces
+it, even though neither movement needs to mutate a retained raw log.
 The discovery-admission epoch covers manifest-declared and discovered watched
 addresses that can change adapter inputs without changing raw logs. Migration
 state is deliberately conservative: any newly applied migration invalidates
@@ -1288,21 +1291,41 @@ applied version. This is sufficient only after the normal migrator has accepted
 the repository's immutable, ordered migration ledger; a missing ledger, an
 empty ledger, any failed row, or migrator checksum/version rejection prevents
 startup reuse rather than weakening that assumption.
+Startup takes SQLx's migrator advisory lock before it locks either the migration
+ledger or the adapter-checkpoint table. A transactional migration therefore
+finishes its checkpoint-table DDL and ledger write before startup can enter
+verification; startup never holds a ledger lock while waiting behind that DDL.
 
 Missing rows, a status other than `completed`, absent key fields, an unknown
-raw-log revision row, revision or generation drift, discovery-admission drift,
-an adapter-version mismatch, or migration-state skew all run the complete
-family sync. The indexer checks the raw-log version under the chain's
-semantic-mutation fence before accepting a completed result and again before
-publishing a replacement completion row; input drift during a scan is never
-recorded as reusable completion. Partial ENSv1 rows keep their existing
-within-phase resume behavior, but partial state is not cross-boot completion
-authority for skipping a family. ENSv2 registry reconciliation is the expected
-self-invalidating case: admitting a registry or resolver advances the
-discovery-admission epoch. The indexer repeats that complete family scan
-against the new key until a pass leaves the key stable, with the same
-1,024-pass safety ceiling used by the other ENSv2 discovery expansion loops.
-It never publishes an intermediate pass as reusable completion.
+raw-log revision row, revision or generation drift, canonical-lineage drift,
+discovery-admission drift, an adapter-version mismatch, or migration-state skew
+all run the complete family sync. The indexer checks the key under the raw-log,
+lineage, admission, and migration fences before accepting a completed result
+and again before publishing a replacement completion row; input drift during a
+scan is never recorded as reusable completion. A partial ENSv1 `running` or
+`stream_complete` row keeps its durable boundary when the retention generation
+is unchanged and the per-block revision ledger proves every newer raw-log
+mutation is strictly above the consumed boundary. A mutation at or below that
+boundary, missing proof, authority drift, or version drift resets it to block
+zero. Completed-row reuse remains exact-key only; partial state never skips the
+family. ENSv2 registry reconciliation is the expected self-invalidating case:
+admitting a registry or resolver advances the discovery-admission epoch. The
+indexer repeats that complete family scan against the new key until a pass
+leaves the key stable, with the same 1,024-pass safety ceiling used by the other
+ENSv2 discovery expansion loops. Each of the other six families gets one
+bounded retry when its key changes during a boot pass, then fails the boot if a
+second pass also moves. No intermediate pass is published as reusable
+completion.
+
+Manifest sync seeds a durable discovery-admission epoch row for every chain in
+the incoming or previously stored repository before it compares watched
+authority. A chain with no discovery mutations therefore still has a strict
+epoch-zero reuse component instead of remaining permanently unknown.
+Out-of-band SQL that manually repairs manifest, discovery, or adapter-owned
+identity state is invisible to this key. Such a repair must run in a migration,
+or the same operation must delete all
+`normalized_replay_adapter_checkpoints` rows whose
+`checkpoint_scope = 'startup_adapter_sync'` so the next boot rebuilds them.
 
 ENSv1 subregistry discovery stages only one raw-log page's changed assignments
 at a time, finalizes through the streamed full-source discovery reconcile, and
@@ -1317,11 +1340,13 @@ raw-log pages, but keeps each page's normalized events in adapter-private
 checkpoint items until its name surfaces, resources, and bindings have been
 materialized. It then publishes and deletes those staged events in pages of
 20,000, so a continuously running projection worker cannot consume an event
-before its identity rows exist. A failed startup retains its rows for the next
-boot, including a stream-complete checkpoint whose target is extended by a
-later boot. Successful startup retains completed startup-scoped rows and their
-adapter-private items for exact-key reuse. Adapters that do not need private
-staged items use the same checkpoint table for a completion row only.
+before its identity rows exist. A failed startup retains its partial rows for
+the next boot. When a later raw-log revision changes only blocks strictly above
+the retained `running` or `stream_complete` boundary, the later boot resumes
+from that boundary; a changed consumed block resets the walk. Successful
+startup retains completed startup-scoped rows and their adapter-private items
+for exact-key reuse. Adapters that do not need private staged items use the same
+checkpoint table for a completion row only.
 
 Every startup adapter family declares a positive integer derivation version in
 `crates/adapters/src/startup_versions.rs`. Adapter authors must increment the
@@ -1332,16 +1357,32 @@ and any declared producer versions. ENSv1 unwrapped authority consumes reverse
 claim events, so its checkpoint version includes the ENSv1 reverse-claim
 declaration. ENSv2 registrar consumes registry normalized events, and ENSv2
 resolver consumes registry name surfaces and bindings, so their checkpoint
-versions include the ENSv2 registry declaration. A producer bump therefore
-invalidates each known downstream family without requiring separate downstream
-declaration bumps. Unrelated families keep their existing versions.
+versions include the ENSv2 registry declaration. ENSv2 permissions reads
+durable `raw_log_preimage_observation` rows emitted by
+`block_derived_normalized_events`, so its version also composes that producer's
+declaration. A producer bump therefore invalidates each known downstream
+family without requiring separate downstream declaration bumps. Unrelated
+families keep their existing versions.
 
 The static repository check maps each family-owned production path to its
-declaration and rejects a changed adapter path whose declaration did not
-increase. The check is intentionally conservative for mapped files, but it
-cannot infer semantic effects from every shared helper or external crate
-change; reviewers remain responsible for adding dependency edges and bumping
-every affected family when previously unmapped shared behavior changes.
+declaration, maps shared module prefixes to every affected family, and maps
+declared producer paths to producer components. It rejects a mapped production
+change whose declaration did not increase. CI fetches and validates its own
+comparison commit; pull requests compare with the target branch and ordinary
+pushes compare with the event's full pre-push commit. A branch-creation event
+has no range base and retains the documented one-parent fallback. The check
+cannot infer semantic effects from every external crate change, so reviewers
+remain responsible for adding dependency edges when previously unmapped shared
+behavior changes.
+
+Timer-driven manifest refresh and live discovery refresh invoke the same
+full-family derivation without a startup checkpoint context. Live intake may
+advance raw-log revisions during those scans; the refresh still completes, but
+it neither verifies nor publishes `startup_adapter_sync` rows. Absence-based
+ENSv1 full-source discovery holds the chain's raw-log mutation fence through
+reconciliation, and uncheckpointed long-running families receive periodic
+in-flight health beats. Strict fail-on-input-change publication is a boot-only
+contract.
 
 For `ens_v1_unwrapped_authority`, the durable checkpoint payload is the adapter's private closure snapshot: dirty name histories, reverse-claim histories, learned name metadata, pending namehash observations, migrated-registry markers, flushed normalized-event counters, and the block-boundary watermark. To keep full-closure replay bounded, that replay lane may flush already-emitted normalized events through the adapter-owned `normalized_events` upsert boundary at checkpoint boundaries, then persist the checkpoint with those event buffers cleared. Those full-closure rows are not projection readiness, public API readiness, identity-row finalization, or a cursor boundary; projection workers still wait for the global `raw_fact_normalized_events` cursor and identity finalization. Startup uses the private event staging and post-materialization paged publication described above instead; this distinction leaves the replay-catch-up lane unchanged.
 

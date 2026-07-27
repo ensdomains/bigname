@@ -58,6 +58,7 @@ const fn compose_checkpoint_version(declared_version: i64, dependency_versions: 
 }
 
 const ENS_V1_REVERSE_CLAIM_STARTUP_VERSION_DECLARATION: i64 = 1;
+const BLOCK_DERIVED_NORMALIZED_EVENTS_STARTUP_VERSION_DECLARATION: i64 = 1;
 const ENS_V1_SUBREGISTRY_DISCOVERY_STARTUP_VERSION_DECLARATION: i64 = 1;
 const ENS_V1_UNWRAPPED_AUTHORITY_STARTUP_VERSION_DECLARATION: i64 = 1;
 const ENS_V2_REGISTRY_RESOURCE_SURFACE_STARTUP_VERSION_DECLARATION: i64 = 1;
@@ -101,7 +102,7 @@ pub const ENS_V2_RESOLVER_STARTUP_VERSION: StartupAdapterVersion = StartupAdapte
 pub const ENS_V2_PERMISSIONS_STARTUP_VERSION: StartupAdapterVersion = StartupAdapterVersion::new(
     "ens_v2_permissions",
     ENS_V2_PERMISSIONS_STARTUP_VERSION_DECLARATION,
-    &[],
+    &[BLOCK_DERIVED_NORMALIZED_EVENTS_STARTUP_VERSION_DECLARATION],
 );
 
 #[cfg(test)]
@@ -133,10 +134,20 @@ mod tests {
             ENS_V2_RESOLVER_STARTUP_VERSION.semantic_version,
             "a registry bump must invalidate resolver startup reuse"
         );
-        assert_eq!(
-            ENS_V2_PERMISSIONS_STARTUP_VERSION.semantic_version,
+    }
+
+    #[test]
+    fn block_derived_semantics_are_part_of_permissions_checkpoint_version() {
+        let permissions_after_producer_bump = StartupAdapterVersion::new(
+            "ens_v2_permissions",
             ENS_V2_PERMISSIONS_STARTUP_VERSION_DECLARATION,
-            "an unrelated family must retain its standalone checkpoint version"
+            &[BLOCK_DERIVED_NORMALIZED_EVENTS_STARTUP_VERSION_DECLARATION + 1],
+        );
+
+        assert_ne!(
+            permissions_after_producer_bump.semantic_version,
+            ENS_V2_PERMISSIONS_STARTUP_VERSION.semantic_version,
+            "a block-derived producer bump must invalidate permissions startup reuse"
         );
     }
 

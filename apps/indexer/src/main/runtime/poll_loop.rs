@@ -13,7 +13,7 @@ use crate::run::startup_heartbeat::{
     RequiredSubtaskActivity, StartupAdapterHeartbeat, StartupHeartbeat,
 };
 
-use super::adapter_sync::sync_adapter_owned_raw_log_state_with_heartbeat;
+use super::adapter_sync::sync_adapter_owned_raw_log_state_live_with_heartbeat;
 use super::intake::{
     IntakeChainTask, intake_runtime_state, sync_intake_chain_tasks_with_progress,
     validate_provider_registry_for_intake_tasks, watched_chain_plan_state,
@@ -166,11 +166,9 @@ pub(crate) async fn run_poll_loop(
 
                                     if adapter_sync_on_manifest_refresh
                                         && (manifest_state_changed || watched_plan_changed)
-                                        && let Err(error) = sync_adapter_owned_raw_log_state_with_heartbeat(
+                                        && let Err(error) = sync_adapter_owned_raw_log_state_live_with_heartbeat(
                                             pool,
-                                            &deployment_profile,
                                             &next_manifest_runtime_state.watched_chain_plan,
-                                            adapter_sync_page_logs,
                                             heartbeat,
                                             &heartbeat_chains,
                                         )

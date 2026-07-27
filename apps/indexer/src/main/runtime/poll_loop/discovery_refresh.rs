@@ -10,7 +10,7 @@ use crate::resolver_profile_convergence::{
 };
 use crate::run::startup_heartbeat::{StartupAdapterHeartbeat, StartupHeartbeat};
 
-use super::super::adapter_sync::sync_adapter_owned_raw_log_state_with_heartbeat;
+use super::super::adapter_sync::sync_adapter_owned_raw_log_state_live_with_heartbeat;
 use super::super::intake::{
     IntakeChainTask, intake_runtime_state, validate_provider_registry_for_intake_tasks,
     watched_chain_plan_state, watched_chain_plans_equal_with_progress,
@@ -115,14 +115,12 @@ async fn refresh_discovery_watch_state_inner(
     // The whole-corpus re-derivation must run before the sentinel read: it is
     // what materializes new edges (and bumps epochs) on the broad-refresh path.
     let adapter_sync_result: Result<()> = if sync_adapter_state_before_refresh {
-        let (deployment_profile, page_logs, heartbeat, chain_ids) = adapter_sync_heartbeat
+        let (_, _, heartbeat, chain_ids) = adapter_sync_heartbeat
             .as_mut()
             .context("discovery adapter refresh requires a live loop heartbeat")?;
-        sync_adapter_owned_raw_log_state_with_heartbeat(
+        sync_adapter_owned_raw_log_state_live_with_heartbeat(
             pool,
-            deployment_profile,
             &manifest_runtime_state.watched_chain_plan,
-            *page_logs,
             heartbeat,
             chain_ids,
         )

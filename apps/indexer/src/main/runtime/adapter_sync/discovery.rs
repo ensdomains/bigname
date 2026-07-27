@@ -6,7 +6,8 @@ use crate::run::startup_heartbeat::{StartupAdapterHeartbeat, StartupHeartbeat};
 
 use super::super::logging::log_ens_v1_subregistry_discovery_sync_summary;
 use super::{
-    checkpoint::prepare_startup_family_sync, journal_authority_with_startup_progress,
+    MAX_NON_LOOPING_STARTUP_FAMILY_PASSES, checkpoint::prepare_startup_family_sync,
+    complete_non_looping_startup_family, journal_authority_with_startup_progress,
     load_startup_adapter_checkpoint_context, record_startup_sync_progress,
     sync_ens_v2_registry_to_startup_fixed_point,
 };
@@ -60,16 +61,20 @@ async fn sync_discovery_adapter_owned_raw_log_state_inner(
     record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
     journal_authority_with_startup_progress(pool, &mut startup_heartbeat).await?;
     for chain in watched_chain_plan {
-        let startup_checkpoint =
-            load_startup_adapter_checkpoint_context(pool, deployment_profile, &chain.chain).await?;
-        if let Some(attempt) = prepare_startup_family_sync(
-            pool,
-            Some(deployment_profile),
-            &chain.chain,
-            ENS_V1_SUBREGISTRY_DISCOVERY_STARTUP_VERSION,
-        )
-        .await?
-        {
+        for pass in 1..=MAX_NON_LOOPING_STARTUP_FAMILY_PASSES {
+            let Some(attempt) = prepare_startup_family_sync(
+                pool,
+                Some(deployment_profile),
+                &chain.chain,
+                ENS_V1_SUBREGISTRY_DISCOVERY_STARTUP_VERSION,
+            )
+            .await?
+            else {
+                break;
+            };
+            let startup_checkpoint =
+                load_startup_adapter_checkpoint_context(pool, deployment_profile, &chain.chain)
+                    .await?;
             let summary = match startup_heartbeat.as_mut() {
                 Some((heartbeat, chain_ids)) => {
                     let mut progress = StartupAdapterHeartbeat::new(heartbeat, chain_ids);
@@ -99,13 +104,17 @@ async fn sync_discovery_adapter_owned_raw_log_state_inner(
                 )
             })?;
             log_ens_v1_subregistry_discovery_sync_summary(&chain.chain, &summary);
-            attempt
-                .complete(
-                    pool,
-                    &chain.chain,
-                    ENS_V1_SUBREGISTRY_DISCOVERY_STARTUP_VERSION,
-                )
-                .await?;
+            if complete_non_looping_startup_family(
+                attempt,
+                pool,
+                &chain.chain,
+                ENS_V1_SUBREGISTRY_DISCOVERY_STARTUP_VERSION,
+                pass,
+            )
+            .await?
+            {
+                break;
+            }
         }
         record_startup_sync_progress(pool, &mut startup_heartbeat).await?;
 

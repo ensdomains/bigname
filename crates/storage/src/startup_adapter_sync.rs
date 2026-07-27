@@ -1,23 +1,32 @@
 use anyhow::{Context, Result, ensure};
-use serde_json::json;
-use sqlx::{PgConnection, PgPool, Row};
+use serde::Serialize;
+use serde_json::{Value, json};
+use sqlx::{Acquire, PgConnection, PgPool, Postgres, Row, migrate::Migrate, pool::PoolConnection};
 
-use crate::{RawLogStagingInputVersion, acquire_raw_log_staging_read_guard};
+use crate::RawLogStagingInputVersion;
 
 pub const STARTUP_ADAPTER_CURSOR_KIND: &str = "startup_adapter_owned_raw_log_state";
 pub const STARTUP_ADAPTER_CHECKPOINT_SCOPE: &str = "startup_adapter_sync";
 pub const STARTUP_DISCOVERY_ADMISSION_EPOCH_FIELD: &str = "startup_discovery_admission_epoch";
+pub const STARTUP_CANONICAL_LINEAGE_HEAD_FIELD: &str = "startup_canonical_lineage_head";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct StartupCanonicalLineageHead {
+    pub block_number: i64,
+    pub block_hash: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StartupAdapterSyncKey {
     pub raw_log_input_version: RawLogStagingInputVersion,
+    pub canonical_lineage_head: Option<StartupCanonicalLineageHead>,
     pub discovery_admission_epoch: i64,
     pub adapter_semantic_version: i64,
     pub schema_migration_count: i64,
     pub schema_migration_max_version: i64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StartupAdapterSyncDecision {
     ReuseCompleted,
     RunFullSync {
@@ -40,30 +49,40 @@ pub async fn prepare_startup_adapter_sync(
     adapter_semantic_version: i64,
 ) -> Result<StartupAdapterSyncDecision> {
     validate_identity(deployment_profile, chain, adapter, adapter_semantic_version)?;
-    let mut guard = acquire_raw_log_staging_read_guard(pool, chain).await?;
-    let key =
-        load_startup_adapter_sync_key(guard.connection_mut(), chain, adapter_semantic_version)
-            .await?;
-    let reusable = match key {
-        Some(key) => {
-            completed_checkpoint_matches(
-                guard.connection_mut(),
-                deployment_profile,
-                chain,
-                adapter,
-                key,
-            )
-            .await?
-        }
-        None => false,
-    };
-    guard.release().await?;
+    let mut migration_guard = StartupMigrationLockGuard::acquire(pool).await?;
+    let operation_result = async {
+        let mut transaction =
+            begin_startup_adapter_fence(migration_guard.connection_mut(), chain).await?;
+        let key =
+            load_startup_adapter_sync_key(transaction.as_mut(), chain, adapter_semantic_version)
+                .await?;
+        let reusable = match key.as_ref() {
+            Some(key) => {
+                completed_checkpoint_matches(
+                    transaction.as_mut(),
+                    deployment_profile,
+                    chain,
+                    adapter,
+                    key,
+                )
+                .await?
+            }
+            None => false,
+        };
+        transaction
+            .commit()
+            .await
+            .context("failed to finish startup adapter checkpoint verification")?;
 
-    Ok(if reusable {
-        StartupAdapterSyncDecision::ReuseCompleted
-    } else {
-        StartupAdapterSyncDecision::RunFullSync { started_key: key }
-    })
+        Ok(if reusable {
+            StartupAdapterSyncDecision::ReuseCompleted
+        } else {
+            StartupAdapterSyncDecision::RunFullSync { started_key: key }
+        })
+    }
+    .await;
+    let release_result = migration_guard.release().await;
+    prioritize_lock_release(operation_result, release_result)
 }
 
 pub async fn complete_startup_adapter_sync(
@@ -79,41 +98,78 @@ pub async fn complete_startup_adapter_sync(
         return Ok(StartupAdapterSyncCompletion::KeyUnknown);
     };
 
-    let mut guard = acquire_raw_log_staging_read_guard(pool, chain).await?;
-    let current_key =
-        load_startup_adapter_sync_key(guard.connection_mut(), chain, adapter_semantic_version)
-            .await?;
-    if current_key != Some(started_key) {
-        guard.release().await?;
-        return Ok(match current_key {
-            Some(_) => StartupAdapterSyncCompletion::InputChanged,
-            None => StartupAdapterSyncCompletion::KeyUnknown,
-        });
-    }
+    let mut migration_guard = StartupMigrationLockGuard::acquire(pool).await?;
+    let operation_result = async {
+        let mut transaction =
+            begin_startup_adapter_fence(migration_guard.connection_mut(), chain).await?;
+        let current_key =
+            load_startup_adapter_sync_key(transaction.as_mut(), chain, adapter_semantic_version)
+                .await?;
+        if current_key.as_ref() != Some(&started_key) {
+            transaction
+                .commit()
+                .await
+                .context("failed to finish changed startup adapter input check")?;
+            return Ok(match current_key {
+                Some(_) => StartupAdapterSyncCompletion::InputChanged,
+                None => StartupAdapterSyncCompletion::KeyUnknown,
+            });
+        }
 
-    publish_completed_checkpoint(
-        guard.connection_mut(),
-        deployment_profile,
-        chain,
-        adapter,
-        started_key,
-    )
-    .await?;
-    guard.release().await?;
-    Ok(StartupAdapterSyncCompletion::Completed)
+        publish_completed_checkpoint(
+            transaction.as_mut(),
+            deployment_profile,
+            chain,
+            adapter,
+            &started_key,
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .context("failed to publish startup adapter checkpoint completion")?;
+        Ok(StartupAdapterSyncCompletion::Completed)
+    }
+    .await;
+    let release_result = migration_guard.release().await;
+    prioritize_lock_release(operation_result, release_result)
 }
 
 pub async fn load_startup_adapter_schema_state(pool: &PgPool) -> Result<Option<(i64, i64)>> {
+    let mut migration_guard = StartupMigrationLockGuard::acquire(pool).await?;
+    let operation_result = async {
+        let mut transaction = migration_guard
+            .connection_mut()
+            .begin()
+            .await
+            .context("failed to start startup adapter schema-state transaction")?;
+        let state = lock_and_load_schema_state(transaction.as_mut()).await?;
+        transaction
+            .commit()
+            .await
+            .context("failed to finish startup adapter schema-state transaction")?;
+        Ok(state)
+    }
+    .await;
+    let release_result = migration_guard.release().await;
+    prioritize_lock_release(operation_result, release_result)
+}
+
+pub async fn load_startup_adapter_canonical_lineage_head(
+    pool: &PgPool,
+    chain: &str,
+) -> Result<Option<StartupCanonicalLineageHead>> {
     let mut transaction = pool
         .begin()
         .await
-        .context("failed to start startup adapter schema-state transaction")?;
-    let state = lock_and_load_schema_state(transaction.as_mut()).await?;
+        .context("failed to start startup canonical-lineage head transaction")?;
+    lock_canonical_lineage(transaction.as_mut(), chain).await?;
+    let head = load_canonical_lineage_head(transaction.as_mut(), chain).await?;
     transaction
         .commit()
         .await
-        .context("failed to finish startup adapter schema-state transaction")?;
-    Ok(state)
+        .context("failed to finish startup canonical-lineage head transaction")?;
+    Ok(head)
 }
 
 async fn load_startup_adapter_sync_key(
@@ -135,6 +191,7 @@ async fn load_startup_adapter_sync_key(
     let Some(raw_log_input) = raw_log_input else {
         return Ok(None);
     };
+    let canonical_lineage_head = load_canonical_lineage_head(connection, chain).await?;
 
     let discovery_admission_epoch = sqlx::query_scalar::<_, i64>(
         r#"
@@ -164,6 +221,7 @@ async fn load_startup_adapter_sync_key(
             retention_generation: raw_log_input.try_get("retention_generation")?,
             revision: raw_log_input.try_get("revision")?,
         },
+        canonical_lineage_head,
         discovery_admission_epoch,
         adapter_semantic_version,
         schema_migration_count,
@@ -211,7 +269,7 @@ async fn completed_checkpoint_matches(
     deployment_profile: &str,
     chain: &str,
     adapter: &str,
-    key: StartupAdapterSyncKey,
+    key: &StartupAdapterSyncKey,
 ) -> Result<bool> {
     sqlx::query_scalar::<_, bool>(
         r#"
@@ -231,6 +289,7 @@ async fn completed_checkpoint_matches(
               AND schema_migration_count = $9
               AND schema_migration_max_version = $10
               AND state_payload -> $11 = to_jsonb($12::BIGINT)
+              AND state_payload -> $13 = $14::JSONB
         )
         "#,
     )
@@ -246,6 +305,10 @@ async fn completed_checkpoint_matches(
     .bind(key.schema_migration_max_version)
     .bind(STARTUP_DISCOVERY_ADMISSION_EPOCH_FIELD)
     .bind(key.discovery_admission_epoch)
+    .bind(STARTUP_CANONICAL_LINEAGE_HEAD_FIELD)
+    .bind(canonical_lineage_head_payload(
+        key.canonical_lineage_head.as_ref(),
+    ))
     .fetch_one(connection)
     .await
     .with_context(|| {
@@ -261,10 +324,12 @@ async fn publish_completed_checkpoint(
     deployment_profile: &str,
     chain: &str,
     adapter: &str,
-    key: StartupAdapterSyncKey,
+    key: &StartupAdapterSyncKey,
 ) -> Result<()> {
     let state_payload = json!({
         (STARTUP_DISCOVERY_ADMISSION_EPOCH_FIELD): key.discovery_admission_epoch,
+        (STARTUP_CANONICAL_LINEAGE_HEAD_FIELD):
+            canonical_lineage_head_payload(key.canonical_lineage_head.as_ref()),
     });
     sqlx::query(
         r#"
@@ -295,16 +360,13 @@ async fn publish_completed_checkpoint(
         )
         DO UPDATE SET
             status = 'completed',
-            state_payload = jsonb_set(
+            state_payload = (
                 CASE
                     WHEN jsonb_typeof(normalized_replay_adapter_checkpoints.state_payload) = 'object'
                         THEN normalized_replay_adapter_checkpoints.state_payload
                     ELSE '{}'::JSONB
-                END,
-                ARRAY[$12::TEXT],
-                to_jsonb($13::BIGINT),
-                TRUE
-            ),
+                END
+            ) || EXCLUDED.state_payload,
             raw_log_retention_generation = EXCLUDED.raw_log_retention_generation,
             raw_log_input_revision = EXCLUDED.raw_log_input_revision,
             adapter_semantic_version = EXCLUDED.adapter_semantic_version,
@@ -326,8 +388,6 @@ async fn publish_completed_checkpoint(
     .bind(key.adapter_semantic_version)
     .bind(key.schema_migration_count)
     .bind(key.schema_migration_max_version)
-    .bind(STARTUP_DISCOVERY_ADMISSION_EPOCH_FIELD)
-    .bind(key.discovery_admission_epoch)
     .execute(connection)
     .await
     .with_context(|| {
@@ -337,6 +397,175 @@ async fn publish_completed_checkpoint(
         )
     })?;
     Ok(())
+}
+
+struct StartupMigrationLockGuard {
+    connection: Option<PoolConnection<Postgres>>,
+}
+
+impl StartupMigrationLockGuard {
+    async fn acquire(pool: &PgPool) -> Result<Self> {
+        let mut guard = Self {
+            connection: Some(
+                pool.acquire()
+                    .await
+                    .context("failed to acquire startup migration-fence connection")?,
+            ),
+        };
+        // SQLx takes this same session advisory lock before opening a migration
+        // transaction. Startup always takes it before locking the migration
+        // ledger or reading the checkpoint table. Therefore a migration can
+        // never hold ACCESS EXCLUSIVE on the checkpoint table while waiting
+        // behind startup's SHARE lock on `_sqlx_migrations`.
+        Migrate::lock(guard.connection_mut())
+            .await
+            .context("failed to acquire SQLx migrator lock for startup adapter sync")?;
+        Ok(guard)
+    }
+
+    fn connection_mut(&mut self) -> &mut PgConnection {
+        self.connection
+            .as_deref_mut()
+            .expect("startup migration guard connection must be present")
+    }
+
+    async fn release(mut self) -> Result<()> {
+        Migrate::unlock(self.connection_mut())
+            .await
+            .context("failed to release SQLx migrator lock for startup adapter sync")?;
+        // Disarm Drop only after the session lock is gone. Cancellation while
+        // awaiting unlock still closes the session instead of pooling it.
+        drop(self.connection.take());
+        Ok(())
+    }
+}
+
+impl Drop for StartupMigrationLockGuard {
+    fn drop(&mut self) {
+        if let Some(connection) = self.connection.as_mut() {
+            connection.close_on_drop();
+        }
+    }
+}
+
+async fn begin_startup_adapter_fence<'a>(
+    connection: &'a mut PgConnection,
+    chain: &str,
+) -> Result<sqlx::Transaction<'a, Postgres>> {
+    let mut transaction = connection
+        .begin()
+        .await
+        .context("failed to start startup adapter input-fence transaction")?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("raw_log_staging:{chain}"))
+        .execute(transaction.as_mut())
+        .await
+        .with_context(|| format!("failed to fence startup raw-log mutation for {chain}"))?;
+    sqlx::query("LOCK TABLE raw_logs IN ACCESS SHARE MODE")
+        .execute(transaction.as_mut())
+        .await
+        .with_context(|| format!("failed to fence startup raw-log truncation for {chain}"))?;
+    lock_canonical_lineage(transaction.as_mut(), chain).await?;
+    Ok(transaction)
+}
+
+async fn lock_canonical_lineage(connection: &mut PgConnection, chain: &str) -> Result<()> {
+    // This short SHARE lock blocks lineage INSERT/UPDATE/DELETE while the head
+    // identity is read. Prepare and completion take the same lock, so movement
+    // during the full scan is observed as an optimistic-key mismatch.
+    sqlx::query("LOCK TABLE chain_lineage IN SHARE MODE")
+        .execute(connection)
+        .await
+        .with_context(|| format!("failed to fence canonical lineage for {chain}"))?;
+    Ok(())
+}
+
+async fn load_canonical_lineage_head(
+    connection: &mut PgConnection,
+    chain: &str,
+) -> Result<Option<StartupCanonicalLineageHead>> {
+    let row = sqlx::query(
+        r#"
+        WITH canonical_state_heads AS MATERIALIZED (
+            (
+                SELECT block_number
+                FROM chain_lineage
+                WHERE chain_id = $1
+                  AND canonicality_state = 'canonical'::canonicality_state
+                ORDER BY block_number DESC
+                LIMIT 1
+            )
+            UNION ALL
+            (
+                SELECT block_number
+                FROM chain_lineage
+                WHERE chain_id = $1
+                  AND canonicality_state = 'safe'::canonicality_state
+                ORDER BY block_number DESC
+                LIMIT 1
+            )
+            UNION ALL
+            (
+                SELECT block_number
+                FROM chain_lineage
+                WHERE chain_id = $1
+                  AND canonicality_state = 'finalized'::canonicality_state
+                ORDER BY block_number DESC
+                LIMIT 1
+            )
+        )
+        SELECT block_number, block_hash, same_height_count
+        FROM (
+            SELECT
+                block_number,
+                block_hash,
+                COUNT(*) OVER () AS same_height_count
+            FROM chain_lineage
+            WHERE chain_id = $1
+              AND block_number = (
+                  SELECT MAX(block_number)
+                  FROM canonical_state_heads
+              )
+              AND canonicality_state IN (
+                  'canonical'::canonicality_state,
+                  'safe'::canonicality_state,
+                  'finalized'::canonicality_state
+              )
+        ) AS canonical_lineage
+        ORDER BY block_hash
+        LIMIT 1
+        "#,
+    )
+    .bind(chain)
+    .fetch_optional(connection)
+    .await
+    .with_context(|| format!("failed to load canonical lineage head for {chain}"))?;
+    row.map(|row| {
+        let same_height_count: i64 = row.try_get("same_height_count")?;
+        ensure!(
+            same_height_count == 1,
+            "canonical lineage for {chain} has {same_height_count} heads at its highest block"
+        );
+        Ok(StartupCanonicalLineageHead {
+            block_number: row.try_get("block_number")?,
+            block_hash: row.try_get("block_hash")?,
+        })
+    })
+    .transpose()
+}
+
+fn canonical_lineage_head_payload(head: Option<&StartupCanonicalLineageHead>) -> Value {
+    json!(head)
+}
+
+fn prioritize_lock_release<T>(
+    operation_result: Result<T>,
+    release_result: Result<()>,
+) -> Result<T> {
+    match (operation_result, release_result) {
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        (Ok(value), Ok(())) => Ok(value),
+    }
 }
 
 fn validate_identity(

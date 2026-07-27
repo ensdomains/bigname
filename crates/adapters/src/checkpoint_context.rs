@@ -8,6 +8,8 @@ pub(crate) const FULL_CLOSURE_CHECKPOINT_SCOPE: &str = "full_closure";
 const STARTUP_CHECKPOINT_SCOPE: &str = "startup_adapter_sync";
 const STARTUP_CHECKPOINT_CURSOR_KIND: &str = "startup_adapter_owned_raw_log_state";
 const STARTUP_DISCOVERY_ADMISSION_EPOCH_FIELD: &str = "startup_discovery_admission_epoch";
+const STARTUP_CANONICAL_LINEAGE_HEAD_FIELD: &str =
+    bigname_storage::STARTUP_CANONICAL_LINEAGE_HEAD_FIELD;
 const STARTUP_CHECKPOINT_ADAPTERS: [&str; 2] =
     ["ens_v1_subregistry_discovery", "ens_v1_unwrapped_authority"];
 
@@ -97,6 +99,8 @@ impl StartupAdapterCheckpointContext {
     ) -> Result<AdapterCheckpointContext> {
         let discovery_admission_epoch =
             bigname_manifests::try_load_discovery_admission_epoch(pool, chain).await?;
+        let canonical_lineage_head =
+            bigname_storage::load_startup_adapter_canonical_lineage_head(pool, chain).await?;
         let schema_migration_state =
             bigname_storage::load_startup_adapter_schema_state(pool).await?;
         Ok(AdapterCheckpointContext {
@@ -106,6 +110,7 @@ impl StartupAdapterCheckpointContext {
             range_start_block_number: self.range_start_block_number,
             target_block_number: self.target_block_number,
             startup_discovery_admission_epoch: discovery_admission_epoch,
+            startup_canonical_lineage_head: canonical_lineage_head,
             startup_adapter_semantic_version: Some(adapter_semantic_version),
             startup_schema_migration_state: schema_migration_state,
         })
@@ -120,6 +125,7 @@ pub(crate) struct AdapterCheckpointContext {
     pub(crate) range_start_block_number: i64,
     pub(crate) target_block_number: i64,
     pub(crate) startup_discovery_admission_epoch: Option<i64>,
+    pub(crate) startup_canonical_lineage_head: Option<bigname_storage::StartupCanonicalLineageHead>,
     pub(crate) startup_adapter_semantic_version: Option<i64>,
     pub(crate) startup_schema_migration_state: Option<(i64, i64)>,
 }
@@ -133,6 +139,7 @@ impl AdapterCheckpointContext {
             range_start_block_number: context.range_start_block_number,
             target_block_number: context.target_block_number,
             startup_discovery_admission_epoch: None,
+            startup_canonical_lineage_head: None,
             startup_adapter_semantic_version: None,
             startup_schema_migration_state: None,
         }
@@ -153,6 +160,12 @@ impl AdapterCheckpointContext {
             .get(STARTUP_DISCOVERY_ADMISSION_EPOCH_FIELD)
             .and_then(Value::as_i64)
             != Some(expected_epoch)
+    }
+
+    pub(crate) fn startup_lineage_changed(&self, state_payload: &Value) -> bool {
+        self.is_startup()
+            && state_payload.get(STARTUP_CANONICAL_LINEAGE_HEAD_FIELD)
+                != Some(&serde_json::json!(&self.startup_canonical_lineage_head))
     }
 
     pub(crate) fn startup_version_changed(
@@ -191,15 +204,21 @@ impl AdapterCheckpointContext {
     }
 
     pub(crate) fn bind_startup_authority(&self, mut state_payload: Value) -> Result<Value> {
-        let Some(discovery_admission_epoch) = self.startup_discovery_admission_epoch else {
+        if !self.is_startup() {
             return Ok(state_payload);
-        };
+        }
         let payload = state_payload
             .as_object_mut()
             .context("adapter checkpoint state payload must be a JSON object")?;
+        if let Some(discovery_admission_epoch) = self.startup_discovery_admission_epoch {
+            payload.insert(
+                STARTUP_DISCOVERY_ADMISSION_EPOCH_FIELD.to_owned(),
+                Value::from(discovery_admission_epoch),
+            );
+        }
         payload.insert(
-            STARTUP_DISCOVERY_ADMISSION_EPOCH_FIELD.to_owned(),
-            Value::from(discovery_admission_epoch),
+            STARTUP_CANONICAL_LINEAGE_HEAD_FIELD.to_owned(),
+            serde_json::json!(&self.startup_canonical_lineage_head),
         );
         Ok(state_payload)
     }
@@ -212,6 +231,8 @@ impl AdapterCheckpointContext {
         if self.is_startup() {
             self.startup_discovery_admission_epoch =
                 bigname_manifests::try_load_discovery_admission_epoch(pool, chain).await?;
+            self.startup_canonical_lineage_head =
+                bigname_storage::load_startup_adapter_canonical_lineage_head(pool, chain).await?;
         }
         Ok(())
     }
