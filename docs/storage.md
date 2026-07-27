@@ -579,10 +579,10 @@ the parent owns the exclusive boundary and new lane iterations cannot start.
 Catch-up heartbeats are completion-driven, not timer-driven. The chain
 threshold must exceed the longest legitimate atomic SQL statement or other
 indivisible operation inside one lane iteration. Live deployment evidence
-includes full-closure coverage-violation scans of about 37 minutes, and that
-duration grows with watch-plan size. Both the indexer and API chain thresholds
-therefore default to 14,400 seconds (4 hours), providing roughly 2x margin
-over the observed scan. Operators must raise
+includes full-closure coverage-violation scans approaching two hours
+mid-recovery, and that duration grows with watch-plan size. Both the indexer
+and API chain thresholds therefore default to 14,400 seconds (4 hours),
+providing roughly 2x margin over the observed scans. Operators must raise
 `BIGNAME_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS` and
 `BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS` together if a larger watch
 plan admits a longer atomic unit; changing either process-row threshold is not

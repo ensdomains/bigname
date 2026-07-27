@@ -66,9 +66,9 @@ requires every expected row to exist and be within
 limit. That independent chain threshold defaults to 14,400 seconds (4 hours).
 It must exceed the longest legitimate atomic statement in a lane iteration:
 live deployment evidence includes [full-closure](glossary.md#closure)
-coverage-violation scans of
-about 37 minutes, with duration growing as the watch plan grows, so the default
-provides roughly 2x margin. Set
+coverage-violation scans
+approaching two hours mid-recovery, with duration growing as the watch plan
+grows, so the default provides roughly 2x margin. Set
 `BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS` to the same value for API
 aggregate health and raise both together when a larger watch plan admits a
 longer atomic unit. Do not raise either process threshold to size lane
