@@ -4,6 +4,7 @@ use std::{
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::Arc,
     time::Duration,
 };
 
@@ -24,7 +25,7 @@ const COINBASE_SQL_USER_AGENT: &str = "bigname-indexer/0.1";
 pub(super) struct CoinbaseSqlClient {
     url: String,
     auth: CoinbaseSqlAuth,
-    rate_limiter: CoinbaseSqlRateLimiter,
+    pub(super) rate_limiter: Arc<CoinbaseSqlRateLimiter>,
     query_timeout_secs: u64,
     query_attempt_recorder: Option<CoinbaseSqlQueryAttemptRecorder>,
 }
@@ -41,6 +42,7 @@ impl CoinbaseSqlClient {
         api_key_id_env: &str,
         api_key_secret_env: &str,
         config: &CoinbaseSqlBackfillConfig,
+        rate_limiter: Arc<CoinbaseSqlRateLimiter>,
     ) -> Result<Self> {
         let parsed_url = validate_coinbase_sql_url(url)?;
         let auth = CoinbaseSqlAuth::from_env(
@@ -52,7 +54,7 @@ impl CoinbaseSqlClient {
         Ok(Self {
             url: url.to_owned(),
             auth,
-            rate_limiter: CoinbaseSqlRateLimiter::new(config.rate_limit_qps),
+            rate_limiter,
             query_timeout_secs: config.query_timeout_secs,
             query_attempt_recorder: None,
         })
@@ -428,6 +430,7 @@ mod tests {
             "BIGNAME_TEST_MISSING_COINBASE_KEY_ID",
             "BIGNAME_TEST_MISSING_COINBASE_KEY_SECRET",
             &test_config(),
+            Arc::new(CoinbaseSqlRateLimiter::new(test_config().rate_limit_qps)),
         ) {
             Ok(_) => panic!("Coinbase SQL client must reject non-HTTPS URLs"),
             Err(error) => error,
@@ -576,6 +579,7 @@ mod tests {
             "COINBASE_CDP_SQL_API_KEY_ID",
             "COINBASE_CDP_SQL_API_KEY_SECRET",
             &test_config(),
+            Arc::new(CoinbaseSqlRateLimiter::new(test_config().rate_limit_qps)),
         )
     }
 

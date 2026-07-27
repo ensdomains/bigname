@@ -243,11 +243,19 @@ fn parse_pipeline_binaries(repo_root: &Path, stdout: &[u8]) -> Result<PipelineBi
 fn pipeline_command(repo_root: &Path, executable: &Path) -> Command {
     let mut command = Command::new(executable);
     command.current_dir(repo_root);
-    // E2e corpora are tiny, but every spawned binary defaults to a
-    // 10-connection pool; under suite parallelism that exhausts the shared
-    // test postgres and surfaces as pool-acquire timeouts in unrelated tests.
-    // Seven is the minimum for the two-chain normalized-replay fixture.
-    command.env("BIGNAME_DATABASE_MAX_CONNECTIONS", "7");
+    // E2e corpora are tiny, but spawned binaries default to 10-connection
+    // pools. API and worker processes need four; seven is the minimum for the
+    // two-chain normalized-replay indexer fixture.
+    let max_connections = if executable
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        == Some("bigname-indexer")
+    {
+        "7"
+    } else {
+        "4"
+    };
+    command.env("BIGNAME_DATABASE_MAX_CONNECTIONS", max_connections);
     command
 }
 
@@ -1602,23 +1610,29 @@ mod tests {
     #[test]
     fn pipeline_command_uses_exact_binary_cwd_and_pool_limit() {
         let repo_root = std::env::temp_dir().join("bigname-e2e-command-root");
-        let executable = std::env::temp_dir()
-            .join("custom target")
-            .join("debug")
-            .join("bigname-api");
-        let command = pipeline_command(&repo_root, &executable);
-        let command = command.as_std();
+        for (binary, expected_pool_limit) in [
+            ("bigname-api", "4"),
+            ("bigname-indexer", "7"),
+            ("bigname-worker", "4"),
+        ] {
+            let executable = std::env::temp_dir()
+                .join("custom target")
+                .join("debug")
+                .join(binary);
+            let command = pipeline_command(&repo_root, &executable);
+            let command = command.as_std();
 
-        assert_eq!(command.get_program(), executable.as_os_str());
-        assert_eq!(command.get_current_dir(), Some(repo_root.as_path()));
-        assert_eq!(command.get_args().count(), 0);
-        assert_eq!(
-            command
-                .get_envs()
-                .find(|(name, _)| *name == OsStr::new("BIGNAME_DATABASE_MAX_CONNECTIONS"))
-                .and_then(|(_, value)| value),
-            Some(OsStr::new("7"))
-        );
+            assert_eq!(command.get_program(), executable.as_os_str());
+            assert_eq!(command.get_current_dir(), Some(repo_root.as_path()));
+            assert_eq!(command.get_args().count(), 0);
+            assert_eq!(
+                command
+                    .get_envs()
+                    .find(|(name, _)| *name == OsStr::new("BIGNAME_DATABASE_MAX_CONNECTIONS"))
+                    .and_then(|(_, value)| value),
+                Some(OsStr::new(expected_pool_limit))
+            );
+        }
     }
 
     #[test]
