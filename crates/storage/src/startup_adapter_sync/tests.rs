@@ -208,6 +208,106 @@ async fn completed_startup_adapter_checkpoint_reuses_only_an_exact_key() -> Resu
 }
 
 #[tokio::test]
+async fn prepare_invalidates_a_nonmatching_completion_before_rollback() -> Result<()> {
+    let database = database("startup_adapter_prepare_rollback").await?;
+    let original = complete(&database, 1).await?;
+
+    assert!(matches!(
+        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 2).await?,
+        StartupAdapterSyncDecision::RunFullSync {
+            started_key: Some(StartupAdapterSyncKey {
+                adapter_semantic_version: 2,
+                ..
+            })
+        }
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = $1
+               AND chain_id = $2
+               AND cursor_kind = $3
+               AND adapter = $4
+               AND checkpoint_scope = $5",
+        )
+        .bind(PROFILE)
+        .bind(CHAIN)
+        .bind(STARTUP_ADAPTER_CURSOR_KIND)
+        .bind(ADAPTER)
+        .bind(STARTUP_ADAPTER_CHECKPOINT_SCOPE)
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "preparing the new semantic version must invalidate the old completion"
+    );
+
+    assert_eq!(
+        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        StartupAdapterSyncDecision::RunFullSync {
+            started_key: Some(original),
+        },
+        "rolling back after the new pass crashes must not revive the old completion"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn prepare_preserves_a_nonmatching_partial_checkpoint() -> Result<()> {
+    let database = database("startup_adapter_prepare_partial").await?;
+    complete(&database, 1).await?;
+    sqlx::query(
+        "UPDATE normalized_replay_adapter_checkpoints
+         SET status = 'running', completed_at = NULL
+         WHERE deployment_profile = $1
+           AND chain_id = $2
+           AND cursor_kind = $3
+           AND adapter = $4
+           AND checkpoint_scope = $5",
+    )
+    .bind(PROFILE)
+    .bind(CHAIN)
+    .bind(STARTUP_ADAPTER_CURSOR_KIND)
+    .bind(ADAPTER)
+    .bind(STARTUP_ADAPTER_CHECKPOINT_SCOPE)
+    .execute(database.pool())
+    .await?;
+
+    assert!(matches!(
+        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 2).await?,
+        StartupAdapterSyncDecision::RunFullSync {
+            started_key: Some(StartupAdapterSyncKey {
+                adapter_semantic_version: 2,
+                ..
+            })
+        }
+    ));
+    assert_eq!(
+        sqlx::query_as::<_, (String, Option<i64>)>(
+            "SELECT status::TEXT, adapter_semantic_version
+             FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = $1
+               AND chain_id = $2
+               AND cursor_kind = $3
+               AND adapter = $4
+               AND checkpoint_scope = $5",
+        )
+        .bind(PROFILE)
+        .bind(CHAIN)
+        .bind(STARTUP_ADAPTER_CURSOR_KIND)
+        .bind(ADAPTER)
+        .bind(STARTUP_ADAPTER_CHECKPOINT_SCOPE)
+        .fetch_one(database.pool())
+        .await?,
+        ("running".to_owned(), Some(1)),
+        "prepare must leave partial state for the adapter's own drift predicates"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn lineage_mutation_revision_covers_changes_below_the_canonical_head() -> Result<()> {
     let database = database("startup_adapter_lineage_key").await?;
     let original = complete(&database, 1).await?;
