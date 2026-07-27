@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::{PgConnection, PgPool, Row};
 use tracing::warn;
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StartupCanonicalLineageHead {
     pub block_number: i64,
     pub block_hash: String,
@@ -108,6 +108,70 @@ pub(super) async fn load_startup_adapter_lineage_state_from_connection(
         mutation_revision,
         canonical_lineage_head,
     }))
+}
+
+pub(super) async fn completed_lineage_extent_is_reusable(
+    connection: &mut PgConnection,
+    chain: &str,
+    recorded_revision: i64,
+    recorded_head: Option<&StartupCanonicalLineageHead>,
+    scanned_extent: Option<&StartupCanonicalLineageHead>,
+    current: &StartupAdapterLineageState,
+) -> Result<bool> {
+    if recorded_revision < 0 || current.mutation_revision < recorded_revision {
+        return Ok(false);
+    }
+    if !current_head_covers_scanned_extent(scanned_extent, recorded_head) {
+        return Ok(false);
+    }
+    if !current_head_covers_scanned_extent(scanned_extent, current.canonical_lineage_head.as_ref())
+    {
+        return Ok(false);
+    }
+    if current.mutation_revision == recorded_revision {
+        return Ok(current.canonical_lineage_head.as_ref() == recorded_head);
+    }
+
+    let expected_evidence_count = current.mutation_revision - recorded_revision;
+    let scanned_through_block = scanned_extent.map_or(0, |head| head.block_number);
+    let (evidence_count, earliest_affected_block) = sqlx::query_as::<_, (i64, Option<i64>)>(
+        r#"
+            SELECT
+                COUNT(*)::BIGINT,
+                MIN(min_affected_block_number)
+            FROM chain_lineage_mutation_revision_evidence
+            WHERE chain_id = $1
+              AND revision > $2
+              AND revision <= $3
+            "#,
+    )
+    .bind(chain)
+    .bind(recorded_revision)
+    .bind(current.mutation_revision)
+    .fetch_one(connection)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to inspect lineage mutation evidence for {chain} after revision \
+                 {recorded_revision} through revision {}",
+            current.mutation_revision
+        )
+    })?;
+
+    Ok(evidence_count == expected_evidence_count
+        && earliest_affected_block.is_some_and(|block| block > scanned_through_block))
+}
+
+fn current_head_covers_scanned_extent(
+    scanned_extent: Option<&StartupCanonicalLineageHead>,
+    current_head: Option<&StartupCanonicalLineageHead>,
+) -> bool {
+    match (scanned_extent, current_head) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(scanned), Some(current)) if current.block_number > scanned.block_number => true,
+        (Some(scanned), Some(current)) => current == scanned,
+    }
 }
 
 async fn load_canonical_lineage_head(

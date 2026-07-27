@@ -72,9 +72,13 @@ async fn sync_discovery_adapter_owned_raw_log_state_inner(
             else {
                 break;
             };
-            let startup_checkpoint =
-                load_startup_adapter_checkpoint_context(pool, deployment_profile, &chain.chain)
-                    .await?;
+            let startup_checkpoint = load_startup_adapter_checkpoint_context(
+                pool,
+                deployment_profile,
+                &chain.chain,
+                attempt.scanned_lineage_extent_block_number(),
+            )
+            .await?;
             let summary = match startup_heartbeat.as_mut() {
                 Some((heartbeat, chain_ids)) => {
                     let mut progress = StartupAdapterHeartbeat::new(heartbeat, chain_ids);

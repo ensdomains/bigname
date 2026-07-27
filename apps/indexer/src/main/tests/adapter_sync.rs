@@ -205,6 +205,107 @@ async fn non_looping_startup_family_retries_one_input_advance() -> Result<()> {
 }
 
 #[tokio::test]
+async fn non_looping_startup_family_accepts_lineage_growth_above_its_scan_extent() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "startup-reverse-tail-growth";
+    sqlx::query(
+        "INSERT INTO raw_log_staging_input_revisions (
+             chain_id, revision, retention_generation, retained_history_complete, incomplete_since
+         ) VALUES ($1, 1, 0, FALSE, now())",
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    sqlx::query("INSERT INTO discovery_admission_epochs (chain_id, epoch) VALUES ($1, 0)")
+        .bind(chain)
+        .execute(database.pool())
+        .await?;
+    let scanned_head = provider_block(
+        "0x0808080808080808080808080808080808080808080808080808080808080808",
+        Some("0x0707070707070707070707070707070707070707070707070707070707070707"),
+        8,
+    );
+    insert_chain_lineage_for_block(
+        database.pool(),
+        chain,
+        &scanned_head,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+
+    let adapter = bigname_adapters::ENS_V1_REVERSE_CLAIM_STARTUP_VERSION;
+    let attempt = crate::runtime::adapter_sync::checkpoint::prepare_startup_family_sync(
+        database.pool(),
+        Some("test"),
+        chain,
+        adapter,
+    )
+    .await?
+    .expect("a missing completion must run");
+    assert_eq!(
+        attempt.scanned_lineage_extent_block_number(),
+        Some(scanned_head.block_number)
+    );
+
+    let live_tail = provider_block(
+        "0x0909090909090909090909090909090909090909090909090909090909090909",
+        Some(&scanned_head.block_hash),
+        9,
+    );
+    insert_chain_lineage_for_block(
+        database.pool(),
+        chain,
+        &live_tail,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+
+    assert!(
+        crate::runtime::adapter_sync::complete_non_looping_startup_family(
+            attempt,
+            database.pool(),
+            chain,
+            adapter,
+            1,
+        )
+        .await?,
+        "evidenced live tail growth must complete on the first bounded pass"
+    );
+    assert!(
+        crate::runtime::adapter_sync::checkpoint::prepare_startup_family_sync(
+            database.pool(),
+            Some("test"),
+            chain,
+            adapter,
+        )
+        .await?
+        .is_none(),
+        "the completion must be immediately reusable at the accepted tail revision"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64, i64)>(
+            "SELECT
+                 replay_target_block_number,
+                 (state_payload->>'startup_lineage_mutation_revision')::BIGINT,
+                 (state_payload->'startup_canonical_lineage_head'->>'block_number')::BIGINT
+             FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = 'test'
+               AND chain_id = $1
+               AND adapter = $2
+               AND checkpoint_scope = 'startup_adapter_sync'",
+        )
+        .bind(chain)
+        .bind(adapter.adapter)
+        .fetch_one(database.pool())
+        .await?,
+        (8, 2, 9),
+        "the row must retain extent 8 while recording the accepted revision and head at 9"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn live_adapter_wait_heartbeats_without_adapter_progress_callbacks() -> Result<()> {
     let database = TestDatabase::new().await?;
     let instance_id = "live-adapter-periodic-heartbeat";
@@ -491,6 +592,188 @@ async fn scoped_ens_v2_registry_sync_emits_registry_permission_events() -> Resul
         .await?,
         1,
         "a registry-scoped adapter run must not skip the permission adapter"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn permissions_startup_rederives_block_producer_before_publishing_permissions() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-mainnet";
+    let resolver_address = "0x0000000000000000000000000000000000000741";
+    let resolver_contract_instance_id = Uuid::from_u128(0x741);
+    let resource = hex_string(&abi_word_u64(42));
+    let account = "0x00000000000000000000000000000000000000aa";
+    let alice_dns_name = dns_encoded_eth_name("alice");
+    let block = provider_block(
+        "0x7474747474747474747474747474747474747474747474747474747474747474",
+        Some("0x7373737373737373737373737373737373737373737373737373737373737373"),
+        74,
+    );
+
+    insert_normalized_replay_ens_v2_resolver_manifest(
+        database.pool(),
+        chain,
+        741,
+        resolver_contract_instance_id,
+        resolver_address,
+    )
+    .await?;
+    insert_chain_lineage_for_block(database.pool(), chain, &block, CanonicalityState::Canonical)
+        .await?;
+    insert_raw_resolver_log(
+        database.pool(),
+        chain,
+        &block,
+        resolver_address,
+        vec![ens_v2_named_resource_topic0(), resource.clone()],
+        decode_hex_string(&encode_dynamic_bytes_log_data(&alice_dns_name)),
+        0,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    insert_raw_resolver_log(
+        database.pool(),
+        chain,
+        &block,
+        resolver_address,
+        vec![
+            ens_v2_eac_roles_changed_topic0(),
+            resource,
+            hex_string(&abi_word_address(account)),
+        ],
+        decode_hex_string(&encode_eac_roles_changed_log_data(
+            &hex_string(&abi_word_u64(0)),
+            &hex_string(&abi_word_u64(1)),
+        )),
+        1,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    bigname_adapters::sync_block_derived_normalized_events(
+        database.pool(),
+        chain,
+        std::slice::from_ref(&block.block_hash),
+        None,
+    )
+    .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'decoded_name'
+             FROM normalized_events
+             WHERE derivation_kind = 'raw_log_preimage_observation'
+               AND after_state->>'source_event' = 'NamedResource'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "alice.eth"
+    );
+
+    let stale_dns_name = dns_encoded_eth_name("Alice");
+    let stale_data = encode_dynamic_bytes_log_data(&stale_dns_name)
+        .trim_start_matches("0x")
+        .to_owned();
+    sqlx::query(
+        "UPDATE normalized_events
+         SET raw_fact_ref = jsonb_set(
+                 raw_fact_ref,
+                 '{data_hex}',
+                 to_jsonb($1::TEXT)
+             ),
+             after_state = jsonb_set(
+                 after_state,
+                 '{dns_encoded_name}',
+                 to_jsonb($2::TEXT)
+             )
+         WHERE derivation_kind = 'raw_log_preimage_observation'
+           AND after_state->>'source_event' = 'NamedResource'",
+    )
+    .bind(stale_data)
+    .bind(hex_string(&stale_dns_name))
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE FUNCTION public.assert_startup_permissions_producer_current()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+            observed_dns_name text;
+        BEGIN
+            SELECT after_state->>'dns_encoded_name'
+            INTO observed_dns_name
+            FROM normalized_events
+            WHERE derivation_kind = 'raw_log_preimage_observation'
+              AND after_state->>'source_event' = 'NamedResource';
+            IF observed_dns_name IS DISTINCT FROM '0x05616c6963650365746800' THEN
+                RAISE EXCEPTION
+                    'permissions ran before the authoritative startup producer replay';
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE TRIGGER assert_startup_permissions_producer_current
+        BEFORE INSERT OR UPDATE ON public.normalized_events
+        FOR EACH ROW
+        WHEN (NEW.derivation_kind = 'ens_v2_permissions')
+        EXECUTE FUNCTION public.assert_startup_permissions_producer_current()
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+
+    crate::runtime::adapter_sync::sync_startup_ens_v2_permissions(
+        database.pool(),
+        "startup-checkpoint-profile",
+        chain,
+        block.block_number,
+        1_000,
+        &mut None,
+    )
+    .await?;
+
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->>'dns_encoded_name'
+             FROM normalized_events
+             WHERE derivation_kind = 'raw_log_preimage_observation'
+               AND after_state->>'source_event' = 'NamedResource'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        hex_string(&alice_dns_name),
+        "authoritative startup replay must supersede the stale producer payload"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT logical_name_id
+             FROM normalized_events
+             WHERE derivation_kind = 'ens_v2_permissions'
+               AND event_kind = 'PermissionChanged'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        "ens:alice.eth",
+        "permissions must publish only after the producer payload is current"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT after_state->'selector'->>'dns_encoded_name'
+             FROM normalized_events
+             WHERE derivation_kind = 'ens_v2_permissions'
+               AND event_kind = 'PermissionChanged'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        hex_string(&alice_dns_name)
     );
 
     database.cleanup().await
@@ -2306,7 +2589,7 @@ async fn sync_adapter_owned_raw_log_state_backfills_wrapper_authority_from_store
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM normalized_events")
             .fetch_one(database.pool())
             .await?,
-        7
+        8
     );
 
     database.cleanup().await?;

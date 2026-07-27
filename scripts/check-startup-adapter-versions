@@ -86,6 +86,8 @@ SHARED_PATHS: dict[str, tuple[str, ...]] = {
     "crates/adapters/src/checkpoint_context.rs": ALL_FAMILIES,
     "crates/adapters/src/manifest_normalized_events.rs": ALL_FAMILIES,
     "crates/adapters/src/block_derived_normalized_events.rs": ALL_FAMILIES,
+    "crates/manifests/src/lib/views/watched.rs": ALL_FAMILIES,
+    "crates/manifests/src/lib/views/watched/": ALL_FAMILIES,
 }
 
 

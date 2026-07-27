@@ -20,8 +20,13 @@ use super::logging::{
     log_ens_v2_registrar_sync_summary, log_ens_v2_registry_resource_surface_sync_summary,
     log_ens_v2_resolver_sync_summary,
 };
+#[path = "adapter_sync/bounded.rs"]
+mod bounded;
 #[path = "adapter_sync/checkpoint.rs"]
 pub(crate) mod checkpoint;
+use bounded::load_startup_adapter_checkpoint_context;
+#[cfg(test)]
+pub(crate) use bounded::sync_startup_ens_v2_permissions;
 use checkpoint::{
     StartupFamilySyncAttempt, StartupFamilySyncCompletion, prepare_startup_family_sync,
 };
@@ -109,18 +114,14 @@ async fn sync_adapter_owned_raw_log_state_with_startup_context(
             else {
                 break;
             };
-            let summary = match startup_heartbeat.as_mut() {
-                Some((heartbeat, chain_ids)) => {
-                    let mut progress = StartupAdapterHeartbeat::new(heartbeat, chain_ids);
-                    bigname_adapters::sync_ens_v1_reverse_claim_with_progress(
-                        pool,
-                        &chain.chain,
-                        &mut progress,
-                    )
-                    .await
-                }
-                None => bigname_adapters::sync_ens_v1_reverse_claim(pool, &chain.chain).await,
-            }
+            let scanned_through_block = attempt.scanned_lineage_extent_block_number();
+            let summary = bounded::sync_ens_v1_reverse_claim(
+                pool,
+                &chain.chain,
+                scanned_through_block,
+                &mut startup_heartbeat,
+            )
+            .await
             .with_context(|| {
                 format!(
                     "failed to sync ENSv1 reverse claim from stored raw logs for chain {}",
@@ -153,10 +154,16 @@ async fn sync_adapter_owned_raw_log_state_with_startup_context(
             else {
                 break;
             };
+            let scanned_through_block = attempt.scanned_lineage_extent_block_number();
             let startup_checkpoint = match startup_context {
                 Some((deployment_profile, page_logs)) => Some((
-                    load_startup_adapter_checkpoint_context(pool, deployment_profile, &chain.chain)
-                        .await?,
+                    load_startup_adapter_checkpoint_context(
+                        pool,
+                        deployment_profile,
+                        &chain.chain,
+                        scanned_through_block,
+                    )
+                    .await?,
                     page_logs,
                 )),
                 None => None,
@@ -235,10 +242,16 @@ async fn sync_adapter_owned_raw_log_state_with_startup_context(
             else {
                 break;
             };
+            let scanned_through_block = attempt.scanned_lineage_extent_block_number();
             let startup_checkpoint = match startup_context {
                 Some((deployment_profile, page_logs)) => Some((
-                    load_startup_adapter_checkpoint_context(pool, deployment_profile, &chain.chain)
-                        .await?,
+                    load_startup_adapter_checkpoint_context(
+                        pool,
+                        deployment_profile,
+                        &chain.chain,
+                        scanned_through_block,
+                    )
+                    .await?,
                     page_logs,
                 )),
                 None => None,
@@ -322,18 +335,14 @@ async fn sync_adapter_owned_raw_log_state_with_startup_context(
             else {
                 break;
             };
-            let summary = match startup_heartbeat.as_mut() {
-                Some((heartbeat, chain_ids)) => {
-                    let mut progress = StartupAdapterHeartbeat::new(heartbeat, chain_ids);
-                    bigname_adapters::sync_ens_v2_registrar_with_progress(
-                        pool,
-                        &chain.chain,
-                        &mut progress,
-                    )
-                    .await
-                }
-                None => bigname_adapters::sync_ens_v2_registrar(pool, &chain.chain).await,
-            }
+            let scanned_through_block = attempt.scanned_lineage_extent_block_number();
+            let summary = bounded::sync_ens_v2_registrar(
+                pool,
+                &chain.chain,
+                scanned_through_block,
+                &mut startup_heartbeat,
+            )
+            .await
             .with_context(|| {
                 format!(
                     "failed to sync ENSv2 registrar state from stored raw logs for chain {}",
@@ -366,18 +375,14 @@ async fn sync_adapter_owned_raw_log_state_with_startup_context(
             else {
                 break;
             };
-            let summary = match startup_heartbeat.as_mut() {
-                Some((heartbeat, chain_ids)) => {
-                    let mut progress = StartupAdapterHeartbeat::new(heartbeat, chain_ids);
-                    bigname_adapters::sync_ens_v2_resolver_with_progress(
-                        pool,
-                        &chain.chain,
-                        &mut progress,
-                    )
-                    .await
-                }
-                None => bigname_adapters::sync_ens_v2_resolver(pool, &chain.chain).await,
-            }
+            let scanned_through_block = attempt.scanned_lineage_extent_block_number();
+            let summary = bounded::sync_ens_v2_resolver(
+                pool,
+                &chain.chain,
+                scanned_through_block,
+                &mut startup_heartbeat,
+            )
+            .await
             .with_context(|| {
                 format!(
                     "failed to sync ENSv2 resolver state from stored raw logs for chain {}",
@@ -410,17 +415,28 @@ async fn sync_adapter_owned_raw_log_state_with_startup_context(
             else {
                 break;
             };
-            let summary = match startup_heartbeat.as_mut() {
-                Some((heartbeat, chain_ids)) => {
-                    let mut progress = StartupAdapterHeartbeat::new(heartbeat, chain_ids);
-                    bigname_adapters::sync_ens_v2_permissions_with_progress(
+            let scanned_through_block = attempt.scanned_lineage_extent_block_number();
+            let summary = match (startup_context, scanned_through_block) {
+                (Some((deployment_profile, page_logs)), Some(through_block)) => {
+                    bounded::sync_startup_ens_v2_permissions(
                         pool,
+                        deployment_profile,
                         &chain.chain,
-                        &mut progress,
+                        through_block,
+                        page_logs,
+                        &mut startup_heartbeat,
                     )
                     .await
                 }
-                None => bigname_adapters::sync_ens_v2_permissions(pool, &chain.chain).await,
+                _ => {
+                    bounded::sync_ens_v2_permissions(
+                        pool,
+                        &chain.chain,
+                        scanned_through_block,
+                        &mut startup_heartbeat,
+                    )
+                    .await
+                }
             }
             .with_context(|| {
                 format!(
@@ -487,18 +503,14 @@ pub(super) async fn sync_ens_v2_registry_to_startup_fixed_point(
         else {
             return Ok(());
         };
-        let summary = match startup_heartbeat.as_mut() {
-            Some((heartbeat, chain_ids)) => {
-                let mut progress = StartupAdapterHeartbeat::new(heartbeat, chain_ids);
-                bigname_adapters::sync_ens_v2_registry_resource_surface_with_progress(
-                    pool,
-                    chain,
-                    &mut progress,
-                )
-                .await
-            }
-            None => bigname_adapters::sync_ens_v2_registry_resource_surface(pool, chain).await,
-        }
+        let scanned_through_block = attempt.scanned_lineage_extent_block_number();
+        let summary = bounded::sync_ens_v2_registry_resource_surface(
+            pool,
+            chain,
+            scanned_through_block,
+            startup_heartbeat,
+        )
+        .await
         .with_context(|| {
             format!(
                 "failed to sync ENSv2 registry resource/surface state and discovery from stored \
@@ -551,41 +563,4 @@ pub(super) async fn journal_authority_with_startup_progress(
         }
     }
     Ok(())
-}
-
-pub(super) async fn load_startup_adapter_checkpoint_context(
-    pool: &sqlx::PgPool,
-    deployment_profile: &str,
-    chain: &str,
-) -> Result<bigname_adapters::StartupAdapterCheckpointContext> {
-    let target_block_number = sqlx::query_scalar::<_, Option<i64>>(
-        r#"
-        SELECT MAX(block_number)::BIGINT
-        FROM (
-            SELECT block_number
-            FROM chain_lineage
-            WHERE chain_id = $1
-              AND canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
-            UNION ALL
-            SELECT block_number
-            FROM raw_logs
-            WHERE chain_id = $1
-              AND canonicality_state IN (
-                  'canonical'::canonicality_state,
-                  'safe'::canonicality_state,
-                  'finalized'::canonicality_state
-              )
-        ) AS startup_adapter_inputs
-        "#,
-    )
-    .bind(chain)
-    .fetch_one(pool)
-    .await
-    .with_context(|| format!("failed to load startup adapter checkpoint target for {chain}"))?
-    .unwrap_or(0);
-    bigname_adapters::StartupAdapterCheckpointContext::new(deployment_profile, target_block_number)
 }

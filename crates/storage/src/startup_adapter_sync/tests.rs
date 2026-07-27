@@ -153,6 +153,18 @@ async fn lineage_mutation_revision_migration_seeds_existing_chains() -> Result<(
         1,
         "the first post-migration statement must advance the seeded revision"
     );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT revision, min_affected_block_number
+             FROM chain_lineage_mutation_revision_evidence
+             WHERE chain_id = $1",
+        )
+        .bind(CHAIN)
+        .fetch_one(database.pool())
+        .await?,
+        (1, 7),
+        "the first bump must retain its minimum affected block as completion evidence"
+    );
 
     database.cleanup().await
 }
@@ -308,35 +320,24 @@ async fn prepare_preserves_a_nonmatching_partial_checkpoint() -> Result<()> {
 }
 
 #[tokio::test]
-async fn lineage_mutation_revision_covers_changes_below_the_canonical_head() -> Result<()> {
+async fn completed_lineage_extent_reuses_tail_growth_and_rejects_prefix_changes() -> Result<()> {
     let database = database("startup_adapter_lineage_key").await?;
-    let original = complete(&database, 1).await?;
-    assert_eq!(original.lineage_mutation_revision, 0);
-    assert_eq!(original.canonical_lineage_head, None);
-
     insert_canonical_head(&database, 8, "0xempty-a").await?;
-    let StartupAdapterSyncDecision::RunFullSync { started_key } =
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?
-    else {
-        panic!("an empty-block lineage advance must invalidate startup reuse");
-    };
-    let advanced = started_key.expect("lineage advance must retain a known key");
-    assert_eq!(advanced.lineage_mutation_revision, 1);
+    let original = complete(&database, 1).await?;
+    assert_eq!(original.lineage_mutation_revision, 1);
     assert_eq!(
-        advanced.canonical_lineage_head,
+        original.canonical_lineage_head,
         Some(StartupCanonicalLineageHead {
             block_number: 8,
             block_hash: "0xempty-a".to_owned(),
         })
     );
+
+    insert_canonical_head(&database, 9, "0xempty-tail").await?;
     assert_eq!(
-        advanced.raw_log_input_version, original.raw_log_input_version,
-        "lineage movement must be detected without relying on a raw-log revision bump"
-    );
-    assert_eq!(
-        complete_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1, Some(advanced),)
-            .await?,
-        StartupAdapterSyncCompletion::Completed
+        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        StartupAdapterSyncDecision::ReuseCompleted,
+        "lineage growth strictly above the scanned extent must reuse the completed prefix"
     );
 
     insert_canonical_head(&database, 7, "0xbelow-head").await?;
@@ -346,12 +347,12 @@ async fn lineage_mutation_revision_covers_changes_below_the_canonical_head() -> 
         panic!("a below-head lineage insert must invalidate startup reuse");
     };
     let below_head = started_key.expect("below-head lineage insert must retain a known key");
-    assert_eq!(below_head.lineage_mutation_revision, 2);
+    assert_eq!(below_head.lineage_mutation_revision, 3);
     assert_eq!(
         below_head.canonical_lineage_head,
         Some(StartupCanonicalLineageHead {
-            block_number: 8,
-            block_hash: "0xempty-a".to_owned(),
+            block_number: 9,
+            block_hash: "0xempty-tail".to_owned(),
         }),
         "the mutation revision must detect a corpus change even when the head is unchanged"
     );
@@ -371,18 +372,18 @@ async fn lineage_mutation_revision_covers_changes_below_the_canonical_head() -> 
     sqlx::query(
         "UPDATE chain_lineage
          SET canonicality_state = 'orphaned'
-         WHERE chain_id = $1 AND block_hash = '0xempty-a'",
+         WHERE chain_id = $1 AND block_hash = '0xempty-tail'",
     )
     .bind(CHAIN)
     .execute(database.pool())
     .await?;
-    insert_canonical_head(&database, 8, "0xempty-b").await?;
+    insert_canonical_head(&database, 9, "0xempty-b").await?;
     assert!(matches!(
         prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
         StartupAdapterSyncDecision::RunFullSync {
             started_key: Some(StartupAdapterSyncKey {
                 canonical_lineage_head: Some(StartupCanonicalLineageHead {
-                    block_number: 8,
+                    block_number: 9,
                     ref block_hash,
                 }),
                 ..
@@ -442,6 +443,113 @@ async fn lineage_statement_triggers_track_insert_update_and_delete() -> Result<(
             mutation_revision: 3,
             canonical_lineage_head: None,
         })
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT revision, min_affected_block_number
+             FROM chain_lineage_mutation_revision_evidence
+             WHERE chain_id = $1
+             ORDER BY revision",
+        )
+        .bind(CHAIN)
+        .fetch_all(database.pool())
+        .await?,
+        vec![(1, 8), (2, 8), (3, 8)],
+        "every statement bump must retain one minimum-block evidence row"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn completion_accepts_only_evidenced_lineage_growth_above_its_scanned_extent() -> Result<()> {
+    let database = database("startup_adapter_lineage_completion_extent").await?;
+    insert_canonical_head(&database, 8, "0xextent").await?;
+    let StartupAdapterSyncDecision::RunFullSync { started_key } =
+        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?
+    else {
+        panic!("fresh startup adapter checkpoint must run");
+    };
+    let started_key = started_key.expect("fixture key must be known");
+
+    insert_canonical_head(&database, 9, "0xtail").await?;
+    assert_eq!(
+        complete_startup_adapter_sync(
+            database.pool(),
+            PROFILE,
+            CHAIN,
+            ADAPTER,
+            1,
+            Some(started_key),
+        )
+        .await?,
+        StartupAdapterSyncCompletion::Completed,
+        "a concurrent tail-only lineage writer must not exhaust the bounded startup passes"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64, i64)>(
+            "SELECT
+                 replay_target_block_number,
+                 (state_payload ->> $4)::BIGINT,
+                 (state_payload -> $5 ->> 'block_number')::BIGINT
+             FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = $1
+               AND chain_id = $2
+               AND adapter = $3",
+        )
+        .bind(PROFILE)
+        .bind(CHAIN)
+        .bind(ADAPTER)
+        .bind(STARTUP_LINEAGE_MUTATION_REVISION_FIELD)
+        .bind(STARTUP_LINEAGE_SCAN_EXTENT_FIELD)
+        .fetch_one(database.pool())
+        .await?,
+        (8, 2, 8),
+        "completion must accept the current revision while retaining the actually scanned extent"
+    );
+    assert_eq!(
+        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        StartupAdapterSyncDecision::ReuseCompleted,
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn completed_lineage_extent_fails_closed_when_revision_evidence_is_missing() -> Result<()> {
+    let database = database("startup_adapter_missing_lineage_evidence").await?;
+    insert_canonical_head(&database, 8, "0xextent").await?;
+    complete(&database, 1).await?;
+    insert_canonical_head(&database, 9, "0xtail").await?;
+    sqlx::query(
+        "DELETE FROM chain_lineage_mutation_revision_evidence
+         WHERE chain_id = $1 AND revision = 2",
+    )
+    .bind(CHAIN)
+    .execute(database.pool())
+    .await?;
+
+    assert!(matches!(
+        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        StartupAdapterSyncDecision::RunFullSync {
+            started_key: Some(_)
+        }
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = $1
+               AND chain_id = $2
+               AND adapter = $3",
+        )
+        .bind(PROFILE)
+        .bind(CHAIN)
+        .bind(ADAPTER)
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "missing per-revision lineage evidence must invalidate the completion"
     );
 
     database.cleanup().await
@@ -504,6 +612,23 @@ async fn startup_adapter_checkpoint_fails_closed_on_missing_partial_and_skewed_s
     .bind(PROFILE)
     .bind(CHAIN)
     .bind(ADAPTER)
+    .execute(database.pool())
+    .await?;
+    assert!(matches!(
+        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        StartupAdapterSyncDecision::RunFullSync { .. }
+    ));
+
+    complete(&database, 1).await?;
+    sqlx::query(
+        "UPDATE normalized_replay_adapter_checkpoints
+         SET state_payload = state_payload - $4
+         WHERE deployment_profile = $1 AND chain_id = $2 AND adapter = $3",
+    )
+    .bind(PROFILE)
+    .bind(CHAIN)
+    .bind(ADAPTER)
+    .bind(STARTUP_LINEAGE_SCAN_EXTENT_FIELD)
     .execute(database.pool())
     .await?;
     assert!(matches!(
@@ -664,6 +789,9 @@ async fn startup_adapter_checkpoint_rechecks_the_key_before_completion() -> Resu
         CHAIN,
         ADAPTER,
         started_key.as_ref().expect("fixture key must be known"),
+        started_key
+            .as_ref()
+            .and_then(|key| key.canonical_lineage_head.as_ref()),
     )
     .await?;
     old_completion.commit().await?;
@@ -727,6 +855,7 @@ async fn startup_adapter_completion_invalidates_checkpoint_when_key_becomes_unkn
         CHAIN,
         ADAPTER,
         &started_key,
+        started_key.canonical_lineage_head.as_ref(),
     )
     .await?;
     competing_completion.commit().await?;
@@ -781,6 +910,83 @@ async fn startup_adapter_completion_invalidates_checkpoint_when_key_becomes_unkn
         },
         "restoring the same key must not revive the invalidated completion"
     );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn key_unknown_attempt_deletes_a_private_completion_minted_mid_pass() -> Result<()> {
+    let database = database("startup_adapter_unknown_prepare_private_completion").await?;
+    sqlx::query("DELETE FROM raw_log_staging_input_revisions WHERE chain_id = $1")
+        .bind(CHAIN)
+        .execute(database.pool())
+        .await?;
+    let StartupAdapterSyncDecision::RunFullSync { started_key } =
+        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?
+    else {
+        panic!("a key-unknown attempt must run the family");
+    };
+    assert_eq!(started_key, None);
+
+    sqlx::query(
+        "INSERT INTO raw_log_staging_input_revisions (
+             chain_id,
+             revision,
+             retention_generation,
+             retained_history_complete,
+             incomplete_since
+         ) VALUES ($1, 7, 3, FALSE, now())",
+    )
+    .bind(CHAIN)
+    .execute(database.pool())
+    .await?;
+    let mut private_completion = database.pool().begin().await?;
+    lock_canonical_lineage(private_completion.as_mut(), CHAIN).await?;
+    let minted_key = load_startup_adapter_sync_key(private_completion.as_mut(), CHAIN, 1)
+        .await?
+        .expect("the missing key component must be known after it is minted");
+    publish_completed_checkpoint(
+        private_completion.as_mut(),
+        PROFILE,
+        CHAIN,
+        ADAPTER,
+        &minted_key,
+        minted_key.canonical_lineage_head.as_ref(),
+    )
+    .await?;
+    private_completion.commit().await?;
+
+    assert_eq!(
+        complete_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1, started_key,)
+            .await?,
+        StartupAdapterSyncCompletion::KeyUnknown
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = $1
+               AND chain_id = $2
+               AND cursor_kind = $3
+               AND adapter = $4
+               AND checkpoint_scope = $5",
+        )
+        .bind(PROFILE)
+        .bind(CHAIN)
+        .bind(STARTUP_ADAPTER_CURSOR_KIND)
+        .bind(ADAPTER)
+        .bind(STARTUP_ADAPTER_CHECKPOINT_SCOPE)
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "the outer completion fence must delete a row produced under uncaptured inputs"
+    );
+    assert!(matches!(
+        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        StartupAdapterSyncDecision::RunFullSync {
+            started_key: Some(_)
+        }
+    ));
 
     database.cleanup().await
 }
