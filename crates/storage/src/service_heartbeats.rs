@@ -5,7 +5,7 @@ use sqlx::{PgPool, types::time::OffsetDateTime};
 
 pub const INDEXER_SERVICE_NAME: &str = "indexer";
 pub const WORKER_SERVICE_NAME: &str = "worker";
-pub const DEFAULT_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS: i64 = 5_400;
+pub const DEFAULT_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS: i64 = 14_400;
 pub const DEFAULT_WORKER_REBUILD_PHASE_MAX_AGE_SECS: i64 = 43_200;
 
 const PROCESS_SCOPE_KIND: &str = "process";

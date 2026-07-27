@@ -170,8 +170,8 @@ async fn normalized_replay_lane_death_fails_process() -> Result<()> {
     sqlx::query(
         r#"
         UPDATE service_loop_heartbeats
-        SET started_at = clock_timestamp() - INTERVAL '3 hours',
-            heartbeat_at = clock_timestamp() - INTERVAL '2 hours'
+        SET started_at = clock_timestamp() - INTERVAL '6 hours',
+            heartbeat_at = clock_timestamp() - INTERVAL '5 hours'
         WHERE service_name = 'indexer'
           AND instance_id = $1
         "#,

@@ -63,7 +63,7 @@ set `BIGNAME_INDEXER_HEARTBEAT_MAX_AGE_SECS` and
 intervals. Once the indexer has an expected live-chain set, its container check
 requires every expected row to exist and be within
 `BIGNAME_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS` instead of applying the process
-limit. That independent chain threshold defaults to 5,400 seconds (90 minutes).
+limit. That independent chain threshold defaults to 14,400 seconds (4 hours).
 It must exceed the longest legitimate atomic statement in a lane iteration:
 live deployment evidence includes [full-closure](glossary.md#closure)
 coverage-violation scans of
@@ -101,7 +101,7 @@ object still require recent indexer and worker evidence, using
 `BIGNAME_API_HEARTBEAT_MAX_AGE_SECS` (default 20), so a planned indexer restart
 or long worker phase stays visible without making the API container or public
 edge unhealthy. Indexer chain rows use the independent
-`BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS` (default 5,400), and any
+`BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS` (default 14,400), and any
 missing or stale expected chain row degrades the aggregate status. The status routes use the API chain RPC mapping for an
 asynchronous cached network-head probe. Tune its provider timeout, refresh
 interval, cache TTL, and ingestion block/time limits with the

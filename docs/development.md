@@ -180,7 +180,7 @@ indexer/worker main-loop liveness:
   intervals. Once an indexer expected chain set exists, every expected row must
   exist and be within
   `BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS`. The independent chain
-  setting defaults to 5,400 seconds.
+  setting defaults to 14,400 seconds.
 
 Database reachability is checked with `SELECT 1` through the configured
 PostgreSQL pool. `api_status` is API-local readiness: because the handler is
@@ -203,10 +203,10 @@ fail when the row is absent or older than the service-specific limit. Once an
 indexer expected live-chain set exists, the indexer check instead requires
 every expected row to exist and be no older than
 `BIGNAME_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS`; a replay lane refreshes only
-its own chain row after each successful iteration, including idle. The 5,400
-second default is roughly twice the observed 37-minute
+its own chain row after each successful iteration, including idle. The 14,400
+second default gives roughly 2x margin over the
 [full-closure](glossary.md#closure)
-coverage-violation scan. Deployments admitting a longer atomic lane statement
+coverage-violation scans observed approaching two hours mid-recovery. Deployments admitting a longer atomic lane statement
 must raise that setting and
 `BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS` together, independently of
 the process thresholds.

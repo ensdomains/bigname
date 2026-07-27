@@ -546,7 +546,7 @@ prefers an instance whose normal heartbeat or active phase is within that
 service's configured age, then falls back to the newest stale evidence when
 none is healthy. An indexer candidate with an expected live-chain set is
 healthy only when every expected row exists and is within
-`BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS`, which defaults to 5,400
+`BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS`, which defaults to 14,400
 seconds independently of `BIGNAME_API_HEARTBEAT_MAX_AGE_SECS`. Indexer phases
 use the ordinary API indexer maximum; worker rebuild
 phases use their separate long-operation maximum. One live instance can
@@ -581,7 +581,7 @@ threshold must exceed the longest legitimate atomic SQL statement or other
 indivisible operation inside one lane iteration. Live deployment evidence
 includes full-closure coverage-violation scans of about 37 minutes, and that
 duration grows with watch-plan size. Both the indexer and API chain thresholds
-therefore default to 5,400 seconds (90 minutes), providing roughly 2x margin
+therefore default to 14,400 seconds (4 hours), providing roughly 2x margin
 over the observed scan. Operators must raise
 `BIGNAME_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS` and
 `BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS` together if a larger watch
