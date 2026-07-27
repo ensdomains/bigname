@@ -1716,8 +1716,8 @@ async fn idle_chain_lane_keeps_beating_while_a_peer_is_wedged_on_coverage_recove
     sqlx::query(
         r#"
         UPDATE service_loop_heartbeats
-        SET started_at = clock_timestamp() - INTERVAL '3 hours',
-            heartbeat_at = clock_timestamp() - INTERVAL '2 hours'
+        SET started_at = clock_timestamp() - INTERVAL '6 hours',
+            heartbeat_at = clock_timestamp() - INTERVAL '5 hours'
         WHERE service_name = 'indexer'
           AND instance_id = $1
           AND scope_kind = 'chain'
@@ -1797,8 +1797,8 @@ async fn idle_chain_lane_keeps_beating_while_a_peer_is_wedged_on_coverage_recove
     let aged_idle_heartbeat = sqlx::query_scalar::<_, sqlx::types::time::OffsetDateTime>(
         r#"
         UPDATE service_loop_heartbeats
-        SET started_at = clock_timestamp() - INTERVAL '3 hours',
-            heartbeat_at = clock_timestamp() - INTERVAL '2 hours'
+        SET started_at = clock_timestamp() - INTERVAL '6 hours',
+            heartbeat_at = clock_timestamp() - INTERVAL '5 hours'
         WHERE service_name = 'indexer'
           AND instance_id = $1
           AND scope_kind = 'chain'

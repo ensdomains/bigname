@@ -27,8 +27,8 @@ async fn service_heartbeats_peer_progress_does_not_refresh_a_stale_chain() -> Re
     sqlx::query(
         r#"
         UPDATE service_loop_heartbeats
-        SET started_at = clock_timestamp() - INTERVAL '3 hours',
-            heartbeat_at = clock_timestamp() - INTERVAL '2 hours'
+        SET started_at = clock_timestamp() - INTERVAL '6 hours',
+            heartbeat_at = clock_timestamp() - INTERVAL '5 hours'
         WHERE service_name = 'indexer'
           AND instance_id = $1
           AND scope_kind = 'chain'
