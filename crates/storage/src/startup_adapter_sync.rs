@@ -71,6 +71,15 @@ pub async fn prepare_startup_adapter_sync(
             }
             None => false,
         };
+        if !reusable {
+            invalidate_completed_startup_adapter_checkpoint(
+                transaction.as_mut(),
+                deployment_profile,
+                chain,
+                adapter,
+            )
+            .await?;
+        }
         transaction
             .commit()
             .await
@@ -428,6 +437,39 @@ async fn invalidate_startup_adapter_checkpoint(
     .with_context(|| {
         format!(
             "failed to invalidate changed startup adapter checkpoint for \
+             {deployment_profile}/{chain}/{adapter}"
+        )
+    })?;
+    Ok(())
+}
+
+async fn invalidate_completed_startup_adapter_checkpoint(
+    connection: &mut PgConnection,
+    deployment_profile: &str,
+    chain: &str,
+    adapter: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        DELETE FROM normalized_replay_adapter_checkpoints
+        WHERE deployment_profile = $1
+          AND chain_id = $2
+          AND cursor_kind = $3
+          AND adapter = $4
+          AND checkpoint_scope = $5
+          AND status = 'completed'
+        "#,
+    )
+    .bind(deployment_profile)
+    .bind(chain)
+    .bind(STARTUP_ADAPTER_CURSOR_KIND)
+    .bind(adapter)
+    .bind(STARTUP_ADAPTER_CHECKPOINT_SCOPE)
+    .execute(connection)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to invalidate non-matching completed startup adapter checkpoint for \
              {deployment_profile}/{chain}/{adapter}"
         )
     })?;
