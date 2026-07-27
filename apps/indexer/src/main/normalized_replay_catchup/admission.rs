@@ -13,6 +13,10 @@ use crate::{
     run::startup_heartbeat::{NormalizedReplayHeartbeat, RequiredSubtaskActivity},
 };
 
+pub(super) fn is_fatal_replay_fence(error: &anyhow::Error) -> bool {
+    bigname_storage::projection_staging::is_fatal_projection_replay_version_fence_error(error)
+}
+
 #[expect(clippy::too_many_arguments)]
 pub(super) async fn run_required_normalized_replay_catchup_iteration(
     pool: &PgPool,

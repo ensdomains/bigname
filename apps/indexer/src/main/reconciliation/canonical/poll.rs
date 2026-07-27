@@ -159,6 +159,11 @@ async fn poll_provider_heads_with_adapter_sync_inner(
                         replay_admission_attempt += 1;
                         continue;
                     }
+                    if bigname_storage::projection_staging::is_fatal_projection_replay_version_fence_error(
+                        &error,
+                    ) {
+                        return Err(error);
+                    }
                     let Some(requirement) = live_coverage_requirement(&error) else {
                         warn!(
                             service = "indexer",
