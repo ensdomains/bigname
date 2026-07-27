@@ -84,6 +84,47 @@ async fn insert_canonical_head(
     Ok(())
 }
 
+async fn advance_raw_log_input(
+    database: &TestDatabase,
+    revision: i64,
+    changed_blocks: &[(&str, i64)],
+) -> Result<()> {
+    let mut transaction = database.pool().begin().await?;
+    for (block_hash, block_number) in changed_blocks {
+        sqlx::query(
+            "INSERT INTO raw_log_staging_block_revisions (
+                 chain_id,
+                 block_hash,
+                 block_number,
+                 revision
+             ) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(CHAIN)
+        .bind(block_hash)
+        .bind(block_number)
+        .bind(revision)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    let update = sqlx::query(
+        "UPDATE raw_log_staging_input_revisions
+         SET revision = $2
+         WHERE chain_id = $1
+           AND revision = $2 - 1",
+    )
+    .bind(CHAIN)
+    .bind(revision)
+    .execute(&mut *transaction)
+    .await?;
+    assert_eq!(
+        update.rows_affected(),
+        1,
+        "raw-log input revision fixture must advance exactly once"
+    );
+    transaction.commit().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn lineage_mutation_revision_migration_seeds_existing_chains() -> Result<()> {
     const LINEAGE_MUTATION_MIGRATION: i64 = 20260727120100;
@@ -170,7 +211,7 @@ async fn lineage_mutation_revision_migration_seeds_existing_chains() -> Result<(
 }
 
 #[tokio::test]
-async fn completed_startup_adapter_checkpoint_reuses_only_an_exact_key() -> Result<()> {
+async fn completed_startup_adapter_checkpoint_reuses_only_a_compatible_key() -> Result<()> {
     let database = database("startup_adapter_exact_key").await?;
     let original = complete(&database, 1).await?;
 
@@ -193,6 +234,7 @@ async fn completed_startup_adapter_checkpoint_reuses_only_an_exact_key() -> Resu
         } if key.raw_log_input_version.revision == original.raw_log_input_version.revision + 1
     ));
 
+    complete(&database, 1).await?;
     sqlx::query(
         "UPDATE raw_log_staging_input_revisions
          SET retention_generation = retention_generation + 1
@@ -209,11 +251,41 @@ async fn completed_startup_adapter_checkpoint_reuses_only_an_exact_key() -> Resu
             == original.raw_log_input_version.retention_generation + 1
     ));
 
+    complete(&database, 1).await?;
     assert!(matches!(
         prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 2).await?,
         StartupAdapterSyncDecision::RunFullSync {
             started_key: Some(key)
         } if key.adapter_semantic_version == 2
+    ));
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn completed_input_extents_reuse_active_tail_growth_and_reject_raw_prefix_changes()
+-> Result<()> {
+    let database = database("startup_adapter_raw_log_extent").await?;
+    insert_canonical_head(&database, 8, "0xextent").await?;
+    complete(&database, 1).await?;
+
+    advance_raw_log_input(&database, 8, &[("0xraw-tail-a", 9), ("0xraw-tail-b", 10)]).await?;
+    insert_canonical_head(&database, 10, "0xactive-head").await?;
+    assert_eq!(
+        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        StartupAdapterSyncDecision::ReuseCompleted,
+        "gap-free raw-log and lineage growth above the extent must preserve completed-prefix reuse"
+    );
+
+    advance_raw_log_input(&database, 9, &[("0xraw-at-extent", 8)]).await?;
+    assert!(matches!(
+        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        StartupAdapterSyncDecision::RunFullSync {
+            started_key: Some(StartupAdapterSyncKey {
+                raw_log_input_version: RawLogStagingInputVersion { revision: 9, .. },
+                ..
+            })
+        }
     ));
 
     database.cleanup().await
@@ -510,6 +582,91 @@ async fn completion_accepts_only_evidenced_lineage_growth_above_its_scanned_exte
     assert_eq!(
         prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
         StartupAdapterSyncDecision::ReuseCompleted,
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn completion_accepts_evidenced_raw_log_growth_above_its_scanned_extent() -> Result<()> {
+    let database = database("startup_adapter_raw_completion_extent").await?;
+    insert_canonical_head(&database, 8, "0xextent").await?;
+    let StartupAdapterSyncDecision::RunFullSync { started_key } =
+        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?
+    else {
+        panic!("fresh startup adapter checkpoint must run");
+    };
+    let started_key = started_key.expect("fixture key must be known");
+
+    advance_raw_log_input(&database, 8, &[("0xraw-tail", 9)]).await?;
+    assert_eq!(
+        complete_startup_adapter_sync(
+            database.pool(),
+            PROFILE,
+            CHAIN,
+            ADAPTER,
+            1,
+            Some(started_key),
+        )
+        .await?,
+        StartupAdapterSyncCompletion::Completed,
+        "a concurrent tail-only raw-log writer must not exhaust the bounded startup passes"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT raw_log_input_revision, replay_target_block_number
+             FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = $1
+               AND chain_id = $2
+               AND adapter = $3",
+        )
+        .bind(PROFILE)
+        .bind(CHAIN)
+        .bind(ADAPTER)
+        .fetch_one(database.pool())
+        .await?,
+        (8, 8),
+        "completion must accept the current raw revision while retaining the scanned extent"
+    );
+    assert_eq!(
+        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        StartupAdapterSyncDecision::ReuseCompleted,
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn completion_rechecks_raw_log_mutations_at_its_scanned_extent() -> Result<()> {
+    let database = database("startup_adapter_raw_completion_prefix").await?;
+    insert_canonical_head(&database, 8, "0xextent").await?;
+    let StartupAdapterSyncDecision::RunFullSync { started_key } =
+        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?
+    else {
+        panic!("fresh startup adapter checkpoint must run");
+    };
+
+    advance_raw_log_input(&database, 8, &[("0xraw-at-extent", 8)]).await?;
+    assert_eq!(
+        complete_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1, started_key,)
+            .await?,
+        StartupAdapterSyncCompletion::InputChanged
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = $1
+               AND chain_id = $2
+               AND adapter = $3",
+        )
+        .bind(PROFILE)
+        .bind(CHAIN)
+        .bind(ADAPTER)
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "a raw-log mutation at the inclusive extent must prevent completion"
     );
 
     database.cleanup().await
@@ -1138,6 +1295,55 @@ async fn cancelled_startup_does_not_return_a_migrator_locked_connection_to_the_p
     })
     .await
     .expect("cancelling startup must close the migrator-locked session");
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn raw_log_range_and_completed_reuse_fail_closed_on_an_intermediate_evidence_gap()
+-> Result<()> {
+    let database = database("startup_adapter_intermediate_block_revision_gap").await?;
+    insert_canonical_head(&database, 100, "0xextent").await?;
+    complete(&database, 1).await?;
+
+    advance_raw_log_input(&database, 8, &[("0xraw-tail-8", 101)]).await?;
+    advance_raw_log_input(&database, 9, &[("0xraw-consumed-9", 50)]).await?;
+    advance_raw_log_input(&database, 10, &[("0xraw-tail-10", 102)]).await?;
+    sqlx::query(
+        "DELETE FROM raw_log_staging_block_revisions
+         WHERE chain_id = $1
+           AND revision = 9",
+    )
+    .bind(CHAIN)
+    .execute(database.pool())
+    .await?;
+
+    assert!(
+        crate::raw_log_staging_block_range_changed_since(database.pool(), CHAIN, 7, 0, 100).await?,
+        "a missing intermediate revision must reset a partial checkpoint even when later evidence survives"
+    );
+    assert!(matches!(
+        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        StartupAdapterSyncDecision::RunFullSync {
+            started_key: Some(_)
+        }
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = $1
+               AND chain_id = $2
+               AND adapter = $3",
+        )
+        .bind(PROFILE)
+        .bind(CHAIN)
+        .bind(ADAPTER)
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "the same evidence gap must invalidate completed-prefix reuse"
+    );
 
     database.cleanup().await
 }

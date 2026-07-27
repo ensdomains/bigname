@@ -88,6 +88,8 @@ SHARED_PATHS: dict[str, tuple[str, ...]] = {
     "crates/adapters/src/block_derived_normalized_events.rs": ALL_FAMILIES,
     "crates/manifests/src/lib/views/watched.rs": ALL_FAMILIES,
     "crates/manifests/src/lib/views/watched/": ALL_FAMILIES,
+    "apps/indexer/src/main/runtime/adapter_sync.rs": ALL_FAMILIES,
+    "apps/indexer/src/main/runtime/adapter_sync/": ALL_FAMILIES,
 }
 
 

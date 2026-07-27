@@ -114,6 +114,7 @@ pub(super) async fn rewind_cursor_for_newly_observed_older_logs(
                 chain,
                 cursor.raw_log_input_revision,
                 cursor.next_block_number - 1,
+                cursor.range_start_block_number,
             )
             .await?
         } else {

@@ -1581,7 +1581,7 @@ async fn idle_chain_lane_keeps_beating_while_a_peer_is_wedged_on_coverage_recove
             chain_id, block_hash, block_number, revision
         )
         VALUES ($1, $2, $3, 1)
-        ON CONFLICT (chain_id, block_hash) DO UPDATE
+        ON CONFLICT (chain_id, revision, block_hash) DO UPDATE
         SET block_number = EXCLUDED.block_number,
             revision = EXCLUDED.revision
         "#,
@@ -1947,7 +1947,7 @@ async fn full_closure_recovery_defers_when_a_competing_runner_wins_the_lease_rac
             chain_id, block_hash, block_number, revision
         )
         VALUES ($1, $2, $3, 1)
-        ON CONFLICT (chain_id, block_hash) DO UPDATE
+        ON CONFLICT (chain_id, revision, block_hash) DO UPDATE
         SET block_number = EXCLUDED.block_number,
             revision = EXCLUDED.revision
         "#,
@@ -2159,7 +2159,7 @@ async fn full_closure_coverage_recovery_honors_non_default_iteration_attempt_cap
         VALUES
             ($1, $2, $3, 1),
             ($1, $4, $5, 1)
-        ON CONFLICT (chain_id, block_hash) DO UPDATE
+        ON CONFLICT (chain_id, revision, block_hash) DO UPDATE
         SET block_number = EXCLUDED.block_number,
             revision = EXCLUDED.revision
         "#,
@@ -2388,7 +2388,7 @@ async fn full_closure_recovery_is_bounded_nonblocking_and_reuses_its_failed_job(
             ($1, $2, 40, 10),
             ($1, $3, 41, 10),
             ($1, $4, 42, 10)
-        ON CONFLICT (chain_id, block_hash) DO UPDATE
+        ON CONFLICT (chain_id, revision, block_hash) DO UPDATE
         SET block_number = EXCLUDED.block_number,
             revision = EXCLUDED.revision
         "#,
@@ -4565,6 +4565,120 @@ async fn normalized_replay_retention_authority_keeps_durable_ensv2_resolver_gap_
 }
 
 #[tokio::test]
+async fn raw_revision_evidence_history_upgrade_rewinds_a_legacy_completed_cursor() -> Result<()> {
+    const EVIDENCE_HISTORY_MIGRATION: i64 = 20260727120200;
+    let database = bigname_test_support::TestDatabase::create(
+        bigname_test_support::TestDatabaseConfig::new(
+            "indexer_raw_revision_evidence_history_upgrade",
+        ),
+    )
+    .await?;
+    let before_evidence_history = sqlx::migrate::Migrator {
+        migrations: std::borrow::Cow::Owned(
+            bigname_storage::MIGRATOR
+                .iter()
+                .filter(|migration| migration.version < EVIDENCE_HISTORY_MIGRATION)
+                .cloned()
+                .collect(),
+        ),
+        ..sqlx::migrate::Migrator::DEFAULT
+    };
+    database
+        .apply_migrations(
+            &before_evidence_history,
+            "failed to apply migrations before raw revision evidence history",
+        )
+        .await?;
+
+    let chain = "legacy-repeated-block";
+    let target = 100;
+    let block_hash = "0x0101010101010101010101010101010101010101010101010101010101010101";
+    sqlx::query(
+        r#"
+        INSERT INTO raw_logs (
+            chain_id, block_hash, block_number, transaction_hash,
+            transaction_index, log_index, emitting_address, topics, data,
+            canonicality_state
+        )
+        VALUES (
+            $1, $2, 101,
+            '0x0202020202020202020202020202020202020202020202020202020202020202',
+            0, 0, '0x0000000000000000000000000000000000000001',
+            ARRAY[]::TEXT[], '\x'::BYTEA, 'observed'
+        )
+        "#,
+    )
+    .bind(chain)
+    .bind(block_hash)
+    .execute(database.pool())
+    .await?;
+    insert_completed_replay_cursor_for_handoff_test(database.pool(), chain, target, 1, 0)
+        .await?;
+
+    for canonicality in ["canonical", "safe"] {
+        sqlx::query(
+            "UPDATE raw_logs
+             SET canonicality_state = $3::canonicality_state
+             WHERE chain_id = $1
+               AND block_hash = $2",
+        )
+        .bind(chain)
+        .bind(block_hash)
+        .bind(canonicality)
+        .execute(database.pool())
+        .await?;
+    }
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT revision, COUNT(*) OVER ()
+             FROM raw_log_staging_block_revisions
+             WHERE chain_id = $1",
+        )
+        .bind(chain)
+        .fetch_one(database.pool())
+        .await?,
+        (3, 1),
+        "the legacy block-hash key must reproduce the compacted evidence gap"
+    );
+
+    database
+        .apply_migrations(
+            &bigname_storage::MIGRATOR,
+            "failed to apply raw revision evidence history migration",
+        )
+        .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT block_revision_evidence_floor
+             FROM raw_log_staging_input_revisions
+             WHERE chain_id = $1",
+        )
+        .bind(chain)
+        .fetch_one(database.pool())
+        .await?,
+        3,
+        "the migration must bound the unprovable legacy revision prefix"
+    );
+    assert!(
+        !normalized_replay_catchup::normalized_replay_cursors_complete(
+            database.pool(),
+            "mainnet",
+            &[chain.to_owned()],
+        )
+        .await?,
+        "handoff must invalidate rather than error on a cursor below the migration floor"
+    );
+    assert_eq!(
+        normalized_replay_catchup::rewind_cursor_for_test(database.pool(), "mainnet", chain)
+            .await?,
+        (target - 10, target - 10, target),
+        "the legacy cursor must rewind conservatively instead of livelocking on its evidence gap"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn normalized_replay_handoff_classifies_completed_cursor_input_versions() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_normalized_replay_cursor_table(database.pool()).await?;
@@ -4644,6 +4758,52 @@ async fn normalized_replay_handoff_classifies_completed_cursor_input_versions() 
     .await
     .expect_err("an advanced revision without block evidence is an integrity error");
     assert!(format!("{missing_evidence_error:#}").contains("without per-block revision evidence"));
+
+    let evidence_gap_chain = "intermediate-evidence-gap";
+    insert_completed_replay_cursor_for_handoff_test(
+        database.pool(),
+        evidence_gap_chain,
+        target,
+        5,
+        0,
+    )
+    .await?;
+    upsert_raw_staging_input_version_for_handoff_test(
+        database.pool(),
+        evidence_gap_chain,
+        8,
+        0,
+    )
+    .await?;
+    for (revision, block_number) in [(6, target + 1), (7, 50), (8, target + 2)] {
+        upsert_raw_staging_block_revision_for_handoff_test(
+            database.pool(),
+            evidence_gap_chain,
+            &format!("0xevidence-{revision}"),
+            block_number,
+            revision,
+        )
+        .await?;
+    }
+    sqlx::query(
+        "DELETE FROM raw_log_staging_block_revisions
+         WHERE chain_id = $1
+           AND revision = 7",
+    )
+    .bind(evidence_gap_chain)
+    .execute(database.pool())
+    .await?;
+    let evidence_gap_error = normalized_replay_catchup::normalized_replay_cursors_complete(
+        database.pool(),
+        "mainnet",
+        &[evidence_gap_chain.to_owned()],
+    )
+    .await
+    .expect_err("a missing intermediate block witness is an integrity error");
+    assert!(
+        format!("{evidence_gap_error:#}").contains("every intervening revision"),
+        "the boundary classifier must report the missing revision witness"
+    );
 
     let rollback_chain = "revision-rollback";
     insert_completed_replay_cursor_for_handoff_test(database.pool(), rollback_chain, target, 6, 0)
@@ -6067,7 +6227,7 @@ async fn upsert_raw_staging_block_revision_for_handoff_test(
             chain_id, block_hash, block_number, revision
         )
         VALUES ($1, $2, $3, $4)
-        ON CONFLICT (chain_id, block_hash) DO UPDATE
+        ON CONFLICT (chain_id, revision, block_hash) DO UPDATE
         SET block_number = EXCLUDED.block_number,
             revision = EXCLUDED.revision
         "#,
@@ -6138,7 +6298,7 @@ async fn commit_raw_revision_after_handoff_fence_for_test(
             chain_id, block_hash, block_number, revision
         )
         VALUES ($1, $2, $3, 2)
-        ON CONFLICT (chain_id, block_hash) DO UPDATE
+        ON CONFLICT (chain_id, revision, block_hash) DO UPDATE
         SET block_number = EXCLUDED.block_number, revision = EXCLUDED.revision
         "#,
     )

@@ -1,7 +1,10 @@
 use anyhow::{Context, Result, ensure};
 use sqlx::{Acquire, PgConnection, PgPool, Postgres, Row, migrate::Migrate, pool::PoolConnection};
 
-use crate::RawLogStagingInputVersion;
+use crate::{
+    RawLogStagingInputVersion,
+    raw_staging_revision::raw_log_staging_block_range_changed_since_from_connection,
+};
 
 mod checkpoint;
 mod lineage;
@@ -152,13 +155,29 @@ pub async fn complete_startup_adapter_sync(
                 .context("failed to finish changed startup adapter input check")?;
             return Ok(StartupAdapterSyncCompletion::KeyUnknown);
         };
-        let non_lineage_key_matches = current_key.raw_log_input_version
-            == started_key.raw_log_input_version
+        let non_extent_key_matches = current_key.raw_log_input_version.retention_generation
+            == started_key.raw_log_input_version.retention_generation
             && current_key.discovery_admission_epoch == started_key.discovery_admission_epoch
             && current_key.adapter_semantic_version == started_key.adapter_semantic_version
             && current_key.schema_migration_count == started_key.schema_migration_count
             && current_key.schema_migration_max_version == started_key.schema_migration_max_version;
-        let lineage_extent_reusable = non_lineage_key_matches
+        let scanned_through_block = started_key
+            .canonical_lineage_head
+            .as_ref()
+            .map_or(0, |head| head.block_number);
+        let raw_log_extent_reusable = if non_extent_key_matches {
+            !raw_log_staging_block_range_changed_since_from_connection(
+                transaction.as_mut(),
+                chain,
+                started_key.raw_log_input_version.revision,
+                0,
+                scanned_through_block,
+            )
+            .await?
+        } else {
+            false
+        };
+        let input_extents_reusable = raw_log_extent_reusable
             && completed_lineage_extent_is_reusable(
                 transaction.as_mut(),
                 chain,
@@ -171,7 +190,7 @@ pub async fn complete_startup_adapter_sync(
                 },
             )
             .await?;
-        if !lineage_extent_reusable {
+        if !input_extents_reusable {
             invalidate_startup_adapter_checkpoint(
                 transaction.as_mut(),
                 deployment_profile,

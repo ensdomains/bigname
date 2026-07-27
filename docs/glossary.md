@@ -199,6 +199,11 @@ truncate). Caches record the revision they saw; a later revision touching
 consumed history invalidates them. Commit order, not timestamps or row ids, is
 the authority.
 
+**Block-revision evidence floor** — the oldest recorded raw-log input revision
+from which every later revision must have append-only per-block evidence. A
+checkpoint below that floor cannot prove its intervening changes and restarts
+conservatively from its stored replay-range start.
+
 **Latest-only** — semantics where only the current value is observable and
 history cannot be reconstructed reliably (for example event-silent reverse
 resolver state).
@@ -212,10 +217,12 @@ usage). Context disambiguates; both senses are intentional.
 
 **Lineage mutation revision** — a per-chain counter advanced once per affected
 chain by statement triggers for every insert, update, or delete of stored block
-lineage. Startup adapter checkpoints record this revision so a lineage change
-invalidates completed reuse and partial resume even when it occurs below the
-stored head and changes no retained raw log. Missing or ambiguous revision
-evidence fails closed.
+lineage. Startup adapter checkpoints record this revision with per-revision
+evidence for the lowest affected block. Completed reuse may accept later
+revisions only when gap-free evidence places every change strictly above the
+recorded scan extent and the current head still covers that extent. Partial
+resume still requires the exact recorded revision, so any lineage change resets
+it. Missing or ambiguous revision evidence fails closed.
 
 **Normalized event** — the append-only, adapter-produced record of one semantic
 protocol transition, carrying identity, provenance, chain position, and
