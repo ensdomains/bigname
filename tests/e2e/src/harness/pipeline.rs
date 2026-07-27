@@ -246,15 +246,12 @@ fn pipeline_command(repo_root: &Path, executable: &Path) -> Command {
     // E2e corpora are tiny, but spawned binaries default to 10-connection
     // pools. API and worker processes need four; seven is the minimum for the
     // two-chain normalized-replay indexer fixture.
-    let max_connections = if executable
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        == Some("bigname-indexer")
-    {
-        "7"
-    } else {
-        "4"
-    };
+    let max_connections =
+        if executable.file_stem().and_then(|stem| stem.to_str()) == Some("bigname-indexer") {
+            "7"
+        } else {
+            "4"
+        };
     command.env("BIGNAME_DATABASE_MAX_CONNECTIONS", max_connections);
     command
 }
