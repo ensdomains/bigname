@@ -4565,7 +4565,8 @@ async fn normalized_replay_retention_authority_keeps_durable_ensv2_resolver_gap_
 }
 
 #[tokio::test]
-async fn raw_revision_evidence_history_upgrade_rewinds_a_legacy_completed_cursor() -> Result<()> {
+async fn normalized_replay_raw_revision_evidence_history_upgrade_rewinds_and_republishes_after_restart()
+-> Result<()> {
     const EVIDENCE_HISTORY_MIGRATION: i64 = 20260727120200;
     let database = bigname_test_support::TestDatabase::create(
         bigname_test_support::TestDatabaseConfig::new(
@@ -4590,7 +4591,7 @@ async fn raw_revision_evidence_history_upgrade_rewinds_a_legacy_completed_cursor
         )
         .await?;
 
-    let chain = "legacy-repeated-block";
+    let chain = "legacy-repeated-block-mainnet";
     let target = 100;
     let block_hash = "0x0101010101010101010101010101010101010101010101010101010101010101";
     sqlx::query(
@@ -4673,6 +4674,70 @@ async fn raw_revision_evidence_history_upgrade_rewinds_a_legacy_completed_cursor
             .await?,
         (target - 10, target - 10, target),
         "the legacy cursor must rewind conservatively instead of livelocking on its evidence gap"
+    );
+
+    // The rewind helper returned without publishing the accepted raw-log
+    // revision. A fresh iteration therefore models a process restart from the
+    // persisted range-start rewind.
+    let replay_block = provider_block(
+        block_hash,
+        Some("0x0000000000000000000000000000000000000000000000000000000000000000"),
+        target + 1,
+    );
+    insert_active_replay_watched_contract_with_source_family(
+        database.pool(),
+        90_100,
+        chain,
+        "ens_v1_reverse_l1",
+        Uuid::from_u128(90_100),
+        "0x0000000000000000000000000000000000009100",
+        "reverse_registrar",
+    )
+    .await?;
+    insert_chain_lineage_for_block(
+        database.pool(),
+        chain,
+        &replay_block,
+        CanonicalityState::Safe,
+    )
+    .await?;
+    let mut config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
+        "mainnet".to_owned(),
+        vec![chain.to_owned()],
+        1_000,
+        1_000,
+        1,
+    )?;
+    config.defer_projection_indexes = false;
+    assert_eq!(
+        normalized_replay_catchup::run_normalized_replay_catchup_iteration(
+            database.pool(),
+            &config,
+            chain,
+        )
+        .await?,
+        normalized_replay_catchup::CatchupIterationStatus::Progressed,
+        "restart must replay from the persisted floor instead of re-entering an integrity error"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64, Option<i64>, i64)>(
+            r#"
+            SELECT
+                next_block_number,
+                target_block_number,
+                last_completed_block_number,
+                raw_log_input_revision
+            FROM normalized_replay_cursors
+            WHERE deployment_profile = 'mainnet'
+              AND chain_id = $1
+              AND cursor_kind = 'raw_fact_normalized_events'
+            "#,
+        )
+        .bind(chain)
+        .fetch_one(database.pool())
+        .await?,
+        (target + 2, target + 1, Some(target + 1), 3),
+        "the restarted iteration must republish the replayed range at the current input revision"
     );
 
     database.cleanup().await
