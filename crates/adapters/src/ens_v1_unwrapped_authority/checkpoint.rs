@@ -112,6 +112,8 @@ impl UnwrappedAuthorityReplayCheckpoint {
                 checkpoint.context.range_start_block_number != context.range_start_block_number
                     || !checkpoint.snapshot_version_is_current()
                     || context.startup_authority_changed(&checkpoint.state_payload)
+                    || (checkpoint.status == "completed"
+                        && context.startup_lineage_changed(&checkpoint.state_payload))
                     || context.startup_version_changed(
                         checkpoint.adapter_semantic_version,
                         checkpoint.schema_migration_count,
@@ -229,8 +231,11 @@ impl UnwrappedAuthorityReplayCheckpoint {
         pool: &PgPool,
         current: Option<RawLogStagingInputVersion>,
     ) -> Result<bool> {
-        if self.context.is_startup() {
+        if self.context.is_startup() && self.status == "completed" {
             return Ok(current != Some(self.raw_log_input_version));
+        }
+        if self.context.is_startup() && current.is_none() {
+            return Ok(true);
         }
         let current = current.unwrap_or_default();
         if self.raw_log_input_version.retention_generation != current.retention_generation

@@ -51,6 +51,14 @@ FAMILY_PATHS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+ALL_FAMILIES = tuple(FAMILY_PATHS)
+PRODUCER_PATHS: dict[str, tuple[str, ...]] = {
+    "BLOCK_DERIVED_NORMALIZED_EVENTS_STARTUP_VERSION": (
+        "crates/adapters/src/block_derived_normalized_events.rs",
+        "crates/adapters/src/block_derived_normalized_events/",
+    ),
+}
+
 SHARED_PATHS: dict[str, tuple[str, ...]] = {
     "crates/adapters/src/registry_migration_cache.rs": (
         "ENS_V1_SUBREGISTRY_DISCOVERY_STARTUP_VERSION",
@@ -62,6 +70,22 @@ SHARED_PATHS: dict[str, tuple[str, ...]] = {
         "ENS_V2_RESOLVER_STARTUP_VERSION",
         "ENS_V2_PERMISSIONS_STARTUP_VERSION",
     ),
+    "crates/adapters/src/ens_v2_common/": (
+        "ENS_V2_REGISTRY_RESOURCE_SURFACE_STARTUP_VERSION",
+        "ENS_V2_REGISTRAR_STARTUP_VERSION",
+        "ENS_V2_RESOLVER_STARTUP_VERSION",
+        "ENS_V2_PERMISSIONS_STARTUP_VERSION",
+    ),
+    "crates/adapters/src/evm_abi.rs": ALL_FAMILIES,
+    "crates/adapters/src/adapter_manifest.rs": ALL_FAMILIES,
+    "crates/adapters/src/normalized_event_support.rs": ALL_FAMILIES,
+    "crates/adapters/src/checkpoint_codec.rs": (
+        "ENS_V1_SUBREGISTRY_DISCOVERY_STARTUP_VERSION",
+        "ENS_V1_UNWRAPPED_AUTHORITY_STARTUP_VERSION",
+    ),
+    "crates/adapters/src/checkpoint_context.rs": ALL_FAMILIES,
+    "crates/adapters/src/manifest_normalized_events.rs": ALL_FAMILIES,
+    "crates/adapters/src/block_derived_normalized_events.rs": ALL_FAMILIES,
 }
 
 
@@ -88,10 +112,24 @@ def production_path(path: str) -> bool:
     )
 
 
+def path_matches(path: str, mapped_path: str) -> bool:
+    return path == mapped_path or path.startswith(mapped_path)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-ref", default="HEAD^")
     args = parser.parse_args()
+
+    try:
+        git("cat-file", "-e", f"{args.base_ref}^{{commit}}")
+    except subprocess.CalledProcessError:
+        print(
+            f"Startup adapter semantic version check failed: base ref "
+            f"{args.base_ref!r} is unavailable.",
+            file=sys.stderr,
+        )
+        return 1
 
     try:
         base_text = git("show", f"{args.base_ref}:{VERSION_FILE}")
@@ -111,13 +149,16 @@ def main() -> int:
         if production_path(path)
     }
 
-    affected: dict[str, set[str]] = {name: set() for name in FAMILY_PATHS}
-    for name, prefixes in FAMILY_PATHS.items():
+    mapped_paths = FAMILY_PATHS | PRODUCER_PATHS
+    affected: dict[str, set[str]] = {name: set() for name in mapped_paths}
+    for name, prefixes in mapped_paths.items():
         for path in changed_paths:
-            if any(path == prefix or path.startswith(prefix) for prefix in prefixes):
+            if any(path_matches(path, prefix) for prefix in prefixes):
                 affected[name].add(path)
-    for path, names in SHARED_PATHS.items():
-        if path in changed_paths:
+    for mapped_path, names in SHARED_PATHS.items():
+        for path in changed_paths:
+            if not path_matches(path, mapped_path):
+                continue
             for name in names:
                 affected[name].add(path)
 

@@ -74,8 +74,10 @@ pub(crate) async fn bump_discovery_admission_epochs(
     Ok(())
 }
 
-/// Current admission epoch for every chain that has recorded a watched-surface
-/// mutation. A chain with no row has epoch `0` and is simply absent.
+/// Current admission epoch for every stored manifest chain or chain that has
+/// recorded a watched-surface mutation. Manifest sync seeds epoch zero even
+/// when no authority row changes; a chain outside stored manifest authority may
+/// still be absent.
 ///
 /// This is the change-detection sentinel for stored watch-plan reloads: any
 /// transaction that mutates the watched surface must bump the owning chain's

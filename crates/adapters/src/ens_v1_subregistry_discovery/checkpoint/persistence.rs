@@ -93,6 +93,7 @@ fn checkpoint_from_row(
             range_start_block_number,
             target_block_number,
             startup_discovery_admission_epoch: context.startup_discovery_admission_epoch,
+            startup_canonical_lineage_head: context.startup_canonical_lineage_head.clone(),
             startup_adapter_semantic_version: context.startup_adapter_semantic_version,
             startup_schema_migration_state: context.startup_schema_migration_state,
         },

@@ -1,4 +1,5 @@
 use super::*;
+use sqlx::postgres::PgPoolOptions;
 
 #[test]
 fn checkpoint_payload_encoding_round_trips_nul_strings() -> Result<()> {
@@ -103,6 +104,44 @@ fn checkpoint_item_rows_prune_empty_pending_observations() -> Result<()> {
     assert_eq!(
         delete_keys,
         vec!["cleared".to_owned(), "missing".to_owned()]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn partial_startup_checkpoint_resets_when_raw_log_version_is_unknown() -> Result<()> {
+    let pool =
+        PgPoolOptions::new().connect_lazy_with(bigname_storage::stamp_projection_replay_version(
+            "postgres://bigname:bigname@127.0.0.1:1/bigname".parse()?,
+        ));
+    let checkpoint = UnwrappedAuthorityReplayCheckpoint {
+        context: AdapterCheckpointContext {
+            deployment_profile: "test".to_owned(),
+            cursor_kind: "startup_adapter_owned_raw_log_state".to_owned(),
+            checkpoint_scope: "startup_adapter_sync",
+            range_start_block_number: 0,
+            target_block_number: 10,
+            startup_discovery_admission_epoch: Some(0),
+            startup_canonical_lineage_head: None,
+            startup_adapter_semantic_version: Some(1),
+            startup_schema_migration_state: Some((1, 1)),
+        },
+        chain: "ethereum-mainnet".to_owned(),
+        status: "running".to_owned(),
+        last_block_number: Some(5),
+        scanned_log_count: 1,
+        matched_log_count: 1,
+        flushed_events: UnwrappedAuthorityReplayFlushedEvents::default(),
+        state_payload: json!({ "version": SNAPSHOT_VERSION }),
+        raw_log_input_version: RawLogStagingInputVersion::default(),
+        adapter_semantic_version: Some(1),
+        schema_migration_count: Some(1),
+        schema_migration_max_version: Some(1),
+    };
+
+    assert!(
+        checkpoint.raw_log_input_requires_reset(&pool, None).await?,
+        "a missing strict revision row is unknown cross-boot authority"
     );
     Ok(())
 }

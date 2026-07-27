@@ -73,6 +73,165 @@ async fn startup_registry_checkpoint_tolerates_its_own_admission_epoch_advance()
 }
 
 #[tokio::test]
+async fn non_looping_startup_family_retries_one_input_advance() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "startup-reverse-external-advance";
+    sqlx::query(
+        "INSERT INTO raw_log_staging_input_revisions (
+             chain_id, revision, retention_generation, retained_history_complete, incomplete_since
+         ) VALUES ($1, 1, 0, FALSE, now())",
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    sqlx::query("INSERT INTO discovery_admission_epochs (chain_id, epoch) VALUES ($1, 0)")
+        .bind(chain)
+        .execute(database.pool())
+        .await?;
+
+    let adapter = bigname_adapters::ENS_V1_REVERSE_CLAIM_STARTUP_VERSION;
+    let first = crate::runtime::adapter_sync::checkpoint::prepare_startup_family_sync(
+        database.pool(),
+        Some("test"),
+        chain,
+        adapter,
+    )
+    .await?
+    .expect("a missing checkpoint must run");
+    sqlx::query("UPDATE discovery_admission_epochs SET epoch = epoch + 1 WHERE chain_id = $1")
+        .bind(chain)
+        .execute(database.pool())
+        .await?;
+    assert!(
+        !crate::runtime::adapter_sync::complete_non_looping_startup_family(
+            first,
+            database.pool(),
+            chain,
+            adapter,
+            1,
+        )
+        .await?,
+        "the first changed pass must request the one bounded retry"
+    );
+
+    let second = crate::runtime::adapter_sync::checkpoint::prepare_startup_family_sync(
+        database.pool(),
+        Some("test"),
+        chain,
+        adapter,
+    )
+    .await?
+    .expect("the advanced key must run once more");
+    assert!(
+        crate::runtime::adapter_sync::complete_non_looping_startup_family(
+            second,
+            database.pool(),
+            chain,
+            adapter,
+            2,
+        )
+        .await?
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn live_adapter_wait_heartbeats_without_adapter_progress_callbacks() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let instance_id = "live-adapter-periodic-heartbeat";
+    let chain_ids = vec!["ethereum-mainnet".to_owned()];
+    install_stale_indexer_heartbeat(database.pool(), instance_id).await?;
+    let mut heartbeat = crate::run::startup_heartbeat::StartupHeartbeat::new(
+        instance_id.to_owned(),
+        tokio::time::Duration::ZERO,
+    );
+    heartbeat.record(database.pool(), &chain_ids).await?;
+    let before = bigname_storage::load_service_loop_heartbeat(
+        database.pool(),
+        bigname_storage::INDEXER_SERVICE_NAME,
+        instance_id,
+    )
+    .await?
+    .context("initial live-adapter heartbeat must exist")?
+    .heartbeat_at;
+
+    crate::runtime::adapter_sync::await_live_adapter_sync_with_heartbeat(
+        database.pool(),
+        &mut heartbeat,
+        &chain_ids,
+        async {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            Ok::<_, anyhow::Error>(())
+        },
+    )
+    .await?;
+
+    let after = bigname_storage::load_service_loop_heartbeat(
+        database.pool(),
+        bigname_storage::INDEXER_SERVICE_NAME,
+        instance_id,
+    )
+    .await?
+    .context("periodic live-adapter heartbeat must remain registered")?
+    .heartbeat_at;
+    assert!(
+        after > before,
+        "the runtime must beat while a live adapter has no progress callback"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn live_full_source_adapter_wait_fences_same_chain_raw_mutation() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "live-full-source-fence";
+    let instance_id = "live-full-source-fence-heartbeat";
+    let chain_ids = vec![chain.to_owned()];
+    install_stale_indexer_heartbeat(database.pool(), instance_id).await?;
+    let pool = database.pool().clone();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let mut heartbeat = crate::run::startup_heartbeat::StartupHeartbeat::new(
+            instance_id.to_owned(),
+            tokio::time::Duration::ZERO,
+        );
+        crate::runtime::adapter_sync::await_live_full_source_adapter_with_heartbeat(
+            &pool,
+            chain,
+            &mut heartbeat,
+            &chain_ids,
+            async move {
+                let _ = started_tx.send(());
+                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                Ok::<_, anyhow::Error>(())
+            },
+        )
+        .await
+    });
+    started_rx
+        .await
+        .context("live full-source fixture must enter the fenced adapter future")?;
+
+    let mut competing = database.pool().begin().await?;
+    let acquired = sqlx::query_scalar::<_, bool>(
+        "SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))",
+    )
+    .bind(format!("raw_log_staging:{chain}"))
+    .fetch_one(&mut *competing)
+    .await?;
+    assert!(
+        !acquired,
+        "same-chain raw mutation must wait until absence-based reconciliation finishes"
+    );
+    competing.rollback().await?;
+    task.await??;
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn focused_startup_registry_sync_checkpoints_after_admitting_an_edge() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_ops_catchup_backfill_job_tables(database.pool()).await?;
@@ -409,7 +568,7 @@ async fn ens_v2_block_hash_dispatch_preserves_progress_for_large_live_chunks() -
 }
 
 #[tokio::test]
-async fn sync_adapter_owned_raw_log_state_backfills_reverse_claims_from_stored_raw_logs()
+async fn live_loop_adapter_sync_tolerates_mid_sync_revision_advance_without_checkpoint()
 -> Result<()> {
     let database = TestDatabase::new().await?;
     let reverse_contract_instance_id = Uuid::from_u128(0x342);
@@ -489,8 +648,72 @@ async fn sync_adapter_owned_raw_log_state_backfills_reverse_claims_from_stored_r
     .await?;
 
     let watched_plan = load_watched_chain_plan(database.pool()).await?;
-    sync_adapter_owned_raw_log_state(database.pool(), &watched_plan).await?;
-    sync_adapter_owned_raw_log_state(database.pool(), &watched_plan).await?;
+    let heartbeat_instance_id = "live-reverse-revision-advance";
+    install_stale_indexer_heartbeat(database.pool(), heartbeat_instance_id).await?;
+    sqlx::raw_sql(
+        r#"
+        CREATE FUNCTION advance_raw_revision_during_reverse_live_sync()
+        RETURNS TRIGGER
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            IF NEW.event_kind = 'ReverseChanged' THEN
+                UPDATE raw_log_staging_input_revisions
+                SET revision = revision + 1
+                WHERE chain_id = NEW.chain_id;
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+        CREATE TRIGGER advance_raw_revision_during_reverse_live_sync
+        AFTER INSERT ON normalized_events
+        FOR EACH ROW EXECUTE FUNCTION advance_raw_revision_during_reverse_live_sync();
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    let revision_before = sqlx::query_scalar::<_, i64>(
+        "SELECT revision FROM raw_log_staging_input_revisions WHERE chain_id = 'ethereum-mainnet'",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    let heartbeat_chain_ids = watched_plan
+        .iter()
+        .map(|chain| chain.chain.clone())
+        .collect::<Vec<_>>();
+    let mut heartbeat = crate::run::startup_heartbeat::StartupHeartbeat::new(
+        heartbeat_instance_id.to_owned(),
+        tokio::time::Duration::ZERO,
+    );
+    crate::runtime::adapter_sync::sync_adapter_owned_raw_log_state_live_with_heartbeat(
+        database.pool(),
+        &watched_plan,
+        &mut heartbeat,
+        &heartbeat_chain_ids,
+    )
+    .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT revision
+             FROM raw_log_staging_input_revisions
+             WHERE chain_id = 'ethereum-mainnet'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        revision_before + 1,
+        "the fixture must advance the raw-log revision from inside a non-registry family"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM normalized_replay_adapter_checkpoints
+             WHERE checkpoint_scope = 'startup_adapter_sync'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "a live-loop pass must never publish a boot startup checkpoint"
+    );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM normalized_events WHERE event_kind = 'ReverseChanged'"
