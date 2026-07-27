@@ -13,7 +13,9 @@ mod closure_boundary;
 #[path = "classification/contracts.rs"]
 mod contracts;
 
-pub(crate) use closure_boundary::LegacyRegistryNewlyRequiredCoverage;
+pub(crate) use closure_boundary::{
+    LegacyRegistryNewlyRequiredCoverage, MAX_REPORTED_LEGACY_CLOSURE_COVERAGE_GAPS,
+};
 use closure_boundary::{
     earliest_required_raw_fact_block, ensure_full_closure_retention_authority,
     ensure_legacy_registry_closure_retention_authority,

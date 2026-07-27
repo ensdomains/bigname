@@ -83,8 +83,8 @@ pub(crate) use persistence::{
 };
 #[allow(unused_imports)]
 pub(crate) use replay::{
-    NormalizedEventReplayAdapter, active_closure_or_dependency_replay_adapters,
-    chain_has_closure_or_dependency_replay_adapter,
+    MAX_REPORTED_LEGACY_CLOSURE_COVERAGE_GAPS, NormalizedEventReplayAdapter,
+    active_closure_or_dependency_replay_adapters, chain_has_closure_or_dependency_replay_adapter,
     ensure_full_closure_retention_authority_for_adapters,
     ensure_legacy_registry_closure_retention_authority_for_adapters,
     replay_raw_fact_normalized_events, replay_raw_fact_normalized_events_with_progress,

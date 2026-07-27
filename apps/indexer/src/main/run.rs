@@ -2,7 +2,7 @@ use std::future::Future;
 
 use anyhow::{Context, Result, ensure};
 use tokio::time::Duration;
-use tracing::info;
+use tracing::{info, warn};
 
 #[path = "startup_heartbeat.rs"]
 pub(crate) mod startup_heartbeat;
@@ -19,7 +19,7 @@ use crate::{
     },
     provider::{ChainProviderKind, ProviderRegistry},
     provider_configuration::ProviderSourceArgs,
-    reconciliation::HeaderAuditMode,
+    reconciliation::{HeaderAuditMode, MAX_REPORTED_LEGACY_CLOSURE_COVERAGE_GAPS},
     replay::deployment_profile_from_manifest_root,
     resolver_profile_convergence::drain_resolver_profile_input_changes_with_progress,
     run_mode::IndexerRunMode,
@@ -72,6 +72,20 @@ fn ensure_indexer_run_pool_capacity(
 
 pub(crate) async fn run(args: RunArgs) -> Result<()> {
     ensure_indexer_run_pool_capacity(&args.database, 0)?;
+    if args.coverage_recovery_max_attempts_per_iteration
+        > MAX_REPORTED_LEGACY_CLOSURE_COVERAGE_GAPS as usize
+    {
+        warn!(
+            service = "indexer",
+            command = "run",
+            configured_coverage_recovery_max_attempts_per_iteration =
+                args.coverage_recovery_max_attempts_per_iteration,
+            coverage_violation_report_ceiling = MAX_REPORTED_LEGACY_CLOSURE_COVERAGE_GAPS,
+            "BIGNAME_INDEXER_COVERAGE_RECOVERY_MAX_ATTEMPTS_PER_ITERATION exceeds the \
+             per-iteration violation report ceiling; configured values above the ceiling do not \
+             increase effective recovery attempts"
+        );
+    }
     let heartbeat_instance_id =
         bigname_storage::resolve_service_instance_id(args.heartbeat_instance_id.as_deref())?;
     let manifest_repository = load_manifest_repository(&args.manifests_root)?;

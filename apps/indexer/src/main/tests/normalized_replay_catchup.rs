@@ -2058,6 +2058,216 @@ async fn full_closure_recovery_defers_when_a_competing_runner_wins_the_lease_rac
 }
 
 #[tokio::test]
+async fn full_closure_coverage_recovery_honors_non_default_iteration_attempt_cap() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    create_normalized_replay_cursor_table(database.pool()).await?;
+    let chain = "ethereum-mainnet";
+    let first_address = "0x0000000000000000000000000000000000000134";
+    let second_address = "0x0000000000000000000000000000000000000135";
+    let first_contract_instance_id = Uuid::from_u128(0x397);
+    let second_contract_instance_id = Uuid::from_u128(0x398);
+    let first_block = provider_block(
+        "0x3434343434343434343434343434343434343434343434343434343434343434",
+        Some("0x3333333333333333333333333333333333333333333333333333333333333333"),
+        34,
+    );
+    let second_block = provider_block(
+        "0x3535353535353535353535353535353535353535353535353535353535353535",
+        Some(&first_block.block_hash),
+        35,
+    );
+    insert_active_replay_watched_contract(
+        database.pool(),
+        397,
+        chain,
+        first_contract_instance_id,
+        first_address,
+    )
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        second_contract_instance_id,
+        chain,
+        "contract",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        second_contract_instance_id,
+        chain,
+        second_address,
+        Some(397),
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        397,
+        "name_wrapper_398",
+        second_contract_instance_id,
+        second_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+    for (contract_instance_id, address, block) in [
+        (first_contract_instance_id, first_address, &first_block),
+        (second_contract_instance_id, second_address, &second_block),
+    ] {
+        sqlx::query(
+            r#"
+            UPDATE contract_instance_addresses
+            SET active_from_block_number = $2
+            WHERE contract_instance_id = $1
+            "#,
+        )
+        .bind(contract_instance_id)
+        .bind(block.block_number)
+        .execute(database.pool())
+        .await?;
+        insert_raw_name_wrapped_log(
+            database.pool(),
+            chain,
+            block,
+            address,
+            0,
+            CanonicalityState::Canonical,
+        )
+        .await?;
+    }
+    sqlx::query(
+        r#"
+        UPDATE raw_log_staging_input_revisions
+        SET revision = 1,
+            retention_generation = 1,
+            retained_history_complete = false,
+            incomplete_since = clock_timestamp(),
+            proven_retention_generation = NULL,
+            proven_discovery_admission_epoch = NULL,
+            proven_through_block = NULL
+        WHERE chain_id = $1
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO raw_log_staging_block_revisions (
+            chain_id, block_hash, block_number, revision
+        )
+        VALUES
+            ($1, $2, $3, 1),
+            ($1, $4, $5, 1)
+        ON CONFLICT (chain_id, block_hash) DO UPDATE
+        SET block_number = EXCLUDED.block_number,
+            revision = EXCLUDED.revision
+        "#,
+    )
+    .bind(chain)
+    .bind(&first_block.block_hash)
+    .bind(first_block.block_number)
+    .bind(&second_block.block_hash)
+    .bind(second_block.block_number)
+    .execute(database.pool())
+    .await?;
+    insert_stale_wrapper_coverage_facts(
+        database.pool(),
+        chain,
+        &[
+            (first_address, first_block.block_number, second_block.block_number),
+            (
+                second_address,
+                second_block.block_number,
+                second_block.block_number,
+            ),
+        ],
+    )
+    .await?;
+
+    let mut first_log = rpc_log_payload(&first_block);
+    first_log["address"] = serde_json::Value::String(first_address.to_owned());
+    let mut second_log = rpc_log_payload(&second_block);
+    second_log["address"] = serde_json::Value::String(second_address.to_owned());
+    let (provider, server) = bundle_provider_with_fixtures(vec![
+        ProviderBlockFixture {
+            block: first_block,
+            logs: vec![first_log],
+        },
+        ProviderBlockFixture {
+            block: second_block,
+            logs: vec![second_log],
+        },
+    ])
+    .await?;
+    let mut config = normalized_replay_catchup::NormalizedReplayCatchupConfig::new(
+        "mainnet".to_owned(),
+        vec![chain.to_owned()],
+        1_000,
+        1_000,
+        1,
+    )?;
+    config.coverage_recovery_max_attempts_per_iteration = 1;
+
+    let error =
+        normalized_replay_catchup::run_normalized_replay_catchup_iteration_with_provider_for_test(
+            database.pool(),
+            &config,
+            chain,
+            &provider,
+            HeaderAuditMode::Minimal,
+        )
+        .await
+        .expect_err("one prepared violation must remain after the iteration attempt cap is spent");
+    assert!(
+        format!("{error:#}").contains("at most 1 provider attempts ran"),
+        "iteration failure must report the configured non-default cap: {error:#}"
+    );
+
+    let jobs = sqlx::query_as::<_, (String, String, i64)>(
+        r#"
+        SELECT job.status::TEXT, range.status::TEXT, range.attempt_count
+        FROM backfill_jobs job
+        JOIN backfill_ranges range USING (backfill_job_id)
+        WHERE job.idempotency_key LIKE
+            'indexer-full-closure-coverage-recovery:v2:%'
+        ORDER BY job.backfill_job_id
+        "#,
+    )
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(jobs.len(), 2, "both reported violations must prepare jobs");
+    assert_eq!(
+        jobs.iter()
+            .filter(|(job_status, range_status, attempt_count)| {
+                job_status == "completed" && range_status == "completed" && *attempt_count == 1
+            })
+            .count(),
+        1,
+        "exactly one prepared job must consume the provider-attempt budget"
+    );
+    assert_eq!(
+        jobs.iter()
+            .filter(|(job_status, range_status, attempt_count)| {
+                job_status == "pending" && range_status == "pending" && *attempt_count == 0
+            })
+            .count(),
+        1,
+        "the second prepared job must remain pending without a provider attempt"
+    );
+    assert_eq!(
+        jobs.iter()
+            .map(|(_, _, attempt_count)| attempt_count)
+            .sum::<i64>(),
+        1,
+        "the iteration must persist exactly one provider attempt"
+    );
+
+    server.abort();
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn full_closure_recovery_is_bounded_nonblocking_and_reuses_its_failed_job() -> Result<()> {
     let database = TestDatabase::new().await?;
     create_normalized_replay_cursor_table(database.pool()).await?;

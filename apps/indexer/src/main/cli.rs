@@ -32,22 +32,18 @@ use crate::runtime::DEFAULT_STARTUP_DISCOVERY_PAGE_LOGS;
 
 #[path = "cli/healthcheck.rs"]
 mod healthcheck_args;
+#[path = "cli/value_parsers.rs"]
+mod value_parsers;
 pub(crate) use healthcheck_args::HealthcheckArgs;
-fn parse_positive_usize(value: &str) -> Result<usize, String> {
-    let value = value.parse::<usize>().map_err(|error| error.to_string())?;
-    let maximum = usize::try_from(i64::MAX - 1).unwrap_or(usize::MAX);
-    match value {
-        0 => Err("value must be positive".to_owned()),
-        value if value > maximum => Err(format!("value must be between 1 and {maximum}")),
-        value => Ok(value),
-    }
-}
+use value_parsers::parse_positive_usize;
+
 #[derive(Parser, Debug)]
 #[command(name = "bigname-indexer", about = "Chain indexing process for bigname")]
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) command: Command,
 }
+
 #[derive(Subcommand, Debug)]
 pub(crate) enum Command {
     Run(RunArgs),
@@ -251,6 +247,7 @@ pub(crate) struct RunArgs {
     )]
     pub(crate) retain_header_audit_fields: bool,
 }
+
 #[derive(Args, Debug)]
 pub(crate) struct BackfillArgs {
     #[command(flatten)]
