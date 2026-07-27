@@ -36,15 +36,53 @@ async fn database(name: &str) -> Result<TestDatabase> {
     Ok(database)
 }
 
+async fn prepare_sync(
+    pool: &sqlx::PgPool,
+    deployment_profile: &str,
+    chain: &str,
+    adapter: &str,
+    adapter_semantic_version: i64,
+) -> Result<StartupAdapterSyncDecision> {
+    super::prepare_startup_adapter_sync(
+        pool,
+        deployment_profile,
+        chain,
+        adapter,
+        adapter_semantic_version,
+        StartupAdapterLineageTailPolicy::ReuseCompleted,
+    )
+    .await
+}
+
+async fn complete_sync(
+    pool: &sqlx::PgPool,
+    deployment_profile: &str,
+    chain: &str,
+    adapter: &str,
+    adapter_semantic_version: i64,
+    started_key: Option<StartupAdapterSyncKey>,
+) -> Result<StartupAdapterSyncCompletion> {
+    super::complete_startup_adapter_sync(
+        pool,
+        deployment_profile,
+        chain,
+        adapter,
+        adapter_semantic_version,
+        started_key,
+        StartupAdapterLineageTailPolicy::ReuseCompleted,
+    )
+    .await
+}
+
 async fn complete(database: &TestDatabase, version: i64) -> Result<StartupAdapterSyncKey> {
     let StartupAdapterSyncDecision::RunFullSync { started_key } =
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, version).await?
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, version).await?
     else {
         panic!("fresh startup adapter checkpoint must run");
     };
     let started_key = started_key.expect("fixture key must be fully known");
     assert_eq!(
-        complete_startup_adapter_sync(
+        complete_sync(
             database.pool(),
             PROFILE,
             CHAIN,
@@ -216,7 +254,7 @@ async fn completed_startup_adapter_checkpoint_reuses_only_a_compatible_key() -> 
     let original = complete(&database, 1).await?;
 
     assert_eq!(
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
         StartupAdapterSyncDecision::ReuseCompleted,
         "an unchanged second boot must take the cheap completed-row verification"
     );
@@ -228,7 +266,7 @@ async fn completed_startup_adapter_checkpoint_reuses_only_a_compatible_key() -> 
     .execute(database.pool())
     .await?;
     assert!(matches!(
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
         StartupAdapterSyncDecision::RunFullSync {
             started_key: Some(key)
         } if key.raw_log_input_version.revision == original.raw_log_input_version.revision + 1
@@ -244,7 +282,7 @@ async fn completed_startup_adapter_checkpoint_reuses_only_a_compatible_key() -> 
     .execute(database.pool())
     .await?;
     assert!(matches!(
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
         StartupAdapterSyncDecision::RunFullSync {
             started_key: Some(key)
         } if key.raw_log_input_version.retention_generation
@@ -253,7 +291,7 @@ async fn completed_startup_adapter_checkpoint_reuses_only_a_compatible_key() -> 
 
     complete(&database, 1).await?;
     assert!(matches!(
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 2).await?,
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 2).await?,
         StartupAdapterSyncDecision::RunFullSync {
             started_key: Some(key)
         } if key.adapter_semantic_version == 2
@@ -272,14 +310,30 @@ async fn completed_input_extents_reuse_active_tail_growth_and_reject_raw_prefix_
     advance_raw_log_input(&database, 8, &[("0xraw-tail-a", 9), ("0xraw-tail-b", 10)]).await?;
     insert_canonical_head(&database, 10, "0xactive-head").await?;
     assert_eq!(
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
         StartupAdapterSyncDecision::ReuseCompleted,
         "gap-free raw-log and lineage growth above the extent must preserve completed-prefix reuse"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, i64)>(
+            "SELECT status::TEXT, replay_target_block_number
+             FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = $1
+               AND chain_id = $2
+               AND adapter = $3",
+        )
+        .bind(PROFILE)
+        .bind(CHAIN)
+        .bind(ADAPTER)
+        .fetch_one(database.pool())
+        .await?,
+        ("completed".to_owned(), 8),
+        "a log-derived family must fully reuse the completed row across the accepted tail"
     );
 
     advance_raw_log_input(&database, 9, &[("0xraw-at-extent", 8)]).await?;
     assert!(matches!(
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
         StartupAdapterSyncDecision::RunFullSync {
             started_key: Some(StartupAdapterSyncKey {
                 raw_log_input_version: RawLogStagingInputVersion { revision: 9, .. },
@@ -292,12 +346,84 @@ async fn completed_input_extents_reuse_active_tail_growth_and_reject_raw_prefix_
 }
 
 #[tokio::test]
+async fn time_derived_lineage_policy_downgrades_only_an_advanced_head() -> Result<()> {
+    let database = database("startup_adapter_time_derived_tail").await?;
+    insert_canonical_head(&database, 8, "0xextent").await?;
+    complete(&database, 1).await?;
+
+    assert_eq!(
+        super::prepare_startup_adapter_sync(
+            database.pool(),
+            PROFILE,
+            CHAIN,
+            ADAPTER,
+            1,
+            StartupAdapterLineageTailPolicy::ResumeFromScannedExtent,
+        )
+        .await?,
+        StartupAdapterSyncDecision::ReuseCompleted,
+        "the time-derived policy must preserve exact no-tail reuse"
+    );
+
+    insert_canonical_head(&database, 9, "0xempty-tail").await?;
+    assert!(matches!(
+        super::prepare_startup_adapter_sync(
+            database.pool(),
+            PROFILE,
+            CHAIN,
+            ADAPTER,
+            1,
+            StartupAdapterLineageTailPolicy::ResumeFromScannedExtent,
+        )
+        .await?,
+        StartupAdapterSyncDecision::RunFullSync {
+            started_key: Some(StartupAdapterSyncKey {
+                canonical_lineage_head: Some(StartupCanonicalLineageHead {
+                    block_number: 9,
+                    ..
+                }),
+                ..
+            })
+        }
+    ));
+
+    assert_eq!(
+        sqlx::query_as::<_, (String, i64, Option<i64>, i64, i64, i64, i64)>(
+            "SELECT
+                 status::TEXT,
+                 replay_target_block_number,
+                 last_block_number,
+                 raw_log_input_revision,
+                 (state_payload ->> $4)::BIGINT,
+                 (state_payload -> $5 ->> 'block_number')::BIGINT,
+                 (state_payload -> $6 ->> 'block_number')::BIGINT
+             FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = $1
+               AND chain_id = $2
+               AND adapter = $3",
+        )
+        .bind(PROFILE)
+        .bind(CHAIN)
+        .bind(ADAPTER)
+        .bind(STARTUP_LINEAGE_MUTATION_REVISION_FIELD)
+        .bind(STARTUP_CANONICAL_LINEAGE_HEAD_FIELD)
+        .bind(STARTUP_LINEAGE_SCAN_EXTENT_FIELD)
+        .fetch_one(database.pool())
+        .await?,
+        ("stream_complete".to_owned(), 8, Some(8), 7, 2, 9, 8),
+        "the completed row must become a crash-safe resume from extent 8 under the accepted head at 9"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn prepare_invalidates_a_nonmatching_completion_before_rollback() -> Result<()> {
     let database = database("startup_adapter_prepare_rollback").await?;
     let original = complete(&database, 1).await?;
 
     assert!(matches!(
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 2).await?,
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 2).await?,
         StartupAdapterSyncDecision::RunFullSync {
             started_key: Some(StartupAdapterSyncKey {
                 adapter_semantic_version: 2,
@@ -327,7 +453,7 @@ async fn prepare_invalidates_a_nonmatching_completion_before_rollback() -> Resul
     );
 
     assert_eq!(
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
         StartupAdapterSyncDecision::RunFullSync {
             started_key: Some(original),
         },
@@ -359,7 +485,7 @@ async fn prepare_preserves_a_nonmatching_partial_checkpoint() -> Result<()> {
     .await?;
 
     assert!(matches!(
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 2).await?,
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 2).await?,
         StartupAdapterSyncDecision::RunFullSync {
             started_key: Some(StartupAdapterSyncKey {
                 adapter_semantic_version: 2,
@@ -407,14 +533,14 @@ async fn completed_lineage_extent_reuses_tail_growth_and_rejects_prefix_changes(
 
     insert_canonical_head(&database, 9, "0xempty-tail").await?;
     assert_eq!(
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
         StartupAdapterSyncDecision::ReuseCompleted,
         "lineage growth strictly above the scanned extent must reuse the completed prefix"
     );
 
     insert_canonical_head(&database, 7, "0xbelow-head").await?;
     let StartupAdapterSyncDecision::RunFullSync { started_key } =
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?
     else {
         panic!("a below-head lineage insert must invalidate startup reuse");
     };
@@ -429,7 +555,7 @@ async fn completed_lineage_extent_reuses_tail_growth_and_rejects_prefix_changes(
         "the mutation revision must detect a corpus change even when the head is unchanged"
     );
     assert_eq!(
-        complete_startup_adapter_sync(
+        complete_sync(
             database.pool(),
             PROFILE,
             CHAIN,
@@ -451,7 +577,7 @@ async fn completed_lineage_extent_reuses_tail_growth_and_rejects_prefix_changes(
     .await?;
     insert_canonical_head(&database, 9, "0xempty-b").await?;
     assert!(matches!(
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
         StartupAdapterSyncDecision::RunFullSync {
             started_key: Some(StartupAdapterSyncKey {
                 canonical_lineage_head: Some(StartupCanonicalLineageHead {
@@ -538,7 +664,7 @@ async fn completion_accepts_only_evidenced_lineage_growth_above_its_scanned_exte
     let database = database("startup_adapter_lineage_completion_extent").await?;
     insert_canonical_head(&database, 8, "0xextent").await?;
     let StartupAdapterSyncDecision::RunFullSync { started_key } =
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?
     else {
         panic!("fresh startup adapter checkpoint must run");
     };
@@ -546,7 +672,7 @@ async fn completion_accepts_only_evidenced_lineage_growth_above_its_scanned_exte
 
     insert_canonical_head(&database, 9, "0xtail").await?;
     assert_eq!(
-        complete_startup_adapter_sync(
+        complete_sync(
             database.pool(),
             PROFILE,
             CHAIN,
@@ -580,8 +706,78 @@ async fn completion_accepts_only_evidenced_lineage_growth_above_its_scanned_exte
         "completion must accept the current revision while retaining the actually scanned extent"
     );
     assert_eq!(
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
         StartupAdapterSyncDecision::ReuseCompleted,
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn time_derived_completion_downgrades_a_concurrent_lineage_tail() -> Result<()> {
+    let database = database("startup_adapter_time_derived_completion_tail").await?;
+    insert_canonical_head(&database, 8, "0xextent").await?;
+    let StartupAdapterSyncDecision::RunFullSync { started_key } =
+        super::prepare_startup_adapter_sync(
+            database.pool(),
+            PROFILE,
+            CHAIN,
+            ADAPTER,
+            1,
+            StartupAdapterLineageTailPolicy::ResumeFromScannedExtent,
+        )
+        .await?
+    else {
+        panic!("the first time-derived pass must run");
+    };
+    let started_key = started_key.expect("the first time-derived pass must have a known key");
+    let mut adapter_completion = database.pool().begin().await?;
+    publish_completed_checkpoint(
+        adapter_completion.as_mut(),
+        PROFILE,
+        CHAIN,
+        ADAPTER,
+        &started_key,
+        started_key.canonical_lineage_head.as_ref(),
+    )
+    .await?;
+    adapter_completion.commit().await?;
+
+    insert_canonical_head(&database, 9, "0xempty-tail").await?;
+    assert_eq!(
+        super::complete_startup_adapter_sync(
+            database.pool(),
+            PROFILE,
+            CHAIN,
+            ADAPTER,
+            1,
+            Some(started_key),
+            StartupAdapterLineageTailPolicy::ResumeFromScannedExtent,
+        )
+        .await?,
+        StartupAdapterSyncCompletion::ResumeFromScannedExtent,
+        "a concurrent accepted head extension must request the bounded resume pass"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, i64, Option<i64>, i64)>(
+            "SELECT
+                 status::TEXT,
+                 replay_target_block_number,
+                 last_block_number,
+                 (state_payload ->> $4)::BIGINT
+             FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = $1
+               AND chain_id = $2
+               AND adapter = $3",
+        )
+        .bind(PROFILE)
+        .bind(CHAIN)
+        .bind(ADAPTER)
+        .bind(STARTUP_LINEAGE_MUTATION_REVISION_FIELD)
+        .fetch_one(database.pool())
+        .await?,
+        ("stream_complete".to_owned(), 8, Some(8), 2),
+        "completion must retain the pass extent while accepting the newer lineage key"
     );
 
     database.cleanup().await
@@ -592,7 +788,7 @@ async fn completion_accepts_evidenced_raw_log_growth_above_its_scanned_extent() 
     let database = database("startup_adapter_raw_completion_extent").await?;
     insert_canonical_head(&database, 8, "0xextent").await?;
     let StartupAdapterSyncDecision::RunFullSync { started_key } =
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?
     else {
         panic!("fresh startup adapter checkpoint must run");
     };
@@ -600,7 +796,7 @@ async fn completion_accepts_evidenced_raw_log_growth_above_its_scanned_extent() 
 
     advance_raw_log_input(&database, 8, &[("0xraw-tail", 9)]).await?;
     assert_eq!(
-        complete_startup_adapter_sync(
+        complete_sync(
             database.pool(),
             PROFILE,
             CHAIN,
@@ -629,7 +825,7 @@ async fn completion_accepts_evidenced_raw_log_growth_above_its_scanned_extent() 
         "completion must accept the current raw revision while retaining the scanned extent"
     );
     assert_eq!(
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
         StartupAdapterSyncDecision::ReuseCompleted,
     );
 
@@ -641,15 +837,14 @@ async fn completion_rechecks_raw_log_mutations_at_its_scanned_extent() -> Result
     let database = database("startup_adapter_raw_completion_prefix").await?;
     insert_canonical_head(&database, 8, "0xextent").await?;
     let StartupAdapterSyncDecision::RunFullSync { started_key } =
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?
     else {
         panic!("fresh startup adapter checkpoint must run");
     };
 
     advance_raw_log_input(&database, 8, &[("0xraw-at-extent", 8)]).await?;
     assert_eq!(
-        complete_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1, started_key,)
-            .await?,
+        complete_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1, started_key,).await?,
         StartupAdapterSyncCompletion::InputChanged
     );
     assert_eq!(
@@ -687,7 +882,7 @@ async fn completed_lineage_extent_fails_closed_when_revision_evidence_is_missing
     .await?;
 
     assert!(matches!(
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
         StartupAdapterSyncDecision::RunFullSync {
             started_key: Some(_)
         }
@@ -719,14 +914,13 @@ async fn same_height_lineage_multiplicity_makes_the_key_unknown_until_repaired()
     insert_canonical_head(&database, 8, "0xhead-b").await?;
 
     let StartupAdapterSyncDecision::RunFullSync { started_key } =
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?
     else {
         panic!("ambiguous highest lineage must never reuse a completion");
     };
     assert_eq!(started_key, None);
     assert_eq!(
-        complete_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1, started_key)
-            .await?,
+        complete_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1, started_key).await?,
         StartupAdapterSyncCompletion::KeyUnknown
     );
 
@@ -739,7 +933,7 @@ async fn same_height_lineage_multiplicity_makes_the_key_unknown_until_repaired()
     .execute(database.pool())
     .await?;
     assert!(matches!(
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
         StartupAdapterSyncDecision::RunFullSync {
             started_key: Some(StartupAdapterSyncKey {
                 lineage_mutation_revision: 3,
@@ -772,7 +966,7 @@ async fn startup_adapter_checkpoint_fails_closed_on_missing_partial_and_skewed_s
     .execute(database.pool())
     .await?;
     assert!(matches!(
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
         StartupAdapterSyncDecision::RunFullSync { .. }
     ));
 
@@ -789,7 +983,7 @@ async fn startup_adapter_checkpoint_fails_closed_on_missing_partial_and_skewed_s
     .execute(database.pool())
     .await?;
     assert!(matches!(
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
         StartupAdapterSyncDecision::RunFullSync { .. }
     ));
 
@@ -806,7 +1000,7 @@ async fn startup_adapter_checkpoint_fails_closed_on_missing_partial_and_skewed_s
     .execute(database.pool())
     .await?;
     assert!(matches!(
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
         StartupAdapterSyncDecision::RunFullSync { .. }
     ));
 
@@ -822,7 +1016,7 @@ async fn startup_adapter_checkpoint_fails_closed_on_missing_partial_and_skewed_s
     .execute(database.pool())
     .await?;
     assert!(matches!(
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
         StartupAdapterSyncDecision::RunFullSync { .. }
     ));
 
@@ -838,7 +1032,7 @@ async fn startup_adapter_checkpoint_fails_closed_on_missing_partial_and_skewed_s
     .execute(database.pool())
     .await?;
     assert!(matches!(
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
         StartupAdapterSyncDecision::RunFullSync { .. }
     ));
 
@@ -855,7 +1049,7 @@ async fn startup_adapter_checkpoint_fails_closed_on_missing_partial_and_skewed_s
     .execute(database.pool())
     .await?;
     assert!(matches!(
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
         StartupAdapterSyncDecision::RunFullSync { .. }
     ));
 
@@ -872,7 +1066,7 @@ async fn startup_adapter_checkpoint_fails_closed_on_missing_partial_and_skewed_s
     .execute(database.pool())
     .await?;
     assert!(matches!(
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
         StartupAdapterSyncDecision::RunFullSync { .. }
     ));
 
@@ -886,7 +1080,7 @@ async fn startup_adapter_checkpoint_fails_closed_on_missing_partial_and_skewed_s
     .execute(database.pool())
     .await?;
     assert!(matches!(
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
         StartupAdapterSyncDecision::RunFullSync { .. }
     ));
 
@@ -895,14 +1089,13 @@ async fn startup_adapter_checkpoint_fails_closed_on_missing_partial_and_skewed_s
         .execute(database.pool())
         .await?;
     let StartupAdapterSyncDecision::RunFullSync { started_key } =
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?
     else {
         panic!("an unknown raw-log input must never reuse completion");
     };
     assert_eq!(started_key, None);
     assert_eq!(
-        complete_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1, started_key,)
-            .await?,
+        complete_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1, started_key,).await?,
         StartupAdapterSyncCompletion::KeyUnknown
     );
 
@@ -922,7 +1115,7 @@ async fn startup_adapter_checkpoint_fails_closed_on_missing_partial_and_skewed_s
         .execute(database.pool())
         .await?;
     let StartupAdapterSyncDecision::RunFullSync { started_key } =
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?
     else {
         panic!("unknown migration state must never reuse completion");
     };
@@ -935,7 +1128,7 @@ async fn startup_adapter_checkpoint_fails_closed_on_missing_partial_and_skewed_s
 async fn startup_adapter_checkpoint_rechecks_the_key_before_completion() -> Result<()> {
     let database = database("startup_adapter_completion_fence").await?;
     let StartupAdapterSyncDecision::RunFullSync { started_key } =
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?
     else {
         panic!("fresh startup adapter checkpoint must run");
     };
@@ -972,8 +1165,7 @@ async fn startup_adapter_checkpoint_rechecks_the_key_before_completion() -> Resu
         .execute(database.pool())
         .await?;
     assert_eq!(
-        complete_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1, started_key,)
-            .await?,
+        complete_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1, started_key,).await?,
         StartupAdapterSyncCompletion::InputChanged
     );
     assert_eq!(
@@ -999,7 +1191,7 @@ async fn startup_adapter_completion_invalidates_checkpoint_when_key_becomes_unkn
 {
     let database = database("startup_adapter_unknown_completion_fence").await?;
     let StartupAdapterSyncDecision::RunFullSync { started_key } =
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?
     else {
         panic!("fresh startup adapter checkpoint must run");
     };
@@ -1022,7 +1214,7 @@ async fn startup_adapter_completion_invalidates_checkpoint_when_key_becomes_unkn
         .execute(database.pool())
         .await?;
     assert_eq!(
-        complete_startup_adapter_sync(
+        complete_sync(
             database.pool(),
             PROFILE,
             CHAIN,
@@ -1061,7 +1253,7 @@ async fn startup_adapter_completion_invalidates_checkpoint_when_key_becomes_unkn
     .execute(database.pool())
     .await?;
     assert_eq!(
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
         StartupAdapterSyncDecision::RunFullSync {
             started_key: Some(started_key),
         },
@@ -1079,7 +1271,7 @@ async fn key_unknown_attempt_deletes_a_private_completion_minted_mid_pass() -> R
         .execute(database.pool())
         .await?;
     let StartupAdapterSyncDecision::RunFullSync { started_key } =
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?
     else {
         panic!("a key-unknown attempt must run the family");
     };
@@ -1114,8 +1306,7 @@ async fn key_unknown_attempt_deletes_a_private_completion_minted_mid_pass() -> R
     private_completion.commit().await?;
 
     assert_eq!(
-        complete_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1, started_key,)
-            .await?,
+        complete_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1, started_key,).await?,
         StartupAdapterSyncCompletion::KeyUnknown
     );
     assert_eq!(
@@ -1139,7 +1330,7 @@ async fn key_unknown_attempt_deletes_a_private_completion_minted_mid_pass() -> R
         "the outer completion fence must delete a row produced under uncaptured inputs"
     );
     assert!(matches!(
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
         StartupAdapterSyncDecision::RunFullSync {
             started_key: Some(_)
         }
@@ -1153,15 +1344,14 @@ async fn startup_adapter_completion_rechecks_below_head_lineage_mutation() -> Re
     let database = database("startup_adapter_lineage_completion_fence").await?;
     insert_canonical_head(&database, 8, "0xempty-a").await?;
     let StartupAdapterSyncDecision::RunFullSync { started_key } =
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?
     else {
         panic!("fresh startup adapter checkpoint must run");
     };
 
     insert_canonical_head(&database, 7, "0xbelow-head").await?;
     assert_eq!(
-        complete_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1, started_key,)
-            .await?,
+        complete_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1, started_key,).await?,
         StartupAdapterSyncCompletion::InputChanged
     );
     assert_eq!(
@@ -1192,9 +1382,8 @@ async fn startup_waits_on_the_migrator_lock_before_the_ledger_or_checkpoint_tabl
         .await?;
 
     let startup_pool = database.pool().clone();
-    let startup = tokio::spawn(async move {
-        prepare_startup_adapter_sync(&startup_pool, PROFILE, CHAIN, ADAPTER, 1).await
-    });
+    let startup =
+        tokio::spawn(async move { prepare_sync(&startup_pool, PROFILE, CHAIN, ADAPTER, 1).await });
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     tokio::time::timeout(
@@ -1234,9 +1423,8 @@ async fn cancelled_startup_does_not_return_a_migrator_locked_connection_to_the_p
         .await?;
 
     let startup_pool = database.pool().clone();
-    let startup = tokio::spawn(async move {
-        prepare_startup_adapter_sync(&startup_pool, PROFILE, CHAIN, ADAPTER, 1).await
-    });
+    let startup =
+        tokio::spawn(async move { prepare_sync(&startup_pool, PROFILE, CHAIN, ADAPTER, 1).await });
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             let held_advisory_locks = sqlx::query_scalar::<_, i64>(
@@ -1323,7 +1511,7 @@ async fn raw_log_range_and_completed_reuse_fail_closed_on_an_intermediate_eviden
         "a missing intermediate revision must reset a partial checkpoint even when later evidence survives"
     );
     assert!(matches!(
-        prepare_startup_adapter_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
+        prepare_sync(database.pool(), PROFILE, CHAIN, ADAPTER, 1).await?,
         StartupAdapterSyncDecision::RunFullSync {
             started_key: Some(_)
         }

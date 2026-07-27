@@ -232,6 +232,17 @@ raw-log [block-revision evidence
 floor](glossary.md#block-revision-evidence-floor), retention-generation change,
 or other incomplete, unknown, or mismatched checkpoint state always runs the
 full family sync.
+Log-derived families may fully reuse a completed result across that proven
+tail. `ens_v1_unwrapped_authority` instead converts a completed result to its
+existing partial checkpoint at the recorded extent whenever the accepted
+canonical head is above that extent, then processes the later blocks before
+publishing completion at the new head. That family derives time-bound
+transitions during finalization from canonical block timestamps, so an empty
+later block can change its output without adding a raw log.
+`ens_v1_subregistry_discovery` continues to reuse completed results across
+proven tails: its assignments, discovery reconciliation, and normalized events
+are derived from canonical raw logs, and an empty head extension adds no
+discovery input.
 Completed ENSv1 subregistry state also retains the staged observation set and
 completed streamed reconciliation outcome, so an unchanged restart does not
 repeat that full walk. These rows are operational startup evidence only: they

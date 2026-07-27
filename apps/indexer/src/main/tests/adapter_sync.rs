@@ -306,6 +306,279 @@ async fn non_looping_startup_family_accepts_lineage_growth_above_its_scan_extent
 }
 
 #[tokio::test]
+async fn startup_authority_resumes_an_empty_time_derived_lineage_tail() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let deployment_profile = "test-authority-tail-resume";
+    let chain = "ethereum-mainnet";
+    let registrar_address = "0x00000000000000000000000000000000000000aa";
+    let registrar_contract_instance_id = Uuid::from_u128(0x0254_0801);
+    let adapter = bigname_adapters::ENS_V1_UNWRAPPED_AUTHORITY_STARTUP_VERSION;
+    let registration_expiry = 1_700_000_100;
+    let mut registration_block = provider_block(
+        "0x4200000000000000000000000000000000000000000000000000000000000008",
+        None,
+        42,
+    );
+    registration_block.block_timestamp_unix_secs = 1_700_000_000;
+
+    sqlx::query(
+        r#"
+        INSERT INTO manifest_versions (
+            manifest_id,
+            manifest_version,
+            namespace,
+            source_family,
+            chain,
+            deployment_epoch,
+            rollout_status,
+            normalizer_version,
+            file_path,
+            manifest_payload
+        )
+        VALUES (
+            1,
+            1,
+            'ens',
+            'ens_v1_registrar_l1',
+            $1,
+            'ens_v1',
+            'active',
+            'ensip15@ens-normalize-0.1.1',
+            'manifests/ens/ens_v1_registrar_l1/v1.toml',
+            DEFAULT
+        )
+        "#,
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    insert_contract_instance(
+        database.pool(),
+        registrar_contract_instance_id,
+        chain,
+        "contract",
+    )
+    .await?;
+    insert_active_contract_instance_address(
+        database.pool(),
+        registrar_contract_instance_id,
+        chain,
+        registrar_address,
+        Some(1),
+    )
+    .await?;
+    insert_manifest_contract_instance(
+        database.pool(),
+        1,
+        "registrar",
+        registrar_contract_instance_id,
+        registrar_address,
+        "none",
+        None,
+        None,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO discovery_admission_epochs (chain_id, epoch)
+         VALUES ($1, 0)
+         ON CONFLICT (chain_id) DO NOTHING",
+    )
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    upsert_raw_blocks(
+        database.pool(),
+        &[provider_block_to_raw_block(
+            chain,
+            &registration_block,
+            CanonicalityState::Canonical,
+        )],
+    )
+    .await?;
+    insert_chain_lineage_for_block(
+        database.pool(),
+        chain,
+        &registration_block,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+    upsert_raw_logs(
+        database.pool(),
+        &[RawLog {
+            chain_id: chain.to_owned(),
+            block_hash: registration_block.block_hash.clone(),
+            block_number: registration_block.block_number,
+            transaction_hash: transaction_hash_for_block(&registration_block),
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: registrar_address.to_owned(),
+            topics: vec![
+                registrar_name_registered_topic0(),
+                labelhash_hex("alice"),
+                hex_string(&abi_word_address(
+                    "0x0000000000000000000000000000000000000001",
+                )),
+            ],
+            data: decode_hex_string(&encode_registrar_name_registered_log_data(
+                "alice",
+                registration_expiry,
+            )),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
+    )
+    .await?;
+
+    let first_attempt = crate::runtime::adapter_sync::checkpoint::prepare_startup_family_sync(
+        database.pool(),
+        Some(deployment_profile),
+        chain,
+        adapter,
+    )
+    .await?
+    .expect("the first authority boot must run");
+    let first_extent = first_attempt
+        .scanned_lineage_extent_block_number()
+        .expect("the first authority boot must latch the registration block");
+    let first_checkpoint =
+        bigname_adapters::StartupAdapterCheckpointContext::new(deployment_profile, first_extent)?;
+    let first_summary =
+        bigname_adapters::sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit(
+            database.pool(),
+            chain,
+            &first_checkpoint,
+            DEFAULT_STARTUP_DISCOVERY_PAGE_LOGS,
+        )
+        .await?;
+    assert_eq!(first_summary.matched_log_count, 1);
+    assert!(
+        crate::runtime::adapter_sync::complete_non_looping_startup_family(
+            first_attempt,
+            database.pool(),
+            chain,
+            adapter,
+            1,
+        )
+        .await?
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM normalized_events
+             WHERE derivation_kind = 'ens_v1_unwrapped_authority'
+               AND event_kind = 'RegistrationReleased'
+               AND logical_name_id = 'ens:alice.eth'",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "the registration must remain unreleased before the retained head crosses its time boundary"
+    );
+
+    let mut empty_tail = provider_block(
+        "0x4300000000000000000000000000000000000000000000000000000000000008",
+        Some(&registration_block.block_hash),
+        43,
+    );
+    empty_tail.block_timestamp_unix_secs = 1_800_000_000;
+    upsert_raw_blocks(
+        database.pool(),
+        &[provider_block_to_raw_block(
+            chain,
+            &empty_tail,
+            CanonicalityState::Canonical,
+        )],
+    )
+    .await?;
+    insert_chain_lineage_for_block(
+        database.pool(),
+        chain,
+        &empty_tail,
+        CanonicalityState::Canonical,
+    )
+    .await?;
+
+    let resumed_attempt =
+        crate::runtime::adapter_sync::checkpoint::prepare_startup_family_sync(
+            database.pool(),
+            Some(deployment_profile),
+            chain,
+            adapter,
+        )
+        .await?
+        .expect("the empty authority tail must downgrade to a boundary resume");
+    assert_eq!(
+        resumed_attempt.scanned_lineage_extent_block_number(),
+        Some(empty_tail.block_number)
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, i64, Option<i64>)>(
+            "SELECT status::TEXT, replay_target_block_number, last_block_number
+             FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = $1
+               AND chain_id = $2
+               AND adapter = $3
+               AND checkpoint_scope = 'startup_adapter_sync'",
+        )
+        .bind(deployment_profile)
+        .bind(chain)
+        .bind(adapter.adapter)
+        .fetch_one(database.pool())
+        .await?,
+        ("stream_complete".to_owned(), 42, Some(42)),
+        "prepare must preserve the completed authority state at its recorded extent"
+    );
+
+    let resumed_checkpoint = bigname_adapters::StartupAdapterCheckpointContext::new(
+        deployment_profile,
+        empty_tail.block_number,
+    )?;
+    bigname_adapters::sync_ens_v1_unwrapped_authority_with_startup_checkpoint_and_log_limit(
+        database.pool(),
+        chain,
+        &resumed_checkpoint,
+        DEFAULT_STARTUP_DISCOVERY_PAGE_LOGS,
+    )
+    .await?;
+    assert!(
+        crate::runtime::adapter_sync::complete_non_looping_startup_family(
+            resumed_attempt,
+            database.pool(),
+            chain,
+            adapter,
+            1,
+        )
+        .await?
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM normalized_events
+             WHERE derivation_kind = 'ens_v1_unwrapped_authority'
+               AND event_kind = 'RegistrationReleased'
+               AND logical_name_id = 'ens:alice.eth'
+               AND block_number = 43",
+        )
+        .fetch_one(database.pool())
+        .await?,
+        1,
+        "the empty-block boundary resume must emit the time-derived registration release"
+    );
+    assert!(
+        crate::runtime::adapter_sync::checkpoint::prepare_startup_family_sync(
+            database.pool(),
+            Some(deployment_profile),
+            chain,
+            adapter,
+        )
+        .await?
+        .is_none(),
+        "the republished completion must retain exact no-tail reuse at the new head"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn live_adapter_wait_heartbeats_without_adapter_progress_callbacks() -> Result<()> {
     let database = TestDatabase::new().await?;
     let instance_id = "live-adapter-periodic-heartbeat";
