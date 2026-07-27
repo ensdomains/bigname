@@ -253,6 +253,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
         for chain in catchup_config.chains.clone() {
             let provider = provider_registry.provider_for(&chain).cloned();
             let lane_chain = chain.clone();
+            let lane_heartbeat = catchup_heartbeat.for_chain(&chain)?;
             spawn_normalized_replay_catchup(
                 &subtasks,
                 &chain,
@@ -263,7 +264,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
                     provider,
                     Some((coinbase_sql_registry.clone(), coinbase_sql_config.clone())),
                     header_audit_mode,
-                    catchup_heartbeat.clone(),
+                    lane_heartbeat,
                     normalized_replay_activity.clone(),
                 ),
             )?;

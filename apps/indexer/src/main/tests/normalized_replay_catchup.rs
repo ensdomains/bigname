@@ -149,7 +149,8 @@ async fn normalized_replay_catchup_rewinds_for_later_older_raw_backfill() -> Res
 }
 
 #[tokio::test]
-async fn outdated_indexer_exits_normalized_replay_catchup_on_fatal_replay_fence() -> Result<()> {
+async fn outdated_indexer_exits_on_fatal_replay_fence_when_failure_journaling_fails()
+-> Result<()> {
     let database = bigname_test_support::TestDatabase::create_migrated(
         bigname_test_support::TestDatabaseConfig::new(
             "bigname_indexer_normalized_replay_fence_test",
@@ -225,9 +226,14 @@ async fn outdated_indexer_exits_normalized_replay_catchup_on_fatal_replay_fence(
     let activity = crate::run::startup_heartbeat::RequiredSubtaskActivity::default();
     let newer_replay_version =
         raise_projection_replay_version_floor_above_process(database.pool()).await?;
+    let hook = normalized_replay_catchup::install_before_cursor_failure_record_test_hook(
+        database.pool(),
+        "mainnet",
+        chain,
+    )
+    .await;
 
-    let result = tokio::time::timeout(
-        tokio::time::Duration::from_secs(10),
+    let catchup = tokio::spawn(
         normalized_replay_catchup::run_normalized_replay_catchup_chain(
             database.pool().clone(),
             config,
@@ -238,9 +244,21 @@ async fn outdated_indexer_exits_normalized_replay_catchup_on_fatal_replay_fence(
             heartbeat,
             activity,
         ),
+    );
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(10),
+        hook.wait_until_before_record(),
     )
     .await
-    .context("an outdated normalized-replay subtask stayed healthy instead of exiting")?;
+    .context("fatal normalized replay did not reach failure journaling")?;
+    sqlx::query("DROP TABLE normalized_replay_cursors")
+        .execute(database.pool())
+        .await?;
+    hook.resume();
+    let result = tokio::time::timeout(tokio::time::Duration::from_secs(10), catchup)
+        .await
+        .context("an outdated normalized-replay subtask stayed healthy instead of exiting")?
+        .context("outdated normalized-replay subtask panicked")?;
     let error = result.expect_err("an outdated normalized-replay subtask must fail");
     assert!(
         bigname_storage::projection_staging::is_fatal_projection_replay_version_fence_error(
@@ -252,6 +270,14 @@ async fn outdated_indexer_exits_normalized_replay_catchup_on_fatal_replay_fence(
     assert!(
         rendered.contains(&newer_replay_version.to_string()),
         "normalized-replay refusal must name the newer replay version, got: {error:#}"
+    );
+    assert!(
+        rendered.contains("normalized replay cursor failure journaling also failed"),
+        "normalized-replay error must retain journaling failure context, got: {error:#}"
+    );
+    assert!(
+        rendered.contains("failed to record normalized replay cursor failure"),
+        "normalized-replay error must include the journaling write failure, got: {error:#}"
     );
 
     database.cleanup().await
@@ -1606,11 +1632,20 @@ async fn parallel_chain_lanes_advance_while_another_chain_is_wedged_on_coverage_
     .await;
     let instance_id = "parallel-normalized-replay-lanes-test";
     install_stale_indexer_heartbeat(database.pool(), instance_id).await?;
+    bigname_storage::record_service_loop_heartbeat(
+        database.pool(),
+        bigname_storage::INDEXER_SERVICE_NAME,
+        instance_id,
+        &config.chains,
+    )
+    .await?;
     let heartbeat = crate::run::startup_heartbeat::NormalizedReplayHeartbeat::new(
         instance_id.to_owned(),
         tokio::time::Duration::ZERO,
         config.chains.clone(),
     );
+    let coverage_heartbeat = heartbeat.for_chain(coverage_chain)?;
+    let advancing_heartbeat = heartbeat.for_chain(advancing_chain)?;
     let activity = crate::run::startup_heartbeat::RequiredSubtaskActivity::default();
 
     let coverage_lane = tokio::spawn(
@@ -1621,7 +1656,7 @@ async fn parallel_chain_lanes_advance_while_another_chain_is_wedged_on_coverage_
             Some(provider::ChainProvider::JsonRpc(coverage_provider)),
             None,
             HeaderAuditMode::Minimal,
-            heartbeat.clone(),
+            coverage_heartbeat,
             activity.clone(),
         ),
     );
@@ -1635,6 +1670,35 @@ async fn parallel_chain_lanes_advance_while_another_chain_is_wedged_on_coverage_
         !coverage_lane.is_finished(),
         "coverage-recovery lane must remain wedged while the other chain advances"
     );
+    sqlx::query(
+        r#"
+        UPDATE service_loop_heartbeats
+        SET started_at = clock_timestamp() - INTERVAL '40 minutes',
+            heartbeat_at = clock_timestamp() - INTERVAL '31 minutes'
+        WHERE service_name = 'indexer'
+          AND instance_id = $1
+          AND scope_kind = 'chain'
+          AND scope_id = $2
+        "#,
+    )
+    .bind(instance_id)
+    .bind(coverage_chain)
+    .execute(database.pool())
+    .await?;
+    let wedged_heartbeat_at = sqlx::query_scalar::<_, sqlx::types::time::OffsetDateTime>(
+        r#"
+        SELECT heartbeat_at
+        FROM service_loop_heartbeats
+        WHERE service_name = 'indexer'
+          AND instance_id = $1
+          AND scope_kind = 'chain'
+          AND scope_id = $2
+        "#,
+    )
+    .bind(instance_id)
+    .bind(coverage_chain)
+    .fetch_one(database.pool())
+    .await?;
 
     let parent_activity = activity.clone();
     let waiting_parent = tokio::spawn(async move {
@@ -1655,7 +1719,7 @@ async fn parallel_chain_lanes_advance_while_another_chain_is_wedged_on_coverage_
             None,
             None,
             HeaderAuditMode::Minimal,
-            heartbeat,
+            advancing_heartbeat,
             activity,
         ),
     );
@@ -1686,6 +1750,36 @@ async fn parallel_chain_lanes_advance_while_another_chain_is_wedged_on_coverage_
     })
     .await
     .context("advancing chain did not complete two chunks while coverage recovery was wedged")??;
+    assert_eq!(
+        sqlx::query_scalar::<_, sqlx::types::time::OffsetDateTime>(
+            r#"
+            SELECT heartbeat_at
+            FROM service_loop_heartbeats
+            WHERE service_name = 'indexer'
+              AND instance_id = $1
+              AND scope_kind = 'chain'
+              AND scope_id = $2
+            "#,
+        )
+        .bind(instance_id)
+        .bind(coverage_chain)
+        .fetch_one(database.pool())
+        .await?,
+        wedged_heartbeat_at,
+        "the advancing peer lane must not refresh the wedged lane's chain heartbeat"
+    );
+    let health_error = bigname_storage::ensure_service_loop_heartbeat_recent(
+        database.pool(),
+        bigname_storage::INDEXER_SERVICE_NAME,
+        instance_id,
+        20,
+    )
+    .await
+    .expect_err("a stale live-chain heartbeat must fail indexer health");
+    assert!(
+        health_error.to_string().contains(coverage_chain),
+        "stale-chain health error must identify the wedged lane: {health_error:#}"
+    );
 
     waiting_parent.abort();
     hook.resume();

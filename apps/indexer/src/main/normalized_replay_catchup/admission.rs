@@ -49,8 +49,15 @@ pub(super) async fn run_required_normalized_replay_catchup_iteration(
         }
         replay_admission_attempt += 1;
     };
-    if let Err(error) = &result {
-        record_cursor_failure(pool, &config.deployment_profile, chain, error).await?;
+    match result {
+        Ok(status) => Ok(status),
+        Err(error) => {
+            match record_cursor_failure(pool, &config.deployment_profile, chain, &error).await {
+                Ok(()) => Err(error),
+                Err(journal_error) => Err(error.context(format!(
+                    "normalized replay cursor failure journaling also failed: {journal_error:#}"
+                ))),
+            }
+        }
     }
-    result
 }

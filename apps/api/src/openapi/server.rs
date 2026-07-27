@@ -49,6 +49,10 @@ pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
         "BIGNAME_API_HEARTBEAT_MAX_AGE_SECS must be greater than zero"
     );
     ensure!(
+        args.indexer_chain_heartbeat_max_age_secs > 0,
+        "BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS must be greater than zero"
+    );
+    ensure!(
         args.worker_rebuild_phase_max_age_secs > 0,
         "BIGNAME_API_WORKER_REBUILD_PHASE_MAX_AGE_SECS must be greater than zero"
     );
@@ -61,6 +65,9 @@ pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
     )?;
     let state = AppState::new(pool, chain_rpc_urls)
         .with_heartbeat_max_age_secs(args.heartbeat_max_age_secs)
+        .with_indexer_chain_heartbeat_max_age_secs(
+            args.indexer_chain_heartbeat_max_age_secs,
+        )
         .with_worker_rebuild_phase_max_age_secs(args.worker_rebuild_phase_max_age_secs)
         .with_status_freshness_config(status_freshness_config);
     state

@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, sync::Arc};
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use sqlx::PgPool;
 use tokio::{
     sync::Mutex,
@@ -35,14 +35,32 @@ pub(crate) struct StartupAdapterHeartbeat<'a> {
 pub(crate) struct NormalizedReplayHeartbeat {
     heartbeat: Arc<Mutex<StartupHeartbeat>>,
     chain_ids: Arc<Vec<String>>,
+    interval: Duration,
+    last_recorded_at: Arc<Mutex<Instant>>,
 }
 
 impl NormalizedReplayHeartbeat {
     pub(crate) fn new(instance_id: String, interval: Duration, chain_ids: Vec<String>) -> Self {
+        let interval = interval.min(MAX_PROGRESS_HEARTBEAT_INTERVAL);
         Self {
             heartbeat: Arc::new(Mutex::new(StartupHeartbeat::new(instance_id, interval))),
             chain_ids: Arc::new(chain_ids),
+            interval,
+            last_recorded_at: Arc::new(Mutex::new(Instant::now())),
         }
+    }
+
+    pub(crate) fn for_chain(&self, chain_id: &str) -> Result<Self> {
+        ensure!(
+            self.chain_ids.iter().any(|candidate| candidate == chain_id),
+            "normalized replay heartbeat chain {chain_id} is not in the configured live-chain set"
+        );
+        Ok(Self {
+            heartbeat: Arc::clone(&self.heartbeat),
+            chain_ids: Arc::new(vec![chain_id.to_owned()]),
+            interval: self.interval,
+            last_recorded_at: Arc::new(Mutex::new(Instant::now())),
+        })
     }
 
     #[cfg(test)]
@@ -96,12 +114,18 @@ impl bigname_adapters::StartupAdapterProgress for NormalizedReplayHeartbeat {
         pool: &'a PgPool,
     ) -> bigname_adapters::StartupAdapterProgressFuture<'a> {
         Box::pin(async move {
+            let mut last_recorded_at = self.last_recorded_at.lock().await;
             let mut heartbeat = self.heartbeat.lock().await;
             #[cfg(test)]
             {
                 heartbeat.adapter_progress_count += 1;
             }
-            heartbeat.record_if_due(pool, &self.chain_ids).await
+            if last_recorded_at.elapsed() < self.interval {
+                return Ok(());
+            }
+            heartbeat.record(pool, &self.chain_ids).await?;
+            *last_recorded_at = Instant::now();
+            Ok(())
         })
     }
 }

@@ -60,8 +60,15 @@ active named-phase heartbeat exceeds the service-specific maximum age. The
 default maximum is 20 seconds;
 set `BIGNAME_INDEXER_HEARTBEAT_MAX_AGE_SECS` and
 `BIGNAME_WORKER_HEARTBEAT_MAX_AGE_SECS` in proportion to custom poll
-intervals. Worker rebuild operations with no safe inner batch boundary use a
-named phase row and the independently tunable
+intervals. Once the indexer has live-chain rows, its container check requires
+every row to be within
+`max(BIGNAME_INDEXER_HEARTBEAT_MAX_AGE_SECS, 1800)` seconds instead of applying
+the 20-second process limit. Each replay lane refreshes only its own chain row.
+The 1,800-second floor exceeds the supported maximum no-progress SQL or
+coverage-verification unit; raise the indexer setting when a deployment permits
+a longer unit, and raise `BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS` to
+the same bound for API aggregate health. Worker rebuild operations with no safe
+inner batch boundary use a named phase row and the independently tunable
 `BIGNAME_WORKER_REBUILD_PHASE_MAX_AGE_SECS` (default 43,200); set the matching
 API interpretation with `BIGNAME_API_WORKER_REBUILD_PHASE_MAX_AGE_SECS`.
 Indexer [full-closure replay](glossary.md) lock waits use a named phase with the
@@ -82,7 +89,9 @@ process and its `SELECT 1` database probe. Its aggregate `status` and `loops`
 object still require recent indexer and worker evidence, using
 `BIGNAME_API_HEARTBEAT_MAX_AGE_SECS` (default 20), so a planned indexer restart
 or long worker phase stays visible without making the API container or public
-edge unhealthy. The status routes use the API chain RPC mapping for an
+edge unhealthy. Indexer chain rows use the greater of that setting and
+`BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS` (default 1,800), and any stale
+chain row degrades the aggregate status. The status routes use the API chain RPC mapping for an
 asynchronous cached network-head probe. Tune its provider timeout, refresh
 interval, cache TTL, and ingestion block/time limits with the
 `BIGNAME_API_STATUS_PROVIDER_*` and `BIGNAME_API_STATUS_MAX_*` variables in
