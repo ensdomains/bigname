@@ -14,7 +14,8 @@ use crate::{
     bootstrap_backfill::run_startup_bootstrap_backfills_with_heartbeat,
     cli::RunArgs,
     normalized_replay_catchup::{
-        NormalizedReplayCatchupConfig, run_normalized_replay_catchup_chain,
+        NormalizedReplayCatchupConfig, ProjectionIndexCoordination,
+        run_normalized_replay_catchup_chain,
     },
     provider::{ChainProviderKind, ProviderRegistry},
     provider_configuration::ProviderSourceArgs,
@@ -202,10 +203,8 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
     )
     .await?;
 
-    // Bootstrap backfill has drained, so the narrow bootstrap scope has served its purpose. Widen
-    // before spawning replay catch-up: both reconcile `contract_instance_addresses`, and the widen
-    // must not race it. The reload also picks up any discovery edges the post-bootstrap
-    // adapter-owned sync just materialized, which is why it runs even when the scopes are equal.
+    // Widen before replay so `contract_instance_addresses` reconciliation cannot race; the reload
+    // also includes post-bootstrap discovery edges even when bootstrap and live scopes are equal.
     let (manifest_runtime_state, intake_chain_tasks, watched_plan_admission_epochs) =
         widen_to_live_watch_scope(
             &pool,
@@ -250,6 +249,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
             Duration::from_secs(args.poll_interval_secs.max(1)),
             live_chain_ids.clone(),
         );
+        let projection_index_coordination = ProjectionIndexCoordination::default();
         for chain in catchup_config.chains.clone() {
             let provider = provider_registry.provider_for(&chain).cloned();
             let lane_chain = chain.clone();
@@ -264,6 +264,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
                     provider,
                     Some((coinbase_sql_registry.clone(), coinbase_sql_config.clone())),
                     header_audit_mode,
+                    projection_index_coordination.clone(),
                     lane_heartbeat,
                     normalized_replay_activity.clone(),
                 ),
@@ -393,9 +394,8 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
             header_audit_mode,
             args.event_silent_reverse_resolver_addresses,
             bootstrap_backfill_outcome.latched_finalized_heads,
-            // Process-lifetime verified-coverage frontier: deep-gap promotion
-            // verifies fact coverage in large chunks once, then every poll cycle
-            // is an O(1) in-memory check.
+            // The process-lifetime frontier verifies deep gaps in large chunks once, then every
+            // poll cycle is an O(1) in-memory check.
             &crate::reconciliation::ChainCoverageFrontiers::default(),
             &normalized_replay_activity,
         ))

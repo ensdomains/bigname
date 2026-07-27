@@ -5,12 +5,11 @@ use sqlx::{PgPool, types::time::OffsetDateTime};
 
 pub const INDEXER_SERVICE_NAME: &str = "indexer";
 pub const WORKER_SERVICE_NAME: &str = "worker";
-pub const DEFAULT_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS: i64 = 1_800;
+pub const DEFAULT_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS: i64 = 5_400;
 pub const DEFAULT_WORKER_REBUILD_PHASE_MAX_AGE_SECS: i64 = 43_200;
 
 const PROCESS_SCOPE_KIND: &str = "process";
 const PROCESS_SCOPE_ID: &str = "process";
-const CHAIN_SCOPE_KIND: &str = "chain";
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServiceLoopHeartbeat {
     pub service_name: String,
@@ -20,6 +19,7 @@ pub struct ServiceLoopHeartbeat {
     pub age_seconds: i64,
     pub active_phase: Option<ServiceLoopPhaseHeartbeat>,
     pub oldest_chain: Option<ServiceLoopChainHeartbeat>,
+    pub missing_expected_chain_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -41,6 +41,7 @@ pub struct ServiceLoopChainHeartbeat {
 mod health;
 pub use health::{
     ensure_service_loop_heartbeat_recent, ensure_service_loop_heartbeat_recent_with_phase,
+    ensure_service_loop_heartbeat_recent_with_phase_and_chain,
     load_preferred_service_loop_heartbeats,
     load_preferred_service_loop_heartbeats_with_indexer_chain_max_age, load_service_loop_heartbeat,
 };
@@ -68,10 +69,53 @@ pub async fn register_service_loop(
 
     sqlx::query(
         r#"
-        WITH retired_scopes AS (
-            DELETE FROM service_loop_heartbeats
-            WHERE service_name = $1
-              AND scope_kind <> 'process'
+        WITH inherited_expected_candidates AS MATERIALIZED (
+            SELECT
+                process.instance_id,
+                process.heartbeat_at,
+                ARRAY(
+                    SELECT inherited.chain_id
+                    FROM (
+                        SELECT UNNEST(process.expected_chain_ids) AS chain_id
+                        UNION
+                        SELECT chain.scope_id AS chain_id
+                        FROM service_loop_heartbeats AS chain
+                        WHERE chain.service_name = process.service_name
+                          AND chain.instance_id = process.instance_id
+                          AND chain.scope_kind = 'chain'
+                    ) AS inherited
+                    ORDER BY inherited.chain_id
+                ) AS expected_chain_ids
+            FROM service_loop_heartbeats AS process
+            WHERE process.service_name = $1
+              AND process.scope_kind = 'process'
+              AND process.scope_id = 'process'
+        ),
+        inherited_expected_chains AS MATERIALIZED (
+            SELECT expected_chain_ids
+            FROM inherited_expected_candidates
+            ORDER BY
+                heartbeat_at DESC,
+                (instance_id = $2) DESC,
+                instance_id
+            LIMIT 1
+        ),
+        retired_scopes AS (
+            DELETE FROM service_loop_heartbeats AS scoped
+            WHERE scoped.service_name = $1
+              AND scoped.scope_kind <> 'process'
+              AND (
+                  scoped.service_name = 'worker'
+                  OR scoped.instance_id = $2
+                  OR NOT EXISTS (
+                      SELECT 1
+                      FROM service_loop_heartbeats AS process
+                      WHERE process.service_name = scoped.service_name
+                        AND process.instance_id = scoped.instance_id
+                        AND process.scope_kind = 'process'
+                        AND process.scope_id = 'process'
+                  )
+              )
         ),
         observed AS (
             SELECT clock_timestamp() AS observed_at
@@ -82,14 +126,32 @@ pub async fn register_service_loop(
             scope_kind,
             scope_id,
             started_at,
-            heartbeat_at
+            heartbeat_at,
+            expected_chain_ids
         )
-        SELECT $1, $2, $3, $4, observed_at, observed_at
+        SELECT
+            $1,
+            $2,
+            $3,
+            $4,
+            observed_at,
+            observed_at,
+            CASE
+                WHEN $1 = 'indexer' THEN COALESCE(
+                    (
+                        SELECT expected_chain_ids
+                        FROM inherited_expected_chains
+                    ),
+                    ARRAY[]::TEXT[]
+                )
+                ELSE ARRAY[]::TEXT[]
+            END
         FROM observed
         ON CONFLICT (service_name, instance_id, scope_kind, scope_id)
         DO UPDATE SET
             started_at = EXCLUDED.started_at,
-            heartbeat_at = EXCLUDED.heartbeat_at
+            heartbeat_at = EXCLUDED.heartbeat_at,
+            expected_chain_ids = EXCLUDED.expected_chain_ids
         "#,
     )
     .bind(service_name)
@@ -116,25 +178,9 @@ pub async fn record_service_loop_heartbeat(
         bail!("only the indexer service may record chain-scoped heartbeats");
     }
 
-    let mut unique_chain_ids = BTreeSet::new();
-    for chain_id in chain_ids {
-        let chain_id = chain_id.trim();
-        if chain_id.is_empty() || chain_id == PROCESS_SCOPE_ID {
-            bail!("heartbeat chain id must be non-blank and must not equal process");
-        }
-        unique_chain_ids.insert(chain_id.to_owned());
-    }
+    let expected_chain_ids = validated_chain_ids(chain_ids)?;
 
-    let mut scope_kinds = Vec::with_capacity(unique_chain_ids.len() + 1);
-    let mut scope_ids = Vec::with_capacity(unique_chain_ids.len() + 1);
-    scope_kinds.push(PROCESS_SCOPE_KIND.to_owned());
-    scope_ids.push(PROCESS_SCOPE_ID.to_owned());
-    for chain_id in unique_chain_ids {
-        scope_kinds.push(CHAIN_SCOPE_KIND.to_owned());
-        scope_ids.push(chain_id);
-    }
-
-    let recorded = sqlx::query(
+    let registered = sqlx::query_scalar::<_, bool>(
         r#"
         WITH registered_process AS MATERIALIZED (
             /* service_loop_heartbeat_registration_fence */ SELECT scope_id
@@ -155,40 +201,151 @@ pub async fn record_service_loop_heartbeat(
         ),
         observed AS (
             SELECT clock_timestamp() AS observed_at
+        ),
+        process_heartbeat AS (
+            UPDATE service_loop_heartbeats
+            SET
+                heartbeat_at = observed.observed_at,
+                expected_chain_ids = CASE
+                    WHEN $1 = 'indexer' THEN $3
+                    ELSE ARRAY[]::TEXT[]
+                END
+            FROM observed
+            WHERE service_name = $1
+              AND instance_id = $2
+              AND scope_kind = 'process'
+              AND scope_id = 'process'
+              AND EXISTS (SELECT 1 FROM registered_process)
+            RETURNING observed.observed_at
+        ),
+        retired_chains AS (
+            DELETE FROM service_loop_heartbeats
+            WHERE service_name = $1
+              AND instance_id = $2
+              AND scope_kind = 'chain'
+              AND NOT (scope_id = ANY($3))
+              AND EXISTS (SELECT 1 FROM process_heartbeat)
+        ),
+        chain_heartbeats AS (
+            INSERT INTO service_loop_heartbeats (
+                service_name,
+                instance_id,
+                scope_kind,
+                scope_id,
+                started_at,
+                heartbeat_at
+            )
+            SELECT
+                $1,
+                $2,
+                'chain',
+                chain_id,
+                process_heartbeat.observed_at,
+                process_heartbeat.observed_at
+            FROM UNNEST($3::TEXT[]) AS expected(chain_id)
+            CROSS JOIN process_heartbeat
+            ON CONFLICT (service_name, instance_id, scope_kind, scope_id)
+            DO UPDATE SET heartbeat_at = EXCLUDED.heartbeat_at
         )
-        INSERT INTO service_loop_heartbeats (
-            service_name,
-            instance_id,
-            scope_kind,
-            scope_id,
-            started_at,
-            heartbeat_at
-        )
-        SELECT
-            $1,
-            $2,
-            scope.scope_kind,
-            scope.scope_id,
-            observed.observed_at,
-            observed.observed_at
-        FROM UNNEST($3::TEXT[], $4::TEXT[]) AS scope(scope_kind, scope_id)
-        CROSS JOIN observed
-        CROSS JOIN registered_process
-        ON CONFLICT (service_name, instance_id, scope_kind, scope_id)
-        DO UPDATE SET heartbeat_at = EXCLUDED.heartbeat_at
+        SELECT EXISTS (SELECT 1 FROM process_heartbeat)
         "#,
     )
     .bind(service_name)
     .bind(instance_id)
-    .bind(&scope_kinds)
-    .bind(&scope_ids)
-    .execute(pool)
+    .bind(&expected_chain_ids)
+    .fetch_one(pool)
     .await
     .with_context(|| {
         format!("failed to record {service_name} service loop heartbeat for {instance_id}")
     })?;
-    if recorded.rows_affected() == 0 {
+    if !registered {
         bail!("{service_name} service loop heartbeat for {instance_id} is not registered");
+    }
+
+    Ok(())
+}
+
+pub async fn record_service_loop_chain_heartbeat(
+    pool: &PgPool,
+    instance_id: &str,
+    chain_id: &str,
+) -> Result<()> {
+    validate_identity(INDEXER_SERVICE_NAME, instance_id)?;
+    let chain_ids = validated_chain_ids(&[chain_id.to_owned()])?;
+    let chain_id = &chain_ids[0];
+
+    let (registered, expected) = sqlx::query_as::<_, (bool, bool)>(
+        r#"
+        WITH registered_process AS MATERIALIZED (
+            /* service_loop_chain_heartbeat_registration_fence */
+            SELECT expected_chain_ids
+            FROM service_loop_heartbeats
+            WHERE service_name = 'indexer'
+              AND instance_id = $1
+              AND scope_kind = 'process'
+              AND scope_id = 'process'
+            FOR UPDATE
+        ),
+        expected_chain AS MATERIALIZED (
+            SELECT 1
+            FROM registered_process
+            WHERE $2 = ANY(expected_chain_ids)
+        ),
+        observed AS (
+            SELECT clock_timestamp() AS observed_at
+        ),
+        process_heartbeat AS (
+            UPDATE service_loop_heartbeats
+            SET heartbeat_at = observed.observed_at
+            FROM observed
+            WHERE service_name = 'indexer'
+              AND instance_id = $1
+              AND scope_kind = 'process'
+              AND scope_id = 'process'
+              AND EXISTS (SELECT 1 FROM expected_chain)
+            RETURNING observed.observed_at
+        ),
+        chain_heartbeat AS (
+            INSERT INTO service_loop_heartbeats (
+                service_name,
+                instance_id,
+                scope_kind,
+                scope_id,
+                started_at,
+                heartbeat_at
+            )
+            SELECT
+                'indexer',
+                $1,
+                'chain',
+                $2,
+                process_heartbeat.observed_at,
+                process_heartbeat.observed_at
+            FROM process_heartbeat
+            ON CONFLICT (service_name, instance_id, scope_kind, scope_id)
+            DO UPDATE SET heartbeat_at = EXCLUDED.heartbeat_at
+        )
+        SELECT
+            EXISTS (SELECT 1 FROM registered_process),
+            EXISTS (SELECT 1 FROM expected_chain)
+        "#,
+    )
+    .bind(instance_id)
+    .bind(chain_id)
+    .fetch_one(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to record indexer service loop heartbeat for chain {chain_id} on {instance_id}"
+        )
+    })?;
+    if !registered {
+        bail!("indexer service loop heartbeat for {instance_id} is not registered");
+    }
+    if !expected {
+        bail!(
+            "indexer service loop heartbeat for chain {chain_id} on {instance_id} is not in the expected live-chain set"
+        );
     }
 
     Ok(())
@@ -355,6 +512,18 @@ fn validate_identity(service_name: &str, instance_id: &str) -> Result<()> {
         bail!("heartbeat instance id must not be blank");
     }
     Ok(())
+}
+
+fn validated_chain_ids(chain_ids: &[String]) -> Result<Vec<String>> {
+    let mut unique_chain_ids = BTreeSet::new();
+    for chain_id in chain_ids {
+        let chain_id = chain_id.trim();
+        if chain_id.is_empty() || chain_id == PROCESS_SCOPE_ID {
+            bail!("heartbeat chain id must be non-blank and must not equal process");
+        }
+        unique_chain_ids.insert(chain_id.to_owned());
+    }
+    Ok(unique_chain_ids.into_iter().collect())
 }
 
 fn validate_service_name(service_name: &str) -> Result<()> {

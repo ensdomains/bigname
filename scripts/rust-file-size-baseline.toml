@@ -31,11 +31,6 @@ loc = 607
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."
 
 [[files]]
-path = "apps/indexer/src/main/normalized_replay_catchup.rs"
-loc = 609
-justification = "The per-chain catch-up lane carries provider-specific recovery configuration and a typed full-closure coverage failure while retaining its existing cursor and heartbeat lifecycle."
-
-[[files]]
 path = "crates/adapters/src/ens_v1_unwrapped_authority/loading/active_emitters.rs"
 loc = 808
 justification = "Phase 7 allowlist for an oversized production file; future changes should split or shrink it."

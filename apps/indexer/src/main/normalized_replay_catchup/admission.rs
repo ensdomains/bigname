@@ -3,8 +3,8 @@ use bigname_storage::projection_staging::wait_for_projection_replay_admission_re
 use sqlx::PgPool;
 
 use super::{
-    CatchupIterationStatus, NormalizedReplayCatchupConfig, cursors::record_cursor_failure,
-    run_normalized_replay_catchup_iteration_with_provider,
+    CatchupIterationStatus, NormalizedReplayCatchupConfig, ProjectionIndexCoordination,
+    cursors::record_cursor_failure, run_normalized_replay_catchup_iteration_with_provider,
 };
 use crate::{
     backfill::{CoinbaseSqlBackfillConfig, CoinbaseSqlSourceRegistry},
@@ -25,6 +25,7 @@ pub(super) async fn run_required_normalized_replay_catchup_iteration(
     provider: Option<&(impl ChainProviderOps + ?Sized)>,
     coinbase_sql_recovery: Option<(&CoinbaseSqlSourceRegistry, &CoinbaseSqlBackfillConfig)>,
     header_audit_mode: HeaderAuditMode,
+    projection_index_coordination: &ProjectionIndexCoordination,
     progress: &mut NormalizedReplayHeartbeat,
     activity: &RequiredSubtaskActivity,
 ) -> Result<CatchupIterationStatus> {
@@ -38,6 +39,7 @@ pub(super) async fn run_required_normalized_replay_catchup_iteration(
             provider,
             coinbase_sql_recovery,
             header_audit_mode,
+            projection_index_coordination,
             &mut Some(&mut *progress),
         )
         .await;

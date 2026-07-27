@@ -21,4 +21,10 @@ pub(crate) struct HealthcheckArgs {
         default_value_t = 20_i64
     )]
     pub(crate) heartbeat_max_age_secs: i64,
+    #[arg(
+        long,
+        env = "BIGNAME_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS",
+        default_value_t = bigname_storage::DEFAULT_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS
+    )]
+    pub(crate) chain_heartbeat_max_age_secs: i64,
 }

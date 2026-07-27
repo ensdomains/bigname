@@ -17,11 +17,13 @@ pub(crate) async fn healthcheck(args: HealthcheckArgs) -> Result<()> {
     verify_migrations_current(&pool).await?;
     let instance_id =
         bigname_storage::resolve_service_instance_id(args.heartbeat_instance_id.as_deref())?;
-    bigname_storage::ensure_service_loop_heartbeat_recent(
+    bigname_storage::ensure_service_loop_heartbeat_recent_with_phase_and_chain(
         &pool,
         bigname_storage::INDEXER_SERVICE_NAME,
         &instance_id,
         args.heartbeat_max_age_secs,
+        args.heartbeat_max_age_secs,
+        args.chain_heartbeat_max_age_secs,
     )
     .await?;
     println!("ok");
@@ -101,7 +103,7 @@ mod tests {
 
     use anyhow::Result;
     use bigname_storage::DatabaseConfig;
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
     use sqlx::{ConnectOptions, postgres::PgConnectOptions};
 
     use crate::cli::{Cli, Command};
@@ -164,9 +166,47 @@ mod tests {
                 assert_eq!(args.database.max_connections, 10);
                 assert_eq!(args.heartbeat_instance_id, None);
                 assert_eq!(args.heartbeat_max_age_secs, 20);
+                assert_eq!(
+                    args.chain_heartbeat_max_age_secs,
+                    bigname_storage::DEFAULT_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS
+                );
             }
             other => panic!("expected healthcheck command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn healthcheck_chain_threshold_has_its_own_environment_and_value() {
+        let cli = Cli::parse_from([
+            "bigname-indexer",
+            "healthcheck",
+            "--heartbeat-max-age-secs",
+            "7200",
+            "--chain-heartbeat-max-age-secs",
+            "60",
+        ]);
+        match cli.command {
+            Command::Healthcheck(args) => {
+                assert_eq!(args.heartbeat_max_age_secs, 7_200);
+                assert_eq!(args.chain_heartbeat_max_age_secs, 60);
+            }
+            other => panic!("expected healthcheck command, got {other:?}"),
+        }
+
+        let command = Cli::command();
+        let healthcheck = command
+            .find_subcommand("healthcheck")
+            .expect("healthcheck subcommand must exist");
+        let chain_threshold = healthcheck
+            .get_arguments()
+            .find(|argument| argument.get_id() == "chain_heartbeat_max_age_secs")
+            .expect("chain heartbeat threshold argument must exist");
+        assert_eq!(
+            chain_threshold.get_env(),
+            Some(std::ffi::OsStr::new(
+                "BIGNAME_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS"
+            ))
+        );
     }
 
     #[tokio::test]
@@ -210,10 +250,76 @@ mod tests {
             manifests_root: manifest_root.path().to_path_buf(),
             heartbeat_instance_id: Some("indexer-healthcheck-test".to_owned()),
             heartbeat_max_age_secs: 20,
+            chain_heartbeat_max_age_secs:
+                bigname_storage::DEFAULT_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS,
         })
         .await;
         database.cleanup().await?;
         result
+    }
+
+    #[tokio::test]
+    async fn healthcheck_applies_the_chain_threshold_independently_of_process_age() -> Result<()> {
+        let database = bigname_test_support::TestDatabase::create_migrated(
+            bigname_test_support::TestDatabaseConfig::new(
+                "bigname_indexer_healthcheck_chain_threshold",
+            ),
+            &bigname_storage::MIGRATOR,
+            "failed to apply migrations for indexer chain-threshold healthcheck test",
+        )
+        .await?;
+        let manifest_root = TestManifestRoot::create()?;
+        let instance_id = "indexer-chain-threshold-test";
+        bigname_storage::register_service_loop(
+            database.pool(),
+            bigname_storage::INDEXER_SERVICE_NAME,
+            instance_id,
+        )
+        .await?;
+        bigname_storage::record_service_loop_heartbeat(
+            database.pool(),
+            bigname_storage::INDEXER_SERVICE_NAME,
+            instance_id,
+            &["ethereum-mainnet".to_owned()],
+        )
+        .await?;
+        sqlx::query(
+            r#"
+            UPDATE service_loop_heartbeats
+            SET started_at = clock_timestamp() - INTERVAL '3 minutes',
+                heartbeat_at = clock_timestamp() - INTERVAL '2 minutes'
+            WHERE service_name = 'indexer'
+              AND instance_id = $1
+            "#,
+        )
+        .bind(instance_id)
+        .execute(database.pool())
+        .await?;
+
+        let stale_error = healthcheck(HealthcheckArgs {
+            database: database_config(&database)?,
+            manifests_root: manifest_root.path().to_path_buf(),
+            heartbeat_instance_id: Some(instance_id.to_owned()),
+            heartbeat_max_age_secs: 3_600,
+            chain_heartbeat_max_age_secs: 60,
+        })
+        .await
+        .expect_err("a large process threshold must not widen the chain threshold");
+        assert!(
+            stale_error.to_string().contains("maximum 60"),
+            "unexpected independent chain-threshold error: {stale_error:#}"
+        );
+
+        healthcheck(HealthcheckArgs {
+            database: database_config(&database)?,
+            manifests_root: manifest_root.path().to_path_buf(),
+            heartbeat_instance_id: Some(instance_id.to_owned()),
+            heartbeat_max_age_secs: 1,
+            chain_heartbeat_max_age_secs: 180,
+        })
+        .await?;
+
+        database.cleanup().await
     }
 
     #[tokio::test]
@@ -228,6 +334,8 @@ mod tests {
             manifests_root: manifest_root.path().to_path_buf(),
             heartbeat_instance_id: Some("indexer-healthcheck-unmigrated".to_owned()),
             heartbeat_max_age_secs: 20,
+            chain_heartbeat_max_age_secs:
+                bigname_storage::DEFAULT_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS,
         })
         .await
         .expect_err("unmigrated database must fail healthcheck");
@@ -256,6 +364,8 @@ mod tests {
             manifests_root: manifest_root.path().to_path_buf(),
             heartbeat_instance_id: Some("missing-indexer".to_owned()),
             heartbeat_max_age_secs: 20,
+            chain_heartbeat_max_age_secs:
+                bigname_storage::DEFAULT_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS,
         })
         .await
         .expect_err("an indexer loop that never started must fail healthcheck");
@@ -286,6 +396,8 @@ mod tests {
             manifests_root: manifest_root.path().to_path_buf(),
             heartbeat_instance_id: Some("stale-indexer".to_owned()),
             heartbeat_max_age_secs: 20,
+            chain_heartbeat_max_age_secs:
+                bigname_storage::DEFAULT_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS,
         })
         .await
         .expect_err("a wedged indexer loop must fail healthcheck");
@@ -309,6 +421,8 @@ mod tests {
             manifests_root: missing_root,
             heartbeat_instance_id: Some("missing-manifests".to_owned()),
             heartbeat_max_age_secs: 20,
+            chain_heartbeat_max_age_secs:
+                bigname_storage::DEFAULT_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS,
         })
         .await
         .expect_err("missing manifest root must fail healthcheck before database access");

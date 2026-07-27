@@ -275,7 +275,7 @@ async fn healthz_distinguishes_not_started_and_stale_service_loops() -> Result<(
 }
 
 #[tokio::test]
-async fn healthz_reports_a_stale_indexer_chain_while_its_peer_advances() -> Result<()> {
+async fn healthz_honors_the_indexer_chain_threshold_independently_of_process_age() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     register_ready_health_loops(&database).await?;
     let wedged_chain = "ethereum-mainnet";
@@ -290,8 +290,8 @@ async fn healthz_reports_a_stale_indexer_chain_while_its_peer_advances() -> Resu
     sqlx::query(
         r#"
         UPDATE service_loop_heartbeats
-        SET started_at = clock_timestamp() - INTERVAL '40 minutes',
-            heartbeat_at = clock_timestamp() - INTERVAL '31 minutes'
+        SET started_at = clock_timestamp() - INTERVAL '3 minutes',
+            heartbeat_at = clock_timestamp() - INTERVAL '2 minutes'
         WHERE service_name = 'indexer'
           AND instance_id = 'api-health-indexer'
           AND scope_kind = 'chain'
@@ -301,36 +301,37 @@ async fn healthz_reports_a_stale_indexer_chain_while_its_peer_advances() -> Resu
     .bind(wedged_chain)
     .execute(&database.pool)
     .await?;
-    bigname_storage::record_service_loop_heartbeat(
+    bigname_storage::record_service_loop_chain_heartbeat(
         &database.pool,
-        bigname_storage::INDEXER_SERVICE_NAME,
         "api-health-indexer",
-        &[peer_chain.to_owned()],
+        peer_chain,
     )
     .await?;
 
-    let response = app_router(database.app_state())
-        .oneshot(
-            Request::builder()
-                .uri("/healthz")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await?;
+    let response = app_router(
+        database
+            .app_state()
+            .with_heartbeat_max_age_secs(3_600)
+            .with_indexer_chain_heartbeat_max_age_secs(60),
+    )
+    .oneshot(
+        Request::builder()
+            .uri("/healthz")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await?;
     assert_eq!(response.status(), StatusCode::OK);
     let payload: Value = read_json(response).await?;
     assert_eq!(payload["status"], json!("degraded"));
     assert_eq!(payload["api_status"], json!("ready"));
     assert_eq!(payload["loops"]["indexer"]["status"], json!("stale"));
     assert_eq!(payload["loops"]["indexer"]["phase"], Value::Null);
-    assert_eq!(
-        payload["loops"]["indexer"]["max_age_seconds"],
-        json!(bigname_storage::DEFAULT_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS)
-    );
+    assert_eq!(payload["loops"]["indexer"]["max_age_seconds"], json!(60));
     assert!(
         payload["loops"]["indexer"]["heartbeat_age_seconds"]
             .as_i64()
-            .is_some_and(|age| age >= 31 * 60)
+            .is_some_and(|age| age >= 2 * 60)
     );
     assert_eq!(payload["loops"]["worker"]["status"], json!("running"));
 

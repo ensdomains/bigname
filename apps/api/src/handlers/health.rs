@@ -45,9 +45,7 @@ pub(super) async fn health(
                 check: "select_1",
                 error: None,
             };
-            let indexer_chain_max_age_secs = state
-                .heartbeat_max_age_secs
-                .max(state.indexer_chain_heartbeat_max_age_secs);
+            let indexer_chain_max_age_secs = state.indexer_chain_heartbeat_max_age_secs;
             match bigname_storage::load_preferred_service_loop_heartbeats_with_indexer_chain_max_age(
                 &health_pool.0,
                 &[
@@ -153,6 +151,18 @@ fn loop_health_response(
             max_age_seconds,
         };
     };
+    if heartbeat.missing_expected_chain_id.is_some()
+        && let Some(chain_max_age_seconds) = chain_max_age_seconds
+    {
+        return HealthLoopResponse {
+            status: "stale",
+            phase: None,
+            started_at: None,
+            heartbeat_at: None,
+            heartbeat_age_seconds: None,
+            max_age_seconds: chain_max_age_seconds,
+        };
+    }
     if let (Some(chain), Some(chain_max_age_seconds)) =
         (heartbeat.oldest_chain.as_ref(), chain_max_age_seconds)
         && chain.age_seconds > chain_max_age_seconds

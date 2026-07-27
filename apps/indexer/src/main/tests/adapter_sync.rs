@@ -1690,6 +1690,7 @@ async fn sync_adapter_owned_raw_log_state_backfills_wrapper_authority_from_store
             scope_id TEXT NOT NULL,
             started_at TIMESTAMPTZ NOT NULL,
             heartbeat_at TIMESTAMPTZ NOT NULL,
+            expected_chain_ids TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
             PRIMARY KEY (service_name, instance_id, scope_kind, scope_id)
         )
         "#,

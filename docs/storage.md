@@ -504,10 +504,17 @@ For ENSv2, `resource_id` keys by `(chain_id, registry_contract_instance_id, upst
 The API process is otherwise read-only against storage.
 
 `service_loop_heartbeats` identifies a service instance by `service_name` and
-`instance_id`. Registering the process-scoped row retires every same-service
-non-process row before it resets `started_at`; stale chain scopes and a prior
-service instance's unfinished phase therefore cannot survive a single-writer service
-handoff. Process rows remain available to rank instances during that handoff.
+`instance_id`. An indexer process row persists its exact expected live-chain
+set. Registering an indexer instance inherits the most recent process row's
+expected set, clears only the registering instance's prior non-process rows and
+orphan scopes whose instance no longer has a process row, and preserves another
+registered instance's chain rows during rolling handoff. The replacement is
+therefore unhealthy until it records the inherited expected chains instead of
+masking a running predecessor's missing or stale lane evidence. A full
+indexer-parent heartbeat replaces the expected set, seeds every expected chain
+row, and removes that instance's decommissioned chain rows. Worker registration
+retains its single-writer behavior and retires predecessor non-process rows.
+Process rows remain available to rank instances during a handoff.
 The supported deployment has one active writer for each service. Each main-loop tick
 advances `heartbeat_at` for its process row. The indexer registers this row
 immediately after opening its database pool, before startup bootstrap, and
@@ -537,11 +544,11 @@ exist, the indexer container healthcheck uses the per-chain contract described
 below. For each service, the API
 prefers an instance whose normal heartbeat or active phase is within that
 service's configured age, then falls back to the newest stale evidence when
-none is healthy. An indexer candidate with chain rows is healthy only when
-every row is within
-`max(BIGNAME_API_HEARTBEAT_MAX_AGE_SECS,
-BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS)`; the latter defaults to 1,800
-seconds. Indexer phases use the ordinary API indexer maximum; worker rebuild
+none is healthy. An indexer candidate with an expected live-chain set is
+healthy only when every expected row exists and is within
+`BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS`, which defaults to 5,400
+seconds independently of `BIGNAME_API_HEARTBEAT_MAX_AGE_SECS`. Indexer phases
+use the ordinary API indexer maximum; worker rebuild
 phases use their separate long-operation maximum. One live instance can
 therefore satisfy shared readiness
 without being hidden by a newer retained instance that stopped. Each
@@ -557,25 +564,30 @@ complete set of active normalized-event replay chain lanes, while chain lanes
 may hold child ownership concurrently. A parent work unit or required child
 iteration acquires ownership before it starts and releases ownership before an
 idle poll sleep. Parent progress stamps the process row and the complete current
-chain set. Each child-lane progress write stamps the process row and only that
-lane's chain row. Concurrent peer lanes can therefore keep the shared process
-row fresh, but cannot refresh a wedged lane's row. The indexer container
-healthcheck fails when any current chain row exceeds
-`max(BIGNAME_INDEXER_HEARTBEAT_MAX_AGE_SECS, 1800)` seconds; when chain rows
-exist, their all-chains check replaces the process-row age check. The API
-aggregate health evaluation applies the corresponding API threshold above. A
-parent wedge ages every chain row because the parent owns the exclusive
-boundary and new lane iterations cannot start.
+chain set. Each successful child-lane iteration, including an idle poll after
+catch-up, attempts the ordinary throttled progress write, which stamps the
+process row and only that lane's chain row. Concurrent peer lanes can therefore
+keep the shared process row fresh, but cannot refresh a wedged lane's row. The
+indexer container healthcheck fails when an expected row is missing or any
+current chain row exceeds
+`BIGNAME_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS`, independently of the process-row
+maximum; when an expected chain set exists, its all-chains check replaces the
+process-row age check. The API aggregate health evaluation applies the
+corresponding API threshold above. A parent wedge ages every chain row because
+the parent owns the exclusive boundary and new lane iterations cannot start.
 
-Catch-up heartbeats are progress-driven, not timer-driven. The 1,800-second
-chain-row floor is the supported maximum for one legitimate no-progress unit
-and leaves margin for SQL statements that run for more than eight minutes and
-for long coverage-verification segments. A deployment that admits a longer
-single statement or verification segment must raise
-`BIGNAME_INDEXER_HEARTBEAT_MAX_AGE_SECS` above that bound and raise
-`BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS` to keep API aggregate health
-aligned. A lane wedge becomes unhealthy only after this bound; until then it is
-intentionally indistinguishable from a slow atomic unit. Full-closure lock
+Catch-up heartbeats are completion-driven, not timer-driven. The chain
+threshold must exceed the longest legitimate atomic SQL statement or other
+indivisible operation inside one lane iteration. Live deployment evidence
+includes full-closure coverage-violation scans of about 37 minutes, and that
+duration grows with watch-plan size. Both the indexer and API chain thresholds
+therefore default to 5,400 seconds (90 minutes), providing roughly 2x margin
+over the observed scan. Operators must raise
+`BIGNAME_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS` and
+`BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS` together if a larger watch
+plan admits a longer atomic unit; changing either process-row threshold is not
+a substitute. A lane wedge becomes unhealthy only after this bound; until then
+it is intentionally indistinguishable from a slow atomic unit. Full-closure lock
 waits for each deployment profile and chain are tracked as separate in-process
 memberships that share one aggregate phase row; its oldest timestamp remains
 until the final unresolved wait acquires ownership. No timer generates beats
@@ -657,8 +669,8 @@ and must be allowed to make the heartbeat stale.
 | indexer resolver-profile convergence | drain input changes and materialize reconciliation targets | newly-covered (#229) | Each 1,000-input page and each completed target/family page. A progress-enabled drain rejects pools below four connections, reserving capacity for the runtime writer guard, reconciliation guard, bounded authority/event reads, and heartbeat writes. |
 | indexer resolver-profile convergence | replay resolver targets, stage/publish events, and enqueue invalidations | newly-covered (#229) | Completed target/log/state pages, 1,000-row staged-event and invalidation pages, family publication, and acknowledged input pages. |
 | indexer spawned task | wait for full-closure replay ownership | newly-covered (#156) | The first unresolved nonblocking lock attempt starts the aggregate `full_closure_replay_lock.wait` phase; 50-millisecond poll ticks never beat. Waits remain separate for each deployment profile and chain, so another chain cannot clear or refresh the oldest timestamp; the final unresolved acquisition finishes the phase. |
-| indexer spawned task | automatic normalized-event replay catch-up | newly-covered (#229) | One required task per chain independently runs chunks, coverage recovery, failure journaling, and idle/error poll sleeps. Completed stateless replay pages, adapter-internal pages, full-closure adapter boundaries, replay chunks, durable cursor publications, and checkpoint cleanup advance the shared process row plus only that lane's chain row. Chain lanes may own work concurrently; a healthy peer cannot refresh another lane's row, and parent work takes exclusive activity ownership. Full-closure waits for each deployment profile and chain share the aggregate phase without interfering with each other's membership, and every lane's exit or panic fails supervision (#242). |
-| indexer spawned task | normalized-replay projection-index preparation and restoration DDL statements | n-a | Each PostgreSQL catalog check and `CREATE INDEX` or `DROP INDEX` statement is atomic at the application boundary, with no safe successful progress callback inside the statement. The replay iteration retains heartbeat ownership, so a slow or stuck statement intentionally ages its chain row instead of receiving a synthetic beat; a peer may still advance the shared process row and its own chain row. |
+| indexer spawned task | automatic normalized-event replay catch-up | newly-covered (#229) | One required task per chain independently runs chunks, coverage recovery, failure journaling, and idle/error poll sleeps. Completed stateless replay pages, adapter-internal pages, full-closure adapter boundaries, replay chunks, durable cursor publications, checkpoint cleanup, and successful idle iterations advance the shared process row plus only that lane's chain row, subject to the ordinary write throttle. Chain lanes may own work concurrently; a healthy peer cannot refresh another lane's row, and parent work takes exclusive activity ownership. Full-closure waits for each deployment profile and chain share the aggregate phase without interfering with each other's membership, and every lane's exit or panic fails supervision (#242). |
+| indexer spawned task | normalized-replay projection-index preparation and restoration DDL statements | n-a | Each PostgreSQL catalog check and `CREATE INDEX` or `DROP INDEX` statement is atomic at the application boundary, with no safe successful progress callback inside the statement. Every session that requires restored indexes holds a process-shared read permit for its complete replay, while index deferral takes the exclusive permit before the existing DDL guard. Both restoration and deferral therefore acquire process coordination before the DDL guard; a drop waits for active closure replay, and closure replay waits for an in-progress drop without a reverse lock order. The replay iteration retains heartbeat ownership, so a slow or stuck statement intentionally ages its chain row instead of receiving a synthetic beat; a peer may still advance the shared process row and its own chain row. |
 | indexer one-shot modes | manual backfill, replay, rewind, repair, and operational catch-up commands | n-a | These commands do not run inside the registered `indexer run` service loop, so service-loop heartbeat coverage does not describe their completion. Backfill range leases retain their separate ownership heartbeat. |
 
 A named phase is a distinct `scope_kind='phase'` row for a service instance.
@@ -670,6 +682,9 @@ phase removes it and refreshes ordinary process evidence. Graceful worker
 shutdown first deletes its process row as a write fence, then deletes the
 instance's remaining heartbeat rows; a new same-service registration also
 clears phases left by a predecessor that exited without running the hook.
+Indexer same-instance registration clears that prior lifetime's scopes, and any
+later registration prunes non-process scopes whose departed instance no longer
+owns a process row.
 Ordinary worker heartbeat-write failures warn and
 continue so a transient database write failure degrades liveness evidence and
 remains due for retry, rather than converting the database blip into worker
@@ -1490,7 +1505,7 @@ Repair does not write `raw_*`, `backfill_*`, projections, manifests, discovery r
 
 ### Bulk-load index deferral
 
-During fresh normalized replay — current projection tables empty, normalized replay cursor not at target — the indexer may defer normalized-event indexes that exist only for projection/API readback while keeping replay-required indexes for event identity, reverse-claim lookup, and latest resolver/version preloads. The retained temporary latest-resolver, latest-record-version, and latest-registrar indexes are the database marker that this absence is intentional. Index deferral/restoration and post-migration index repair use one cross-process advisory fence: `worker migrate` does not recreate a deliberately deferred record-inventory replay index while any marker remains, but it repairs an invalid or missing index when replay is not deferring it. Replay removes the markers only after every deferred index is ready. Deferred indexes are therefore recreated before projection rebuilds or API-ready declared reads complete.
+During fresh normalized replay — current projection tables empty, normalized replay cursor not at target — the indexer may defer normalized-event indexes that exist only for projection/API readback while keeping replay-required indexes for event identity, reverse-claim lookup, and latest resolver/version preloads. The retained temporary latest-resolver, latest-record-version, and latest-registrar indexes are the database marker that this absence is intentional. Index deferral/restoration and post-migration index repair use one cross-process advisory fence. Inside one indexer process, every closure/dependency replay session holds a shared restored-index permit for its full history scan, while a fresh stateless session takes the exclusive permit before attempting deferral and releases it after the index-mode transition. Both paths acquire that process permit before the advisory DDL guard, so a fresh lane cannot drop indexes during another lane's closure scan and neither ordering creates a lock cycle. `worker migrate` does not recreate a deliberately deferred record-inventory replay index while any marker remains, but it repairs an invalid or missing index when replay is not deferring it. Replay removes the markers only after every deferred index is ready. Deferred indexes are therefore recreated before projection rebuilds or API-ready declared reads complete.
 
 `current_projection_replay_status` rows let worker restarts resume from the first unfinished projection family instead of restarting bootstrap/full replay from the start. They are worker-owned operational progress: not API truth, not projection data, not live-readiness state, and ignored unless the recorded replay version and full-replay input revision are current and the recorded normalized target covers the requested replay target. The API does not read this table. The full-replay input singleton also retains the activation state and minimum projection replay version admitted to projection-owned writes, even when a later direct-input repair invalidates all markers and the automatic attempt. Every new database connection stamps the binary's compiled replay version. Replay-state writers lock the singleton exclusively, reject a compiled version below the stored minimum or any persisted attempt, checkpoint, or marker version, and activate or raise the fence in the same transaction. Statement triggers on the invalidation queue and cursor, current projection and companion tables, replay state, and the singleton itself normally take the shared lock before every write. Before activation they serialize any already-running pre-fence writer with the first fence-aware replay. After activation, they reject both a lower stamp and a missing stamp from a pre-fence binary. A statement trigger that finds replay admission already holding the singleton fails immediately rather than waiting after its table lock and creating a reverse lock-order deadlock. A current, validly stamped writer receives the one retryable admission error. An unstamped or already-outdated process receives the fatal outdated-process error; missing singleton state and invalid stamps are also fatal fence failures, but are not classified as outdated. Claimed apply also holds an explicit shared fence through projection publication and queue completion, while claim, claim-heartbeat, invalidation derive, and hydration transactions perform their own typed checks. An earlier shared writer therefore commits before newer replay admission, while an outdated writer arriving afterward fails fatally without claiming or publishing. Dynamic stage-table writes are coupled to a protected checkpoint mutation in the same transaction. A direct non-event source repair advances the input revision and invalidates markers and the automatic attempt in its source-update transaction without lowering the replay-version minimum. Automatic bootstrap holds its cross-process replay lock from apply-cursor baseline selection through family replay. The manual `replay all-current-projections` command tries to acquire that same lock and exits with a clear ownership error instead of competing with automatic replay. Projection-specific one-shot rebuild commands also acquire it before clearing a marker or entering durable full-family staging, and fail without changing shared replay state when another process owns the lock. Once admitted, a manual all-current command first reuses a compatible persisted attempt and its target. Without an attempt, it starts one at the same normalized-replay and chain-checkpoint head used by automatic bootstrap when either head exists, resumes only unfinished families, and writes that real target on every completion marker. Those target-bearing markers can therefore satisfy the later automatic handoff. When no attempt and neither head exist, the manual command instead proceeds without creating an attempt and writes `NULL`-target checkpoints and completion markers. No automatic attempt exists to consume that targetless progress, and a later attempt with a concrete target does not treat those markers as covering it. The final automatic transaction locks the input revision, verifies all seven compatible markers, creates a missing `projection_apply_cursors` row at the persisted attempt baseline, and consumes the attempt. Continuous apply therefore cannot observe the handoff cursor before the protected replay has completed.
 
