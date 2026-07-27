@@ -28,6 +28,14 @@ pub(crate) enum StartupFamilySyncCompletion {
 }
 
 impl StartupFamilySyncAttempt {
+    pub(crate) fn scanned_lineage_extent_block_number(&self) -> Option<i64> {
+        self.started_key.as_ref().map(|key| {
+            key.canonical_lineage_head
+                .as_ref()
+                .map_or(0, |head| head.block_number)
+        })
+    }
+
     pub(crate) async fn complete_or_retry(
         self,
         pool: &sqlx::PgPool,

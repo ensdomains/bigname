@@ -1078,6 +1078,24 @@ async fn replay_normalized_events_rejects_deployment_profile_outside_active_mani
             .contains("does not match active manifest/discovery corpus profile mainnet"),
         "unexpected error: {error:?}"
     );
+    let stateless_error = replay_stateless_only_raw_fact_normalized_events(
+        database.pool(),
+        RawFactNormalizedEventReplayRequest {
+            deployment_profile: "sepolia".to_owned(),
+            chain: chain.to_owned(),
+            selection: RawFactNormalizedEventReplaySelection::BlockRange {
+                from_block: block.block_number,
+                to_block: block.block_number,
+            },
+        },
+    )
+    .await
+    .expect_err("mismatched deployment profile must be rejected for stateless-only repair");
+    assert!(
+        format!("{stateless_error:?}")
+            .contains("does not match active manifest/discovery corpus profile mainnet"),
+        "unexpected stateless-only error: {stateless_error:?}"
+    );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM normalized_events")
             .fetch_one(database.pool())

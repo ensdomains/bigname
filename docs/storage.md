@@ -1269,21 +1269,33 @@ error.
 
 The post-bootstrap startup adapter sync uses the separate
 `startup_adapter_owned_raw_log_state` cursor namespace and
-`startup_adapter_sync` checkpoint scope. It latches the greatest canonical
-stored block or raw-log block for the chain and uses the existing ENSv1
-adapter-private checkpoint formats without sharing rows with full-closure
-replay. A completed family result is reusable across process starts only when
-its raw-log [input revision](glossary.md), raw-log retention
-[generation](glossary.md), trigger-maintained per-chain [lineage mutation
-revision](glossary.md#lineage-mutation-revision), highest canonical lineage
-block number and hash, discovery-[admission epoch](glossary.md),
-adapter-declared derivation version, applied migration count, and highest
-applied migration version all exactly match the current database and binary.
+`startup_adapter_sync` checkpoint scope. When the startup key is known, it
+latches the unambiguous highest canonical lineage block as the inclusive scan
+extent (or block zero for an empty lineage corpus), and every family scan is
+bounded through that extent. It uses the existing ENSv1 adapter-private
+checkpoint formats without sharing rows with full-closure replay. A completed
+family result records both that consumed lineage extent and the lineage
+revision and head accepted when completion was published. Its raw-log [input
+revision](glossary.md), raw-log retention [generation](glossary.md),
+discovery-[admission epoch](glossary.md), adapter-declared derivation version,
+applied migration count, and highest applied migration version must exactly
+match the current database and binary.
+
 Statement triggers advance the lineage mutation revision once for each affected
-chain on a `chain_lineage` insert, update, or delete. It therefore changes when
-a header-anchor backfill inserts a block below the stored head, as well as when
-an empty block advances the head or a same-height branch switch replaces it,
-even though none of those changes needs to mutate a retained raw log.
+chain on a `chain_lineage` insert, update, or delete, and write one evidence row
+for that revision with the lowest affected block number. A later completion or
+boot may retain the completed prefix only when every revision after the
+recorded revision has exactly one evidence row and every such row is strictly
+above the recorded scan extent. The current head must still cover that extent;
+when no newer revision exists, it must exactly match the head accepted with the
+recorded revision. A mutation at or below the extent, a missing evidence row, a
+revision gap, a lower or ambiguous current head, or malformed checkpoint
+evidence invalidates the completion. This lets an old and new indexer overlap:
+live tail growth above a bounded pass does not force that pass to retry, and a
+quiet chain can reuse a completed prefix after its head advances. A header-anchor
+backfill below the stored head or a same-height branch switch still invalidates,
+even when neither change mutates a retained raw log.
+
 The discovery-admission epoch covers manifest-declared and discovered watched
 addresses that can change adapter inputs without changing raw logs. Migration
 state is deliberately conservative: any newly applied migration invalidates
@@ -1301,26 +1313,33 @@ finishes its checkpoint-table DDL and ledger write before startup can enter
 verification; startup never holds a ledger lock while waiting behind that DDL.
 
 Missing rows, a status other than `completed`, absent key fields, an unknown
-raw-log revision row, revision or generation drift, canonical-lineage drift,
-discovery-admission drift, an adapter-version mismatch, or migration-state skew
-all run the complete family sync. The indexer checks the key under the raw-log,
-lineage, admission, and migration fences before accepting a completed result
-and again before publishing a replacement completion row; input drift during a
-scan is never recorded as reusable completion. If a pass reports changed
-inputs, its existing family checkpoint row is deleted unconditionally inside
-the fenced completion transaction before the bounded retry; a completion that
-was already present is not treated as proof that this pass left its derived
-rows intact. A partial ENSv1 `running` or `stream_complete` row keeps its durable
-boundary only when the lineage mutation revision is unchanged, the retention generation
+raw-log revision row, raw-log revision or generation drift, an unproved
+lineage-prefix change, discovery-admission drift, an adapter-version mismatch,
+or migration-state skew all run the complete family sync. The indexer checks
+the key under the raw-log, lineage, admission, and migration fences before
+accepting a completed result and again before publishing a replacement
+completion row. Only fully evidenced lineage mutations strictly above the
+latched extent are non-invalidating; other input drift during a scan is never
+recorded as reusable completion. If a pass reports changed inputs, its existing
+family checkpoint row is deleted unconditionally inside the fenced completion
+transaction before the bounded retry; a completion that was already present is
+not treated as proof that this pass left its derived rows intact. If prepare
+cannot capture a complete key, the family still runs, but the fenced completion
+step deletes the exact deployment-profile, chain, cursor, adapter, and startup
+scope row. This also removes a completion that an ENSv1 private checkpoint
+writer may have stamped after prepare, so no row produced under uncaptured
+inputs can become reusable when the missing key component later appears.
+
+A partial ENSv1 `running` or `stream_complete` row keeps its durable boundary
+only when the lineage mutation revision is unchanged, the retention generation
 is unchanged, and the per-block revision ledger proves every newer raw-log
 mutation is strictly above the consumed boundary. Lineage drift, a raw-log
 mutation at or below that boundary, missing proof, authority drift, or version
-drift resets it to block zero. Completed-row reuse remains exact-key only;
-partial state never skips the family. If more than one canonical, safe, or
-finalized lineage row exists at the highest stored height, startup logs a
-warning, treats the key as unknown, runs the full sync, and publishes no
-reusable completion instead of failing the boot. ENSv2 registry reconciliation
-is the expected self-invalidating case:
+drift resets it to block zero. Partial state never skips the family. If more
+than one canonical, safe, or finalized lineage row exists at the highest stored
+height, startup logs a warning, treats the key as unknown, runs the full sync,
+and retains no reusable completion instead of failing the boot. ENSv2 registry
+reconciliation is the expected self-invalidating case:
 admitting a registry or resolver advances the discovery-admission epoch. The
 indexer repeats that complete family scan against the new key until a pass
 leaves the key stable, with the same 1,024-pass safety ceiling used by the other
@@ -1357,7 +1376,8 @@ the next boot. When lineage is unchanged and a later raw-log revision changes
 only blocks strictly above the retained `running` or `stream_complete`
 boundary, the later boot resumes from that boundary; lineage drift or a changed
 consumed block resets the walk. Successful startup retains completed
-startup-scoped rows and their adapter-private items for exact-key reuse.
+startup-scoped rows and their adapter-private items for evidence-qualified
+prefix reuse.
 Adapters that do not need private staged items use the same checkpoint table
 for a completion row only.
 
@@ -1375,12 +1395,27 @@ durable `raw_log_preimage_observation` rows emitted by
 `block_derived_normalized_events`, so its version also composes that producer's
 declaration. A producer bump therefore invalidates each known downstream
 family without requiring separate downstream declaration bumps. Unrelated
-families keep their existing versions.
+families keep their existing versions. Whenever a checkpointed ENSv2
+permissions family must rerun, startup first runs the central authoritative
+stateless raw-fact replay through the same latched extent, in bounded whole-block
+pages, and only then runs the permissions scan and permits its completion to be
+published. This deliberately applies to every permissions rerun because the
+persisted composed version does not identify which component changed. A
+producer-replay failure aborts before permissions completion, so a producer
+declaration bump cannot cause stale durable resolver-resource hints to be
+republished under a current-looking permissions checkpoint. The startup
+deployment profile remains the operational checkpoint identity; this internal
+replay derives its source scope from the already admitted stored manifest and
+discovery corpus rather than requiring that identity to equal the manifest
+corpus profile used by manual replay requests.
 
 The static repository check maps each family-owned production path to its
 declaration, maps shared module prefixes to every affected family, and maps
 declared producer paths to producer components. It rejects a mapped production
-change whose declaration did not increase. CI fetches and validates its own
+change whose declaration did not increase. The manifest watched-contract
+loader path (`crates/manifests/src/lib/views/watched.rs` and its module
+directory) maps to every family because it supplies every family emitter set.
+CI fetches and validates its own
 comparison commit; pull requests compare with the target branch and ordinary
 pushes compare with the event's full pre-push commit. A branch-creation event
 has no range base and retains the documented one-parent fallback. The check

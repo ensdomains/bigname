@@ -1,21 +1,29 @@
 use anyhow::{Context, Result, ensure};
-use serde_json::{Value, json};
 use sqlx::{Acquire, PgConnection, PgPool, Postgres, Row, migrate::Migrate, pool::PoolConnection};
 
 use crate::RawLogStagingInputVersion;
 
+mod checkpoint;
 mod lineage;
 
+use checkpoint::{
+    completed_checkpoint_matches, invalidate_completed_startup_adapter_checkpoint,
+    invalidate_startup_adapter_checkpoint, publish_completed_checkpoint,
+};
 pub use lineage::{
     StartupAdapterLineageState, StartupCanonicalLineageHead, load_startup_adapter_lineage_state,
 };
-use lineage::{load_startup_adapter_lineage_state_from_connection, lock_canonical_lineage};
+use lineage::{
+    completed_lineage_extent_is_reusable, load_startup_adapter_lineage_state_from_connection,
+    lock_canonical_lineage,
+};
 
 pub const STARTUP_ADAPTER_CURSOR_KIND: &str = "startup_adapter_owned_raw_log_state";
 pub const STARTUP_ADAPTER_CHECKPOINT_SCOPE: &str = "startup_adapter_sync";
 pub const STARTUP_DISCOVERY_ADMISSION_EPOCH_FIELD: &str = "startup_discovery_admission_epoch";
 pub const STARTUP_CANONICAL_LINEAGE_HEAD_FIELD: &str = "startup_canonical_lineage_head";
 pub const STARTUP_LINEAGE_MUTATION_REVISION_FIELD: &str = "startup_lineage_mutation_revision";
+pub const STARTUP_LINEAGE_SCAN_EXTENT_FIELD: &str = "startup_lineage_scan_extent";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StartupAdapterSyncKey {
@@ -105,18 +113,15 @@ pub async fn complete_startup_adapter_sync(
     started_key: Option<StartupAdapterSyncKey>,
 ) -> Result<StartupAdapterSyncCompletion> {
     validate_identity(deployment_profile, chain, adapter, adapter_semantic_version)?;
-    let Some(started_key) = started_key else {
-        return Ok(StartupAdapterSyncCompletion::KeyUnknown);
-    };
-
     let mut migration_guard = StartupMigrationLockGuard::acquire(pool).await?;
     let operation_result = async {
         let mut transaction =
             begin_startup_adapter_fence(migration_guard.connection_mut(), chain).await?;
-        let current_key =
-            load_startup_adapter_sync_key(transaction.as_mut(), chain, adapter_semantic_version)
-                .await?;
-        if current_key.as_ref() != Some(&started_key) {
+        let Some(started_key) = started_key else {
+            // A private ENSv1 checkpoint may have become `completed` after the
+            // outer prepare observed an unknown key. Delete the exact startup
+            // scope while every input is fenced so that row cannot become
+            // trusted if the missing key component appears later.
             invalidate_startup_adapter_checkpoint(
                 transaction.as_mut(),
                 deployment_profile,
@@ -124,16 +129,61 @@ pub async fn complete_startup_adapter_sync(
                 adapter,
             )
             .await?;
-            let completion = if current_key.is_some() {
-                StartupAdapterSyncCompletion::InputChanged
-            } else {
-                StartupAdapterSyncCompletion::KeyUnknown
-            };
+            transaction
+                .commit()
+                .await
+                .context("failed to fence unknown startup adapter completion")?;
+            return Ok(StartupAdapterSyncCompletion::KeyUnknown);
+        };
+        let current_key =
+            load_startup_adapter_sync_key(transaction.as_mut(), chain, adapter_semantic_version)
+                .await?;
+        let Some(current_key) = current_key else {
+            invalidate_startup_adapter_checkpoint(
+                transaction.as_mut(),
+                deployment_profile,
+                chain,
+                adapter,
+            )
+            .await?;
             transaction
                 .commit()
                 .await
                 .context("failed to finish changed startup adapter input check")?;
-            return Ok(completion);
+            return Ok(StartupAdapterSyncCompletion::KeyUnknown);
+        };
+        let non_lineage_key_matches = current_key.raw_log_input_version
+            == started_key.raw_log_input_version
+            && current_key.discovery_admission_epoch == started_key.discovery_admission_epoch
+            && current_key.adapter_semantic_version == started_key.adapter_semantic_version
+            && current_key.schema_migration_count == started_key.schema_migration_count
+            && current_key.schema_migration_max_version == started_key.schema_migration_max_version;
+        let lineage_extent_reusable = non_lineage_key_matches
+            && completed_lineage_extent_is_reusable(
+                transaction.as_mut(),
+                chain,
+                started_key.lineage_mutation_revision,
+                started_key.canonical_lineage_head.as_ref(),
+                started_key.canonical_lineage_head.as_ref(),
+                &StartupAdapterLineageState {
+                    mutation_revision: current_key.lineage_mutation_revision,
+                    canonical_lineage_head: current_key.canonical_lineage_head.clone(),
+                },
+            )
+            .await?;
+        if !lineage_extent_reusable {
+            invalidate_startup_adapter_checkpoint(
+                transaction.as_mut(),
+                deployment_profile,
+                chain,
+                adapter,
+            )
+            .await?;
+            transaction
+                .commit()
+                .await
+                .context("failed to finish changed startup adapter input check")?;
+            return Ok(StartupAdapterSyncCompletion::InputChanged);
         }
 
         publish_completed_checkpoint(
@@ -141,7 +191,8 @@ pub async fn complete_startup_adapter_sync(
             deployment_profile,
             chain,
             adapter,
-            &started_key,
+            &current_key,
+            started_key.canonical_lineage_head.as_ref(),
         )
         .await?;
         transaction
@@ -272,210 +323,6 @@ async fn lock_and_load_schema_state(connection: &mut PgConnection) -> Result<Opt
     })
 }
 
-async fn completed_checkpoint_matches(
-    connection: &mut PgConnection,
-    deployment_profile: &str,
-    chain: &str,
-    adapter: &str,
-    key: &StartupAdapterSyncKey,
-) -> Result<bool> {
-    sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM normalized_replay_adapter_checkpoints
-            WHERE deployment_profile = $1
-              AND chain_id = $2
-              AND cursor_kind = $3
-              AND adapter = $4
-              AND checkpoint_scope = $5
-              AND status = 'completed'
-              AND completed_at IS NOT NULL
-              AND raw_log_retention_generation = $6
-              AND raw_log_input_revision = $7
-              AND adapter_semantic_version = $8
-              AND schema_migration_count = $9
-              AND schema_migration_max_version = $10
-              AND state_payload -> $11 = to_jsonb($12::BIGINT)
-              AND state_payload -> $13 = to_jsonb($14::BIGINT)
-              AND state_payload -> $15 = $16::JSONB
-        )
-        "#,
-    )
-    .bind(deployment_profile)
-    .bind(chain)
-    .bind(STARTUP_ADAPTER_CURSOR_KIND)
-    .bind(adapter)
-    .bind(STARTUP_ADAPTER_CHECKPOINT_SCOPE)
-    .bind(key.raw_log_input_version.retention_generation)
-    .bind(key.raw_log_input_version.revision)
-    .bind(key.adapter_semantic_version)
-    .bind(key.schema_migration_count)
-    .bind(key.schema_migration_max_version)
-    .bind(STARTUP_DISCOVERY_ADMISSION_EPOCH_FIELD)
-    .bind(key.discovery_admission_epoch)
-    .bind(STARTUP_LINEAGE_MUTATION_REVISION_FIELD)
-    .bind(key.lineage_mutation_revision)
-    .bind(STARTUP_CANONICAL_LINEAGE_HEAD_FIELD)
-    .bind(canonical_lineage_head_payload(
-        key.canonical_lineage_head.as_ref(),
-    ))
-    .fetch_one(connection)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to verify completed startup adapter checkpoint for \
-             {deployment_profile}/{chain}/{adapter}"
-        )
-    })
-}
-
-async fn publish_completed_checkpoint(
-    connection: &mut PgConnection,
-    deployment_profile: &str,
-    chain: &str,
-    adapter: &str,
-    key: &StartupAdapterSyncKey,
-) -> Result<()> {
-    let state_payload = json!({
-        (STARTUP_DISCOVERY_ADMISSION_EPOCH_FIELD): key.discovery_admission_epoch,
-        (STARTUP_LINEAGE_MUTATION_REVISION_FIELD): key.lineage_mutation_revision,
-        (STARTUP_CANONICAL_LINEAGE_HEAD_FIELD):
-            canonical_lineage_head_payload(key.canonical_lineage_head.as_ref()),
-    });
-    sqlx::query(
-        r#"
-        INSERT INTO normalized_replay_adapter_checkpoints (
-            deployment_profile,
-            chain_id,
-            cursor_kind,
-            adapter,
-            checkpoint_scope,
-            replay_start_block_number,
-            replay_target_block_number,
-            status,
-            state_payload,
-            raw_log_retention_generation,
-            raw_log_input_revision,
-            adapter_semantic_version,
-            schema_migration_count,
-            schema_migration_max_version,
-            completed_at
-        )
-        VALUES ($1, $2, $3, $4, $5, 0, 0, 'completed', $6, $7, $8, $9, $10, $11, now())
-        ON CONFLICT (
-            deployment_profile,
-            chain_id,
-            cursor_kind,
-            adapter,
-            checkpoint_scope
-        )
-        DO UPDATE SET
-            status = 'completed',
-            state_payload = (
-                CASE
-                    WHEN jsonb_typeof(normalized_replay_adapter_checkpoints.state_payload) = 'object'
-                        THEN normalized_replay_adapter_checkpoints.state_payload
-                    ELSE '{}'::JSONB
-                END
-            ) || EXCLUDED.state_payload,
-            raw_log_retention_generation = EXCLUDED.raw_log_retention_generation,
-            raw_log_input_revision = EXCLUDED.raw_log_input_revision,
-            adapter_semantic_version = EXCLUDED.adapter_semantic_version,
-            schema_migration_count = EXCLUDED.schema_migration_count,
-            schema_migration_max_version = EXCLUDED.schema_migration_max_version,
-            last_failure_reason = NULL,
-            completed_at = now(),
-            updated_at = now()
-        "#,
-    )
-    .bind(deployment_profile)
-    .bind(chain)
-    .bind(STARTUP_ADAPTER_CURSOR_KIND)
-    .bind(adapter)
-    .bind(STARTUP_ADAPTER_CHECKPOINT_SCOPE)
-    .bind(state_payload)
-    .bind(key.raw_log_input_version.retention_generation)
-    .bind(key.raw_log_input_version.revision)
-    .bind(key.adapter_semantic_version)
-    .bind(key.schema_migration_count)
-    .bind(key.schema_migration_max_version)
-    .execute(connection)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to publish completed startup adapter checkpoint for \
-             {deployment_profile}/{chain}/{adapter}"
-        )
-    })?;
-    Ok(())
-}
-
-async fn invalidate_startup_adapter_checkpoint(
-    connection: &mut PgConnection,
-    deployment_profile: &str,
-    chain: &str,
-    adapter: &str,
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        DELETE FROM normalized_replay_adapter_checkpoints
-        WHERE deployment_profile = $1
-          AND chain_id = $2
-          AND cursor_kind = $3
-          AND adapter = $4
-          AND checkpoint_scope = $5
-        "#,
-    )
-    .bind(deployment_profile)
-    .bind(chain)
-    .bind(STARTUP_ADAPTER_CURSOR_KIND)
-    .bind(adapter)
-    .bind(STARTUP_ADAPTER_CHECKPOINT_SCOPE)
-    .execute(connection)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to invalidate changed startup adapter checkpoint for \
-             {deployment_profile}/{chain}/{adapter}"
-        )
-    })?;
-    Ok(())
-}
-
-async fn invalidate_completed_startup_adapter_checkpoint(
-    connection: &mut PgConnection,
-    deployment_profile: &str,
-    chain: &str,
-    adapter: &str,
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        DELETE FROM normalized_replay_adapter_checkpoints
-        WHERE deployment_profile = $1
-          AND chain_id = $2
-          AND cursor_kind = $3
-          AND adapter = $4
-          AND checkpoint_scope = $5
-          AND status = 'completed'
-        "#,
-    )
-    .bind(deployment_profile)
-    .bind(chain)
-    .bind(STARTUP_ADAPTER_CURSOR_KIND)
-    .bind(adapter)
-    .bind(STARTUP_ADAPTER_CHECKPOINT_SCOPE)
-    .execute(connection)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to invalidate non-matching completed startup adapter checkpoint for \
-             {deployment_profile}/{chain}/{adapter}"
-        )
-    })?;
-    Ok(())
-}
-
 struct StartupMigrationLockGuard {
     connection: Option<PoolConnection<Postgres>>,
 }
@@ -544,10 +391,6 @@ async fn begin_startup_adapter_fence<'a>(
         .with_context(|| format!("failed to fence startup raw-log truncation for {chain}"))?;
     lock_canonical_lineage(transaction.as_mut(), chain).await?;
     Ok(transaction)
-}
-
-fn canonical_lineage_head_payload(head: Option<&StartupCanonicalLineageHead>) -> Value {
-    json!(head)
 }
 
 fn prioritize_lock_release<T>(

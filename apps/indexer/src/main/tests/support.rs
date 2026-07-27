@@ -1400,20 +1400,42 @@ async fn create_chain_lineage_mutation_revision_fixture(pool: &PgPool) -> Result
             revision BIGINT NOT NULL CHECK (revision >= 0)
         );
 
+        CREATE TABLE chain_lineage_mutation_revision_evidence (
+            chain_id TEXT NOT NULL,
+            revision BIGINT NOT NULL CHECK (revision > 0),
+            min_affected_block_number BIGINT NOT NULL CHECK (min_affected_block_number >= 0),
+            PRIMARY KEY (chain_id, revision)
+        );
+
         CREATE FUNCTION bump_chain_lineage_mutation_revision_after_insert()
         RETURNS trigger
         LANGUAGE plpgsql
         AS $$
         DECLARE
             affected_chain TEXT;
+            next_revision BIGINT;
+            min_affected_block_number BIGINT;
         BEGIN
             FOR affected_chain IN
                 SELECT DISTINCT chain_id FROM inserted_rows ORDER BY chain_id
             LOOP
+                SELECT MIN(block_number)
+                INTO STRICT min_affected_block_number
+                FROM inserted_rows
+                WHERE chain_id = affected_chain;
+
                 INSERT INTO chain_lineage_mutation_revisions (chain_id, revision)
                 VALUES (affected_chain, 1)
                 ON CONFLICT (chain_id) DO UPDATE
-                SET revision = chain_lineage_mutation_revisions.revision + 1;
+                SET revision = chain_lineage_mutation_revisions.revision + 1
+                RETURNING revision INTO next_revision;
+
+                INSERT INTO chain_lineage_mutation_revision_evidence (
+                    chain_id,
+                    revision,
+                    min_affected_block_number
+                )
+                VALUES (affected_chain, next_revision, min_affected_block_number);
             END LOOP;
             RETURN NULL;
         END;
@@ -1425,6 +1447,8 @@ async fn create_chain_lineage_mutation_revision_fixture(pool: &PgPool) -> Result
         AS $$
         DECLARE
             affected_chain TEXT;
+            next_revision BIGINT;
+            min_affected_block_number BIGINT;
         BEGIN
             FOR affected_chain IN
                 SELECT chain_id
@@ -1435,10 +1459,30 @@ async fn create_chain_lineage_mutation_revision_fixture(pool: &PgPool) -> Result
                 ) AS affected_chains
                 ORDER BY chain_id
             LOOP
+                SELECT MIN(block_number)
+                INTO STRICT min_affected_block_number
+                FROM (
+                    SELECT block_number
+                    FROM deleted_rows
+                    WHERE chain_id = affected_chain
+                    UNION ALL
+                    SELECT block_number
+                    FROM inserted_rows
+                    WHERE chain_id = affected_chain
+                ) AS affected_rows;
+
                 INSERT INTO chain_lineage_mutation_revisions (chain_id, revision)
                 VALUES (affected_chain, 1)
                 ON CONFLICT (chain_id) DO UPDATE
-                SET revision = chain_lineage_mutation_revisions.revision + 1;
+                SET revision = chain_lineage_mutation_revisions.revision + 1
+                RETURNING revision INTO next_revision;
+
+                INSERT INTO chain_lineage_mutation_revision_evidence (
+                    chain_id,
+                    revision,
+                    min_affected_block_number
+                )
+                VALUES (affected_chain, next_revision, min_affected_block_number);
             END LOOP;
             RETURN NULL;
         END;
@@ -1450,14 +1494,29 @@ async fn create_chain_lineage_mutation_revision_fixture(pool: &PgPool) -> Result
         AS $$
         DECLARE
             affected_chain TEXT;
+            next_revision BIGINT;
+            min_affected_block_number BIGINT;
         BEGIN
             FOR affected_chain IN
                 SELECT DISTINCT chain_id FROM deleted_rows ORDER BY chain_id
             LOOP
+                SELECT MIN(block_number)
+                INTO STRICT min_affected_block_number
+                FROM deleted_rows
+                WHERE chain_id = affected_chain;
+
                 INSERT INTO chain_lineage_mutation_revisions (chain_id, revision)
                 VALUES (affected_chain, 1)
                 ON CONFLICT (chain_id) DO UPDATE
-                SET revision = chain_lineage_mutation_revisions.revision + 1;
+                SET revision = chain_lineage_mutation_revisions.revision + 1
+                RETURNING revision INTO next_revision;
+
+                INSERT INTO chain_lineage_mutation_revision_evidence (
+                    chain_id,
+                    revision,
+                    min_affected_block_number
+                )
+                VALUES (affected_chain, next_revision, min_affected_block_number);
             END LOOP;
             RETURN NULL;
         END;

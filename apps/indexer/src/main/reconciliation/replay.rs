@@ -48,6 +48,7 @@ enum RawFactReplayExecution {
     Complete,
     StatelessBeforeFullClosure,
     StatelessOnlyAuthoritative,
+    StartupStatelessOnlyAuthoritative,
 }
 
 impl RawFactReplayExecution {
@@ -56,6 +57,7 @@ impl RawFactReplayExecution {
             Self::Complete => "complete",
             Self::StatelessBeforeFullClosure => "stateless_before_full_closure",
             Self::StatelessOnlyAuthoritative => "stateless_only_authoritative",
+            Self::StartupStatelessOnlyAuthoritative => "startup_stateless_only_authoritative",
         }
     }
 
@@ -64,7 +66,7 @@ impl RawFactReplayExecution {
     }
 
     const fn validates_request_profile(self) -> bool {
-        !matches!(self, Self::StatelessBeforeFullClosure)
+        matches!(self, Self::Complete | Self::StatelessOnlyAuthoritative)
     }
 }
 
@@ -122,6 +124,33 @@ pub(crate) async fn replay_stateless_only_raw_fact_normalized_events(
     .await
 }
 
+pub(crate) async fn replay_startup_stateless_only_raw_fact_normalized_events(
+    pool: &sqlx::PgPool,
+    request: RawFactNormalizedEventReplayRequest,
+) -> Result<RawFactNormalizedEventReplayOutcome> {
+    replay_raw_fact_normalized_events_with_execution(
+        pool,
+        request,
+        RawFactReplayExecution::StartupStatelessOnlyAuthoritative,
+        &mut None,
+    )
+    .await
+}
+
+pub(crate) async fn replay_startup_stateless_only_raw_fact_normalized_events_with_progress(
+    pool: &sqlx::PgPool,
+    request: RawFactNormalizedEventReplayRequest,
+    progress: &mut dyn StartupAdapterProgress,
+) -> Result<RawFactNormalizedEventReplayOutcome> {
+    replay_raw_fact_normalized_events_with_execution(
+        pool,
+        request,
+        RawFactReplayExecution::StartupStatelessOnlyAuthoritative,
+        &mut Some(progress),
+    )
+    .await
+}
+
 async fn replay_raw_fact_normalized_events_with_execution(
     pool: &sqlx::PgPool,
     request: RawFactNormalizedEventReplayRequest,
@@ -168,16 +197,18 @@ async fn replay_raw_fact_normalized_events_with_execution(
             )
             .await?
         }
-        // Automatic catch-up has already admitted the manifest corpus, and
-        // its cursor profile is an operational ownership identity rather than
-        // a manual replay request. It validates retained history immediately
-        // before phase two. Phase one uses the same restricted adapter
-        // selection as manual whole-range replay, so it runs only producers
-        // that phase two does not re-emit.
+        // Automatic internal replays have already admitted the manifest
+        // corpus, and their cursor/checkpoint profile is an operational
+        // ownership identity rather than a manual replay request. Automatic
+        // catch-up validates retained history immediately before phase two.
+        // Its phase one uses the same restricted adapter selection as manual
+        // whole-range replay, so it runs only producers that phase two does
+        // not re-emit.
         RawFactReplayExecution::StatelessBeforeFullClosure => {
             RawFactReplayContractPlan::full_closure()
         }
-        RawFactReplayExecution::StatelessOnlyAuthoritative => {
+        RawFactReplayExecution::StatelessOnlyAuthoritative
+        | RawFactReplayExecution::StartupStatelessOnlyAuthoritative => {
             RawFactReplayContractPlan::stateless_only_authoritative()
         }
     };

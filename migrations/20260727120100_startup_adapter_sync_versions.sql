@@ -21,7 +21,7 @@ ALTER TABLE public.normalized_replay_adapter_checkpoints
         )
     );
 
--- Commit-ordered lineage mutations for exact startup adapter checkpoint keys.
+-- Commit-ordered lineage mutations for startup adapter lineage-prefix keys.
 -- Header-anchor backfills routinely add rows below the current head without
 -- touching raw logs, so the head identity alone cannot describe the retained
 -- lineage corpus consumed by stateful ENSv1 adapters.
@@ -29,6 +29,23 @@ CREATE TABLE public.chain_lineage_mutation_revisions (
     chain_id text PRIMARY KEY,
     revision bigint NOT NULL,
     CONSTRAINT chain_lineage_mutation_revisions_revision_check CHECK (revision >= 0)
+);
+
+-- One row per committed lineage-revision bump records the lowest affected
+-- block. Startup checkpoint reuse can therefore distinguish live tail growth
+-- above a completed scan from a mutation inside the consumed prefix. The
+-- composite primary key also makes a missing revision in an expected interval
+-- detectable instead of treating incomplete evidence as proof.
+CREATE TABLE public.chain_lineage_mutation_revision_evidence (
+    chain_id text NOT NULL,
+    revision bigint NOT NULL,
+    min_affected_block_number bigint NOT NULL,
+    CONSTRAINT chain_lineage_mutation_revision_evidence_pkey
+        PRIMARY KEY (chain_id, revision),
+    CONSTRAINT chain_lineage_mutation_revision_evidence_revision_check
+        CHECK (revision > 0),
+    CONSTRAINT chain_lineage_mutation_revision_evidence_block_number_check
+        CHECK (min_affected_block_number >= 0)
 );
 
 -- Drain pre-migration lineage writers before snapshotting existing chains and
@@ -45,14 +62,29 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     affected_chain text;
+    next_revision bigint;
+    min_affected_block_number bigint;
 BEGIN
     FOR affected_chain IN
         SELECT DISTINCT chain_id FROM inserted_rows ORDER BY chain_id
     LOOP
+        SELECT MIN(block_number)
+        INTO STRICT min_affected_block_number
+        FROM inserted_rows
+        WHERE chain_id = affected_chain;
+
         INSERT INTO public.chain_lineage_mutation_revisions (chain_id, revision)
         VALUES (affected_chain, 1)
         ON CONFLICT (chain_id) DO UPDATE
-        SET revision = public.chain_lineage_mutation_revisions.revision + 1;
+        SET revision = public.chain_lineage_mutation_revisions.revision + 1
+        RETURNING revision INTO next_revision;
+
+        INSERT INTO public.chain_lineage_mutation_revision_evidence (
+            chain_id,
+            revision,
+            min_affected_block_number
+        )
+        VALUES (affected_chain, next_revision, min_affected_block_number);
     END LOOP;
     RETURN NULL;
 END;
@@ -64,6 +96,8 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     affected_chain text;
+    next_revision bigint;
+    min_affected_block_number bigint;
 BEGIN
     FOR affected_chain IN
         SELECT chain_id
@@ -74,10 +108,30 @@ BEGIN
         ) AS affected_chains
         ORDER BY chain_id
     LOOP
+        SELECT MIN(block_number)
+        INTO STRICT min_affected_block_number
+        FROM (
+            SELECT block_number
+            FROM deleted_rows
+            WHERE chain_id = affected_chain
+            UNION ALL
+            SELECT block_number
+            FROM inserted_rows
+            WHERE chain_id = affected_chain
+        ) AS affected_rows;
+
         INSERT INTO public.chain_lineage_mutation_revisions (chain_id, revision)
         VALUES (affected_chain, 1)
         ON CONFLICT (chain_id) DO UPDATE
-        SET revision = public.chain_lineage_mutation_revisions.revision + 1;
+        SET revision = public.chain_lineage_mutation_revisions.revision + 1
+        RETURNING revision INTO next_revision;
+
+        INSERT INTO public.chain_lineage_mutation_revision_evidence (
+            chain_id,
+            revision,
+            min_affected_block_number
+        )
+        VALUES (affected_chain, next_revision, min_affected_block_number);
     END LOOP;
     RETURN NULL;
 END;
@@ -89,14 +143,29 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     affected_chain text;
+    next_revision bigint;
+    min_affected_block_number bigint;
 BEGIN
     FOR affected_chain IN
         SELECT DISTINCT chain_id FROM deleted_rows ORDER BY chain_id
     LOOP
+        SELECT MIN(block_number)
+        INTO STRICT min_affected_block_number
+        FROM deleted_rows
+        WHERE chain_id = affected_chain;
+
         INSERT INTO public.chain_lineage_mutation_revisions (chain_id, revision)
         VALUES (affected_chain, 1)
         ON CONFLICT (chain_id) DO UPDATE
-        SET revision = public.chain_lineage_mutation_revisions.revision + 1;
+        SET revision = public.chain_lineage_mutation_revisions.revision + 1
+        RETURNING revision INTO next_revision;
+
+        INSERT INTO public.chain_lineage_mutation_revision_evidence (
+            chain_id,
+            revision,
+            min_affected_block_number
+        )
+        VALUES (affected_chain, next_revision, min_affected_block_number);
     END LOOP;
     RETURN NULL;
 END;
