@@ -3,8 +3,8 @@ use std::{future::Future, time::Duration};
 use anyhow::Result;
 use bigname_adapters::StartupAdapterVersion;
 use bigname_storage::{
-    StartupAdapterSyncCompletion, StartupAdapterSyncDecision, StartupAdapterSyncKey,
-    acquire_raw_log_staging_read_guard, complete_startup_adapter_sync,
+    StartupAdapterLineageTailPolicy, StartupAdapterSyncCompletion, StartupAdapterSyncDecision,
+    StartupAdapterSyncKey, acquire_raw_log_staging_read_guard, complete_startup_adapter_sync,
     prepare_startup_adapter_sync,
 };
 use tracing::{info, warn};
@@ -52,6 +52,7 @@ impl StartupFamilySyncAttempt {
             adapter.adapter,
             adapter.semantic_version,
             self.started_key,
+            lineage_tail_policy(adapter),
         )
         .await?
         {
@@ -93,6 +94,19 @@ impl StartupFamilySyncAttempt {
                 );
                 Ok(StartupFamilySyncCompletion::Retry)
             }
+            StartupAdapterSyncCompletion::ResumeFromScannedExtent => {
+                info!(
+                    service = "indexer",
+                    command = "startup-adapter-sync",
+                    deployment_profile,
+                    chain,
+                    adapter = adapter.adapter,
+                    adapter_semantic_version = adapter.semantic_version,
+                    "startup adapter lineage tail retained a completed prefix; resuming from the \
+                     recorded block boundary"
+                );
+                Ok(StartupFamilySyncCompletion::Retry)
+            }
         }
     }
 }
@@ -115,6 +129,7 @@ pub(crate) async fn prepare_startup_family_sync(
         chain,
         adapter.adapter,
         adapter.semantic_version,
+        lineage_tail_policy(adapter),
     )
     .await?
     {
@@ -136,6 +151,14 @@ pub(crate) async fn prepare_startup_family_sync(
                 started_key,
             }))
         }
+    }
+}
+
+fn lineage_tail_policy(adapter: StartupAdapterVersion) -> StartupAdapterLineageTailPolicy {
+    if adapter == bigname_adapters::ENS_V1_UNWRAPPED_AUTHORITY_STARTUP_VERSION {
+        StartupAdapterLineageTailPolicy::ResumeFromScannedExtent
+    } else {
+        StartupAdapterLineageTailPolicy::ReuseCompleted
     }
 }
 

@@ -194,6 +194,7 @@ pub(super) async fn sync_ens_v1_unwrapped_authority_with_scope(
                 migrated_registry_nodes = state.migrated_registry_nodes;
                 matched_log_count = checkpoint.matched_log_count();
                 flushed_events = checkpoint.flushed_events().clone();
+                refresh_registration_release_boundaries(&mut histories, &block_index)?;
             }
         }
 

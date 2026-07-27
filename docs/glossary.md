@@ -221,8 +221,13 @@ lineage. Startup adapter checkpoints record this revision with per-revision
 evidence for the lowest affected block. Completed reuse may accept later
 revisions only when gap-free evidence places every change strictly above the
 recorded scan extent and the current head still covers that extent. Partial
-resume still requires the exact recorded revision, so any lineage change resets
-it. Missing or ambiguous revision evidence fails closed.
+resume still requires the exact recorded revision, so any unclassified lineage
+change resets it. The one completed-to-partial transition is
+`ens_v1_unwrapped_authority`: after the same gap-free proof accepts a higher
+canonical head, storage refreshes the partial row's lineage key and resumes
+from the recorded extent because that adapter's finalization depends on
+canonical block timestamps. Missing or ambiguous revision evidence fails
+closed.
 
 **Normalized event** — the append-only, adapter-produced record of one semantic
 protocol transition, carrying identity, provenance, chain position, and

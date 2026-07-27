@@ -10,15 +10,16 @@ mod checkpoint;
 mod lineage;
 
 use checkpoint::{
-    completed_checkpoint_matches, invalidate_completed_startup_adapter_checkpoint,
-    invalidate_startup_adapter_checkpoint, publish_completed_checkpoint,
+    completed_checkpoint_matches, downgrade_completed_checkpoint_to_boundary_resume,
+    invalidate_completed_startup_adapter_checkpoint, invalidate_startup_adapter_checkpoint,
+    publish_completed_checkpoint,
+};
+use lineage::{
+    CompletedLineageExtentDecision, completed_lineage_extent_decision,
+    load_startup_adapter_lineage_state_from_connection, lock_canonical_lineage,
 };
 pub use lineage::{
     StartupAdapterLineageState, StartupCanonicalLineageHead, load_startup_adapter_lineage_state,
-};
-use lineage::{
-    completed_lineage_extent_is_reusable, load_startup_adapter_lineage_state_from_connection,
-    lock_canonical_lineage,
 };
 
 pub const STARTUP_ADAPTER_CURSOR_KIND: &str = "startup_adapter_owned_raw_log_state";
@@ -39,6 +40,12 @@ pub struct StartupAdapterSyncKey {
     pub schema_migration_max_version: i64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StartupAdapterLineageTailPolicy {
+    ReuseCompleted,
+    ResumeFromScannedExtent,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StartupAdapterSyncDecision {
     ReuseCompleted,
@@ -52,6 +59,7 @@ pub enum StartupAdapterSyncCompletion {
     Completed,
     InputChanged,
     KeyUnknown,
+    ResumeFromScannedExtent,
 }
 
 pub async fn prepare_startup_adapter_sync(
@@ -60,6 +68,7 @@ pub async fn prepare_startup_adapter_sync(
     chain: &str,
     adapter: &str,
     adapter_semantic_version: i64,
+    lineage_tail_policy: StartupAdapterLineageTailPolicy,
 ) -> Result<StartupAdapterSyncDecision> {
     validate_identity(deployment_profile, chain, adapter, adapter_semantic_version)?;
     let mut migration_guard = StartupMigrationLockGuard::acquire(pool).await?;
@@ -69,7 +78,7 @@ pub async fn prepare_startup_adapter_sync(
         let key =
             load_startup_adapter_sync_key(transaction.as_mut(), chain, adapter_semantic_version)
                 .await?;
-        let reusable = match key.as_ref() {
+        let lineage_decision = match key.as_ref() {
             Some(key) => {
                 completed_checkpoint_matches(
                     transaction.as_mut(),
@@ -77,30 +86,58 @@ pub async fn prepare_startup_adapter_sync(
                     chain,
                     adapter,
                     key,
+                    lineage_tail_policy,
                 )
                 .await?
             }
-            None => false,
+            None => CompletedLineageExtentDecision::Reject,
         };
-        if !reusable {
-            invalidate_completed_startup_adapter_checkpoint(
-                transaction.as_mut(),
-                deployment_profile,
-                chain,
-                adapter,
-            )
-            .await?;
-        }
+        let decision = match lineage_decision {
+            CompletedLineageExtentDecision::ReuseCompleted => {
+                StartupAdapterSyncDecision::ReuseCompleted
+            }
+            CompletedLineageExtentDecision::ResumeFromScannedExtent => {
+                let downgraded = downgrade_completed_checkpoint_to_boundary_resume(
+                    transaction.as_mut(),
+                    deployment_profile,
+                    chain,
+                    adapter,
+                    key.as_ref()
+                        .expect("a reusable completed checkpoint must have a current key"),
+                )
+                .await?;
+                if !downgraded {
+                    invalidate_completed_startup_adapter_checkpoint(
+                        transaction.as_mut(),
+                        deployment_profile,
+                        chain,
+                        adapter,
+                    )
+                    .await?;
+                }
+                StartupAdapterSyncDecision::RunFullSync {
+                    started_key: key.clone(),
+                }
+            }
+            CompletedLineageExtentDecision::Reject => {
+                invalidate_completed_startup_adapter_checkpoint(
+                    transaction.as_mut(),
+                    deployment_profile,
+                    chain,
+                    adapter,
+                )
+                .await?;
+                StartupAdapterSyncDecision::RunFullSync {
+                    started_key: key.clone(),
+                }
+            }
+        };
         transaction
             .commit()
             .await
             .context("failed to finish startup adapter checkpoint verification")?;
 
-        Ok(if reusable {
-            StartupAdapterSyncDecision::ReuseCompleted
-        } else {
-            StartupAdapterSyncDecision::RunFullSync { started_key: key }
-        })
+        Ok(decision)
     }
     .await;
     let release_result = migration_guard.release().await;
@@ -114,6 +151,7 @@ pub async fn complete_startup_adapter_sync(
     adapter: &str,
     adapter_semantic_version: i64,
     started_key: Option<StartupAdapterSyncKey>,
+    lineage_tail_policy: StartupAdapterLineageTailPolicy,
 ) -> Result<StartupAdapterSyncCompletion> {
     validate_identity(deployment_profile, chain, adapter, adapter_semantic_version)?;
     let mut migration_guard = StartupMigrationLockGuard::acquire(pool).await?;
@@ -177,8 +215,8 @@ pub async fn complete_startup_adapter_sync(
         } else {
             false
         };
-        let input_extents_reusable = raw_log_extent_reusable
-            && completed_lineage_extent_is_reusable(
+        let lineage_decision = if raw_log_extent_reusable {
+            completed_lineage_extent_decision(
                 transaction.as_mut(),
                 chain,
                 started_key.lineage_mutation_revision,
@@ -188,21 +226,57 @@ pub async fn complete_startup_adapter_sync(
                     mutation_revision: current_key.lineage_mutation_revision,
                     canonical_lineage_head: current_key.canonical_lineage_head.clone(),
                 },
+                lineage_tail_policy,
             )
-            .await?;
-        if !input_extents_reusable {
-            invalidate_startup_adapter_checkpoint(
-                transaction.as_mut(),
-                deployment_profile,
-                chain,
-                adapter,
-            )
-            .await?;
-            transaction
-                .commit()
-                .await
-                .context("failed to finish changed startup adapter input check")?;
-            return Ok(StartupAdapterSyncCompletion::InputChanged);
+            .await?
+        } else {
+            CompletedLineageExtentDecision::Reject
+        };
+        match lineage_decision {
+            CompletedLineageExtentDecision::Reject => {
+                invalidate_startup_adapter_checkpoint(
+                    transaction.as_mut(),
+                    deployment_profile,
+                    chain,
+                    adapter,
+                )
+                .await?;
+                transaction
+                    .commit()
+                    .await
+                    .context("failed to finish changed startup adapter input check")?;
+                return Ok(StartupAdapterSyncCompletion::InputChanged);
+            }
+            CompletedLineageExtentDecision::ResumeFromScannedExtent => {
+                let downgraded = downgrade_completed_checkpoint_to_boundary_resume(
+                    transaction.as_mut(),
+                    deployment_profile,
+                    chain,
+                    adapter,
+                    &current_key,
+                )
+                .await?;
+                if !downgraded {
+                    invalidate_startup_adapter_checkpoint(
+                        transaction.as_mut(),
+                        deployment_profile,
+                        chain,
+                        adapter,
+                    )
+                    .await?;
+                    transaction
+                        .commit()
+                        .await
+                        .context("failed to reset unavailable startup boundary resume")?;
+                    return Ok(StartupAdapterSyncCompletion::InputChanged);
+                }
+                transaction
+                    .commit()
+                    .await
+                    .context("failed to publish startup adapter boundary resume")?;
+                return Ok(StartupAdapterSyncCompletion::ResumeFromScannedExtent);
+            }
+            CompletedLineageExtentDecision::ReuseCompleted => {}
         }
 
         publish_completed_checkpoint(

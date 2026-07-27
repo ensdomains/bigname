@@ -317,7 +317,7 @@ pub use resolver_profile_authority_journal::{
     resolver_profile_authority_entry_key,
 };
 #[rustfmt::skip]
-pub use startup_adapter_sync::{STARTUP_CANONICAL_LINEAGE_HEAD_FIELD, STARTUP_LINEAGE_MUTATION_REVISION_FIELD, StartupAdapterLineageState, StartupAdapterSyncCompletion, StartupAdapterSyncDecision, StartupAdapterSyncKey, StartupCanonicalLineageHead, complete_startup_adapter_sync, load_startup_adapter_lineage_state, load_startup_adapter_schema_state, prepare_startup_adapter_sync};
+pub use startup_adapter_sync::{STARTUP_CANONICAL_LINEAGE_HEAD_FIELD, STARTUP_LINEAGE_MUTATION_REVISION_FIELD, StartupAdapterLineageState, StartupAdapterLineageTailPolicy, StartupAdapterSyncCompletion, StartupAdapterSyncDecision, StartupAdapterSyncKey, StartupCanonicalLineageHead, complete_startup_adapter_sync, load_startup_adapter_lineage_state, load_startup_adapter_schema_state, prepare_startup_adapter_sync};
 #[rustfmt::skip]
 pub use resolver_profile_authority_journal::{ResolverProfileAuthorityJournalProgress, ResolverProfileAuthorityJournalProgressFuture};
 pub use resolver_profile_input_changes::{

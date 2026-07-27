@@ -1317,12 +1317,23 @@ above the recorded scan extent. The current head must still cover that extent;
 when no newer revision exists, it must exactly match the head accepted with the
 recorded revision. A mutation at or below the extent, a missing evidence row, a
 revision gap, a lower or ambiguous current head, or malformed checkpoint
-evidence invalidates the completion. This lets an old and new indexer overlap:
-evidenced raw-log and lineage tail growth above a bounded pass does not force
-that pass to retry, and a quiet chain can reuse a completed prefix after its
-head advances. A header-anchor backfill below the stored head or a same-height
-branch switch still invalidates, even when neither change mutates a retained
-raw log.
+evidence invalidates the completion. For log-derived families this lets an old
+and new indexer overlap: evidenced raw-log and lineage tail growth above a
+bounded pass does not force that pass to retry, and a quiet chain can fully
+reuse a completed result after its head advances. The
+`ens_v1_unwrapped_authority` family is the exception because finalization uses
+canonical block timestamps to place time-bound transitions. When its accepted
+canonical head is above the recorded extent, storage changes the completed row
+to `stream_complete`, keeps its private state and block watermark at the
+recorded extent, refreshes the proven input metadata, and runs the existing
+incremental extension over the later blocks before completion is published at
+the new head. A crash after that change leaves a resumable partial row, not a
+falsely reusable completion. Exact no-tail reuse is unchanged.
+`ens_v1_subregistry_discovery` has no analogous head-derived output: its staged
+assignments, discovery reconciliation, and normalized events come from
+canonical raw logs, so it retains full tail reuse. A header-anchor backfill
+below the stored head or a same-height branch switch still invalidates every
+family, even when neither change mutates a retained raw log.
 
 The discovery-admission epoch covers manifest-declared and discovered watched
 addresses that can change adapter inputs without changing raw logs. Migration

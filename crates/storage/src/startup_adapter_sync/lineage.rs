@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgConnection, PgPool, Row};
 use tracing::warn;
 
+use super::StartupAdapterLineageTailPolicy;
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StartupCanonicalLineageHead {
     pub block_number: i64,
@@ -110,32 +112,39 @@ pub(super) async fn load_startup_adapter_lineage_state_from_connection(
     }))
 }
 
-pub(super) async fn completed_lineage_extent_is_reusable(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CompletedLineageExtentDecision {
+    Reject,
+    ReuseCompleted,
+    ResumeFromScannedExtent,
+}
+
+pub(super) async fn completed_lineage_extent_decision(
     connection: &mut PgConnection,
     chain: &str,
     recorded_revision: i64,
     recorded_head: Option<&StartupCanonicalLineageHead>,
     scanned_extent: Option<&StartupCanonicalLineageHead>,
     current: &StartupAdapterLineageState,
-) -> Result<bool> {
+    tail_policy: StartupAdapterLineageTailPolicy,
+) -> Result<CompletedLineageExtentDecision> {
     if recorded_revision < 0 || current.mutation_revision < recorded_revision {
-        return Ok(false);
+        return Ok(CompletedLineageExtentDecision::Reject);
     }
     if !current_head_covers_scanned_extent(scanned_extent, recorded_head) {
-        return Ok(false);
+        return Ok(CompletedLineageExtentDecision::Reject);
     }
     if !current_head_covers_scanned_extent(scanned_extent, current.canonical_lineage_head.as_ref())
     {
-        return Ok(false);
+        return Ok(CompletedLineageExtentDecision::Reject);
     }
-    if current.mutation_revision == recorded_revision {
-        return Ok(current.canonical_lineage_head.as_ref() == recorded_head);
-    }
-
-    let expected_evidence_count = current.mutation_revision - recorded_revision;
-    let scanned_through_block = scanned_extent.map_or(0, |head| head.block_number);
-    let (evidence_count, earliest_affected_block) = sqlx::query_as::<_, (i64, Option<i64>)>(
-        r#"
+    let lineage_is_reusable = if current.mutation_revision == recorded_revision {
+        current.canonical_lineage_head.as_ref() == recorded_head
+    } else {
+        let expected_evidence_count = current.mutation_revision - recorded_revision;
+        let scanned_through_block = scanned_extent.map_or(0, |head| head.block_number);
+        let (evidence_count, earliest_affected_block) = sqlx::query_as::<_, (i64, Option<i64>)>(
+            r#"
             SELECT
                 COUNT(*)::BIGINT,
                 MIN(min_affected_block_number)
@@ -144,22 +153,35 @@ pub(super) async fn completed_lineage_extent_is_reusable(
               AND revision > $2
               AND revision <= $3
             "#,
-    )
-    .bind(chain)
-    .bind(recorded_revision)
-    .bind(current.mutation_revision)
-    .fetch_one(connection)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to inspect lineage mutation evidence for {chain} after revision \
-                 {recorded_revision} through revision {}",
-            current.mutation_revision
         )
-    })?;
+        .bind(chain)
+        .bind(recorded_revision)
+        .bind(current.mutation_revision)
+        .fetch_one(connection)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to inspect lineage mutation evidence for {chain} after revision \
+                 {recorded_revision} through revision {}",
+                current.mutation_revision
+            )
+        })?;
 
-    Ok(evidence_count == expected_evidence_count
-        && earliest_affected_block.is_some_and(|block| block > scanned_through_block))
+        evidence_count == expected_evidence_count
+            && earliest_affected_block.is_some_and(|block| block > scanned_through_block)
+    };
+    if !lineage_is_reusable {
+        return Ok(CompletedLineageExtentDecision::Reject);
+    }
+    if tail_policy == StartupAdapterLineageTailPolicy::ResumeFromScannedExtent
+        && current_head_is_above_scanned_extent(
+            scanned_extent,
+            current.canonical_lineage_head.as_ref(),
+        )
+    {
+        return Ok(CompletedLineageExtentDecision::ResumeFromScannedExtent);
+    }
+    Ok(CompletedLineageExtentDecision::ReuseCompleted)
 }
 
 fn current_head_covers_scanned_extent(
@@ -171,6 +193,17 @@ fn current_head_covers_scanned_extent(
         (Some(_), None) => false,
         (Some(scanned), Some(current)) if current.block_number > scanned.block_number => true,
         (Some(scanned), Some(current)) => current == scanned,
+    }
+}
+
+fn current_head_is_above_scanned_extent(
+    scanned_extent: Option<&StartupCanonicalLineageHead>,
+    current_head: Option<&StartupCanonicalLineageHead>,
+) -> bool {
+    match (scanned_extent, current_head) {
+        (None, Some(_)) => true,
+        (Some(scanned), Some(current)) => current.block_number > scanned.block_number,
+        _ => false,
     }
 }
 
