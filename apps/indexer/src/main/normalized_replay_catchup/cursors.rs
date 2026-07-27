@@ -103,6 +103,10 @@ pub(super) async fn rewind_cursor_for_newly_observed_older_logs(
         return Ok((cursor, current_version));
     };
 
+    let revision_reentry_at_floor = current_version.retention_generation
+        == cursor.raw_log_retention_generation
+        && current_version.revision > cursor.raw_log_input_revision
+        && cursor.next_block_number == cursor.range_start_block_number;
     let revision_rewind =
         if current_version.retention_generation != cursor.raw_log_retention_generation {
             Some(cursor.range_start_block_number)
@@ -120,7 +124,11 @@ pub(super) async fn rewind_cursor_for_newly_observed_older_logs(
         } else {
             None
         };
-    let rewind_block = if revision_rewind.is_some() {
+    let rewind_block = if revision_reentry_at_floor {
+        // A prior attempt already persisted the conservative rewind. Replaying
+        // from the floor will publish the newly latched input version.
+        None
+    } else if revision_rewind.is_some() {
         revision_rewind
     } else {
         sqlx::query_scalar::<_, Option<i64>>(

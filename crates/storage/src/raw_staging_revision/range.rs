@@ -142,9 +142,12 @@ pub async fn earliest_raw_log_staging_block_changed_since(
         "raw-log staging changed-block boundary must not be negative"
     );
     ensure!(
-        (0..=through_block).contains(&rewind_floor_block),
-        "raw-log staging rewind floor must fall within the consumed boundary"
+        rewind_floor_block >= 0,
+        "raw-log staging rewind floor must not be negative"
     );
+    if through_block < rewind_floor_block {
+        return Ok(None);
+    }
     sqlx::query_scalar::<_, Option<i64>>(
         r#"
         SELECT CASE
