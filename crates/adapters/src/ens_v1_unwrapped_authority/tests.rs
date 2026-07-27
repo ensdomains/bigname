@@ -5170,7 +5170,10 @@ async fn startup_authority_extends_after_interrupted_finalize() -> Result<()> {
     .await?;
     upsert_raw_blocks(
         database.pool(),
-        &[raw_block(block_42, None, 42, 1_700_000_042)],
+        &[
+            raw_block(block_42, None, 42, 1_700_000_042),
+            raw_block(block_43, Some(block_42), 43, 1_700_000_043),
+        ],
     )
     .await?;
     upsert_raw_logs(
@@ -5280,11 +5283,6 @@ async fn startup_authority_extends_after_interrupted_finalize() -> Result<()> {
     sqlx::query("DELETE FROM startup_authority_finalize_failure")
         .execute(database.pool())
         .await?;
-    upsert_raw_blocks(
-        database.pool(),
-        &[raw_block(block_43, Some(block_42), 43, 1_700_000_043)],
-    )
-    .await?;
     upsert_raw_logs(
         database.pool(),
         &[RawLog {

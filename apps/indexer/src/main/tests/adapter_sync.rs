@@ -102,6 +102,59 @@ async fn non_looping_startup_family_retries_one_input_advance() -> Result<()> {
         .bind(chain)
         .execute(database.pool())
         .await?;
+    let (migration_count, migration_max_version) =
+        bigname_storage::load_startup_adapter_schema_state(database.pool())
+            .await?
+            .expect("migrated fixture must have known schema state");
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_replay_adapter_checkpoints (
+            deployment_profile,
+            chain_id,
+            cursor_kind,
+            adapter,
+            checkpoint_scope,
+            replay_start_block_number,
+            replay_target_block_number,
+            status,
+            state_payload,
+            raw_log_retention_generation,
+            raw_log_input_revision,
+            adapter_semantic_version,
+            schema_migration_count,
+            schema_migration_max_version,
+            completed_at
+        )
+        VALUES (
+            'test',
+            $1,
+            'startup_adapter_owned_raw_log_state',
+            $2,
+            'startup_adapter_sync',
+            0,
+            0,
+            'completed',
+            jsonb_build_object(
+                'startup_discovery_admission_epoch', 1,
+                'startup_lineage_mutation_revision', 0,
+                'startup_canonical_lineage_head', NULL
+            ),
+            0,
+            1,
+            $3,
+            $4,
+            $5,
+            now()
+        )
+        "#,
+    )
+    .bind(chain)
+    .bind(adapter.adapter)
+    .bind(adapter.semantic_version)
+    .bind(migration_count)
+    .bind(migration_max_version)
+    .execute(database.pool())
+    .await?;
     assert!(
         !crate::runtime::adapter_sync::complete_non_looping_startup_family(
             first,
@@ -112,6 +165,21 @@ async fn non_looping_startup_family_retries_one_input_advance() -> Result<()> {
         )
         .await?,
         "the first changed pass must request the one bounded retry"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT
+             FROM normalized_replay_adapter_checkpoints
+             WHERE deployment_profile = 'test'
+               AND chain_id = $1
+               AND adapter = $2",
+        )
+        .bind(chain)
+        .bind(adapter.adapter)
+        .fetch_one(database.pool())
+        .await?,
+        0,
+        "InputChanged must invalidate a matching pre-existing completion instead of reusing it"
     );
 
     let second = crate::runtime::adapter_sync::checkpoint::prepare_startup_family_sync(

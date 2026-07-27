@@ -73,36 +73,15 @@ impl StartupFamilySyncAttempt {
                 Ok(StartupFamilySyncCompletion::Stable)
             }
             StartupAdapterSyncCompletion::InputChanged => {
-                if matches!(
-                    prepare_startup_adapter_sync(
-                        pool,
-                        &deployment_profile,
-                        chain,
-                        adapter.adapter,
-                        adapter.semantic_version,
-                    )
-                    .await?,
-                    StartupAdapterSyncDecision::ReuseCompleted
-                ) {
-                    info!(
-                        service = "indexer",
-                        command = "startup-adapter-sync",
-                        deployment_profile,
-                        chain,
-                        adapter = adapter.adapter,
-                        adapter_semantic_version = adapter.semantic_version,
-                        "startup adapter published its own completion after converging on a newer key"
-                    );
-                    return Ok(StartupFamilySyncCompletion::Stable);
-                }
-                info!(
+                warn!(
                     service = "indexer",
                     command = "startup-adapter-sync",
                     deployment_profile,
                     chain,
                     adapter = adapter.adapter,
                     adapter_semantic_version = adapter.semantic_version,
-                    "startup adapter input advanced during the pass; another full pass is required"
+                    "startup adapter input advanced during the pass; the retained checkpoint was \
+                     invalidated and another full pass is required"
                 );
                 Ok(StartupFamilySyncCompletion::Retry)
             }

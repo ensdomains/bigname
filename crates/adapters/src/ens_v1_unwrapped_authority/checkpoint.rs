@@ -112,8 +112,7 @@ impl UnwrappedAuthorityReplayCheckpoint {
                 checkpoint.context.range_start_block_number != context.range_start_block_number
                     || !checkpoint.snapshot_version_is_current()
                     || context.startup_authority_changed(&checkpoint.state_payload)
-                    || (checkpoint.status == "completed"
-                        && context.startup_lineage_changed(&checkpoint.state_payload))
+                    || context.startup_lineage_changed(&checkpoint.state_payload)
                     || context.startup_version_changed(
                         checkpoint.adapter_semantic_version,
                         checkpoint.schema_migration_count,
