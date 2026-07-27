@@ -546,13 +546,18 @@ projection freshness evidence.
 
 The worker's parent projection loop and required spawned hydration or
 invalidation-derivation work share an exclusive process-heartbeat ownership
-gate. The indexer's parent poll and automatic normalized-event replay catch-up
-share the same kind of gate. A parent work unit or required child iteration
-acquires ownership before it starts and releases ownership before an idle poll
-sleep. Only the current owner can advance the row, and it can do so only after
-its own bounded work commits. A wedged child therefore cannot be hidden by an
-otherwise healthy parent, and a progressing child cannot hide a wedged parent.
-No timer generates beats on either operation's behalf.
+gate. For the indexer, the parent poll takes exclusive ownership against the
+complete set of active normalized-event replay chain lanes, while chain lanes
+may hold child ownership concurrently. A parent work unit or required child
+iteration acquires ownership before it starts and releases ownership before an
+idle poll sleep. Only the parent or active child-lane set can advance the row,
+and each can do so only after its own bounded work commits. A wedged child
+therefore cannot be hidden by an otherwise healthy parent, and a progressing
+child cannot hide a wedged parent. Concurrent peer lanes can advance the shared
+process row. Profile-and-chain full-closure lock waits are tracked as separate
+in-process memberships that share one aggregate phase row; its oldest timestamp
+remains until the final unresolved wait acquires ownership. No timer generates
+beats on either operation's behalf.
 
 Full worker rebuild heartbeat routes are explicit:
 
@@ -596,7 +601,7 @@ and must be allowed to make the heartbeat stale.
 | worker spawned task | route-local primary-name execution pruning | n-a | Detached best-effort maintenance does not own worker readiness; every call is capped by the configured delete batch, and the parent loop remains independently observable. |
 | worker/indexer main loop | idle poll sleep and subtask supervision | n-a | Sleeping is intentional inactivity; loop ticks record liveness only while no required spawned task owns the row. Spawned-task exit and panic are reported by the existing supervisor (#242), not by synthetic progress beats. |
 | indexer pre-registration and live poll | parse the checked-in manifest repository | cannot-exceed-20s-with-reason | Bounded by the finite checked-in deployment files, not chain history; live parsing runs before deciding whether stored manifest state needs refresh. |
-| indexer pre-registration | connect to PostgreSQL and register the service loop | n-a | No heartbeat row exists yet, and each connection or registration statement is atomic. A stalled database operation has no completed progress unit and must not be kept green. `indexer run` rejects pools below four connections before opening them so the permanent runtime writer guard, nested bounded work guards, and progress heartbeat writer cannot exhaust the pool. |
+| indexer pre-registration | connect to PostgreSQL and register the service loop | n-a | No heartbeat row exists yet, and each connection or registration statement is atomic. A stalled database operation has no completed progress unit and must not be kept green. `indexer run` rejects pools below four connections before opening them. After the live chain plan is known, automatic catch-up additionally requires `max(4, 1 + 3 * chain lane count)` pooled connections for the permanent runtime writer guard and each lane's bounded work guard, nested work, and progress or lease-heartbeat write. |
 | indexer startup | synchronize manifest declarations, source graph, active addresses, and stale discovery rows | newly-covered (#229) | Completed manifest, discovery-edge, active-address, and stale-row stream pages through `ManifestRuntimeProgress`. Full-source discovery reconciliation pages the active-edge summary, desired/insert and deactivation diffs, candidate observations, same-assignment retention, set-based historical-successor resolution, historical materialization, and final active-edge summary; the candidate allocation cap is checked before extending the retained vector with each bounded page. |
 | indexer startup | load discovery admission, watched contracts, drift inputs, and manifest-derived normalized events | newly-covered (#229) | Completed 1,000-row or 10,000-row database pages and bounded event-upsert pages. |
 | indexer startup | build and persist intake tasks from the watched-chain plan | newly-covered (#229) | Each completed 10,000-address plan copy/comparison chunk and persisted chain task. |
@@ -629,8 +634,8 @@ and must be allowed to make the heartbeat stale.
 | indexer resolver-profile convergence | compare and advance the authority journal | newly-covered (#229) | Completed authority-entry, seed-family expansion, staged-diff, mutation, and forced-target pages. |
 | indexer resolver-profile convergence | drain input changes and materialize reconciliation targets | newly-covered (#229) | Each 1,000-input page and each completed target/family page. A progress-enabled drain rejects pools below four connections, reserving capacity for the runtime writer guard, reconciliation guard, bounded authority/event reads, and heartbeat writes. |
 | indexer resolver-profile convergence | replay resolver targets, stage/publish events, and enqueue invalidations | newly-covered (#229) | Completed target/log/state pages, 1,000-row staged-event and invalidation pages, family publication, and acknowledged input pages. |
-| indexer spawned task | wait for full-closure replay ownership | newly-covered (#156) | The first failed nonblocking lock attempt starts `full_closure_replay_lock.wait`; 50-millisecond poll ticks never beat. The phase timestamp ages while periodic holder-identifying warnings expose contention, and acquisition finishes the phase. |
-| indexer spawned task | automatic normalized-event replay catch-up | newly-covered (#229) | Completed stateless replay pages, adapter-internal pages, full-closure adapter boundaries, replay chunks, durable cursor publications, and checkpoint cleanup advance the shared process row. Parent work and the spawned iteration mutually exclude each other's heartbeat writes while either owns a work unit, including failure journaling, so neither can mask the other's wedge; idle catch-up sleep releases ownership. Exit and panic remain supervised (#242). |
+| indexer spawned task | wait for full-closure replay ownership | newly-covered (#156) | The first unresolved nonblocking lock attempt starts the aggregate `full_closure_replay_lock.wait` phase; 50-millisecond poll ticks never beat. Profile-and-chain waits remain separate in-process memberships, so another chain cannot clear or refresh the oldest timestamp; the final unresolved acquisition finishes the phase. |
+| indexer spawned task | automatic normalized-event replay catch-up | newly-covered (#229) | One required task per chain independently runs chunks, coverage recovery, failure journaling, and idle/error poll sleeps. Completed stateless replay pages, adapter-internal pages, full-closure adapter boundaries, replay chunks, durable cursor publications, and checkpoint cleanup advance the shared process row. Chain lanes may own work concurrently; parent work takes exclusive activity ownership and therefore cannot mask a lane's wedge. Profile-and-chain full-closure waits share the aggregate phase without interfering with each other's membership, and every lane's exit or panic fails supervision (#242). |
 | indexer spawned task | normalized-replay projection-index preparation and restoration DDL statements | n-a | Each PostgreSQL catalog check and `CREATE INDEX` or `DROP INDEX` statement is atomic at the application boundary, with no safe successful progress callback inside the statement. The replay iteration retains heartbeat ownership, so a slow or stuck statement intentionally ages the process row instead of receiving a synthetic beat. |
 | indexer one-shot modes | manual backfill, replay, rewind, repair, and operational catch-up commands | n-a | These commands do not run inside the registered `indexer run` service loop, so service-loop heartbeat coverage does not describe their completion. Backfill range leases retain their separate ownership heartbeat. |
 

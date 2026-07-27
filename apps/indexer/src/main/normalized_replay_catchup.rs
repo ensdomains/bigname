@@ -3,14 +3,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(test)]
-use crate::provider::ChainProvider;
 use crate::{
     backfill::{
         CoinbaseSqlBackfillConfig, CoinbaseSqlSourceRegistry,
         DEFAULT_HASH_PINNED_BACKFILL_CHUNK_BLOCKS,
     },
-    provider::{ChainProviderOps, ProviderRegistry},
+    provider::{ChainProvider, ChainProviderOps},
     reconciliation::{
         HeaderAuditMode, RawFactNormalizedEventReplayRequest,
         RawFactNormalizedEventReplaySelection, chain_has_closure_or_dependency_replay_adapter,
@@ -267,11 +265,13 @@ impl NormalizedReplayCatchupConfig {
     }
 }
 
-pub(crate) async fn run_normalized_replay_catchup(
+#[expect(clippy::too_many_arguments)]
+pub(crate) async fn run_normalized_replay_catchup_chain(
     pool: PgPool,
     config: NormalizedReplayCatchupConfig,
-    provider_registry: ProviderRegistry,
-    coinbase_sql_recovery: (CoinbaseSqlSourceRegistry, CoinbaseSqlBackfillConfig),
+    chain: String,
+    provider: Option<ChainProvider>,
+    coinbase_sql_recovery: Option<(CoinbaseSqlSourceRegistry, CoinbaseSqlBackfillConfig)>,
     header_audit_mode: HeaderAuditMode,
     heartbeat: NormalizedReplayHeartbeat,
     activity: RequiredSubtaskActivity,
@@ -281,47 +281,45 @@ pub(crate) async fn run_normalized_replay_catchup(
         command = "run",
         replay_cursor_kind = CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS,
         deployment_profile = %config.deployment_profile,
-        chain_count = config.chains.len(),
+        chain,
         chunk_blocks = config.chunk_blocks,
         max_raw_logs_per_chunk = config.max_raw_logs_per_chunk,
         poll_interval_secs = config.poll_interval_secs,
         defer_projection_indexes = config.defer_projection_indexes,
-        "automatic normalized-event replay catch-up started"
+        "automatic normalized-event replay catch-up chain lane started"
     );
 
     loop {
-        let mut progressed = false;
-        for chain in &config.chains {
-            let mut progress = heartbeat.clone();
-            match admission::run_required_normalized_replay_catchup_iteration(
-                &pool,
-                &config,
-                chain,
-                provider_registry.provider_for(chain),
-                Some((&coinbase_sql_recovery.0, &coinbase_sql_recovery.1)),
-                header_audit_mode,
-                &mut progress,
-                &activity,
-            )
-            .await
-            {
-                Ok(CatchupIterationStatus::Progressed) => {
-                    progressed = true;
-                }
-                Ok(CatchupIterationStatus::Idle) => {}
-                Err(error) if admission::is_fatal_replay_fence(&error) => return Err(error),
-                Err(error) => {
-                    warn!(
-                        service = "indexer",
-                        command = "run",
-                        replay_cursor_kind = CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS,
-                        chain,
-                        error = ?error,
-                        "automatic normalized-event replay catch-up iteration failed"
-                    );
-                }
+        let mut progress = heartbeat.clone();
+        let status = admission::run_required_normalized_replay_catchup_iteration(
+            &pool,
+            &config,
+            &chain,
+            provider.as_ref(),
+            coinbase_sql_recovery
+                .as_ref()
+                .map(|(registry, config)| (registry, config)),
+            header_audit_mode,
+            &mut progress,
+            &activity,
+        )
+        .await;
+        let progressed = match status {
+            Ok(CatchupIterationStatus::Progressed) => true,
+            Ok(CatchupIterationStatus::Idle) => false,
+            Err(error) if admission::is_fatal_replay_fence(&error) => return Err(error),
+            Err(error) => {
+                warn!(
+                    service = "indexer",
+                    command = "run",
+                    replay_cursor_kind = CURSOR_KIND_RAW_FACT_NORMALIZED_EVENTS,
+                    chain,
+                    error = ?error,
+                    "automatic normalized-event replay catch-up iteration failed"
+                );
+                false
             }
-        }
+        };
 
         if !progressed {
             sleep(Duration::from_secs(config.poll_interval_secs)).await;

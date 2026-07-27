@@ -14,7 +14,10 @@ use sqlx::{
     postgres::{PgAdvisoryLock, PgConnectOptions, PgPoolOptions},
     types::time::OffsetDateTime,
 };
-use tokio::time::{sleep, timeout};
+use tokio::{
+    sync::oneshot,
+    time::{sleep, timeout},
+};
 use tracing_subscriber::fmt::MakeWriter;
 
 use super::*;
@@ -87,6 +90,63 @@ fn captured_warn_logs() -> CapturedLogs {
             captured_logs
         })
         .clone()
+}
+
+#[tokio::test]
+async fn parallel_full_closure_sessions_on_different_chains_do_not_interfere() -> Result<()> {
+    let database = test_database("full_closure_different_chains").await?;
+    let deployment_profile = "parallel-profile";
+    let first_chain = "ethereum-mainnet";
+    let second_chain = "base-mainnet";
+    let (first_started_tx, first_started_rx) = oneshot::channel();
+    let (release_first_tx, release_first_rx) = oneshot::channel();
+    let first_pool = database.pool().clone();
+    let mut first_session = tokio::spawn(async move {
+        let mut wait_heartbeat: Option<&mut dyn FullClosureReplayLockWaitHeartbeat> = None;
+        with_full_closure_replay_lock_config(
+            &first_pool,
+            deployment_profile,
+            first_chain,
+            &mut wait_heartbeat,
+            FullClosureReplayLockWaitConfig::default(),
+            || async move {
+                let _ = first_started_tx.send(());
+                let _ = release_first_rx.await;
+                Ok(())
+            },
+        )
+        .await
+    });
+    timeout(TEST_CONNECTION_TIMEOUT, first_started_rx)
+        .await
+        .context("first full-closure session did not acquire its chain fence")?
+        .context("first full-closure session exited before reporting acquisition")?;
+
+    let mut second_wait_heartbeat: Option<&mut dyn FullClosureReplayLockWaitHeartbeat> = None;
+    timeout(
+        TEST_TIMEOUT,
+        with_full_closure_replay_lock_config(
+            database.pool(),
+            deployment_profile,
+            second_chain,
+            &mut second_wait_heartbeat,
+            FullClosureReplayLockWaitConfig::default(),
+            || async { Ok(()) },
+        ),
+    )
+    .await
+    .context("another chain's full-closure session was blocked by the first chain")??;
+    assert!(
+        !first_session.is_finished(),
+        "the first chain must still hold its fence when the second chain completes"
+    );
+
+    let _ = release_first_tx.send(());
+    timeout(TEST_TIMEOUT, &mut first_session)
+        .await
+        .context("first full-closure session did not finish after release")?
+        .context("first full-closure session task panicked")??;
+    database.cleanup().await
 }
 
 #[tokio::test]

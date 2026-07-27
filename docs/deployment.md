@@ -1197,6 +1197,21 @@ Use `RUST_LOG=info,sqlx::query=error` for these runs; otherwise SQLx slow-query
 warnings can print huge generated INSERT statements for dense chunks and waste
 time on logging instead of ingest.
 
+Automatic catch-up runs one independently supervised lane per configured
+chain. A lane that is idle or has recorded an iteration failure sleeps on its
+own poll timer; progress on another chain neither delays that timer nor waits
+behind it. Size the indexer primary pool to
+`max(4, 1 + 3 * catch-up chain count)`: one connection is retained by the
+process-wide writer guard, and each concurrent lane can retain a bounded work
+guard while using a nested work connection and a progress or backfill-lease
+heartbeat connection. The default `BIGNAME_DATABASE_MAX_CONNECTIONS=10`
+therefore covers up to three concurrent chain lanes; the two-chain mainnet
+profile requires at least seven. A full-closure lane also opens one dedicated
+PostgreSQL connection for its profile-and-chain advisory-lock fence. That
+connection is outside the SQLx primary pool limit, so include up to one
+additional server connection per simultaneously active full-closure lane in
+PostgreSQL capacity planning.
+
 ### Targeted stateless normalized-event repair
 
 Use `replay normalized-events --stateless-only` when a retained canonical raw
@@ -1426,9 +1441,11 @@ the abort-status migration is installed, resume/complete the run or restore the
 database to a consistent pre-run snapshot before running migrations or writers.
 Guarded writer processes require at least two database pool connections so the
 held advisory lock connection cannot starve ordinary writer work. The indexer
-requires at least four so its permanent runtime writer guard, nested bounded
-work guards, and progress-heartbeat writer cannot exhaust the pool. Each path
-rejects a smaller pool before starting that work.
+requires at least four, or the larger
+`1 + 3 * normalized-replay catch-up chain count` when automatic catch-up is
+enabled, so its permanent runtime writer guard, nested bounded work guards, and
+progress-heartbeat writer cannot exhaust the pool. Each path rejects a smaller
+pool before starting that work.
 
 1. Stop the indexer and worker services, leaving PostgreSQL and the API online
    for dry-run review if desired.
