@@ -12,6 +12,8 @@ pub(super) const DISCOVERY_EDGES_DEACTIVATED_IDENTITY_INDEX: &str =
     "discovery_edges_deactivated_identity_idx";
 pub(super) const RAW_LOG_STAGING_BLOCK_RANGE_REVISION_INDEX: &str =
     "raw_log_staging_block_revisions_block_range_idx";
+const PROJECTION_INVALIDATIONS_PENDING_STATE_INDEX: &str =
+    "projection_invalidations_pending_state_idx";
 const PRIMARY_NAME_ROUTE_OUTCOME_RETENTION_INDEX: &str =
     "execution_cache_outcomes_route_primary_checkpoint_idx";
 const PRIMARY_NAME_ROUTE_TRACE_RETENTION_INDEX: &str =
@@ -69,6 +71,15 @@ pub(super) const REQUIRED_RUNTIME_INDEXES: &[RequiredIndexDescriptor] = &[
         create_concurrently_sql: r#"
             CREATE INDEX CONCURRENTLY IF NOT EXISTS raw_log_staging_block_revisions_block_range_idx
             ON public.raw_log_staging_block_revisions (chain_id, block_number, revision DESC)
+        "#,
+    },
+    RequiredIndexDescriptor {
+        name: PROJECTION_INVALIDATIONS_PENDING_STATE_INDEX,
+        table: "public.projection_invalidations",
+        create_concurrently_sql: r#"
+            CREATE INDEX CONCURRENTLY IF NOT EXISTS projection_invalidations_pending_state_idx
+            ON public.projection_invalidations (state)
+            WHERE state = 'pending'::public.projection_invalidation_state
         "#,
     },
     RequiredIndexDescriptor {
