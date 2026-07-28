@@ -11,6 +11,7 @@ use crate::backfill::{
     BackfillBlockRange, BackfillJobRunConfig, BackfillOutcome, BackfillTopicPlan,
     CoinbaseSqlBackfillConfig, CoinbaseSqlValidationMode, HistoricalBackfillSourceOps,
     HistoricalLogPayload, HistoricalLogPayloadRequest,
+    coinbase_sql::fetch_windowed_stored_log_identity_evidence,
     fetching::{
         BackfillCanonicalityEvidence, fill_log_payloads_from_validation_provider,
         materialize_historical_payload_range,
@@ -268,6 +269,7 @@ pub(super) async fn prepare(
             source_plan,
             topic_plan,
             evidence_source,
+            coinbase_config.evidence_window_blocks,
         )
         .await?;
         plan.verify_provider_evidence(evidence)
@@ -289,6 +291,7 @@ pub(super) async fn prepare(
     }
 }
 
+#[expect(clippy::too_many_arguments)]
 pub(super) async fn reverify_after_fetch(
     pool: &sqlx::PgPool,
     active_range: &BackfillRange,
@@ -297,6 +300,7 @@ pub(super) async fn reverify_after_fetch(
     source_plan: &WatchedSourceSelectorPlan,
     topic_plan: &BackfillTopicPlan,
     evidence_source: &dyn StoredLogIdentityEvidenceSource,
+    coinbase_config: &CoinbaseSqlBackfillConfig,
 ) -> Result<StoredVerificationPlan> {
     let result: Result<StoredVerificationPlan> = async {
         let plan = run_with_backfill_lease_heartbeat(
@@ -313,6 +317,7 @@ pub(super) async fn reverify_after_fetch(
             source_plan,
             topic_plan,
             evidence_source,
+            coinbase_config.evidence_window_blocks,
         )
         .await?;
         let plan = plan.verify_provider_evidence(evidence)?;
@@ -346,17 +351,20 @@ async fn fetch(
     source_plan: &WatchedSourceSelectorPlan,
     topic_plan: &BackfillTopicPlan,
     evidence_source: &dyn StoredLogIdentityEvidenceSource,
+    evidence_window_blocks: i64,
 ) -> Result<crate::backfill::stored_verification::StoredLogIdentityEvidence> {
-    let evidence =
-        run_with_backfill_lease_heartbeat(
-            pool,
-            active_range,
-            config,
-            evidence_source.fetch_stored_log_identity_evidence(
-                stored_log_identity_evidence_request(source_plan, topic_plan, config.range)?,
-            ),
-        )
-        .await?;
+    let request = stored_log_identity_evidence_request(source_plan, topic_plan, config.range)?;
+    let evidence = run_with_backfill_lease_heartbeat(
+        pool,
+        active_range,
+        config,
+        fetch_windowed_stored_log_identity_evidence(
+            evidence_source,
+            &request,
+            evidence_window_blocks,
+        ),
+    )
+    .await?;
     if !evidence_source.records_provider_query_attempts_incrementally() {
         let query_count = i64::try_from(evidence.query_count)
             .context("Coinbase SQL verification query count exceeds signed 64-bit")?;

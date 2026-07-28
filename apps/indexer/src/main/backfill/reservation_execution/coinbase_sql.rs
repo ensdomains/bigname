@@ -47,8 +47,6 @@ use recovery::{
     sample_decoded_payload_log_limit as coinbase_sql_sample_decoded_payload_log_limit,
     sample_validation_block_numbers as coinbase_sql_sample_validation_block_numbers,
 };
-#[cfg(test)]
-const MAX_COINBASE_SQL_PRACTICAL_WINDOW_BLOCKS: i64 = 65_536;
 pub(crate) async fn run_resumable_coinbase_sql_backfill_job(
     pool: &sqlx::PgPool,
     source_plan: &WatchedSourceSelectorPlan,
@@ -572,6 +570,8 @@ async fn run_reserved_coinbase_sql_backfill_range_inner(
                 source_plan,
                 topic_plan,
                 evidence_source,
+                // Use the same configured block bound for the second evidence scan.
+                coinbase_config,
             )
             .await?;
         }

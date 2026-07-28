@@ -4,39 +4,52 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use super::{
-    client::{CoinbaseSqlClient, CoinbaseSqlRawQueryResponse, query_memory_limit_attempt_count},
+    client::{CoinbaseSqlClient, CoinbaseSqlRawQueryResponse},
+    error::query_memory_limit_attempt_count,
     query,
 };
 use crate::backfill::{
     BackfillBlockRange,
     stored_verification::{
         StoredLogIdentityBucket, StoredLogIdentityEvidence, StoredLogIdentityEvidenceRequest,
+        StoredLogIdentityEvidenceSource,
     },
 };
 
 const MAX_EVIDENCE_WINDOW_HALVINGS: usize = 4;
 
-pub(super) async fn fetch_stored_log_identity_evidence(
+pub(super) async fn fetch_stored_log_identity_evidence_window(
     client: &CoinbaseSqlClient,
+    request: &StoredLogIdentityEvidenceRequest,
+    query_range: BackfillBlockRange,
+) -> Result<StoredLogIdentityEvidence> {
+    let sql = stored_log_identity_evidence_query(request, query_range)?;
+    raw_query_response_to_evidence(client.run_raw_query(&sql).await?)
+}
+
+pub(in crate::backfill) async fn fetch_windowed_stored_log_identity_evidence(
+    source: &dyn StoredLogIdentityEvidenceSource,
     request: &StoredLogIdentityEvidenceRequest,
     initial_window_blocks: i64,
 ) -> Result<StoredLogIdentityEvidence> {
-    fetch_windowed_stored_log_identity_evidence(
+    fetch_windowed_stored_log_identity_evidence_with(
         request,
         initial_window_blocks,
-        |_query_range, sql| async move { client.run_raw_query(&sql).await },
+        |query_range| {
+            source.fetch_stored_log_identity_evidence_window(request.clone(), query_range)
+        },
     )
     .await
 }
 
-async fn fetch_windowed_stored_log_identity_evidence<F, Fut>(
+async fn fetch_windowed_stored_log_identity_evidence_with<F, Fut>(
     request: &StoredLogIdentityEvidenceRequest,
     initial_window_blocks: i64,
-    mut run_query: F,
+    mut fetch_window: F,
 ) -> Result<StoredLogIdentityEvidence>
 where
-    F: FnMut(BackfillBlockRange, String) -> Fut,
-    Fut: Future<Output = Result<CoinbaseSqlRawQueryResponse>>,
+    F: FnMut(BackfillBlockRange) -> Fut,
+    Fut: Future<Output = Result<StoredLogIdentityEvidence>>,
 {
     if initial_window_blocks <= 0 {
         bail!("Coinbase SQL evidence window blocks must be positive");
@@ -56,20 +69,14 @@ where
             .checked_sub(from_block)
             .and_then(|distance| distance.checked_add(1))
             .context("Coinbase SQL evidence sub-window length overflowed")?;
-        let sql = stored_log_identity_evidence_query(request, query_range)?;
 
-        match run_query(query_range, sql).await {
-            Ok(response) => {
+        match fetch_window(query_range).await {
+            Ok(evidence) => {
                 query_count = query_count
-                    .checked_add(
-                        response
-                            .retry_count
-                            .checked_add(1)
-                            .context("Coinbase SQL evidence query attempt count overflowed")?,
-                    )
+                    .checked_add(evidence.query_count)
                     .context("Coinbase SQL evidence query count overflowed")?;
-                for row in response.rows {
-                    merge_bucket(&mut buckets, stored_log_identity_bucket_from_value(row)?)?;
+                for bucket in evidence.buckets {
+                    merge_bucket(&mut buckets, bucket)?;
                 }
             }
             Err(error) => {
@@ -98,6 +105,24 @@ where
 
     Ok(StoredLogIdentityEvidence {
         buckets: buckets.into_values().collect(),
+        query_count,
+    })
+}
+
+fn raw_query_response_to_evidence(
+    response: CoinbaseSqlRawQueryResponse,
+) -> Result<StoredLogIdentityEvidence> {
+    let query_count = response
+        .retry_count
+        .checked_add(1)
+        .context("Coinbase SQL evidence query attempt count overflowed")?;
+    let buckets = response
+        .rows
+        .into_iter()
+        .map(stored_log_identity_bucket_from_value)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(StoredLogIdentityEvidence {
+        buckets,
         query_count,
     })
 }
@@ -256,7 +281,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::backfill::coinbase_sql::client::CoinbaseSqlHttpError;
+    use crate::backfill::coinbase_sql::error::CoinbaseSqlHttpError;
 
     #[derive(Clone, Copy)]
     struct FixtureIdentity {
@@ -312,11 +337,16 @@ mod tests {
 
     #[tokio::test]
     async fn memory_limit_400_halves_the_window_and_counts_each_attempt() -> Result<()> {
+        const LIVE_MEMORY_LIMIT_BODY: &str = concat!(
+            "\"Query memory limit exceeded: would use 14.06 GiB ",
+            "(attempt to allocate chunk of 128.00 MiB bytes), maximum: 13.97 GiB.\" ",
+            "(errorType invalid_request)"
+        );
         let request = request(0, 7, 4)?;
         let attempted_ranges = Arc::new(Mutex::new(Vec::new()));
-        let evidence = fetch_windowed_stored_log_identity_evidence(&request, 8, {
+        let evidence = fetch_windowed_stored_log_identity_evidence_with(&request, 8, {
             let attempted_ranges = Arc::clone(&attempted_ranges);
-            move |query_range, _sql| {
+            move |query_range| {
                 let attempted_ranges = Arc::clone(&attempted_ranges);
                 async move {
                     attempted_ranges
@@ -326,16 +356,12 @@ mod tests {
                     if query_range.to_block - query_range.from_block + 1 > 4 {
                         return Err(CoinbaseSqlHttpError {
                             status: StatusCode::BAD_REQUEST,
-                            body: json!({
-                                "errorType": "invalid_request",
-                                "errorMessage": "Query memory limit exceeded: would use 14.02 GiB"
-                            })
-                            .to_string(),
+                            body: LIVE_MEMORY_LIMIT_BODY.to_owned(),
                             attempt_count: 1,
                         }
                         .into());
                     }
-                    Ok(CoinbaseSqlRawQueryResponse {
+                    raw_query_response_to_evidence(CoinbaseSqlRawQueryResponse {
                         rows: Vec::new(),
                         retry_count: 0,
                     })
@@ -362,9 +388,9 @@ mod tests {
     async fn memory_limit_halving_is_bounded() -> Result<()> {
         let request = request(0, 31, 4)?;
         let attempt_count = Arc::new(Mutex::new(0usize));
-        let error = fetch_windowed_stored_log_identity_evidence(&request, 32, {
+        let error = fetch_windowed_stored_log_identity_evidence_with(&request, 32, {
             let attempt_count = Arc::clone(&attempt_count);
-            move |_query_range, _sql| {
+            move |_query_range| {
                 let attempt_count = Arc::clone(&attempt_count);
                 async move {
                     *attempt_count
@@ -403,13 +429,13 @@ mod tests {
     ) -> Result<StoredLogIdentityEvidence> {
         let bucket_origin = request.range.from_block;
         let bucket_blocks = request.bucket_blocks;
-        fetch_windowed_stored_log_identity_evidence(
+        fetch_windowed_stored_log_identity_evidence_with(
             request,
             window_blocks,
-            move |query_range, _sql| {
+            move |query_range| {
                 let fixture = Arc::clone(&fixture);
                 async move {
-                    Ok(CoinbaseSqlRawQueryResponse {
+                    raw_query_response_to_evidence(CoinbaseSqlRawQueryResponse {
                         rows: fixture_response(&fixture, bucket_origin, bucket_blocks, query_range),
                         retry_count: 0,
                     })
