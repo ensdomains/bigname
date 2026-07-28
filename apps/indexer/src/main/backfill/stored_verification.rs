@@ -191,9 +191,10 @@ pub(crate) trait StoredLogIdentityEvidenceSource: Send + Sync {
         false
     }
 
-    fn fetch_stored_log_identity_evidence<'a>(
+    fn fetch_stored_log_identity_evidence_window<'a>(
         &'a self,
         request: StoredLogIdentityEvidenceRequest,
+        query_range: BackfillBlockRange,
     ) -> Pin<Box<dyn Future<Output = Result<StoredLogIdentityEvidence>> + Send + 'a>>;
 }
 

@@ -1,5 +1,5 @@
 use std::{
-    fmt, fs,
+    fs,
     io::Write,
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
@@ -15,7 +15,12 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::{auth::CoinbaseSqlAuth, rate_limit::CoinbaseSqlRateLimiter, rows::CoinbaseSqlLogRow};
+use super::{
+    auth::CoinbaseSqlAuth,
+    error::{CoinbaseSqlHttpError, truncate_error_body},
+    rate_limit::CoinbaseSqlRateLimiter,
+    rows::CoinbaseSqlLogRow,
+};
 use crate::backfill::CoinbaseSqlBackfillConfig;
 
 const MAX_SQL_ATTEMPTS: usize = 5;
@@ -317,49 +322,6 @@ pub(super) struct CoinbaseSqlRawQueryResponse {
     pub(super) retry_count: usize,
 }
 
-#[derive(Debug)]
-pub(super) struct CoinbaseSqlHttpError {
-    pub(super) status: StatusCode,
-    pub(super) body: String,
-    pub(super) attempt_count: usize,
-}
-
-impl CoinbaseSqlHttpError {
-    fn is_query_memory_limit(&self) -> bool {
-        if self.status != StatusCode::BAD_REQUEST {
-            return false;
-        }
-        serde_json::from_str::<Value>(&self.body)
-            .ok()
-            .and_then(|body| {
-                body.get("errorMessage")
-                    .and_then(Value::as_str)
-                    .map(str::to_ascii_lowercase)
-            })
-            .is_some_and(|message| message.contains("query memory limit exceeded"))
-    }
-}
-
-impl fmt::Display for CoinbaseSqlHttpError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "Coinbase SQL request failed with status {}: {}",
-            self.status,
-            truncate_error_body(&self.body)
-        )
-    }
-}
-
-impl std::error::Error for CoinbaseSqlHttpError {}
-
-pub(super) fn query_memory_limit_attempt_count(error: &anyhow::Error) -> Option<usize> {
-    error
-        .downcast_ref::<CoinbaseSqlHttpError>()
-        .filter(|error| error.is_query_memory_limit())
-        .map(|error| error.attempt_count)
-}
-
 struct CoinbaseSqlHttpResponse {
     status: StatusCode,
     body: String,
@@ -402,15 +364,6 @@ async fn sleep_backoff(attempt: usize) {
 async fn sleep_waf_challenge_backoff(attempt: usize) {
     let millis = 2_000_u64.saturating_mul(1_u64 << attempt.min(4));
     tokio::time::sleep(Duration::from_millis(millis)).await;
-}
-
-fn truncate_error_body(body: &str) -> String {
-    const MAX_ERROR_BODY_CHARS: usize = 2_000;
-    let mut truncated = body.chars().take(MAX_ERROR_BODY_CHARS).collect::<String>();
-    if body.chars().count() > MAX_ERROR_BODY_CHARS {
-        truncated.push_str("...");
-    }
-    truncated
 }
 
 #[cfg(test)]

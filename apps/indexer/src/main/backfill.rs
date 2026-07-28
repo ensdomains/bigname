@@ -36,6 +36,8 @@ use crate::reconciliation::HeaderAuditMode;
 pub(crate) const STALE_BACKFILL_CLAIM_MAX_AGE_SECS: i64 = 3_600;
 
 pub(crate) use coinbase_sql::load_backfill_topic_plan;
+#[cfg(test)]
+pub(crate) use coinbase_sql::test_coinbase_sql_bad_request_error;
 pub(crate) use coinbase_sql::{
     CoinbaseSqlSourceRegistry, DEFAULT_COINBASE_SQL_API_KEY_ID_ENV,
     DEFAULT_COINBASE_SQL_API_KEY_SECRET_ENV,

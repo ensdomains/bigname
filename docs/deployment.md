@@ -1225,9 +1225,10 @@ limit is above the effective result cap, pagination and window tuning use the
 cap. The QPS default is a conservative per-process guardrail and remains
 operator-configurable if product limits change. [Stored-history
 verification](glossary.md) evidence aggregation defaults to disjoint
-4,000,000-block sub-windows. A structured
-memory-limit `400 Bad Request` halves the affected sub-window up to four times;
-every failed and replacement query remains visible in job query accounting.
+4,000,000-block sub-windows. A memory-limit `400 Bad Request`, whether returned
+as a structured `errorMessage` or Coinbase's provider-rendered error body,
+halves the affected sub-window up to four times; every failed and replacement
+query remains visible in job query accounting.
 The default validation mode is
 `full`, so the validation provider fetches the same address/topic log span and
 fails the range if Coinbase SQL omitted or added a selected log identity.

@@ -109,11 +109,195 @@ struct IncrementallyRecordedFailureSource {
     stage: IncrementalQueryFailureStage,
 }
 
+const LIVE_COINBASE_SQL_MEMORY_LIMIT_BODY: &str = concat!(
+    "\"Query memory limit exceeded: would use 14.06 GiB ",
+    "(attempt to allocate chunk of 128.00 MiB bytes), maximum: 13.97 GiB.\" ",
+    "(errorType invalid_request)"
+);
+
+#[derive(Clone, Copy)]
+enum MemoryLimitedEvidenceMode {
+    FailAboveBlocks(i64),
+    AlwaysFail,
+}
+
+struct MemoryLimitedEvidenceSource {
+    pool: PgPool,
+    backfill_job_id: i64,
+    mode: MemoryLimitedEvidenceMode,
+    attempted_ranges: Arc<Mutex<Vec<BackfillBlockRange>>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EvidenceFetchPhase {
+    Prepare,
+    Reverify,
+}
+
+struct ReverifyMemoryLimitedEvidenceSource {
+    pool: PgPool,
+    backfill_job_id: i64,
+    payload_calls: Arc<std::sync::atomic::AtomicUsize>,
+    attempted_ranges: Arc<Mutex<Vec<(EvidenceFetchPhase, BackfillBlockRange)>>>,
+}
+
+struct MemoryLimitEvidenceRun {
+    error: Option<String>,
+    attempted_ranges: Vec<BackfillBlockRange>,
+    job_status: String,
+    range_status: String,
+    failure_phase: Option<String>,
+    projected_queries: i64,
+    actual_queries: i64,
+}
+
 struct FenceMutatingHistoricalSource {
     pool: PgPool,
     chain: String,
     block_number: i64,
     evidence_calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl backfill::HistoricalBackfillSourceOps for MemoryLimitedEvidenceSource {
+    fn records_provider_query_attempts_incrementally(&self) -> bool {
+        true
+    }
+
+    async fn fetch_selected_log_payloads(
+        &self,
+        _request: backfill::HistoricalLogPayloadRequest<'_>,
+    ) -> Result<backfill::HistoricalLogPayload> {
+        anyhow::bail!("memory-limit evidence regression must not fetch provider log rows")
+    }
+}
+
+impl backfill::StoredLogIdentityEvidenceSource for MemoryLimitedEvidenceSource {
+    fn records_provider_query_attempts_incrementally(&self) -> bool {
+        true
+    }
+
+    fn fetch_stored_log_identity_evidence_window<'a>(
+        &'a self,
+        _request: backfill::StoredLogIdentityEvidenceRequest,
+        query_range: BackfillBlockRange,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<backfill::StoredLogIdentityEvidence>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            self.attempted_ranges
+                .lock()
+                .expect("attempted-range lock must not be poisoned")
+                .push(query_range);
+            bigname_storage::add_backfill_job_actual_provider_queries(
+                &self.pool,
+                self.backfill_job_id,
+                1,
+            )
+            .await?;
+            let query_blocks = query_range
+                .to_block
+                .checked_sub(query_range.from_block)
+                .and_then(|distance| distance.checked_add(1))
+                .context("memory-limit test query range length overflowed")?;
+            let should_fail = match self.mode {
+                MemoryLimitedEvidenceMode::FailAboveBlocks(max_blocks) => query_blocks > max_blocks,
+                MemoryLimitedEvidenceMode::AlwaysFail => true,
+            };
+            if should_fail {
+                return Err(backfill::test_coinbase_sql_bad_request_error(
+                    LIVE_COINBASE_SQL_MEMORY_LIMIT_BODY,
+                ));
+            }
+            Ok(backfill::StoredLogIdentityEvidence {
+                buckets: Vec::new(),
+                query_count: 1,
+            })
+        })
+    }
+}
+
+impl backfill::HistoricalBackfillSourceOps for ReverifyMemoryLimitedEvidenceSource {
+    fn records_provider_query_attempts_incrementally(&self) -> bool {
+        true
+    }
+
+    async fn fetch_selected_log_payloads(
+        &self,
+        request: backfill::HistoricalLogPayloadRequest<'_>,
+    ) -> Result<backfill::HistoricalLogPayload> {
+        self.payload_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        bigname_storage::add_backfill_job_actual_provider_queries(
+            &self.pool,
+            self.backfill_job_id,
+            1,
+        )
+        .await?;
+        Ok(backfill::HistoricalLogPayload {
+            validation_mode: request.validation_mode,
+            ..Default::default()
+        })
+    }
+}
+
+impl backfill::StoredLogIdentityEvidenceSource for ReverifyMemoryLimitedEvidenceSource {
+    fn records_provider_query_attempts_incrementally(&self) -> bool {
+        true
+    }
+
+    fn fetch_stored_log_identity_evidence_window<'a>(
+        &'a self,
+        _request: backfill::StoredLogIdentityEvidenceRequest,
+        query_range: BackfillBlockRange,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<backfill::StoredLogIdentityEvidence>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let phase = if self.payload_calls.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                EvidenceFetchPhase::Prepare
+            } else {
+                EvidenceFetchPhase::Reverify
+            };
+            self.attempted_ranges
+                .lock()
+                .expect("attempted-range lock must not be poisoned")
+                .push((phase, query_range));
+            bigname_storage::add_backfill_job_actual_provider_queries(
+                &self.pool,
+                self.backfill_job_id,
+                1,
+            )
+            .await?;
+            if phase == EvidenceFetchPhase::Reverify
+                && query_range.to_block > query_range.from_block
+            {
+                return Err(backfill::test_coinbase_sql_bad_request_error(
+                    LIVE_COINBASE_SQL_MEMORY_LIMIT_BODY,
+                ));
+            }
+            let buckets = (phase == EvidenceFetchPhase::Prepare)
+                .then_some(backfill::StoredLogIdentityBucket {
+                    bucket: 0,
+                    selected_log_count: 1,
+                    digest_left: 0,
+                    digest_right: 0,
+                })
+                .into_iter()
+                .collect();
+            Ok(backfill::StoredLogIdentityEvidence {
+                buckets,
+                query_count: 1,
+            })
+        })
+    }
 }
 
 impl backfill::HistoricalBackfillSourceOps for FenceMutatingHistoricalSource {
@@ -133,9 +317,10 @@ impl backfill::HistoricalBackfillSourceOps for FenceMutatingHistoricalSource {
 }
 
 impl backfill::StoredLogIdentityEvidenceSource for FenceMutatingHistoricalSource {
-    fn fetch_stored_log_identity_evidence<'a>(
+    fn fetch_stored_log_identity_evidence_window<'a>(
         &'a self,
         _request: backfill::StoredLogIdentityEvidenceRequest,
+        _query_range: BackfillBlockRange,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<Output = Result<backfill::StoredLogIdentityEvidence>>
@@ -229,9 +414,10 @@ impl backfill::StoredLogIdentityEvidenceSource for IncrementallyRecordedFailureS
         true
     }
 
-    fn fetch_stored_log_identity_evidence<'a>(
+    fn fetch_stored_log_identity_evidence_window<'a>(
         &'a self,
         _request: backfill::StoredLogIdentityEvidenceRequest,
+        _query_range: BackfillBlockRange,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<Output = Result<backfill::StoredLogIdentityEvidence>>
@@ -295,9 +481,10 @@ impl backfill::HistoricalBackfillSourceOps for OversizedHistoricalSource {
 }
 
 impl backfill::StoredLogIdentityEvidenceSource for OversizedHistoricalSource {
-    fn fetch_stored_log_identity_evidence<'a>(
+    fn fetch_stored_log_identity_evidence_window<'a>(
         &'a self,
         _request: backfill::StoredLogIdentityEvidenceRequest,
+        _query_range: BackfillBlockRange,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<Output = Result<backfill::StoredLogIdentityEvidence>>
@@ -351,9 +538,10 @@ impl backfill::HistoricalBackfillSourceOps for RepairingHistoricalSource {
 }
 
 impl backfill::StoredLogIdentityEvidenceSource for RepairingHistoricalSource {
-    fn fetch_stored_log_identity_evidence<'a>(
+    fn fetch_stored_log_identity_evidence_window<'a>(
         &'a self,
         _request: backfill::StoredLogIdentityEvidenceRequest,
+        _query_range: BackfillBlockRange,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<Output = Result<backfill::StoredLogIdentityEvidence>>
@@ -370,9 +558,10 @@ impl backfill::StoredLogIdentityEvidenceSource for RepairingHistoricalSource {
 }
 
 impl backfill::StoredLogIdentityEvidenceSource for StoredOnlyHistoricalSource {
-    fn fetch_stored_log_identity_evidence<'a>(
+    fn fetch_stored_log_identity_evidence_window<'a>(
         &'a self,
         _request: backfill::StoredLogIdentityEvidenceRequest,
+        _query_range: BackfillBlockRange,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<Output = Result<backfill::StoredLogIdentityEvidence>>
@@ -406,9 +595,10 @@ impl backfill::HistoricalBackfillSourceOps for EmptyHistoricalSource {
 }
 
 impl backfill::StoredLogIdentityEvidenceSource for EmptyHistoricalSource {
-    fn fetch_stored_log_identity_evidence<'a>(
+    fn fetch_stored_log_identity_evidence_window<'a>(
         &'a self,
         request: backfill::StoredLogIdentityEvidenceRequest,
+        query_range: BackfillBlockRange,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<Output = Result<backfill::StoredLogIdentityEvidence>>
@@ -417,7 +607,8 @@ impl backfill::StoredLogIdentityEvidenceSource for EmptyHistoricalSource {
         >,
     > {
         Box::pin(async move {
-            let buckets = (self.calls.load(std::sync::atomic::Ordering::SeqCst) == 0)
+            let buckets = (self.calls.load(std::sync::atomic::Ordering::SeqCst) == 0
+                && query_range.from_block == request.range.from_block)
                 .then_some(backfill::StoredLogIdentityBucket {
                     bucket: 0,
                     selected_log_count: 1,
@@ -426,11 +617,9 @@ impl backfill::StoredLogIdentityEvidenceSource for EmptyHistoricalSource {
                 })
                 .into_iter()
                 .collect();
-            let query_count =
-                usize::try_from(request.range.to_block - request.range.from_block + 1)?;
             Ok(backfill::StoredLogIdentityEvidence {
                 buckets,
-                query_count,
+                query_count: 1,
             })
         })
     }
@@ -5253,6 +5442,309 @@ async fn historical_materialization_skips_code_observations_without_selected_log
         .filter(|request| request.method == "eth_getCode")
         .count();
     assert_eq!(code_requests, 0);
+
+    server.abort();
+    database.cleanup().await
+}
+
+async fn run_memory_limited_evidence_job(
+    mode: MemoryLimitedEvidenceMode,
+    manifest_id: i64,
+    idempotency_key: &str,
+) -> Result<MemoryLimitEvidenceRun> {
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let range = BackfillBlockRange::new(0, 31)?;
+    let source_plan =
+        materialization_pipeline_source_plan(database.pool(), manifest_id, range).await?;
+    let topic_plan = backfill::load_backfill_topic_plan(database.pool(), &source_plan).await?;
+    let coinbase_config = backfill::CoinbaseSqlBackfillConfig {
+        initial_window_blocks: 1,
+        max_window_blocks: 1,
+        evidence_window_blocks: 32,
+        page_limit: 100,
+        sql_char_limit: 10_000,
+        query_timeout_secs: 30,
+        rate_limit_qps: 1,
+        validation_mode: backfill::CoinbaseSqlValidationMode::Sample,
+    };
+    let mut config = backfill_job_config(range, idempotency_key, idempotency_key)?;
+    config.scope_idempotency_to_raw_log_retention_generation = true;
+    config.adapter_sync_mode = backfill::BackfillAdapterSyncMode::RawOnly;
+    let record = backfill::create_verified_coinbase_sql_backfill_job(
+        database.pool(),
+        &source_plan,
+        &config,
+        &coinbase_config,
+        &topic_plan,
+    )
+    .await?;
+    let job_id = record.job.backfill_job_id;
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        materialization_pipeline_provider_fixtures(),
+        requests,
+    )
+    .await?;
+    let attempted_ranges = Arc::new(Mutex::new(Vec::new()));
+    let source = MemoryLimitedEvidenceSource {
+        pool: database.pool().clone(),
+        backfill_job_id: job_id,
+        mode,
+        attempted_ranges: Arc::clone(&attempted_ranges),
+    };
+
+    let error = backfill::run_precreated_verified_coinbase_sql_backfill_job(
+        database.pool(),
+        &source_plan,
+        &provider,
+        &source,
+        config,
+        coinbase_config,
+        topic_plan,
+        record,
+    )
+    .await
+    .err()
+    .map(|error| format!("{error:#}"));
+    let (job_status, range_status, failure_phase, projected_queries, actual_queries) =
+        sqlx::query_as::<_, (String, String, Option<String>, i64, i64)>(
+            r#"
+        SELECT
+            job.status::TEXT,
+            range.status::TEXT,
+            range.failure_metadata ->> 'phase',
+            job.projected_minimum_provider_query_count,
+            job.actual_provider_query_count
+        FROM backfill_jobs job
+        JOIN backfill_ranges range USING (backfill_job_id)
+        WHERE job.backfill_job_id = $1
+        "#,
+        )
+        .bind(job_id)
+        .fetch_one(database.pool())
+        .await?;
+    let attempted_ranges = attempted_ranges
+        .lock()
+        .expect("attempted-range lock must not be poisoned")
+        .clone();
+
+    server.abort();
+    database.cleanup().await?;
+    Ok(MemoryLimitEvidenceRun {
+        error,
+        attempted_ranges,
+        job_status,
+        range_status,
+        failure_phase,
+        projected_queries,
+        actual_queries,
+    })
+}
+
+#[tokio::test]
+async fn verified_coinbase_prepare_halves_live_memory_limit_400_and_counts_attempts() -> Result<()>
+{
+    let run = run_memory_limited_evidence_job(
+        MemoryLimitedEvidenceMode::FailAboveBlocks(16),
+        9_312,
+        "verified-coinbase-memory-limit-halving",
+    )
+    .await?;
+
+    assert_eq!(run.error, None);
+    assert_eq!(
+        run.attempted_ranges,
+        vec![
+            BackfillBlockRange::new(0, 31)?,
+            BackfillBlockRange::new(0, 15)?,
+            BackfillBlockRange::new(16, 31)?,
+        ]
+    );
+    assert_eq!(run.job_status, "completed");
+    assert_eq!(run.range_status, "completed");
+    assert_eq!(run.failure_phase, None);
+    assert_eq!(run.projected_queries, 1);
+    assert_eq!(
+        run.actual_queries, 3,
+        "the failed wide query and both halved replacements must be counted"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn verified_coinbase_prepare_fails_range_after_four_memory_limit_halvings() -> Result<()> {
+    let run = run_memory_limited_evidence_job(
+        MemoryLimitedEvidenceMode::AlwaysFail,
+        9_313,
+        "verified-coinbase-memory-limit-exhaustion",
+    )
+    .await?;
+
+    assert!(
+        run.error
+            .as_deref()
+            .is_some_and(|error| error.contains("Query memory limit exceeded")),
+        "unexpected exhaustion error: {:?}",
+        run.error
+    );
+    assert_eq!(
+        run.attempted_ranges,
+        vec![
+            BackfillBlockRange::new(0, 31)?,
+            BackfillBlockRange::new(0, 15)?,
+            BackfillBlockRange::new(0, 7)?,
+            BackfillBlockRange::new(0, 3)?,
+            BackfillBlockRange::new(0, 1)?,
+        ]
+    );
+    assert_eq!(run.job_status, "failed");
+    assert_eq!(run.range_status, "failed");
+    assert_eq!(
+        run.failure_phase.as_deref(),
+        Some("stored_verification_prepare")
+    );
+    assert_eq!(run.projected_queries, 1);
+    assert_eq!(
+        run.actual_queries, 5,
+        "the initial query and all four halved retries must be counted"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn verified_coinbase_reverify_halves_live_memory_limit_400_and_counts_attempts() -> Result<()>
+{
+    let database = TestDatabase::new().await?;
+    create_backfill_job_tables(database.pool()).await?;
+    let range = BackfillBlockRange::new(42, 43)?;
+    let manifest_id = 9_314;
+    let source_plan =
+        materialization_pipeline_source_plan(database.pool(), manifest_id, range).await?;
+    sqlx::query(
+        r#"
+        UPDATE manifest_versions
+        SET manifest_payload = $2
+        WHERE manifest_id = $1
+        "#,
+    )
+    .bind(manifest_id)
+    .bind(json!({
+        "abi": {
+            "events": [{
+                "name": "NameWrapped",
+                "fragment": "event NameWrapped(bytes32 indexed node, bytes name, address owner, uint32 fuses, uint64 expiry)",
+                "emitter_roles": ["name_wrapper"],
+                "normalized_events": ["WrapperNameWrapped", "PreimageObserved"]
+            }]
+        }
+    }))
+    .execute(database.pool())
+    .await?;
+    let topic_plan = backfill::load_backfill_topic_plan(database.pool(), &source_plan).await?;
+    let coinbase_config = backfill::CoinbaseSqlBackfillConfig {
+        initial_window_blocks: 1,
+        max_window_blocks: 1,
+        evidence_window_blocks: 2,
+        page_limit: 100,
+        sql_char_limit: 10_000,
+        query_timeout_secs: 30,
+        rate_limit_qps: 1,
+        validation_mode: backfill::CoinbaseSqlValidationMode::Sample,
+    };
+    let mut config = backfill_job_config(
+        range,
+        "verified-coinbase-reverify-memory-limit-halving",
+        "verified-reverify-memory-limit-lease",
+    )?;
+    config.scope_idempotency_to_raw_log_retention_generation = true;
+    config.adapter_sync_mode = backfill::BackfillAdapterSyncMode::RawOnly;
+    let record = backfill::create_verified_coinbase_sql_backfill_job(
+        database.pool(),
+        &source_plan,
+        &config,
+        &coinbase_config,
+        &topic_plan,
+    )
+    .await?;
+    let job_id = record.job.backfill_job_id;
+    let requests = Arc::new(Mutex::new(Vec::<RecordedRpcRequest>::new()));
+    let (provider, server) = number_resolving_provider_with_fixtures(
+        materialization_pipeline_provider_fixtures(),
+        requests,
+    )
+    .await?;
+    let payload_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let attempted_ranges = Arc::new(Mutex::new(Vec::new()));
+    let source = ReverifyMemoryLimitedEvidenceSource {
+        pool: database.pool().clone(),
+        backfill_job_id: job_id,
+        payload_calls: Arc::clone(&payload_calls),
+        attempted_ranges: Arc::clone(&attempted_ranges),
+    };
+
+    backfill::run_precreated_verified_coinbase_sql_backfill_job(
+        database.pool(),
+        &source_plan,
+        &provider,
+        &source,
+        config,
+        coinbase_config,
+        topic_plan,
+        record,
+    )
+    .await?;
+
+    assert_eq!(payload_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(
+        attempted_ranges
+            .lock()
+            .expect("attempted-range lock must not be poisoned")
+            .as_slice(),
+        [
+            (
+                EvidenceFetchPhase::Prepare,
+                BackfillBlockRange::new(42, 43)?
+            ),
+            (
+                EvidenceFetchPhase::Reverify,
+                BackfillBlockRange::new(42, 43)?
+            ),
+            (
+                EvidenceFetchPhase::Reverify,
+                BackfillBlockRange::new(42, 42)?
+            ),
+            (
+                EvidenceFetchPhase::Reverify,
+                BackfillBlockRange::new(43, 43)?
+            ),
+        ]
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, String, i64, i64, Option<i64>)>(
+            r#"
+            SELECT
+                job.status::TEXT,
+                range.status::TEXT,
+                job.projected_minimum_provider_query_count,
+                job.actual_provider_query_count,
+                job.stored_verification_log_count
+            FROM backfill_jobs job
+            JOIN backfill_ranges range USING (backfill_job_id)
+            WHERE job.backfill_job_id = $1
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(database.pool())
+        .await?,
+        (
+            "completed".to_owned(),
+            "completed".to_owned(),
+            4,
+            6,
+            Some(0)
+        )
+    );
 
     server.abort();
     database.cleanup().await

@@ -8,6 +8,8 @@ use sqlx::types::Uuid;
 use super::*;
 use crate::backfill::{BackfillAdapterSyncMode, HistoricalLogValidationFilter};
 
+const MAX_COINBASE_SQL_PRACTICAL_WINDOW_BLOCKS: i64 = 65_536;
+
 fn source_plan_for_family(source_family: &str) -> WatchedSourceSelectorPlan {
     let address = "0x1111111111111111111111111111111111111111";
     WatchedSourceSelectorPlan {

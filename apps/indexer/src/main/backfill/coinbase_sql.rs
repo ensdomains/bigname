@@ -9,6 +9,8 @@ use anyhow::{Context, Result, bail};
 mod auth;
 #[path = "coinbase_sql/client.rs"]
 mod client;
+#[path = "coinbase_sql/error.rs"]
+mod error;
 #[path = "coinbase_sql/evidence.rs"]
 mod evidence;
 #[path = "coinbase_sql/pagination.rs"]
@@ -25,14 +27,18 @@ mod rows;
 use crate::provider::{ProviderLog, ProviderReceipt, ProviderTransaction};
 
 use super::{
-    CoinbaseSqlBackfillConfig, CoinbaseSqlValidationMode, HistoricalBackfillSourceOps,
-    HistoricalLogPayload, HistoricalLogPayloadRequest, HistoricalLogValidationFilter,
+    BackfillBlockRange, CoinbaseSqlBackfillConfig, CoinbaseSqlValidationMode,
+    HistoricalBackfillSourceOps, HistoricalLogPayload, HistoricalLogPayloadRequest,
+    HistoricalLogValidationFilter,
     stored_verification::{
         StoredLogIdentityEvidence, StoredLogIdentityEvidenceRequest,
         StoredLogIdentityEvidenceSource,
     },
 };
 
+#[cfg(test)]
+pub(crate) use error::test_bad_request_error as test_coinbase_sql_bad_request_error;
+pub(super) use evidence::fetch_windowed_stored_log_identity_evidence;
 #[cfg(test)]
 use evidence::{stored_log_identity_bucket_from_value, stored_log_identity_evidence_query};
 pub(crate) use planner::load_backfill_topic_plan;
@@ -284,9 +290,10 @@ impl StoredLogIdentityEvidenceSource for CoinbaseSqlBackfillSource {
         self.client.records_query_attempts_incrementally()
     }
 
-    fn fetch_stored_log_identity_evidence<'a>(
+    fn fetch_stored_log_identity_evidence_window<'a>(
         &'a self,
         request: StoredLogIdentityEvidenceRequest,
+        query_range: BackfillBlockRange,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<StoredLogIdentityEvidence>> + Send + 'a>,
     > {
@@ -298,12 +305,8 @@ impl StoredLogIdentityEvidenceSource for CoinbaseSqlBackfillSource {
                     request.chain
                 );
             }
-            evidence::fetch_stored_log_identity_evidence(
-                &self.client,
-                &request,
-                self.config.evidence_window_blocks,
-            )
-            .await
+            evidence::fetch_stored_log_identity_evidence_window(&self.client, &request, query_range)
+                .await
         })
     }
 }
