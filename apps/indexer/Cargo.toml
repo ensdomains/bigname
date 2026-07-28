@@ -33,6 +33,7 @@ reth-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v2.2.0", d
 bigname-adapters.workspace = true
 bigname-domain.workspace = true
 bigname-manifests.workspace = true
+bigname-metrics.workspace = true
 bigname-storage.workspace = true
 
 [dev-dependencies]

@@ -1,6 +1,3 @@
-use clap::{Args, Parser, Subcommand};
-use {bigname_storage::DatabaseConfig, std::path::PathBuf};
-
 use crate::backfill::{
     BackfillSourceKind, CoinbaseSqlValidationMode, DEFAULT_COINBASE_SQL_API_KEY_ID_ENV,
     DEFAULT_COINBASE_SQL_API_KEY_SECRET_ENV, DEFAULT_COINBASE_SQL_EVIDENCE_WINDOW_BLOCKS,
@@ -29,7 +26,8 @@ use crate::repair::{
     RAW_CODE_HASH_CORRECTION_DEFAULT_OBSERVED_FROM,
 };
 use crate::runtime::DEFAULT_STARTUP_DISCOVERY_PAGE_LOGS;
-
+use clap::{Args, Parser, Subcommand};
+use {bigname_storage::DatabaseConfig, std::path::PathBuf};
 #[path = "cli/healthcheck.rs"]
 mod healthcheck_args;
 #[path = "cli/value_parsers.rs"]
@@ -130,6 +128,8 @@ pub(crate) struct CoinbaseSqlArgs {
 pub(crate) struct RunArgs {
     #[command(flatten)]
     pub(crate) database: DatabaseConfig,
+    #[command(flatten)]
+    pub(crate) metrics: crate::metrics::MetricsArgs,
     #[arg(
         long,
         env = "BIGNAME_INDEXER_MANIFESTS_ROOT",

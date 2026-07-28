@@ -400,6 +400,10 @@ async fn persist_reconciled_raw_payloads_inner(
         );
     }
 
+    crate::metrics::record_live_intake(chain, raw_blocks.len(), logs.len());
+    if canonical.status == CanonicalReconciliationStatus::ReorgReconciled {
+        crate::metrics::record_reorg(chain);
+    }
     Ok(())
 }
 

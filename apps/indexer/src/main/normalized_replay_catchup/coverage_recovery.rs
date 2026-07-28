@@ -31,29 +31,41 @@ pub(crate) async fn recover_ens_v2_live_coverage_requirement_for_replay(
     requirement: &bigname_adapters::EnsV2MissingCoverage,
     progress: &mut Option<&mut NormalizedReplayHeartbeat>,
 ) -> Result<EnsV2LiveCoverageRecoveryStatus> {
-    match progress.as_deref_mut() {
-        Some(progress) => {
-            recover_ens_v2_live_coverage_requirement_with_progress(
-                pool,
-                deployment_profile,
-                provider,
-                header_audit_mode,
-                requirement,
-                progress,
-            )
-            .await
+    let result = crate::metrics::with_coverage_provider_queries(async {
+        match progress.as_deref_mut() {
+            Some(progress) => {
+                recover_ens_v2_live_coverage_requirement_with_progress(
+                    pool,
+                    deployment_profile,
+                    provider,
+                    header_audit_mode,
+                    requirement,
+                    progress,
+                )
+                .await
+            }
+            None => {
+                recover_ens_v2_live_coverage_requirement(
+                    pool,
+                    deployment_profile,
+                    provider,
+                    header_audit_mode,
+                    requirement,
+                )
+                .await
+            }
         }
-        None => {
-            recover_ens_v2_live_coverage_requirement(
-                pool,
-                deployment_profile,
-                provider,
-                header_audit_mode,
-                requirement,
-            )
-            .await
-        }
-    }
+    })
+    .await;
+    crate::metrics::record_coverage_recovery_job(
+        &requirement.chain,
+        match &result {
+            Ok(EnsV2LiveCoverageRecoveryStatus::Recovered) => "completed",
+            Ok(EnsV2LiveCoverageRecoveryStatus::AuthorityChanged) => "deferred",
+            Err(_) => "failed",
+        },
+    );
+    result
 }
 
 #[expect(clippy::too_many_arguments)]
@@ -78,7 +90,7 @@ pub(super) async fn replay_full_closure_with_coverage_recovery(
     let mut recovery_attempt = 0_usize;
     let mut stateless_ranges = vec![(from_block, to_block)];
     loop {
-        let replay_error = match replay_full_closure_or_dependency_normalized_events(
+        let replay_result = replay_full_closure_or_dependency_normalized_events(
             pool,
             deployment_profile,
             chain,
@@ -88,8 +100,8 @@ pub(super) async fn replay_full_closure_with_coverage_recovery(
             max_raw_logs_per_page,
             progress,
         )
-        .await
-        {
+        .await;
+        let replay_error = match replay_result {
             Ok(outcome) => return Ok((outcome, raw_log_input_version)),
             Err(error) => error,
         };

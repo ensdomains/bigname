@@ -26,6 +26,7 @@ tracing-subscriber.workspace = true
 bigname-domain.workspace = true
 bigname-execution.workspace = true
 bigname-manifests.workspace = true
+bigname-metrics.workspace = true
 bigname-storage.workspace = true
 
 [dev-dependencies]

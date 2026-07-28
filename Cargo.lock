@@ -1691,6 +1691,7 @@ dependencies = [
  "bigname-domain",
  "bigname-execution",
  "bigname-manifests",
+ "bigname-metrics",
  "bigname-storage",
  "bigname-test-support",
  "clap",
@@ -1748,6 +1749,7 @@ dependencies = [
  "bigname-adapters",
  "bigname-domain",
  "bigname-manifests",
+ "bigname-metrics",
  "bigname-storage",
  "bigname-test-support",
  "bytes",
@@ -1783,6 +1785,16 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "bigname-metrics"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "prometheus",
+ "tokio",
 ]
 
 [[package]]
@@ -1823,6 +1835,7 @@ dependencies = [
  "bigname-domain",
  "bigname-execution",
  "bigname-manifests",
+ "bigname-metrics",
  "bigname-storage",
  "bigname-test-support",
  "clap",
@@ -5933,6 +5946,20 @@ dependencies = [
  "bitflags 2.11.1",
  "chrono",
  "hex",
+]
+
+[[package]]
+name = "prometheus"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ca5326d8d0b950a9acd87e6a3f94745394f62e4dae1b1ee22b2bc0c394af43a"
+dependencies = [
+ "cfg-if",
+ "fnv",
+ "lazy_static",
+ "memchr",
+ "parking_lot",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use anyhow::Result;
 use bigname_storage::projection_staging::wait_for_projection_replay_admission_retry as wait_for_admission_retry;
 use sqlx::PgPool;
@@ -29,6 +31,7 @@ pub(super) async fn run_required_normalized_replay_catchup_iteration(
     progress: &mut NormalizedReplayHeartbeat,
     activity: &RequiredSubtaskActivity,
 ) -> Result<CatchupIterationStatus> {
+    let _iteration_timer = crate::metrics::catchup_iteration_timer(chain);
     let _activity = activity.begin().await;
     let mut replay_admission_attempt = 1_usize;
     let result = loop {
@@ -46,9 +49,11 @@ pub(super) async fn run_required_normalized_replay_catchup_iteration(
         let Err(error) = &result else {
             break result;
         };
+        let wait_started = Instant::now();
         if !wait_for_admission_retry(error, replay_admission_attempt).await {
             break result;
         }
+        crate::metrics::record_admission_retry(chain, wait_started.elapsed());
         replay_admission_attempt += 1;
     };
     match result {

@@ -96,8 +96,19 @@ impl ChainProviderOps for JsonRpcProvider {
     }
 }
 
+impl ChainProvider {
+    pub(crate) fn metrics_chain(&self) -> Option<&str> {
+        match self {
+            Self::JsonRpc(provider) => provider.chain.as_deref(),
+            // The compiled Reth reader currently supports Ethereum Mainnet only.
+            Self::RethDb(_) => Some("ethereum-mainnet"),
+        }
+    }
+}
+
 impl ChainProviderOps for ChainProvider {
     async fn fetch_chain_heads(&self) -> Result<ProviderHeadSnapshot> {
+        let _timer = crate::metrics::provider_lookup_timer(self);
         match self {
             Self::JsonRpc(provider) => provider.fetch_chain_heads().await,
             Self::RethDb(provider) => provider.fetch_chain_heads().await,
@@ -108,6 +119,7 @@ impl ChainProviderOps for ChainProvider {
         &self,
         block_numbers: &[i64],
     ) -> Result<Vec<ProviderResolvedBlock>> {
+        let _timer = crate::metrics::provider_lookup_timer(self);
         match self {
             Self::JsonRpc(provider) => provider.fetch_block_hashes_by_numbers(block_numbers).await,
             Self::RethDb(provider) => provider.fetch_block_hashes_by_numbers(block_numbers).await,
@@ -115,6 +127,7 @@ impl ChainProviderOps for ChainProvider {
     }
 
     async fn fetch_block_by_hash(&self, block_hash: &str) -> Result<ProviderBlock> {
+        let _timer = crate::metrics::provider_lookup_timer(self);
         match self {
             Self::JsonRpc(provider) => provider.fetch_block_by_hash(block_hash).await,
             Self::RethDb(provider) => provider.fetch_block_by_hash(block_hash).await,
@@ -125,6 +138,7 @@ impl ChainProviderOps for ChainProvider {
         &self,
         resolved_blocks: &[ProviderResolvedBlock],
     ) -> Result<Vec<ProviderBlock>> {
+        let _timer = crate::metrics::provider_lookup_timer(self);
         match self {
             Self::JsonRpc(provider) => {
                 provider
@@ -145,6 +159,7 @@ impl ChainProviderOps for ChainProvider {
         topic0s: &[String],
         addresses: &[String],
     ) -> Result<BTreeMap<i64, Vec<ProviderLog>>> {
+        let _timer = crate::metrics::provider_lookup_timer(self);
         match self {
             Self::JsonRpc(provider) => {
                 provider
@@ -171,6 +186,7 @@ impl ChainProviderOps for ChainProvider {
         &self,
         resolved_blocks: &[ProviderResolvedBlock],
     ) -> Result<Vec<ProviderBlockBundle>> {
+        let _timer = crate::metrics::provider_lookup_timer(self);
         match self {
             Self::JsonRpc(provider) => {
                 provider
@@ -189,6 +205,7 @@ impl ChainProviderOps for ChainProvider {
         &self,
         resolved_blocks: &[ProviderResolvedBlock],
     ) -> Result<Vec<ProviderBlockBundle>> {
+        let _timer = crate::metrics::provider_lookup_timer(self);
         match self {
             Self::JsonRpc(provider) => {
                 provider
@@ -204,6 +221,7 @@ impl ChainProviderOps for ChainProvider {
     }
 
     async fn fetch_block_bundle_by_hash(&self, block_hash: &str) -> Result<ProviderBlockBundle> {
+        let _timer = crate::metrics::provider_lookup_timer(self);
         match self {
             Self::JsonRpc(provider) => provider.fetch_block_bundle_by_hash(block_hash).await,
             Self::RethDb(provider) => provider.fetch_block_bundle_by_hash(block_hash).await,
@@ -215,6 +233,7 @@ impl ChainProviderOps for ChainProvider {
         resolved_blocks: &[ProviderResolvedBlock],
         addresses: &[String],
     ) -> Result<BTreeMap<i64, Vec<ProviderLog>>> {
+        let _timer = crate::metrics::provider_lookup_timer(self);
         match self {
             Self::JsonRpc(provider) => {
                 provider
@@ -233,6 +252,7 @@ impl ChainProviderOps for ChainProvider {
         &self,
         requests: &[ProviderTransactionReceiptRequest],
     ) -> Result<Vec<ProviderTransactionReceiptBundle>> {
+        let _timer = crate::metrics::provider_lookup_timer(self);
         match self {
             Self::JsonRpc(provider) => {
                 provider
@@ -252,6 +272,7 @@ impl ChainProviderOps for ChainProvider {
         addresses: &[String],
         block: ProviderBlockSelection,
     ) -> Result<Vec<ProviderCodeObservation>> {
+        let _timer = crate::metrics::provider_lookup_timer(self);
         match self {
             Self::JsonRpc(provider) => {
                 provider
@@ -270,6 +291,7 @@ impl ChainProviderOps for ChainProvider {
         &self,
         requests: &[ProviderBlockCodeObservationRequest],
     ) -> Result<Vec<ProviderBlockCodeObservations>> {
+        let _timer = crate::metrics::provider_lookup_timer(self);
         match self {
             Self::JsonRpc(provider) => {
                 provider

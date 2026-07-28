@@ -28,6 +28,12 @@ pub(crate) struct ServeArgs {
     #[arg(long, env = "BIGNAME_API_BIND_ADDR", default_value = "127.0.0.1:3000")]
     pub(crate) bind_addr: SocketAddr,
     #[arg(
+        long,
+        env = "BIGNAME_API_METRICS_BIND_ADDR",
+        default_value = "127.0.0.1:9464"
+    )]
+    pub(crate) metrics_bind_addr: SocketAddr,
+    #[arg(
         long = "chain-rpc-url",
         env = "BIGNAME_API_CHAIN_RPC_URLS",
         value_delimiter = ','

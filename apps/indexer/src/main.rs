@@ -16,6 +16,7 @@ mod drop_rederive;
 mod ens_v1_resolver;
 #[path = "main/healthcheck.rs"]
 mod healthcheck;
+mod metrics;
 #[path = "main/normalized_replay_catchup.rs"]
 mod normalized_replay_catchup;
 #[path = "main/ops_catchup.rs"]
@@ -48,9 +49,6 @@ mod source_scope;
 #[cfg(test)]
 #[path = "main/tests.rs"]
 mod tests;
-#[cfg(test)]
-use std::path::PathBuf;
-
 use anyhow::{Context, Result};
 use backfill::{
     BackfillAdapterSyncMode, BackfillBlockRange, BackfillJobRunConfig, BackfillSourceKind,
@@ -79,7 +77,7 @@ use cli::{
     BackfillArgs, Cli, Command, HealthcheckArgs, OpsCatchupArgs, RepairArgs, RepairCommand,
     ReplayArgs, ReplayCommand, ReplayNormalizedEventsArgs, RewindArgs,
 };
-use drop_rederive::drop_and_rederive_base_normalized_events_command;
+use drop_rederive::drop_and_rederive_base_normalized_events_command as run_drop_and_rederive;
 #[allow(unused_imports)]
 use provider::{
     ChainProviderKind, JsonRpcProvider, ProviderBlock, ProviderHeadSnapshot, ProviderRegistry,
@@ -100,23 +98,25 @@ use replay::{backfill_source_selector, replay_normalized_events_selection};
 use resolver_profile_convergence::drain_resolver_profile_input_changes;
 #[allow(unused_imports)]
 use runtime::*;
+#[cfg(test)]
+use std::path::PathBuf;
 use {clap::Parser, tracing::info};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing("bigname-indexer");
-
     match Cli::parse().command {
-        Command::Run(args) => run::run(args).await,
+        Command::Run(args) => {
+            metrics::spawn_listener(args.metrics.bind_addr).await?;
+            run::run(args).await
+        }
         Command::Healthcheck(args) => run_healthcheck(args).await,
         Command::Backfill(args) => run_backfill(args).await,
         Command::OpsCatchup(args) => run_ops_catchup(args).await,
         Command::Replay(args) => run_replay(args).await,
         Command::Rewind(args) => run_rewind(args).await.map(|_| ()),
         Command::Repair(args) => run_repair(args).await,
-        Command::DropAndRederiveBaseNormalizedEvents(args) => {
-            drop_and_rederive_base_normalized_events_command(args).await
-        }
+        Command::DropAndRederiveBaseNormalizedEvents(args) => run_drop_and_rederive(args).await,
     }
 }
 

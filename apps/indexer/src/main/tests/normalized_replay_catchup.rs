@@ -1,3 +1,26 @@
+#[test]
+fn catchup_upsert_metric_excludes_idempotently_replayed_events() {
+    let outcome = RawFactNormalizedEventReplayOutcome {
+        deployment_profile: "mainnet".to_owned(),
+        chain: "ethereum-mainnet".to_owned(),
+        selection_kind: "block_range",
+        source_scope_target_count: 0,
+        selected_block_count: 1,
+        canonical_raw_log_count: 1,
+        scanned_raw_log_count: 1,
+        matched_raw_log_count: 1,
+        normalized_event_synced_count: 1,
+        normalized_event_inserted_count: 0,
+        stateless_replay_authority:
+            bigname_storage::NormalizedEventReplayAuthoritySummary::default(),
+    };
+
+    assert_eq!(
+        normalized_replay_catchup::normalized_events_upserted_metric_count(&outcome),
+        0
+    );
+}
+
 #[tokio::test]
 async fn normalized_replay_catchup_rewinds_for_later_older_raw_backfill() -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -52,6 +75,8 @@ async fn normalized_replay_catchup_rewinds_for_later_older_raw_backfill() -> Res
         1_000,
         1,
     )?;
+    let catchup_chunks_before = crate::metrics::catchup_chunks(chain);
+    let normalized_events_derived_before = crate::metrics::normalized_events_derived(chain);
     assert_eq!(
         normalized_replay_catchup::run_normalized_replay_catchup_iteration(
             database.pool(),
@@ -60,6 +85,14 @@ async fn normalized_replay_catchup_rewinds_for_later_older_raw_backfill() -> Res
         )
         .await?,
         normalized_replay_catchup::CatchupIterationStatus::Progressed
+    );
+    assert!(
+        crate::metrics::catchup_chunks(chain) > catchup_chunks_before,
+        "a completed catch-up chunk must increment its Prometheus counter"
+    );
+    assert!(
+        crate::metrics::normalized_events_derived(chain) > normalized_events_derived_before,
+        "a catch-up chunk that derives an event must increment the derived-event counter"
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
@@ -528,6 +561,7 @@ async fn normalized_replay_coverage_recovery_preserves_per_page_heartbeats() -> 
         required_from_block: 1,
         required_to_block: through_block,
     };
+    let completed_jobs_before = crate::metrics::coverage_recovery_jobs(chain, "completed");
     let status = {
         let mut progress = Some(&mut heartbeat);
         normalized_replay_catchup::recover_ens_v2_live_coverage_requirement_for_replay(
@@ -543,6 +577,10 @@ async fn normalized_replay_coverage_recovery_preserves_per_page_heartbeats() -> 
     let recovery_progress_count = heartbeat.adapter_progress_count().await - progress_before;
 
     assert_eq!(status, EnsV2LiveCoverageRecoveryStatus::Recovered);
+    assert_eq!(
+        crate::metrics::coverage_recovery_jobs(chain, "completed"),
+        completed_jobs_before + 1
+    );
     assert!(
         recovery_progress_count >= 2,
         "a 1,025-block generation-bound recovery must preserve at least two chunk-page beats through the normalized-replay caller, got {recovery_progress_count}"
@@ -1069,6 +1107,8 @@ async fn normalized_replay_catchup_validates_retention_before_stateless_phase() 
     )?;
     let stateless_pages =
         install_stateless_page_observer(database.pool(), deployment_profile, chain).await?;
+    let coverage_scan_observations =
+        crate::metrics::coverage_violation_scan_observations(chain);
     let error = normalized_replay_catchup::run_normalized_replay_catchup_iteration(
         database.pool(),
         &config,
@@ -1079,6 +1119,11 @@ async fn normalized_replay_catchup_validates_retention_before_stateless_phase() 
     assert!(
         format!("{error:#}").contains("retention generation 1"),
         "unexpected retention validation error: {error:#}"
+    );
+    assert!(
+        crate::metrics::coverage_violation_scan_observations(chain)
+            > coverage_scan_observations,
+        "a preflight retention violation must record its scan duration"
     );
     assert_eq!(
         stateless_pages.page_ranges(),
@@ -4523,6 +4568,8 @@ async fn normalized_replay_retention_authority_keeps_durable_ensv2_resolver_gap_
         NormalizedEventReplayAdapter::EnsV2RegistryResourceSurface,
         NormalizedEventReplayAdapter::EnsV2Resolver,
     ];
+    let coverage_scan_observations =
+        crate::metrics::coverage_violation_scan_observations(chain);
     let error = ensure_full_closure_retention_authority_for_adapters(
         database.pool(),
         chain,
@@ -4560,6 +4607,11 @@ async fn normalized_replay_retention_authority_keeps_durable_ensv2_resolver_gap_
         3,
     )
     .await?;
+    assert!(
+        crate::metrics::coverage_violation_scan_observations(chain)
+            >= coverage_scan_observations + 2,
+        "both violating and clean generation-bound coverage scans must record duration"
+    );
 
     database.cleanup().await
 }

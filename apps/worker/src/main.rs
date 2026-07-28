@@ -24,7 +24,7 @@ mod main_tests;
 use anyhow::Result;
 use clap::Parser;
 
-use crate::cli::Cli;
+use crate::cli::{Cli, Command};
 
 pub(crate) const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const BUILD_SHA: &str = match option_env!("BIGNAME_BUILD_SHA") {
@@ -36,5 +36,23 @@ pub(crate) const BUILD_SHA: &str = match option_env!("BIGNAME_BUILD_SHA") {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     runtime::init_tracing("bigname-worker", cli.writes_machine_json());
+    if let Command::Run(args) = &cli.command {
+        let metrics_bind_addr = args.metrics_bind_addr;
+        let metrics_server = runtime::bind_metrics(metrics_bind_addr).await?;
+        tracing::info!(
+            service = "worker",
+            %metrics_bind_addr,
+            "metrics listener bound"
+        );
+        let _metrics_task = tokio::spawn(async move {
+            if let Err(error) = metrics_server.serve().await {
+                tracing::error!(
+                    service = "worker",
+                    error = %format!("{error:#}"),
+                    "metrics listener exited"
+                );
+            }
+        });
+    }
     commands::dispatch(cli.command).await
 }

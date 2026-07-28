@@ -62,22 +62,29 @@ pub(crate) async fn run_once(
     text_hydration_config: Option<&record_inventory::RecordInventoryTextHydrationConfig>,
     loop_heartbeat: &mut LoopHeartbeat,
 ) -> Result<ProjectionApplyIterationSummary> {
-    let derived = derive_once_with_heartbeat(pool, loop_heartbeat).await?;
-    let applied = apply::apply_pending_invalidations_with_heartbeat(
-        pool,
-        PROJECTION_APPLY_BATCH_LIMIT,
-        text_hydration_config,
-        loop_heartbeat,
-    )
-    .await?;
+    let timer = crate::runtime::projection_apply_timer();
+    let result: Result<ProjectionApplyIterationSummary> = async {
+        let derived = derive_once_with_heartbeat(pool, loop_heartbeat).await?;
+        let applied = apply::apply_pending_invalidations_with_heartbeat(
+            pool,
+            PROJECTION_APPLY_BATCH_LIMIT,
+            text_hydration_config,
+            loop_heartbeat,
+        )
+        .await?;
 
-    let summary = ProjectionApplyIterationSummary {
-        scanned_event_count: derived.scanned_event_count,
-        enqueued_invalidation_count: derived.enqueued_invalidation_count,
-        claimed_invalidation_count: applied.claimed_invalidation_count,
-        applied_invalidation_count: applied.applied_invalidation_count,
-        failed_invalidation_count: applied.failed_invalidation_count,
-    };
+        Ok(ProjectionApplyIterationSummary {
+            scanned_event_count: derived.scanned_event_count,
+            enqueued_invalidation_count: derived.enqueued_invalidation_count,
+            claimed_invalidation_count: applied.claimed_invalidation_count,
+            applied_invalidation_count: applied.applied_invalidation_count,
+            failed_invalidation_count: applied.failed_invalidation_count,
+        })
+    }
+    .await;
+    timer.observe_duration();
+    crate::runtime::refresh_projection_apply_queue_depth(pool).await;
+    let summary = result?;
 
     if summary.made_progress() {
         info!(

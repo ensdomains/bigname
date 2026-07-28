@@ -1,9 +1,11 @@
 # Deployment
 
 Project-specific terms used below (checkpoint promotion, coverage frontier,
-watched tuple, companion checks, retention generation, admission epoch) are
-defined in the [glossary](glossary.md); "promotion" in this document always
-means checkpoint promotion, the chain-safety sense.
+watched tuple, companion checks, retention generation, admission epoch,
+[normalized event](glossary.md#normalized-event), and
+[projection](glossary.md#projection)) are defined in the
+[glossary](glossary.md); "promotion" in this document always means checkpoint
+promotion, the chain-safety sense.
 
 The production container image contains the three runnable bigname binaries:
 
@@ -50,6 +52,83 @@ the indexer, and the worker. The API listens on the host port from
 `BIGNAME_API_HOST` to control the host bind address; production public-edge
 deployments normally set it to `127.0.0.1` and expose traffic through the Caddy
 override documented in `docs/production.md`.
+
+## Native Prometheus Metrics
+
+Each long-running service exposes Prometheus text format on a dedicated
+operational listener. The binary defaults bind only to loopback:
+
+| Service | Configuration | Binary default |
+| --- | --- | --- |
+| API | `BIGNAME_API_METRICS_BIND_ADDR` | `127.0.0.1:9464` |
+| indexer | `BIGNAME_INDEXER_METRICS_BIND_ADDR` | `127.0.0.1:9465` |
+| worker | `BIGNAME_WORKER_METRICS_BIND_ADDR` | `127.0.0.1:9466` |
+
+All three listeners serve `GET /metrics`. `docker-compose.server.yml` sets the
+container-side addresses to `0.0.0.0` so Docker can forward them, but publishes
+the host ports on `127.0.0.1` only. The host ports can be changed with
+`BIGNAME_API_METRICS_PORT`, `BIGNAME_INDEXER_METRICS_PORT`, and
+`BIGNAME_WORKER_METRICS_PORT`; their host bind variables have the same service
+prefix and end in `_METRICS_HOST`. A local scrape check is:
+
+```sh
+curl -fsS http://127.0.0.1:9464/metrics
+curl -fsS http://127.0.0.1:9465/metrics
+curl -fsS http://127.0.0.1:9466/metrics
+```
+
+These endpoints are not API routes, do not appear in OpenAPI, and are not
+matched by the production Caddy allowlist. Keep them on an internal or
+loopback interface.
+
+The indexer exports:
+
+- `catchup_chunks_total`, `catchup_chunk_duration_seconds`,
+  `catchup_raw_logs_scanned_total`, `catchup_raw_logs_matched_total`,
+  `normalized_events_derived_total`, `normalized_events_upserted_total`, and
+  `catchup_iteration_duration_seconds`, labeled only by `chain`.
+  `normalized_events_derived_total` counts every derived event presented to
+  persistence.
+  `normalized_events_upserted_total` counts newly inserted normalized-event
+  identities and excludes idempotent replays of unchanged identities.
+- `admission_retries_total` and `fence_wait_seconds`, labeled only by `chain`.
+- `coverage_recovery_jobs_total{chain,outcome}`,
+  `coverage_provider_queries_total{chain}`, and
+  `coverage_violation_scan_duration_seconds{chain}`.
+  Recovery outcomes are the fixed `completed`, `failed`, `deferred`,
+  `terminal`, `pending`, and fallback `unknown` set; live admission waits and
+  authority-change replans are `deferred`.
+- `live_blocks_ingested_total`, `live_logs_ingested_total`, and
+  `reorg_events_total`, labeled only by `chain`.
+- `provider_lookup_duration_seconds{chain,provider_kind}`.
+
+The worker exports `projection_apply_queue_depth`,
+`projection_apply_duration_seconds`, `projection_rebuilds_total`,
+`projection_rebuild_keys_requested_total`, `projection_rebuild_rows_total`,
+`projection_rebuild_duration_seconds`, and `replay_version`.
+`projection_rebuild_keys_requested_total` counts requested projection keys;
+the row counter is limited to `upserted` and `deleted` operations. The
+queue-depth gauge is refreshed with an exact pending-row count at most once
+every five seconds so a large backlog does not add a full queue scan to every
+25-row apply batch. Rebuild labels use the fixed projection, operation, and
+outcome sets compiled into the worker.
+
+The API exports
+`http_requests_total{route,method,status_class}`,
+`http_request_duration_seconds{route}`,
+`verified_execution_total{outcome}`,
+`verified_execution_duration_seconds`, `http_requests_in_flight`, and
+`verified_execution_in_flight`. The `route` value is the Axum route template,
+never the requested path.
+
+Every service also exports
+`build_info{build_sha,replay_version,schema_version} 1`.
+
+Label cardinality is bounded by configuration and compiled behavior: chain
+IDs, registered route templates, a fixed HTTP method set, status classes,
+provider kinds, projection names, operations, and outcomes. Metrics never use
+addresses, names, query strings, or raw request paths as labels. Build and
+storage-version labels contribute one active series per running process.
 
 The indexer and worker healthcheck commands verify that applied database
 migrations exactly match the migration set compiled into the running binary
