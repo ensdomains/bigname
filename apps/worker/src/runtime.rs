@@ -127,6 +127,9 @@ pub(crate) async fn refresh_projection_apply_queue_depth(pool: &PgPool) {
         r#"
         SELECT COUNT(*)::BIGINT
         FROM projection_invalidations
+        -- Keep this predicate aligned with
+        -- projection_invalidations_pending_state_idx: recovery-time refreshes
+        -- depend on an index-only count.
         WHERE state = 'pending'::projection_invalidation_state
         "#,
     )
@@ -236,8 +239,23 @@ mod tests {
     use std::io::{Read, Write};
 
     use anyhow::{Context, Result, ensure};
+    use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 
     use super::*;
+
+    async fn test_database() -> Result<TestDatabase> {
+        TestDatabase::create_migrated(
+            TestDatabaseConfig::new("bigname_worker_runtime_test")
+                .admin_database("postgres")
+                .pool_max_connections(5)
+                .parse_context("failed to parse database URL for worker runtime tests")
+                .admin_connect_context("failed to connect admin pool for worker runtime tests")
+                .pool_connect_context("failed to connect worker runtime test pool"),
+            &bigname_storage::MIGRATOR,
+            "failed to apply migrations for worker runtime tests",
+        )
+        .await
+    }
 
     #[test]
     fn projection_apply_queue_depth_refresh_is_rate_limited() {
@@ -247,6 +265,84 @@ mod tests {
         assert!(gate.claim(started));
         assert!(!gate.claim(started + PROJECTION_APPLY_QUEUE_DEPTH_REFRESH_INTERVAL / 2));
         assert!(gate.claim(started + PROJECTION_APPLY_QUEUE_DEPTH_REFRESH_INTERVAL));
+    }
+
+    #[tokio::test]
+    async fn projection_apply_queue_depth_gauge_reads_pending_rows_through_partial_index()
+    -> Result<()> {
+        let database = test_database().await?;
+        sqlx::query(
+            r#"
+            INSERT INTO projection_invalidations (
+                projection,
+                projection_key,
+                state
+            )
+            VALUES
+                (
+                    'name_current',
+                    'metrics-pending-one',
+                    'pending'::projection_invalidation_state
+                ),
+                (
+                    'children_current',
+                    'metrics-pending-two',
+                    'pending'::projection_invalidation_state
+                ),
+                (
+                    'permissions_current',
+                    'metrics-not-pending',
+                    'dead_letter'::projection_invalidation_state
+                )
+            "#,
+        )
+        .execute(database.pool())
+        .await?;
+
+        refresh_projection_apply_queue_depth(database.pool()).await;
+        assert_eq!(worker_metrics().projection_apply_queue_depth.get(), 2);
+
+        let mut transaction = database.pool().begin().await?;
+        sqlx::query("SET LOCAL enable_seqscan = off")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("SET LOCAL enable_bitmapscan = off")
+            .execute(&mut *transaction)
+            .await?;
+        let plan = sqlx::query_scalar::<_, String>(
+            r#"
+            EXPLAIN (FORMAT TEXT)
+            SELECT COUNT(*)::BIGINT
+            FROM projection_invalidations
+            WHERE state = 'pending'::projection_invalidation_state
+            "#,
+        )
+        .fetch_all(&mut *transaction)
+        .await?
+        .join("\n");
+        ensure!(
+            plan.contains("Index Only Scan using projection_invalidations_pending_state_idx"),
+            "queue-depth count must use its partial index:\n{plan}"
+        );
+        transaction.rollback().await?;
+
+        database.cleanup().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn worker_boot_reports_an_occupied_metrics_port() -> Result<()> {
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = occupied.local_addr()?;
+        let error = bind_metrics(address)
+            .await
+            .err()
+            .context("worker boot unexpectedly bound an occupied metrics port")?;
+        let message = format!("{error:#}");
+
+        ensure!(message.contains("failed to bind metrics listener"));
+        ensure!(message.contains(&address.to_string()));
+        Ok(())
     }
 
     #[test]
