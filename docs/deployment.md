@@ -79,7 +79,10 @@ curl -fsS http://127.0.0.1:9466/metrics
 
 These endpoints are not API routes, do not appear in OpenAPI, and are not
 matched by the production Caddy allowlist. Keep them on an internal or
-loopback interface.
+loopback interface. A metrics listener that fails to bind (for example a
+port collision) aborts service boot; after boot, serve errors only log and
+never take the service down. Tests and the smoke gates therefore pass an
+ephemeral `:0` bind.
 
 The indexer exports:
 
