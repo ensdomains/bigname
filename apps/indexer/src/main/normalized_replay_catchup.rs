@@ -7,7 +7,7 @@ use crate::{
     },
     provider::ChainProviderOps,
     reconciliation::{
-        HeaderAuditMode, RawFactNormalizedEventReplayRequest,
+        HeaderAuditMode, RawFactNormalizedEventReplayOutcome, RawFactNormalizedEventReplayRequest,
         RawFactNormalizedEventReplaySelection, chain_has_closure_or_dependency_replay_adapter,
         replay_raw_fact_normalized_events, replay_raw_fact_normalized_events_with_progress,
         select_log_bounded_replay_to_block,
@@ -553,6 +553,15 @@ pub(super) async fn run_normalized_replay_catchup_iteration_with_provider(
         .await?;
     }
 
+    let elapsed = started.elapsed();
+    crate::metrics::record_catchup_chunk(
+        chain,
+        elapsed,
+        outcome.scanned_raw_log_count,
+        outcome.matched_raw_log_count,
+        outcome.normalized_event_synced_count,
+        normalized_events_upserted_metric_count(&outcome),
+    );
     info!(
         service = "indexer",
         command = "run",
@@ -569,9 +578,15 @@ pub(super) async fn run_normalized_replay_catchup_iteration_with_provider(
         matched_raw_log_count = outcome.matched_raw_log_count,
         normalized_event_synced_count = outcome.normalized_event_synced_count,
         normalized_event_inserted_count = outcome.normalized_event_inserted_count,
-        elapsed_ms = started.elapsed().as_millis(),
+        elapsed_ms = elapsed.as_millis(),
         "automatic normalized-event replay catch-up chunk completed"
     );
 
     Ok(CatchupIterationStatus::Progressed)
+}
+
+pub(crate) fn normalized_events_upserted_metric_count(
+    outcome: &RawFactNormalizedEventReplayOutcome,
+) -> usize {
+    outcome.normalized_event_inserted_count
 }

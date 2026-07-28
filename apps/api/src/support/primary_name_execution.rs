@@ -77,6 +77,9 @@ pub(super) async fn load_primary_name_route_read(
                 "selected ENS primary-name snapshot is missing its Ethereum position",
             )
         })?;
+    let mut verified_timer = mode
+        .includes_verified()
+        .then(crate::metrics::verified_execution_timer);
     let reverse_started = Instant::now();
     let claim_read = load_on_demand_primary_name_claim(
         state,
@@ -133,6 +136,9 @@ pub(super) async fn load_primary_name_route_read(
         )
         .await?;
         if !route_local_trace_is_current {
+            if let Some(timer) = verified_timer.take() {
+                timer.finish("superseded");
+            }
             return Ok(PrimaryNameRouteRead {
                 lookup_state,
                 selected_snapshot: None,
@@ -140,6 +146,10 @@ pub(super) async fn load_primary_name_route_read(
         }
     }
 
+    if let Some(timer) = verified_timer {
+        let outcome = primary_name_verified_result(namespace, &lookup_state);
+        timer.finish(crate::metrics::json_outcome(&outcome));
+    }
     Ok(PrimaryNameRouteRead {
         lookup_state,
         selected_snapshot: Some(selected_snapshot),

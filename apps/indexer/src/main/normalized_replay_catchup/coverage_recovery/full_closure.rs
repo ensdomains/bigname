@@ -190,7 +190,7 @@ pub(super) async fn recover_full_closure_coverage_batch(
             bigname_storage::load_coverage_recovery_epoch(pool, &failure_key).await?;
         let allow_provider_attempt = provider_attempt_budget.allows_attempt();
         let mut provider_attempted = false;
-        let result = recover_one_violation(
+        let result = crate::metrics::with_coverage_provider_queries(recover_one_violation(
             pool,
             deployment_profile,
             provider,
@@ -205,21 +205,24 @@ pub(super) async fn recover_full_closure_coverage_batch(
             allow_provider_attempt,
             &mut provider_attempted,
             progress,
-        )
+        ))
         .await;
         provider_attempt_budget.record(provider_attempted);
         match result {
             Ok(ViolationRecoveryOutcome::Completed { job_id, attempted }) => {
+                crate::metrics::record_coverage_recovery_job(&requirement.chain, "completed");
                 if attempted {
                     batch.attempted_job_ids.push(job_id);
                 }
                 batch.completed_job_ids.push(job_id);
             }
             Ok(ViolationRecoveryOutcome::Failed { job_id, error }) => {
+                crate::metrics::record_coverage_recovery_job(&requirement.chain, "failed");
                 batch.attempted_job_ids.push(job_id);
                 batch.failed_jobs.push((Some(job_id), error));
             }
             Ok(ViolationRecoveryOutcome::Deferred { job_id }) => {
+                crate::metrics::record_coverage_recovery_job(&requirement.chain, "deferred");
                 if let Some(job_id) = job_id {
                     batch.deferred_job_ids.push(job_id);
                 }
@@ -229,24 +232,29 @@ pub(super) async fn recover_full_closure_coverage_batch(
                 cause,
                 attempted,
             }) => {
+                crate::metrics::record_coverage_recovery_job(&requirement.chain, "terminal");
                 if attempted && let Some(job_id) = job_id {
                     batch.attempted_job_ids.push(job_id);
                 }
                 batch.terminal_jobs.push((job_id, cause));
             }
             Ok(ViolationRecoveryOutcome::Pending { job_id }) => {
+                crate::metrics::record_coverage_recovery_job(&requirement.chain, "pending");
                 batch.pending_job_ids.push(job_id);
             }
-            Err(error) => batch.failed_jobs.push((
-                None,
-                format!(
-                    "{} {} over {}..={}: {error:#}",
-                    violation.source_family,
-                    violation.address,
-                    violation.required_from_block,
-                    violation.required_to_block
-                ),
-            )),
+            Err(error) => {
+                crate::metrics::record_coverage_recovery_job(&requirement.chain, "failed");
+                batch.failed_jobs.push((
+                    None,
+                    format!(
+                        "{} {} over {}..={}: {error:#}",
+                        violation.source_family,
+                        violation.address,
+                        violation.required_from_block,
+                        violation.required_to_block
+                    ),
+                ));
+            }
         }
     }
 

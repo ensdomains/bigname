@@ -42,6 +42,7 @@ mod bounds;
 mod cli;
 mod errors;
 mod graphql;
+mod metrics;
 mod pagination;
 mod query;
 #[cfg(test)]

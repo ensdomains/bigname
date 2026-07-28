@@ -616,6 +616,8 @@ impl WorkerRunSession {
                 database_url,
                 "--poll-interval-secs",
                 "1",
+                "--metrics-bind-addr",
+                "127.0.0.1:0",
             ])
             .kill_on_drop(true)
             .stdout(std::process::Stdio::from(log_file.try_clone()?))
@@ -778,6 +780,8 @@ impl IndexerRunSession {
                 &chain_rpc_urls,
                 "--poll-interval-secs",
                 "1",
+                "--metrics-bind-addr",
+                "127.0.0.1:0",
                 // Scenario readiness often waits on a full-closure authority
                 // sync round; the default 30s cadence just slows tests down.
                 "--normalized-replay-catchup-poll-interval-secs",
@@ -1332,6 +1336,8 @@ impl ApiServer {
             "serve",
             "--bind-addr",
             &bind_addr,
+            "--metrics-bind-addr",
+            "127.0.0.1:0",
             "--database-url",
             database_url,
         ]);

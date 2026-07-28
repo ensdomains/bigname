@@ -80,10 +80,12 @@ pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(args.bind_addr)
         .await
         .context("failed to bind the API listener")?;
+    let metrics_server = crate::metrics::bind(args.metrics_bind_addr).await?;
 
     info!(
         service = "api",
         bind_addr = %args.bind_addr,
+        metrics_bind_addr = %args.metrics_bind_addr,
         version = SOFTWARE_VERSION,
         build_sha = BUILD_SHA,
         schema_migration_version = bigname_storage::latest_migration_version(),
@@ -105,6 +107,15 @@ pub(crate) async fn serve(args: ServeArgs) -> Result<()> {
         "API booted"
     );
 
+    let _metrics_task = tokio::spawn(async move {
+        if let Err(error) = metrics_server.serve().await {
+            tracing::error!(
+                service = "api",
+                error = %format!("{error:#}"),
+                "metrics listener exited"
+            );
+        }
+    });
     axum::serve(
         listener,
         router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -163,6 +174,9 @@ fn app_router_with_bounds(
         health_router.layer(cors),
         bounds,
     )
+    .layer(axum::middleware::from_fn(
+        crate::metrics::track_http_request,
+    ))
 }
 
 async fn openapi_json() -> Json<JsonValue> {

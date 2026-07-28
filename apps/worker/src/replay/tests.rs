@@ -208,7 +208,12 @@ async fn all_current_projection_replay_clears_stale_rows_and_is_idempotent() -> 
     let database = TestDatabase::new().await?;
     seed_replay_inputs(database.pool()).await?;
 
+    let rebuilds_before = crate::runtime::projection_rebuild_count("name_current", "completed");
     let first_summary = rebuild_all_current_projections(database.pool(), None, None).await?;
+    assert!(
+        crate::runtime::projection_rebuild_count("name_current", "completed") > rebuilds_before,
+        "a completed projection rebuild must increment its Prometheus counter"
+    );
     assert_eq!(
         first_summary.projection_order(),
         ALL_CURRENT_PROJECTION_ORDER

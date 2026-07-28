@@ -89,7 +89,8 @@ async fn execute_ens_verified_resolution_cache_miss(
         })
         .collect::<Vec<_>>();
 
-    bigname_execution::execute_ens_universal_resolver_verified_resolution(
+    let timer = crate::metrics::verified_execution_timer();
+    let outcome = bigname_execution::execute_ens_universal_resolver_verified_resolution(
         pool,
         bigname_execution::OnDemandEnsResolutionRequest {
             row,
@@ -118,5 +119,7 @@ async fn execute_ens_verified_resolution_cache_miss(
                 error.message()
             ))
         }
-    })
+    })?;
+    timer.finish(crate::metrics::execution_outcome(&outcome));
+    Ok(outcome)
 }

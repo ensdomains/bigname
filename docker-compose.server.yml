@@ -70,6 +70,7 @@ services:
     command: api
     ports:
       - "${BIGNAME_API_HOST:-127.0.0.1}:${BIGNAME_API_PORT:-3000}:3000"
+      - "${BIGNAME_API_METRICS_HOST:-127.0.0.1}:${BIGNAME_API_METRICS_PORT:-9464}:9464"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -80,6 +81,7 @@ services:
     environment:
       <<: *bigname-env
       BIGNAME_API_BIND_ADDR: ${BIGNAME_API_BIND_ADDR:-0.0.0.0:3000}
+      BIGNAME_API_METRICS_BIND_ADDR: ${BIGNAME_API_METRICS_BIND_ADDR:-0.0.0.0:9464}
       BIGNAME_API_CHAIN_RPC_URLS: ${BIGNAME_API_CHAIN_RPC_URLS:-}
       BIGNAME_API_HEARTBEAT_MAX_AGE_SECS: ${BIGNAME_API_HEARTBEAT_MAX_AGE_SECS:-20}
       BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS: ${BIGNAME_API_INDEXER_CHAIN_HEARTBEAT_MAX_AGE_SECS:-14400}
@@ -114,6 +116,8 @@ services:
   indexer:
     <<: *bigname-service
     command: indexer
+    ports:
+      - "${BIGNAME_INDEXER_METRICS_HOST:-127.0.0.1}:${BIGNAME_INDEXER_METRICS_PORT:-9465}:9465"
     depends_on:
       postgres:
         condition: service_healthy
@@ -122,6 +126,7 @@ services:
     environment:
       <<: *bigname-env
       BIGNAME_HEARTBEAT_INSTANCE_ID: ${BIGNAME_INDEXER_HEARTBEAT_INSTANCE_ID:-indexer}
+      BIGNAME_INDEXER_METRICS_BIND_ADDR: ${BIGNAME_INDEXER_METRICS_BIND_ADDR:-0.0.0.0:9465}
       BIGNAME_INDEXER_MANIFESTS_ROOT: ${BIGNAME_INDEXER_MANIFESTS_ROOT:-/app/manifests/mainnet}
       BIGNAME_INDEXER_POLL_INTERVAL_SECS: ${BIGNAME_INDEXER_POLL_INTERVAL_SECS:-5}
       BIGNAME_INDEXER_HEARTBEAT_MAX_AGE_SECS: ${BIGNAME_INDEXER_HEARTBEAT_MAX_AGE_SECS:-20}
@@ -191,6 +196,8 @@ services:
   worker:
     <<: *bigname-service
     command: worker
+    ports:
+      - "${BIGNAME_WORKER_METRICS_HOST:-127.0.0.1}:${BIGNAME_WORKER_METRICS_PORT:-9466}:9466"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -201,6 +208,7 @@ services:
     environment:
       <<: *bigname-env
       BIGNAME_HEARTBEAT_INSTANCE_ID: ${BIGNAME_WORKER_HEARTBEAT_INSTANCE_ID:-worker}
+      BIGNAME_WORKER_METRICS_BIND_ADDR: ${BIGNAME_WORKER_METRICS_BIND_ADDR:-0.0.0.0:9466}
       BIGNAME_WORKER_POLL_INTERVAL_SECS: ${BIGNAME_WORKER_POLL_INTERVAL_SECS:-5}
       BIGNAME_WORKER_HEARTBEAT_MAX_AGE_SECS: ${BIGNAME_WORKER_HEARTBEAT_MAX_AGE_SECS:-20}
       BIGNAME_WORKER_REBUILD_PHASE_MAX_AGE_SECS: ${BIGNAME_WORKER_REBUILD_PHASE_MAX_AGE_SECS:-43200}

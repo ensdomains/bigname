@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Instant};
 
 use crate::{provider::ProviderRegistry, runtime::IntakeChainTask};
 use anyhow::Result;
@@ -125,24 +125,28 @@ async fn poll_provider_heads_with_adapter_sync_inner(
         // fresh storage transactions and retains the unchanged intake task.
         let mut replay_admission_attempt = 1_usize;
         loop {
-            match reconcile_intake_chain_task_with_adapter_sync_and_progress(
-                pool,
-                deployment_profile,
-                task,
-                provider,
-                watched_plan_admission_epochs
-                    .get(&task.chain)
-                    .copied()
-                    .unwrap_or(0),
-                adapter_sync_enabled,
-                header_audit_mode,
-                event_silent_reverse_resolver_addresses,
-                coverage_frontiers,
-                latched_bootstrap_finalized_heads.get(&task.chain),
-                progress,
+            let reconciliation = crate::metrics::with_provider_metrics(
+                &task.chain,
+                provider.kind(),
+                reconcile_intake_chain_task_with_adapter_sync_and_progress(
+                    pool,
+                    deployment_profile,
+                    task,
+                    provider,
+                    watched_plan_admission_epochs
+                        .get(&task.chain)
+                        .copied()
+                        .unwrap_or(0),
+                    adapter_sync_enabled,
+                    header_audit_mode,
+                    event_silent_reverse_resolver_addresses,
+                    coverage_frontiers,
+                    latched_bootstrap_finalized_heads.get(&task.chain),
+                    progress,
+                ),
             )
-            .await
-            {
+            .await;
+            match reconciliation {
                 Ok(Some((next_task, outcome))) => {
                     log_chain_reconciliation_outcome(&outcome);
                     changed_tasks.push((index, next_task));
@@ -150,7 +154,8 @@ async fn poll_provider_heads_with_adapter_sync_inner(
                 }
                 Ok(None) => break,
                 Err(error) => {
-                    if bigname_storage::projection_staging::wait_for_projection_replay_admission_retry(
+                    if wait_for_live_replay_admission_retry(
+                        &task.chain,
                         &error,
                         replay_admission_attempt,
                     )
@@ -189,29 +194,44 @@ async fn poll_provider_heads_with_adapter_sync_inner(
                     let recovery_requirement = requirement.as_recovery_requirement();
                     let recovery_result = match progress.as_deref_mut() {
                         Some(progress) => {
-                            recover_ens_v2_live_coverage_requirement_with_progress(
-                                pool,
-                                deployment_profile,
-                                provider,
-                                header_audit_mode,
-                                &recovery_requirement,
-                                progress,
+                            crate::metrics::with_coverage_provider_metrics(
+                                &task.chain,
+                                provider.kind(),
+                                recover_ens_v2_live_coverage_requirement_with_progress(
+                                    pool,
+                                    deployment_profile,
+                                    provider,
+                                    header_audit_mode,
+                                    &recovery_requirement,
+                                    progress,
+                                ),
                             )
                             .await
                         }
                         None => {
-                            super::recover_ens_v2_live_coverage_requirement(
-                                pool,
-                                deployment_profile,
-                                provider,
-                                header_audit_mode,
-                                &recovery_requirement,
+                            crate::metrics::with_coverage_provider_metrics(
+                                &task.chain,
+                                provider.kind(),
+                                super::recover_ens_v2_live_coverage_requirement(
+                                    pool,
+                                    deployment_profile,
+                                    provider,
+                                    header_audit_mode,
+                                    &recovery_requirement,
+                                ),
                             )
                             .await
                         }
                     };
                     match recovery_result {
                         Ok(status) => {
+                            crate::metrics::record_coverage_recovery_job(
+                                &task.chain,
+                                match status {
+                                    EnsV2LiveCoverageRecoveryStatus::Recovered => "completed",
+                                    EnsV2LiveCoverageRecoveryStatus::AuthorityChanged => "deferred",
+                                },
+                            );
                             record_progress(pool, progress).await?;
                             info!(
                                 service = "indexer",
@@ -231,17 +251,23 @@ async fn poll_provider_heads_with_adapter_sync_inner(
                             );
                         }
                         Err(recovery_error) => {
-                            if bigname_storage::projection_staging::wait_for_projection_replay_admission_retry(
+                            if wait_for_live_replay_admission_retry(
+                                &task.chain,
                                 &recovery_error,
                                 replay_admission_attempt,
                             )
                             .await
                             {
+                                crate::metrics::record_coverage_recovery_job(
+                                    &task.chain,
+                                    "deferred",
+                                );
                                 replay_admission_attempt += 1;
                                 coverage_recovery_attempt =
                                     coverage_recovery_attempt.saturating_sub(1);
                                 continue;
                             }
+                            crate::metrics::record_coverage_recovery_job(&task.chain, "failed");
                             warn!(
                                 service = "indexer",
                                 command = "poll",
@@ -268,6 +294,24 @@ async fn poll_provider_heads_with_adapter_sync_inner(
         tasks[index] = next_task;
     }
     Ok(())
+}
+
+async fn wait_for_live_replay_admission_retry(
+    chain: &str,
+    error: &anyhow::Error,
+    failed_attempt: usize,
+) -> bool {
+    let wait_started = Instant::now();
+    let should_retry =
+        bigname_storage::projection_staging::wait_for_projection_replay_admission_retry(
+            error,
+            failed_attempt,
+        )
+        .await;
+    if should_retry {
+        crate::metrics::record_admission_retry(chain, wait_started.elapsed());
+    }
+    should_retry
 }
 
 async fn record_progress(
@@ -410,5 +454,21 @@ mod tests {
         let error = anyhow::anyhow!("provider failed").context("adapter sync failed");
 
         assert_eq!(live_coverage_requirement(&error), None);
+    }
+
+    #[tokio::test]
+    async fn live_replay_admission_wait_records_retry_and_fence_duration() {
+        let chain = "live-admission-metrics-test";
+        let retries_before = crate::metrics::admission_retries(chain);
+        let waits_before = crate::metrics::fence_wait_observations(chain);
+        let error =
+            anyhow::anyhow!("projection replay admission is in progress; retry protected write");
+
+        assert!(wait_for_live_replay_admission_retry(chain, &error, 1).await);
+        assert_eq!(crate::metrics::admission_retries(chain), retries_before + 1);
+        assert_eq!(
+            crate::metrics::fence_wait_observations(chain),
+            waits_before + 1
+        );
     }
 }

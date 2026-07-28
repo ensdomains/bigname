@@ -21,6 +21,7 @@ pub(crate) async fn find_uncovered_generation_bound_coverage_with_current_topics
     retention_generation: i64,
     uncovered_limit: i64,
 ) -> std::result::Result<Vec<UncoveredWatchedTuple>, String> {
+    let _scan_timer = crate::metrics::coverage_violation_scan_timer(chain);
     let required_tuples = nonempty_required_tuples(chain, required_tuples)
         .cloned()
         .collect::<Vec<_>>();

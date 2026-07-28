@@ -195,6 +195,7 @@ run_readiness_check() {
   log "starting API for health probe on ${BIGNAME_SMOKE_API_BIND_ADDR}"
   "$api_bin" serve \
     --bind-addr "$BIGNAME_SMOKE_API_BIND_ADDR" \
+    --metrics-bind-addr 127.0.0.1:0 \
     > "$api_log_tmp" 2>&1 &
   api_pid=$!
 

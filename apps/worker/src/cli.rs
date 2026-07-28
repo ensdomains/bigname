@@ -1,5 +1,6 @@
 use bigname_storage::DatabaseConfig;
 use clap::{Args, Parser, Subcommand};
+use std::net::SocketAddr;
 use uuid::Uuid;
 
 use crate::inspect;
@@ -38,6 +39,12 @@ pub(crate) enum Command {
 pub(crate) struct RunArgs {
     #[command(flatten)]
     pub(crate) database: DatabaseConfig,
+    #[arg(
+        long,
+        env = "BIGNAME_WORKER_METRICS_BIND_ADDR",
+        default_value = "127.0.0.1:9466"
+    )]
+    pub(crate) metrics_bind_addr: SocketAddr,
     #[arg(
         long,
         env = "BIGNAME_WORKER_POLL_INTERVAL_SECS",

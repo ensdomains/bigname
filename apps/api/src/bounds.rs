@@ -269,6 +269,7 @@ async fn enforce_verified_execution_bounds(
     let Ok(permit) = admission.semaphore.clone().try_acquire_owned() else {
         return overloaded_response();
     };
+    let _in_flight = crate::metrics::verified_in_flight_guard();
     let response = next.run(request).await;
     drop(permit);
     response

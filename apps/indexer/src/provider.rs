@@ -277,6 +277,7 @@ pub(crate) trait ChainProviderOps {
 
 #[derive(Clone)]
 pub struct JsonRpcProvider {
+    chain: Option<String>,
     endpoint: Url,
     client: http_client::RecoveringHttpClient,
     receipt_fallback_endpoint: Option<Url>,
@@ -383,6 +384,7 @@ impl JsonRpcProvider {
             .transpose()?;
 
         Ok(Self {
+            chain,
             endpoint,
             client,
             receipt_fallback_endpoint,
@@ -395,6 +397,7 @@ impl JsonRpcProvider {
             bail!("unsupported code fallback RPC endpoint scheme; expected http:// or https://");
         }
         Ok(Self {
+            chain: None,
             endpoint,
             client: http_client::RecoveringHttpClient::new(
                 JSON_RPC_PROVIDER_CONNECT_TIMEOUT,

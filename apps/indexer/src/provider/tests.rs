@@ -1199,9 +1199,20 @@ async fn json_rpc_provider_fetches_chain_heads_via_tag_hash_discovery() -> Resul
         }
     }))
     .await?;
-    let provider = JsonRpcProvider::new(&url)?;
+    let chain = "metrics-provider-bound-chain";
+    let registry = ProviderRegistry::from_chain_rpc_urls(&[format!("{chain}={url}")])?;
+    let provider = registry
+        .provider_for(chain)
+        .expect("metrics test provider must be configured");
+    let provider_lookup_observations =
+        crate::metrics::provider_lookup_observations(chain, "json_rpc");
 
     let heads = provider.fetch_chain_heads().await?;
+    assert_eq!(
+        crate::metrics::provider_lookup_observations(chain, "json_rpc"),
+        provider_lookup_observations + 1,
+        "a provider obtained from the registry must carry its chain into lookup metrics"
+    );
     assert_eq!(heads.canonical.block_number, 43);
     assert_eq!(
         heads.canonical.parent_hash,

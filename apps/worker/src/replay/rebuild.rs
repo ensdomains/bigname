@@ -361,11 +361,26 @@ where
     Fut: Future<Output = Result<CurrentProjectionReplayStepSummary>>,
 {
     if projection_should_replay(pool, projection, skip_completed, normalized_target_block).await? {
-        let step = rebuild.await?;
-        mark_projection_replay_completed(pool, &step, normalized_target_block).await?;
-        Ok(step)
+        let _timer = crate::runtime::projection_rebuild_timer(projection);
+        let result = async {
+            let step = rebuild.await?;
+            mark_projection_replay_completed(pool, &step, normalized_target_block).await?;
+            Ok(step)
+        }
+        .await;
+        match &result {
+            Ok(step) => crate::runtime::record_projection_rebuild_completed(
+                projection,
+                step.requested_key_count,
+                step.upserted_row_count,
+                step.deleted_row_count,
+            ),
+            Err(_) => crate::runtime::record_projection_rebuild_failed(projection),
+        }
+        result
     } else {
         super::staging::cleanup_projection_checkpoint(pool, projection).await?;
+        crate::runtime::record_projection_rebuild_skipped(projection);
         Ok(skipped_step(projection))
     }
 }
