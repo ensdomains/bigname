@@ -178,6 +178,9 @@ pub(super) fn stored_log_identity_evidence_query(
         bail!("Coinbase SQL stored verification requires at least one topic0");
     }
     let network = query::coinbase_sql_network(&request.chain)?;
+    // Direct predicates share row fetch's live assumption that CDP stores lowercase hex.
+    // For stored identities, violations undercount evidence; the digest mismatch visibly fails
+    // the job instead of silently reusing those identities.
     let address = query::sql_string_literals(&[request.address.to_ascii_lowercase()]);
     let normalized_topics = request
         .topic0s

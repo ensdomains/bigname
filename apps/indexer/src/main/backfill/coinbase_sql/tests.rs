@@ -134,7 +134,7 @@ fn stored_identity_query_reduces_logs_before_one_narrow_transaction_scan() -> Re
         "aggregate evidence must filter the two log tables before reading transactions"
     );
     assert_eq!(
-        sql.matches("FROM base.transactions t").count(),
+        sql.matches("base.transactions").count(),
         1,
         "aggregate evidence must scan the transaction changelog once"
     );
@@ -148,6 +148,19 @@ fn stored_identity_query_reduces_logs_before_one_narrow_transaction_scan() -> Re
             .find("FROM base.transactions t")
             .is_some_and(|tx| logs < tx)),
         "log action reduction must happen before the transaction scan"
+    );
+    assert!(
+        sql.contains(
+            "active_rows AS (
+  SELECT
+    block_number,
+    block_hash,
+    transaction_hash,
+    log_index,
+    address
+  FROM active_transaction_log_rows"
+        ),
+        "active rows must consume transaction-filtered log rows"
     );
     assert!(
         !sql.contains("lower(l.address)") && !sql.contains("lower(l.topics[1])"),
