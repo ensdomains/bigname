@@ -26,6 +26,7 @@ pub(super) use identity::{
     normalized_event_identity_differences, normalized_event_identity_summary,
 };
 use identity::{normalized_event_snapshots_after_upsert, validate_existing_normalized_events};
+pub use metrics::*;
 use metrics::{count_normalized_events_by_event_kind, count_normalized_events_by_source_family};
 use repair::{
     repair_after_state_conflicts, repair_resource_id_conflicts,
@@ -216,6 +217,7 @@ pub async fn upsert_normalized_events_with_summary(
         .await
         .context("failed to commit normalized-event upsert")?;
     let commit_ms = commit_started.elapsed().as_millis();
+    metrics::observe_startup_adapter_reconcile_event_batch(pool, events).await;
 
     info!(
         service = "storage",

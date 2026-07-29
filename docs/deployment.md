@@ -94,6 +94,22 @@ The indexer exports:
   persistence.
   `normalized_events_upserted_total` counts newly inserted normalized-event
   identities and excludes idempotent replays of unchanged identities.
+- `startup_adapter_reconcile_normalized_events_processed_total{adapter,chain}`
+  counts normalized events in batches successfully committed by
+  `upsert_normalized_events_with_summary` while the matching startup checkpoint
+  row is `stream_complete`. It includes newly inserted and unchanged event
+  identities and is a process-lifetime counter, so a retry in the same process
+  continues increasing it.
+  `startup_adapter_reconcile_staged_items{adapter,chain}` copies the checkpoint
+  row's `staged_item_count` while that window is active and returns to zero
+  after it closes. The currently observed adapter value is
+  `ens_v1_subregistry_discovery`.
+  For that adapter, a staged item is one latest registry or resolver
+  assignment. The counter measures only the later normalized-event upsert
+  pass: one staged assignment can emit no event, and the earlier
+  [discovery-edge](glossary.md#discovery-graph--discovery-edge) diff also scans
+  stored edges. The two values therefore expose event-emission progress
+  against staged assignment work, not an exact reconciled-item fraction.
 - `admission_retries_total` and `fence_wait_seconds`, labeled only by `chain`.
 - `coverage_recovery_jobs_total{chain,outcome}`,
   `coverage_provider_queries_total{chain}`, and
@@ -129,9 +145,10 @@ Every service also exports
 
 Label cardinality is bounded by configuration and compiled behavior: chain
 IDs, registered route templates, a fixed HTTP method set, status classes,
-provider kinds, projection names, operations, and outcomes. Metrics never use
-addresses, names, query strings, or raw request paths as labels. Build and
-storage-version labels contribute one active series per running process.
+provider kinds, startup adapter values, projection names, operations, and
+outcomes. Metrics never use addresses, names, query strings, or raw request
+paths as labels. Build and storage-version labels contribute one active series
+per running process.
 
 The indexer and worker healthcheck commands verify that applied database
 migrations exactly match the migration set compiled into the running binary

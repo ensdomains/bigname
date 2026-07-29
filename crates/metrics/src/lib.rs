@@ -10,7 +10,7 @@ use axum::{
 use prometheus::{Encoder, Registry, TextEncoder, core::Collector};
 
 pub use prometheus::{
-    GaugeVec, HistogramOpts, HistogramTimer, HistogramVec, IntCounterVec, IntGauge,
+    GaugeVec, HistogramOpts, HistogramTimer, HistogramVec, IntCounterVec, IntGauge, IntGaugeVec,
 };
 
 const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
@@ -75,6 +75,12 @@ impl MetricsRegistry {
     pub fn int_gauge(&self, name: &str, help: &str) -> Result<IntGauge> {
         let gauge =
             IntGauge::new(name, help).with_context(|| format!("failed to define {name}"))?;
+        self.register(gauge)
+    }
+
+    pub fn int_gauge_vec(&self, name: &str, help: &str, labels: &[&str]) -> Result<IntGaugeVec> {
+        let gauge = IntGaugeVec::new(prometheus::Opts::new(name, help), labels)
+            .with_context(|| format!("failed to define {name}"))?;
         self.register(gauge)
     }
 

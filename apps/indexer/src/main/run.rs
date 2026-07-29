@@ -94,12 +94,12 @@ pub(crate) async fn run(args: RunArgs) -> Result<()> {
     log_manifest_summary(&manifest_summary);
     ensure_manifest_root_ready(&manifest_summary)?;
 
-    let (pool, _runtime_rederive_guard) =
-        bigname_storage::connect_with_base_normalized_rederive_writer_guard(
-            &args.database,
-            "bigname-indexer",
-        )
-        .await?;
+    let (pool, _rederive) = bigname_storage::connect_with_base_normalized_rederive_writer_guard(
+        &args.database,
+        "bigname-indexer",
+    )
+    .await?;
+    crate::metrics::configure_reconcile_progress(&pool, &deployment_profile).await?;
     bigname_storage::register_service_loop(
         &pool,
         bigname_storage::INDEXER_SERVICE_NAME,
