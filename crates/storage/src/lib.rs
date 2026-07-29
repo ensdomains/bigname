@@ -10,6 +10,7 @@ mod connection;
 mod coverage_recovery_failures;
 mod evm_primitives;
 mod execution;
+mod full_closure_coverage;
 mod history;
 mod identity;
 mod identity_facade;
@@ -138,12 +139,10 @@ pub use execution::{
     upsert_execution_outcome, upsert_execution_outcome_in_transaction, upsert_execution_trace,
     upsert_execution_trace_in_transaction,
 };
+pub use full_closure_coverage::*;
 pub use long_operation_exports::*;
-use sqlx::{
-    PgPool, Postgres,
-    pool::PoolConnection,
-    postgres::{PgConnectOptions, PgPoolOptions},
-};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::{PgPool, Postgres, pool::PoolConnection};
 use tracing::info;
 #[rustfmt::skip]
 pub use execution::{ExecutionOutcomeInvalidationProgress, ExecutionOutcomeInvalidationProgressFuture, invalidate_execution_outcomes_for_orphaned_blocks_with_progress};

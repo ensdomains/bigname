@@ -351,6 +351,22 @@ For stateful and contextual adapters, automatic catch-up treats batching as phys
 
 Without a documented durable adapter-state snapshot, a restarted stateful replay must resume from an authoritative retained closure boundary rather than from the last physical page. The earliest retained canonical fact is authoritative only for a never-destructively-rotated generation-zero corpus; a generation-zero request beginning at block zero is also a genuinely empty closure when no required canonical raw fact exists. After a retention-generation change, replay requires current-generation, gap-free `backfill_coverage_facts` for every historically authoritative interval of each closure family outside the ENSv2 root/registry proof, with current manifest topics, or a versioned snapshot tied to that generation and input revision. ENSv2 root/registry families continue to require their retained-history proof tuple.
 
+That full-closure coverage check uses a durable, fact-derived interval
+aggregate rather than re-aggregating every accumulated coverage fact once per
+watched tuple on every catch-up iteration. The aggregate is rebuilt from
+`backfill_coverage_facts`; it is not closure authority by itself. A normal
+iteration consumes only newly journaled facts, raw-log revisions, or affected
+fact/job retirements and then compares freshly loaded watched requirements
+with indexed aggregate rows. The saved state binds the chain-wide current topic
+map, so callers proving different source-family subsets share one stable
+aggregate. Retention-generation, discovery-admission, watch-set, or
+current-topic changes force conservative re-evaluation, while a missing
+coverage-journal or raw block-revision witness rebuilds or fails the proof.
+Before the first saved state, including generation zero, fact writes advance
+only the input revision and do not accumulate unused per-fact journal rows.
+When none of those inputs changed, a restart reuses the revision-bound aggregate
+and pays only the watched-requirement comparison.
+
 An unscoped operator `BlockRange` request may run this full-closure path only when its start is that authoritative boundary. It loads the complete historically watched source corpus, including emitters whose canonical discovery interval closed before the requested target, and reruns closure-required and contextual adapters through that target under the range-specific checkpoint. A block-hash or source-restricted request remains a restricted repair selector and does not gain full-closure authority.
 
 While the automatic replay cursor is incomplete, live polling may persist raw facts without running adapter-owned normalization so a single replay owner remains responsible for the selected closure. After the automatic replay cursor is complete for provider-configured chains, the indexer first runs a bounded post-replay live-adapter backlog pass over canonical raw-log blocks already persisted after the replay target latched, then live polling resumes adapter-owned normalization for newly persisted raw facts. That backlog pass derives live adapter scope from the persisted raw-log emitters in the selected block hashes, owns only its operational cursor and adapter-owned upserts, and does not widen the completed full-closure replay target. It is not a substitute for provider-backed live intake: the following live head reconciliation still refreshes raw payloads for any newer canonical gap before advancing checkpoints.

@@ -130,6 +130,34 @@ pub async fn load_active_manifest_abi_events_by_chain_and_source_families(
     active_manifest_abi_events_from_rows(rows).await
 }
 
+pub async fn load_active_manifest_abi_events_by_chain(
+    pool: &PgPool,
+    chain: &str,
+) -> Result<Vec<ActiveManifestAbiEvent>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            manifest_id,
+            manifest_version,
+            namespace,
+            source_family,
+            chain,
+            deployment_epoch,
+            manifest_payload
+        FROM manifest_versions
+        WHERE rollout_status = 'active'
+          AND chain = $1
+        ORDER BY source_family, manifest_id
+        "#,
+    )
+    .bind(chain)
+    .fetch_all(pool)
+    .await
+    .context("failed to load active manifest ABI events by chain")?;
+
+    active_manifest_abi_events_from_rows(rows).await
+}
+
 async fn active_manifest_abi_events_from_rows(
     rows: Vec<sqlx::postgres::PgRow>,
 ) -> Result<Vec<ActiveManifestAbiEvent>> {

@@ -2961,8 +2961,24 @@ async fn active_manifest_abi_events_derive_topics_from_payload() -> Result<()> {
     let registry_manifest_id =
         active_manifest_id_for_source_family(database.pool(), "ens", "ens_v2_registry_l1").await?;
     let events = load_active_manifest_abi_events(database.pool(), &[registry_manifest_id]).await?;
+    let chain_events =
+        load_active_manifest_abi_events_by_chain(database.pool(), "ethereum-sepolia").await?;
+    let chain_families = chain_events
+        .iter()
+        .map(|event| event.source_family.as_str())
+        .collect::<BTreeSet<_>>();
 
     assert_eq!(events.len(), 12);
+    assert!(chain_families.contains("ens_v2_registry_l1"));
+    assert!(
+        chain_families.len() > 1,
+        "chain-wide topic authority must not collapse to one caller's family subset"
+    );
+    assert!(events.iter().all(|expected| {
+        chain_events
+            .iter()
+            .any(|event| event.manifest_id == expected.manifest_id && event.name == expected.name)
+    }));
     let label_registered = events
         .iter()
         .find(|event| event.name == "LabelRegistered")

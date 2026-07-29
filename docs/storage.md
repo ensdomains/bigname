@@ -836,6 +836,63 @@ proof. A migrated generation-one database can therefore recover replay
 authority by completing generation-scoped historical backfill; a retained
 suffix without independent completeness evidence still fails closed.
 
+The full-closure comparison keeps a storage-owned, fact-derived aggregate in
+`full_closure_coverage_rollups`, keyed by chain, raw-log retention generation,
+source family, scope, and address. `backfill_coverage_facts` and their completed
+parent jobs remain the source of truth; the aggregate is rebuildable
+operational state, not raw fact authority, a projection, an execution artifact,
+or API-readable state. `full_closure_coverage_rollup_states` binds each saved
+aggregate to its proof-format version, commit-ordered coverage input revision,
+raw-log [input revision](glossary.md), raw-log
+[retention generation](glossary.md), discovery-[admission epoch](glossary.md),
+and the chain-wide current manifest topic map. The additive migration does not
+backfill these tables: the first upgraded proof builds one current-generation
+aggregate from the authoritative facts, so migrations may still be pre-applied
+before the new indexer rolls.
+
+One deliberate difference from the former fact scan is the
+`block_revision_evidence_floor`: facts whose stored-history verification
+revision is below that floor are excluded from the aggregate, while the former
+scan counted them. The first post-deploy proof can therefore report currently
+required intervals that relied only on those facts as uncovered, causing
+recovery to verify those intervals once. The pre-deploy excluded-fact inventory
+measured `base-mainnet`: 0 facts; `ethereum-mainnet`: 855 facts belonging to 16
+parent jobs. Any resulting Ethereum recovery uses only the local provider.
+
+Every proof reloads the current watched requirements and compares them with at
+most the exact-address and family aggregate rows. The commit-ordered
+`full_closure_coverage_input_changes` journal lets a later proof merge only new
+eligible fact intervals or rebuild only keys whose authority may have shrunk.
+The chain-scoped aggregate transaction is repeatable-read and serialized with
+the journal triggers. It takes an `ACCESS SHARE` fact-table lock before the
+chain advisory lock, matching the table-then-advisory order of fact truncation
+without blocking ordinary inserts, updates, or deletes. It prunes a journal
+prefix only after publishing the matching state revision, and it rechecks the
+coverage input revision after commit. Saved state therefore survives an
+indexer restart without turning the aggregate into independent authority.
+
+The invalidation rules are fail-closed:
+
+| Input change | Required aggregate behavior |
+| --- | --- |
+| New `backfill_coverage_facts` rows | Every insert statement advances the commit-ordered coverage input revision. Once saved aggregate state exists, the trigger also records the fact identities and tuple keys, and the next proof validates only those facts against current job, generation, stored-verification, and topic authority before unioning their intervals into the affected aggregate rows. Before the first saved state—including generation zero—the journal remains empty because the first eventual proof must cold-rebuild from all authoritative facts. |
+| Fact update, delete, cascade retirement, truncation, or an authority-relevant parent-job change | The trigger records rebuild entries for every affected old or new tuple key. Parent-job authority includes chain, lifecycle status, declared bounds, retention generation, stored-verification fields, and immutable source identity. The next proof deletes and re-derives those keys from authoritative facts; it never subtracts intervals optimistically. |
+| Raw-log input revision | Complete per-block revision evidence identifies only stored-verification-backed fact keys whose intervals a newer mutation touched; those keys are re-derived. A missing intervening revision witness fails the proof. If the saved revision falls below the evidence floor, the whole aggregate is rebuilt. |
+| Watch-set or discovery-admission change | Requirements are never cached. The next proof reads the changed set, and the mandatory admission-epoch bump invalidates the whole saved aggregate. Epoch drift during the proof fails before closure can be claimed. |
+| Current manifest topic set | A topic-map mismatch rebuilds the whole aggregate, re-evaluating every topic-filtered parent-job identity. |
+| Raw-log retention generation or coverage-fact parent generation | A retention-generation mismatch rebuilds from only current-generation facts. A parent-job generation mutation also journals every affected tuple key. Older-generation aggregate rows and facts never compose into the proof. |
+| Proof-format change, saved-revision regression, or coverage-journal gap | The whole aggregate is discarded and rebuilt from facts. No saved interval is reused across an unexplained state transition. |
+
+With `T` watched requirements, `F` eligible coverage facts, `ΔF` new facts, and
+`F_changed` the facts belonging to invalidated tuple keys, the former
+correlated comparison re-ran `range_agg` over coverage facts for every tuple,
+making each iteration `O(T × F)`. Initial or wholesale-invalidated
+synchronization is now one grouped `O(F)` pass followed by an indexed `O(T)`
+comparison. An ordinary iteration is `O(ΔF + F_changed + T)`; an unchanged
+restart is `O(T)` and does not rescan accumulated facts. Raw-log revision work
+also scales with the new block-revision evidence and the affected
+stored-verification keys rather than with every fact for every requirement.
+
 For Coinbase SQL recovery, retained raw logs may replace provider row fetches
 only after independent aggregate queries over the exact address, manifest
 topic set, and job window. The indexer divides the window into 131,072-block

@@ -1984,8 +1984,8 @@ async fn create_stored_lineage_coverage_frontier_tables(pool: &PgPool) -> Result
     Ok(())
 }
 
-/// Apply the real backfill_coverage_facts migration so fixture schemas cannot
-/// drift from the checked-in DDL.
+/// Apply the real coverage-fact and incremental full-closure migrations so
+/// fixture schemas cannot drift from the checked-in DDL.
 async fn create_backfill_coverage_facts_table(pool: &PgPool) -> Result<()> {
     sqlx::raw_sql(include_str!(
         "../../../../../migrations/20260710060000_backfill_coverage_facts.sql"
@@ -1993,6 +1993,12 @@ async fn create_backfill_coverage_facts_table(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await
     .context("failed to apply the backfill_coverage_facts migration for indexer tests")?;
+    sqlx::raw_sql(include_str!(
+        "../../../../../migrations/20260729120000_full_closure_coverage_rollups.sql"
+    ))
+    .execute(pool)
+    .await
+    .context("failed to apply the full-closure coverage rollup migration for indexer tests")?;
     Ok(())
 }
 
