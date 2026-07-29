@@ -1,7 +1,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    io,
     process::Command,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use anyhow::Result;
@@ -11,9 +12,12 @@ use bigname_manifests::{
 };
 use serde_json::json;
 use sqlx::types::Uuid;
+use tracing_subscriber::fmt::MakeWriter;
 
 use super::{
     CoinbaseSqlSourceRegistry, coinbase_sql_logs_need_validation_provider_payload,
+    error::CoinbaseSqlHttpError,
+    evidence::fetch_windowed_stored_log_identity_evidence_with,
     pagination::{CoinbaseSqlLogCursor, append_page_rows, ensure_full_page_advanced_cursor},
     planner::build_filter_packs,
     push_deduped_log,
@@ -26,7 +30,7 @@ use crate::{
         BackfillBlockRange, BackfillTopicPlan, COINBASE_SQL_RESULT_SET_CAP,
         CoinbaseSqlBackfillConfig, CoinbaseSqlFetchStats, CoinbaseSqlValidationMode,
         DEFAULT_COINBASE_SQL_QUERY_CHAR_LIMIT, HistoricalLogPayloadRequest,
-        StoredLogIdentityEvidenceRequest,
+        StoredLogIdentityEvidence, StoredLogIdentityEvidenceRequest,
         reservation_execution::{
             backfill_job_source_identity_payload, coinbase_sql_backfill_job_source_identity_payload,
         },
@@ -34,6 +38,51 @@ use crate::{
     },
     provider::{ProviderLog, ProviderResolvedBlock},
 };
+
+#[derive(Clone, Default)]
+struct CapturedLogs {
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+struct CapturedLogWriter {
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl CapturedLogs {
+    fn contents(&self) -> String {
+        String::from_utf8(
+            self.bytes
+                .lock()
+                .expect("captured log mutex must not be poisoned")
+                .clone(),
+        )
+        .expect("captured logs must be UTF-8")
+    }
+}
+
+impl io::Write for CapturedLogWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.bytes
+            .lock()
+            .expect("captured log mutex must not be poisoned")
+            .extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'writer> MakeWriter<'writer> for CapturedLogs {
+    type Writer = CapturedLogWriter;
+
+    fn make_writer(&'writer self) -> Self::Writer {
+        CapturedLogWriter {
+            bytes: Arc::clone(&self.bytes),
+        }
+    }
+}
 
 #[test]
 fn stored_identity_query_returns_bounded_bucket_count_and_digest_evidence() -> Result<()> {
@@ -51,7 +100,7 @@ fn stored_identity_query_returns_bounded_bucket_count_and_digest_evidence() -> R
     assert!(sql.contains("GROUP BY bucket"));
     assert!(sql.contains("groupBitXor"));
     assert!(sql.contains("MD5(concat(lower(block_hash), lower(transaction_hash)"));
-    assert!(sql.contains("lower(l.address) = '0x1111111111111111111111111111111111111111'"));
+    assert!(sql.contains("l.address = '0x1111111111111111111111111111111111111111'"));
     assert!(!sql.contains("LIMIT"));
 
     let bucket = stored_log_identity_bucket_from_value(json!({
@@ -68,7 +117,7 @@ fn stored_identity_query_returns_bounded_bucket_count_and_digest_evidence() -> R
 }
 
 #[test]
-fn stored_identity_query_excludes_logs_from_removed_transactions() -> Result<()> {
+fn stored_identity_query_reduces_logs_before_one_narrow_transaction_scan() -> Result<()> {
     let request = StoredLogIdentityEvidenceRequest {
         chain: "base-mainnet".to_owned(),
         address: "0x1111111111111111111111111111111111111111".to_owned(),
@@ -81,16 +130,29 @@ fn stored_identity_query_excludes_logs_from_removed_transactions() -> Result<()>
     let sql = stored_log_identity_evidence_query(&request, request.range)?;
 
     assert!(
-        sql.contains("WITH active_transactions AS"),
-        "aggregate evidence must use the same active-transaction changelog reduction as row fetches"
+        sql.contains("WITH selected_rows AS"),
+        "aggregate evidence must filter the two log tables before reading transactions"
     );
     assert_eq!(
-        sql.matches("JOIN active_transactions t").count(),
-        2,
-        "both decoded and encoded aggregate arms must exclude logs from removed transactions"
+        sql.matches("FROM base.transactions t").count(),
+        1,
+        "aggregate evidence must scan the transaction changelog once"
     );
-    assert!(sql.contains("FROM base.transactions"));
-    assert!(sql.contains("WHERE t.action_sum > 0"));
+    assert!(sql.contains("JOIN active_log_rows l"));
+    assert!(sql.contains("t.transaction_index"));
+    assert!(sql.contains(
+        "HAVING sum(CASE WHEN toString(t.action) IN ('1', 'added') THEN 1 WHEN toString(t.action) IN ('-1', 'removed') THEN -1 ELSE 0 END) > 0"
+    ));
+    assert!(
+        sql.find("active_log_rows AS").is_some_and(|logs| sql
+            .find("FROM base.transactions t")
+            .is_some_and(|tx| logs < tx)),
+        "log action reduction must happen before the transaction scan"
+    );
+    assert!(
+        !sql.contains("lower(l.address)") && !sql.contains("lower(l.topics[1])"),
+        "normalized direct predicates must preserve provider pushdown"
+    );
     Ok(())
 }
 
@@ -110,6 +172,67 @@ fn stored_identity_sub_window_keeps_the_whole_range_bucket_origin() -> Result<()
 
     assert!(sql.contains("l.block_number BETWEEN 15 AND 20"));
     assert!(sql.contains("intDiv(toInt64(block_number) - 10, 8) AS bucket"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn evidence_resource_limit_halvings_log_each_retry_class_and_depth() -> Result<()> {
+    let request = StoredLogIdentityEvidenceRequest {
+        chain: "base-mainnet".to_owned(),
+        address: "0x1111111111111111111111111111111111111111".to_owned(),
+        topic0s: vec![
+            "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(),
+        ],
+        range: BackfillBlockRange::new(0, 3)?,
+        bucket_blocks: 4,
+    };
+    let captured_logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_target(false)
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(captured_logs.clone())
+        .finish();
+    let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+
+    let evidence =
+        fetch_windowed_stored_log_identity_evidence_with(&request, 4, |query_range| async move {
+            let query_blocks = query_range.to_block - query_range.from_block + 1;
+            if query_blocks > 1 {
+                let body = if query_blocks == 4 {
+                    "Query memory limit exceeded"
+                } else {
+                    "Limit for rows or bytes to read on leaf node exceeded"
+                };
+                return Err(CoinbaseSqlHttpError {
+                    status: reqwest::StatusCode::BAD_REQUEST,
+                    body: body.to_owned(),
+                    attempt_count: 1,
+                }
+                .into());
+            }
+            Ok(StoredLogIdentityEvidence {
+                buckets: Vec::new(),
+                query_count: 1,
+            })
+        })
+        .await?;
+
+    assert_eq!(evidence.query_count, 6);
+    let logs = captured_logs.contents();
+    let message = "retrying Coinbase SQL stored-history evidence query with a halved window";
+    assert_eq!(logs.matches(message).count(), 2, "{logs}");
+    for expected in [
+        "window_blocks=2",
+        "halving_depth=1",
+        "error_class=\"query_memory_limit\"",
+        "window_blocks=1",
+        "halving_depth=2",
+        "error_class=\"query_bytes_read_limit\"",
+    ] {
+        assert!(logs.contains(expected), "missing {expected:?} in {logs}");
+    }
     Ok(())
 }
 

@@ -6,7 +6,10 @@ use bigname_manifests::{
 use sqlx::types::Uuid;
 
 use super::*;
-use crate::backfill::{BackfillAdapterSyncMode, HistoricalLogValidationFilter};
+use crate::backfill::{
+    BackfillAdapterSyncMode, DEFAULT_COINBASE_SQL_EVIDENCE_WINDOW_BLOCKS,
+    HistoricalLogValidationFilter,
+};
 
 const MAX_COINBASE_SQL_PRACTICAL_WINDOW_BLOCKS: i64 = 65_536;
 
@@ -154,13 +157,13 @@ fn sparse_coinbase_sql_window_growth_stays_below_practical_query_memory_ceiling(
 }
 
 #[test]
-fn evidence_query_projection_counts_each_static_sub_window() -> Result<()> {
+fn default_evidence_query_projection_counts_each_static_sub_window() -> Result<()> {
     let mut config = coinbase_sql_config_with_max(8_192);
-    config.evidence_window_blocks = 4_000_000;
+    config.evidence_window_blocks = DEFAULT_COINBASE_SQL_EVIDENCE_WINDOW_BLOCKS;
 
     assert_eq!(
         config.evidence_query_count(BackfillBlockRange::new(0, 46_954_147)?)?,
-        12
+        47
     );
     Ok(())
 }
