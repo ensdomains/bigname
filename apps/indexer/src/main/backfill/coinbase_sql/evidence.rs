@@ -2,10 +2,11 @@ use std::{collections::BTreeMap, future::Future};
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
+use tracing::info;
 
 use super::{
     client::{CoinbaseSqlClient, CoinbaseSqlRawQueryResponse},
-    error::query_memory_limit_attempt_count,
+    error::query_resource_limit_error,
     query,
 };
 use crate::backfill::{
@@ -42,7 +43,7 @@ pub(in crate::backfill) async fn fetch_windowed_stored_log_identity_evidence(
     .await
 }
 
-async fn fetch_windowed_stored_log_identity_evidence_with<F, Fut>(
+pub(super) async fn fetch_windowed_stored_log_identity_evidence_with<F, Fut>(
     request: &StoredLogIdentityEvidenceRequest,
     initial_window_blocks: i64,
     mut fetch_window: F,
@@ -80,17 +81,29 @@ where
                 }
             }
             Err(error) => {
-                let Some(attempt_count) = query_memory_limit_attempt_count(&error) else {
+                let Some(resource_limit) = query_resource_limit_error(&error) else {
                     return Err(error);
                 };
                 query_count = query_count
-                    .checked_add(attempt_count)
+                    .checked_add(resource_limit.attempt_count)
                     .context("Coinbase SQL evidence query count overflowed")?;
                 if halving_count >= MAX_EVIDENCE_WINDOW_HALVINGS || query_blocks == 1 {
                     return Err(error);
                 }
-                window_blocks = (query_blocks / 2).max(1);
+                let retry_window_blocks = (query_blocks / 2).max(1);
                 halving_count += 1;
+                info!(
+                    service = "indexer",
+                    command = "backfill",
+                    provider = "coinbase_sql",
+                    window_blocks = retry_window_blocks,
+                    halving_depth = halving_count,
+                    error_class = resource_limit.error_class.as_str(),
+                    failed_from_block = query_range.from_block,
+                    failed_to_block = query_range.to_block,
+                    "retrying Coinbase SQL stored-history evidence query with a halved window"
+                );
+                window_blocks = retry_window_blocks;
                 continue;
             }
         }
@@ -165,30 +178,35 @@ pub(super) fn stored_log_identity_evidence_query(
         bail!("Coinbase SQL stored verification requires at least one topic0");
     }
     let network = query::coinbase_sql_network(&request.chain)?;
-    let address = query::sql_string_literals(std::slice::from_ref(&request.address));
-    let topics = query::sql_string_literals(&request.topic0s);
-    let action = query::active_action_expression("l.action");
+    // Direct predicates share row fetch's live assumption that CDP stores lowercase hex.
+    // For stored identities, violations undercount evidence; the digest mismatch visibly fails
+    // the job instead of silently reusing those identities.
+    let address = query::sql_string_literals(&[request.address.to_ascii_lowercase()]);
+    let normalized_topics = request
+        .topic0s
+        .iter()
+        .map(|topic| topic.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let topics = query::sql_string_literals(&normalized_topics);
+    let log_action = query::active_action_expression("l.action");
+    let transaction_action = query::active_action_expression("t.action");
     let from_block = query_range.from_block;
     let to_block = query_range.to_block;
     let bucket_origin = request.range.from_block;
     let bucket_blocks = request.bucket_blocks;
-    let active_transactions_cte = query::active_transactions_cte(network, from_block, to_block);
     Ok(format!(
-        r#"WITH {active_transactions_cte},
-selected_rows AS (
+        r#"WITH selected_rows AS (
   SELECT
     l.block_number,
     l.block_hash,
     l.transaction_hash,
     l.log_index,
     l.address,
-    {action} AS action_delta
+    {log_action} AS action_delta
   FROM {network}.events l
-  JOIN active_transactions t
-    ON {active_transaction_log_join}
   WHERE l.block_number BETWEEN {from_block} AND {to_block}
-    AND lower(l.address) = {address}
-    AND lower(l.topics[1]) IN ({topics})
+    AND l.address = {address}
+    AND l.topics[1] IN ({topics})
   UNION ALL
   SELECT
     l.block_number,
@@ -196,15 +214,13 @@ selected_rows AS (
     l.transaction_hash,
     l.log_index,
     l.address,
-    {action} AS action_delta
+    {log_action} AS action_delta
   FROM {network}.encoded_logs l
-  JOIN active_transactions t
-    ON {active_transaction_log_join}
   WHERE l.block_number BETWEEN {from_block} AND {to_block}
-    AND lower(l.address) = {address}
-    AND lower(l.topics[1]) IN ({topics})
+    AND l.address = {address}
+    AND l.topics[1] IN ({topics})
 ),
-active_rows AS (
+active_log_rows AS (
   SELECT
     block_number,
     block_hash,
@@ -214,6 +230,37 @@ active_rows AS (
   FROM selected_rows
   GROUP BY block_number, block_hash, transaction_hash, log_index, address
   HAVING sum(action_delta) > 0
+),
+active_transaction_log_rows AS (
+  SELECT
+    l.block_number AS block_number,
+    l.block_hash AS block_hash,
+    l.transaction_hash AS transaction_hash,
+    t.transaction_index AS transaction_index,
+    l.log_index AS log_index,
+    l.address AS address
+  FROM {network}.transactions t
+  JOIN active_log_rows l
+    ON {active_transaction_log_join}
+  WHERE t.block_number BETWEEN {from_block} AND {to_block}
+  GROUP BY
+    l.block_number,
+    l.block_hash,
+    l.transaction_hash,
+    t.transaction_index,
+    l.log_index,
+    l.address
+  HAVING sum({transaction_action}) > 0
+),
+active_rows AS (
+  SELECT
+    block_number,
+    block_hash,
+    transaction_hash,
+    log_index,
+    address
+  FROM active_transaction_log_rows
+  GROUP BY block_number, block_hash, transaction_hash, log_index, address
 )
 SELECT
   intDiv(toInt64(block_number) - {bucket_origin}, {bucket_blocks}) AS bucket,

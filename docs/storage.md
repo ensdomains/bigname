@@ -920,8 +920,8 @@ Coinbase SQL recovery persists a pre-fetch lower bound containing one initial
 aggregate query per configured evidence sub-window, one row query per
 configured initial block window containing a true gap, and the same aggregate
 sub-window count for final verification when any gap exists. Actuals include
-memory-limit halving attempts, retries, pagination, and query-size filter-pack
-splits. Each returned query's attempts are recorded before subsequent
+halving attempts after query-memory or leaf bytes-read-limit errors, retries,
+pagination, and query-size filter-pack splits. Each returned query's attempts are recorded before subsequent
 validation and materialization so a later failure preserves the paid-work
 count. Provider row gaps retain the existing window, page, query-size, timeout,
 and rate limits.
