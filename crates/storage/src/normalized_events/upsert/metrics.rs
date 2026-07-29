@@ -129,6 +129,10 @@ async fn observe_startup_adapter_reconcile_event_batch_inner(
     pool: &PgPool,
     events: &[NormalizedEvent],
 ) -> Result<()> {
+    let event_counts = candidate_event_counts(events);
+    if event_counts.is_empty() {
+        return Ok(());
+    }
     let Some(config) = observer_config()
         .read()
         .map_err(|_| anyhow::anyhow!("startup adapter reconcile observer lock is poisoned"))?
@@ -136,10 +140,9 @@ async fn observe_startup_adapter_reconcile_event_batch_inner(
     else {
         return Ok(());
     };
-    let event_counts = candidate_event_counts(events);
-    if event_counts.is_empty() {
-        return Ok(());
-    }
+    // This post-commit status re-read is safe because the only writer for these derivations
+    // finishes its final flush before mark_completed closes the checkpoint; reordering those
+    // steps would break the stream_complete gate.
     let checkpoints =
         load_active_startup_adapter_reconcile_checkpoints(pool, &config.deployment_profile).await?;
     for batch in event_batches_for_checkpoints(&event_counts, &checkpoints) {
@@ -194,6 +197,8 @@ fn event_batches_for_checkpoints(
     event_counts: &BTreeMap<String, usize>,
     checkpoints: &[StartupAdapterReconcileCheckpoint],
 ) -> Vec<StartupAdapterReconcileEventBatch> {
+    // OBSERVED_ADAPTERS is intentionally a singleton: a second adapter on the same chain would
+    // receive the same shared events and double-count them. Revisit this before widening the set.
     checkpoints
         .iter()
         .filter_map(|checkpoint| {

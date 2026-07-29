@@ -87,11 +87,12 @@ pub(super) async fn configure(pool: &PgPool, deployment_profile: &str) -> Result
     bigname_storage::configure_startup_adapter_reconcile_event_observer(
         deployment_profile,
         record_event_batch,
-    )?;
+    )
+    .context("failed to configure startup adapter reconcile metrics observer")?;
     let generation = configuration_generation().fetch_add(1, Ordering::AcqRel) + 1;
-    refresh_expected(pool, deployment_profile)
-        .await
-        .context("failed to initialize startup adapter reconcile metrics")?;
+    if let Err(error) = refresh_expected(pool, deployment_profile).await {
+        warn_refresh_failure(deployment_profile, &error);
+    }
 
     let pool = pool.clone();
     let deployment_profile = deployment_profile.to_owned();
@@ -102,16 +103,20 @@ pub(super) async fn configure(pool: &PgPool, deployment_profile: &str) -> Result
                 return;
             }
             if let Err(error) = refresh_expected(&pool, &deployment_profile).await {
-                tracing::warn!(
-                    service = "indexer",
-                    deployment_profile,
-                    error = %format!("{error:#}"),
-                    "failed to refresh startup adapter reconcile metrics"
-                );
+                warn_refresh_failure(&deployment_profile, &error);
             }
         }
     });
     Ok(())
+}
+
+fn warn_refresh_failure(deployment_profile: &str, error: &anyhow::Error) {
+    tracing::warn!(
+        service = "indexer",
+        deployment_profile,
+        error = %format!("{error:#}"),
+        "failed to refresh startup adapter reconcile metrics"
+    );
 }
 
 async fn refresh_expected(pool: &PgPool, deployment_profile: &str) -> Result<()> {
@@ -148,8 +153,29 @@ pub(super) fn initialize_endpoint_test_series() {
 #[cfg(test)]
 mod tests {
     use bigname_metrics::{BuildInfo, MetricsRegistry};
+    use sqlx::postgres::PgPoolOptions;
 
     use super::*;
+
+    #[tokio::test]
+    async fn configuration_errors_are_fatal_but_initial_refresh_errors_are_not() -> Result<()> {
+        let pool = PgPoolOptions::new().connect_lazy_with(
+            bigname_storage::stamp_projection_replay_version(
+                "postgres://localhost/reconcile_metrics".parse()?,
+            ),
+        );
+        pool.close().await;
+
+        let error = configure(&pool, " ")
+            .await
+            .expect_err("blank deployment profile configuration must fail");
+        assert!(
+            format!("{error:#}")
+                .contains("startup adapter reconcile metrics require a deployment profile")
+        );
+        configure(&pool, "initial-refresh-failure-test").await?;
+        Ok(())
+    }
 
     #[test]
     fn event_batches_keep_family_chain_labels_and_counter_monotonicity() -> Result<()> {

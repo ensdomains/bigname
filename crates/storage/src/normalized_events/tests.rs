@@ -30,6 +30,13 @@ fn record_reconcile_event_batch(batch: &StartupAdapterReconcileEventBatch) {
         .push(batch.clone());
 }
 
+fn reconfigure_reconcile_observer_to_unmatched_profile() -> Result<()> {
+    configure_startup_adapter_reconcile_event_observer(
+        "reconcile-metrics-observer-unmatched-profile",
+        record_reconcile_event_batch,
+    )
+}
+
 struct TestDatabase {
     admin_pool: PgPool,
     pool: PgPool,
@@ -2390,23 +2397,85 @@ async fn reconcile_observer_emits_only_after_commits_in_stream_complete_window()
     .bind(CHAIN)
     .execute(database.pool())
     .await?;
-    upsert_normalized_events_with_summary(
+    let stream_complete_event = subregistry_reconcile_event("reconcile-observer:stream-complete");
+    let inserted = upsert_normalized_events_with_summary(
         database.pool(),
-        &[subregistry_reconcile_event(
-            "reconcile-observer:stream-complete",
-        )],
+        std::slice::from_ref(&stream_complete_event),
     )
     .await?;
+    assert_eq!(inserted.inserted_count, 1);
+    let conflict_only = upsert_normalized_events_with_summary(
+        database.pool(),
+        std::slice::from_ref(&stream_complete_event),
+    )
+    .await?;
+    assert_eq!(conflict_only.inserted_count, 0);
     assert_eq!(
         *RECONCILE_EVENT_BATCHES
             .lock()
             .expect("reconcile event batch test lock should not be poisoned"),
-        vec![StartupAdapterReconcileEventBatch {
-            family: StartupAdapterReconcileFamily::EnsV1SubregistryDiscovery,
-            chain: CHAIN.to_owned(),
-            normalized_event_count: 1,
-            staged_item_count: 4,
-        }]
+        vec![
+            StartupAdapterReconcileEventBatch {
+                family: StartupAdapterReconcileFamily::EnsV1SubregistryDiscovery,
+                chain: CHAIN.to_owned(),
+                normalized_event_count: 1,
+                staged_item_count: 4,
+            },
+            StartupAdapterReconcileEventBatch {
+                family: StartupAdapterReconcileFamily::EnsV1SubregistryDiscovery,
+                chain: CHAIN.to_owned(),
+                normalized_event_count: 1,
+                staged_item_count: 4,
+            },
+        ]
+    );
+
+    sqlx::query(
+        r#"
+        CREATE FUNCTION fail_reconcile_observer_commit() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            IF NEW.event_identity = 'reconcile-observer:rolled-back' THEN
+                RAISE EXCEPTION 'forced reconcile observer commit failure';
+            END IF;
+            RETURN NEW;
+        END;
+        $$
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE CONSTRAINT TRIGGER fail_reconcile_observer_commit
+        AFTER INSERT ON normalized_events
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW EXECUTE FUNCTION fail_reconcile_observer_commit()
+        "#,
+    )
+    .execute(database.pool())
+    .await?;
+    let rolled_back_identity = "reconcile-observer:rolled-back";
+    let error = upsert_normalized_events_with_summary(
+        database.pool(),
+        &[subregistry_reconcile_event(rolled_back_identity)],
+    )
+    .await
+    .expect_err("deferred trigger must fail the normalized-event commit");
+    assert!(format!("{error:#}").contains("forced reconcile observer commit failure"));
+    let rolled_back_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(rolled_back_identity)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(rolled_back_count, 0);
+    assert_eq!(
+        RECONCILE_EVENT_BATCHES
+            .lock()
+            .expect("reconcile event batch test lock should not be poisoned")
+            .len(),
+        2
     );
 
     sqlx::query(
@@ -2431,13 +2500,10 @@ async fn reconcile_observer_emits_only_after_commits_in_stream_complete_window()
             .lock()
             .expect("reconcile event batch test lock should not be poisoned")
             .len(),
-        1
+        2
     );
 
-    configure_startup_adapter_reconcile_event_observer(
-        "reconcile-metrics-observer-disabled",
-        record_reconcile_event_batch,
-    )?;
+    reconfigure_reconcile_observer_to_unmatched_profile()?;
     database.cleanup().await
 }
 
