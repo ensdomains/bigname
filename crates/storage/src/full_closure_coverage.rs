@@ -179,7 +179,7 @@ async fn find_violations(
     let rows = sqlx::query(
         r#"
         WITH required_tuples AS (
-            SELECT *
+            SELECT DISTINCT *
             FROM UNNEST(
                 $3::TEXT[],
                 $4::TEXT[],
@@ -229,7 +229,8 @@ async fn find_violations(
         ORDER BY
             watched.source_family,
             watched.address,
-            watched.required_from_block
+            watched.required_from_block,
+            watched.required_to_block
         LIMIT $7
         "#,
     )

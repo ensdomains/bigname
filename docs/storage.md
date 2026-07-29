@@ -850,6 +850,15 @@ backfill these tables: the first upgraded proof builds one current-generation
 aggregate from the authoritative facts, so migrations may still be pre-applied
 before the new indexer rolls.
 
+One deliberate difference from the former fact scan is the
+`block_revision_evidence_floor`: facts whose stored-history verification
+revision is below that floor are excluded from the aggregate, while the former
+scan counted them. The first post-deploy proof can therefore report currently
+required intervals that relied only on those facts as uncovered, causing
+recovery to verify those intervals once. The pre-deploy excluded-fact inventory
+measured `base-mainnet`: 0 facts; `ethereum-mainnet`: 855 facts belonging to 16
+parent jobs. Any resulting Ethereum recovery uses only the local provider.
+
 Every proof reloads the current watched requirements and compares them with at
 most the exact-address and family aggregate rows. The commit-ordered
 `full_closure_coverage_input_changes` journal lets a later proof merge only new

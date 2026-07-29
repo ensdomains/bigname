@@ -141,11 +141,8 @@ pub use execution::{
 };
 pub use full_closure_coverage::*;
 pub use long_operation_exports::*;
-use sqlx::{
-    PgPool, Postgres,
-    pool::PoolConnection,
-    postgres::{PgConnectOptions, PgPoolOptions},
-};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::{PgPool, Postgres, pool::PoolConnection};
 use tracing::info;
 #[rustfmt::skip]
 pub use execution::{ExecutionOutcomeInvalidationProgress, ExecutionOutcomeInvalidationProgressFuture, invalidate_execution_outcomes_for_orphaned_blocks_with_progress};
@@ -350,6 +347,7 @@ pub use snapshot_selection::{
 pub use versions::{CURRENT_PROJECTION_REPLAY_VERSION, latest_migration_version};
 /// Checked-in database migrations.
 pub const MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
+
 /// Common database settings shared by the services.
 #[derive(Args, Clone, Debug)]
 pub struct DatabaseConfig {
@@ -371,6 +369,7 @@ impl Default for DatabaseConfig {
         }
     }
 }
+
 /// Default database URL for local development.
 pub const fn default_database_url() -> &'static str {
     "postgres://bigname:bigname@127.0.0.1:5432/bigname"

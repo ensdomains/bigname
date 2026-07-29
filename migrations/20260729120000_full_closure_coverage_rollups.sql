@@ -457,6 +457,8 @@ REFERENCING OLD TABLE AS deleted_jobs NEW TABLE AS inserted_jobs
 FOR EACH STATEMENT
 EXECUTE FUNCTION public.journal_full_closure_coverage_job_authority_updates();
 
+-- This non-concurrent index briefly blocks backfill_jobs writes while a
+-- pre-applied migration builds it.
 CREATE INDEX backfill_jobs_completed_generation_coverage_idx
     ON public.backfill_jobs (
         chain_id,

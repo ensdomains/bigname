@@ -200,6 +200,8 @@ pub async fn materialize_completed_backfill_topic_evidence(
         SELECT
             backfill_job_id,
             source_family,
+            -- This drift-eligibility CASE is duplicated in
+            -- full_closure_coverage/eligible_facts.rs; both must change together.
             CASE
                 WHEN persisted_map ? source_family
                     THEN persisted_topic0s = current_topic0s

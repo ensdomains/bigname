@@ -1,7 +1,7 @@
 use anyhow::Result;
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::{Value, json};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use std::time::Duration;
 
 use super::*;
@@ -9,7 +9,20 @@ use crate::MIGRATOR;
 
 const CHAIN: &str = "test-chain";
 const FAMILY: &str = "test-family";
+const SECOND_FAMILY: &str = "test-family-two";
 const ADDRESS: &str = "0x0000000000000000000000000000000000000001";
+const SECOND_ADDRESS: &str = "0x0000000000000000000000000000000000000002";
+const THIRD_ADDRESS: &str = "0x0000000000000000000000000000000000000003";
+
+#[derive(Debug, Eq, PartialEq)]
+struct RollupRowBytes {
+    chain_id: String,
+    raw_log_retention_generation: i64,
+    source_family: String,
+    scope: String,
+    address: Option<String>,
+    covered_blocks: Vec<u8>,
+}
 
 fn requirement(from: i64, to: i64) -> BackfillTopicCoverageRequirement {
     BackfillTopicCoverageRequirement {
@@ -156,6 +169,18 @@ async fn insert_fact(
     from: i64,
     to: i64,
 ) -> Result<()> {
+    insert_fact_for_family(pool, job_id, FAMILY, scope, address, from, to).await
+}
+
+async fn insert_fact_for_family(
+    pool: &PgPool,
+    job_id: i64,
+    source_family: &str,
+    scope: &str,
+    address: Option<&str>,
+    from: i64,
+    to: i64,
+) -> Result<()> {
     sqlx::query(
         r#"
         INSERT INTO backfill_coverage_facts (
@@ -173,7 +198,7 @@ async fn insert_fact(
     )
     .bind(job_id)
     .bind(CHAIN)
-    .bind(FAMILY)
+    .bind(source_family)
     .bind(scope)
     .bind(address)
     .bind(from)
@@ -200,6 +225,43 @@ async fn scan(
         20,
     )
     .await
+}
+
+async fn load_rollup_row_bytes(pool: &PgPool) -> Result<Vec<RollupRowBytes>> {
+    sqlx::query(
+        r#"
+        SELECT
+            chain_id,
+            raw_log_retention_generation,
+            source_family,
+            scope,
+            address,
+            convert_to(covered_blocks::TEXT, 'UTF8') AS covered_blocks
+        FROM full_closure_coverage_rollups
+        WHERE chain_id = $1
+        ORDER BY
+            chain_id,
+            raw_log_retention_generation,
+            source_family,
+            scope,
+            address NULLS FIRST
+        "#,
+    )
+    .bind(CHAIN)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|row| {
+        Ok(RollupRowBytes {
+            chain_id: row.try_get("chain_id")?,
+            raw_log_retention_generation: row.try_get("raw_log_retention_generation")?,
+            source_family: row.try_get("source_family")?,
+            scope: row.try_get("scope")?,
+            address: row.try_get("address")?,
+            covered_blocks: row.try_get("covered_blocks")?,
+        })
+    })
+    .collect()
 }
 
 async fn wait_for_coverage_advisory_lock(pool: &PgPool) -> Result<()> {
@@ -257,6 +319,245 @@ async fn wait_for_fact_truncate_lock_request(pool: &PgPool) -> Result<()> {
     })
     .await??;
     Ok(())
+}
+
+#[tokio::test]
+async fn incremental_rollup_rows_are_byte_equal_to_a_cold_rebuild() -> Result<()> {
+    let database = database("full_closure_rollup_byte_equality").await?;
+    seed_authority(database.pool(), 0, 1, 0, 0).await?;
+    let family_topic = topic(1);
+    let second_family_topic = topic(2);
+    let topics = BTreeMap::from([
+        (FAMILY.to_owned(), vec![family_topic.clone()]),
+        (SECOND_FAMILY.to_owned(), vec![second_family_topic.clone()]),
+    ]);
+
+    let overlapping_job = insert_completed_job(
+        database.pool(),
+        "byte-equality-overlapping",
+        1,
+        json!({"topic0s_by_source_family": {(FAMILY): [family_topic.clone()]}}),
+        None,
+        1,
+        30,
+    )
+    .await?;
+    insert_fact(database.pool(), overlapping_job, "family", None, 1, 5).await?;
+    insert_fact(database.pool(), overlapping_job, "family", None, 6, 10).await?;
+    insert_fact(
+        database.pool(),
+        overlapping_job,
+        "address",
+        Some(ADDRESS),
+        3,
+        7,
+    )
+    .await?;
+    insert_fact(
+        database.pool(),
+        overlapping_job,
+        "address",
+        Some(ADDRESS),
+        7,
+        12,
+    )
+    .await?;
+
+    let second_family_job = insert_completed_job(
+        database.pool(),
+        "byte-equality-second-family",
+        1,
+        json!({
+            "topic0s_by_source_family": {
+                (SECOND_FAMILY): [second_family_topic.clone()]
+            }
+        }),
+        None,
+        20,
+        22,
+    )
+    .await?;
+    insert_fact_for_family(
+        database.pool(),
+        second_family_job,
+        SECOND_FAMILY,
+        "address",
+        Some(SECOND_ADDRESS),
+        20,
+        22,
+    )
+    .await?;
+
+    let old_generation_job = insert_completed_job(
+        database.pool(),
+        "byte-equality-old-generation",
+        0,
+        json!({}),
+        None,
+        1,
+        100,
+    )
+    .await?;
+    insert_fact(
+        database.pool(),
+        old_generation_job,
+        "address",
+        Some(ADDRESS),
+        1,
+        100,
+    )
+    .await?;
+
+    let stale_topic_job = insert_completed_job(
+        database.pool(),
+        "byte-equality-stale-topic",
+        1,
+        json!({
+            "topic0s_by_source_family": {
+                (SECOND_FAMILY): [topic(3)]
+            }
+        }),
+        None,
+        1,
+        50,
+    )
+    .await?;
+    insert_fact_for_family(
+        database.pool(),
+        stale_topic_job,
+        SECOND_FAMILY,
+        "family",
+        None,
+        1,
+        50,
+    )
+    .await?;
+
+    let dirty_job = insert_completed_job(
+        database.pool(),
+        "byte-equality-dirty",
+        1,
+        json!({"topic0s_by_source_family": {(FAMILY): [family_topic.clone()]}}),
+        None,
+        30,
+        40,
+    )
+    .await?;
+    insert_fact(
+        database.pool(),
+        dirty_job,
+        "address",
+        Some(THIRD_ADDRESS),
+        30,
+        40,
+    )
+    .await?;
+
+    let initial = scan(database.pool(), &topics, &[], 1, 0).await?;
+    assert!(initial.synchronization.full_rebuild);
+
+    sqlx::query("UPDATE backfill_jobs SET source_identity = $2 WHERE backfill_job_id = $1")
+        .bind(dirty_job)
+        .bind(json!({
+            "topic0s_by_source_family": {
+                (FAMILY): [topic(4)]
+            }
+        }))
+        .execute(database.pool())
+        .await?;
+
+    let appended_job = insert_completed_job(
+        database.pool(),
+        "byte-equality-appended",
+        1,
+        json!({"topic0s_by_source_family": {(FAMILY): [family_topic]}}),
+        None,
+        10,
+        18,
+    )
+    .await?;
+    insert_fact(database.pool(), appended_job, "family", None, 11, 15).await?;
+    insert_fact(
+        database.pool(),
+        appended_job,
+        "address",
+        Some(ADDRESS),
+        10,
+        18,
+    )
+    .await?;
+
+    let incremental = scan(database.pool(), &topics, &[], 1, 0).await?;
+    assert!(!incremental.synchronization.full_rebuild);
+    assert_eq!(incremental.synchronization.rebuilt_key_count, 1);
+    assert_eq!(incremental.synchronization.appended_fact_count, 2);
+    let incremental_rows = load_rollup_row_bytes(database.pool()).await?;
+    assert_eq!(
+        incremental_rows,
+        vec![
+            RollupRowBytes {
+                chain_id: CHAIN.to_owned(),
+                raw_log_retention_generation: 1,
+                source_family: FAMILY.to_owned(),
+                scope: "address".to_owned(),
+                address: Some(ADDRESS.to_owned()),
+                covered_blocks: b"{[3,19)}".to_vec(),
+            },
+            RollupRowBytes {
+                chain_id: CHAIN.to_owned(),
+                raw_log_retention_generation: 1,
+                source_family: FAMILY.to_owned(),
+                scope: "family".to_owned(),
+                address: None,
+                covered_blocks: b"{[1,16)}".to_vec(),
+            },
+            RollupRowBytes {
+                chain_id: CHAIN.to_owned(),
+                raw_log_retention_generation: 1,
+                source_family: SECOND_FAMILY.to_owned(),
+                scope: "address".to_owned(),
+                address: Some(SECOND_ADDRESS.to_owned()),
+                covered_blocks: b"{[20,23)}".to_vec(),
+            },
+        ]
+    );
+
+    sqlx::query("DELETE FROM full_closure_coverage_rollup_states WHERE chain_id = $1")
+        .bind(CHAIN)
+        .execute(database.pool())
+        .await?;
+    sqlx::query("DELETE FROM full_closure_coverage_rollups WHERE chain_id = $1")
+        .bind(CHAIN)
+        .execute(database.pool())
+        .await?;
+    let cold = scan(database.pool(), &topics, &[], 1, 0).await?;
+    assert!(cold.synchronization.full_rebuild);
+    let cold_rows = load_rollup_row_bytes(database.pool()).await?;
+
+    assert_eq!(incremental_rows, cold_rows);
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn violation_rows_are_deduplicated_and_fully_ordered_before_limit() -> Result<()> {
+    let database = database("full_closure_rollup_violation_order").await?;
+    seed_authority(database.pool(), 0, 1, 0, 0).await?;
+    let short = requirement(1, 10);
+    let long = requirement(1, 20);
+
+    let outcome = find_uncovered_full_closure_coverage(
+        database.pool(),
+        CHAIN,
+        &BTreeMap::new(),
+        &[long.clone(), short.clone(), short.clone()],
+        1,
+        0,
+        2,
+    )
+    .await?;
+
+    assert_eq!(outcome.violations, vec![short, long]);
+    database.cleanup().await
 }
 
 #[tokio::test]
@@ -477,6 +778,36 @@ async fn raw_revision_rebuilds_only_overlapping_stored_verification() -> Result<
     assert!(recovered.violations.is_empty());
     assert_eq!(recovered.synchronization.appended_fact_count, 1);
 
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn stored_verification_below_evidence_floor_is_excluded_in_same_generation() -> Result<()> {
+    let database = database("full_closure_rollup_evidence_floor").await?;
+    seed_authority(database.pool(), 3, 1, 3, 0).await?;
+    let job = insert_completed_job(
+        database.pool(),
+        "evidence-floor",
+        1,
+        json!({}),
+        Some(2),
+        1,
+        10,
+    )
+    .await?;
+    insert_fact(database.pool(), job, "address", Some(ADDRESS), 1, 10).await?;
+
+    let outcome = scan(
+        database.pool(),
+        &BTreeMap::new(),
+        &[requirement(1, 10)],
+        1,
+        0,
+    )
+    .await?;
+
+    assert!(outcome.synchronization.full_rebuild);
+    assert_eq!(outcome.violations, vec![requirement(1, 10)]);
     database.cleanup().await
 }
 

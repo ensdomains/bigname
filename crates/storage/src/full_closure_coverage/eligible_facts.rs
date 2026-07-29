@@ -125,6 +125,8 @@ eligible_coverage_facts AS (
         covered_to_block
     FROM normalized_topics
     WHERE current_topic0s IS NULL
+       -- This drift-eligibility CASE is duplicated in
+       -- backfill_jobs/topic_evidence.rs; both must change together.
        OR CASE
             WHEN persisted_map ? source_family
                 THEN persisted_topic0s = current_topic0s
