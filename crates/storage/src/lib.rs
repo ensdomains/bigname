@@ -10,6 +10,7 @@ mod connection;
 mod coverage_recovery_failures;
 mod evm_primitives;
 mod execution;
+mod full_closure_coverage;
 mod history;
 mod identity;
 mod identity_facade;
@@ -138,6 +139,7 @@ pub use execution::{
     upsert_execution_outcome, upsert_execution_outcome_in_transaction, upsert_execution_trace,
     upsert_execution_trace_in_transaction,
 };
+pub use full_closure_coverage::*;
 pub use long_operation_exports::*;
 use sqlx::{
     PgPool, Postgres,
@@ -348,7 +350,6 @@ pub use snapshot_selection::{
 pub use versions::{CURRENT_PROJECTION_REPLAY_VERSION, latest_migration_version};
 /// Checked-in database migrations.
 pub const MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
-
 /// Common database settings shared by the services.
 #[derive(Args, Clone, Debug)]
 pub struct DatabaseConfig {
@@ -370,7 +371,6 @@ impl Default for DatabaseConfig {
         }
     }
 }
-
 /// Default database URL for local development.
 pub const fn default_database_url() -> &'static str {
     "postgres://bigname:bigname@127.0.0.1:5432/bigname"
