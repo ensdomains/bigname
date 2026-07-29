@@ -1,7 +1,10 @@
 use std::{
     collections::BTreeMap,
     str::FromStr,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -17,6 +20,15 @@ use super::*;
 use crate::{RawBlock, default_database_url, upsert_raw_blocks};
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
+static RECONCILE_EVENT_BATCHES: Mutex<Vec<StartupAdapterReconcileEventBatch>> =
+    Mutex::new(Vec::new());
+
+fn record_reconcile_event_batch(batch: &StartupAdapterReconcileEventBatch) {
+    RECONCILE_EVENT_BATCHES
+        .lock()
+        .expect("reconcile event batch test lock should not be poisoned")
+        .push(batch.clone());
+}
 
 struct TestDatabase {
     admin_pool: PgPool,
@@ -111,6 +123,17 @@ fn normalized_event(
         before_state: json!({}),
         after_state: json!({"key": event_identity}),
     }
+}
+
+fn subregistry_reconcile_event(event_identity: &str) -> NormalizedEvent {
+    let mut event = normalized_event(
+        event_identity,
+        "SubregistryChanged",
+        CanonicalityState::Canonical,
+    );
+    event.source_family = "ens_v1_registry_l1".to_owned();
+    event.derivation_kind = "ens_v1_subregistry_changed".to_owned();
+    event
 }
 
 fn basenames_primary_claim_source_repair_event() -> NormalizedEvent {
@@ -2294,6 +2317,127 @@ async fn upserts_and_loads_normalized_events() -> Result<()> {
         ])
     );
 
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn reconcile_observer_emits_only_after_commits_in_stream_complete_window() -> Result<()> {
+    const DEPLOYMENT_PROFILE: &str = "reconcile-metrics-observer-test-profile";
+    const CHAIN: &str = "ethereum-mainnet";
+
+    let database = TestDatabase::new().await?;
+    RECONCILE_EVENT_BATCHES
+        .lock()
+        .expect("reconcile event batch test lock should not be poisoned")
+        .clear();
+    configure_startup_adapter_reconcile_event_observer(
+        DEPLOYMENT_PROFILE,
+        record_reconcile_event_batch,
+    )?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO normalized_replay_adapter_checkpoints (
+            deployment_profile,
+            chain_id,
+            cursor_kind,
+            adapter,
+            checkpoint_scope,
+            replay_start_block_number,
+            replay_target_block_number,
+            staged_item_count,
+            status
+        )
+        VALUES (
+            $1,
+            $2,
+            'startup_adapter_owned_raw_log_state',
+            'ens_v1_subregistry_discovery',
+            'startup_adapter_sync',
+            0,
+            10,
+            4,
+            'running'
+        )
+        "#,
+    )
+    .bind(DEPLOYMENT_PROFILE)
+    .bind(CHAIN)
+    .execute(database.pool())
+    .await?;
+
+    upsert_normalized_events_with_summary(
+        database.pool(),
+        &[subregistry_reconcile_event("reconcile-observer:running")],
+    )
+    .await?;
+    assert!(
+        RECONCILE_EVENT_BATCHES
+            .lock()
+            .expect("reconcile event batch test lock should not be poisoned")
+            .is_empty()
+    );
+
+    sqlx::query(
+        r#"
+        UPDATE normalized_replay_adapter_checkpoints
+        SET status = 'stream_complete'
+        WHERE deployment_profile = $1
+          AND chain_id = $2
+        "#,
+    )
+    .bind(DEPLOYMENT_PROFILE)
+    .bind(CHAIN)
+    .execute(database.pool())
+    .await?;
+    upsert_normalized_events_with_summary(
+        database.pool(),
+        &[subregistry_reconcile_event(
+            "reconcile-observer:stream-complete",
+        )],
+    )
+    .await?;
+    assert_eq!(
+        *RECONCILE_EVENT_BATCHES
+            .lock()
+            .expect("reconcile event batch test lock should not be poisoned"),
+        vec![StartupAdapterReconcileEventBatch {
+            family: StartupAdapterReconcileFamily::EnsV1SubregistryDiscovery,
+            chain: CHAIN.to_owned(),
+            normalized_event_count: 1,
+            staged_item_count: 4,
+        }]
+    );
+
+    sqlx::query(
+        r#"
+        UPDATE normalized_replay_adapter_checkpoints
+        SET status = 'completed'
+        WHERE deployment_profile = $1
+          AND chain_id = $2
+        "#,
+    )
+    .bind(DEPLOYMENT_PROFILE)
+    .bind(CHAIN)
+    .execute(database.pool())
+    .await?;
+    upsert_normalized_events_with_summary(
+        database.pool(),
+        &[subregistry_reconcile_event("reconcile-observer:completed")],
+    )
+    .await?;
+    assert_eq!(
+        RECONCILE_EVENT_BATCHES
+            .lock()
+            .expect("reconcile event batch test lock should not be poisoned")
+            .len(),
+        1
+    );
+
+    configure_startup_adapter_reconcile_event_observer(
+        "reconcile-metrics-observer-disabled",
+        record_reconcile_event_batch,
+    )?;
     database.cleanup().await
 }
 
