@@ -167,7 +167,7 @@ Manifests pin each [source family](glossary.md) by version and live under a sele
 
 Each manifest contains: `manifest_version`, `namespace`, `source_family`, `chain`, `deployment_epoch`, `rollout_status` (`draft` | `shadow` | `active` | `deprecated`), `normalizer_version`, `capability_flags` (`unsupported` | `shadow` | `supported`), `roots`, `contracts`, `discovery_rules`. `start_block` is optional inclusive bootstrap metadata; omitted means unknown — adapters preserve that state rather than inferring zero.
 
-Manifest changes are first-class normalized events: `SourceManifestUpdated`, `ProxyImplementationChanged`, `CapabilityChanged`.
+Manifest declaration changes normalize as `SourceManifestUpdated`. During the staged port, existing authored capability flags retain their current meaning inside the manifest payload; their changes do not create separate state rows or `CapabilityChanged` events. The later API-and-surface port in the [replacement build plan](../simplification-build-plan-20260730.md) removes those authored flags when it adopts declared-means-supported. Admitted on-chain proxy upgrade logs normalize as `Upgraded`; the upstream event identifies the new implementation and is emitted by the upgrade call. (upstream: .refs/ens_v2/contracts/src/universalResolver/UpgradableUniversalResolverProxy.sol:L30 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/universalResolver/UpgradableUniversalResolverProxy.sol:L114 @ ens_v2@ccaeb58) `ProxyImplementationChanged` is replaced by `Upgraded`.
 
 Rules:
 
@@ -181,7 +181,13 @@ Schema, capability ownership detail, and the discovery edge model are in [`manif
 
 ## Discovery graph
 
-Discovery expands the canonical graph through time-versioned reachability edges: resolver, subregistry, parent, alias, metadata, proxy/implementation, migration, and transport. Each edge stores `edge_id`, `from_contract_instance_id`, `to_contract_instance_id`, `discovered_by`, `edge_kind`, `active_from`, `active_to`, provenance, and canonicality.
+Discovery expands the canonical graph through four time-versioned reachability
+edge kinds: `resolver`, `subregistry`, `proxy_implementation`, and `migration`.
+Each stored edge records its endpoint contract instances, discovery source,
+manifest authority, active block range, provenance, and canonicality. Parent and
+alias relationships are normalized name topology; metadata observations and
+cross-chain transport are source or execution provenance. None of those are
+`discovery_edges` rows.
 
 ENSv2 mappings:
 
@@ -276,19 +282,19 @@ Permissions and control are anchored to `resource_id`, never to surface text. Th
 
 ## Normalized event taxonomy
 
-Identity, preimage, discovery: `PreimageObserved`, `NameClassified`, `SurfaceBound`, `SurfaceUnbound`, `ContractDiscovered`, `MetadataChanged`, `SourceManifestUpdated`.
+The replacement schema uses a closed event vocabulary. Identity, preimage, and discovery events are `PreimageObserved`, `SurfaceBound`, `SurfaceUnbound`, `RegistryCreated`, `SourceManifestUpdated`, and `Upgraded`.
 
-Registration and authority: `RegistrationReserved`, `RegistrationGranted`, `RegistrarNameRegistered`, `RegistrationRenewed`, `RegistrationReleased`, `ExpiryChanged`, `AuthorityTransferred`, `AuthorityEpochChanged`, `MigrationApplied`, `PricingPolicyChanged`.
+Registration and authority events are `RegistrationReserved`, `RegistrationGranted`, `RegistrarNameRegistered`, `RegistrationRenewed`, `RegistrationReleased`, `ExpiryChanged`, `AuthorityTransferred`, and `AuthorityEpochChanged`.
 
-Lineage and control: `TokenResourceLinked`, `TokenRegenerated`, `TokenControlTransferred`, `ResolutionEpochChanged`.
+Lineage and control events are `TokenResourceLinked`, `TokenRegenerated`, and `TokenControlTransferred`.
 
-Topology and resolution: `ResolverChanged`, `SubregistryChanged`, `ParentChanged`, `AliasChanged`, `WildcardCoverageChanged`, `RecordChanged`, `RecordVersionChanged`, `RecordInventoryObserved`.
+Topology and resolution events are `ResolverChanged`, `SubregistryChanged`, `ParentChanged`, `AliasChanged`, `RecordChanged`, and `RecordVersionChanged`.
 
-Permissions: `PermissionChanged`, `RootPermissionChanged`, `PermissionScopeChanged`.
+Permission events are `PermissionChanged`, `RootPermissionChanged`, and `PermissionScopeChanged`.
 
-Reverse and primary: `ReverseChanged`, `PrimaryNameClaimed`, `PrimaryNameVerified`, `PrimaryNameInvalidated`.
+The reverse-name event is `ReverseChanged`.
 
-Execution and coverage: `VerifiedResolutionObserved`, `VerifiedResolutionInvalidated`, `CoverageChanged`.
+Kinds that existed only for separate capability-state changes, polling, coverage, execution-trace, or repair machinery are not admitted. Manifest content changes use `SourceManifestUpdated`. Projections and identity tables store their own current state; the interpreter does not invent extra normalized events for those writes.
 
 ENSv2 mappings:
 
@@ -311,6 +317,36 @@ Taxonomy reconciliation decisions:
 ENSv1 wrapper/resolver mappings: `PreimageObserved`, `SurfaceBound`, `SurfaceUnbound`, `AuthorityTransferred`, `ExpiryChanged`, `TokenControlTransferred`, `ResolverChanged`, `PermissionChanged`, `PermissionScopeChanged`, and `RecordChanged` come from admitted NameWrapper and PublicResolver events.[^v1-iname-l27][^v1-iname-l31][^v1-iname-l35][^v1-iname-l37][^v1-iname-l38][^v1-nw-l1022][^v1-nw-l1034][^v1-pres-l20][^v1-pres-l51][^v1-pres-l58] `PermissionScopeChanged` retains wrapper fuse changes without inventing subject grants. Current projections do not turn those scope events into wrapper-holder permission rows or a published masked `effective_powers` set.
 
 Every normalized event carries: namespace, `logical_name_id` when applicable, `resource_id` when applicable, source family, manifest version, chain position, raw fact reference, derivation kind, canonicality flag, and before/after state where possible.
+
+### Derivation kinds
+
+`derivation_kind` identifies the interpreter path that produced a normalized
+event. It is not the upstream event name or the manifest source family. The
+closed vocabulary is:
+
+- `ens_v1_reverse_claim` — the ENSv1-compatible reverse-name interpreter,
+  including reverse claim and reverse `name` record observations.
+- `ens_v1_unwrapped_authority` — the ENSv1/Basenames interpreter for registry,
+  registrar, wrapper, and admitted resolver facts that establish unwrapped
+  name authority.
+- `ens_v2_permissions` — the ENSv2 EAC permission interpreter.
+- `ens_v2_registrar` — the ENSv2 registrar registration and renewal
+  interpreter.
+- `ens_v2_registry_resource_surface` — the ENSv2 registry interpreter that
+  links registry resources, token lineages, and name surfaces.
+- `ens_v2_resolver` — the ENSv2 resolver interpreter for admitted record,
+  record-version, alias, and resolver-scoped facts.
+- `manifest_sync` — the manifest-change interpreter owned by manifest sync, for
+  `SourceManifestUpdated` events derived from an authored declaration change.
+- `proxy_upgrade` — the chain interpreter for admitted proxy `Upgraded` logs.
+- `raw_log_preimage_observation` — the chain interpreter path that retains a
+  label or name preimage observed directly in a selected raw log.
+
+`normalized_events` has exactly two logical write owners: chain interpreters for
+chain-derived events and manifest sync for `SourceManifestUpdated` through its
+manifest-change interpreter. Each writer may use only the derivation value
+assigned to its path. Adding or reassigning a value is a normalized-event
+contract change.
 
 Normalized events are semantic adapter transitions. Replay needs different amounts of history depending on the event kind: A row may be stateless when every payload field is derivable from one selected raw fact, stateful when fields such as `before_state`, resource continuity, authority metadata, resolver state, wrapper state, registrar expiry, and permission provenance depend on the adapter's prior canonical observations, or contextual when identity/resource/discovery fields depend on another adapter-owned output already being stable. Stateful replay is deterministic only from a full [closure](glossary.md) boundary for that adapter/source graph; contextual replay is deterministic only after dependency closure is stable or inside a topologically ordered closure replay. Source-family slices, target slices, block-hash selections, and IO chunks are not semantic substitutes for those closures.
 
@@ -481,7 +517,7 @@ Wildcard and offchain names cannot be assumed exhaustively enumerable; backfill 
 
 ## Operations
 
-Metrics: chain lag, safe/finalized lag, reorg depth, adapter failure rate, manifest drift, proxy upgrade detection, execution latency, CCIP error rate, verification failure rate, coverage partial rate, replay duration, backfill capacity checks (Postgres size, free disk).
+Metrics: chain lag, safe/finalized lag, reorg depth, adapter failure rate, proxy upgrade intake, execution latency, CCIP error rate, verification failure rate, replay duration, and capacity checks (Postgres size, free disk).
 
 Worker-owned tools (none expose public `v1` routes; inspection tools are read-only):
 
@@ -489,10 +525,10 @@ Worker-owned tools (none expose public `v1` routes; inspection tools are read-on
 - `bigname-worker inspect stored-lineage-range --chain-id <id> --from-block <n> --to-block <n>` — stored lineage rows in a bounded block range.
 - `bigname-worker inspect backfill-job --backfill-job-id <id>` — one persisted backfill job plus child ranges.
 - `bigname-worker inspect execution-trace --execution-trace-id <id>` — one persisted execution trace and its persisted steps.
-- `bigname-worker inspect manifest-drift --json` and `bigname-worker inspect watch-plan --json` — persisted manifest/proxy alert observations and runtime watch-plan state.
+- `bigname-worker inspect watch-plan --json` — runtime watch-plan state.
 - Current projection maintenance is shipped as point-or-full rebuilds for each current projection family, `replay all-current-projections`, execution-cache invalidation commands, and bounded finalized-head/backfill processing with capacity preflight. Range-scoped projection rebuild, historical rewind materialization, surface-binding inspection, resolver-topology inspection, raw-fact inspection beyond canonicality/stored-lineage views, manifest-version inspection, and [declared-vs-verified](glossary.md) diff tooling are deferred; operators should not treat them as available CLI contracts.
 
-Live manifest drift / proxy upgrade alerting is a worker-owned operational loop. It does not write `normalized_events`, mutate manifests, rewrite discovery, or expose a public route.
+The replacement runtime has no code-hash polling or persisted manifest/proxy alert loop. Manifest corrections produce `SourceManifestUpdated`; admitted proxy upgrades produce `Upgraded`.
 
 ## Constraints
 

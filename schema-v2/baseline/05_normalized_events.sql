@@ -42,7 +42,38 @@ CREATE TABLE IF NOT EXISTS normalized_events (
         REFERENCES chain_lineage (chain_id, block_hash, block_number),
     CHECK (btrim(event_identity) <> ''),
     CHECK (btrim(namespace) <> ''),
-    CHECK (btrim(event_kind) <> ''),
+    CONSTRAINT normalized_events_event_kind_check
+        CHECK (
+            event_kind IN (
+                'AliasChanged',
+                'AuthorityEpochChanged',
+                'AuthorityTransferred',
+                'ExpiryChanged',
+                'ParentChanged',
+                'PermissionChanged',
+                'PermissionScopeChanged',
+                'PreimageObserved',
+                'RecordChanged',
+                'RecordVersionChanged',
+                'RegistrarNameRegistered',
+                'RegistrationGranted',
+                'RegistrationReleased',
+                'RegistrationRenewed',
+                'RegistrationReserved',
+                'RegistryCreated',
+                'ResolverChanged',
+                'ReverseChanged',
+                'RootPermissionChanged',
+                'SourceManifestUpdated',
+                'SubregistryChanged',
+                'SurfaceBound',
+                'SurfaceUnbound',
+                'TokenControlTransferred',
+                'TokenRegenerated',
+                'TokenResourceLinked',
+                'Upgraded'
+            )
+        ),
     CHECK (btrim(source_family) <> ''),
     CHECK (manifest_version > 0),
     CHECK (btrim(chain_id) <> ''),
@@ -66,7 +97,20 @@ CREATE TABLE IF NOT EXISTS normalized_events (
         )
     ),
     CHECK (jsonb_typeof(raw_fact_ref) = 'object'),
-    CHECK (btrim(derivation_kind) <> ''),
+    CONSTRAINT normalized_events_derivation_kind_check
+        CHECK (
+            derivation_kind IN (
+                'ens_v1_reverse_claim',
+                'ens_v1_unwrapped_authority',
+                'ens_v2_permissions',
+                'ens_v2_registrar',
+                'ens_v2_registry_resource_surface',
+                'ens_v2_resolver',
+                'manifest_sync',
+                'proxy_upgrade',
+                'raw_log_preimage_observation'
+            )
+        ),
     CHECK (jsonb_typeof(before_state) = 'object'),
     CHECK (jsonb_typeof(after_state) = 'object')
 );
@@ -79,7 +123,8 @@ CREATE INDEX IF NOT EXISTS normalized_events_name_history_idx
         log_index DESC,
         normalized_event_id DESC
     )
-    WHERE logical_name_id IS NOT NULL;
+    WHERE logical_name_id IS NOT NULL
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
 CREATE INDEX IF NOT EXISTS normalized_events_resource_history_idx
     ON normalized_events (
@@ -89,7 +134,8 @@ CREATE INDEX IF NOT EXISTS normalized_events_resource_history_idx
         log_index DESC,
         normalized_event_id DESC
     )
-    WHERE resource_id IS NOT NULL;
+    WHERE resource_id IS NOT NULL
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
 CREATE INDEX IF NOT EXISTS normalized_events_block_idx
     ON normalized_events (

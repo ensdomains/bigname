@@ -8,7 +8,8 @@ CREATE TABLE IF NOT EXISTS contract_instances (
     inserted_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (chain_id, contract_instance_id),
     CHECK (btrim(chain_id) <> ''),
-    CHECK (btrim(contract_kind) <> ''),
+    CONSTRAINT contract_instances_contract_kind_check
+        CHECK (contract_kind IN ('root', 'contract')),
     CHECK (jsonb_typeof(provenance) = 'object')
 );
 
@@ -97,7 +98,15 @@ CREATE TABLE IF NOT EXISTS discovery_edges (
         FOREIGN KEY (chain_id, to_contract_instance_id)
         REFERENCES contract_instances (chain_id, contract_instance_id),
     CHECK (btrim(chain_id) <> ''),
-    CHECK (btrim(edge_kind) <> ''),
+    CONSTRAINT discovery_edges_edge_kind_check
+        CHECK (
+            edge_kind IN (
+                'resolver',
+                'subregistry',
+                'proxy_implementation',
+                'migration'
+            )
+        ),
     CHECK (from_contract_instance_id <> to_contract_instance_id),
     CHECK (btrim(discovery_source) <> ''),
     CHECK (btrim(admission_basis) <> ''),
@@ -179,7 +188,7 @@ CREATE TABLE IF NOT EXISTS name_surfaces (
     namehash text NOT NULL,
     labelhashes text[] NOT NULL,
     normalizer_version text NOT NULL,
-    visibility_state text NOT NULL DEFAULT 'shadow',
+    visibility_state text NOT NULL,
     normalization_errors jsonb NOT NULL DEFAULT '[]'::jsonb,
     deactivation_reason text,
     deactivated_at timestamptz,
@@ -195,12 +204,13 @@ CREATE TABLE IF NOT EXISTS name_surfaces (
         REFERENCES chain_lineage (chain_id, block_hash, block_number),
     CHECK (btrim(namespace) <> ''),
     CHECK (btrim(namehash) <> ''),
-    CHECK (logical_name_id = namespace || ':' || namehash),
+    CONSTRAINT name_surfaces_logical_identity_check
+        CHECK (logical_name_id = namespace || ':' || namehash),
     CHECK (cardinality(raw_labels) = cardinality(labelhashes)),
     CHECK (btrim(normalizer_version) <> ''),
     CHECK (visibility_state IN ('active', 'shadow')),
     CHECK (jsonb_typeof(normalization_errors) = 'array'),
-    CHECK (
+    CONSTRAINT name_surfaces_visibility_coherence_check CHECK (
         (
             visibility_state = 'active'
             AND deactivation_reason IS NULL
@@ -253,7 +263,17 @@ CREATE TABLE IF NOT EXISTS surface_bindings (
         REFERENCES resources (chain_id, resource_id),
     FOREIGN KEY (chain_id, block_hash, block_number)
         REFERENCES chain_lineage (chain_id, block_hash, block_number),
-    CHECK (btrim(binding_kind) <> ''),
+    CONSTRAINT surface_bindings_binding_kind_check
+        CHECK (
+            binding_kind IN (
+                'declared_registry_path',
+                'linked_subregistry_path',
+                'resolver_alias_path',
+                'observed_wildcard_path',
+                'migration_rebind',
+                'observed_only'
+            )
+        ),
     CHECK (active_to IS NULL OR active_to > active_from),
     CHECK (block_number >= 0),
     CHECK (jsonb_typeof(provenance) = 'object'),
@@ -276,16 +296,19 @@ CREATE INDEX IF NOT EXISTS surface_bindings_name_idx
         logical_name_id,
         active_from,
         active_to,
-        canonicality_state
-    );
+        surface_binding_id
+    )
+    WHERE canonicality_state IN ('canonical', 'safe', 'finalized');
 
 CREATE INDEX IF NOT EXISTS surface_bindings_resource_idx
     ON surface_bindings (
         resource_id,
         active_from,
         active_to,
-        canonicality_state
-    );
+        logical_name_id,
+        surface_binding_id
+    )
+    WHERE canonicality_state IN ('canonical', 'safe', 'finalized');
 
 CREATE INDEX IF NOT EXISTS surface_bindings_block_idx
     ON surface_bindings (chain_id, block_hash);

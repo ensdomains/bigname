@@ -153,11 +153,13 @@ name kept because it is a stored identifier: that pipeline derives ownership
 and control for ENSv1 and Basenames names alike, whether the name is registry-,
 registrar-, or NameWrapper-held.
 
-**Discovery graph / discovery edge** — the time-versioned reachability graph
-(resolver, subregistry, parent, alias, metadata, proxy/implementation,
-migration, transport edges) that extends authority beyond directly declared
-contracts. A discovered contract is authoritative only while reachable from an
-active root.
+**Discovery graph / discovery edge** — the time-versioned contract-reachability
+graph whose stored edge kinds are `resolver`, `subregistry`,
+`proxy_implementation`, and `migration`. It extends authority beyond directly
+declared contracts, and a discovered contract is authoritative only while
+reachable from an active root. Parent and alias relationships are normalized
+name topology; metadata observations and cross-chain transport are source or
+execution provenance, not discovery edges.
 
 **Event-silent** — a contract that changes relevant state without emitting a
 usable event (for example a legacy reverse resolver whose `name` value changes

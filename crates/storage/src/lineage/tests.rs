@@ -115,6 +115,49 @@ fn timestamp(seconds: i64) -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(seconds).expect("test timestamp must be valid")
 }
 
+async fn install_adjacent_canonicality_transition_guard(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION test_enforce_adjacent_canonicality_transition()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            IF NEW.canonicality_state IS NOT DISTINCT FROM OLD.canonicality_state THEN
+                RETURN NEW;
+            END IF;
+            IF NOT (
+                (OLD.canonicality_state = 'observed' AND NEW.canonicality_state IN ('canonical', 'orphaned'))
+                OR (OLD.canonicality_state = 'canonical' AND NEW.canonicality_state IN ('safe', 'orphaned'))
+                OR (OLD.canonicality_state = 'safe' AND NEW.canonicality_state IN ('finalized', 'orphaned'))
+                OR (OLD.canonicality_state = 'orphaned' AND NEW.canonicality_state = 'canonical')
+            ) THEN
+                RAISE EXCEPTION
+                    'illegal chain lineage canonicality transition: % -> %',
+                    OLD.canonicality_state,
+                    NEW.canonicality_state
+                    USING ERRCODE = '23514';
+            END IF;
+            RETURN NEW;
+        END
+        $$;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE TRIGGER test_chain_lineage_adjacent_canonicality_transition
+        BEFORE UPDATE OF canonicality_state ON chain_lineage
+        FOR EACH ROW
+        EXECUTE FUNCTION test_enforce_adjacent_canonicality_transition()
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn upserts_and_loads_lineage_blocks() -> Result<()> {
     let database = TestDatabase::new().await?;
@@ -169,6 +212,8 @@ async fn bulk_upserts_and_promotes_lineage_blocks() -> Result<()> {
             .all(|block| block.canonicality_state == CanonicalityState::Canonical)
     );
 
+    install_adjacent_canonicality_transition_guard(database.pool()).await?;
+
     let promoted_blocks = blocks
         .iter()
         .cloned()
@@ -186,6 +231,40 @@ async fn bulk_upserts_and_promotes_lineage_blocks() -> Result<()> {
             .all(|block| block.canonicality_state == CanonicalityState::Finalized)
     );
 
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn path_promotion_advances_through_adjacent_canonicality_states() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[block(
+            "eth-mainnet",
+            "0xaaa",
+            Some("0x999"),
+            10,
+            timestamp(1_717_171_717),
+            CanonicalityState::Observed,
+        )],
+    )
+    .await?;
+    install_adjacent_canonicality_transition_guard(database.pool()).await?;
+
+    let mut transaction = database.pool().begin().await?;
+    let promoted = promote_chain_lineage_path(
+        &mut transaction,
+        "eth-mainnet",
+        "0xaaa",
+        None,
+        CanonicalityState::Finalized,
+        false,
+    )
+    .await?;
+    transaction.commit().await?;
+
+    assert_eq!(promoted.len(), 1);
+    assert_eq!(promoted[0].canonicality_state, CanonicalityState::Finalized);
     database.cleanup().await
 }
 

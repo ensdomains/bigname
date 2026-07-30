@@ -136,35 +136,52 @@ pub(crate) async fn promote_chain_lineage_path(
         .map(|block| block.block_hash.clone())
         .collect::<Vec<_>>();
 
-    sqlx::query(
-        r#"
-        UPDATE chain_lineage
-        SET canonicality_state = CASE
-            WHEN canonicality_state = 'orphaned'::canonicality_state THEN $3::canonicality_state
-            WHEN $3::canonicality_state = 'canonical'::canonicality_state
-                AND canonicality_state IN ('safe'::canonicality_state, 'finalized'::canonicality_state)
-                THEN canonicality_state
-            WHEN $3::canonicality_state = 'safe'::canonicality_state
-                AND canonicality_state = 'finalized'::canonicality_state
-                THEN canonicality_state
-            WHEN $3::canonicality_state = 'observed'::canonicality_state
-                THEN canonicality_state
-            ELSE $3::canonicality_state
-        END
-        WHERE chain_id = $1
-          AND block_hash = ANY($2::TEXT[])
-        "#,
-    )
-    .bind(chain_id)
-    .bind(&block_hashes)
-    .bind(target_state.as_str())
-    .execute(&mut **executor)
-    .await
-    .with_context(|| {
-        format!(
-            "failed to promote lineage path for chain {chain_id} starting from block {from_hash}"
-        )
-    })?;
+    match target_state {
+        CanonicalityState::Observed => {}
+        CanonicalityState::Canonical => {
+            advance_lineage_path_state(
+                executor,
+                chain_id,
+                &block_hashes,
+                &[CanonicalityState::Observed, CanonicalityState::Orphaned],
+                CanonicalityState::Canonical,
+            )
+            .await?;
+        }
+        CanonicalityState::Safe => {
+            advance_lineage_path_to_canonical(executor, chain_id, &block_hashes).await?;
+            advance_lineage_path_state(
+                executor,
+                chain_id,
+                &block_hashes,
+                &[CanonicalityState::Canonical],
+                CanonicalityState::Safe,
+            )
+            .await?;
+        }
+        CanonicalityState::Finalized => {
+            advance_lineage_path_to_canonical(executor, chain_id, &block_hashes).await?;
+            advance_lineage_path_state(
+                executor,
+                chain_id,
+                &block_hashes,
+                &[CanonicalityState::Canonical],
+                CanonicalityState::Safe,
+            )
+            .await?;
+            advance_lineage_path_state(
+                executor,
+                chain_id,
+                &block_hashes,
+                &[CanonicalityState::Safe],
+                CanonicalityState::Finalized,
+            )
+            .await?;
+        }
+        CanonicalityState::Orphaned => {
+            bail!("lineage path promotion cannot target orphaned state");
+        }
+    }
 
     load_lineage_snapshots_for_hashes(&mut **executor, chain_id, &block_hashes)
         .await
@@ -173,4 +190,54 @@ pub(crate) async fn promote_chain_lineage_path(
                 "failed to reload promoted lineage path for chain {chain_id} starting from block {from_hash}"
             )
         })
+}
+
+async fn advance_lineage_path_to_canonical(
+    executor: &mut sqlx::Transaction<'_, Postgres>,
+    chain_id: &str,
+    block_hashes: &[String],
+) -> Result<()> {
+    advance_lineage_path_state(
+        executor,
+        chain_id,
+        block_hashes,
+        &[CanonicalityState::Observed, CanonicalityState::Orphaned],
+        CanonicalityState::Canonical,
+    )
+    .await
+}
+
+async fn advance_lineage_path_state(
+    executor: &mut sqlx::Transaction<'_, Postgres>,
+    chain_id: &str,
+    block_hashes: &[String],
+    from_states: &[CanonicalityState],
+    target_state: CanonicalityState,
+) -> Result<()> {
+    let from_states = from_states
+        .iter()
+        .map(|state| state.as_str())
+        .collect::<Vec<_>>();
+    sqlx::query(
+        r#"
+        UPDATE chain_lineage
+        SET canonicality_state = $3::canonicality_state
+        WHERE chain_id = $1
+          AND block_hash = ANY($2::TEXT[])
+          AND canonicality_state::TEXT = ANY($4::TEXT[])
+        "#,
+    )
+    .bind(chain_id)
+    .bind(block_hashes)
+    .bind(target_state.as_str())
+    .bind(from_states)
+    .execute(&mut **executor)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to advance lineage path for chain {chain_id} to {}",
+            target_state.as_str()
+        )
+    })?;
+    Ok(())
 }

@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS manifest_versions (
     namespace text NOT NULL,
     source_family text NOT NULL,
     chain_id text NOT NULL,
-    deployment_epoch text NOT NULL,
+    deployment_label text NOT NULL,
     rollout_status text NOT NULL,
     normalizer_version text NOT NULL,
     file_path text NOT NULL UNIQUE,
@@ -22,14 +22,14 @@ CREATE TABLE IF NOT EXISTS manifest_versions (
         namespace,
         source_family,
         chain_id,
-        deployment_epoch,
+        deployment_label,
         manifest_version
     ),
     CHECK (manifest_version > 0),
     CHECK (btrim(namespace) <> ''),
     CHECK (btrim(source_family) <> ''),
     CHECK (btrim(chain_id) <> ''),
-    CHECK (btrim(deployment_epoch) <> ''),
+    CHECK (btrim(deployment_label) <> ''),
     CHECK (rollout_status IN ('draft', 'shadow', 'active', 'deprecated')),
     CHECK (btrim(normalizer_version) <> ''),
     CHECK (btrim(file_path) <> ''),
@@ -108,7 +108,15 @@ CREATE TABLE IF NOT EXISTS manifest_discovery_rules (
         FOREIGN KEY (manifest_id)
         REFERENCES manifest_versions (manifest_id)
         ON DELETE CASCADE,
-    CHECK (btrim(edge_kind) <> ''),
+    CONSTRAINT manifest_discovery_rules_edge_kind_check
+        CHECK (
+            edge_kind IN (
+                'resolver',
+                'subregistry',
+                'proxy_implementation',
+                'migration'
+            )
+        ),
     CHECK (from_role IS NULL OR btrim(from_role) <> ''),
     CHECK (btrim(admission) <> ''),
     CHECK (jsonb_typeof(rule_payload) = 'object')
@@ -159,8 +167,8 @@ COMMENT ON COLUMN manifest_versions.source_family IS
     'This value identifies the declared source group.';
 COMMENT ON COLUMN manifest_versions.chain_id IS
     'This value identifies the chain.';
-COMMENT ON COLUMN manifest_versions.deployment_epoch IS
-    'This value identifies the deployment period.';
+COMMENT ON COLUMN manifest_versions.deployment_label IS
+    'This value stores the authored deployment epoch label.';
 COMMENT ON COLUMN manifest_versions.rollout_status IS
     'This value states whether the manifest is active.';
 COMMENT ON COLUMN manifest_versions.normalizer_version IS

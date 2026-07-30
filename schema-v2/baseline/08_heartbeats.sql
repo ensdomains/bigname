@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS service_heartbeats (
             'live'
         )
     ),
-    CHECK (heartbeat_at >= started_at)
+    CONSTRAINT service_heartbeats_time_order_check
+        CHECK (heartbeat_at >= started_at)
 );
 
 CREATE INDEX IF NOT EXISTS service_heartbeats_readiness_idx

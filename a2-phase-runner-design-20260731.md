@@ -24,9 +24,10 @@ except `verify` and `live`, which may overlap because `verify` only reads.
    an announced contract (RegistryCreated, resolver signature, Upgraded)
    extends the address-scoped watch set forward from its announcement.
 3. **project** — build/refresh the projection tables from normalized
-   events (stage-and-swap for full builds, incremental applies while
-   live). Hydration belongs to this phase: multicall reads pinned at the
-   chain's canonical head hash for the event-silent legacy set.
+   events. A full build publishes every table in one projection family
+   together through a single rename-swap transaction; live updates apply
+   incrementally. Hydration belongs to this phase: multicall reads pinned
+   at the chain's canonical head hash for the event-silent legacy set.
 4. **verify** (Base: dRPC sweep behind finality; Ethereum: one-time sweep
    against reth) — read-only. On mismatch: mark the chain's status,
    stop that chain's supervisor, leave a diagnosis bundle. Never repairs.
@@ -62,6 +63,10 @@ positions. The ingest→live handoff datum is "ingest ended at block N";
 - The runner publishes per-chain head markers (latest/safe/finalized) —
   the successor to `chain_checkpoints`; API snapshots and /v2/status read
   these.
+- A checkpoint jump promotes lineage through each legal state in order in the
+  same head-publication transaction: observed→canonical→safe→finalized.
+  Re-canonicalization first moves orphaned→canonical. The port must not reuse
+  the retained helper's direct assignment of one target state across a path.
 - Heartbeat rows: (`service_name='phase-runner'`, `instance_id`, `chain_id`,
   `phase_name`, `heartbeat_at`),
   written by each phase loop at most every 5s. /healthz checks DB
@@ -100,3 +105,6 @@ stop, a human, and (worst case) wipe-and-resync.
    this one binary once per chain (two containers, same code) — isolation
    by chain, never by pipeline half. The indexer/worker split does not
    return.
+5. Manifest sync keeps the authored `deployment_epoch` field and persists it
+   one-to-one as `manifest_versions.deployment_label`; queries use the
+   storage name after the Stage B port.

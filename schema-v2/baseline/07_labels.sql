@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS label_preimages (
     CHECK (btrim(labelhash) <> ''),
     CHECK (raw_label <> ''),
     CHECK (btrim(normalizer_version) <> ''),
-    CHECK (
+    CONSTRAINT label_preimages_normalization_coherence_check CHECK (
         (normalized_under_version AND normalization_error IS NULL)
         OR (
             NOT normalized_under_version

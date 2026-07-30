@@ -21,16 +21,17 @@ CREATE TABLE IF NOT EXISTS ingest_cursors (
         )
     ),
     CHECK (start_block_number >= 0),
-    CHECK (next_block_number >= start_block_number),
-    CHECK (
+    CONSTRAINT ingest_cursors_next_block_order_check
+        CHECK (next_block_number >= start_block_number),
+    CONSTRAINT ingest_cursors_target_block_order_check CHECK (
         target_block_number IS NULL
         OR target_block_number >= start_block_number
     ),
-    CHECK (
+    CONSTRAINT ingest_cursors_last_processed_pair_check CHECK (
         (last_processed_block_number IS NULL)
         = (last_processed_block_hash IS NULL)
     ),
-    CHECK (
+    CONSTRAINT ingest_cursors_last_processed_order_check CHECK (
         last_processed_block_number IS NULL
         OR (
             last_processed_block_number >= start_block_number
@@ -85,7 +86,8 @@ CREATE TABLE IF NOT EXISTS chain_phase_state (
             'node_checked'
         )
     ),
-    CHECK (verification_level IS NULL OR phase_name = 'verify'),
+    CONSTRAINT chain_phase_state_verification_phase_check
+        CHECK (verification_level IS NULL OR phase_name = 'verify'),
     CHECK (
         (current_block_number IS NULL)
         = (current_block_hash IS NULL)

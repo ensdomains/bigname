@@ -5,6 +5,8 @@ use super::reads::load_chain_lineage_block_internal;
 use super::types::ChainLineageBlock;
 use super::validation::validate_lineage_block;
 
+mod transitions;
+
 /// Insert missing lineage rows or refresh existing rows when the same block hash
 /// is observed again. Immutable block metadata must match the stored row.
 pub async fn upsert_chain_lineage_blocks(
@@ -139,6 +141,13 @@ async fn upsert_lineage_anchor_chunk_without_snapshots(
     chunk: &[ChainLineageBlock],
     orphaned_conflict: OrphanedLineageConflict,
 ) -> Result<()> {
+    transitions::advance_existing_lineage_chunk_through_adjacent_states(
+        transaction,
+        chunk,
+        orphaned_conflict,
+    )
+    .await?;
+
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
         WITH input (

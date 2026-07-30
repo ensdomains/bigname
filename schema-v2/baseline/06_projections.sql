@@ -50,6 +50,18 @@ CREATE TABLE IF NOT EXISTS name_current (
             AND btrim(binding_kind) <> ''
         )
     ),
+    CONSTRAINT name_current_binding_kind_check
+        CHECK (
+            binding_kind IS NULL
+            OR binding_kind IN (
+                'declared_registry_path',
+                'linked_subregistry_path',
+                'resolver_alias_path',
+                'observed_wildcard_path',
+                'migration_rebind',
+                'observed_only'
+            )
+        ),
     CHECK (token_lineage_id IS NULL OR resource_id IS NOT NULL),
     CHECK (jsonb_typeof(declared_summary) = 'object'),
     CHECK (support_status IN ('supported', 'unsupported')),
@@ -146,7 +158,18 @@ CREATE TABLE IF NOT EXISTS permissions_current (
     PRIMARY KEY (resource_id, subject, scope),
     CHECK (btrim(subject) <> ''),
     CHECK (btrim(scope) <> ''),
-    CHECK (btrim(scope_kind) <> ''),
+    CONSTRAINT permissions_current_scope_kind_check
+        CHECK (
+            scope_kind IN (
+                'root',
+                'registry',
+                'resource',
+                'resolver',
+                'record_manager',
+                'migration_derived',
+                'transport_derived'
+            )
+        ),
     CHECK (jsonb_typeof(scope_detail) = 'object'),
     CHECK (jsonb_typeof(effective_powers) = 'array'),
     CHECK (jsonb_typeof(grant_source) = 'object'),
@@ -233,9 +256,6 @@ CREATE TABLE IF NOT EXISTS record_inventory_current (
     CHECK (manifest_version > 0)
 );
 
-CREATE INDEX IF NOT EXISTS record_inventory_current_resource_idx
-    ON record_inventory_current (resource_id, record_version_boundary_key);
-
 CREATE TABLE IF NOT EXISTS resolver_current (
     chain_id text NOT NULL,
     resolver_address text NOT NULL,
@@ -308,12 +328,29 @@ CREATE TABLE IF NOT EXISTS address_names_current (
     FOREIGN KEY (resource_id, token_lineage_id)
         REFERENCES resources (resource_id, token_lineage_id),
     CHECK (btrim(address) <> ''),
-    CHECK (btrim(relation) <> ''),
+    CONSTRAINT address_names_current_relation_check
+        CHECK (
+            relation IN (
+                'registrant',
+                'token_holder',
+                'effective_controller'
+            )
+        ),
     CHECK (btrim(namespace) <> ''),
     CHECK (btrim(namehash) <> ''),
     CONSTRAINT address_names_current_logical_identity_check
         CHECK (logical_name_id = namespace || ':' || namehash),
-    CHECK (btrim(binding_kind) <> ''),
+    CONSTRAINT address_names_current_binding_kind_check
+        CHECK (
+            binding_kind IN (
+                'declared_registry_path',
+                'linked_subregistry_path',
+                'resolver_alias_path',
+                'observed_wildcard_path',
+                'migration_rebind',
+                'observed_only'
+            )
+        ),
     CHECK (token_lineage_id IS NULL OR resource_id IS NOT NULL),
     CHECK (support_status IN ('supported', 'unsupported')),
     CHECK (
@@ -363,7 +400,7 @@ CREATE TABLE IF NOT EXISTS primary_names_current (
             'invalid_name'
         )
     ),
-    CHECK (
+    CONSTRAINT primary_names_current_claim_name_check CHECK (
         (
             claim_status IN ('success', 'invalid_name')
             AND raw_claim_name IS NOT NULL
@@ -374,8 +411,9 @@ CREATE TABLE IF NOT EXISTS primary_names_current (
             AND raw_claim_name IS NULL
         )
     ),
-    CHECK (NOT claim_name_is_normalized OR claim_status = 'success'),
-    CHECK (
+    CONSTRAINT primary_names_current_normalized_claim_check
+        CHECK (NOT claim_name_is_normalized OR claim_status = 'success'),
+    CONSTRAINT primary_names_current_unsupported_reason_coherence_check CHECK (
         (claim_status = 'unsupported' AND unsupported_reason IS NOT NULL)
         OR (claim_status <> 'unsupported' AND unsupported_reason IS NULL)
     ),

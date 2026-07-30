@@ -108,6 +108,45 @@ BEGIN
 END
 $$;
 
+CREATE OR REPLACE FUNCTION enforce_chain_lineage_canonicality_transition()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.canonicality_state IS NOT DISTINCT FROM OLD.canonicality_state THEN
+        RETURN NEW;
+    END IF;
+
+    IF NOT (
+        (
+            OLD.canonicality_state = 'observed'
+            AND NEW.canonicality_state IN ('canonical', 'orphaned')
+        )
+        OR (
+            OLD.canonicality_state = 'canonical'
+            AND NEW.canonicality_state IN ('safe', 'orphaned')
+        )
+        OR (
+            OLD.canonicality_state = 'safe'
+            AND NEW.canonicality_state IN ('finalized', 'orphaned')
+        )
+        OR (
+            OLD.canonicality_state = 'orphaned'
+            AND NEW.canonicality_state = 'canonical'
+        )
+    ) THEN
+        RAISE EXCEPTION
+            'illegal chain lineage canonicality transition: % -> %',
+            OLD.canonicality_state,
+            NEW.canonicality_state
+            USING ERRCODE = '23514';
+    END IF;
+
+    NEW.canonicality_updated_at := now();
+    RETURN NEW;
+END
+$$;
+
 CREATE OR REPLACE FUNCTION enforce_chain_head_state()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -211,6 +250,13 @@ BEFORE UPDATE OF
 ON chain_lineage
 FOR EACH ROW
 EXECUTE FUNCTION protect_chain_lineage_identity();
+
+DROP TRIGGER IF EXISTS chain_lineage_enforce_canonicality_transition
+    ON chain_lineage;
+CREATE TRIGGER chain_lineage_enforce_canonicality_transition
+BEFORE UPDATE OF canonicality_state ON chain_lineage
+FOR EACH ROW
+EXECUTE FUNCTION enforce_chain_lineage_canonicality_transition();
 
 DROP TRIGGER IF EXISTS chain_heads_enforce_state ON chain_heads;
 CREATE TRIGGER chain_heads_enforce_state

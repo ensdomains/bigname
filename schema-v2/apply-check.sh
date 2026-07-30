@@ -128,6 +128,7 @@ DECLARE
     uncommented_columns text;
     forbidden_tables text;
     forbidden_columns text;
+    forbidden_projection_publication_tables text;
     raw_table_without_hash_key text;
     missing_behavioral_constraints text;
 BEGIN
@@ -225,39 +226,81 @@ BEGIN
         RAISE EXCEPTION 'unexpected schema-v2 tables: %', unexpected_tables;
     END IF;
 
-    SELECT string_agg(table_name, ', ' ORDER BY table_name)
+    -- Add exact exceptions only after maintainer authorization.
+    WITH maintainer_authorized_allowlist(table_name) AS (
+        SELECT NULL::text
+        WHERE FALSE
+    )
+    SELECT string_agg(actual.table_name, ', ' ORDER BY actual.table_name)
     INTO forbidden_tables
-    FROM information_schema.tables
-    WHERE table_schema = current_schema()
-      AND table_type = 'BASE TABLE'
+    FROM information_schema.tables actual
+    LEFT JOIN maintainer_authorized_allowlist
+      ON maintainer_authorized_allowlist.table_name = actual.table_name
+    WHERE actual.table_schema = current_schema()
+      AND actual.table_type = 'BASE TABLE'
+      AND maintainer_authorized_allowlist.table_name IS NULL
       AND (
-          table_name ~ '(coverage|backfill|lease|generation|revision)'
-          OR table_name ~ '(checkpoint|frontier|queue|dead_letter|watermark)'
-          OR table_name ~ '(code_hash|execution_trace|execution_step)'
-          OR table_name ~ '(outcome_cache|raw_call|startup)'
-          OR table_name = 'manifest_capability_flags'
+          actual.table_name ~
+              '(coverage|backfill|lease|generation|revision)'
+          OR actual.table_name ~
+              '(checkpoint|frontier|queue|dead_letter|watermark)'
+          OR actual.table_name ~
+              '(code_hash|execution_trace|execution_step)'
+          OR actual.table_name ~ '(outcome_cache|raw_call|startup)'
+          OR actual.table_name ~
+              '(fence|epoch|journal|promotion|reconciliation|rederive)'
+          OR actual.table_name ~
+              '(drift|alert|replay_version|dead_letter|watermark|staging)'
+          OR actual.table_name = 'manifest_capability_flags'
       );
 
     IF forbidden_tables IS NOT NULL THEN
         RAISE EXCEPTION 'forbidden schema-v2 tables: %', forbidden_tables;
     END IF;
 
+    -- Add exact exceptions only after maintainer authorization.
+    WITH maintainer_authorized_allowlist(table_name, column_name) AS (
+        SELECT NULL::text, NULL::text
+        WHERE FALSE
+    )
     SELECT string_agg(
-        format('%I.%I', table_name, column_name),
+        format('%I.%I', actual.table_name, actual.column_name),
         ', '
-        ORDER BY table_name, ordinal_position
+        ORDER BY actual.table_name, actual.ordinal_position
     )
     INTO forbidden_columns
-    FROM information_schema.columns
-    WHERE table_schema = current_schema()
+    FROM information_schema.columns actual
+    LEFT JOIN maintainer_authorized_allowlist
+      ON maintainer_authorized_allowlist.table_name = actual.table_name
+     AND maintainer_authorized_allowlist.column_name = actual.column_name
+    WHERE actual.table_schema = current_schema()
+      AND maintainer_authorized_allowlist.column_name IS NULL
       AND (
-          column_name ~ '(coverage|exhaustiveness|generation|revision)'
-          OR column_name ~ '(supersed|repair|capability)'
-          OR column_name = 'code_hash'
+          actual.column_name ~
+              '(coverage|exhaustiveness|generation|revision)'
+          OR actual.column_name ~ '(supersed|repair|capability)'
+          OR actual.column_name ~
+              '(fence|epoch|journal|promotion|reconciliation|rederive)'
+          OR actual.column_name ~
+              '(drift|alert|replay_version|dead_letter|watermark|staging)'
+          OR actual.column_name = 'code_hash'
       );
 
     IF forbidden_columns IS NOT NULL THEN
         RAISE EXCEPTION 'forbidden schema-v2 columns: %', forbidden_columns;
+    END IF;
+
+    SELECT string_agg(table_name, ', ' ORDER BY table_name)
+    INTO forbidden_projection_publication_tables
+    FROM information_schema.tables
+    WHERE table_schema = current_schema()
+      AND table_type = 'BASE TABLE'
+      AND table_name ~ '(_staging|_publication)$';
+
+    IF forbidden_projection_publication_tables IS NOT NULL THEN
+        RAISE EXCEPTION
+            'schema-v2 contains forbidden projection publication tables: %',
+            forbidden_projection_publication_tables;
     END IF;
 
     SELECT string_agg(class.relname, ', ' ORDER BY class.relname)
@@ -430,6 +473,126 @@ BEGIN
                   AND conname = 'raw_logs_transaction_position_fkey'
                   AND contype = 'f'
             )
+        UNION ALL
+        SELECT
+            'chain lineage canonicality transitions are constrained',
+            EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgrelid = 'chain_lineage'::regclass
+                  AND tgname =
+                      'chain_lineage_enforce_canonicality_transition'
+                  AND NOT tgisinternal
+            )
+        UNION ALL
+        SELECT
+            format('%s carries its closed vocabulary', required.table_name),
+            EXISTS (
+                SELECT 1
+                FROM pg_constraint
+                WHERE conrelid = to_regclass(required.table_name)
+                  AND conname = required.constraint_name
+                  AND contype = 'c'
+            )
+        FROM (
+            VALUES
+                (
+                    'contract_instances',
+                    'contract_instances_contract_kind_check'
+                ),
+                (
+                    'discovery_edges',
+                    'discovery_edges_edge_kind_check'
+                ),
+                (
+                    'manifest_discovery_rules',
+                    'manifest_discovery_rules_edge_kind_check'
+                ),
+                (
+                    'surface_bindings',
+                    'surface_bindings_binding_kind_check'
+                ),
+                ('name_current', 'name_current_binding_kind_check'),
+                (
+                    'address_names_current',
+                    'address_names_current_binding_kind_check'
+                ),
+                (
+                    'normalized_events',
+                    'normalized_events_event_kind_check'
+                ),
+                (
+                    'normalized_events',
+                    'normalized_events_derivation_kind_check'
+                ),
+                (
+                    'permissions_current',
+                    'permissions_current_scope_kind_check'
+                ),
+                (
+                    'address_names_current',
+                    'address_names_current_relation_check'
+                )
+        ) AS required(table_name, constraint_name)
+        UNION ALL
+        SELECT
+            format('%s filters readable history', required.index_name),
+            EXISTS (
+                SELECT 1
+                FROM pg_indexes
+                WHERE schemaname = current_schema()
+                  AND indexname = required.index_name
+                  AND indexdef LIKE '% WHERE %'
+                  AND indexdef LIKE '%canonicality_state%'
+                  AND indexdef LIKE '%''canonical''%'
+                  AND indexdef LIKE '%''safe''%'
+                  AND indexdef LIKE '%''finalized''%'
+            )
+        FROM (
+            VALUES
+                ('surface_bindings_name_idx'),
+                ('surface_bindings_resource_idx'),
+                ('normalized_events_name_history_idx'),
+                ('normalized_events_resource_history_idx')
+        ) AS required(index_name)
+        UNION ALL
+        SELECT
+            'name surface visibility requires an explicit decision',
+            NOT EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'name_surfaces'
+                  AND column_name = 'visibility_state'
+                  AND column_default IS NOT NULL
+            )
+        UNION ALL
+        SELECT
+            'manifest deployment label has an unambiguous storage name',
+            EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'manifest_versions'
+                  AND column_name = 'deployment_label'
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'manifest_versions'
+                  AND column_name = 'deployment_id'
+            )
+        UNION ALL
+        SELECT
+            'record inventory has no primary-key duplicate index',
+            NOT EXISTS (
+                SELECT 1
+                FROM pg_indexes
+                WHERE schemaname = current_schema()
+                  AND indexname =
+                      'record_inventory_current_resource_idx'
+            )
     )
     SELECT string_agg(invariant_name, ', ' ORDER BY invariant_name)
     INTO missing_behavioral_constraints
@@ -449,6 +612,7 @@ BEGIN;
 DO $$
 DECLARE
     manifest_key bigint;
+    transition_case record;
     accepted_projection_identity_mismatches text[] := ARRAY[]::text[];
     accepted_cross_chain_relationships text[] := ARRAY[]::text[];
     accepted_head_invariants text[] := ARRAY[]::text[];
@@ -493,6 +657,274 @@ BEGIN
             'orphaned'
         );
 
+    FOR transition_case IN
+        SELECT *
+        FROM (
+            VALUES
+                ('observed', 'safe'),
+                ('observed', 'finalized'),
+                ('canonical', 'observed'),
+                ('canonical', 'finalized'),
+                ('safe', 'observed'),
+                ('safe', 'canonical'),
+                ('orphaned', 'observed'),
+                ('orphaned', 'safe'),
+                ('orphaned', 'finalized'),
+                ('finalized', 'observed'),
+                ('finalized', 'canonical'),
+                ('finalized', 'safe'),
+                ('finalized', 'orphaned')
+        ) AS illegal(from_state, to_state)
+    LOOP
+        INSERT INTO chain_lineage (
+            chain_id,
+            block_hash,
+            block_number,
+            block_timestamp,
+            canonicality_state
+        )
+        VALUES (
+            format(
+                'schema-v2-illegal-%s-%s',
+                transition_case.from_state,
+                transition_case.to_state
+            ),
+            'transition-block',
+            0,
+            '2026-01-01 00:00:00+00',
+            transition_case.from_state::canonicality_state
+        );
+
+        BEGIN
+            UPDATE chain_lineage
+            SET canonicality_state =
+                transition_case.to_state::canonicality_state
+            WHERE chain_id = format(
+                'schema-v2-illegal-%s-%s',
+                transition_case.from_state,
+                transition_case.to_state
+            )
+              AND block_hash = 'transition-block';
+            RAISE EXCEPTION
+                'chain_lineage accepted illegal canonicality transition % -> %',
+                transition_case.from_state,
+                transition_case.to_state;
+        EXCEPTION
+            WHEN check_violation THEN
+                IF SQLERRM <> format(
+                    'illegal chain lineage canonicality transition: %s -> %s',
+                    transition_case.from_state,
+                    transition_case.to_state
+                ) THEN
+                    RAISE;
+                END IF;
+        END;
+
+        DELETE FROM chain_lineage
+        WHERE chain_id = format(
+            'schema-v2-illegal-%s-%s',
+            transition_case.from_state,
+            transition_case.to_state
+        )
+          AND block_hash = 'transition-block';
+    END LOOP;
+
+    FOR transition_case IN
+        SELECT *
+        FROM (
+            VALUES
+                ('observed', 'canonical'),
+                ('observed', 'orphaned'),
+                ('canonical', 'safe'),
+                ('canonical', 'orphaned'),
+                ('safe', 'finalized'),
+                ('safe', 'orphaned'),
+                ('orphaned', 'canonical')
+        ) AS legal(from_state, to_state)
+    LOOP
+        INSERT INTO chain_lineage (
+            chain_id,
+            block_hash,
+            block_number,
+            block_timestamp,
+            canonicality_state
+        )
+        VALUES (
+            format(
+                'schema-v2-legal-%s-%s',
+                transition_case.from_state,
+                transition_case.to_state
+            ),
+            'transition-block',
+            0,
+            '2026-01-01 00:00:00+00',
+            transition_case.from_state::canonicality_state
+        );
+
+        UPDATE chain_lineage
+        SET canonicality_state =
+            transition_case.to_state::canonicality_state
+        WHERE chain_id = format(
+            'schema-v2-legal-%s-%s',
+            transition_case.from_state,
+            transition_case.to_state
+        )
+          AND block_hash = 'transition-block';
+
+        IF NOT EXISTS (
+            SELECT 1
+            FROM chain_lineage
+            WHERE chain_id = format(
+                'schema-v2-legal-%s-%s',
+                transition_case.from_state,
+                transition_case.to_state
+            )
+              AND block_hash = 'transition-block'
+              AND canonicality_state =
+                  transition_case.to_state::canonicality_state
+        ) THEN
+            RAISE EXCEPTION
+                'chain_lineage did not apply legal canonicality transition % -> %',
+                transition_case.from_state,
+                transition_case.to_state;
+        END IF;
+
+        DELETE FROM chain_lineage
+        WHERE chain_id = format(
+            'schema-v2-legal-%s-%s',
+            transition_case.from_state,
+            transition_case.to_state
+        )
+          AND block_hash = 'transition-block';
+    END LOOP;
+
+    INSERT INTO chain_lineage (
+        chain_id,
+        block_hash,
+        block_number,
+        block_timestamp,
+        canonicality_state,
+        first_observed_at,
+        canonicality_updated_at
+    )
+    VALUES (
+        'schema-v2-transition-timestamp',
+        'transition-block',
+        0,
+        '2026-01-01 00:00:00+00',
+        'observed',
+        '2026-01-01 00:00:00+00',
+        '2026-01-01 00:00:00+00'
+    );
+
+    UPDATE chain_lineage
+    SET canonicality_state = 'canonical'
+    WHERE chain_id = 'schema-v2-transition-timestamp'
+      AND block_hash = 'transition-block';
+
+    IF (
+        SELECT canonicality_updated_at
+        FROM chain_lineage
+        WHERE chain_id = 'schema-v2-transition-timestamp'
+          AND block_hash = 'transition-block'
+    ) <= TIMESTAMPTZ '2026-01-01 00:00:00+00'
+    THEN
+        RAISE EXCEPTION
+            'chain_lineage did not timestamp its canonicality transition';
+    END IF;
+
+    DELETE FROM chain_lineage
+    WHERE chain_id = 'schema-v2-transition-timestamp'
+      AND block_hash = 'transition-block';
+
+    INSERT INTO chain_lineage (
+        chain_id,
+        block_hash,
+        parent_hash,
+        block_number,
+        block_timestamp,
+        canonicality_state
+    )
+    VALUES
+        (
+            'schema-v2-checkpoint-jump',
+            'jump-block-0',
+            NULL,
+            0,
+            '2026-01-01 00:00:00+00',
+            'observed'
+        ),
+        (
+            'schema-v2-checkpoint-jump',
+            'jump-block-1',
+            'jump-block-0',
+            1,
+            '2026-01-01 00:00:01+00',
+            'observed'
+        ),
+        (
+            'schema-v2-checkpoint-jump',
+            'jump-block-2',
+            'jump-block-1',
+            2,
+            '2026-01-01 00:00:02+00',
+            'observed'
+        ),
+        (
+            'schema-v2-checkpoint-jump',
+            'jump-block-3',
+            'jump-block-2',
+            3,
+            '2026-01-01 00:00:03+00',
+            'observed'
+        );
+
+    UPDATE chain_lineage
+    SET canonicality_state = 'canonical'
+    WHERE chain_id = 'schema-v2-checkpoint-jump';
+
+    UPDATE chain_lineage
+    SET canonicality_state = 'safe'
+    WHERE chain_id = 'schema-v2-checkpoint-jump'
+      AND block_number <= 2;
+
+    UPDATE chain_lineage
+    SET canonicality_state = 'finalized'
+    WHERE chain_id = 'schema-v2-checkpoint-jump'
+      AND block_number <= 1;
+
+    INSERT INTO chain_heads (
+        chain_id,
+        latest_block_hash,
+        latest_block_number,
+        safe_block_hash,
+        safe_block_number,
+        finalized_block_hash,
+        finalized_block_number
+    )
+    VALUES (
+        'schema-v2-checkpoint-jump',
+        'jump-block-3',
+        3,
+        'jump-block-2',
+        2,
+        'jump-block-1',
+        1
+    );
+
+    IF (
+        SELECT array_agg(
+            canonicality_state::text
+            ORDER BY block_number
+        )
+        FROM chain_lineage
+        WHERE chain_id = 'schema-v2-checkpoint-jump'
+    ) <> ARRAY['finalized', 'finalized', 'safe', 'canonical']
+    THEN
+        RAISE EXCEPTION
+            'ordered checkpoint jump did not preserve adjacent canonicality transitions';
+    END IF;
+
     BEGIN
         INSERT INTO chain_heads (
             chain_id,
@@ -509,7 +941,12 @@ BEGIN
         DELETE FROM chain_heads
         WHERE chain_id = 'schema-v2-other';
     EXCEPTION
-        WHEN check_violation OR foreign_key_violation THEN NULL;
+        WHEN check_violation OR foreign_key_violation THEN
+            IF SQLERRM <>
+                'latest head must reference a canonical chain block'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     BEGIN
@@ -536,7 +973,12 @@ BEGIN
         WHERE chain_id = 'schema-v2-check'
           AND block_hash = 'competing-block-0';
     EXCEPTION
-        WHEN unique_violation THEN NULL;
+        WHEN unique_violation THEN
+            IF SQLERRM NOT LIKE
+                '%chain_lineage_readable_height_idx%'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     INSERT INTO chain_heads (
@@ -565,7 +1007,12 @@ BEGIN
         WHERE chain_id = 'schema-v2-check'
           AND block_hash = 'block-0';
     EXCEPTION
-        WHEN check_violation OR foreign_key_violation THEN NULL;
+        WHEN check_violation OR foreign_key_violation THEN
+            IF SQLERRM <>
+                'a chain head still references this block state'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     IF cardinality(accepted_head_invariants) > 0 THEN
@@ -613,7 +1060,12 @@ BEGIN
         RAISE EXCEPTION
             'a non-verify phase accepted a verification level';
     EXCEPTION
-        WHEN check_violation THEN NULL;
+        WHEN check_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "chain_phase_state_verification_phase_check"%'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     INSERT INTO chain_phase_state (
@@ -657,7 +1109,12 @@ BEGIN
         RAISE EXCEPTION
             'raw_receipts accepted a mismatched transaction position';
     EXCEPTION
-        WHEN foreign_key_violation THEN NULL;
+        WHEN foreign_key_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "raw_receipts_transaction_position_fkey"%'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     BEGIN
@@ -682,7 +1139,12 @@ BEGIN
         RAISE EXCEPTION
             'raw_logs accepted a mismatched transaction position';
     EXCEPTION
-        WHEN foreign_key_violation THEN NULL;
+        WHEN foreign_key_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "raw_logs_transaction_position_fkey"%'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     INSERT INTO contract_instances (
@@ -693,7 +1155,7 @@ BEGIN
     VALUES (
         '00000000-0000-0000-0000-000000000001',
         'schema-v2-check',
-        'registry'
+        'root'
     );
 
     INSERT INTO contract_instances (
@@ -704,7 +1166,7 @@ BEGIN
     VALUES (
         '00000000-0000-0000-0000-000000000002',
         'schema-v2-check',
-        'resolver'
+        'contract'
     );
 
     INSERT INTO contract_instances (
@@ -715,7 +1177,7 @@ BEGIN
     VALUES (
         '00000000-0000-0000-0000-000000000003',
         'schema-v2-other',
-        'registry'
+        'root'
     );
 
     BEGIN
@@ -732,7 +1194,12 @@ BEGIN
         RAISE EXCEPTION
             'a contract address accepted a different instance chain';
     EXCEPTION
-        WHEN foreign_key_violation THEN NULL;
+        WHEN foreign_key_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "contract_instance_addresses_instance_chain_fkey"%'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     BEGIN
@@ -746,7 +1213,7 @@ BEGIN
         )
         VALUES (
             'schema-v2-other',
-            'proxy',
+            'proxy_implementation',
             '00000000-0000-0000-0000-000000000001',
             '00000000-0000-0000-0000-000000000002',
             'schema-v2-check',
@@ -755,7 +1222,12 @@ BEGIN
         RAISE EXCEPTION
             'a discovery edge accepted different endpoint chains';
     EXCEPTION
-        WHEN foreign_key_violation THEN NULL;
+        WHEN foreign_key_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "discovery_edges_from_instance_chain_fkey"%'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     INSERT INTO contract_instance_addresses (
@@ -795,7 +1267,12 @@ BEGIN
         RAISE EXCEPTION
             'one contract instance accepted overlapping address ranges';
     EXCEPTION
-        WHEN exclusion_violation THEN NULL;
+        WHEN exclusion_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "contract_instance_addresses_no_overlap"%'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     INSERT INTO contract_instance_addresses (
@@ -825,7 +1302,14 @@ BEGIN
         RAISE EXCEPTION
             'one contract instance accepted two active addresses';
     EXCEPTION
-        WHEN unique_violation OR exclusion_violation THEN NULL;
+        WHEN unique_violation OR exclusion_violation THEN
+            IF SQLERRM NOT LIKE
+                '%contract_instance_addresses_active_instance_idx%'
+                AND SQLERRM NOT LIKE
+                    '%constraint "contract_instance_addresses_no_overlap"%'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     INSERT INTO token_lineages (
@@ -956,6 +1440,171 @@ BEGIN
             namehash,
             labelhashes,
             normalizer_version,
+            chain_id,
+            block_hash,
+            block_number,
+            canonicality_state
+        )
+        VALUES (
+            'schema-v2-check:namehash-missing-visibility',
+            'schema-v2-check',
+            'Missing',
+            ARRAY['Missing'],
+            '\x074d697373696e6700',
+            'namehash-missing-visibility',
+            ARRAY['labelhash-missing-visibility'],
+            'check',
+            'schema-v2-check',
+            'block-0',
+            0,
+            'canonical'
+        );
+        RAISE EXCEPTION
+            'name_surfaces accepted an omitted visibility decision';
+    EXCEPTION
+        WHEN not_null_violation THEN
+            IF SQLERRM NOT LIKE
+                '%null value in column "visibility_state"%'
+            THEN
+                RAISE EXCEPTION
+                    'name_surfaces omitted visibility failed with unexpected message: %',
+                    SQLERRM;
+            END IF;
+    END;
+
+    INSERT INTO name_surfaces (
+        logical_name_id,
+        namespace,
+        raw_name,
+        raw_labels,
+        dns_encoded_name,
+        namehash,
+        labelhashes,
+        normalizer_version,
+        visibility_state,
+        normalization_errors,
+        deactivation_reason,
+        deactivated_at,
+        chain_id,
+        block_hash,
+        block_number,
+        canonicality_state
+    )
+    VALUES (
+        'schema-v2-check:namehash-shadow',
+        'schema-v2-check',
+        'Shadow',
+        ARRAY['Shadow'],
+        '\x06536861646f7700',
+        'namehash-shadow',
+        ARRAY['labelhash-shadow'],
+        'check',
+        'shadow',
+        '["normalization failed"]'::jsonb,
+        'normalization failed',
+        '2026-01-01 00:00:01+00',
+        'schema-v2-check',
+        'block-0',
+        0,
+        'canonical'
+    );
+
+    BEGIN
+        INSERT INTO name_surfaces (
+            logical_name_id,
+            namespace,
+            raw_name,
+            raw_labels,
+            dns_encoded_name,
+            namehash,
+            labelhashes,
+            normalizer_version,
+            visibility_state,
+            normalization_errors,
+            chain_id,
+            block_hash,
+            block_number,
+            canonicality_state
+        )
+        VALUES (
+            'schema-v2-check:namehash-invalid-active',
+            'schema-v2-check',
+            'Invalid Active',
+            ARRAY['Invalid Active'],
+            '\x0e496e76616c69642041637469766500',
+            'namehash-invalid-active',
+            ARRAY['labelhash-invalid-active'],
+            'check',
+            'active',
+            '["unexpected"]'::jsonb,
+            'schema-v2-check',
+            'block-0',
+            0,
+            'canonical'
+        );
+        RAISE EXCEPTION
+            'name_surfaces accepted active normalization errors';
+    EXCEPTION
+        WHEN check_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "name_surfaces_visibility_coherence_check"%'
+            THEN
+                RAISE;
+            END IF;
+    END;
+
+    BEGIN
+        INSERT INTO name_surfaces (
+            logical_name_id,
+            namespace,
+            raw_name,
+            raw_labels,
+            dns_encoded_name,
+            namehash,
+            labelhashes,
+            normalizer_version,
+            visibility_state,
+            chain_id,
+            block_hash,
+            block_number,
+            canonicality_state
+        )
+        VALUES (
+            'schema-v2-check:namehash-invalid-shadow',
+            'schema-v2-check',
+            'Invalid Shadow',
+            ARRAY['Invalid Shadow'],
+            '\x0e496e76616c696420536861646f7700',
+            'namehash-invalid-shadow',
+            ARRAY['labelhash-invalid-shadow'],
+            'check',
+            'shadow',
+            'schema-v2-check',
+            'block-0',
+            0,
+            'canonical'
+        );
+        RAISE EXCEPTION
+            'name_surfaces accepted an incomplete shadow state';
+    EXCEPTION
+        WHEN check_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "name_surfaces_visibility_coherence_check"%'
+            THEN
+                RAISE;
+            END IF;
+    END;
+
+    BEGIN
+        INSERT INTO name_surfaces (
+            logical_name_id,
+            namespace,
+            raw_name,
+            raw_labels,
+            dns_encoded_name,
+            namehash,
+            labelhashes,
+            normalizer_version,
             visibility_state,
             chain_id,
             block_hash,
@@ -980,7 +1629,12 @@ BEGIN
         RAISE EXCEPTION
             'name_surfaces accepted a logical ID that is not namespace:namehash';
     EXCEPTION
-        WHEN check_violation THEN NULL;
+        WHEN check_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "name_surfaces_logical_identity_check"%'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     BEGIN
@@ -1006,7 +1660,12 @@ BEGIN
         DELETE FROM resources
         WHERE resource_id = '00000000-0000-0000-0000-000000000014';
     EXCEPTION
-        WHEN foreign_key_violation THEN NULL;
+        WHEN foreign_key_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "resources_chain_id_token_lineage_id_fkey"%'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     BEGIN
@@ -1024,7 +1683,7 @@ BEGIN
             '00000000-0000-0000-0000-000000000023',
             'schema-v2-check:namehash-0',
             '00000000-0000-0000-0000-000000000013',
-            'declared',
+            'declared_registry_path',
             '2026-01-01 00:00:00+00',
             'schema-v2-other',
             'block-other-0',
@@ -1039,7 +1698,12 @@ BEGIN
         WHERE surface_binding_id =
             '00000000-0000-0000-0000-000000000023';
     EXCEPTION
-        WHEN foreign_key_violation THEN NULL;
+        WHEN foreign_key_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "surface_bindings_chain_id_logical_name_id_fkey"%'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     BEGIN
@@ -1057,7 +1721,7 @@ BEGIN
             '00000000-0000-0000-0000-000000000024',
             'schema-v2-check:namehash-0',
             '00000000-0000-0000-0000-000000000013',
-            'declared',
+            'declared_registry_path',
             '2026-01-01 00:00:00+00',
             'schema-v2-check',
             'block-0',
@@ -1072,7 +1736,12 @@ BEGIN
         WHERE surface_binding_id =
             '00000000-0000-0000-0000-000000000024';
     EXCEPTION
-        WHEN foreign_key_violation THEN NULL;
+        WHEN foreign_key_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "surface_bindings_chain_id_resource_id_fkey"%'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     BEGIN
@@ -1090,11 +1759,11 @@ BEGIN
             'cross-chain-name-event',
             'schema-v2-check',
             'schema-v2-check:namehash-0',
-            'check',
+            'ResolverChanged',
             'check',
             1,
             'schema-v2-other',
-            'check'
+            'ens_v2_resolver'
         );
         accepted_cross_chain_relationships :=
             array_append(
@@ -1104,7 +1773,12 @@ BEGIN
         DELETE FROM normalized_events
         WHERE event_identity = 'cross-chain-name-event';
     EXCEPTION
-        WHEN foreign_key_violation THEN NULL;
+        WHEN foreign_key_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "normalized_events_chain_id_logical_name_id_fkey"%'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     BEGIN
@@ -1122,11 +1796,11 @@ BEGIN
             'cross-chain-resource-event',
             'schema-v2-check',
             '00000000-0000-0000-0000-000000000011',
-            'check',
+            'ResolverChanged',
             'check',
             1,
             'schema-v2-other',
-            'check'
+            'ens_v2_resolver'
         );
         accepted_cross_chain_relationships :=
             array_append(
@@ -1136,7 +1810,12 @@ BEGIN
         DELETE FROM normalized_events
         WHERE event_identity = 'cross-chain-resource-event';
     EXCEPTION
-        WHEN foreign_key_violation THEN NULL;
+        WHEN foreign_key_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "normalized_events_chain_id_resource_id_fkey"%'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     IF cardinality(accepted_cross_chain_relationships) > 0 THEN
@@ -1179,7 +1858,10 @@ BEGIN
         RAISE EXCEPTION
             'chain_lineage accepted a block timestamp identity change';
     EXCEPTION
-        WHEN check_violation THEN NULL;
+        WHEN check_violation THEN
+            IF SQLERRM <> 'chain lineage block identity is immutable' THEN
+                RAISE;
+            END IF;
     END;
 
     BEGIN
@@ -1217,7 +1899,12 @@ BEGIN
         RAISE EXCEPTION
             'resolution_divergences accepted clearing before last observation';
     EXCEPTION
-        WHEN check_violation THEN NULL;
+        WHEN check_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "resolution_divergences_clearing_time_check"%'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     INSERT INTO resolution_divergences (
@@ -1306,7 +1993,12 @@ BEGIN
         DELETE FROM resolution_divergences
         WHERE resolver_address = 'resolver-address-orphan-check';
     EXCEPTION
-        WHEN foreign_key_violation THEN NULL;
+        WHEN foreign_key_violation THEN
+            IF SQLERRM <>
+                'active resolution difference position resolver is not canonical'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     IF cardinality(accepted_divergence_canonicality) > 0 THEN
@@ -1344,7 +2036,12 @@ BEGIN
         RAISE EXCEPTION
             'one request accepted two active divergence rows';
     EXCEPTION
-        WHEN unique_violation THEN NULL;
+        WHEN unique_violation THEN
+            IF SQLERRM NOT LIKE
+                '%resolution_divergences_one_active_request_idx%'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     UPDATE resolution_divergences
@@ -1395,7 +2092,7 @@ BEGIN
         '00000000-0000-0000-0000-000000000021',
         'schema-v2-check:namehash-0',
         '00000000-0000-0000-0000-000000000011',
-        'declared',
+        'declared_registry_path',
         '2026-01-01 00:00:00+00',
         'schema-v2-check',
         'block-0',
@@ -1418,7 +2115,7 @@ BEGIN
         '00000000-0000-0000-0000-000000000025',
         'schema-v2-check:namehash-2',
         '00000000-0000-0000-0000-000000000012',
-        'declared',
+        'declared_registry_path',
         '2026-01-01 00:00:00+00',
         'schema-v2-check',
         'block-0',
@@ -1447,7 +2144,7 @@ BEGIN
             '00000000-0000-0000-0000-000000000025',
             '00000000-0000-0000-0000-000000000012',
             '00000000-0000-0000-0000-000000000032',
-            'declared',
+            'declared_registry_path',
             'supported',
             1
         );
@@ -1459,7 +2156,12 @@ BEGIN
         DELETE FROM name_current
         WHERE logical_name_id = 'schema-v2-check:namehash-0';
     EXCEPTION
-        WHEN foreign_key_violation THEN NULL;
+        WHEN foreign_key_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "name_current_surface_binding_id_logical_name_id_resource_i_fkey"%'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     BEGIN
@@ -1480,14 +2182,14 @@ BEGIN
         VALUES (
             'address-binding-mismatch',
             'schema-v2-check:namehash-0',
-            'owner',
+            'registrant',
             'schema-v2-check',
             'Name',
             'namehash-0',
             '00000000-0000-0000-0000-000000000025',
             '00000000-0000-0000-0000-000000000012',
             '00000000-0000-0000-0000-000000000032',
-            'declared',
+            'declared_registry_path',
             'supported',
             1
         );
@@ -1499,7 +2201,12 @@ BEGIN
         DELETE FROM address_names_current
         WHERE address = 'address-binding-mismatch';
     EXCEPTION
-        WHEN foreign_key_violation THEN NULL;
+        WHEN foreign_key_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "address_names_current_surface_binding_id_logical_name_id_r_fkey"%'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     BEGIN
@@ -1523,7 +2230,7 @@ BEGIN
             '00000000-0000-0000-0000-000000000021',
             '00000000-0000-0000-0000-000000000011',
             '00000000-0000-0000-0000-000000000032',
-            'declared',
+            'declared_registry_path',
             'supported',
             1
         );
@@ -1535,7 +2242,12 @@ BEGIN
         DELETE FROM name_current
         WHERE logical_name_id = 'schema-v2-check:namehash-0';
     EXCEPTION
-        WHEN foreign_key_violation THEN NULL;
+        WHEN foreign_key_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "name_current_resource_id_token_lineage_id_fkey"%'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     BEGIN
@@ -1556,14 +2268,14 @@ BEGIN
         VALUES (
             'address-token-mismatch',
             'schema-v2-check:namehash-0',
-            'owner',
+            'registrant',
             'schema-v2-check',
             'Name',
             'namehash-0',
             '00000000-0000-0000-0000-000000000021',
             '00000000-0000-0000-0000-000000000011',
             '00000000-0000-0000-0000-000000000032',
-            'declared',
+            'declared_registry_path',
             'supported',
             1
         );
@@ -1575,7 +2287,12 @@ BEGIN
         DELETE FROM address_names_current
         WHERE address = 'address-token-mismatch';
     EXCEPTION
-        WHEN foreign_key_violation THEN NULL;
+        WHEN foreign_key_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "address_names_current_resource_id_token_lineage_id_fkey"%'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     IF cardinality(accepted_projection_relationship_mismatches) > 0 THEN
@@ -1612,7 +2329,12 @@ BEGIN
         DELETE FROM name_current
         WHERE logical_name_id = 'schema-v2-check:namehash-0';
     EXCEPTION
-        WHEN check_violation THEN NULL;
+        WHEN check_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "name_current_logical_identity_check"%'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     BEGIN
@@ -1641,7 +2363,12 @@ BEGIN
         WHERE parent_logical_name_id = 'schema-v2-check:namehash-0'
           AND child_logical_name_id = 'schema-v2-check:child-namehash';
     EXCEPTION
-        WHEN check_violation THEN NULL;
+        WHEN check_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "children_current_logical_identity_check"%'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     BEGIN
@@ -1661,13 +2388,13 @@ BEGIN
         VALUES (
             'address-0',
             'schema-v2-check:namehash-0',
-            'owner',
+            'registrant',
             'wrong-namespace',
             'Name',
             'wrong-namehash',
             '00000000-0000-0000-0000-000000000021',
             '00000000-0000-0000-0000-000000000011',
-            'declared',
+            'declared_registry_path',
             'supported',
             1
         );
@@ -1679,9 +2406,14 @@ BEGIN
         DELETE FROM address_names_current
         WHERE address = 'address-0'
           AND logical_name_id = 'schema-v2-check:namehash-0'
-          AND relation = 'owner';
+          AND relation = 'registrant';
     EXCEPTION
-        WHEN check_violation THEN NULL;
+        WHEN check_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "address_names_current_logical_identity_check"%'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     IF cardinality(accepted_projection_identity_mismatches) > 0 THEN
@@ -1692,6 +2424,738 @@ BEGIN
                 ', '
             );
     END IF;
+
+    BEGIN
+        INSERT INTO contract_instances (
+            contract_instance_id,
+            chain_id,
+            contract_kind
+        )
+        VALUES (
+            '00000000-0000-0000-0000-000000000099',
+            'schema-v2-check',
+            'registry'
+        );
+        RAISE EXCEPTION
+            'contract_instances accepted an unknown contract kind';
+    EXCEPTION
+        WHEN check_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "contract_instances_contract_kind_check"%'
+            THEN
+                RAISE;
+            END IF;
+    END;
+
+    BEGIN
+        INSERT INTO discovery_edges (
+            chain_id,
+            edge_kind,
+            from_contract_instance_id,
+            to_contract_instance_id,
+            discovery_source,
+            admission_basis
+        )
+        VALUES (
+            'schema-v2-check',
+            'proxy',
+            '00000000-0000-0000-0000-000000000001',
+            '00000000-0000-0000-0000-000000000002',
+            'schema-check',
+            'schema-check'
+        );
+        RAISE EXCEPTION
+            'discovery_edges accepted an unknown edge kind';
+    EXCEPTION
+        WHEN check_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "discovery_edges_edge_kind_check"%'
+            THEN
+                RAISE;
+            END IF;
+    END;
+
+    BEGIN
+        INSERT INTO surface_bindings (
+            surface_binding_id,
+            logical_name_id,
+            resource_id,
+            binding_kind,
+            active_from,
+            chain_id,
+            block_hash,
+            block_number
+        )
+        VALUES (
+            '00000000-0000-0000-0000-000000000029',
+            'schema-v2-check:namehash-0',
+            '00000000-0000-0000-0000-000000000011',
+            'declared',
+            '2025-01-01 00:00:00+00',
+            'schema-v2-check',
+            'block-0',
+            0
+        );
+        RAISE EXCEPTION
+            'surface_bindings accepted an unknown binding kind';
+    EXCEPTION
+        WHEN check_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "surface_bindings_binding_kind_check"%'
+            THEN
+                RAISE;
+            END IF;
+    END;
+
+    BEGIN
+        INSERT INTO normalized_events (
+            event_identity,
+            namespace,
+            event_kind,
+            source_family,
+            manifest_version,
+            chain_id,
+            derivation_kind
+        )
+        VALUES (
+            'invalid-event-kind',
+            'schema-v2-check',
+            'Check',
+            'schema-check',
+            1,
+            'schema-v2-check',
+            'ens_v2_resolver'
+        );
+        RAISE EXCEPTION
+            'normalized_events accepted an unknown event kind';
+    EXCEPTION
+        WHEN check_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "normalized_events_event_kind_check"%'
+            THEN
+                RAISE;
+            END IF;
+    END;
+
+    INSERT INTO normalized_events (
+        event_identity,
+        namespace,
+        event_kind,
+        source_family,
+        manifest_version,
+        chain_id,
+        derivation_kind
+    )
+    SELECT
+        'valid-derivation-kind-' || derivation_kind,
+        'schema-v2-check',
+        'ResolverChanged',
+        'schema-check',
+        1,
+        'schema-v2-check',
+        derivation_kind
+    FROM unnest(
+        ARRAY[
+            'ens_v1_reverse_claim',
+            'ens_v1_unwrapped_authority',
+            'ens_v2_permissions',
+            'ens_v2_registrar',
+            'ens_v2_registry_resource_surface',
+            'ens_v2_resolver',
+            'manifest_sync',
+            'proxy_upgrade',
+            'raw_log_preimage_observation'
+        ]
+    ) AS admitted(derivation_kind);
+
+    BEGIN
+        INSERT INTO normalized_events (
+            event_identity,
+            namespace,
+            event_kind,
+            source_family,
+            manifest_version,
+            chain_id,
+            derivation_kind
+        )
+        VALUES (
+            'invalid-derivation-kind',
+            'schema-v2-check',
+            'ResolverChanged',
+            'schema-check',
+            1,
+            'schema-v2-check',
+            'check'
+        );
+        RAISE EXCEPTION
+            'normalized_events accepted an unknown derivation kind';
+    EXCEPTION
+        WHEN check_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "normalized_events_derivation_kind_check"%'
+            THEN
+                RAISE;
+            END IF;
+    END;
+
+    BEGIN
+        INSERT INTO permissions_current (
+            resource_id,
+            subject,
+            scope,
+            scope_kind,
+            manifest_version
+        )
+        VALUES (
+            '00000000-0000-0000-0000-000000000011',
+            'schema-check-subject',
+            'schema-check-scope',
+            'check',
+            1
+        );
+        RAISE EXCEPTION
+            'permissions_current accepted an unknown scope kind';
+    EXCEPTION
+        WHEN check_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "permissions_current_scope_kind_check"%'
+            THEN
+                RAISE;
+            END IF;
+    END;
+
+    BEGIN
+        INSERT INTO name_current (
+            logical_name_id,
+            namespace,
+            raw_name,
+            namehash,
+            surface_binding_id,
+            resource_id,
+            binding_kind,
+            support_status,
+            manifest_version
+        )
+        VALUES (
+            'schema-v2-check:namehash-0',
+            'schema-v2-check',
+            'Name',
+            'namehash-0',
+            '00000000-0000-0000-0000-000000000021',
+            '00000000-0000-0000-0000-000000000011',
+            'declared',
+            'supported',
+            1
+        );
+        RAISE EXCEPTION
+            'name_current accepted an unknown binding kind';
+    EXCEPTION
+        WHEN check_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "name_current_binding_kind_check"%'
+            THEN
+                RAISE;
+            END IF;
+    END;
+
+    BEGIN
+        INSERT INTO address_names_current (
+            address,
+            logical_name_id,
+            relation,
+            namespace,
+            raw_name,
+            namehash,
+            surface_binding_id,
+            resource_id,
+            binding_kind,
+            support_status,
+            manifest_version
+        )
+        VALUES (
+            'invalid-relation',
+            'schema-v2-check:namehash-0',
+            'owner',
+            'schema-v2-check',
+            'Name',
+            'namehash-0',
+            '00000000-0000-0000-0000-000000000021',
+            '00000000-0000-0000-0000-000000000011',
+            'declared_registry_path',
+            'supported',
+            1
+        );
+        RAISE EXCEPTION
+            'address_names_current accepted an unknown relation';
+    EXCEPTION
+        WHEN check_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "address_names_current_relation_check"%'
+            THEN
+                RAISE;
+            END IF;
+    END;
+
+    BEGIN
+        INSERT INTO address_names_current (
+            address,
+            logical_name_id,
+            relation,
+            namespace,
+            raw_name,
+            namehash,
+            surface_binding_id,
+            resource_id,
+            binding_kind,
+            support_status,
+            manifest_version
+        )
+        VALUES (
+            'invalid-binding-kind',
+            'schema-v2-check:namehash-0',
+            'registrant',
+            'schema-v2-check',
+            'Name',
+            'namehash-0',
+            '00000000-0000-0000-0000-000000000021',
+            '00000000-0000-0000-0000-000000000011',
+            'declared',
+            'supported',
+            1
+        );
+        RAISE EXCEPTION
+            'address_names_current accepted an unknown binding kind';
+    EXCEPTION
+        WHEN check_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "address_names_current_binding_kind_check"%'
+            THEN
+                RAISE;
+            END IF;
+    END;
+
+    INSERT INTO label_preimages (
+        labelhash,
+        raw_label,
+        normalizer_version,
+        normalized_under_version,
+        normalization_error,
+        source_kind,
+        source_priority
+    )
+    VALUES
+        (
+            'labelhash-normalized',
+            'normalized',
+            'check',
+            true,
+            NULL,
+            'schema-check',
+            0
+        ),
+        (
+            'labelhash-rejected',
+            'rejected',
+            'check',
+            false,
+            'normalization failed',
+            'schema-check',
+            0
+        );
+
+    FOR transition_case IN
+        SELECT *
+        FROM (
+            VALUES
+                (
+                    'labelhash-invalid-success',
+                    true,
+                    'unexpected error'::text
+                ),
+                (
+                    'labelhash-invalid-failure',
+                    false,
+                    NULL::text
+                )
+        ) AS invalid(labelhash, normalized, normalization_error)
+    LOOP
+        BEGIN
+            INSERT INTO label_preimages (
+                labelhash,
+                raw_label,
+                normalizer_version,
+                normalized_under_version,
+                normalization_error,
+                source_kind,
+                source_priority
+            )
+            VALUES (
+                transition_case.labelhash,
+                'invalid',
+                'check',
+                transition_case.normalized,
+                transition_case.normalization_error,
+                'schema-check',
+                0
+            );
+            RAISE EXCEPTION
+                'label_preimages accepted incoherent normalization state';
+        EXCEPTION
+            WHEN check_violation THEN
+                IF SQLERRM NOT LIKE
+                    '%constraint "label_preimages_normalization_coherence_check"%'
+                THEN
+                    RAISE;
+                END IF;
+        END;
+    END LOOP;
+
+    INSERT INTO primary_names_current (
+        address,
+        coin_type,
+        namespace,
+        claim_status,
+        raw_claim_name,
+        claim_name_is_normalized,
+        unsupported_reason
+    )
+    VALUES
+        (
+            'primary-success',
+            '60',
+            'schema-v2-check',
+            'success',
+            'name.eth',
+            true,
+            NULL
+        ),
+        (
+            'primary-not-found',
+            '60',
+            'schema-v2-check',
+            'not_found',
+            NULL,
+            false,
+            NULL
+        ),
+        (
+            'primary-unsupported',
+            '60',
+            'schema-v2-check',
+            'unsupported',
+            NULL,
+            false,
+            'coin type unsupported'
+        ),
+        (
+            'primary-invalid-name',
+            '60',
+            'schema-v2-check',
+            'invalid_name',
+            'invalid name',
+            false,
+            NULL
+        );
+
+    FOR transition_case IN
+        SELECT *
+        FROM (
+            VALUES
+                (
+                    'primary-missing-name',
+                    'success',
+                    NULL::text,
+                    false,
+                    NULL::text,
+                    'primary_names_current_claim_name_check'
+                ),
+                (
+                    'primary-unexpected-name',
+                    'not_found',
+                    'name.eth',
+                    false,
+                    NULL::text,
+                    'primary_names_current_claim_name_check'
+                ),
+                (
+                    'primary-invalid-normalized',
+                    'invalid_name',
+                    'invalid name',
+                    true,
+                    NULL::text,
+                    'primary_names_current_normalized_claim_check'
+                ),
+                (
+                    'primary-missing-reason',
+                    'unsupported',
+                    NULL::text,
+                    false,
+                    NULL::text,
+                    'primary_names_current_unsupported_reason_coherence_check'
+                ),
+                (
+                    'primary-unexpected-reason',
+                    'success',
+                    'name.eth',
+                    true,
+                    'unexpected reason',
+                    'primary_names_current_unsupported_reason_coherence_check'
+                )
+        ) AS invalid(
+            address,
+            claim_status,
+            raw_claim_name,
+            claim_name_is_normalized,
+            unsupported_reason,
+            constraint_name
+        )
+    LOOP
+        BEGIN
+            INSERT INTO primary_names_current (
+                address,
+                coin_type,
+                namespace,
+                claim_status,
+                raw_claim_name,
+                claim_name_is_normalized,
+                unsupported_reason
+            )
+            VALUES (
+                transition_case.address,
+                '60',
+                'schema-v2-check',
+                transition_case.claim_status,
+                transition_case.raw_claim_name,
+                transition_case.claim_name_is_normalized,
+                transition_case.unsupported_reason
+            );
+            RAISE EXCEPTION
+                'primary_names_current accepted incoherent claim state';
+        EXCEPTION
+            WHEN check_violation THEN
+                IF SQLERRM NOT LIKE format(
+                    '%%constraint "%s"%%',
+                    transition_case.constraint_name
+                ) THEN
+                    RAISE;
+                END IF;
+        END;
+    END LOOP;
+
+    INSERT INTO ingest_cursors (
+        chain_id,
+        source_key,
+        source_kind,
+        seed_basis,
+        start_block_number,
+        next_block_number,
+        target_block_number,
+        last_processed_block_number,
+        last_processed_block_hash
+    )
+    VALUES (
+        'schema-v2-check',
+        'valid-source',
+        'logs',
+        'base_seam',
+        10,
+        11,
+        12,
+        10,
+        'processed-block-10'
+    );
+
+    FOR transition_case IN
+        SELECT *
+        FROM (
+            VALUES
+                (
+                    'invalid-next',
+                    10::bigint,
+                    9::bigint,
+                    NULL::bigint,
+                    NULL::bigint,
+                    NULL::text,
+                    'ingest_cursors_next_block_order_check'
+                ),
+                (
+                    'invalid-target',
+                    10::bigint,
+                    10::bigint,
+                    9::bigint,
+                    NULL::bigint,
+                    NULL::text,
+                    'ingest_cursors_target_block_order_check'
+                ),
+                (
+                    'invalid-last-pair',
+                    10::bigint,
+                    11::bigint,
+                    NULL::bigint,
+                    10::bigint,
+                    NULL::text,
+                    'ingest_cursors_last_processed_pair_check'
+                ),
+                (
+                    'invalid-last-order',
+                    10::bigint,
+                    11::bigint,
+                    NULL::bigint,
+                    11::bigint,
+                    'processed-block-11',
+                    'ingest_cursors_last_processed_order_check'
+                )
+        ) AS invalid(
+            source_key,
+            start_block_number,
+            next_block_number,
+            target_block_number,
+            last_processed_block_number,
+            last_processed_block_hash,
+            constraint_name
+        )
+    LOOP
+        BEGIN
+            INSERT INTO ingest_cursors (
+                chain_id,
+                source_key,
+                source_kind,
+                seed_basis,
+                start_block_number,
+                next_block_number,
+                target_block_number,
+                last_processed_block_number,
+                last_processed_block_hash
+            )
+            VALUES (
+                'schema-v2-check',
+                transition_case.source_key,
+                'logs',
+                'base_seam',
+                transition_case.start_block_number,
+                transition_case.next_block_number,
+                transition_case.target_block_number,
+                transition_case.last_processed_block_number,
+                transition_case.last_processed_block_hash
+            );
+            RAISE EXCEPTION
+                'ingest_cursors accepted invalid ordering';
+        EXCEPTION
+            WHEN check_violation THEN
+                IF SQLERRM NOT LIKE format(
+                    '%%constraint "%s"%%',
+                    transition_case.constraint_name
+                ) THEN
+                    RAISE;
+                END IF;
+        END;
+    END LOOP;
+
+    INSERT INTO service_heartbeats (
+        service_name,
+        instance_id,
+        chain_id,
+        phase_name,
+        started_at,
+        heartbeat_at
+    )
+    VALUES (
+        'indexer',
+        'instance-valid',
+        'schema-v2-check',
+        'project',
+        '2026-01-01 00:00:00+00',
+        '2026-01-01 00:00:01+00'
+    );
+
+    FOR transition_case IN
+        SELECT *
+        FROM (
+            VALUES
+                (
+                    '',
+                    'instance-invalid-service',
+                    'schema-v2-check',
+                    'project',
+                    '2026-01-01 00:00:00+00'::timestamptz,
+                    '2026-01-01 00:00:01+00'::timestamptz,
+                    'service_heartbeats_service_name_check'
+                ),
+                (
+                    'indexer',
+                    '',
+                    'schema-v2-check',
+                    'project',
+                    '2026-01-01 00:00:00+00'::timestamptz,
+                    '2026-01-01 00:00:01+00'::timestamptz,
+                    'service_heartbeats_instance_id_check'
+                ),
+                (
+                    'indexer',
+                    'instance-invalid-chain',
+                    '',
+                    'project',
+                    '2026-01-01 00:00:00+00'::timestamptz,
+                    '2026-01-01 00:00:01+00'::timestamptz,
+                    'service_heartbeats_chain_id_check'
+                ),
+                (
+                    'indexer',
+                    'instance-invalid-phase',
+                    'schema-v2-check',
+                    'publish',
+                    '2026-01-01 00:00:00+00'::timestamptz,
+                    '2026-01-01 00:00:01+00'::timestamptz,
+                    'service_heartbeats_phase_name_check'
+                ),
+                (
+                    'indexer',
+                    'instance-invalid-time',
+                    'schema-v2-check',
+                    'project',
+                    '2026-01-01 00:00:01+00'::timestamptz,
+                    '2026-01-01 00:00:00+00'::timestamptz,
+                    'service_heartbeats_time_order_check'
+                )
+        ) AS invalid(
+            service_name,
+            instance_id,
+            chain_id,
+            phase_name,
+            started_at,
+            heartbeat_at,
+            constraint_name
+        )
+    LOOP
+        BEGIN
+            INSERT INTO service_heartbeats (
+                service_name,
+                instance_id,
+                chain_id,
+                phase_name,
+                started_at,
+                heartbeat_at
+            )
+            VALUES (
+                transition_case.service_name,
+                transition_case.instance_id,
+                transition_case.chain_id,
+                transition_case.phase_name,
+                transition_case.started_at,
+                transition_case.heartbeat_at
+            );
+            RAISE EXCEPTION
+                'service_heartbeats accepted an invalid row shape';
+        EXCEPTION
+            WHEN check_violation THEN
+                IF SQLERRM NOT LIKE format(
+                    '%%constraint "%s"%%',
+                    transition_case.constraint_name
+                ) THEN
+                    RAISE;
+                END IF;
+        END;
+    END LOOP;
 
     BEGIN
         INSERT INTO surface_bindings (
@@ -1709,7 +3173,7 @@ BEGIN
             '00000000-0000-0000-0000-000000000022',
             'schema-v2-check:namehash-0',
             '00000000-0000-0000-0000-000000000012',
-            'declared',
+            'declared_registry_path',
             '2026-01-01 00:00:00+00',
             'schema-v2-check',
             'block-0',
@@ -1719,7 +3183,12 @@ BEGIN
         RAISE EXCEPTION
             'surface_bindings accepted overlapping canonical ranges';
     EXCEPTION
-        WHEN exclusion_violation THEN NULL;
+        WHEN exclusion_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "surface_bindings_no_overlap"%'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     INSERT INTO manifest_versions (
@@ -1727,7 +3196,7 @@ BEGIN
         namespace,
         source_family,
         chain_id,
-        deployment_epoch,
+        deployment_label,
         rollout_status,
         normalizer_version,
         file_path,
@@ -1745,6 +3214,24 @@ BEGIN
         '{}'::jsonb
     )
     RETURNING manifest_id INTO manifest_key;
+
+    BEGIN
+        INSERT INTO manifest_discovery_rules (
+            manifest_id,
+            edge_kind,
+            admission
+        )
+        VALUES (manifest_key, 'announced', 'declared');
+        RAISE EXCEPTION
+            'manifest_discovery_rules accepted an unknown edge kind';
+    EXCEPTION
+        WHEN check_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "manifest_discovery_rules_edge_kind_check"%'
+            THEN
+                RAISE;
+            END IF;
+    END;
 
     BEGIN
         INSERT INTO manifest_contract_instances (
@@ -1774,7 +3261,12 @@ BEGIN
         WHERE manifest_id = manifest_key
           AND declaration_name = 'cross-chain-root';
     EXCEPTION
-        WHEN foreign_key_violation THEN NULL;
+        WHEN foreign_key_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "manifest_contract_instances_chain_id_contract_instance_id_fkey"%'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     BEGIN
@@ -1791,12 +3283,12 @@ BEGIN
         VALUES (
             'mismatched-manifest-event',
             'wrong-namespace',
-            'check',
+            'ResolverChanged',
             'wrong-source-family',
             99,
             manifest_key,
             'schema-v2-other',
-            'check'
+            'ens_v2_resolver'
         );
         accepted_manifest_mismatches :=
             array_append(
@@ -1806,7 +3298,12 @@ BEGIN
         DELETE FROM normalized_events
         WHERE event_identity = 'mismatched-manifest-event';
     EXCEPTION
-        WHEN foreign_key_violation THEN NULL;
+        WHEN foreign_key_violation THEN
+            IF SQLERRM NOT LIKE
+                '%constraint "normalized_events_source_manifest_id_namespace_source_fami_fkey"%'
+            THEN
+                RAISE;
+            END IF;
     END;
 
     IF cardinality(accepted_manifest_mismatches) > 0 THEN
@@ -1839,7 +3336,7 @@ BEGIN
         edge_kind,
         admission
     )
-    VALUES (manifest_key, 'announced', 'declared');
+    VALUES (manifest_key, 'resolver', 'declared');
 
     UPDATE contract_instance_addresses
     SET source_manifest_id = manifest_key
@@ -1858,7 +3355,7 @@ BEGIN
     )
     VALUES (
         'schema-v2-check',
-        'proxy',
+        'proxy_implementation',
         '00000000-0000-0000-0000-000000000001',
         '00000000-0000-0000-0000-000000000002',
         'schema-v2-check',
@@ -1879,12 +3376,12 @@ BEGIN
     VALUES (
         'manifest-delete-check',
         'schema-v2-check',
-        'check',
+        'ResolverChanged',
         'schema-v2-check',
         1,
         manifest_key,
         'schema-v2-check',
-        'check'
+        'ens_v2_resolver'
     );
 
     DELETE FROM manifest_versions

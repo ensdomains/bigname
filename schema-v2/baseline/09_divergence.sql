@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS resolution_divergences (
     CHECK (observed_positions <> '{}'::jsonb),
     CHECK (indexed_result <> live_result),
     CHECK (last_observed_at >= first_observed_at),
-    CHECK (cleared_at IS NULL OR cleared_at >= last_observed_at)
+    CONSTRAINT resolution_divergences_clearing_time_check
+        CHECK (cleared_at IS NULL OR cleared_at >= last_observed_at)
 );
 
 CREATE INDEX IF NOT EXISTS resolution_divergences_active_name_idx
