@@ -10,6 +10,12 @@ fn main() {
         .and_then(|path| path.parent())
         .expect("test-support must be two directories below the workspace root");
 
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir
+            .join("src/interpreter_content_hash_impl.rs")
+            .display()
+    );
     for path in interpreter_content_hash_impl::watched_paths(workspace_root) {
         println!("cargo:rerun-if-changed={}", path.display());
     }
