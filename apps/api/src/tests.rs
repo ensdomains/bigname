@@ -641,6 +641,8 @@ include!("tests/names_collection.rs");
 
 include!("tests/graphql.rs");
 
+include!("tests/graphql_contract.rs");
+
 include!("tests/records.rs");
 
 include!("tests/identity.rs");

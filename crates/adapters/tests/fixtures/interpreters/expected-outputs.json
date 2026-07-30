@@ -1,0 +1,641 @@
+{
+  "cases": [
+    {
+      "id": "ens_reverse_claim",
+      "normalized_events": [
+        {
+          "event_identity": "ens_v1_reverse_claim:ReverseChanged:1:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0xtx2a:0:0x1111111111111111111111111111111111111111",
+          "namespace": "ens",
+          "logical_name_id": null,
+          "resource_id": null,
+          "event_kind": "ReverseChanged",
+          "source_family": "ens_v1_reverse_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 42,
+          "block_hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "transaction_hash": "0xtx2a",
+          "log_index": 0,
+          "raw_fact_ref": {
+            "block_hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "block_number": 42,
+            "chain_id": "ethereum-mainnet",
+            "emitting_address": "0x00000000000000000000000000000000000000aa",
+            "kind": "raw_log",
+            "log_index": 0,
+            "transaction_hash": "0xtx2a",
+            "transaction_index": 0
+          },
+          "derivation_kind": "ens_v1_reverse_claim",
+          "canonicality_state": "Canonical",
+          "before_state": {},
+          "after_state": {
+            "address": "0x1111111111111111111111111111111111111111",
+            "claim_provenance": {
+              "contract_instance_id": "00000000-0000-0000-0000-000000000001",
+              "contract_role": "reverse_registrar",
+              "emitting_address": "0x00000000000000000000000000000000000000aa",
+              "source_family": "ens_v1_reverse_l1"
+            },
+            "coin_type": "60",
+            "namespace": "ens",
+            "reverse_label": "1111111111111111111111111111111111111111",
+            "reverse_name": "1111111111111111111111111111111111111111.addr.reverse",
+            "reverse_namespace": "ens",
+            "reverse_node": "0x19e798729483c8dd1c93223c8c568fac7f64fc6d6ed33b20f51cae2fbbb65f4d",
+            "source_event": "ReverseClaimed"
+          }
+        }
+      ],
+      "name_surfaces": [],
+      "surface_bindings": [],
+      "resources": [],
+      "token_lineages": []
+    },
+    {
+      "id": "basenames_reverse_record",
+      "normalized_events": [
+        {
+          "event_identity": "ens_v1_reverse_claim:ReverseChanged:1:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0xtx2a:0:0x1111111111111111111111111111111111111111",
+          "namespace": "basenames",
+          "logical_name_id": null,
+          "resource_id": null,
+          "event_kind": "ReverseChanged",
+          "source_family": "basenames_base_primary",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "base-mainnet",
+          "block_number": 42,
+          "block_hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "transaction_hash": "0xtx2a",
+          "log_index": 0,
+          "raw_fact_ref": {
+            "block_hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "block_number": 42,
+            "chain_id": "base-mainnet",
+            "emitting_address": "0x00000000000000000000000000000000000000aa",
+            "kind": "raw_log",
+            "log_index": 0,
+            "transaction_hash": "0xtx2a",
+            "transaction_index": 0
+          },
+          "derivation_kind": "ens_v1_reverse_claim",
+          "canonicality_state": "Canonical",
+          "before_state": {},
+          "after_state": {
+            "address": "0x1111111111111111111111111111111111111111",
+            "claim_provenance": {
+              "contract_instance_id": "00000000-0000-0000-0000-000000000001",
+              "contract_role": "reverse_registrar",
+              "emitting_address": "0x00000000000000000000000000000000000000aa",
+              "source_family": "basenames_base_primary"
+            },
+            "coin_type": "2147492101",
+            "namespace": "basenames",
+            "reverse_label": "1111111111111111111111111111111111111111",
+            "reverse_name": "1111111111111111111111111111111111111111.80002105.reverse",
+            "reverse_namespace": "basenames",
+            "reverse_node": "0xdc0f6a56a058a55875c58fa1f2253beb593bb27de664c86ee0993107699dc116",
+            "source_event": "NameForAddrChanged"
+          }
+        },
+        {
+          "event_identity": "ens_v1_reverse_claim:RecordChanged:1:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0xtx2a:0:0x1111111111111111111111111111111111111111:name",
+          "namespace": "basenames",
+          "logical_name_id": null,
+          "resource_id": null,
+          "event_kind": "RecordChanged",
+          "source_family": "basenames_base_primary",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "base-mainnet",
+          "block_number": 42,
+          "block_hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "transaction_hash": "0xtx2a",
+          "log_index": 0,
+          "raw_fact_ref": {
+            "block_hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "block_number": 42,
+            "chain_id": "base-mainnet",
+            "emitting_address": "0x00000000000000000000000000000000000000aa",
+            "kind": "raw_log",
+            "log_index": 0,
+            "transaction_hash": "0xtx2a",
+            "transaction_index": 0
+          },
+          "derivation_kind": "ens_v1_reverse_claim",
+          "canonicality_state": "Canonical",
+          "before_state": {},
+          "after_state": {
+            "primary_claim_source": {
+              "address": "0x1111111111111111111111111111111111111111",
+              "claim_provenance": {
+                "contract_instance_id": "00000000-0000-0000-0000-000000000001",
+                "contract_role": "reverse_registrar",
+                "emitting_address": "0x00000000000000000000000000000000000000aa",
+                "source_family": "basenames_base_primary"
+              },
+              "coin_type": "2147492101",
+              "namespace": "basenames",
+              "reverse_name": "1111111111111111111111111111111111111111.80002105.reverse",
+              "reverse_node": "0xdc0f6a56a058a55875c58fa1f2253beb593bb27de664c86ee0993107699dc116"
+            },
+            "raw_name": "alice.base.eth",
+            "record_family": "name",
+            "record_key": "name",
+            "selector_key": null,
+            "source_event": "NameForAddrChanged"
+          }
+        }
+      ],
+      "name_surfaces": [],
+      "surface_bindings": [],
+      "resources": [],
+      "token_lineages": []
+    },
+    {
+      "id": "wrapped_name_preimage",
+      "normalized_events": [
+        {
+          "event_identity": "raw_log_preimage_observed:1:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0xtx2a:0:0x00000000000000000000000000000000000000aa",
+          "namespace": "ens",
+          "logical_name_id": null,
+          "resource_id": null,
+          "event_kind": "PreimageObserved",
+          "source_family": "ens_v1_wrapper_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 42,
+          "block_hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "transaction_hash": "0xtx2a",
+          "log_index": 0,
+          "raw_fact_ref": {
+            "block_hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "block_number": 42,
+            "chain_id": "ethereum-mainnet",
+            "data_hex": "0000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d0777726170706564036574680000000000000000000000000000000000000000",
+            "emitting_address": "0x00000000000000000000000000000000000000aa",
+            "kind": "raw_log",
+            "log_index": 0,
+            "topic0": "0x8ce7013e8abebc55c3890a68f5a27c67c3f7efa64e584de5fb22363c606fd340",
+            "topic1": "0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84",
+            "topic2": null,
+            "transaction_hash": "0xtx2a",
+            "transaction_index": 0
+          },
+          "derivation_kind": "raw_log_preimage_observation",
+          "canonicality_state": "Canonical",
+          "before_state": {},
+          "after_state": {
+            "decoded_name": "wrapped.eth",
+            "dns_encoded_name": "0x07777261707065640365746800",
+            "labelhashes": [
+              "0x4ca938ec1b323ca71c4fb47a712abb68cce1cabf39ea4d6789e42fbc1f95459b",
+              "0x4f5b812789fc606be1b3b16908db13fc7a9adf7ca72641f84d75b47069d3d7f0"
+            ],
+            "namehash": "0x4b162e8ef5a976a025f29a8308523ae94e4f248a0db2d87addd10ce0ec703d84",
+            "source_event": "NameWrapped"
+          }
+        }
+      ],
+      "name_surfaces": [],
+      "surface_bindings": [],
+      "resources": [],
+      "token_lineages": []
+    },
+    {
+      "id": "ens_unwrapped_authority",
+      "normalized_events": [
+        {
+          "event_identity": "ens_v1_unwrapped_authority:RegistrationGranted:grant:0xa100000000000000000000000000000000000000000000000000000000000010:0xtxa1000000000000000000000000000000000000000000000000000000000010:0",
+          "namespace": "ens",
+          "logical_name_id": "ens:alice.eth",
+          "resource_id": "a72e7c29-77c9-538d-8a10-fed16bd0bc61",
+          "event_kind": "RegistrationGranted",
+          "source_family": "ens_v1_registrar_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 10,
+          "block_hash": "0xa100000000000000000000000000000000000000000000000000000000000010",
+          "transaction_hash": "0xtxa1000000000000000000000000000000000000000000000000000000000010",
+          "log_index": 0,
+          "raw_fact_ref": {
+            "block_hash": "0xa100000000000000000000000000000000000000000000000000000000000010",
+            "block_number": 10,
+            "chain_id": "ethereum-mainnet",
+            "kind": "raw_log",
+            "log_index": 0,
+            "transaction_hash": "0xtxa1000000000000000000000000000000000000000000000000000000000010",
+            "transaction_index": 0
+          },
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "canonicality_state": "Canonical",
+          "before_state": {
+            "authority_kind": null,
+            "registrant": null
+          },
+          "after_state": {
+            "authority_key": "registrar:ethereum-mainnet:1:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xa100000000000000000000000000000000000000000000000000000000000010:0",
+            "authority_kind": "registrar",
+            "expiry": 1800000000,
+            "labelhash": "0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501",
+            "registrant": "0x0000000000000000000000000000000000001011"
+          }
+        },
+        {
+          "event_identity": "ens_v1_unwrapped_authority:ExpiryChanged:expiry:0xa100000000000000000000000000000000000000000000000000000000000010:0xtxa1000000000000000000000000000000000000000000000000000000000010:0",
+          "namespace": "ens",
+          "logical_name_id": "ens:alice.eth",
+          "resource_id": "a72e7c29-77c9-538d-8a10-fed16bd0bc61",
+          "event_kind": "ExpiryChanged",
+          "source_family": "ens_v1_registrar_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 10,
+          "block_hash": "0xa100000000000000000000000000000000000000000000000000000000000010",
+          "transaction_hash": "0xtxa1000000000000000000000000000000000000000000000000000000000010",
+          "log_index": 0,
+          "raw_fact_ref": {
+            "block_hash": "0xa100000000000000000000000000000000000000000000000000000000000010",
+            "block_number": 10,
+            "chain_id": "ethereum-mainnet",
+            "kind": "raw_log",
+            "log_index": 0,
+            "transaction_hash": "0xtxa1000000000000000000000000000000000000000000000000000000000010",
+            "transaction_index": 0
+          },
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "canonicality_state": "Canonical",
+          "before_state": {
+            "expiry": null
+          },
+          "after_state": {
+            "expiry": 1800000000
+          }
+        },
+        {
+          "event_identity": "ens_v1_unwrapped_authority:PermissionChanged:permission:grant:resource:0x0000000000000000000000000000000000001011:0xa100000000000000000000000000000000000000000000000000000000000010:0xtxa1000000000000000000000000000000000000000000000000000000000010:0",
+          "namespace": "ens",
+          "logical_name_id": "ens:alice.eth",
+          "resource_id": "a72e7c29-77c9-538d-8a10-fed16bd0bc61",
+          "event_kind": "PermissionChanged",
+          "source_family": "ens_v1_registrar_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 10,
+          "block_hash": "0xa100000000000000000000000000000000000000000000000000000000000010",
+          "transaction_hash": "0xtxa1000000000000000000000000000000000000000000000000000000000010",
+          "log_index": 0,
+          "raw_fact_ref": {
+            "block_hash": "0xa100000000000000000000000000000000000000000000000000000000000010",
+            "block_number": 10,
+            "chain_id": "ethereum-mainnet",
+            "kind": "raw_log",
+            "log_index": 0,
+            "transaction_hash": "0xtxa1000000000000000000000000000000000000000000000000000000000010",
+            "transaction_index": 0
+          },
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "canonicality_state": "Canonical",
+          "before_state": {
+            "effective_powers": [],
+            "grant_source": null,
+            "inheritance_path": [],
+            "revocation_source": null,
+            "scope": {
+              "kind": "resource"
+            },
+            "subject": "0x0000000000000000000000000000000000001011",
+            "transfer_behavior": "replace_on_authority_change"
+          },
+          "after_state": {
+            "effective_powers": [
+              "resource_control"
+            ],
+            "grant_source": {
+              "authority_key": "registrar:ethereum-mainnet:1:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xa100000000000000000000000000000000000000000000000000000000000010:0",
+              "authority_kind": "registrar",
+              "kind": "ens_v1_authority",
+              "source_event_kind": "RegistrationGranted"
+            },
+            "inheritance_path": [],
+            "revocation_source": null,
+            "scope": {
+              "kind": "resource"
+            },
+            "subject": "0x0000000000000000000000000000000000001011",
+            "transfer_behavior": "replace_on_authority_change"
+          }
+        },
+        {
+          "event_identity": "ens_v1_unwrapped_authority:SurfaceBound:surface-bound:0xa100000000000000000000000000000000000000000000000000000000000010:ens:alice.eth:77417fd1-2c12-54a4-b8d8-60e2d2681db1",
+          "namespace": "ens",
+          "logical_name_id": "ens:alice.eth",
+          "resource_id": "a72e7c29-77c9-538d-8a10-fed16bd0bc61",
+          "event_kind": "SurfaceBound",
+          "source_family": "ens_v1_registrar_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 10,
+          "block_hash": "0xa100000000000000000000000000000000000000000000000000000000000010",
+          "transaction_hash": null,
+          "log_index": null,
+          "raw_fact_ref": {
+            "block_hash": "0xa100000000000000000000000000000000000000000000000000000000000010",
+            "block_number": 10,
+            "block_timestamp": 1700000010,
+            "chain_id": "ethereum-mainnet",
+            "kind": "raw_block"
+          },
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "canonicality_state": "Canonical",
+          "before_state": {},
+          "after_state": {
+            "active_from": 1700000010,
+            "authority_key": "registrar:ethereum-mainnet:1:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xa100000000000000000000000000000000000000000000000000000000000010:0",
+            "authority_kind": "registrar",
+            "binding_kind": "declared_registry_path"
+          }
+        },
+        {
+          "event_identity": "ens_v1_unwrapped_authority:AuthorityEpochChanged:authority-epoch:0xa100000000000000000000000000000000000000000000000000000000000010:ens:alice.eth:1700000010:none:registrar:ethereum-mainnet:1:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xa100000000000000000000000000000000000000000000000000000000000010:0",
+          "namespace": "ens",
+          "logical_name_id": "ens:alice.eth",
+          "resource_id": "a72e7c29-77c9-538d-8a10-fed16bd0bc61",
+          "event_kind": "AuthorityEpochChanged",
+          "source_family": "ens_v1_registrar_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 1,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 10,
+          "block_hash": "0xa100000000000000000000000000000000000000000000000000000000000010",
+          "transaction_hash": null,
+          "log_index": null,
+          "raw_fact_ref": {
+            "block_hash": "0xa100000000000000000000000000000000000000000000000000000000000010",
+            "block_number": 10,
+            "block_timestamp": 1700000010,
+            "chain_id": "ethereum-mainnet",
+            "kind": "raw_block"
+          },
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "canonicality_state": "Canonical",
+          "before_state": {
+            "authority_key": null,
+            "authority_kind": null
+          },
+          "after_state": {
+            "authority_key": "registrar:ethereum-mainnet:1:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xa100000000000000000000000000000000000000000000000000000000000010:0",
+            "authority_kind": "registrar"
+          }
+        },
+        {
+          "event_identity": "ens_v1_unwrapped_authority:ResolverChanged:resolver:0xa100000000000000000000000000000000000000000000000000000000000010:0xtxa1000000000000000000000000000000000000000000000000000000000010:1",
+          "namespace": "ens",
+          "logical_name_id": "ens:alice.eth",
+          "resource_id": "a72e7c29-77c9-538d-8a10-fed16bd0bc61",
+          "event_kind": "ResolverChanged",
+          "source_family": "ens_v1_registry_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 2,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 10,
+          "block_hash": "0xa100000000000000000000000000000000000000000000000000000000000010",
+          "transaction_hash": "0xtxa1000000000000000000000000000000000000000000000000000000000010",
+          "log_index": 1,
+          "raw_fact_ref": {
+            "block_hash": "0xa100000000000000000000000000000000000000000000000000000000000010",
+            "block_number": 10,
+            "chain_id": "ethereum-mainnet",
+            "kind": "raw_log",
+            "log_index": 1,
+            "transaction_hash": "0xtxa1000000000000000000000000000000000000000000000000000000000010",
+            "transaction_index": 0
+          },
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "canonicality_state": "Canonical",
+          "before_state": {
+            "resolver": null
+          },
+          "after_state": {
+            "namehash": "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
+            "resolver": "0x00000000000000000000000000000000000010cc"
+          }
+        },
+        {
+          "event_identity": "ens_v1_unwrapped_authority:PermissionChanged:permission:grant:resolver:0x00000000000000000000000000000000000010cc:0x0000000000000000000000000000000000001011:0xa100000000000000000000000000000000000000000000000000000000000010:0xtxa1000000000000000000000000000000000000000000000000000000000010:1",
+          "namespace": "ens",
+          "logical_name_id": "ens:alice.eth",
+          "resource_id": "a72e7c29-77c9-538d-8a10-fed16bd0bc61",
+          "event_kind": "PermissionChanged",
+          "source_family": "ens_v1_registry_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 2,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 10,
+          "block_hash": "0xa100000000000000000000000000000000000000000000000000000000000010",
+          "transaction_hash": "0xtxa1000000000000000000000000000000000000000000000000000000000010",
+          "log_index": 1,
+          "raw_fact_ref": {
+            "block_hash": "0xa100000000000000000000000000000000000000000000000000000000000010",
+            "block_number": 10,
+            "chain_id": "ethereum-mainnet",
+            "kind": "raw_log",
+            "log_index": 1,
+            "transaction_hash": "0xtxa1000000000000000000000000000000000000000000000000000000000010",
+            "transaction_index": 0
+          },
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "canonicality_state": "Canonical",
+          "before_state": {
+            "effective_powers": [],
+            "grant_source": null,
+            "inheritance_path": [],
+            "revocation_source": null,
+            "scope": {
+              "chain_id": "ethereum-mainnet",
+              "kind": "resolver",
+              "resolver_address": "0x00000000000000000000000000000000000010cc"
+            },
+            "subject": "0x0000000000000000000000000000000000001011",
+            "transfer_behavior": "replace_on_authority_change"
+          },
+          "after_state": {
+            "effective_powers": [
+              "resolver_control"
+            ],
+            "grant_source": {
+              "authority_key": "registrar:ethereum-mainnet:1:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xa100000000000000000000000000000000000000000000000000000000000010:0",
+              "authority_kind": "registrar",
+              "kind": "ens_v1_authority",
+              "source_event_kind": "ResolverChanged"
+            },
+            "inheritance_path": [],
+            "revocation_source": null,
+            "scope": {
+              "chain_id": "ethereum-mainnet",
+              "kind": "resolver",
+              "resolver_address": "0x00000000000000000000000000000000000010cc"
+            },
+            "subject": "0x0000000000000000000000000000000000001011",
+            "transfer_behavior": "replace_on_authority_change"
+          }
+        },
+        {
+          "event_identity": "ens_v1_unwrapped_authority:RecordChanged:record-change:0xa100000000000000000000000000000000000000000000000000000000000010:0xtxa1000000000000000000000000000000000000000000000000000000000010:2",
+          "namespace": "ens",
+          "logical_name_id": "ens:alice.eth",
+          "resource_id": "a72e7c29-77c9-538d-8a10-fed16bd0bc61",
+          "event_kind": "RecordChanged",
+          "source_family": "ens_v1_resolver_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 3,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 10,
+          "block_hash": "0xa100000000000000000000000000000000000000000000000000000000000010",
+          "transaction_hash": "0xtxa1000000000000000000000000000000000000000000000000000000000010",
+          "log_index": 2,
+          "raw_fact_ref": {
+            "block_hash": "0xa100000000000000000000000000000000000000000000000000000000000010",
+            "block_number": 10,
+            "chain_id": "ethereum-mainnet",
+            "kind": "raw_log",
+            "log_index": 2,
+            "transaction_hash": "0xtxa1000000000000000000000000000000000000000000000000000000000010",
+            "transaction_index": 0
+          },
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "canonicality_state": "Canonical",
+          "before_state": {},
+          "after_state": {
+            "record_family": "addr",
+            "record_key": "addr:60",
+            "selector_key": "60",
+            "value": "0x0000000000000000000000000000000000001022"
+          }
+        },
+        {
+          "event_identity": "ens_v1_unwrapped_authority:RecordChanged:record-change:0xa100000000000000000000000000000000000000000000000000000000000030:0xtxa1000000000000000000000000000000000000000000000000000000000030:0",
+          "namespace": "ens",
+          "logical_name_id": "ens:alice.eth",
+          "resource_id": "a72e7c29-77c9-538d-8a10-fed16bd0bc61",
+          "event_kind": "RecordChanged",
+          "source_family": "ens_v1_resolver_l1",
+          "manifest_version": 1,
+          "source_manifest_id": 3,
+          "chain_id": "ethereum-mainnet",
+          "block_number": 30,
+          "block_hash": "0xa100000000000000000000000000000000000000000000000000000000000030",
+          "transaction_hash": "0xtxa1000000000000000000000000000000000000000000000000000000000030",
+          "log_index": 0,
+          "raw_fact_ref": {
+            "block_hash": "0xa100000000000000000000000000000000000000000000000000000000000030",
+            "block_number": 30,
+            "chain_id": "ethereum-mainnet",
+            "kind": "raw_log",
+            "log_index": 0,
+            "transaction_hash": "0xtxa1000000000000000000000000000000000000000000000000000000000030",
+            "transaction_index": 0
+          },
+          "derivation_kind": "ens_v1_unwrapped_authority",
+          "canonicality_state": "Canonical",
+          "before_state": {},
+          "after_state": {
+            "record_family": "addr",
+            "record_key": "addr:60",
+            "selector_key": "60",
+            "value": "0x0000000000000000000000000000000000001033"
+          }
+        }
+      ],
+      "name_surfaces": [
+        {
+          "block_hash": "0xa100000000000000000000000000000000000000000000000000000000000010",
+          "block_number": 10,
+          "canonical_display_name": "alice.eth",
+          "canonicality_state": "canonical",
+          "chain_id": "ethereum-mainnet",
+          "dns_encoded_name": "\\x05616c6963650365746800",
+          "input_name": "alice.eth",
+          "labelhashes": [
+            "0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501",
+            "0x4f5b812789fc606be1b3b16908db13fc7a9adf7ca72641f84d75b47069d3d7f0"
+          ],
+          "logical_name_id": "ens:alice.eth",
+          "namehash": "0x787192fc5378cc32aa956ddfdedbf26b24e8d78e40109add0eea2c1a012c3dec",
+          "namespace": "ens",
+          "normalization_errors": [],
+          "normalization_warnings": [],
+          "normalized_name": "alice.eth",
+          "normalizer_version": "ensip15@ens-normalize-0.1.1",
+          "provenance": {
+            "adapter": "ens_v1_unwrapped_authority",
+            "logical_name_id": "ens:alice.eth",
+            "source_event": "registrar_name_observation"
+          }
+        }
+      ],
+      "surface_bindings": [
+        {
+          "active_from": "2023-11-14T22:13:30+00:00",
+          "active_to": null,
+          "binding_kind": "declared_registry_path",
+          "block_hash": "0xa100000000000000000000000000000000000000000000000000000000000010",
+          "block_number": 10,
+          "canonicality_state": "canonical",
+          "chain_id": "ethereum-mainnet",
+          "logical_name_id": "ens:alice.eth",
+          "provenance": {
+            "adapter": "ens_v1_unwrapped_authority",
+            "authority_key": "registrar:ethereum-mainnet:1:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xa100000000000000000000000000000000000000000000000000000000000010:0",
+            "authority_kind": "registrar"
+          },
+          "resource_id": "a72e7c29-77c9-538d-8a10-fed16bd0bc61",
+          "surface_binding_id": "77417fd1-2c12-54a4-b8d8-60e2d2681db1"
+        }
+      ],
+      "resources": [
+        {
+          "block_hash": "0xa100000000000000000000000000000000000000000000000000000000000010",
+          "block_number": 10,
+          "canonicality_state": "canonical",
+          "chain_id": "ethereum-mainnet",
+          "provenance": {
+            "adapter": "ens_v1_unwrapped_authority",
+            "authority_key": "registrar:ethereum-mainnet:1:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xa100000000000000000000000000000000000000000000000000000000000010:0",
+            "authority_kind": "registrar",
+            "expiry": 1800000000,
+            "labelhash": "0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501",
+            "logical_name_id": "ens:alice.eth",
+            "registrant": "0x0000000000000000000000000000000000001011",
+            "released_at": null
+          },
+          "resource_id": "a72e7c29-77c9-538d-8a10-fed16bd0bc61",
+          "token_lineage_id": "52cdf768-7c5b-59b4-a7d7-e66e9c7a459f"
+        }
+      ],
+      "token_lineages": [
+        {
+          "block_hash": "0xa100000000000000000000000000000000000000000000000000000000000010",
+          "block_number": 10,
+          "canonicality_state": "canonical",
+          "chain_id": "ethereum-mainnet",
+          "provenance": {
+            "adapter": "ens_v1_unwrapped_authority",
+            "authority_key": "registrar:ethereum-mainnet:1:0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501:0xa100000000000000000000000000000000000000000000000000000000000010:0",
+            "authority_kind": "registrar",
+            "labelhash": "0x9c0257114eb9399a2985f8e75dad7600c5d89fe3824ffa99ec1c3eb8bf3b0501",
+            "logical_name_id": "ens:alice.eth"
+          },
+          "token_lineage_id": "52cdf768-7c5b-59b4-a7d7-e66e9c7a459f"
+        }
+      ]
+    }
+  ]
+}

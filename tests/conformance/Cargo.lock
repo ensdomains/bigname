@@ -808,6 +808,7 @@ dependencies = [
 name = "bigname-test-support"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "anyhow",
  "bigname-storage",
  "sqlx",

@@ -1,0 +1,5 @@
+query MigratedNamesCount($where: DomainFilter!) {
+  domainConnection(first: 0, where: $where) {
+    totalCount
+  }
+}

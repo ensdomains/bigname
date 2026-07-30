@@ -1,0 +1,17 @@
+query Domains(
+  $where: DomainFilter!
+  $first: Int
+  $skip: Int
+  $orderBy: Domain_orderBy
+  $orderDirection: OrderDirection
+) {
+  domains(
+    where: $where
+    first: $first
+    skip: $skip
+    orderBy: $orderBy
+    orderDirection: $orderDirection
+  ) {
+    ...Domain
+  }
+}
