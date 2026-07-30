@@ -757,8 +757,6 @@ Diagnostic snapshot rules:
   event_kind, source_family, manifest_version?, source_manifest_id?,
   chain_position, transaction_hash, log_index, raw_fact_ref, derivation_kind,
   canonicality_state, before_state?, after_state?, provenance, coverage}`.
-  `derivation_kind` uses the closed, writer-owned vocabulary defined in
-  [Architecture § Derivation kinds](architecture.md#derivation-kinds).
 - Pagination behavior: standard collection pagination.
 - Snapshot behavior: diagnostic event rows come from current state. The
   response omits `meta.as_of` and `meta.as_of_token`, and its cursor carries no

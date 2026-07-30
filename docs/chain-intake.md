@@ -53,29 +53,7 @@ ENSv2 adapters normalize log-derived facts after raw block admission:
 
 Any ENSv2 enrichment call used to repair or disambiguate a log-derived fact — `getResource(anyId)`, `getTokenId(anyId)`, `getState(anyId)`, `getAlias(fromName)`, EAC role reads — anchors to the same block identity as the raw log. Log-derived state is never rewritten through ambiguous number-only calls.[^v2-iperm-l57][^v2-iperm-l67][^v2-iperm-l72][^v2-iperm-resolver-l56][^v2-eac-l100]
 
-The checked-in fresh-schema manifests and current adapter intake exclude post-audit
-`RegistryCreated` and `URIUpdated`, resolver `DataChanged` and
-`NamedDataResource`, and ERC-1155 `ApprovalForAll`; they produce no current
-normalized intake events. Before the replacement admits `RegistryCreated`, the
-mandatory one-time historical-signature fetch must populate its required range.
-The manifest ABI and intake can then admit it, normalize it as
-`RegistryCreated`, and use its exact log position as the announced registry's
-intake boundary. `URIUpdated` and the other listed omissions remain excluded.
-The same fetch-before-admission rule applies to proxy `Upgraded`, which current
-intake has never watched. `ETHRenewerV1` is not an admitted emitter — only the
-admitted `ETHRegistrar` supplies `NameRenewed` — and `PublicResolverV2` is not an
-admitted resolver profile. A registry resolver edge may still make
-`PublicResolverV2` a watch-only contract instance whose configured generic
-events are retained as normalized observations. Resolver-local projection
-requires that the emitter match the name's current registry binding and that an
-ENSv2 resolver profile be explicitly admitted; without both, no selector value
-or authoritative record coverage is published. A current-emitter
-`VersionChanged` remains eligible only as the boundary of an explicit
-`resolver_family_pending` row, never as record-value support. These omissions
-are explicit capability boundaries, not absence claims about upstream
-behavior.[^v2-events-created][^v2-events-uri][^v2-pres-data][^v2-deploy-renewer][^v2-deploy-public-resolver][^v2-public-resolver-discovery][^v2-public-resolver-version][^v2-iethrenewer-l21]
-(upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L336 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L341 @ ens_v2@ccaeb58)
+Post-audit `RegistryCreated` and `URIUpdated`, resolver `DataChanged` and `NamedDataResource`, and ERC-1155 `ApprovalForAll` are outside the active manifest ABI and produce no normalized intake events. `ETHRenewerV1` is not an admitted emitter — only the admitted `ETHRegistrar` supplies `NameRenewed` — and `PublicResolverV2` is not an admitted resolver profile. A registry resolver edge may still make `PublicResolverV2` a watch-only contract instance whose configured generic events are retained as normalized observations. Resolver-local projection requires that the emitter match the name's current registry binding and that an ENSv2 resolver profile be explicitly admitted; without both, no selector value or authoritative record coverage is published. A current-emitter `VersionChanged` remains eligible only as the boundary of an explicit `resolver_family_pending` row, never as record-value support. These omissions are explicit capability boundaries, not absence claims about upstream behavior.[^v2-events-created][^v2-events-uri][^v2-pres-data][^v2-deploy-renewer][^v2-deploy-public-resolver][^v2-public-resolver-discovery][^v2-public-resolver-version][^v2-iethrenewer-l21] (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L336 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L341 @ ens_v2@48b3e2d)
 
 ## Upstream requirements
 
@@ -543,30 +521,30 @@ The intake contract is acceptable when the storage, projection, API, and executi
 [^v2-deploy-ethreg]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistry.json:L2 @ ens_v2@48b3e2d)
 [^v2-deploy-ethrc]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRegistrar.json:L2 @ ens_v2@48b3e2d)
 [^v2-deploy-pres]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/PermissionedResolverImpl.json:L2 @ ens_v2@48b3e2d)
-[^v2-deploy-renewer]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRenewerV1.json:L2 @ ens_v2@ccaeb58)
-[^v2-deploy-public-resolver]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/PublicResolverV2.json:L2 @ ens_v2@ccaeb58)
-[^v2-public-resolver-discovery]: `PublicResolverV2` composes the standard resolver profiles and authorizes writes through registry ownership or approvals; locked-name migration can replace a recognized ENSv1 resolver with that public resolver before a nonzero registered resolver emits `ResolverUpdated`: (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L4 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L23 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L179 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L139 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L474 @ ens_v2@ccaeb58)
-[^v2-public-resolver-version]: The deployed resolver ABI includes `VersionChanged` and `clearRecords`: (upstream: .refs/ens_v2/contracts/deployments/sepolia/PublicResolverV2.json:L429 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/deployments/sepolia/PublicResolverV2.json:L598 @ ens_v2@ccaeb58)
+[^v2-deploy-renewer]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/ETHRenewerV1.json:L2 @ ens_v2@48b3e2d)
+[^v2-deploy-public-resolver]: (upstream: .refs/ens_v2/contracts/deployments/sepolia/PublicResolverV2.json:L2 @ ens_v2@48b3e2d)
+[^v2-public-resolver-discovery]: `PublicResolverV2` composes the standard resolver profiles and authorizes writes through registry ownership or approvals; locked-name migration can replace a recognized ENSv1 resolver with that public resolver before a nonzero registered resolver emits `ResolverUpdated`: (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L4 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L23 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L179 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L139 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L474 @ ens_v2@48b3e2d)
+[^v2-public-resolver-version]: The deployed resolver ABI includes `VersionChanged` and `clearRecords`: (upstream: .refs/ens_v2/contracts/deployments/sepolia/PublicResolverV2.json:L429 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/deployments/sepolia/PublicResolverV2.json:L598 @ ens_v2@48b3e2d)
 
 [^v2-iperm-l34]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L38 @ ens_v2@48b3e2d)
 [^v2-iperm-l57]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L61 @ ens_v2@48b3e2d)
 [^v2-iperm-l67]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L71 @ ens_v2@48b3e2d)
 [^v2-iperm-l72]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L76 @ ens_v2@48b3e2d)
-[^v2-events-created]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@ccaeb58)
+[^v2-events-created]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@48b3e2d)
 [^v2-events-l49]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L56 @ ens_v2@48b3e2d)
 [^v2-events-l59]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L66 @ ens_v2@48b3e2d)
 [^v2-events-l69]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L82 @ ens_v2@48b3e2d)
 [^v2-events-l75]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L88 @ ens_v2@48b3e2d)
-[^v2-events-uri]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L76 @ ens_v2@ccaeb58)
+[^v2-events-uri]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L76 @ ens_v2@48b3e2d)
 [^v2-pr-l451]: (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L537 @ ens_v2@48b3e2d)
 
 [^v2-iperm-resolver-l14]: (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L19 @ ens_v2@48b3e2d)
 [^v2-iperm-resolver-l56]: (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L60 @ ens_v2@48b3e2d)
-[^v2-pres-data]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L46 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L161 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L437 @ ens_v2@ccaeb58)
+[^v2-pres-data]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L46 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L161 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L437 @ ens_v2@48b3e2d)
 
 [^v2-eac-l19]: (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L22 @ ens_v2@48b3e2d)
 [^v2-eac-l100]: (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L98 @ ens_v2@48b3e2d)
-[^v2-iethrenewer-l21]: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRenewer.sol:L21 @ ens_v2@ccaeb58)
+[^v2-iethrenewer-l21]: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRenewer.sol:L21 @ ens_v2@48b3e2d)
 
 [^ponder-reorg-l41]: (upstream: .refs/ponder/docs/pages/docs/indexing/overview.mdx:L41 @ ponder@c8f6935)
 [^ponder-reorg-l44]: (upstream: .refs/ponder/docs/pages/docs/indexing/overview.mdx:L44 @ ponder@c8f6935)

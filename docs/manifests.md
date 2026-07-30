@@ -56,11 +56,6 @@ For `[[discovery_rules]]`, the only authorable `admission` value is `reachable_f
 ### `capability_flags`
 
 Each flag carries a name, a status (`unsupported` | `shadow` | `supported`), and optional notes.
-The fields remain required during the interpreter and manifest-sync port in the
-[replacement build plan](../simplification-build-plan-20260730.md) and retain
-their current behavior. The fresh schema keeps them only in `manifest_payload`;
-it has no capability table. The later API-and-surface port removes the fields
-and adopts declared-means-supported.
 
 ### `chain`
 
@@ -194,34 +189,7 @@ Upstream events map to normalized adapter output: `TokenResource` → `TokenReso
 
 ENSv2 terminal lifecycle events also close adapter-owned state. `LabelUnregistered` is emitted before upstream expires the entry and has no paired zero-target subregistry or resolver updates, so the adapter closes the current surface binding and emits terminal discovery observations at that log position. It also emits null `SubregistryChanged` and `ResolverChanged` boundaries for any attached roles so full and incremental projections retire the old topology. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L201 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L208 @ ens_v2@48b3e2d) A replacement registration or reservation can bump the token version and overwrite the stored subregistry and resolver, while upstream emits follow-up target updates only for nonzero replacements; the adapter therefore closes the prior discovery targets before accepting the successor lifecycle and emits the same null role boundaries. Replacement registration lets the following `TokenResource` close the old surface at the successor start; replacement reservation has no successor resource, so it closes immediately and emits `SurfaceUnbound` as position-specific reorg-repair evidence. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L452 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L459 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L471 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L474 @ ens_v2@48b3e2d)
 
-The checked-in fresh-schema manifests and current adapter intake still exclude
-`RegistryCreated`. Before the replacement admits it as an event-announcement
-discovery input, a mandatory one-time historical-signature fetch populates the
-required range; only then may the manifest ABI and intake change land ahead of
-the replacement rebuild. `PermissionedRegistry` emits `RegistryCreated` in the
-constructor before granting the root roles, so the event's exact log position
-is the new registry's intake boundary.[^v2-events-created]
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L112 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L113 @ ens_v2@ccaeb58)
-The interpreter normalizes the announcement as
-`RegistryCreated`; linkage to an admitted parent decides authority separately.
-`URIUpdated`, `DataChanged`, `NamedDataResource`, and `ApprovalForAll` remain
-outside normalized admission and do not widen route coverage.[^v2-events-uri][^v2-pres-data]
-Operator approval is not treated as token ownership or an ENSv2 resource-role
-grant.
-(upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L336 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L341 @ ens_v2@ccaeb58)
-The separately deployed `ETHRenewerV1` is not an admitted
-registrar emitter; `NameRenewed` intake remains limited to the admitted
-`ETHRegistrar` emitter.[^v2-deploy-renewer][^v2-iethrenewer-l21]
-`PublicResolverV2` is not directly declared by a manifest and is not an admitted
-resolver profile.[^v2-deploy-public-resolver] Resolver observations can
-discovery-admit `PublicResolverV2` as a watch-only contract instance and retain
-configured normalized facts, but they publish no selectors, cache values, or
-authoritative record coverage without explicit ENSv2 resolver-profile
-admission. A current-emitter `RecordVersionChanged` may remain only as an
-explicit `resolver_family_pending` boundary; non-current resolver emitters are
-always excluded.[^v2-public-resolver-discovery][^v2-public-resolver-version]
+The post-audit contracts add `RegistryCreated` and `URIUpdated` registry events, `PermissionedResolver` adds the `DataChanged` / `NamedDataResource` data-record pair, and the ERC-1155 base emits `ApprovalForAll` for operator approvals.[^v2-events-created][^v2-events-uri][^v2-pres-data] Those five events are intentionally absent from the active manifest ABI, so they do not produce normalized registry, record, permission, or ownership events and do not widen route coverage. Operator approval is not treated as token ownership or an ENSv2 resource-role grant. (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L336 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/erc1155/ERC1155Singleton.sol:L341 @ ens_v2@48b3e2d) The separately deployed `ETHRenewerV1` is not an admitted registrar emitter; `NameRenewed` intake remains limited to the admitted `ETHRegistrar` emitter.[^v2-deploy-renewer][^v2-iethrenewer-l21] `PublicResolverV2` is not directly declared by a manifest and is not an admitted resolver profile.[^v2-deploy-public-resolver] Resolver observations can discovery-admit `PublicResolverV2` as a watch-only contract instance and retain configured normalized facts, but they publish no selectors, cache values, or authoritative record coverage without explicit ENSv2 resolver-profile admission. A current-emitter `RecordVersionChanged` may remain only as an explicit `resolver_family_pending` boundary; non-current resolver emitters are always excluded.[^v2-public-resolver-discovery][^v2-public-resolver-version]
 
 All other current Sepolia artifacts — including universal/reverse resolution, wrapper, migration, factory, oracle, batch-registrar, and mock-payment surfaces — remain outside admission until a doc-first update.
 
@@ -267,12 +235,7 @@ A discovered contract is authoritative when one of these holds:
 - it is reachable from an active manifest root through an allowed `discovery_rules` edge
 - it is explicitly allow-listed by a manifest version for a migration epoch
 
-Each admitted edge stores `from_contract_instance_id`,
-`to_contract_instance_id`, source manifest version, edge kind, discovery source,
-active range, and provenance. Stored edge kinds are closed to `resolver`,
-`subregistry`, `proxy_implementation`, and `migration`. Parent and alias
-relationships are normalized name topology; metadata observations and
-cross-chain transport are source or execution provenance, not discovery edges.
+Each admitted edge stores `from_contract_instance_id`, `to_contract_instance_id`, source manifest version, edge kind, discovery source, active range, and provenance.
 
 Discovery resolves `(chain, address, point in time)` to endpoint `contract_instance_id`s before storing the edge. Re-admitting an address that was previously admitted on the same chain reuses the prior `contract_instance_id` and appends a new range; replaying the exact same observation reuses its historical edge epoch instead of appending a duplicate. A new ID is minted only for addresses never admitted on that chain. Manifest-declared and discovered proxy/implementation links share the same edge and active-range rules.
 
@@ -282,28 +245,15 @@ Registry-discovery live reorg repair is an absence-aware complete-source case, e
 
 ## Manifest change propagation
 
-Manifest sync owns `SourceManifestUpdated` writes and performs them through its
-manifest-change interpreter; it does not hand declaration changes to a chain
-interpreter. During the staged port, the existing authored `capability_flags`
-remain in `manifest_payload` and keep their current meaning. A flag edit is
-manifest content in `SourceManifestUpdated`; the replacement schema has no
-separate capability-state table or `CapabilityChanged` event. The later
-API-and-surface port in the
-[replacement build plan](../simplification-build-plan-20260730.md) removes the
-authored flags when it adopts the ratified declared-means-supported rule.
+Manifest changes produce [normalized events](glossary.md): `SourceManifestUpdated`, `ProxyImplementationChanged`, `CapabilityChanged`. They update discovery admission, invalidate execution cache entries, and trigger projection recomputation where capability boundaries change.
 
-After its mandatory one-time historical-signature fetch, an admitted proxy's
-on-chain `Upgraded` log produces `Upgraded`, which replaces
-`ProxyImplementationChanged` and code-hash polling. Current intake has never
-watched that signature, so the replacement may not admit it before the fetch.
-ENSv2 declares the event with the new implementation address and emits it when
-the proxy changes implementation.
-(upstream: .refs/ens_v2/contracts/src/universalResolver/UpgradableUniversalResolverProxy.sol:L30 @ ens_v2@ccaeb58)
-(upstream: .refs/ens_v2/contracts/src/universalResolver/UpgradableUniversalResolverProxy.sol:L114 @ ens_v2@ccaeb58)
+Resolver-profile authority additionally has a durable convergence journal. Its persisted semantic snapshot contains the active `ens_v1_resolver_l1` and `basenames_base_resolver` target identities, source manifests, active ranges, seed membership, and the full set of admitted resolver-profile, fact-family, status, admission-basis, and matched-seed semantics for each target. It also stores the per-chain discovery-admission epochs and a journal revision. After manifest or discovery authority may change, the indexer compares a current authority snapshot taken between two equal epoch reads with that persisted snapshot. One storage transaction durably force-enqueues added, removed, or changed addresses before a revision compare-and-set publishes the new snapshot, and commits both changes or neither. A crash after mutation is recovered by startup or a later epoch guard; a revision conflict rolls back its queue increments, reloads, and retries. The persisted prior snapshot keeps a removed final target available for absence cleanup.
 
-Resolver-profile admission changes trigger event-driven scoped recomputation of the affected resolver classifications. The replacement pipeline performs that work inline. It has no durable convergence journal or queue.
+A changed ENSv1 current or legacy PublicResolver-generation seed queues every old and new active ENSv1 resolver target on that chain; a changed Basenames `L2Resolver` seed does the same for every old and new active Basenames resolver target. Repository sync and broad startup/timer reconciliation run the full journal. Ordinary block adapter sync reads only that chain's discovery-admission epoch before and after discovery work; an unchanged epoch performs no global resolver-authority scan, while drift forces the full journal even if a retry reports no new edge mutation. Timer-driven repository and discovery refresh drains forced work before adopting the refreshed watch state. The queue and journal are repair orchestration, not manifest truth: current manifests and discovery edges still decide admission when the work is drained.
 
-The replacement runtime has no code-hash polling loop, persisted manifest-drift alerts, or manifest-drift CLI. A repository correction produces `SourceManifestUpdated`. An admitted on-chain proxy change produces `Upgraded`.
+Live manifest drift and proxy-upgrade alerting is a worker-owned operational loop. The worker computes drift candidates from admitted manifests, code-hash facts, proxy/implementation edges, and watch-plan state, and persists them to the worker-owned alert observation family. The worker does not write `normalized_events`, mutate manifests, mutate discovery admission, change capability flags, write projections, or expose a public route. Remediation is an explicit manifest or discovery change that produces the normal events above.
+
+`bigname-worker manifest-drift audit --json` computes candidates, persists alert observations, and renders the persisted view alongside live counts. `--fail-on-alert --json` returns nonzero when actionable persisted alerts remain. `bigname-worker inspect manifest-drift --json` is read-only over already persisted observations.
 
 ## Watch-plan expansion
 
@@ -319,12 +269,7 @@ Watch-plan expansion starts from active manifest roots by `contract_instance_id`
 
 ## Capability policy
 
-Until the later API-and-surface port removes the authored flags, capabilities
-gate behavior, not public-contract existence. An unsupported capability
-surfaces as `coverage.unsupported_reason` or a typed error. Shadow capabilities
-write facts without enabling general reads. The replacement schema keeps the
-authored values only inside `manifest_payload`; it does not create capability
-rows or capability-change events.
+Capabilities gate behavior, not public-contract existence. An unsupported capability surfaces as `coverage.unsupported_reason` or a typed error. Shadow capabilities write facts and traces without enabling general reads. Adding a new capability is additive only when it does not change prior semantics.
 
 ## Ownership
 
@@ -415,7 +360,7 @@ Known historical starts cite a pinned upstream source. Targets without a pinned 
 
 [^v2-pres-l38]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L33 @ ens_v2@48b3e2d)
 [^v2-pres-l70]: (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L19 @ ens_v2@48b3e2d)
-[^v2-pres-data]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L46 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L161 @ ens_v2@ccaeb58) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L437 @ ens_v2@ccaeb58)
+[^v2-pres-data]: (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L46 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L161 @ ens_v2@48b3e2d) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L437 @ ens_v2@48b3e2d)
 
 [^v2-iperm-l22]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L23 @ ens_v2@48b3e2d)
 [^v2-iperm-l34]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L38 @ ens_v2@48b3e2d)
@@ -423,12 +368,12 @@ Known historical starts cite a pinned upstream source. Targets without a pinned 
 [^v2-iethreg-l32]: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@48b3e2d)
 [^v2-iethrenewer-l21]: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRenewer.sol:L21 @ ens_v2@48b3e2d)
 
-[^v2-events-created]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@ccaeb58)
+[^v2-events-created]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@48b3e2d)
 [^v2-events-l15]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L18 @ ens_v2@48b3e2d)
 [^v2-events-l49]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L56 @ ens_v2@48b3e2d)
 [^v2-events-l69]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L82 @ ens_v2@48b3e2d)
 [^v2-events-l75]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L88 @ ens_v2@48b3e2d)
-[^v2-events-uri]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L76 @ ens_v2@ccaeb58)
+[^v2-events-uri]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L76 @ ens_v2@48b3e2d)
 
 [^v2-eac-l19]: (upstream: .refs/ens_v2/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L22 @ ens_v2@48b3e2d)
 
