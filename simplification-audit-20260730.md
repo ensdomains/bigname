@@ -77,8 +77,10 @@ Each claim must be **structurally enforced and audited once at rewrite time**
   error on one chain (e.g. bad Base provider data → deliberate crash) stops
   that chain only; the other keeps syncing and serving. Cheap: all storage is
   already chain-keyed and lanes are per-chain; this is process/supervisor
-  structure, not data-model work. Cross-chain reads (ENSv2 L1↔L2) join at
-  the projection/API layer, not during per-chain intake.
+  structure, not data-model work. Cross-chain reads join at the projection/API layer, not during per-chain
+  intake. (2026-07-31 maintainer correction: Namechain — ENSv2's planned L2 —
+  was cancelled upstream; no name ever spans chains within one namespace, so
+  single-chain name binding in the schema is correct.)
 
 ## Normalization as a gate, not stored identity (maintainer, 2026-07-30)
 
