@@ -256,6 +256,16 @@ manifest_normalized_events ABSORB remainder lands in B2's manifest sync.
 D4 adds the reference-pin triage + ens_v2 citation-hash sweep. B4/finalization
 gate adds: measure the dRPC sweep's query volume/cost before D3.
 
+## Stage A review decisions (maintainer, 2026-07-31)
+
+- GraphQL gains `text(key:)` on Resolver in Stage C (manager main already
+  queries it; pin bump follows).
+- Lookup execution pins to the newest processed block (same rule as
+  hydration); divergence positions therefore always cite ingested blocks.
+- The reorg auto-clear rule on the divergence ledger is maintainer-ratified.
+- Namechain cancellation (upstream, maintainer-stated): single-chain name
+  binding stands; the L1↔L2 cross-chain concern is void.
+
 ## Risk register (top five)
 
 1. **ENSv1 interpreter port regressions** — richest semantics, 15k lines.
