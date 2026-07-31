@@ -525,7 +525,8 @@ impl PhaseRunner {
                 PhaseBatchOutcome::Complete(_) => {
                     return Ok(PhaseLoopResult::Completed(Box::new(progress)));
                 }
-                PhaseBatchOutcome::Continue(_) => {
+                PhaseBatchOutcome::Continue(_) => {}
+                PhaseBatchOutcome::Idle(_) => {
                     tokio::select! {
                         () = cancellation.cancelled() => {
                             return Ok(PhaseLoopResult::Cancelled);

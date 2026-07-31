@@ -6,6 +6,7 @@ use phase_runner::{
     capacity::CapacityGuard,
     cli::{Cli, ResolvedCommand},
     database::RunnerDatabase,
+    ingest_phase::IngestPhase,
     phase::PhaseSet,
     runner::{PhaseRunner, SupervisorReport},
 };
@@ -37,9 +38,11 @@ async fn main() -> Result<()> {
                 .saturating_mul(2)
                 .max(4);
             let database = RunnerDatabase::connect(&database_url, connections).await?;
+            let phases =
+                PhaseSet::with_ingest(Arc::new(IngestPhase::new(database.pool().clone())))?;
             let runner = Arc::new(PhaseRunner::new(
                 database,
-                PhaseSet::loopback(),
+                phases,
                 CapacityGuard::system(runtime.capacity.clone()),
                 runtime.instance_id.clone(),
                 runtime.timing.clone(),
@@ -57,9 +60,11 @@ async fn main() -> Result<()> {
             range,
         } => {
             let database = RunnerDatabase::connect(&database_url, 4).await?;
+            let phases =
+                PhaseSet::with_ingest(Arc::new(IngestPhase::new(database.pool().clone())))?;
             let runner = PhaseRunner::new(
                 database,
-                PhaseSet::loopback(),
+                phases,
                 CapacityGuard::system(capacity),
                 instance_id,
                 timing,
