@@ -24,22 +24,29 @@ except `verify` and `live`, which may overlap because `verify` only reads.
    an announced contract (RegistryCreated, resolver signature, Upgraded)
    extends the address-scoped watch set forward from its announcement.
 3. **project** — build/refresh the projection tables from normalized
-   events (stage-and-swap for full builds, incremental applies while
-   live). Hydration belongs to this phase: multicall reads pinned at the
-   chain's canonical head hash for the event-silent legacy set.
+   events. A full build publishes every table in one projection family
+   together through a single rename-swap transaction; live updates apply
+   incrementally. Hydration belongs to this phase: multicall reads pinned
+   at the chain's canonical head hash for the event-silent legacy set.
 4. **verify** (Base: dRPC sweep behind finality; Ethereum: one-time sweep
    against reth) — read-only. On mismatch: mark the chain's status,
    stop that chain's supervisor, leave a diagnosis bundle. Never repairs.
 5. **live** — follow the head via RPC: reorg walk, orphaning, gap fill,
    then incremental interpret+project per new block range.
 
-Phase transitions are explicit rows in `phase_state` (chain, phase,
-started_at, ended_at, end_position). The ingest→live handoff datum is
-"ingest ended at block N"; `live` starts its cold walk from N.
+Phase transitions are explicit rows in `chain_phase_state`, keyed by
+(`chain_id`, `phase_name`). `started_at` and `finished_at` bracket a run;
+the current, target, and live-handoff block-number/hash columns record its
+positions. The ingest→live handoff datum is "ingest ended at block N";
+`live` starts its cold walk from N.
 
 ## Writer rules (structural, audited at D5)
 
-- The phase runner is the ONLY writer binary.
+- The phase runner is the ONLY pipeline writer binary. The separate API has
+  one bounded write exception: an API-triggered lookup may write or clear the
+  `resolution_divergences` table defined by build-plan amendment H. A
+  `chain_lineage` canonicality change also clears affected active rows through
+  a database invariant; it is not a second writer binary.
 - Raw-table writes exist only in ingest modules. Derived-table writes
   exist only in interpret/project modules. The verifier has no write
   capability (compile-level: no pool with write role).
@@ -47,7 +54,7 @@ started_at, ended_at, end_position). The ingest→live handoff datum is
   attempting the same phase fails loudly. This is the entire
   writer-exclusion apparatus (~20 lines).
 - Every connection stamps the interpreter content hash (A3). A binary
-  whose hash differs from the one recorded in `phase_state` for the
+  whose hash differs from the one recorded in `chain_phase_state` for the
   current interpret/project epoch refuses derived writes and reports.
   This is the deploy-race guard both review lenses required.
 
@@ -56,10 +63,15 @@ started_at, ended_at, end_position). The ingest→live handoff datum is
 - The runner publishes per-chain head markers (latest/safe/finalized) —
   the successor to `chain_checkpoints`; API snapshots and /v2/status read
   these.
-- Heartbeat rows: (service='phase-runner', chain, phase, beat_at),
+- A checkpoint jump promotes lineage through each legal state in order in the
+  same head-publication transaction: observed→canonical→safe→finalized.
+  Re-canonicalization first moves orphaned→canonical. The port must not reuse
+  the retained helper's direct assignment of one target state across a path.
+- Heartbeat rows: (`service_name='phase-runner'`, `instance_id`, `chain_id`,
+  `phase_name`, `heartbeat_at`),
   written by each phase loop at most every 5s. /healthz checks DB
-  reachability + newest beat age. /v2/status derives per-chain state
-  from phase_state + head markers + beat age, and reports the trust
+  reachability + newest heartbeat age. /v2/status derives per-chain state
+  from `chain_phase_state` + head markers + heartbeat age, and reports the trust
   label: Ethereum node-checked; Base quick-synced → cross-checked.
 - The ops_catchup disk/DB capacity guard is re-homed here: every phase
   loop checks free-disk and database-size floors between batches and
@@ -86,8 +98,13 @@ stop, a human, and (worst case) wipe-and-resync.
    phase with capped backoff; only verify-mismatch and data-integrity
    errors stop a chain.
 2. Ethereum's one-time reth sweep runs BEFORE live follow (local, fast).
-3. The API stays a separate read-only binary.
+3. The API stays a separate binary. It is read-only except for the bounded
+   `resolution_divergences` write above; chain canonicality changes enforce
+   the automatic clearing invariant described there.
 4. Deployment note: hard blast isolation, when wanted, comes from running
    this one binary once per chain (two containers, same code) — isolation
    by chain, never by pipeline half. The indexer/worker split does not
    return.
+5. Manifest sync keeps the authored `deployment_epoch` field and persists it
+   one-to-one as `manifest_versions.deployment_label`; queries use the
+   storage name after the Stage B port.

@@ -124,6 +124,38 @@ jobs:
       - name: cargo clippy (e2e workspace)
         run: cargo clippy --manifest-path tests/e2e/Cargo.toml --locked --all-targets -- -D warnings
 
+  schema_v2:
+    name: test (schema v2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: bigname
+          POSTGRES_USER: bigname
+          POSTGRES_PASSWORD: bigname
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bigname -d bigname"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      BIGNAME_TEST_DATABASE_URL: postgres://bigname:bigname@127.0.0.1:5432/bigname
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client
+
+      - name: Apply and verify schema v2
+        run: ./schema-v2/apply-check.sh
+
   test_shard:
     name: test (${{ matrix.name }})
     runs-on: ubuntu-latest
@@ -308,6 +340,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs:
+      - schema_v2
       - test_shard
       - conformance
       - e2e
@@ -315,6 +348,10 @@ jobs:
     steps:
       - name: Check test shards
         run: |
+          if [ "${{ needs.schema_v2.result }}" != "success" ]; then
+            echo "schema v2 finished with result: ${{ needs.schema_v2.result }}"
+            exit 1
+          fi
           if [ "${{ needs.test_shard.result }}" != "success" ]; then
             echo "test shards finished with result: ${{ needs.test_shard.result }}"
             exit 1
