@@ -339,9 +339,10 @@ impl PhaseStore {
         .execute(&self.pool)
         .await
         .map_err(|error| {
-            RunnerError::transient(format!(
-                "failed to record phase {phase} failure for chain {chain_id}: {error}"
-            ))
+            RunnerError::database(
+                format!("failed to record phase {phase} failure for chain {chain_id}"),
+                error,
+            )
         })?;
         Ok(())
     }

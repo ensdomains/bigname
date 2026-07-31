@@ -17,6 +17,9 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 
 bigname-content-hash.workspace = true
+bigname-ingest = { workspace = true, features = ["reth-db"] }
 
 [dev-dependencies]
+axum.workspace = true
 bigname-test-support.workspace = true
+serde_json = "1.0.149"

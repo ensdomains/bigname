@@ -63,9 +63,10 @@ pub(crate) async fn update_progress(
         .execute(pool)
         .await
         .map_err(|error| {
-            RunnerError::transient(format!(
-                "failed to record progress for chain {chain_id} phase {phase}: {error}"
-            ))
+            RunnerError::database(
+                format!("failed to record progress for chain {chain_id} phase {phase}"),
+                error,
+            )
         })?;
     Ok(())
 }
@@ -464,10 +465,15 @@ pub(crate) async fn load_redo_resume(
             "active redo state is missing for chain {chain_id} phase {phase}"
         ))
     })?;
+    let ingest_cursors = if phase == PhaseName::Ingest {
+        load_ingest_cursors(pool, chain_id).await?
+    } else {
+        Vec::new()
+    };
     Ok(PhaseResume {
         current: marker_from_pair(current_number, current_hash),
         target: marker_from_pair(target_number, target_hash),
-        ingest_cursors: Arc::from([]),
+        ingest_cursors: Arc::from(ingest_cursors),
     })
 }
 

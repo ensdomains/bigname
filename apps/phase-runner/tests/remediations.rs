@@ -1483,6 +1483,141 @@ async fn non_verify_phase_rejects_a_verification_level() -> Result<()> {
 }
 
 #[tokio::test]
+async fn ingest_redo_resume_loads_each_persisted_source_cursor() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_ingest_redo_cursors").await?;
+    let chain_id = "ingest-redo-cursor-chain";
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(chain_id).await?;
+    let sources = vec![
+        source(chain_id, "bulk", SeedBasis::BaseSeam, 10)?,
+        source(chain_id, "rpc", SeedBasis::NewSignatureRange, 20)?,
+    ];
+    store
+        .update_ingest_cursors(
+            &sources,
+            &PhaseProgress {
+                current: Some(BlockMarker::new(29, "redo-cursor-block-29")?),
+                target: Some(BlockMarker::new(40, "redo-cursor-block-40")?),
+                source_progress: vec![
+                    SourceProgress {
+                        source_key: "bulk".to_owned(),
+                        current: Some(BlockMarker::new(19, "redo-cursor-block-19")?),
+                        target: Some(BlockMarker::new(19, "redo-cursor-block-19")?),
+                    },
+                    SourceProgress {
+                        source_key: "rpc".to_owned(),
+                        current: Some(BlockMarker::new(29, "redo-cursor-block-29")?),
+                        target: Some(BlockMarker::new(40, "redo-cursor-block-40")?),
+                    },
+                ],
+                ..PhaseProgress::default()
+            },
+        )
+        .await?;
+    sqlx::query(
+        "
+        UPDATE chain_phase_state
+        SET phase_status = 'running',
+            redo_in_progress = true,
+            redo_mode = 'redo',
+            redo_previous_phase_status = 'idle',
+            redo_from_block_number = 10,
+            redo_to_block_number = 40,
+            redo_current_block_number = 15,
+            redo_current_block_hash = 'redo-cursor-block-15',
+            redo_target_block_number = 40,
+            redo_target_block_hash = 'redo-cursor-block-40',
+            started_at = now()
+        WHERE chain_id = $1
+          AND phase_name = 'ingest'
+        ",
+    )
+    .bind(chain_id)
+    .execute(scratch.pool())
+    .await?;
+
+    let resume = store
+        .phase_resume(
+            chain_id,
+            PhaseName::Ingest,
+            &RunMode::Redo(BlockRange::new(10, 40)?),
+        )
+        .await?;
+    assert_eq!(resume.ingest_cursors.len(), 2);
+    assert_eq!(resume.ingest_cursors[0].source_key, "bulk");
+    assert_eq!(resume.ingest_cursors[0].next_block_number, 20);
+    assert_eq!(resume.ingest_cursors[0].target_block_number, Some(19));
+    assert_eq!(
+        resume.ingest_cursors[0]
+            .last_processed
+            .as_ref()
+            .map(|marker| marker.number),
+        Some(19)
+    );
+    assert_eq!(resume.ingest_cursors[1].source_key, "rpc");
+    assert_eq!(resume.ingest_cursors[1].next_block_number, 30);
+    assert_eq!(resume.ingest_cursors[1].target_block_number, Some(40));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn normal_mode_constraint_violations_are_terminal_data_integrity() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_normal_constraint").await?;
+    let chain_id = "normal-constraint-chain";
+    let store = PhaseStore::new(scratch.runner().pool().clone());
+    store.initialize_chain(chain_id).await?;
+    store
+        .start_phase(chain_id, PhaseName::Ingest, &RunMode::Normal)
+        .await?;
+    sqlx::raw_sql(
+        "
+        CREATE FUNCTION reject_test_normal_writes()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            IF NEW.current_block_number = 23 OR NEW.phase_status = 'failed' THEN
+                RAISE EXCEPTION 'deterministic test constraint'
+                    USING ERRCODE = '23514';
+            END IF;
+            RETURN NEW;
+        END
+        $$;
+        CREATE TRIGGER reject_test_normal_writes
+        BEFORE UPDATE ON chain_phase_state
+        FOR EACH ROW
+        EXECUTE FUNCTION reject_test_normal_writes();
+        ",
+    )
+    .execute(scratch.pool())
+    .await?;
+
+    let progress_error = store
+        .record_progress(
+            chain_id,
+            PhaseName::Ingest,
+            &RunMode::Normal,
+            &PhaseProgress {
+                current: Some(BlockMarker::new(23, "normal-constraint-block-23")?),
+                target: Some(BlockMarker::new(24, "normal-constraint-block-24")?),
+                ..PhaseProgress::default()
+            },
+        )
+        .await
+        .expect_err("class-23 progress violation must be terminal");
+    assert_eq!(progress_error.kind(), ErrorKind::DataIntegrity);
+    assert!(!progress_error.is_retryable());
+
+    let failure_error = store
+        .fail_phase(chain_id, PhaseName::Ingest, "test failure")
+        .await
+        .expect_err("class-23 failure-recording violation must be terminal");
+    assert_eq!(failure_error.kind(), ErrorKind::DataIntegrity);
+    assert!(!failure_error.is_retryable());
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn verify_phase_cannot_complete_without_a_verification_level() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_verify_level_required").await?;
     let chain_id = "verify-level-required-chain";

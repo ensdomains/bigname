@@ -271,6 +271,32 @@ impl Phase for LoopbackPhase {
     }
 }
 
+#[derive(Clone, Debug)]
+struct UnavailablePhase {
+    name: PhaseName,
+}
+
+impl UnavailablePhase {
+    const fn new(name: PhaseName) -> Self {
+        Self { name }
+    }
+}
+
+impl Phase for UnavailablePhase {
+    fn name(&self) -> PhaseName {
+        self.name
+    }
+
+    fn run_batch(&self, _context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move {
+            Err(RunnerError::new(
+                crate::error::ErrorKind::Configuration,
+                format!("phase {} has not been ported", self.name),
+            ))
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct PhaseSet {
     phases: [Arc<dyn Phase>; 5],
@@ -298,7 +324,46 @@ impl PhaseSet {
         Ok(Self { phases })
     }
 
+    pub fn with_ingest(ingest: Arc<dyn Phase>) -> RunnerResult<Self> {
+        Self::new([
+            ingest,
+            Arc::new(UnavailablePhase::new(PhaseName::Interpret)),
+            Arc::new(UnavailablePhase::new(PhaseName::Project)),
+            Arc::new(UnavailablePhase::new(PhaseName::Verify)),
+            Arc::new(UnavailablePhase::new(PhaseName::Live)),
+        ])
+    }
+
     pub fn get(&self, name: PhaseName) -> Arc<dyn Phase> {
         Arc::clone(&self.phases[name as usize])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn ingest_only_phase_set_rejects_unported_downstream_phases() {
+        let phases =
+            PhaseSet::with_ingest(Arc::new(LoopbackPhase::new(PhaseName::Ingest))).unwrap();
+        let context = PhaseContext {
+            chain_id: "test-chain".to_owned(),
+            phase: PhaseName::Interpret,
+            mode: RunMode::Normal,
+            sources: Arc::from([]),
+            available_heads: None,
+            live_handoff: None,
+            resume: PhaseResume::default(),
+        };
+
+        let error = phases
+            .get(PhaseName::Interpret)
+            .run_batch(context)
+            .await
+            .expect_err("unported downstream phase must stop");
+
+        assert_eq!(error.kind(), crate::error::ErrorKind::Configuration);
+        assert!(error.to_string().contains("interpret"));
     }
 }

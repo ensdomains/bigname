@@ -1,0 +1,31 @@
+[package]
+name = "bigname-ingest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+reth-db = ["dep:reth-ethereum"]
+
+[dependencies]
+alloy-consensus.workspace = true
+alloy-primitives.workspace = true
+alloy-rpc-types-eth.workspace = true
+anyhow.workspace = true
+base64 = "0.22.1"
+jsonwebtoken = { version = "10.3.0", default-features = false, features = ["rust_crypto", "use_pem"] }
+reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls"] }
+serde.workspace = true
+serde_json = "1.0.149"
+sqlx.workspace = true
+tokio = { workspace = true, features = ["time"] }
+tracing.workspace = true
+uuid.workspace = true
+reth-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v2.2.0", default-features = false, features = ["std", "node"], optional = true }
+
+bigname-manifests.workspace = true
+
+[dev-dependencies]
+bigname-test-support.workspace = true
