@@ -225,6 +225,18 @@ subregistry checkpoint implementation remains with that still-retained
 discovery adapter, but the production startup caller supplies no checkpoint
 context.
 
+### Transitional old-indexer limits
+
+A target discovered during an old-indexer session enters stored discovery and a later watch-plan reload, but the old runtime no longer fetches that target's earlier logs in the same session. This is acceptable only because a build containing these Stage B cuts is limited to CI and end-to-end tests until the old runtime is deleted; the new phase pipeline will return newly admitted sources to `ingest`, and `interpret` will wait for that source range.
+
+An ENSv1 manifest rollover now makes broad synchronization fail closed when retained [normalized events](glossary.md) still carry the previous manifest provenance; the deleted provenance-pinning path no longer rewrites them. This is acceptable only because a build containing these Stage B cuts is limited to CI and end-to-end tests until the old runtime is deleted; later in Stage B, an explicit `phase-runner redo --phase interpret` over the affected range will own re-derivation under the new manifest.
+
+Outside the storage contract's explicitly admitted normalized-event field repairs and Basenames boundary supersession classes, automatic raw-fact replay now fails closed when an existing normalized-event identity has a stale payload; the deleted general arbitration path no longer supersedes that row automatically. This is acceptable only because a build containing these Stage B cuts is limited to CI and end-to-end tests until the old runtime is deleted; the new pipeline will require an explicit `interpret` redo/restage to replace the affected derived output.
+
+ENSv2 live-poll registry-state reconstruction now uses the earliest retained watched log as its floor and walks forward to the selected target without proof that earlier required history is complete; the [closure](glossary.md) gate that supplied that proof was deleted. This is acceptable only because a build containing these Stage B cuts is limited to CI and end-to-end tests until the old runtime is deleted; the new pipeline will establish source-range completeness in `ingest` before `interpret` reconstructs registry state.
+
+A full-source ENSv2 registry sync now always interprets the retained facts instead of becoming a no-op when closure authority is absent. This is acceptable only because a build containing these Stage B cuts is limited to CI and end-to-end tests until the old runtime is deleted; the new pipeline will keep completeness as an `ingest` readiness prerequisite and run `interpret` only after that boundary is established.
+
 Reconciliation, fetch, notification, and historical-backfill detail live in [`chain-intake.md`](chain-intake.md).
 
 ## Immutable facts and rebuildable state

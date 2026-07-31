@@ -3435,6 +3435,85 @@ async fn ens_v2_subregistry_hydration_requires_stable_ancestry_and_excludes_cano
 }
 
 #[tokio::test]
+async fn ens_v2_orphaned_positionless_discovery_start_builds_valid_tombstone() -> Result<()> {
+    let database = TestDatabase::new().await?;
+    let chain = "ethereum-sepolia";
+    let registry = "0x00000000000000000000000000000000000000aa";
+    let child = "0x00000000000000000000000000000000000000c1";
+    let start_hash = lifecycle_branch_block_hash(10, 1);
+    let registry_id = Uuid::from_u128(0x1759);
+    let child_id = Uuid::from_u128(0x175a);
+
+    let mut orphaned_start = test_raw_block(chain, &start_hash, 10);
+    orphaned_start.canonicality_state = CanonicalityState::Orphaned;
+    upsert_chain_lineage_blocks(
+        database.pool(),
+        &[raw_block_to_test_lineage(&orphaned_start)],
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+        VALUES ($1, $3, 'registry'), ($2, $3, 'registry')
+        "#,
+    )
+    .bind(registry_id)
+    .bind(child_id)
+    .bind(chain)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO discovery_edges (
+            chain_id,
+            edge_kind,
+            from_contract_instance_id,
+            to_contract_instance_id,
+            discovery_source,
+            admission,
+            active_from_block_number,
+            active_from_block_hash,
+            provenance
+        ) VALUES (
+            $1,
+            'subregistry',
+            $2,
+            $3,
+            $4,
+            'admitted',
+            10,
+            $5,
+            jsonb_build_object(
+                'observation_key', 'legacy-positionless-edge',
+                'from_address', $6::TEXT,
+                'to_address', $7::TEXT
+            )
+        )
+        "#,
+    )
+    .bind(chain)
+    .bind(registry_id)
+    .bind(child_id)
+    .bind(ens_v2_subregistry_discovery_source(chain))
+    .bind(&start_hash)
+    .bind(registry)
+    .bind(child)
+    .execute(database.pool())
+    .await?;
+
+    let tombstones =
+        super::discovery::load_orphaned_discovery_start_tombstones(database.pool(), chain).await?;
+    assert_eq!(tombstones.len(), 1);
+    assert_eq!(
+        bigname_manifests::discovery_observation_evm_event_position(&tombstones[0].provenance)?,
+        None,
+        "a legacy positionless edge must produce a positionless tombstone"
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn ens_v2_full_history_replay_retains_each_subregistry_transition() -> Result<()> {
     let database = TestDatabase::new().await?;
     let chain = "ethereum-sepolia";

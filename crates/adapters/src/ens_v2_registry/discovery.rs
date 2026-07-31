@@ -67,8 +67,7 @@ pub(super) async fn load_orphaned_discovery_start_tombstones(
     .await
     .with_context(|| format!("failed to load orphaned ENSv2 discovery starts for {chain}"))?;
 
-    Ok(rows
-        .into_iter()
+    rows.into_iter()
         .map(
             |(
                 chain,
@@ -80,17 +79,8 @@ pub(super) async fn load_orphaned_discovery_start_tombstones(
                 block_hash,
                 transaction_index,
                 log_index,
-            )| DiscoveryObservation {
-                chain: chain.clone(),
-                from_address: from_address.clone(),
-                to_address: ZERO_ADDRESS.to_owned(),
-                edge_kind,
-                discovery_source,
-                active_from_block_number: Some(block_number),
-                active_from_block_hash: Some(block_hash.clone()),
-                active_to_block_number: None,
-                active_to_block_hash: None,
-                provenance: json!({
+            )| {
+                let mut provenance = json!({
                     "source": "orphaned_discovery_edge",
                     "source_event": "CanonicalityChanged",
                     "observation_key": observation_key,
@@ -99,13 +89,33 @@ pub(super) async fn load_orphaned_discovery_start_tombstones(
                     "chain_id": chain,
                     "block_hash": block_hash,
                     "block_number": block_number,
-                    "transaction_index": transaction_index,
-                    "log_index": log_index,
                     "tombstone": true,
-                }),
+                });
+                match (transaction_index, log_index) {
+                    (Some(transaction_index), Some(log_index)) => {
+                        provenance["transaction_index"] = json!(transaction_index);
+                        provenance["log_index"] = json!(log_index);
+                    }
+                    (None, None) => {}
+                    _ => anyhow::bail!(
+                        "orphaned ENSv2 discovery start provenance must contain both transaction_index and log_index or neither"
+                    ),
+                }
+                Ok(DiscoveryObservation {
+                    chain: chain.clone(),
+                    from_address: from_address.clone(),
+                    to_address: ZERO_ADDRESS.to_owned(),
+                    edge_kind,
+                    discovery_source,
+                    active_from_block_number: Some(block_number),
+                    active_from_block_hash: Some(block_hash.clone()),
+                    active_to_block_number: None,
+                    active_to_block_hash: None,
+                    provenance,
+                })
             },
         )
-        .collect())
+        .collect()
 }
 
 pub(super) fn latest_discovery_observations(

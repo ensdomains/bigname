@@ -7,6 +7,8 @@ watched tuple, companion checks, retention generation, admission epoch,
 [glossary](glossary.md); "promotion" in this document always means checkpoint
 promotion, the chain-safety sense.
 
+Stage B transition constraint: the old-indexer commands below describe the last pre-cut production release. A build containing the Stage B adapter/indexer cuts is for CI and end-to-end testing only and must not be deployed; production stays on that pre-cut release until the `ingest`, `interpret`, `project`, and `live` phase pipeline replaces it, and the old runtime is deleted before the next deployment.
+
 The production container image contains the three runnable bigname binaries:
 
 - `bigname-api`
