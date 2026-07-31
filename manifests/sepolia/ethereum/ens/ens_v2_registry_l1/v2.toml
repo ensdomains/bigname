@@ -43,7 +43,9 @@ from_role = "registry"
 admission = "reachable_from_root"
 
 # Registry event ABI fragments consumed by ENSv2 registry adapters.
-# RegistryCreated and URIUpdated are intentionally outside normalized-event admission.
+# Current intake excludes RegistryCreated and URIUpdated. The
+# replacement admits RegistryCreated only after its mandatory historical fetch;
+# URIUpdated remains excluded.
 # LabelRegistered: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L18 @ ens_v2@48b3e2d).
 [[abi.events]]
 name = "LabelRegistered"
