@@ -61,9 +61,13 @@ mod tests {
             collect_rust_source_files(&workspace_root.join(directory), &mut source_files);
         }
 
+        // The phase runner is the replacement runtime: it stamps its own
+        // interpretation-input hash and never joins the projection
+        // replay-version scheme this stamp protects.
+        let phase_runner_root = workspace_root.join("apps/phase-runner");
         let mut missing_stamps = Vec::new();
         for path in source_files {
-            if path == this_file {
+            if path == this_file || path.starts_with(&phase_runner_root) {
                 continue;
             }
             let source = fs::read_to_string(&path)
