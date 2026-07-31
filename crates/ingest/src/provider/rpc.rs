@@ -189,7 +189,7 @@ impl JsonRpcProvider {
             .as_array()
             .context("provider returned non-array exact-block logs")?
             .iter()
-            .map(|value| Log::from_value(value, &block.hash, block.number))
+            .map(|value| Log::from_block_hash_value(value, &block.hash, block.number))
             .collect()
     }
 

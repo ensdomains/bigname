@@ -110,10 +110,22 @@ fn retryable_status(status: StatusCode) -> bool {
             | StatusCode::BAD_GATEWAY
             | StatusCode::SERVICE_UNAVAILABLE
             | StatusCode::GATEWAY_TIMEOUT
-    )
+    ) || matches!(status.as_u16(), 520 | 521 | 522 | 524)
 }
 
 async fn backoff(attempt: usize, waf: bool) {
     let base = if waf { 2_000 } else { 250 };
     tokio::time::sleep(Duration::from_millis(base * (1_u64 << attempt.min(4)))).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coinbase_edge_gateway_status_is_retried_in_client() {
+        let status = StatusCode::from_u16(520).expect("520 is a valid HTTP status");
+
+        assert!(retryable_status(status));
+    }
 }

@@ -34,7 +34,7 @@ async fn production_ingest_writes_raw_facts_cursors_heads_and_handoff() -> Resul
     let scratch = ScratchDatabase::create("phase_runner_production_ingest").await?;
     let chain_id = "rpc-ingest-test";
     seed_watch_set(scratch.pool(), chain_id).await?;
-    let (endpoint, server) = spawn_rpc(true).await?;
+    let (endpoint, server) = spawn_rpc(true, false).await?;
     let configured_chain = ChainConfig::new(
         chain_id,
         vec![SourceConfig::new(
@@ -225,7 +225,7 @@ async fn ingest_rejects_a_provider_without_checkpoint_heads() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_ingest_missing_checkpoints").await?;
     let chain_id = "rpc-missing-checkpoints-test";
     seed_watch_set(scratch.pool(), chain_id).await?;
-    let (endpoint, server) = spawn_rpc(false).await?;
+    let (endpoint, server) = spawn_rpc(false, false).await?;
     let outcome = Engine::new(scratch.pool().clone())
         .run_batch(BatchRequest {
             chain_id: chain_id.to_owned(),
@@ -245,6 +245,34 @@ async fn ingest_rejects_a_provider_without_checkpoint_heads() -> Result<()> {
     let error = outcome.expect_err("ingest must require safe and finalized checkpoints");
     assert_eq!(error.kind(), IngestErrorKind::DataIntegrity);
     assert!(error.to_string().contains("checkpoint"));
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn block_hash_pinned_log_mismatch_is_terminal_data_integrity() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_block_hash_log_mismatch").await?;
+    let chain_id = "rpc-block-hash-log-mismatch-test";
+    seed_watch_set(scratch.pool(), chain_id).await?;
+    let (endpoint, server) = spawn_rpc(true, true).await?;
+    let outcome = Engine::new(scratch.pool().clone())
+        .run_batch(BatchRequest {
+            chain_id: chain_id.to_owned(),
+            sources: vec![SourceDescriptor {
+                key: "rpc".to_owned(),
+                kind: "rpc".to_owned(),
+                start_block: 0,
+                endpoint,
+            }],
+            cursors: Vec::new(),
+            redo_range: None,
+            resume_current: None,
+        })
+        .await;
+    server.abort();
+
+    let error = outcome.expect_err("blockHash-pinned log mismatch must fail ingest");
+    assert_eq!(error.kind(), IngestErrorKind::DataIntegrity);
+    assert!(error.to_string().contains("outside blockHash-pinned block"));
     scratch.cleanup().await
 }
 
@@ -348,7 +376,10 @@ async fn seed_watch_set(pool: &sqlx::PgPool, chain_id: &str) -> Result<()> {
     Ok(())
 }
 
-async fn spawn_rpc(checkpoint_support: bool) -> Result<(String, tokio::task::JoinHandle<()>)> {
+async fn spawn_rpc(
+    checkpoint_support: bool,
+    mismatched_block_hash_log: bool,
+) -> Result<(String, tokio::task::JoinHandle<()>)> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let server = tokio::spawn(async move {
@@ -356,7 +387,7 @@ async fn spawn_rpc(checkpoint_support: bool) -> Result<(String, tokio::task::Joi
             listener,
             Router::new()
                 .route("/", post(rpc))
-                .with_state(checkpoint_support),
+                .with_state((checkpoint_support, mismatched_block_hash_log)),
         )
         .await
         .expect("test RPC server");
@@ -364,19 +395,30 @@ async fn spawn_rpc(checkpoint_support: bool) -> Result<(String, tokio::task::Joi
     Ok((format!("http://{address}/"), server))
 }
 
-async fn rpc(State(checkpoint_support): State<bool>, Json(request): Json<Value>) -> Json<Value> {
+async fn rpc(
+    State((checkpoint_support, mismatched_block_hash_log)): State<(bool, bool)>,
+    Json(request): Json<Value>,
+) -> Json<Value> {
     if let Some(requests) = request.as_array() {
         return Json(Value::Array(
             requests
                 .iter()
-                .map(|request| rpc_response(request, checkpoint_support))
+                .map(|request| rpc_response(request, checkpoint_support, mismatched_block_hash_log))
                 .collect::<Vec<_>>(),
         ));
     }
-    Json(rpc_response(&request, checkpoint_support))
+    Json(rpc_response(
+        &request,
+        checkpoint_support,
+        mismatched_block_hash_log,
+    ))
 }
 
-fn rpc_response(request: &Value, checkpoint_support: bool) -> Value {
+fn rpc_response(
+    request: &Value,
+    checkpoint_support: bool,
+    mismatched_block_hash_log: bool,
+) -> Value {
     let id = request.get("id").cloned().unwrap_or(json!(1));
     let method = request["method"].as_str().unwrap_or_default();
     let params = request["params"].as_array().cloned().unwrap_or_default();
@@ -409,6 +451,9 @@ fn rpc_response(request: &Value, checkpoint_support: bool) -> Value {
             let filter = params.first().cloned().unwrap_or_default();
             match filter.get("blockHash").and_then(Value::as_str) {
                 Some(BLOCK_0) => Some(json!([])),
+                Some(BLOCK_1) if mismatched_block_hash_log => {
+                    Some(json!([block_hash_mismatched_log()]))
+                }
                 Some(BLOCK_1) => Some(json!([raw_log(), sibling_log()])),
                 _ => Some(json!([raw_log()])),
             }
@@ -471,6 +516,12 @@ fn raw_log() -> Value {
         ],
         "data": "0x"
     })
+}
+
+fn block_hash_mismatched_log() -> Value {
+    let mut log = raw_log();
+    log["blockHash"] = json!(BLOCK_0);
+    log
 }
 
 fn sibling_log() -> Value {

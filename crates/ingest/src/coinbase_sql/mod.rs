@@ -25,6 +25,7 @@ const PAGE_LIMIT: usize = 10_000;
 const SQL_CHAR_LIMIT: usize = 10_000;
 const QUERY_TIMEOUT_SECS: u64 = 120;
 const RATE_LIMIT_QPS: u32 = 1;
+const COINBASE_BLOCKS_PER_BATCH: i64 = 1_024;
 
 #[derive(Clone)]
 pub struct CoinbaseSqlSource {
@@ -167,7 +168,10 @@ impl AdaptiveWindow {
         Ok(Self {
             next: from_block,
             through: to_block,
-            blocks: to_block.saturating_sub(from_block).saturating_add(1),
+            blocks: to_block
+                .saturating_sub(from_block)
+                .saturating_add(1)
+                .min(COINBASE_BLOCKS_PER_BATCH),
         })
     }
 
@@ -197,6 +201,7 @@ impl AdaptiveWindow {
     fn advance(&mut self) {
         let (_, to_block) = self.current().expect("an active window can advance");
         self.next = to_block.saturating_add(1);
+        self.blocks = self.blocks.saturating_mul(2).min(COINBASE_BLOCKS_PER_BATCH);
     }
 }
 
@@ -209,6 +214,10 @@ pub fn source_error(context: &str, error: anyhow::Error) -> crate::IngestError {
         "status 502",
         "status 503",
         "status 504",
+        "status 520",
+        "status 521",
+        "status 522",
+        "status 524",
         "timed out",
         "timeout",
         "connection",
@@ -270,8 +279,38 @@ mod tests {
         assert!(!window.halve());
 
         window.advance();
-        assert_eq!(window.current(), Some((11, 11)));
+        assert_eq!(window.current(), Some((11, 12)));
         Ok(())
+    }
+
+    #[test]
+    fn successful_bulk_windows_regrow_to_batch_cap_after_halving() -> Result<()> {
+        let mut window = AdaptiveWindow::new(0, COINBASE_BLOCKS_PER_BATCH * 4 - 1)?;
+
+        assert_eq!(window.current(), Some((0, COINBASE_BLOCKS_PER_BATCH - 1)));
+        assert!(window.halve());
+        assert!(window.halve());
+        assert_eq!(window.blocks, COINBASE_BLOCKS_PER_BATCH / 4);
+
+        window.advance();
+        assert_eq!(window.blocks, COINBASE_BLOCKS_PER_BATCH / 2);
+        window.advance();
+        assert_eq!(window.blocks, COINBASE_BLOCKS_PER_BATCH);
+        window.advance();
+        assert_eq!(window.blocks, COINBASE_BLOCKS_PER_BATCH);
+        Ok(())
+    }
+
+    #[test]
+    fn coinbase_edge_gateway_status_is_transient_after_client_retries() {
+        let status = reqwest::StatusCode::from_u16(520).expect("520 is a valid HTTP status");
+        let error = error::CoinbaseSqlHttpError {
+            status,
+            body: "edge gateway unavailable".to_owned(),
+        };
+        let error = source_error("failed to fetch Coinbase SQL logs", error.into());
+
+        assert_eq!(error.kind(), ErrorKind::Transient);
     }
 
     #[test]

@@ -90,11 +90,40 @@ impl Log {
         expected_hash: &str,
         expected_number: i64,
     ) -> Result<Self> {
+        Self::from_value_for_lookup(
+            value,
+            expected_hash,
+            expected_number,
+            LogLookup::ResolvedRange,
+        )
+    }
+
+    pub(super) fn from_block_hash_value(
+        value: &Value,
+        expected_hash: &str,
+        expected_number: i64,
+    ) -> Result<Self> {
+        Self::from_value_for_lookup(value, expected_hash, expected_number, LogLookup::BlockHash)
+    }
+
+    fn from_value_for_lookup(
+        value: &Value,
+        expected_hash: &str,
+        expected_number: i64,
+        lookup: LogLookup,
+    ) -> Result<Self> {
         let log = decode_ref::<RpcLog>(value, "log")?;
         let block_hash = hash_hex(log.block_hash);
         let block_number = u256_i64(log.block_number, "log block number")?;
         if block_hash != expected_hash || block_number != expected_number {
-            bail!("provider returned log outside resolved block {expected_number} {expected_hash}");
+            match lookup {
+                LogLookup::ResolvedRange => bail!(
+                    "provider returned log outside resolved block {expected_number} {expected_hash}"
+                ),
+                LogLookup::BlockHash => bail!(
+                    "provider returned log outside blockHash-pinned block {expected_number} {expected_hash}"
+                ),
+            }
         }
         Ok(Self {
             block_hash,
@@ -114,6 +143,12 @@ impl Log {
             "log block number",
         )
     }
+}
+
+#[derive(Clone, Copy)]
+enum LogLookup {
+    ResolvedRange,
+    BlockHash,
 }
 
 pub(super) fn normalize_hash(value: &str) -> String {
@@ -236,4 +271,48 @@ struct RpcLog {
 #[serde(rename_all = "camelCase")]
 struct RpcLogNumber {
     block_number: U256,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::{ErrorKind, provider::provider_error};
+
+    #[test]
+    fn log_mismatch_classification_depends_on_lookup_scope() {
+        let expected_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let value = json!({
+            "blockHash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "blockNumber": "0xa",
+            "transactionHash":
+                "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "transactionIndex": "0x0",
+            "logIndex": "0x0",
+            "address": "0xdddddddddddddddddddddddddddddddddddddddd",
+            "topics": [],
+            "data": "0x"
+        });
+
+        let range_error =
+            Log::from_value(&value, expected_hash, 10).expect_err("range mismatch must fail");
+        assert!(range_error.to_string().contains("outside resolved block"));
+        assert_eq!(
+            provider_error("range log lookup failed", range_error).kind(),
+            ErrorKind::Transient
+        );
+
+        let block_hash_error = Log::from_block_hash_value(&value, expected_hash, 10)
+            .expect_err("blockHash-pinned mismatch must fail");
+        assert!(
+            block_hash_error
+                .to_string()
+                .contains("outside blockHash-pinned block")
+        );
+        assert_eq!(
+            provider_error("blockHash log lookup failed", block_hash_error).kind(),
+            ErrorKind::DataIntegrity
+        );
+    }
 }

@@ -107,6 +107,8 @@ pub(super) fn build_query(
     let log_action_expr = active_action_expression("l.action");
     let active_transactions_cte = active_transactions_cte(network, pack.from_block, pack.to_block);
 
+    // Keep the UNION ALL wrapped in a subquery: in ClickHouse, a trailing ORDER BY
+    // otherwise binds only to the final union arm.
     Ok(format!(
         r#"WITH {active_transactions_cte},
 decoded_log_rows AS (
